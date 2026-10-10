@@ -344,6 +344,9 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		atomic.AddInt64(&statBlocked, 1)
 		// Fire scan_timeout alert for infrastructure monitoring (Finding 8.3).
+		// An av_unavailable refusal fires nothing extra here: its fault is
+		// already alerted at the producer (scan_clam_error / scan_svc_down),
+		// once per bounded class, rather than once per refused response.
 		if scanResult.Source == "timeout" {
 			go fireAlert("scan_timeout", AlertPayload{
 				Actor:  cip,

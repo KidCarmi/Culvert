@@ -36,7 +36,16 @@ services:
   # Official image from the ClamAV project (Cisco Talos).
   # clamd listens on TCP 3310 inside the compose network (not exposed to host).
   clamav:
-    image: clamav/clamav:1.4
+    # The official ClamAV 1.4.6 image (pinned by digest) + pcre2 10.49,
+    # zlib 1.3.2-r1 and nghttp2-libs 1.70.0-r0, built LOCALLY from appliance/clamav when this
+    # local-only tag is absent (the OVA ships it pre-built). pull_policy:
+    # never is REQUIRED: without it Compose tries the registry first when the
+    # tag is absent (measured on v5.3.1) and would run whatever answered for
+    # this name instead of building the pinned derivative.
+    image: culvert/clamav:1.4.6-culvert.3
+    pull_policy: never
+    build:
+      context: ./appliance/clamav
     container_name: culvert-clamav
     restart: unless-stopped
     volumes:
@@ -124,6 +133,23 @@ services:
       # valid cluster-wide (docs/OPERATIONS.md §3); leave unset for a single
       # node to let the proxy generate one automatically at startup.
       - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET:-}
+      # Boot-time policy posture when config.yaml sets no default_action:
+      # "deny" makes a fresh install refuse proxy traffic until a rule allows
+      # it (the appliance first-boot sets this); unset keeps the historical
+      # auto-detect (no rules ⇒ allow/passthrough). A saved admin choice in
+      # admin_settings.json still wins at load.
+      - CULVERT_DEFAULT_ACTION=${CULVERT_DEFAULT_ACTION:-}
+      # Scanner posture when the AV engine (ClamAV) cannot scan a response
+      # because it is stopped/crashed/unreachable: "closed" REFUSES the content
+      # (the appliance first-boot sets this), "open"/unset forwards it
+      # unscanned, counted and alerted (historical). A saved admin choice in
+      # admin_settings.json still wins at load.
+      - CULVERT_AV_UNAVAILABLE=${CULVERT_AV_UNAVAILABLE:-}
+      # Per-instance first-admin setup token: POST /api/setup/complete refuses
+      # without it while set (the appliance first-boot mints one and shows it
+      # on the console); unset keeps the open bootstrap window of a plain
+      # quick-start install.
+      - CULVERT_SETUP_TOKEN=${CULVERT_SETUP_TOKEN:-}
       # Release Management catalog/dispatch config. The maint-agent URL is
       # intentionally supplied only by docker-compose.maint-agent.yml, because
       # it is valid only when the Maintenance Agent socket is mounted.
@@ -253,6 +279,9 @@ services:
       # restore validation — dry-run and commit alike — hard-fails without
       # it (docs/operator/docker-compose-backup-restore.md §4-6).
       - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
+      # --history-import opens the request-history store under the SAME key
+      # the proxy uses (CULVERT_LOG_PASSPHRASE, else the CA passphrase).
+      - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-}
     volumes:
       - proxy-data:/data
       - culvert-backups:/backup

@@ -53,6 +53,7 @@ jobs:
       release: ${{ steps.classify.outputs.release }}
       maint: ${{ steps.classify.outputs.maint }}
       terraform: ${{ steps.classify.outputs.terraform }}
+      appliance: ${{ steps.classify.outputs.appliance }}
       image_needed: ${{ steps.classify.outputs.image_needed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,18 +65,21 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            for k in proxy_core security docker deps tests packaging release maint terraform image_needed; do
+            for k in proxy_core security docker deps tests packaging release maint terraform appliance image_needed; do
               echo "$k=true" >> "$GITHUB_OUTPUT"
             done
             echo "Manual run — all deep jobs enabled."
             exit 0
           fi
-          git diff --name-only HEAD^1 HEAD > changed.txt
+          # --no-renames: a rename otherwise lists only its destination, so moving a
+          # file OUT of a classified path would skip that path's jobs while the
+          # aggregate counts the skip as success (same rule as pr-fast-gate.yml).
+          git diff --no-renames --name-only HEAD^1 HEAD > changed.txt
           echo "── Changed files ──"; cat changed.txt
 
           proxy_core=false; security=false; docker=false; deps=false
           tests=false; packaging=false; release=false; maint=false
-          terraform=false
+          terraform=false; appliance=false
           self=false
           while IFS= read -r f; do
             case "$f" in
@@ -97,16 +101,16 @@ jobs:
               clam.go|yara_scan.go|fileblock.go|fileprofile.go|threatfeed.go|\
               lockout.go|totp.go|identity.go|enrollment.go|controlplane.go|\
               ui_*.go|update*.go|backup*.go|restore.go|geoip.go|events.go|\
-              internal/*)
+              internal/*|pkg/releaseproof/*)
                 security=true ;;
             esac
             case "$f" in
               # .trivyignore: a suppression edit must re-run the scan that
               # consumes it (CI review P1-5).
-              Dockerfile*|docker-compose*.yml|.dockerignore|.trivyignore) docker=true ;;
+              Dockerfile*|docker-compose*.yml|.dockerignore|.trivyignore|third_party/*|pkg/releaseproof/*) docker=true ;;
             esac
             case "$f" in
-              go.mod|go.sum) deps=true ;;
+              go.mod|go.sum|third_party/*|pkg/releaseproof/*) deps=true ;;
             esac
             case "$f" in
               *_test.go) tests=true ;;
@@ -121,11 +125,28 @@ jobs:
               # Test-only maint changes already set tests=true (also gates it).
               # (`*` in a bash case matches `/`, so this catches internal/… too.)
               cmd/culvert-maint/*_test.go) ;;
-              cmd/culvert-maint/*.go|cmd/culvert-maint/go.mod|cmd/culvert-maint/go.sum)
+              cmd/culvert-maint/*.go|cmd/culvert-maint/go.mod|cmd/culvert-maint/go.sum|pkg/releaseproof/*)
                 maint=true ;;
             esac
             case "$f" in
-              packaging/*|scripts/*) packaging=true ;;
+              # The appliance's provisioning/maintenance scripts are packaging
+              # too: shellchecked by the same job as the agent installer.
+              packaging/*|scripts/*|appliance/provision/*|appliance/os-maintenance/*|appliance/build/*.sh) packaging=true ;;
+            esac
+            case "$f" in
+              # On-prem appliance qualification (owner review, PR #1528): the
+              # real-image lifecycle + agent harnesses run against the
+              # deep-gate-image artifact whenever the appliance, the
+              # backup/restore/cleanup path, the deploy bundle or the
+              # harnesses themselves change. `*` matches `/`, so
+              # appliance/* covers build/, provision/, os-maintenance/, sbom/.
+              appliance/*|test/e2e/appliance/*|restore*.go|backup*.go|cleanup*.go|scripts/install.sh|docker-compose.yml|packaging/*)
+                appliance=true ;;
+              # The appliance console (#1540) is host software the OVA
+              # installs: its regression suite (appliance-console) and the
+              # lifecycle harnesses must run when it changes.
+              cmd/culvert-console/*|cmd/culvert-access/*|internal/applianceconsole/*|internal/applianceaccess/*|internal/appliancehost/*|appliance_*test.go|pkg/releaseproof/*|third_party/*|.github/workflows/appliance-console.yml)
+                appliance=true ;;
             esac
             case "$f" in
               # Declarations-only IaC skeleton (M0-PR5). Gates the terraform
@@ -138,15 +159,16 @@ jobs:
               # material (baked Sigstore root, CI↔binary identity SSOT).
               # NOTE: catalog-e2e.yml's paths: filter must stay in sync with
               # these globs (see roadmap/CI-REDESIGN.md).
-              release_*.go|test/e2e/*|trusted_root.json|trusted_root.provenance.txt|release_identity.env)
+              release_*.go|pkg/releaseproof/*|test/e2e/*|trusted_root.json|trusted_root.provenance.txt|release_identity.env)
                 release=true ;;
             esac
             case "$f" in
               # Self-validation: edits to this workflow, its reusable build,
               # or the shared composite action must exercise EVERY deep job —
               # otherwise a broken gate lands silently and degrades all
-              # future PRs (CI review P1-2).
-              .github/workflows/pr-deep-gate.yml|.github/workflows/_build-image.yml|.github/actions/*)
+              # future PRs (CI review P1-2). The candidate version script
+              # shapes the image build (its VERSION build-arg).
+              .github/workflows/pr-deep-gate.yml|.github/workflows/_build-image.yml|.github/scripts/pr-candidate-version.sh|.github/actions/*)
                 self=true ;;
             esac
           done < changed.txt
@@ -155,17 +177,23 @@ jobs:
             echo "Gate self-change detected — enabling all deep jobs."
             proxy_core=true; security=true; docker=true; deps=true
             tests=true; packaging=true; release=true; maint=true
-            terraform=true
+            terraform=true; appliance=true
           fi
 
+          # Every job that `needs: build-image` must be covered here, or a
+          # change that selects that job without selecting the build skips
+          # the job — and the aggregate reads a skipped job as a pass. `maint`
+          # selects `appliance-agent` (Codex P1, PR #1528: a maint-only change
+          # got a green gate with the agent qualification never run).
+          # Pinned by appliance_ci_lane_test.go.
           image_needed=false
-          if $proxy_core || $security || $docker || $deps || $release; then
+          if $proxy_core || $security || $docker || $deps || $release || $appliance || $maint; then
             image_needed=true
           fi
-          for k in proxy_core security docker deps tests packaging release maint terraform image_needed; do
+          for k in proxy_core security docker deps tests packaging release maint terraform appliance image_needed; do
             eval "echo \"$k=\$$k\"" >> "$GITHUB_OUTPUT"
           done
-          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release maint=$maint terraform=$terraform image_needed=$image_needed"
+          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release maint=$maint terraform=$terraform appliance=$appliance image_needed=$image_needed"
 
   # ─── 1. Build the proxy image ONCE (amd64) — consumed by the jobs below ───
   build-image:
@@ -209,6 +237,20 @@ jobs:
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --ignorefile .trivyignore \
+            --exit-code 1 \
+            culvert:ci-smoke
+
+      # A stale image is caught at ANY severity: the runtime stage runs
+      # `apk upgrade`, so a FIXABLE Alpine package finding means that
+      # upgrade did not happen (a cached layer shipped zlib 1.3.2-r0 after r1,
+      # rated MEDIUM, passed the gate above). No ignore file applies here.
+      - name: Scan image OS packages (any fixable finding, any severity)
+        run: |
+          trivy image \
+            --scanners vuln \
+            --pkg-types os \
+            --ignore-unfixed \
+            --ignorefile /dev/null \
             --exit-code 1 \
             culvert:ci-smoke
 
@@ -433,6 +475,26 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           shellcheck packaging/culvert-maint/install.sh
 
+      - name: shellcheck appliance scripts (first boot, status, sudo policy, OS maintenance, OVA build, harnesses)
+        run: |
+          shellcheck -S warning \
+            appliance/provision/culvert-firstboot.sh appliance/provision/culvert-status \
+            appliance/provision/culvert-sudo-policy appliance/provision/culvert-net \
+            appliance/provision/culvert-issue-update appliance/provision/culvert-appliance-reset-identity \
+            appliance/os-maintenance/culvert-os-update \
+            appliance/build/build-ova.sh appliance/build/prepare-guest.sh appliance/build/archive-identity.sh appliance/build/cold-load-check.sh \
+            test/e2e/appliance/lifecycle-qualify.sh test/e2e/appliance/agent-qualify.sh \
+            test/e2e/appliance/clamav-image-qualify.sh test/e2e/appliance/upgrade-enospc-qualify.sh
+
+      - name: Validate appliance sudoers + first-boot unit shapes
+        run: |
+          # The key-only drop-in first boot writes (95-culvert-keyonly) and the
+          # console rule prepare-guest.sh installs must be valid sudoers.
+          printf 'culvert ALL=(ALL:ALL) NOPASSWD: ALL\n' > /tmp/95-culvert-keyonly
+          printf 'culvert ALL=(ALL:ALL) ALL\n' > /tmp/50-culvert-console
+          sudo visudo -c -f /tmp/95-culvert-keyonly && sudo visudo -c -f /tmp/50-culvert-console
+          bash -n appliance/provision/culvert-firstboot.sh
+
       - name: Validate sudoers drop-in
         # The P1.4 pin-binding security boundary — a syntax error here would
         # brick the maintenance agent's privilege model on install.
@@ -451,6 +513,205 @@ jobs:
           (cd cmd/culvert-maint && go build -o /tmp/culvert-maint .)
           sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
           systemd-analyze verify packaging/systemd/culvert-maint.service
+
+  # ─── 9. On-prem appliance qualification (owner review, PR #1528) ───────────
+  #
+  # The real-image lifecycle and agent harnesses (test/e2e/appliance/) run
+  # against the SAME deep-gate-image artifact the other jobs consume, so the
+  # evidence names the exact PR-head image. Three blocking jobs, each on its
+  # own runner because both harnesses bind host ports 8080/9090:
+  #   appliance-lifecycle  A/B/D/E/G: fresh install → setup → posture → actual
+  #                        allow/block → restart; two real predecessors
+  #                        (v1.0.258, v1.0.259) upgraded with seeded state;
+  #                        backup → mutate → refused-while-running → offline
+  #                        restore → verified; interrupted restore → refused
+  #                        boot → explicit recovery; restore onto a FULL
+  #                        loop-backed ext4 volume → refused before any move.
+  #   appliance-clamav     scenario A with the deploy bundle's REAL ClamAV
+  #                        sidecar (signature download, scanner rows on
+  #                        /ready strict) — needs the runner's direct egress.
+  #   appliance-agent      F1–F5: maintenance-agent apply/duplicate/kill +
+  #                        reconcile/offline rollback/restart idempotency
+  #                        against a throwaway TLS registry.
+  # Runner limits (why this is what it is): ubuntu-latest is 4 vCPU/16 GB
+  # with Docker + compose v2, sudo root and loop devices; it runs the
+  # CONTAINER topology, not the OVA (no OVA boot here — that is the
+  # appliance-boot gap the readiness report records), and the predecessor
+  # images come from the public ghcr.io registry (no secrets needed).
+  appliance-lifecycle:
+    name: "Deep · appliance lifecycle (real images)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [changes, build-image]
+    if: needs.changes.outputs.appliance == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+      - name: Load the PR-head image
+        run: docker load -i culvert-image.tar && docker image inspect culvert:ci-smoke --format 'id={{.Id}}'
+      - name: Pre-pull predecessors + fixtures (retry)
+        run: |
+          set -euo pipefail
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; echo "pull $1 failed (attempt $i)"; sleep $((i*3)); done; return 1; }
+          for img in ghcr.io/kidcarmi/culvert:v1.0.258 ghcr.io/kidcarmi/culvert:v1.0.259 busybox:stable alpine:3.20; do pull_retry "$img"; done
+      - name: Lifecycle qualification
+        env:
+          CUR_IMAGE: culvert:ci-smoke
+          PRED_IMAGES: "ghcr.io/kidcarmi/culvert:v1.0.258 ghcr.io/kidcarmi/culvert:v1.0.259"
+          SCENARIOS: "A B D E G"
+        run: EVID="$RUNNER_TEMP/appliance-lifecycle" ./test/e2e/appliance/lifecycle-qualify.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lifecycle-evidence
+          path: |
+            ${{ runner.temp }}/appliance-lifecycle/REPORT.md
+            ${{ runner.temp }}/appliance-lifecycle/checks.jsonl
+          retention-days: 14
+
+  appliance-clamav:
+    name: "Deep · appliance scenario A with real ClamAV"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [changes, build-image]
+    if: needs.changes.outputs.appliance == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+      - name: Load the PR-head image
+        run: docker load -i culvert-image.tar
+      - name: Build the shipped ClamAV sidecar + pre-pull fixtures (retry)
+        # The sidecar the appliance runs is built from appliance/clamav (the
+        # pinned official image + pcre2 10.49, CVE-2026-103111) under its
+        # local-only tag, so scenario A below runs exactly that image.
+        run: |
+          set -euo pipefail
+          . appliance/build/manifest.env
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; echo "pull $1 failed (attempt $i)"; sleep $((i*3)); done; return 1; }
+          for img in "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" busybox:stable alpine:3.20; do pull_retry "$img"; done
+          docker build -q -t "$CLAMAV_SIDECAR_REF" appliance/clamav
+          docker image inspect "$CLAMAV_SIDECAR_REF" --format '{{.Id}}'
+      - name: Scenario A against the real ClamAV sidecar
+        env:
+          CUR_IMAGE: culvert:ci-smoke
+          SCENARIOS: "A"
+          CULVERT_QUALIFY_REAL_CLAMAV: "1"
+          QUAL_HEALTH_WAIT_S: "900"
+        run: EVID="$RUNNER_TEMP/appliance-clamav" ./test/e2e/appliance/lifecycle-qualify.sh
+      # Real clamd behind the real proxy: EICAR, a custom PCRE logical
+      # signature (the libpcre2 path of CVE-2026-103111), a regex-miss control
+      # and the clamd-down posture. Run against the SHIPPED sidecar (built
+      # here, never pushed) and, for comparison, the pinned official base.
+      - name: Real-ClamAV scan check — pinned official image
+        run: |
+          set -euo pipefail
+          . appliance/build/manifest.env
+          docker pull -q "${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}"
+          CLAMAV_IMAGE="${CLAMAV_IMAGE_REPO}@${CLAMAV_IMAGE_INDEX_DIGEST}" PROXY_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/clamav-image-official" ./test/e2e/appliance/clamav-image-qualify.sh
+      - name: Real-ClamAV scan check — the shipped sidecar (built from appliance/clamav, never pushed)
+        run: |
+          set -euo pipefail
+          . appliance/build/manifest.env
+          docker build -q -t "$CLAMAV_SIDECAR_REF" appliance/clamav
+          CLAMAV_IMAGE="$CLAMAV_SIDECAR_REF" PROXY_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/clamav-image-shipped" ./test/e2e/appliance/clamav-image-qualify.sh
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+      - name: CVE gate on the shipped sidecar (no fixable HIGH/CRITICAL)
+        run: |
+          set -euo pipefail
+          . appliance/build/manifest.env
+          trivy image --download-db-only --db-repository mirror.gcr.io/aquasec/trivy-db:2
+          trivy image --skip-db-update --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+            --format table --exit-code 1 "$CLAMAV_SIDECAR_REF" | tee "$RUNNER_TEMP/clamav-image-shipped/trivy.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-clamav-evidence
+          path: |
+            ${{ runner.temp }}/appliance-clamav/REPORT.md
+            ${{ runner.temp }}/appliance-clamav/checks.jsonl
+            ${{ runner.temp }}/clamav-image-official/clamav-image-qualify.jsonl
+            ${{ runner.temp }}/clamav-image-shipped/clamav-image-qualify.jsonl
+            ${{ runner.temp }}/clamav-image-shipped/trivy.txt
+          retention-days: 14
+
+  appliance-agent:
+    name: "Deep · appliance maintenance-agent flow"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [changes, build-image]
+    if: needs.changes.outputs.appliance == 'true' || needs.changes.outputs.maint == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deep-gate-image
+      - name: Load the PR-head image
+        run: docker load -i culvert-image.tar
+      - name: Pre-pull predecessor + registry (retry)
+        run: |
+          set -euo pipefail
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; echo "pull $1 failed (attempt $i)"; sleep $((i*3)); done; return 1; }
+          for img in ghcr.io/kidcarmi/culvert:v1.0.259 registry:2 busybox:stable \
+                     docker:29-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1; do pull_retry "$img"; done
+      - name: "Build the agent from this PR head (warms the module cache; the harness rebuilds as root)"
+        run: (cd cmd/culvert-maint && go build -o /dev/null .)
+      - name: "Agent update-flow qualification (root — writes /etc/docker/certs.d for the TLS registry)"
+        # The harness runs the agent in docker_group_lab mode as root — the
+        # same lab shape the install-lifecycle e2e uses; the sudoers-bound
+        # production mode is covered by install-lifecycle-e2e.yml.
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+            CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=ghcr.io/kidcarmi/culvert:v1.0.259 \
+            EVID="$RUNNER_TEMP/appliance-agent" ./test/e2e/appliance/agent-qualify.sh
+      - name: "Upgrade under a full disk on a size-bounded nested Docker host (root — loop mount, privileged dind)"
+        # Image store (dockerd + its managed containerd), stack directory and
+        # agent state live in ONE 2 GiB loop-mounted ext4 file; the fill is a
+        # file inside it, so the runner's own disk never fills.
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+            CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=ghcr.io/kidcarmi/culvert:v1.0.259 \
+            EVID="$RUNNER_TEMP/appliance-enospc" ./test/e2e/appliance/upgrade-enospc-qualify.sh
+      - name: "F-DISK-1 (REQUIRED): disk exhausted during the boot-time category write — proxy survives, write refused, recovery + integrity"
+        # A merge gate since the fix (third_party/ristretto/CULVERT-PATCH.md):
+        # a disk that fills during a BadgerDB write must surface as a refused
+        # write, never a SIGBUS. Any crash, a write that does not fail, a
+        # recovery that needs more than free-space + `compose up -d`, or a
+        # failed integrity check fails the step. Exit 2 = inconclusive (no
+        # write observed) also fails it: a scenario that did not run is never
+        # reported as passed.
+        if: always()
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+            QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
+            EVID="$RUNNER_TEMP/appliance-fdisk1" ./test/e2e/appliance/upgrade-enospc-qualify.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-agent-evidence
+          path: |
+            ${{ runner.temp }}/appliance-agent/REPORT.md
+            ${{ runner.temp }}/appliance-agent/checks.jsonl
+            ${{ runner.temp }}/appliance-enospc/REPORT.md
+            ${{ runner.temp }}/appliance-enospc/checks.jsonl
+            ${{ runner.temp }}/appliance-enospc/op-full-disk.log
+            ${{ runner.temp }}/appliance-enospc/op-retry.log
+            ${{ runner.temp }}/appliance-enospc/diagnose.log
+            ${{ runner.temp }}/appliance-fdisk1/REPORT.md
+            ${{ runner.temp }}/appliance-fdisk1/checks.jsonl
+            ${{ runner.temp }}/appliance-fdisk1/diagnose.log
+          retention-days: 14
 
   # ─── Terraform guardrails skeleton — fmt + validate (declarations-only) ──────
   terraform:
@@ -486,6 +747,51 @@ jobs:
           terraform validate
         working-directory: deploy/terraform
 
+  # ─── Appliance console + host power/lifecycle regressions (#1540) ─────────
+  # The same suite .github/workflows/appliance-console.yml defines (console
+  # state/display/auth boundary, root-owned recovery storage faults, the
+  # agent's shutdown-fence admission, culvert-os-update power/resume, staged
+  # console install), called here so a red result blocks the REQUIRED
+  # aggregate instead of landing as an advisory check (V1 integration, #1528).
+  appliance-console:
+    name: "Deep · appliance console + power/lifecycle regressions"
+    needs: changes
+    if: needs.changes.outputs.appliance == 'true' || needs.changes.outputs.maint == 'true' || needs.changes.outputs.deps == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/appliance-console.yml
+
+  # F-DISK-1: the badger stores on a REAL full filesystem (a size-capped
+  # tmpfs). Mounting needs root, so these tests skip in the ordinary suites;
+  # here they run as root and a skip fails the job. Covers the category store
+  # (write refused not SIGBUS, bounded Close, reopen) and request history
+  # (purge frees a full disk, writes resume).
+  full-disk:
+    name: "Deep · F-DISK-1 full-filesystem stores (root tmpfs)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.security == 'true' || needs.changes.outputs.deps == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+      - name: Badger stores on a size-capped tmpfs
+        run: |
+          set -euo pipefail
+          go test -c -o "$RUNNER_TEMP/catdb.test" ./internal/catdb
+          go test -c -o "$RUNNER_TEMP/logstore.test" ./internal/logstore
+          # Only the test binaries run as root (to mount); they were built as
+          # the runner user.
+          for t in catdb:TestFullFilesystemWriteReturnsErrorNotSIGBUS logstore:TestPurgeOnFullFilesystemFreesSpaceAndWritesResume; do
+            pkg="${t%%:*}"; name="${t#*:}"
+            rc=0; out="$(cd "internal/$pkg" && sudo "$RUNNER_TEMP/$pkg.test" -test.run "^${name}\$" -test.v -test.count=1 2>&1)" || rc=$?
+            echo "$out"
+            [ "$rc" = 0 ] || { echo "::error::$name failed (exit $rc)"; exit 1; }
+            # A skip proves nothing: the gate exists to run these.
+            if grep -q -- "--- SKIP" <<<"$out"; then echo "::error::$name skipped"; exit 1; fi
+            grep -q -- "--- PASS: $name " <<<"$out" || { echo "::error::$name did not report PASS"; exit 1; }
+          done
+
   # ─── ✅ Aggregate — required check, passes when all-skipped ─────────────────
   deep-gate-approved:
     name: "✅ Deep PR Gate — APPROVED"
@@ -502,6 +808,11 @@ jobs:
       - licenses
       - packaging
       - terraform
+      - appliance-lifecycle
+      - appliance-clamav
+      - appliance-agent
+      - appliance-console
+      - full-disk
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

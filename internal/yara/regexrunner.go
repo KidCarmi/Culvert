@@ -139,9 +139,16 @@ func (r *regexRunner) releaseCharge() {
 	}
 }
 
+// regexRunnerStarts counts workers ever started. It exists so the lazy-creation
+// contract (no worker for a literal-only rule set) is checked exactly rather
+// than inferred from the process-wide goroutine count, which other goroutines
+// move. One atomic add per scan that runs a regex; nothing reads it in production.
+var regexRunnerStarts atomic.Int64
+
 // newRegexRunner starts a worker with the timer already armed for the caller's
 // first match. It does not book an inflight slot — charge does that per match.
 func newRegexRunner(timeout time.Duration) *regexRunner {
+	regexRunnerStarts.Add(1)
 	r := &regexRunner{
 		// Both buffered so neither side can be wedged by the other: the parent
 		// can hand off a job without a rendezvous, and an abandoned worker can

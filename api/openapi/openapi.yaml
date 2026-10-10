@@ -186,6 +186,9 @@ components:
           type: boolean
           description: True until an initial admin credential (or explicit open mode) is configured.
         ui_tls_fallback: { type: boolean, description: "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log." }
+        setupTokenRequired:
+          type: boolean
+          description: True when the deployment was started with a per-instance setup token (CULVERT_SETUP_TOKEN; the appliance first boot mints one) and POST /api/setup/complete requires it in the X-Culvert-Setup-Token header. Absent/false on deployments without a token.
     SetupCompleteRequest:
       type: object
       description: Provide credentials, OR set unauth=true for explicit open mode.
@@ -986,6 +989,23 @@ components:
       type: object
       description: YARA engine runtime settings (fields vary by build/config).
       additionalProperties: true
+    AVSettings:
+      type: object
+      description: "Scanner av_unavailable posture: what a body scan does when the AV engine (local ClamAV or the remote scan sidecar) is faulted — stopped, crashed, restarting, unreachable, or answering without a verdict. Node-local — outside export/import, config-version rollback, and CP→DP sync. Budget/capacity refusals are fail-closed in both postures and are not governed by this setting."
+      required: [av_unavailable, source, revision]
+      additionalProperties: false
+      properties:
+        av_unavailable:
+          type: string
+          enum: [open, closed]
+          description: "open = forward the content UNSCANNED for that request (counted + alerted; the default). closed = refuse the content (HTTP 403, Source av_unavailable); never cached, so the next request rescans."
+        source:
+          type: string
+          enum: [admin, boot]
+          description: "admin = an explicit admin save owns the posture (admin_settings.json); boot = the CULVERT_AV_UNAVAILABLE boot default (or open when unset) is in force."
+        revision:
+          type: string
+          description: "Server-owned content-derived revision of the returned posture. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision})."
     DecryptionRedaction:
       type: object
       description: "Global destination-privacy posture (traffic-log destination pseudonymization). Node-local — outside export/import, config-version rollback, and CP→DP sync. Controls what destination information is retained in logs/observability; it does NOT control whether traffic is decrypted."
@@ -1994,6 +2014,17 @@ components:
         ifRevision:
           type: string
           description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies."
+    SetAVSettings:
+      type: object
+      required: [av_unavailable]
+      additionalProperties: false
+      properties:
+        av_unavailable:
+          type: string
+          enum: [open, closed]
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, last-writer-wins applies."
     SetLogsRetention:
       type: object
       additionalProperties: false
@@ -2348,6 +2379,15 @@ components:
       additionalProperties: false
       properties:
         ips: { type: array, items: { type: string } }
+    UIAccessPolicyError:
+      type: object
+      required: [error, code]
+      additionalProperties: false
+      properties:
+        error: { type: string }
+        code:
+          type: string
+          enum: [ui_access_policy_unavailable, ui_allow_ips_not_saved, ui_allow_ips_persistence_uncertain]
     SetDefaultAuthOutcomeBody:
       type: object
       required: [defaultAuthOutcome]
@@ -2906,6 +2946,22 @@ components:
         no_rollback: { type: boolean }
         passphrase_ref: { type: string }
         idempotency_key: { type: string }
+        allow_downgrade:
+          type: boolean
+          description: >-
+            Break-glass only. Admit a target OLDER than the running release.
+            Without it the planner refuses with kind "downgrade" (HTTP 409).
+            Restore-from-backup is the supported way back; see
+            docs/appliance/upgrade-transition-matrix.md.
+        acknowledge_unknown_current:
+          type: boolean
+          description: >-
+            Admit a target that declares min_upgrade_from when the running
+            release is not a catalog release (custom build), i.e. the
+            transition floor cannot be evaluated. Without it the planner
+            refuses with kind "unknown_current" (HTTP 409). A running release
+            BELOW the floor is refused with kind "unsupported_transition" and
+            no acknowledgement admits it.
 
 paths:
   /healthz:
@@ -2969,8 +3025,17 @@ paths:
       description: |
         One-time bootstrap. Sets the first admin credential, or enables explicit
         open mode with `{unauth:true}`. Returns 403 once auth is already
-        configured. Rate-limited per source IP.
+        configured, and 403 when the deployment requires a setup token
+        (`GET /api/setup/status` → `setupTokenRequired`) that the request does
+        not present in `X-Culvert-Setup-Token`. Rate-limited per source IP; a
+        missing or wrong token counts as a failed attempt.
       security: []
+      parameters:
+        - in: header
+          name: X-Culvert-Setup-Token
+          required: false
+          description: The per-instance setup token (appliance console / `sudo culvert-status`). Required only when `setupTokenRequired` is true.
+          schema: { type: string }
       x-culvert-visibility: public-supported
       x-culvert-permission: public
       x-culvert-tenant-scope: appliance
@@ -6079,6 +6144,63 @@ paths:
           content:
             text/plain: { schema: { type: string } }
 
+  /api/security-scan/av-settings:
+    get:
+      operationId: getAVSettings
+      tags: [security]
+      summary: AV-unavailable scan posture
+      description: "Returns the scanner's av_unavailable posture (open|closed), whether an admin save or the boot default owns it, and a revision fingerprinting exactly the returned value."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 2.1.0
+      responses:
+        '200':
+          description: The live posture.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AVSettings' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setAVSettings
+      tags: [security]
+      summary: Set AV-unavailable scan posture
+      description: "Sets the av_unavailable posture. closed refuses content that cannot be scanned while the AV engine is unavailable; open forwards it unscanned (counted + alerted). Persist-before-apply: a 200 means the posture is durable AND live."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 2.1.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: security.av_unavailable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetAVSettings' }
+      responses:
+        '200':
+          description: Updated (durable AND live; carries the new revision).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AVSettings' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the posture changed since the asserted revision; nothing mutated.' }
+        '500':
+          description: The posture could not be persisted; the live posture is UNCHANGED (persist-before-apply). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+
   /api/security-scan/yara/settings:
     get:
       operationId: getYARASettings
@@ -8434,6 +8556,123 @@ paths:
           description: The durable write failed — the running tunables (and every learned exclusion) are unchanged. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+
+  /api/sso-ip-binding:
+    get:
+      operationId: getSSOIPBinding
+      tags: [auth]
+      summary: IP-bound sign-in status
+      description: "IP-bound sign-in (F-SSO-SCOPE-1): the settings plus node-local counters. A browser SSO session is a cookie on the admin UI host and identifies no proxied traffic on its own; when this is enabled a completed sign-in binds the browser's client address to its identity for the configured lifetime. Off by default."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Settings, live binding count, bind outcomes and hits.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setSSOIPBinding
+      tags: [auth]
+      summary: Set IP-bound sign-in
+      description: "Full replacement (validate → persist → apply; a persist failure is a 500 with the running settings unchanged). Turning it off removes every binding. Node-local AdminSettings-durable; outside export/import, config-version rollback and CP→DP sync."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: auth.sso_ip_binding.settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                ttlMinutes: { type: integer, minimum: 0, maximum: 1440, description: "0 = default (60); otherwise 5–1440" }
+                excludeCidrs: { type: array, maxItems: 256, items: { type: string }, description: "Client ranges (CIDR or address) never bound: NAT gateways, terminal servers, shared hosts" }
+      responses:
+        '200':
+          description: The installed settings and counters.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: The durable write failed — the running settings are unchanged. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+
+  /api/sso-ip-binding/bindings:
+    get:
+      operationId: listSSOIPBindings
+      tags: [auth]
+      summary: List IP-bound sign-in bindings
+      description: The live bindings on this node (client address, subject, provider, groups, bound/expiry times). Admin-only — it names users and their addresses.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Live bindings.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: revokeSSOIPBindings
+      tags: [auth]
+      summary: Revoke IP-bound sign-in bindings
+      description: "Removes one binding (addr=<ip>) or every binding (all=1). The browsers concerned must sign in again."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: beta
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: auth.sso_ip_binding.revoke
+      parameters:
+        - name: addr
+          in: query
+          required: false
+          schema: { type: string }
+        - name: all
+          in: query
+          required: false
+          schema: { type: string, enum: ["1"] }
+      responses:
+        '200':
+          description: "{removed: N}"
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/policy-learning:
     get:
@@ -10857,6 +11096,62 @@ paths:
               schema: { $ref: '#/components/schemas/UpstreamRefusal' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/logs/history/export:
+    post:
+      operationId: exportRequestHistory
+      tags: [dashboard]
+      summary: Export request history (encrypted archive)
+      description: >-
+        Streams every record of the stored request history, sealed in the
+        CVRTST01 streaming envelope (PBKDF2-SHA256 + chunked AES-256-GCM) under
+        the supplied archive passphrase — a key the operator holds, independent
+        of this node's history-store key. Import it offline with
+        `culvert --history-import <file> --confirm` (CULVERT_HISTORY_PASSPHRASE).
+        A failure after streaming starts leaves an archive with no final chunk,
+        which never authenticates, and aborts the response. Stored entries
+        larger than 4 MiB are skipped and counted (archive trailer and audit
+        detail). One export at a time. The admin UI posts a form so the browser
+        streams the download to disk.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: logstore.export
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [archivePhrase]
+              properties:
+                archivePhrase:
+                  type: string
+                  minLength: 12
+                  description: Passphrase the archive is sealed under. Keep it with the archive's custody record; it is not stored.
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [archivePhrase]
+              properties:
+                archivePhrase:
+                  type: string
+                  minLength: 12
+      responses:
+        '200':
+          description: The encrypted archive.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
   /api/logs/purge:
     post:
       operationId: purgeLogs
@@ -11248,11 +11543,16 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/UIAllowIPs' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Access policy is unavailable, or saving failed. Inspect code; ui_allow_ips_persistence_uncertain means the new policy is active but its crash durability is unconfirmed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UIAccessPolicyError' }
     post:
       operationId: setUIAllowIPs
       tags: [settings]
       summary: Set UI allow-IPs
-      description: Set UI allow-IPs.
+      description: Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions; a missing ips field, a blank entry, or a malformed address/CIDR is refused with a plain-text 400 and leaves the active policy unchanged. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -11271,12 +11571,17 @@ paths:
             schema: { $ref: '#/components/schemas/SetUIAllowIPsBody' }
       responses:
         '200':
-          description: Set UI allow-IPs.
+          description: Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Access policy is unavailable, or saving failed. Inspect code; ui_allow_ips_persistence_uncertain means the new policy is active but its crash durability is unconfirmed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UIAccessPolicyError' }
   /api/settings/default-auth-outcome:
     put:
       operationId: setDefaultAuthOutcome

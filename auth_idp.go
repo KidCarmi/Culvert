@@ -696,6 +696,26 @@ func (r *IdPRegistry) LiveProvider(id string) (IdentityProvider, bool) {
 	return p, ok
 }
 
+// ProfileEnabled reports whether profile id is enabled and has a live
+// provider — allocation-free, for the per-request IP-bound sign-in check
+// (sso_surrogate.go): a binding counts only while its IdP still does.
+func (r *IdPRegistry) ProfileEnabled(id string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.live[id]; !ok {
+		return false
+	}
+	for _, p := range r.profiles {
+		if p.ID == id {
+			return p.Enabled
+		}
+	}
+	return false
+}
+
 // EnabledProviders returns all live (enabled+compiled) providers in profile order.
 func (r *IdPRegistry) EnabledProviders() []IdentityProvider {
 	r.mu.RLock()

@@ -1,0 +1,92 @@
+2026-10-03T11:18:13.406271685Z	agent	NOTE	op_id=01M40QRTMQNP599QF1R3DKY0GG kind=upgrades.apply actor=uid=0,user=root — started
+2026-10-03T11:18:13.406283482Z	capture_before	START
+2026-10-03T11:18:13.602652225Z	capture_before	out	capture_before: running_image_id=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f prior_digests=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f prior_ref="172.17.0.1:5056/culvert@sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f" rollback_target=valid baseline: 503 503 Service Unavailable preserved=[session_secret,ca,policy_loaded] failing=[clamav]
+2026-10-03T11:18:13.602663497Z	capture_before	END succeeded
+2026-10-03T11:18:13.602666947Z	resolve_target	START
+2026-10-03T11:18:13.710325978Z	resolve_target	out	resolve_target: requested_ref="172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1" pinned_ref="172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1" target_digests=sha256:08fbbecd79ceb771d9c9052d4460e3f7a29d261a730aafea20fbef530fec99c3,sha256:093d2a30171d6e0b9eb1af845990a2ed489903a34a2d894d8977e6f59ba6a170,sha256:0a3a60cb83abc30a10f7f790415955f0087ac3f184cf8b5c3101edc00e161fec,sha256:0d4cdc7c06605da3257e8d99d914240c3787e4118daace88383c9598090037e1,sha256:0f902986372fd6020f1f52f889785564321bca57501f750fb7dff9058afe45eb,sha256:1fe6ed614dae42a4e0353c2e26de0f2faec3c9d4f82b0207cc731de927af93b1,sha256:204f4abf887de252d220648f217d488f4061384401217d24c577bf0f22ed6607,sha256:209cc9c6387b1f3d561ead97696d538607c862f256e80e07a7e0ccd2d89ac39b,sha256:389f11b1f9269420569893d5662b5e8177b5d3a248e07bd4be5c6602c94ea853,sha256:9e79263b23a87fc6fa1f6ca4a0046c6a11e01efd0a1645c76a849a5829031ef4,sha256:bb1e8e1f36d66e692f403b428f39b2aa34e48d5656adabb290865b8842892b01,sha256:c2cf35c487bdf01750a07ee9c26a143abc89ffe3e97aa8881888d3e381b325df,sha256:c7f590e2f45d50145a85209baa652c11e479dd22de91bdc17fb6fc1a60259245,sha256:c93fb8c105b3dec698e3a7f9792623394bbdb79e9faa76bab75f90100f1ed377,sha256:cf56540e5c6d633380a8d87881ee56eded916f075d021e1cbdacad74e71727fc,sha256:dde74b51f3ad2948131dd008796bd49127dd7e5f51729dac17087eac8ffc378c,sha256:e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5,sha256:f6dd52ccea00f96816ee031bbcb3e738d6aa816a60302c058be13cdb69e05372 already_current=false
+2026-10-03T11:18:13.710337482Z	resolve_target	END succeeded
+2026-10-03T11:18:13.710342815Z	preflight_dependencies	START
+2026-10-03T11:18:13.825174962Z	preflight_dependencies	out	preflight_dependencies: no unhealthy dependency
+2026-10-03T11:18:13.825204183Z	preflight_dependencies	END succeeded
+2026-10-03T11:18:13.825209396Z	preflight_space	START
+2026-10-03T11:18:13.825227203Z	preflight_space	out	preflight_space: 1818 MiB free on /var/lib/docker, about 349 MiB needed
+2026-10-03T11:18:13.82522902Z	preflight_space	END succeeded
+2026-10-03T11:18:13.825230473Z	pre_backup	START
+2026-10-03T11:18:13.825232821Z	pre_backup	out	pre_backup: skipped (pre_backup=false)
+2026-10-03T11:18:13.825234181Z	pre_backup	END succeeded
+2026-10-03T11:18:13.82523726Z	pull	START
+2026-10-03T11:18:14.79607801Z	pull	out	172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1: Pulling from culvert
+2026-10-03T11:18:14.796143567Z	pull	out	bb1e8e1f36d6: Pulling fs layer
+2026-10-03T11:18:14.796146567Z	pull	out	08fbbecd79ce: Pulling fs layer
+2026-10-03T11:18:14.796147807Z	pull	out	c7f590e2f45d: Pulling fs layer
+2026-10-03T11:18:14.796149078Z	pull	out	389f11b1f926: Pulling fs layer
+2026-10-03T11:18:14.796150341Z	pull	out	cf56540e5c6d: Pulling fs layer
+2026-10-03T11:18:14.796151653Z	pull	out	209cc9c6387b: Pulling fs layer
+2026-10-03T11:18:14.796152697Z	pull	out	1fe6ed614dae: Pulling fs layer
+2026-10-03T11:18:14.796153817Z	pull	out	0a3a60cb83ab: Pulling fs layer
+2026-10-03T11:18:14.796154844Z	pull	out	c2cf35c487bd: Pulling fs layer
+2026-10-03T11:18:14.796155952Z	pull	out	dde74b51f3ad: Pulling fs layer
+2026-10-03T11:18:14.796157038Z	pull	out	f6dd52ccea00: Pulling fs layer
+2026-10-03T11:18:14.796165934Z	pull	out	0f902986372f: Pulling fs layer
+2026-10-03T11:18:14.796167079Z	pull	out	08fbbecd79ce: Download complete
+2026-10-03T11:18:14.796168179Z	pull	out	389f11b1f926: Download complete
+2026-10-03T11:18:14.796169512Z	pull	out	209cc9c6387b: Download complete
+2026-10-03T11:18:14.796170542Z	pull	out	c7f590e2f45d: Download complete
+2026-10-03T11:18:14.796171524Z	pull	out	cf56540e5c6d: Download complete
+2026-10-03T11:18:14.796172551Z	pull	out	c2cf35c487bd: Download complete
+2026-10-03T11:18:14.796173518Z	pull	out	f6dd52ccea00: Download complete
+2026-10-03T11:18:14.796174564Z	pull	out	0a3a60cb83ab: Download complete
+2026-10-03T11:18:14.796175569Z	pull	out	1fe6ed614dae: Download complete
+2026-10-03T11:18:14.796176519Z	pull	out	dde74b51f3ad: Download complete
+2026-10-03T11:18:14.796177484Z	pull	out	093d2a30171d: Download complete
+2026-10-03T11:18:14.796178436Z	pull	out	bb1e8e1f36d6: Download complete
+2026-10-03T11:18:14.796179411Z	pull	out	389f11b1f926: Pull complete
+2026-10-03T11:18:14.796180364Z	pull	out	c7f590e2f45d: Pull complete
+2026-10-03T11:18:14.796181364Z	pull	out	0f902986372f: Download complete
+2026-10-03T11:18:14.796182321Z	pull	out	0a3a60cb83ab: Pull complete
+2026-10-03T11:18:14.796183329Z	pull	out	dde74b51f3ad: Pull complete
+2026-10-03T11:18:14.796184388Z	pull	out	08fbbecd79ce: Pull complete
+2026-10-03T11:18:14.796185376Z	pull	out	209cc9c6387b: Pull complete
+2026-10-03T11:18:14.796186334Z	pull	out	cf56540e5c6d: Pull complete
+2026-10-03T11:18:14.796187298Z	pull	out	0f902986372f: Pull complete
+2026-10-03T11:18:14.796188278Z	pull	out	c2cf35c487bd: Pull complete
+2026-10-03T11:18:14.796189246Z	pull	out	f6dd52ccea00: Pull complete
+2026-10-03T11:18:14.796190201Z	pull	out	1fe6ed614dae: Pull complete
+2026-10-03T11:18:14.796191204Z	pull	out	bb1e8e1f36d6: Pull complete
+2026-10-03T11:18:14.796192161Z	pull	out	Digest: sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1
+2026-10-03T11:18:14.796193165Z	pull	out	Status: Downloaded newer image for 172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1
+2026-10-03T11:18:14.796197821Z	pull	out	172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1
+2026-10-03T11:18:14.796200106Z	pull	END succeeded
+2026-10-03T11:18:14.796241103Z	restart	START
+2026-10-03T11:18:16.445815906Z	restart	err	 Container culvert-origin-allowed-1 Running 
+2026-10-03T11:18:16.445840005Z	restart	err	 Container culvert-clamav Running 
+2026-10-03T11:18:16.445842269Z	restart	err	 Container culvert-origin-blocked-1 Running 
+2026-10-03T11:18:16.445844329Z	restart	err	 Container culvert Recreate 
+2026-10-03T11:18:16.445846095Z	restart	err	 Container culvert Recreated 
+2026-10-03T11:18:16.44584781Z	restart	err	 Container culvert-clamav Waiting 
+2026-10-03T11:18:16.445849885Z	restart	err	 Container culvert-clamav Healthy 
+2026-10-03T11:18:16.445851697Z	restart	err	 Container culvert Starting 
+2026-10-03T11:18:16.445853378Z	restart	err	 Container culvert Started 
+2026-10-03T11:18:16.445855781Z	restart	END succeeded
+2026-10-03T11:18:16.445861308Z	health_gate	START
+2026-10-03T11:18:18.4503475Z	health_gate	out	ready=true ready_detail="503 503 Service Unavailable tolerated: failing [clamav]; /ready was already non-2xx and no row that was ok broke after 2 attempt(s) in 2.003s" health=true health_detail="200 200 OK" preserved=[session_secret,ca,policy_loaded] duration=2.004467124s
+2026-10-03T11:18:18.450374305Z	health_gate	END succeeded
+2026-10-03T11:18:18.450379017Z	verify	START
+2026-10-03T11:18:18.63405117Z	verify	out	verify: running_image_id=sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1 running_digests=sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1,sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1
+2026-10-03T11:18:18.63406432Z	verify	END succeeded
+2026-10-03T11:18:18.634069466Z	rollback_pull	START
+2026-10-03T11:18:18.634073173Z	rollback_pull	out	rollback_pull: skipped (no post-restart failure)
+2026-10-03T11:18:18.634080453Z	rollback_pull	END succeeded
+2026-10-03T11:18:18.634085239Z	rollback_restart	START
+2026-10-03T11:18:18.634087217Z	rollback_restart	out	rollback_restart: skipped (no post-restart failure)
+2026-10-03T11:18:18.634088667Z	rollback_restart	END succeeded
+2026-10-03T11:18:18.634090069Z	rollback_health	START
+2026-10-03T11:18:18.634091737Z	rollback_health	out	rollback_health: skipped (no post-restart failure)
+2026-10-03T11:18:18.634093105Z	rollback_health	END succeeded
+2026-10-03T11:18:18.634101839Z	rollback_verify	START
+2026-10-03T11:18:18.634103448Z	rollback_verify	out	rollback_verify: skipped (no post-restart failure)
+2026-10-03T11:18:18.634104634Z	rollback_verify	END succeeded
+2026-10-03T11:18:18.634105902Z	report	START
+2026-10-03T11:18:18.634132919Z	report	out	upgrade_apply requested_ref="172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1" pinned_ref="172.17.0.1:5056/culvert@sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1" already_current=false pre_backup=false target_digests=sha256:08fbbecd79ceb771d9c9052d4460e3f7a29d261a730aafea20fbef530fec99c3,sha256:093d2a30171d6e0b9eb1af845990a2ed489903a34a2d894d8977e6f59ba6a170,sha256:0a3a60cb83abc30a10f7f790415955f0087ac3f184cf8b5c3101edc00e161fec,sha256:0d4cdc7c06605da3257e8d99d914240c3787e4118daace88383c9598090037e1,sha256:0f902986372fd6020f1f52f889785564321bca57501f750fb7dff9058afe45eb,sha256:1fe6ed614dae42a4e0353c2e26de0f2faec3c9d4f82b0207cc731de927af93b1,sha256:204f4abf887de252d220648f217d488f4061384401217d24c577bf0f22ed6607,sha256:209cc9c6387b1f3d561ead97696d538607c862f256e80e07a7e0ccd2d89ac39b,sha256:389f11b1f9269420569893d5662b5e8177b5d3a248e07bd4be5c6602c94ea853,sha256:9e79263b23a87fc6fa1f6ca4a0046c6a11e01efd0a1645c76a849a5829031ef4,sha256:bb1e8e1f36d66e692f403b428f39b2aa34e48d5656adabb290865b8842892b01,sha256:c2cf35c487bdf01750a07ee9c26a143abc89ffe3e97aa8881888d3e381b325df,sha256:c7f590e2f45d50145a85209baa652c11e479dd22de91bdc17fb6fc1a60259245,sha256:c93fb8c105b3dec698e3a7f9792623394bbdb79e9faa76bab75f90100f1ed377,sha256:cf56540e5c6d633380a8d87881ee56eded916f075d021e1cbdacad74e71727fc,sha256:dde74b51f3ad2948131dd008796bd49127dd7e5f51729dac17087eac8ffc378c,sha256:e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5,sha256:f6dd52ccea00f96816ee031bbcb3e738d6aa816a60302c058be13cdb69e05372 prior_digests=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f running_after=sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1,sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1 health=[ready=true ready_detail="503 503 Service Unavailable tolerated: failing [clamav]; /ready was already non-2xx and no row that was ok broke after 2 attempt(s) in 2.003s" health=true health_detail="200 200 OK" preserved=[session_secret,ca,policy_loaded] duration=2.004467124s] | rollback attempted=false succeeded=false target=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f final_running=sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1,sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1
+2026-10-03T11:18:18.634134604Z	report	END succeeded
+2026-10-03T11:18:18.638777539Z	agent	NOTE	op finished succeeded

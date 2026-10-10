@@ -30,6 +30,7 @@ var d0PublicPaths = []string{
 	"/api/auth/totp/verify", // prefix allowlist /api/auth/totp
 	"/auth/oidc/callback",
 	"/auth/saml/callback",
+	"/auth/saml/complete",
 	"/auth/select",
 	"/auth/logout",
 	"/auth/some-future-callback", // prefix allowlist /auth/

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -237,6 +238,12 @@ type Manager struct {
 	activeRetention time.Duration
 	maxActive       int
 	now             func() time.Time
+
+	// Persisted idempotency index (idempotency_store.go). idempPath == "" ⇒
+	// disabled (the historical in-memory-only behaviour).
+	idempPath        string
+	persisted        map[string]*IdempRecord
+	idempPersistErrs atomic.Int64
 }
 
 // NewManager returns a fresh Manager. clock may be nil (defaults to
@@ -374,6 +381,7 @@ func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map
 			OpID: op.ID,
 			When: m.now(),
 		}
+		m.recordIdempAdmissionLocked(op)
 	}
 	return m.cloneLocked(op), false, nil
 }
@@ -555,6 +563,7 @@ func (m *Manager) Finish(opID string, finalState State, reason FailureReason, re
 	if m.holder != nil && m.holder.ID == opID {
 		m.holder = nil
 	}
+	m.recordIdempTerminalLocked(op)
 	return nil
 }
 

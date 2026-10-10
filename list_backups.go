@@ -45,15 +45,38 @@ type backupListEntry struct {
 // encrypted/unencrypted via magic-bytes peek, and emits a JSON array
 // (sorted by filename ascending) on out.
 func runListBackups(dir string, out io.Writer) error {
+	_, err := listBackupsTo(dir, out)
+	return err
+}
+
+// listBackupsTimingMarker prefixes the one timing line --list-backups writes
+// to STDERR (stdout stays the JSON array the agent parses). The maintenance
+// agent reads it to split a slow listing into container start (process start
+// minus compose invocation) and the directory scan itself. Counts and
+// durations only — no paths, no file names.
+const listBackupsTimingMarker = "CULVERT_LIST_BACKUPS_TIMING"
+
+// runListBackupsTimed is runListBackups plus that timing line, written
+// whether the scan succeeded or not.
+func runListBackupsTimed(dir string, out, diag io.Writer) error {
+	start := time.Now()
+	n, err := listBackupsTo(dir, out)
+	_, _ = fmt.Fprintf(diag, "%s start_unix_ns=%d enumerate_us=%d entries=%d ok=%t\n",
+		listBackupsTimingMarker, start.UnixNano(), time.Since(start).Microseconds(), n, err == nil)
+	return err
+}
+
+// listBackupsTo performs the scan and returns how many entries it emitted.
+func listBackupsTo(dir string, out io.Writer) (int, error) {
 	if dir == "" {
-		return fmt.Errorf("--backup-dir is required")
+		return 0, fmt.Errorf("--backup-dir is required")
 	}
 	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("--backup-dir must be absolute, got %q", dir)
+		return 0, fmt.Errorf("--backup-dir must be absolute, got %q", dir)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("read backup dir %s: %w", dir, err)
+		return 0, fmt.Errorf("read backup dir %s: %w", dir, err)
 	}
 	out_entries := make([]backupListEntry, 0, len(entries))
 	for _, e := range entries {
@@ -89,9 +112,9 @@ func runListBackups(dir string, out io.Writer) error {
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(out_entries); err != nil {
-		return fmt.Errorf("encode JSON: %w", err)
+		return 0, fmt.Errorf("encode JSON: %w", err)
 	}
-	return nil
+	return len(out_entries), nil
 }
 
 // peekEncryptedMagic returns true iff the first backupEncMagicLen bytes

@@ -263,3 +263,57 @@ func TestInstallScript_EnvPut_ConcurrentSameVar_NoLostUpdateOrDuplicate(t *testi
 		t.Errorf("pre-existing EXISTING var lost to the concurrent env_put race; .env content:\n%s", content)
 	}
 }
+
+// The appliance first boot hands install.sh the per-instance setup token
+// (CULVERT_INSTALL_SETUP_TOKEN); install.sh must persist it through the same
+// env_put (never overwriting an existing value — an interrupted first boot
+// keeps the token the console already showed) and must refuse a value
+// outside the .env-safe alphabet. The block is extracted from the real
+// installer so the test cannot drift from it.
+func TestInstallScript_PersistsSetupTokenViaEnvPut(t *testing.T) {
+	installSH := filepath.Join(pkgSourceDir(), "scripts", "install.sh")
+	raw, err := os.ReadFile(installSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	start := strings.Index(src, `if [[ -n "${CULVERT_INSTALL_SETUP_TOKEN:-}" ]]; then`)
+	if start < 0 {
+		t.Fatal("install.sh no longer handles CULVERT_INSTALL_SETUP_TOKEN")
+	}
+	end := strings.Index(src[start:], "\nfi\n")
+	block := src[start : start+end+4]
+	envPut := extractShellFunction(t, installSH, "env_put")
+	alreadySet := extractShellFunction(t, installSH, "secret_already_set")
+	run := func(t *testing.T, token, envFile string) string {
+		t.Helper()
+		script := "set -euo pipefail\ninfo(){ :; }; warn(){ echo \"WARN: $*\"; }\n" + envPut + "\n" + alreadySet + "\nINSTALL_DIR=\"$(dirname \"$1\")\"\nexport CULVERT_INSTALL_SETUP_TOKEN=" + token + "\n" + block
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "setup_token_test", envFile) // #nosec G204 -- fixed test script content
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("script failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	envFile := filepath.Join(t.TempDir(), ".env")
+	run(t, "0123456789abcdef0123456789abcdef", envFile)
+	got, _ := os.ReadFile(envFile)
+	if !strings.Contains(string(got), "CULVERT_SETUP_TOKEN=0123456789abcdef0123456789abcdef\n") {
+		t.Fatalf("token not persisted:\n%s", got)
+	}
+	// Re-run with a different token: env_put never overwrites.
+	run(t, "ffffffffffffffffffffffffffffffff", envFile)
+	got, _ = os.ReadFile(envFile)
+	if strings.Contains(string(got), "ffffffff") || strings.Count(string(got), "CULVERT_SETUP_TOKEN=") != 1 {
+		t.Fatalf("an existing token must never be overwritten:\n%s", got)
+	}
+	// An unsafe value is refused, never written.
+	envFile2 := filepath.Join(t.TempDir(), ".env")
+	out := run(t, "'bad token;rm -rf /'", envFile2)
+	if !strings.Contains(out, "Ignoring CULVERT_INSTALL_SETUP_TOKEN") {
+		t.Fatalf("unsafe token must be refused with a warning:\n%s", out)
+	}
+	if got, _ := os.ReadFile(envFile2); strings.Contains(string(got), "CULVERT_SETUP_TOKEN") {
+		t.Fatalf("unsafe token must not be persisted:\n%s", got)
+	}
+}

@@ -248,7 +248,7 @@ func (c *Client) ScanContext(ctx context.Context, data []byte) (virusName string
 	if err != nil {
 		return "", false, fmt.Errorf("clamav: read response: %w", err)
 	}
-	return parseClamResponse(strings.TrimRight(string(resp), "\x00\n\r "))
+	return parseRawClamResponse(resp)
 }
 
 // acquireSlot books one of the clamMaxConcurrent scan slots, waiting on the
@@ -318,7 +318,43 @@ func (c *Client) watchCancel(ctx context.Context, conn net.Conn) func() {
 	return func() { close(done) }
 }
 
-// parseClamResponse parses a CLAMD INSTREAM response.
+// parseRawClamResponse parses everything clamd wrote for one INSTREAM. clamd
+// can write MORE THAN ONE NUL-terminated reply to a single request: when it
+// cannot spool the stream to its temporary directory (a full disk) it answers
+// "Error writing to temporary file ERROR\0stream: OK\0" — the error, then a
+// verdict for the part it did scan. Matching only the suffix of the whole
+// buffer read that as clean, so a full disk delivered EICAR unscanned even
+// under av_unavailable=closed (appliance lab, 41bd1193). Every reply is
+// judged: a FOUND anywhere is a detection (blocking is always the safe
+// reading); otherwise an ERROR anywhere is an error, which the av_unavailable
+// posture then governs; only exactly one reply that is OK is clean.
+func parseRawClamResponse(raw []byte) (virusName string, isMalicious bool, err error) {
+	var replies []string
+	for _, r := range strings.Split(string(raw), "\x00") {
+		if r = strings.Trim(r, "\n\r "); r != "" {
+			replies = append(replies, r)
+		}
+	}
+	if len(replies) == 0 {
+		return "", false, fmt.Errorf("clamav: empty response (daemon may have closed connection)")
+	}
+	for _, r := range replies {
+		if strings.HasSuffix(r, " FOUND") {
+			return parseClamResponse(r)
+		}
+	}
+	for _, r := range replies {
+		if strings.HasSuffix(r, " ERROR") {
+			return "", false, fmt.Errorf("clamav: scan error: %s", strings.Join(replies, " | "))
+		}
+	}
+	if len(replies) != 1 {
+		return "", false, fmt.Errorf("clamav: unexpected response: %q", strings.Join(replies, " | "))
+	}
+	return parseClamResponse(replies[0])
+}
+
+// parseClamResponse parses ONE clamd INSTREAM reply.
 //
 //	"stream: OK"                       → ("", false, nil)
 //	"stream: Eicar-Test-Signature FOUND" → ("Eicar-Test-Signature", true, nil)

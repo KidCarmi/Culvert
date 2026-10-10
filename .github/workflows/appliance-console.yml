@@ -1,0 +1,150 @@
+name: Appliance Console
+
+on:
+  # Pull requests run this suite through the Deep PR Gate
+  # (pr-deep-gate.yml `appliance-console`), so its result is part of the
+  # REQUIRED aggregate rather than a separate advisory check.
+  workflow_call:
+  push:
+    branches: [feat/appliance-console, feat/appliance-firstboot-guidance, harden/appliance-access-and-artifacts, harden/appliance-release-boundaries]
+    paths:
+      - 'appliance/console/**'
+      - 'appliance/boot-splash/**'
+      - 'appliance/os-maintenance/**'
+      - 'appliance/build/**'
+      - 'appliance/provision/**'
+      - 'cmd/culvert-console/**'
+      - 'cmd/culvert-access/**'
+      - 'internal/applianceaccess/**'
+      - 'internal/session/**'
+      - 'appliance/artifact-audit/**'
+      - 'third_party/**'
+      - 'setup_token*'
+      - 'ui_session*'
+      - 'ui_middleware*'
+      - 'store.go'
+      - 'cmd/culvert-maint/**'
+      - 'pkg/releaseproof/**'
+      - 'third_party/crewjam-saml/**'
+      - 'release_catalog*'
+      - 'release_dispatch*'
+      - 'ui_allow_ips*'
+      - 'ui_access_policy*'
+      - 'admin_settings*'
+      - 'appliance_*test.go'
+      - 'internal/applianceconsole/**'
+      - 'internal/appliancehost/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/appliance-console.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  console:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Console state, display, process and authentication boundary tests
+        run: |
+          go test -race -shuffle=on -count=2 ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console ./internal/applianceaccess ./cmd/culvert-access ./internal/session
+          go vet ./internal/applianceconsole ./internal/appliancehost ./cmd/culvert-console ./internal/applianceaccess ./cmd/culvert-access ./internal/session
+      - name: Root-owned recovery storage fault tests
+        run: |
+          go test -c -o /tmp/culvert-host.test ./internal/appliancehost
+          sudo env CULVERT_STORAGE_FAULTS=1 /tmp/culvert-host.test -test.shuffle=on -test.count=2
+      - name: Root-only bootstrap credential lifecycle
+        run: |
+          go test -c -o /tmp/culvert-console.test ./cmd/culvert-console
+          sudo /tmp/culvert-console.test -test.run '^TestBootstrap' -test.shuffle=on -test.count=2
+      - name: Artifact inspection safety regressions
+        run: |
+          python3 -m venv /tmp/culvert-artifact-audit-env
+          /tmp/culvert-artifact-audit-env/bin/pip install cryptography==50.0.2
+          /tmp/culvert-artifact-audit-env/bin/python -m unittest discover -s appliance/artifact-audit -v
+      - name: Patched SAML runtime and signature regressions
+        run: |
+          (cd third_party/crewjam-saml && go test -mod=readonly ./xmlenc ./samlsp .)
+          go test -run '^Test(SAML|ReleaseProof|CosignVerifier|CosignBundle|UIAllow|UIAccess|AdminSettings|LoadUIAccessPolicy|LoadAdminSettings_|SetUIAllowedCIDRs)' .
+          CGO_ENABLED=0 go build -trimpath -o /tmp/culvert-runtime .
+          /tmp/culvert-artifact-audit-env/bin/python appliance/artifact-audit/verify_saml_patch.py --binary /tmp/culvert-runtime
+      - name: Operator key import privilege and filesystem boundaries
+        run: |
+          go test -c -o /tmp/culvert-access.test ./cmd/culvert-access
+          sudo /tmp/culvert-access.test -test.run '^TestAccessKey' -test.shuffle=on -test.count=2
+      - name: Maintenance agent admission and interrupted journal regressions
+        working-directory: cmd/culvert-maint
+        run: |
+          go test -race -shuffle=on -count=2 ./internal/server ./internal/journal ./internal/releasetrust
+          go vet ./internal/server ./internal/journal ./internal/releasetrust
+      - name: Management access policy feedback
+        run: node --test test/ui-allow-ips.test.mjs test/ca-rotate.test.mjs test/release-dispatch.test.mjs
+      - name: Independent signed release evidence verifier
+        working-directory: pkg/releaseproof
+        run: |
+          go test -race -shuffle=on -count=2 ./...
+          go vet ./...
+          go mod tidy -diff
+      - name: Existing firstboot and OS maintenance contracts
+        run: go test -shuffle=on -count=1 -run '^Test(FirstBoot|OSUpdate|SudoPolicy|SetupToken|UIAuthBootstrap|UISessionRole|SessionRole|RoleFailClosed|AuthStatus|RosterToSession|SessionAdmin|AuditActor|APIAuth|LiveTrustHTTP)' .
+      - name: Bounded terminal layout fuzzing
+        run: go test ./internal/applianceconsole -run '^$' -fuzz '^FuzzFrameBounds$' -fuzztime=10s -parallel=2
+      - name: Build static host binary with the repository compiler
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o appliance/console/culvert-console ./cmd/culvert-console
+          expected=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+          actual=$(go version -m appliance/console/culvert-console | head -1 | awk '{print $2}')
+          test "$actual" = "$expected"
+      - name: Syntax and degraded-host smoke
+        run: |
+          bash -n appliance/console/install.sh
+          bash -n appliance/console/install-lib.sh
+          bash -n appliance/console/profile.sh
+          bash -n appliance/boot-splash/install.sh
+          bash -n appliance/boot-splash/install-lib.sh
+          bash -n appliance/boot-splash/99-culvert-splash.cfg
+          sh -n appliance/boot-splash/culvert-splash-message
+          sh -n appliance/boot-splash/culvert-kernel-log-vt
+          sh -n appliance/boot-splash/culvert-has-display
+          bash -n appliance/build/boot-splash_test.sh
+          sudo bash appliance/console/install_test.sh
+          bash appliance/os-maintenance/power_test.sh
+          bash appliance/build/console-bundle_test.sh
+          bash appliance/build/boot-splash_test.sh
+          appliance/console/culvert-console --json
+          appliance/console/culvert-console --text
+          appliance/console/culvert-console --report
+
+  ssh-boundary:
+    # A fresh disposable runner isolates account/sshd mutations from the other
+    # root fixture suites. Failure still fails this reusable workflow.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Real SSH operator boundary on disposable runner
+        working-directory: cmd/culvert-access
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq openssh-server openssh-client
+          fi
+          go test -c -o /tmp/culvert-access.test .
+          CGO_ENABLED=0 go build -mod=readonly -trimpath -o /tmp/culvert-access .
+          sudo env CULVERT_ACCESS_SSH_FIXTURE=1 CULVERT_ACCESS_TEST_BINARY=/tmp/culvert-access \
+            /tmp/culvert-access.test -test.run '^TestAccessRealSSHBoundary$' -test.v

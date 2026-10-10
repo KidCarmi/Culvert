@@ -100,6 +100,38 @@
       }
     },
     "schemas": {
+      "AVSettings": {
+        "additionalProperties": false,
+        "description": "Scanner av_unavailable posture: what a body scan does when the AV engine (local ClamAV or the remote scan sidecar) is faulted — stopped, crashed, restarting, unreachable, or answering without a verdict. Node-local — outside export/import, config-version rollback, and CP→DP sync. Budget/capacity refusals are fail-closed in both postures and are not governed by this setting.",
+        "properties": {
+          "av_unavailable": {
+            "description": "open = forward the content UNSCANNED for that request (counted + alerted; the default). closed = refuse the content (HTTP 403, Source av_unavailable); never cached, so the next request rescans.",
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "revision": {
+            "description": "Server-owned content-derived revision of the returned posture. Echo back as `ifRevision` on the write for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
+          },
+          "source": {
+            "description": "admin = an explicit admin save owns the posture (admin_settings.json); boot = the CULVERT_AV_UNAVAILABLE boot default (or open when unset) is in force.",
+            "enum": [
+              "admin",
+              "boot"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "av_unavailable",
+          "source",
+          "revision"
+        ],
+        "type": "object"
+      },
       "AddBlocklistEntry": {
         "additionalProperties": false,
         "description": "Provide a single host or a list.",
@@ -2000,8 +2032,16 @@
       "DispatchReleaseBody": {
         "additionalProperties": false,
         "properties": {
+          "acknowledge_unknown_current": {
+            "description": "Admit a target that declares min_upgrade_from when the running release is not a catalog release (custom build), i.e. the transition floor cannot be evaluated. Without it the planner refuses with kind \"unknown_current\" (HTTP 409). A running release BELOW the floor is refused with kind \"unsupported_transition\" and no acknowledgement admits it.",
+            "type": "boolean"
+          },
           "agent": {
             "type": "string"
+          },
+          "allow_downgrade": {
+            "description": "Break-glass only. Admit a target OLDER than the running release. Without it the planner refuses with kind \"downgrade\" (HTTP 409). Restore-from-backup is the supported way back; see docs/appliance/upgrade-transition-matrix.md.",
+            "type": "boolean"
           },
           "channel": {
             "type": "string"
@@ -4467,6 +4507,26 @@
         ],
         "type": "object"
       },
+      "SetAVSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "av_unavailable": {
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, last-writer-wins applies.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "av_unavailable"
+        ],
+        "type": "object"
+      },
       "SetBlockPageBody": {
         "additionalProperties": false,
         "properties": {
@@ -5011,6 +5071,10 @@
             "description": "True until an initial admin credential (or explicit open mode) is configured.",
             "type": "boolean"
           },
+          "setupTokenRequired": {
+            "description": "True when the deployment was started with a per-instance setup token (CULVERT_SETUP_TOKEN; the appliance first boot mints one) and POST /api/setup/complete requires it in the X-Culvert-Setup-Token header. Absent/false on deployments without a token.",
+            "type": "boolean"
+          },
           "ui_tls_fallback": {
             "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log.",
             "type": "boolean"
@@ -5393,6 +5457,27 @@
       "TunablesPatch": {
         "additionalProperties": true,
         "description": "Adaptive auto-exclude tunables patch (subset of tunable fields).",
+        "type": "object"
+      },
+      "UIAccessPolicyError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "ui_access_policy_unavailable",
+              "ui_allow_ips_not_saved",
+              "ui_allow_ips_persistence_uncertain"
+            ],
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ],
         "type": "object"
       },
       "UIAllowIPs": {
@@ -15215,6 +15300,88 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/logs/history/export": {
+      "post": {
+        "description": "Streams every record of the stored request history, sealed in the CVRTST01 streaming envelope (PBKDF2-SHA256 + chunked AES-256-GCM) under the supplied archive passphrase — a key the operator holds, independent of this node's history-store key. Import it offline with `culvert --history-import <file> --confirm` (CULVERT_HISTORY_PASSPHRASE). A failure after streaming starts leaves an archive with no final chunk, which never authenticates, and aborts the response. Stored entries larger than 4 MiB are skipped and counted (archive trailer and audit detail). One export at a time. The admin UI posts a form so the browser streams the download to disk.",
+        "operationId": "exportRequestHistory",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "archivePhrase": {
+                    "description": "Passphrase the archive is sealed under. Keep it with the archive's custody record; it is not stored.",
+                    "minLength": 12,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "archivePhrase"
+                ],
+                "type": "object"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "properties": {
+                  "archivePhrase": {
+                    "minLength": 12,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "archivePhrase"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The encrypted archive."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Export request history (encrypted archive)",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-audit-event": "logstore.export",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/logs/purge": {
       "post": {
         "description": "Purge logs.",
@@ -21491,6 +21658,110 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/security-scan/av-settings": {
+      "get": {
+        "description": "Returns the scanner's av_unavailable posture (open|closed), whether an admin save or the boot default owns it, and a revision fingerprinting exactly the returned value.",
+        "operationId": "getAVSettings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AVSettings"
+                }
+              }
+            },
+            "description": "The live posture."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "AV-unavailable scan posture",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Sets the av_unavailable posture. closed refuses content that cannot be scanned while the AV engine is unavailable; open forwards it unscanned (counted + alerted). Persist-before-apply: a 200 means the posture is durable AND live.",
+        "operationId": "setAVSettings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAVSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AVSettings"
+                }
+              }
+            },
+            "description": "Updated (durable AND live; carries the new revision)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the posture changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The posture could not be persisted; the live posture is UNCHANGED (persist-before-apply). Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set AV-unavailable scan posture",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "security.av_unavailable",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/security-scan/cache": {
       "delete": {
         "description": "Purge scan cache.",
@@ -23136,8 +23407,19 @@
     },
     "/api/setup/complete": {
       "post": {
-        "description": "One-time bootstrap. Sets the first admin credential, or enables explicit\nopen mode with `{unauth:true}`. Returns 403 once auth is already\nconfigured. Rate-limited per source IP.\n",
+        "description": "One-time bootstrap. Sets the first admin credential, or enables explicit\nopen mode with `{unauth:true}`. Returns 403 once auth is already\nconfigured, and 403 when the deployment requires a setup token\n(`GET /api/setup/status` → `setupTokenRequired`) that the request does\nnot present in `X-Culvert-Setup-Token`. Rate-limited per source IP; a\nmissing or wrong token counts as a failed attempt.\n",
         "operationId": "completeSetup",
+        "parameters": [
+          {
+            "description": "The per-instance setup token (appliance console / `sudo culvert-status`). Required only when `setupTokenRequired` is true.",
+            "in": "header",
+            "name": "X-Culvert-Setup-Token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -23375,6 +23657,232 @@
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "operator",
         "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/sso-ip-binding": {
+      "get": {
+        "description": "IP-bound sign-in (F-SSO-SCOPE-1): the settings plus node-local counters. A browser SSO session is a cookie on the admin UI host and identifies no proxied traffic on its own; when this is enabled a completed sign-in binds the browser's client address to its identity for the configured lifetime. Off by default.",
+        "operationId": "getSSOIPBinding",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Settings, live binding count, bind outcomes and hits."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "IP-bound sign-in status",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "beta",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Full replacement (validate → persist → apply; a persist failure is a 500 with the running settings unchanged). Turning it off removes every binding. Node-local AdminSettings-durable; outside export/import, config-version rollback and CP→DP sync.",
+        "operationId": "setSSOIPBinding",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "excludeCidrs": {
+                    "description": "Client ranges (CIDR or address) never bound: NAT gateways, terminal servers, shared hosts",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 256,
+                    "type": "array"
+                  },
+                  "ttlMinutes": {
+                    "description": "0 = default (60); otherwise 5–1440",
+                    "maximum": 1440,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The installed settings and counters."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The durable write failed — the running settings are unchanged. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set IP-bound sign-in",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "auth.sso_ip_binding.settings",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "beta",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/sso-ip-binding/bindings": {
+      "delete": {
+        "description": "Removes one binding (addr=<ip>) or every binding (all=1). The browsers concerned must sign in again.",
+        "operationId": "revokeSSOIPBindings",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "{removed: N}"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Revoke IP-bound sign-in bindings",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "auth.sso_ip_binding.revoke",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "beta",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "get": {
+        "description": "The live bindings on this node (client address, subject, provider, groups, bound/expiry times). Admin-only — it names users and their addresses.",
+        "operationId": "listSSOIPBindings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Live bindings."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "List IP-bound sign-in bindings",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "beta",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
       }
@@ -25347,6 +25855,16 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UIAccessPolicyError"
+                }
+              }
+            },
+            "description": "Access policy is unavailable, or saving failed. Inspect code; ui_allow_ips_persistence_uncertain means the new policy is active but its crash durability is unconfirmed."
           }
         },
         "security": [
@@ -25369,7 +25887,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "post": {
-        "description": "Set UI allow-IPs.",
+        "description": "Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions; a missing ips field, a blank entry, or a malformed address/CIDR is refused with a plain-text 400 and leaves the active policy unchanged. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed.",
         "operationId": "setUIAllowIPs",
         "requestBody": {
           "content": {
@@ -25391,13 +25909,23 @@
                 }
               }
             },
-            "description": "Set UI allow-IPs."
+            "description": "Validate and persist the complete access list before publishing it. An empty array intentionally removes restrictions. A persistence-uncertain response means the replacement landed and the new policy is active, but crash durability could not be confirmed."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UIAccessPolicyError"
+                }
+              }
+            },
+            "description": "Access policy is unavailable, or saving failed. Inspect code; ui_allow_ips_persistence_uncertain means the new policy is active but its crash durability is unconfirmed."
           }
         },
         "security": [

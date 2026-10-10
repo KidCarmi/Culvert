@@ -78,6 +78,12 @@ const (
 // (P1.4 / D1.6c-pin-value-binding-plan.md).
 const pinnedProxyTag = "culvert/proxy:pinned"
 
+// PinnedProxyTag exports the fixed local tag so the startup reconciler can ask
+// `docker image inspect culvert/proxy:pinned` what the tag currently resolves
+// to (read-only; the existing `docker image inspect *` sudoers wildcard admits
+// this argv — a dedicated enumerated line is a recorded hardening follow-up).
+const PinnedProxyTag = pinnedProxyTag
+
 // defaultProxyRepo is the repository the pinned-digest pull/tag are bound to
 // when Options.ProxyRepo is unset. It mirrors the config `proxy_repo` default
 // and the canonical `image_allowlist` repo. The two MUST describe the same

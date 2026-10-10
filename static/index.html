@@ -1281,7 +1281,9 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               </div>
               <button class="btn" data-click="saveRetention">Save</button>
               <button class="btn ghost" data-click="purgeHistory" style="color:var(--red)">Purge all</button>
+              <button class="btn ghost" data-click="exportHistory" title="Encrypted archive of all saved history, under a passphrase you choose">Export history (encrypted)</button>
             </div>
+            <div style="font-size:.72rem;color:var(--muted);margin-top:6px">Saved history is not part of the configuration backup. Export it to keep it across a restore, a new appliance or a change of log passphrase; import with <code>culvert --history-import</code> (proxy stopped).</div>
             <div id="ret-estimate" style="font-size:.78rem;color:var(--muted);margin-top:12px"></div>
             <div id="ret-encryption" style="font-size:.8rem;margin-top:8px"></div>
             <div id="log-retention-usage" style="font-size:.82rem;color:var(--muted);margin-top:8px">Loading…</div>
@@ -1612,6 +1614,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div id="sec-remote-inflight" style="font-weight:600;font-size:.85rem">0</div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Bodies REFUSED because the AV engine (ClamAV or the scan sidecar) was unavailable while the AV-unavailable posture is closed. Non-zero means users are being denied content until the AV engine recovers.">Refused: AV unavailable</div>
+              <div id="sec-av-unavailable-refused" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="A YARA regex match panicked (an internal crash, not a slow match) and was contained instead of taking down the scan. The verdict was decided by the configured on-timeout posture (block/allow), not by the rule itself. Non-zero points at a bug in a specific rule's regex, not a timeout — raising the timeout will not help.">YARA match panics</div>
               <div id="sec-yara-match-panics" style="font-weight:600;font-size:.85rem">0</div>
             </div>
@@ -1693,6 +1699,28 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             <div style="display:flex;gap:8px;align-items:center">
               <button class="btn ghost sm" data-click="saveYARASettings">Save YARA Settings</button>
               <div id="yara-settings-status" style="font-size:.78rem;display:none"></div>
+            </div>
+          </div>
+
+          <!-- AV-unavailable posture (av_unavailable) -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">When ClamAV Is Unavailable</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">What happens to a response when the AV engine (ClamAV, or the remote scan sidecar) is stopped, crashed, restarting or unreachable and cannot scan it. <b>closed</b> refuses content that cannot be scanned while ClamAV is unavailable (HTTP 403, never cached — the next request rescans). <b>open</b> forwards it unscanned, counted and alerted. Scans that run out of time are refused in both modes.</div>
+            <div id="av-settings-warn" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:.78rem;color:var(--yellow)">
+              Warning: open forwards content UNSCANNED whenever the AV engine is down. Ensure scan_clam_error / scan_svc_down alerting is operational before using this mode.
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">AV unavailable
+                <select id="av-setting-unavailable" data-change="avSettingCheckWarn" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                  <option value="closed">closed (refuse unscanned content)</option>
+                  <option value="open">open (forward unscanned, alert)</option>
+                </select>
+              </label>
+              <div id="av-settings-source" style="font-size:.72rem;color:var(--muted)"></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn ghost sm" data-click="saveAVSettings">Save AV Posture</button>
+              <div id="av-settings-status" style="font-size:.78rem;display:none"></div>
             </div>
           </div>
 
@@ -1799,6 +1827,18 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
       </div>
       <div id="idp-legacy-ldap-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6"></div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
+      <div id="sso-ipb" style="margin-top:24px;background:var(--surface1);border:1px solid var(--border);border-radius:10px;padding:16px 18px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><h3 style="margin:0;font-size:1rem">IP-bound sign-in</h3><span id="sso-ipb-state" style="font-size:.72rem;padding:2px 8px;border-radius:10px;background:var(--surface2);color:var(--muted)"></span></div>
+        <p style="color:var(--muted);font-size:.8rem;margin:0 0 12px;line-height:1.6">
+          A browser sign-in sets a cookie on this admin UI host only, so <strong>on its own it identifies none of the browser's web traffic through the proxy</strong>. IP-bound sign-in lets a completed sign-in identify the browser's network address for a limited time. Everyone behind one address (NAT, a terminal server, a shared jump host) becomes the same user — exclude such ranges. Bindings live on this node only and are cleared by a restart, by sign-out and when this is turned off. While it is off the proxy does not send browsers to sign in; they get the challenge with an explanation.
+        </p>
+        <label style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin-bottom:10px"><input type="checkbox" id="sso-ipb-enabled"> Enable IP-bound sign-in</label>
+        <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:10px">Binding lifetime (minutes, 5–1440)<br><input type="number" id="sso-ipb-ttl" min="5" max="1440" style="width:120px"></label>
+        <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:10px">Never bind these sources (one CIDR or address per line)<br><textarea id="sso-ipb-exclude" rows="3" style="width:100%;font-family:monospace"></textarea></label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-click="saveSSOIPBinding">Save</button><button class="btn btn-secondary" data-click="loadSSOIPBindings">Show bindings</button><button class="btn btn-secondary" data-click="revokeAllSSOIPBindings">Revoke all bindings</button></div>
+        <div id="sso-ipb-stats" style="font-size:.78rem;color:var(--muted);margin-top:10px"></div>
+        <div id="sso-ipb-bindings" style="margin-top:10px"></div>
+      </div>
     </div>
 
     <!-- ── IdP MODAL (wizard) ──────────────────────────────────────────────── -->
@@ -5478,6 +5518,12 @@ Firefox (all platforms):
         <input id="rel-disp-passphrase" placeholder="env ref, e.g. CULVERT_BACKUP_PASSPHRASE" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       </label>
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-norollback"> Disable auto-rollback (no_rollback)</label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px" title="Only needed when the running release is not a catalog release; confirms you verified the transition yourself"><input type="checkbox" id="rel-disp-ack-unknown"> Acknowledge unknown running release (acknowledge_unknown_current)</label>
+      <label style="font-size:.82rem;display:flex;align-items:center;gap:8px" title="Break-glass: dispatch a release OLDER than the running one. Restore-from-backup is the supported way back."><input type="checkbox" id="rel-disp-allow-downgrade"> Allow downgrade (allow_downgrade, break-glass)</label>
+    </div>
+    <div id="rel-disp-recovery" role="alert" style="display:none;margin-top:16px;padding:10px 12px;border:1px solid var(--red,#e5484d);border-radius:8px;font-size:.78rem;line-height:1.5">
+      <div id="rel-disp-recovery-msg"></div>
+      <pre id="rel-disp-recovery-body" style="margin:8px 0 0;max-height:30vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:.72rem;background:var(--surface);padding:8px;border-radius:6px"></pre>
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
       <button class="btn ghost" data-click="releaseDispatchCancel">Cancel</button>
@@ -5571,6 +5617,7 @@ document.addEventListener('click', e => {
     case 'saveRetention':     saveRetention(); break;
     case 'saveDiskThreshold': saveDiskThreshold(); break;
     case 'purgeHistory':      purgeHistory(); break;
+    case 'exportHistory':     exportHistory(); break;
     case 'setLogTab':         setLogTab(arg || ''); break;
 
     // ── Blocklist ──
@@ -5606,6 +5653,7 @@ document.addEventListener('click', e => {
     case 'deleteYARARule':    deleteYARARule(); break;
     case 'selectYARARule':    selectYARARule(arg); break;
     case 'saveYARASettings':  saveYARASettings(); break;
+    case 'saveAVSettings':    saveAVSettings(); break;
     case 'saveScanExclusions': saveScanExclusions(); break;
     case 'saveDPIBypass':     saveDPIBypass(); break;
     case 'addTFAllowlistDomain': addTFAllowlistDomain(); break;
@@ -5618,6 +5666,10 @@ document.addEventListener('click', e => {
 
     // ── IdP / auth ──
     case 'openIdPModal':      openIdPModal(); break;
+    case 'saveSSOIPBinding':  saveSSOIPBinding(); break;
+    case 'loadSSOIPBindings': loadSSOIPBindings(); break;
+    case 'revokeSSOIPBinding': revokeSSOIPBinding(arg); break;
+    case 'revokeAllSSOIPBindings': revokeAllSSOIPBindings(); break;
     case 'closeIdPModal':     closeIdPModal(); break;
     case 'selectIdPTemplate': selectIdPTemplate(arg); break;
     case 'discoverOIDC':      discoverOIDC(); break;
@@ -5950,6 +6002,7 @@ document.addEventListener('change', e => {
     case 'backupNowEncryptToggle':   document.getElementById('backup-now-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
+    case 'avSettingCheckWarn': avSettingCheckWarn(); break;
     case 'toggleDecRedaction': toggleDecRedaction(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
@@ -8979,6 +9032,47 @@ async function purgeHistory() {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
+// exportHistory downloads the saved history as an encrypted archive. The
+// passphrase is typed twice into a password field (one typo would make the
+// archive permanently unimportable), sent in the POST body only, and never
+// stored. A hidden form post lets the browser stream a multi-gigabyte archive
+// to disk; a download never fires the iframe's load event, so a load means the
+// server answered with an error page, which is shown.
+async function askHistoryPhrase(title, msg) {
+  const input = document.getElementById('confirm-dialog-input');
+  const pending = promptAction({title, msg, label: 'Archive passphrase', okLabel: 'Continue'});
+  input.type = 'password';
+  try { return await pending; } finally { input.type = 'text'; input.value = ''; }
+}
+async function exportHistory() {
+  const phrase = await askHistoryPhrase('Export saved history',
+    'Choose an archive passphrase (12+ characters). Keep it with the archive: it is not stored anywhere and the archive cannot be imported without it.');
+  if (!phrase) return;
+  if (phrase.length < 12) { toast('Passphrase must be at least 12 characters', 'error'); return; }
+  const again = await askHistoryPhrase('Confirm passphrase', 'Type the archive passphrase again.');
+  if (again !== phrase) { toast('The passphrases do not match — nothing was exported', 'error'); return; }
+  let frame = document.getElementById('history-export-frame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'history-export-frame'; frame.name = 'history-export-frame'; frame.style.display = 'none';
+    frame.addEventListener('load', () => {
+      let msg = '';
+      try { msg = (frame.contentDocument && frame.contentDocument.body && frame.contentDocument.body.textContent || '').trim(); } catch (e) { msg = ''; }
+      if (msg) toast('Export failed: ' + msg, 'error');
+    });
+    document.body.appendChild(frame);
+  }
+  const form = document.createElement('form');
+  form.method = 'POST'; form.action = BASE + '/api/logs/history/export'; form.target = frame.name; form.style.display = 'none';
+  const field = document.createElement('input');
+  field.type = 'hidden'; field.name = 'archivePhrase'; field.value = phrase;
+  form.appendChild(field);
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
+  toast('Export started — your browser will save the encrypted archive', 'success');
+}
+
 function renderLogs() {
   const tbody = document.getElementById('live-log');
   const dash  = document.getElementById('dash-log');
@@ -9544,6 +9638,7 @@ async function loadSecurity() {
   loadTFAllowlist();
   loadYARARules();
   loadYARASettings();
+  loadAVSettings();
   loadScanExclusions();
   loadDPIBypass();
 }
@@ -9791,6 +9886,7 @@ async function loadSecScanStatus() {
     setMetric('sec-scan-inflight', s.scan_inflight, 4, 16);
     setMetric('sec-yara-match-panics', s.yara_match_panics, 1, 10);
     setMetric('sec-scan-late-discard', s.stat_scan_late_discard, 1, 10);
+    setMetric('sec-av-unavailable-refused', s.stat_av_unavailable_refused, 1, 10);
   } catch(e) { console.error(e); }
 }
 
@@ -9874,6 +9970,52 @@ async function saveYARASettings() {
   } catch(e) {
     statusEl.style.color = 'var(--red)';
     statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+// ── AV-unavailable posture (av_unavailable) ─────────────────────────────
+let avSettingsRevision = '';
+async function loadAVSettings() {
+  try {
+    const s = await api('/api/security-scan/av-settings');
+    const sel = document.getElementById('av-setting-unavailable');
+    if (sel) sel.value = s.av_unavailable;
+    avSettingsRevision = s.revision || '';
+    const src = document.getElementById('av-settings-source');
+    if (src) src.textContent = s.source === 'admin'
+      ? 'Saved by an admin.'
+      : 'Boot default (CULVERT_AV_UNAVAILABLE, else open) — save to take ownership.';
+    avSettingCheckWarn();
+  } catch(e) { console.error('loadAVSettings:', e); }
+}
+
+function avSettingCheckWarn() {
+  const sel = document.getElementById('av-setting-unavailable');
+  const warn = document.getElementById('av-settings-warn');
+  if (!warn) return;
+  warn.style.display = (sel && sel.value === 'open') ? 'block' : 'none';
+}
+
+async function saveAVSettings() {
+  const statusEl = document.getElementById('av-settings-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Saving…';
+  try {
+    const body = {
+      av_unavailable: document.getElementById('av-setting-unavailable')?.value,
+      ifRevision: avSettingsRevision,
+    };
+    await api('/api/security-scan/av-settings', { method: 'PUT', body: JSON.stringify(body) });
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Saved.';
+    setTimeout(() => { statusEl.style.display = 'none'; }, 2000);
+    loadAVSettings();
+    loadSecScanStatus();
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Error: ' + e.message;
+    loadAVSettings();
   }
 }
 
@@ -11013,6 +11155,33 @@ function removeUIAllowIP(idx) {
   renderUIAllowIPList();
 }
 
+// uiAllowIPsFailure maps a failed POST /api/ui-allow-ips to operator text.
+// A 400 (or 403) is the established plain-text contract: the request was
+// refused and the previous policy stays active; a 400 body is a fixed or
+// index-only message (never an echo of the entries). A 503 is typed JSON and
+// its code decides whether the new policy is active. Callers render the result via textContent
+// / toast (which escapes) - never innerHTML.
+function uiAllowIPsFailure(status, text) {
+  if (status === 400 || status === 403) {
+    const detail = String(text || '').trim().slice(0, 200);
+    return 'Not saved; the previous policy remains active.' + (detail ? ' ' + detail : '');
+  }
+  let code = '';
+  if (status === 503) {
+    try { code = JSON.parse(text).code; } catch (_) { /* An untyped 503 cannot establish the save outcome. */ }
+  }
+  if (code === 'ui_allow_ips_persistence_uncertain') {
+    return 'New policy is active; storage durability is unconfirmed. Verify storage before restarting.';
+  }
+  if (code === 'ui_allow_ips_not_saved') {
+    return 'Not saved; the previous policy remains active. Check storage, then retry.';
+  }
+  if (code === 'ui_access_policy_unavailable') {
+    return 'Management access policy is unavailable. Local console recovery is required.';
+  }
+  return 'Save result is unconfirmed. Refresh the policy before retrying.';
+}
+
 async function saveUIAllowIPs() {
   const statusEl = document.getElementById('s-uiip-status');
   // Tier 3: a wrong list locks the admin console for everyone, including you.
@@ -11025,21 +11194,35 @@ async function saveUIAllowIPs() {
       ? 'Requests from any other IP get 403 - starting with your NEXT request. If your current IP (or your proxy/VPN egress) is not on the list, you lock yourself out.'
       : 'The admin console becomes reachable from ALL IPs again (authentication still required).',
     rollback: _uiAllowIPList.length
-      ? 'From an allowed IP: edit this list. If fully locked out: restart with the -ui-allow-ip flag or edit the persisted settings on the host.'
+      ? 'From an allowed IP: edit this list. If fully locked out: use authenticated local console recovery to repair the persisted settings, then restart.'
       : 'Re-add CIDRs here at any time.',
     confirmWord: _uiAllowIPList.length ? 'RESTRICT' : 'OPEN',
     okLabel: _uiAllowIPList.length ? 'Apply allowlist' : 'Remove restriction',
   });
   if (!ok) return;
+  statusEl.textContent = 'Saving...';
+  statusEl.style.color = 'var(--amber)';
+  let message;
   try {
-    await api('/api/ui-allow-ips', {
+    const r = await apiFetch('/api/ui-allow-ips', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ips: _uiAllowIPList})
     });
-    statusEl.textContent = '✓ Saved';
-    statusEl.style.color = 'var(--green)';
-    toast('IP allowlist updated', 'success');
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+    if (r.ok) {
+      statusEl.textContent = '✓ Saved';
+      statusEl.style.color = 'var(--green)';
+      toast('IP allowlist updated', 'success');
+      return;
+    }
+    if (r.status === 401) { statusEl.textContent = ''; return; } // apiFetch showed the login overlay
+    message = uiAllowIPsFailure(r.status, await r.text());
+  } catch (_) {
+    // Transport failure: the request may or may not have landed.
+    message = uiAllowIPsFailure(0, '');
+  }
+  statusEl.textContent = message;
+  statusEl.style.color = 'var(--amber)';
+  toast(message, 'error');
 }
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────
@@ -13863,8 +14046,59 @@ function idpProviderMeta(p) {
   return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#14b8a6' };
 }
 
+// ── IP-bound sign-in (F-SSO-SCOPE-1) ─────────────────────────────────────
+async function loadSSOIPBinding() {
+  const res = await apiFetch('/api/sso-ip-binding');
+  if (!res.ok) return;
+  const d = await res.json();
+  const s = d.settings || {};
+  document.getElementById('sso-ipb-enabled').checked = !!s.enabled;
+  document.getElementById('sso-ipb-ttl').value = s.ttlMinutes || 60;
+  document.getElementById('sso-ipb-exclude').value = (s.excludeCidrs || []).join('\n');
+  const st = document.getElementById('sso-ipb-state');
+  st.textContent = s.enabled ? 'ON' : 'OFF';
+  st.style.color = s.enabled ? 'var(--success, #22c55e)' : 'var(--muted)';
+  const b = d.binds || {};
+  document.getElementById('sso-ipb-stats').textContent = s.enabled
+    ? `${d.bindings} live binding(s) of ${d.maxBindings} · logins bound ${b.bound||0}, not bound: excluded ${b.excluded||0}, local ${b.local||0}, full ${b.full||0} · requests identified ${d.hits||0} · ${d.scope}`
+    : 'Off: browser sign-in identifies no proxied traffic.';
+}
+async function saveSSOIPBinding() {
+  const enabled = document.getElementById('sso-ipb-enabled').checked;
+  if (enabled && !window.confirm('Enable IP-bound sign-in? After a browser signs in, every request from its network address is attributed to that user until the binding expires. Exclude NAT and shared-host ranges first.')) return;
+  const body = {
+    enabled,
+    ttlMinutes: parseInt(document.getElementById('sso-ipb-ttl').value, 10) || 0,
+    excludeCidrs: document.getElementById('sso-ipb-exclude').value.split('\n').map(x => x.trim()).filter(Boolean),
+  };
+  try { await api('/api/sso-ip-binding', {method: 'PUT', body}); toast('IP-bound sign-in saved'); }
+  catch (e) { toast('Save failed: ' + e.message, 'error'); }
+  loadSSOIPBinding();
+}
+async function loadSSOIPBindings() {
+  const el = document.getElementById('sso-ipb-bindings');
+  const res = await apiFetch('/api/sso-ip-binding/bindings');
+  if (!res.ok) { el.textContent = 'Could not load bindings (admin only).'; return; }
+  const list = (await res.json()).bindings || [];
+  if (!list.length) { el.textContent = 'No live bindings.'; return; }
+  el.innerHTML = '<table class="tbl" style="width:100%;font-size:.78rem"><tr><th>Address</th><th>User</th><th>Provider</th><th>Groups</th><th>Expires</th><th></th></tr>' +
+    list.map(b => `<tr><td>${escHtml(b.addr)}</td><td>${escHtml(b.subject)}</td><td>${escHtml(b.provider)}</td><td>${escHtml((b.groups||[]).join(', '))}</td><td>${escHtml(b.expires)}</td><td><button class="btn btn-secondary" data-click="revokeSSOIPBinding" data-arg="${escHtml(b.addr)}">Revoke</button></td></tr>`).join('') + '</table>';
+}
+async function revokeSSOIPBinding(addr) {
+  try { await api('/api/sso-ip-binding/bindings?addr=' + encodeURIComponent(addr), {method: 'DELETE'}); toast('Binding revoked'); }
+  catch (e) { toast('Revoke failed: ' + e.message, 'error'); }
+  loadSSOIPBindings(); loadSSOIPBinding();
+}
+async function revokeAllSSOIPBindings() {
+  if (!window.confirm('Revoke every IP-bound sign-in? Those browsers must sign in again.')) return;
+  try { await api('/api/sso-ip-binding/bindings?all=1', {method: 'DELETE'}); toast('All bindings revoked'); }
+  catch (e) { toast('Revoke failed: ' + e.message, 'error'); }
+  loadSSOIPBindings(); loadSSOIPBinding();
+}
+
 async function loadIdPList() {
   loadLegacyLDAPBanner();
+  loadSSOIPBinding();
   const res = await apiFetch('/api/idp');
   if (!res.ok) return;
   const data = await res.json();
@@ -17658,13 +17892,24 @@ async function loadReleaseStatus(forceMore) {
     // Keep refreshing while a dispatch is in flight, OR for a few forced rounds
     // after an action (dispatch/resume) whose background store update may lag
     // the 202 response - otherwise the panel could freeze on a stale record.
+    releaseStatusErrors = 0;
     if ((rec && rec.phase === 'dispatched') || more > 0) {
       releaseStatusTimer = setTimeout(() => loadReleaseStatus(more > 0 ? more - 1 : 0), 2500);
     }
   } catch (err) {
-    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>';
+    // The control plane is the container the dispatch replaces: a fetch error
+    // mid-poll is the EXPECTED shape of a successful upgrade (the proxy is
+    // restarting), not a reason to stop watching. Keep polling with backoff for
+    // up to ~5 minutes; the restarted process resumes the dispatch record on
+    // its own (release_dispatch_persist.go) and the next successful poll shows it.
+    releaseStatusErrors++;
+    const retrying = releaseStatusErrors <= 60;
+    box.innerHTML = '<span style="color:var(--danger)">' + escHtml(err.message) + '</span>'
+      + (retrying ? '<div style="color:var(--muted);font-size:.8rem">Control plane unreachable (restarting during the update?) - retrying ' + releaseStatusErrors + '/60</div>' : '');
+    if (retrying) releaseStatusTimer = setTimeout(() => loadReleaseStatus(more), Math.min(5000, 1500 + releaseStatusErrors * 250));
   }
 }
+let releaseStatusErrors = 0;
 
 function renderReleaseStatus(rec) {
   const box = document.getElementById('rel-status');
@@ -17702,10 +17947,26 @@ function releaseDispatchOpen() {
   document.getElementById('rel-disp-norollback').checked = false;
   document.getElementById('rel-disp-passphrase').value = '';
   document.getElementById('rel-disp-passlabel').style.display = 'none';
+  document.getElementById('rel-disp-recovery').style.display = 'none';
+  document.getElementById('rel-disp-submit').disabled = false;
   modalOpen(document.getElementById('release-dispatch-modal'), '#rel-disp-release');
 }
 function releaseDispatchCancel() {
   modalClose(document.getElementById('release-dispatch-modal'));
+}
+
+// An accepted dispatch whose record did not reach disk (durable:false) is
+// running but untracked: a control-plane restart -- which the upgrade itself
+// causes -- loses it. The response carries the complete resume context; keep it
+// in front of the operator instead of reporting a plain success.
+function releaseDispatchRecovery(payload, agent) {
+  if (!payload || payload.durable !== false) return null;
+  return {
+    message: 'Dispatch accepted (op ' + (payload.op_id || '?') + '), but its record was NOT saved. ' +
+      'If the control plane restarts before the upgrade finishes, nothing will track it. Copy the recovery ' +
+      'context below and, if needed, send it to POST /api/releases/dispatch/resume.',
+    text: JSON.stringify({ agent: payload.agent || agent, resume_context: payload.resume_context || null }, null, 2),
+  };
 }
 
 async function releaseDispatchSubmit() {
@@ -17727,6 +17988,8 @@ async function releaseDispatchSubmit() {
     pre_backup: preBackup,
     no_rollback: document.getElementById('rel-disp-norollback').checked,
   };
+  if (document.getElementById('rel-disp-ack-unknown').checked) body.acknowledge_unknown_current = true;
+  if (document.getElementById('rel-disp-allow-downgrade').checked) body.allow_downgrade = true;
   if (preBackup) body.passphrase_ref = passphraseRef;
   if (releaseId) body.release_id = releaseId; else body.channel = channel;
   const btn = document.getElementById('rel-disp-submit');
@@ -17737,7 +18000,15 @@ async function releaseDispatchSubmit() {
     });
     let payload = {};
     try { payload = await r.json(); } catch (_) {}
-    if (r.status === 202) {
+    const recovery = r.status === 202 ? releaseDispatchRecovery(payload, agent) : null;
+    if (recovery) {
+      toast(recovery.message, 'error');
+      document.getElementById('rel-disp-recovery-msg').textContent = recovery.message;
+      document.getElementById('rel-disp-recovery-body').textContent = recovery.text;
+      document.getElementById('rel-disp-recovery').style.display = 'block';
+      if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
+      btn.dataset.keepDisabled = '1'; // the op is already running; re-submitting would only be refused
+    } else if (r.status === 202) {
       toast('Dispatch accepted (op ' + (payload.op_id || '?') + ')', 'success');
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
@@ -17748,6 +18019,13 @@ async function releaseDispatchSubmit() {
         : 'Dispatch accepted', 'success');
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
+    } else if (r.status === 409 && payload.status === 'refused') {
+      // Transition policy refusals (checkTransition): the body was fine, the
+      // TRANSITION is not. Name the kind and the acknowledgement (if any).
+      const hint = payload.kind === 'downgrade' ? ' - tick "Allow downgrade" only as break-glass (restore-from-backup is the supported way back)'
+        : payload.kind === 'unknown_current' ? ' - tick "Acknowledge unknown running release" after verifying the transition'
+        : payload.kind === 'unsupported_transition' ? ' - upgrade through a release at or above min_upgrade_from first' : '';
+      toast('Refused (' + (payload.kind || 'policy') + '): ' + (payload.detail || '') + hint, 'error');
     } else if (r.status === 409) {
       toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this maintenance agent', 'error');
     } else if (r.status === 404) {
@@ -17762,7 +18040,8 @@ async function releaseDispatchSubmit() {
   } catch (err) {
     toast('Dispatch error: ' + err.message, 'error');
   } finally {
-    btn.disabled = false;
+    btn.disabled = btn.dataset.keepDisabled === '1';
+    delete btn.dataset.keepDisabled;
   }
 }
 
@@ -18006,6 +18285,20 @@ async function clearCACache() {
   loadCAMgmt();
 }
 
+// caRotateResultMessage — the toast for a confirmed rotation. persisted:false
+// means the new CA is ACTIVE but exists in memory only (lost on restart): that
+// is never a success. A persisted rotation keeps the existing CA passphrase —
+// nothing new to copy — but invalidates the old trust anchor, so the operator
+// must distribute the new PUBLIC certificate and take a fresh backup that
+// contains the rotated bundle.
+function caRotateResultMessage(r) {
+  if (!r || r.error) return 'Rotation failed: ' + (r?.error || 'unknown');
+  if (r.persisted === false) {
+    return 'Root CA rotated in memory only — NOT saved. ' + String(r.warning || 'It will be lost on restart.').slice(0, 300);
+  }
+  return 'Root CA rotated. Download and distribute the new public CA certificate, then take a fresh backup; the CA recovery passphrase is unchanged.';
+}
+
 async function forceRotateCA() {
   try {
     // Step 1: request confirmation token from server.
@@ -18018,8 +18311,8 @@ async function forceRotateCA() {
     if (!await confirmAction('Rotate Root CA', pending.warning, 'Rotate')) return;
     // Step 3: confirm rotation with token.
     const r = await api('/api/ca/rotate', {method:'POST', body:{confirm:true, confirmation_token:pending.confirmation_token}});
-    if (r && !r.error) { toast('Root CA rotated successfully','success'); loadCAMgmt(); }
-    else toast('Rotation failed: '+(r?.error||'unknown'),'error');
+    toast(caRotateResultMessage(r), r && !r.error && r.persisted !== false ? 'success' : 'error');
+    if (r && !r.error) loadCAMgmt();
   } catch(e) {
     toast('Rotation failed: '+e.message,'error');
   }
@@ -19623,6 +19916,10 @@ function resetBlockPage() {
       <input id="su-pass" type="password" autocomplete="new-password" minlength="8" required>
       <label for="su-pass2">Confirm password</label>
       <input id="su-pass2" type="password" autocomplete="new-password" minlength="8" required>
+      <div id="su-token-row" style="display:none">
+        <label for="su-token">Setup token <span style="color:var(--muted)">(this deployment requires it: appliance console or <code>sudo culvert-status</code>)</span></label>
+        <input id="su-token" type="password" autocomplete="off" maxlength="128">
+      </div>
       <div class="setup-err" id="su-err"></div>
       <button class="setup-submit" id="su-btn" type="submit">Set Password &amp; Continue</button>
     </form>
@@ -19990,6 +20287,11 @@ function renderTLSFallbackBanner(idPrefix, active) {
     if (d.needsSetup) {
       // First-time setup - show the setup wizard.
       document.getElementById('setup-overlay').classList.add('active');
+      // A deployment started with CULVERT_SETUP_TOKEN gates the one-time
+      // setup on a per-instance token; the server says so and refuses
+      // without it (setup_token.go), so ask for it up front.
+      const tokenRequired = !!d.setupTokenRequired;
+      if (tokenRequired) document.getElementById('su-token-row').style.display = '';
 
       document.getElementById('setup-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -20006,12 +20308,16 @@ function renderTLSFallbackBanner(idPrefix, active) {
         if (!meetsPasswordComplexity(pass))
           return showErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
         if (pass !== pass2)   return showErr('Passwords do not match.');
+        const token = tokenRequired ? document.getElementById('su-token').value.trim() : '';
+        if (tokenRequired && !token) return showErr('This deployment requires the setup token shown on the appliance console.');
 
         btn.disabled = true; btn.textContent = 'Saving\u2026';
         try {
+          const headers = {'Content-Type': 'application/json'};
+          if (token) headers['X-Culvert-Setup-Token'] = token;
           const r = await fetch('/api/setup/complete', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers,
             body: JSON.stringify({user, pass})
           });
           if (r.ok) {

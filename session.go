@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -165,7 +166,17 @@ func readSessionCookie(r *http.Request) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decodeSession(c.Value)
+	sess, err := decodeSession(c.Value)
+	if err != nil || sess == nil {
+		return sess, err
+	}
+	// Proxy sessions have no audience. A signed token for another surface
+	// (including the administrator UI) must not become a proxy identity merely
+	// because the caller renames its cookie.
+	if sess.Audience != "" {
+		return nil, errors.New("session is not a proxy session")
+	}
+	return sess, nil
 }
 
 // clearSessionCookie removes the session cookie.

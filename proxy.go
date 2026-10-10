@@ -415,7 +415,25 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 				// A switch (not an if-else chain) keeps gocritic happy; cases 3a/3a'
 				// fall through to Stage-2, 3b/3c/Default write a response and return.
 				d := resolveNoCredAuthOutcome(r, clientIP, effectiveDefault)
+				// IP-bound sign-in (F-SSO-SCOPE-1) is consulted AFTER the Stage-1
+				// rule match, so a binding can never satisfy a rule it must not:
+				// never a CredentialRequired rule, and an SSORequired rule's
+				// providerRefs bind it to those providers (sso_surrogate.go).
+				sid, viaBinding := ssoSurrogateLookupFor(r, clientIP, d)
 				switch {
+				case viaBinding:
+					// ── 2b. IP-bound sign-in (opt-in) ──────────────────────────
+					// This client address completed an interactive SSO login on
+					// the admin UI host within the binding lifetime. The source is
+					// "sso-ip:<provider>" — distinct from the provider itself, so
+					// logs show the identity was inferred from an address, and a
+					// rule scoped to the provider (AuthSource) does not accept it.
+					authenticatedIdentity = sid.Sub
+					if authenticatedIdentity == "" {
+						authenticatedIdentity = sid.Email
+					}
+					authenticatedGroups = sid.Groups
+					authenticatedSource = "sso-ip:" + sid.Provider
 				case d.Outcome == OutcomeExempt && d.Rule != nil:
 					// ── 3a. No credentials — SCOPED Exempt rule (Rule != nil) ────
 					// An explicitly matched auth/exempt rule waives the challenge
@@ -488,12 +506,12 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// Proxy-Authorization header is present).
 					authLog = authLogFieldsFor(d)
 					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
-					// Only a browser can complete an interactive SSO flow. Resolving the
-					// portal URL can ALLOCATE IdP callback state (PKCE / SAML stores) as a
-					// side effect, so it is done ONLY for browser clients: a non-browser or
-					// CONNECT request fails closed WITHOUT touching those capped stores
-					// (otherwise a stream of denied requests could churn / evict legitimate
-					// in-flight browser logins). classifyClient is consulted ONLY here.
+					// Only a browser can complete an interactive SSO flow, so only a
+					// browser is redirected; a non-browser or CONNECT request fails
+					// closed. The redirect targets the sign-in page on the UI host
+					// (uiSelectURL) — no IdP state is minted on the proxy path (login
+					// state is minted only there, bound to the browser:
+					// auth_login_binding.go). classifyClient is consulted ONLY here.
 					if classifyClient(r) == clientBrowser {
 						if portalURL, eligible := resolveSSOPortalURL(r, d.Rule.Auth.ProviderRefs); eligible > 0 && portalURL != "" && isSafeCaptiveRedirect(portalURL) {
 							// Browser + ≥1 eligible IdP → 302 to the captive portal /
@@ -514,7 +532,11 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					recordRequestAuth(clientIP, r.Method, r.Host, "SSO_DENIED", d.Rule.Name, "", "", authLog)
 					logger.Printf("AUTH_SSO rule=%q id=%q %s -> %q {req_id=%s action=deny}",
 						sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-					http.Error(w, "Forbidden: destination requires interactive SSO", http.StatusForbidden)
+					msg := "Forbidden: destination requires interactive SSO"
+					if why := ssoSignInWithheld(clientIP); why != "" {
+						msg += ". " + ssoSignInExplanation(why)
+					}
+					http.Error(w, msg, http.StatusForbidden)
 					return authOutcome{}, false
 				default:
 					// ── 3. No credentials ────────────────────────────────────────
@@ -545,16 +567,17 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 						// Route browser to appropriate IdP based on email domain hint.
 						loginURL := resolveCaptivePortalURL(r)
 						// Inline guard for static-analysis visibility:
-						// resolveCaptivePortalURL returns either a same-origin
-						// path ("/auth/select?relay=...") or an admin-configured
-						// absolute http(s) IdP URL. isSafeCaptiveRedirect rejects
+						// resolveCaptivePortalURL returns the sign-in page on the
+						// UI host (<proxy.base_url>/auth/select?…, signed relay)
+						// or an admin-configured legacy http(s) login URL; "" when
+						// neither applies. isSafeCaptiveRedirect rejects
 						// protocol-relative ("//evil"), data:/javascript:, and
 						// any other shape (covered by TestIsSafeCaptiveRedirect).
 						if loginURL != "" && isSafeCaptiveRedirect(loginURL) {
 							// gosec G710's SSA pass cannot follow the
 							// isSafeCaptiveRedirect predicate; the guard above is
 							// the actual safety check.
-							http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (same-origin path or admin-configured http(s) URL)
+							http.Redirect(w, r, loginURL, http.StatusFound) // #nosec G710 -- loginURL passed isSafeCaptiveRedirect (base_url sign-in page or admin-configured http(s) URL)
 							return authOutcome{}, false
 						}
 					}
@@ -563,7 +586,27 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					if u := cfg.OIDCLoginURL(); u != "" {
 						w.Header().Set("Link", `<`+u+`>; rel="authorization_endpoint"`)
 					}
-					http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+					msg := "Proxy Authentication Required"
+					if ssoCapable {
+						if why := ssoSignInWithheld(clientIP); why != "" {
+							if !credCapable && r.Header.Get("Proxy-Authorization") == "" {
+								// Nothing a browser could PRESENT would be accepted (no
+								// credential-capable backend) and sign-in is withheld:
+								// a Basic challenge would re-prompt forever. Refuse,
+								// and say why. (A client that DID present credentials
+								// keeps the 407 contract — they were refused, not absent.)
+								w.Header().Del("Proxy-Authenticate")
+								w.Header().Del("Link")
+								atomic.AddInt64(&statAuthFail, 1)
+								http.Error(w, "Forbidden. "+ssoSignInExplanation(why), http.StatusForbidden)
+								recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
+								logger.Printf("AUTH_FAIL (no-credentials, sign-in withheld: %s) %s {req_id=%s action=block}", why, clientIP, reqID)
+								return authOutcome{}, false
+							}
+							msg += ". " + ssoSignInExplanation(why)
+						}
+					}
+					http.Error(w, msg, http.StatusProxyAuthRequired)
 					recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
 					logger.Printf("AUTH_FAIL (no-credentials) %s {req_id=%s action=block}", clientIP, reqID)
 					return authOutcome{}, false

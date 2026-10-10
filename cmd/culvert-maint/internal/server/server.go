@@ -73,6 +73,18 @@ type Status struct {
 	LastOperationOpID         string                 `json:"last_operation_op_id,omitempty"`
 	LastOperationState        string                 `json:"last_operation_state,omitempty"`
 	Extra                     map[string]interface{} `json:"extra,omitempty"`
+
+	// Crash-recovery reconcile surface (RISK-022 PR-E E3), overlaid by the
+	// server from the on-disk journal — see reconcile_status.go.
+	// InterruptedOperations lists every journal record that belongs to no
+	// running op, with its durable verdict; AttentionRequired is true whenever
+	// any exists, a quarantined (unreadable) record exists, or the journal
+	// could not be read. ReconcileOnStartup echoes the config switch.
+	InterruptedOperations     []InterruptedOperation `json:"interrupted_operations,omitempty"`
+	QuarantinedJournalRecords []string               `json:"quarantined_journal_records,omitempty"`
+	JournalError              string                 `json:"journal_error,omitempty"`
+	AttentionRequired         bool                   `json:"attention_required"`
+	ReconcileOnStartup        bool                   `json:"reconcile_on_startup"`
 }
 
 // ServiceStatus describes one compose service from `docker compose ps`.
@@ -111,6 +123,8 @@ type RunningImage struct {
 
 // Options configures Server.
 type Options struct {
+	ReleaseTrust ReleaseTrust // nil refuses image mutation and adoption
+
 	Cfg       *config.Config
 	Auth      *auth.Policy
 	Audit     *audit.Logger
@@ -145,6 +159,10 @@ type Options struct {
 	// HealthProbeFactory builds a fresh health.Probe per restore
 	// operation. May be nil in tests that don't exercise restore.
 	HealthProbeFactory func() health.Probe
+
+	// FreeBytes reports the free bytes on the filesystem holding path
+	// (the upgrade space preflight). nil ⇒ the platform statfs.
+	FreeBytes func(path string) (uint64, error)
 }
 
 // DefaultOpDrainTimeout is the shutdown drain window for in-flight orchestrator
@@ -177,6 +195,17 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	httpSrv  *http.Server
+
+	// resolving maps an interrupted op_id → the resolve op currently acting on
+	// it (handlers_reconcile.go), so a duplicate resolve is refused rather than
+	// admitted as a second mutation.
+	reconcileMu sync.Mutex
+	resolving   map[string]string
+	// claimed holds the op_ids a /v1/reconcile request is currently
+	// deciding on (classification, health probe, admission). Checked and set
+	// with resolving under reconcileMu so a concurrent dismiss and resolve
+	// can never both act on one record (Codex P2, PR #1528).
+	claimed map[string]bool
 }
 
 // New constructs a Server. Returns an error if any required option is
@@ -312,6 +341,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			ctx = context.WithValue(ctx, connAcceptedKey{}, time.Now())
 			return context.WithValue(ctx, connContextKey{}, c)
 		},
 	}
@@ -406,6 +436,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/upgrades/apply", s.withAuth(s.handleUpgradeApply))
 	mux.HandleFunc("POST /v1/rollbacks", s.withAuth(s.handleRollback))
 
+	// Explicit resolver for interrupted operations (RISK-022 PR-E E3).
+	mux.HandleFunc("POST /v1/reconcile/", s.withAuth(s.handleReconcile))
+
 	// Authenticated catch-all under /v1/* so unknown /v1 paths get a
 	// peer-rejection rather than leaking that the path doesn't exist.
 	mux.HandleFunc("/v1/", s.withAuth(func(w http.ResponseWriter, r *http.Request, _ auth.PeerInfo) {
@@ -462,6 +495,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ auth.Pee
 	if st.AgentVersion == "" {
 		st.AgentVersion = Version
 	}
+	s.overlayReconcileStatus(&st)
 	writeJSON(w, http.StatusOK, st)
 }
 

@@ -52,78 +52,54 @@ var (
 
 // AddUIAllowedCIDR adds a CIDR to the UI access allowlist.
 func AddUIAllowedCIDR(cidr string) error {
-	_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	nets, err := parseUIAllowedCIDRs([]string{cidr})
 	if err != nil {
-		// Try as bare IP.
-		ip := net.ParseIP(strings.TrimSpace(cidr))
-		if ip == nil {
-			return fmt.Errorf("invalid IP/CIDR: %s", cidr)
-		}
-		bits := 32
-		if ip.To4() == nil {
-			bits = 128
-		}
-		n = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+		return err
 	}
 	uiAllowedNetsMu.Lock()
-	uiAllowedNets = append(uiAllowedNets, n)
+	uiAllowedNets = append(uiAllowedNets, nets...)
 	uiAllowedNetsMu.Unlock()
 	return nil
 }
 
-// SetUIAllowedCIDRs replaces the full allowlist.
+// SetUIAllowedCIDRs replaces the full allowlist. Invalid input preserves the
+// current policy; only an explicitly empty list permits every address.
 func SetUIAllowedCIDRs(cidrs []string) error {
-	nets := make([]*net.IPNet, 0, len(cidrs))
-	for _, c := range cidrs {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		_, n, err := net.ParseCIDR(c)
-		if err != nil {
-			ip := net.ParseIP(c)
-			if ip == nil {
-				return fmt.Errorf("invalid IP/CIDR: %s", c)
-			}
-			bits := 32
-			if ip.To4() == nil {
-				bits = 128
-			}
-			n = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
-		}
-		nets = append(nets, n)
+	nets, err := parseUIAllowedCIDRs(cidrs)
+	if err != nil {
+		return err
 	}
-	uiAllowedNetsMu.Lock()
-	uiAllowedNets = nets
-	uiAllowedNetsMu.Unlock()
+	publishUIAllowedCIDRs(nets)
 	return nil
 }
 
-// ListUIAllowedCIDRs returns the current allowlist as strings.
+// ListUIAllowedCIDRs returns current CIDRs, or the refused stored slice while
+// degraded so an unrelated save cannot replace the operator's policy with empty.
 func ListUIAllowedCIDRs() []string {
 	uiAllowedNetsMu.RLock()
 	defer uiAllowedNetsMu.RUnlock()
-	out := make([]string, len(uiAllowedNets))
-	for i, n := range uiAllowedNets {
-		out[i] = n.String()
+	if uiAccessRefused {
+		return append([]string(nil), uiAccessRetained...)
 	}
-	return out
+	return canonicalUIAllowedCIDRs(uiAllowedNets)
 }
 
-// uiIPGuardMiddleware blocks requests from IPs not in uiAllowedNets.
-// When the allowlist is empty all IPs are permitted (default behaviour).
+// uiIPGuardMiddleware enforces the allowlist before any UI route or setup/auth
+// exemption. An unknown or malformed loaded policy refuses all UI requests.
 func uiIPGuardMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		uiAllowedNetsMu.RLock()
-		allowed := uiAllowedNets
+		allowed, refused := uiAllowedNets, uiAccessRefused
 		uiAllowedNetsMu.RUnlock()
+		if refused {
+			writeUIAccessRefusal(w, "ui_access_policy_unavailable", "Management access policy requires local recovery.")
+			return
+		}
 		if len(allowed) == 0 {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// RISK-019: match the allowlist against the real client behind a
-		// configured trusted proxy, so the admin-IP allowlist keeps working
-		// when the panel is fronted by an L7 proxy (falls back to direct peer).
+		// Use only the established trusted-proxy policy to derive the client IP.
 		ip := net.ParseIP(realClientIP(r))
 		for _, cidr := range allowed {
 			if ip != nil && cidr.Contains(ip) {
@@ -172,7 +148,7 @@ func securityMiddleware(next http.Handler) http.Handler {
 		// doesn't match our Host header it's a cross-site forgery attempt.
 		// Requests without Origin (curl, API clients) are allowed through.
 		isMutating := r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete
-		if origin != "" && !isSameOrigin(r, origin) && isMutating {
+		if origin != "" && !isSameOrigin(r, origin) && isMutating && !isCrossSiteBindingEndpoint(r) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
@@ -193,6 +169,19 @@ func securityMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isCrossSiteBindingEndpoint reports the one request whose legitimate caller
+// is a cross-site form POST: the SAML assertion consumer service. In the SAML
+// HTTP-POST binding the IdP's page posts the response to us, so the browser
+// sends the IdP's Origin (or "null" under a no-referrer policy); the same-origin
+// check above refused every such login with 403 (lab SAML replay, #1528). The
+// ACS does not rely on Origin: the assertion must carry a valid IdP signature,
+// answer an AuthnRequest this SP issued (InResponseTo), and redeem a
+// server-stored, single-use RelayState (authSAMLCallback, ExchangeAssertion).
+// Exact path and method only: every other endpoint keeps the Origin check.
+func isCrossSiteBindingEndpoint(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/auth/saml/callback"
 }
 
 // isSameOrigin returns true when the Origin header matches the request's Host.
@@ -255,6 +244,15 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// AuthEnabled): open mode (defaultAuthOutcome=Exempt) counts as configured,
 		// so it keeps the admin UI gated rather than granting RoleAdmin to all.
 		if !cfg.IsConfigured() {
+			// The temporary administrator role must share the first-admin
+			// token gate. Otherwise callers can bypass /api/setup/complete
+			// through protected APIs such as /api/auth/users. Static assets
+			// remain public so the setup wizard can load; token-unset installs
+			// retain their historical bootstrap behavior.
+			if strings.HasPrefix(r.URL.Path, "/api/") && !setupTokenAccepts(r.Header.Get(headerSetupToken)) {
+				http.Error(w, "setup token required or invalid", http.StatusForbidden)
+				return
+			}
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return

@@ -1356,6 +1356,8 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 		scanResult = safeScanBody(scanBody)
 	}
 	if scanResult != nil {
+		// av_unavailable refusals fire nothing extra here — their fault is
+		// alerted once per bounded class at the producer (see proxy_http.go).
 		if scanResult.Source == "timeout" {
 			go fireAlert("scan_timeout", AlertPayload{Actor: id.ClientIP, Host: hostOnly, Detail: scanResult.Reason, Source: "scan_timeout"})
 		}

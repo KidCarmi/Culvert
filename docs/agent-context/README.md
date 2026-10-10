@@ -113,6 +113,27 @@ to this checkout, not to an unmerged branch.
   [support history](history/support-and-redaction.md). Verify the source-side
   redaction and collection authority before broadening an export.
 
+## Appliance (on-prem OVA)
+
+- OVA build, first-boot provisioning and OS maintenance: [appliance/](../../appliance),
+  with design and evidence under [docs/appliance](../appliance) (readiness report,
+  matrices, runbooks) and Docker-driven qualification in
+  [test/e2e/appliance](../../test/e2e/appliance).
+- Restore commit on a mount-point `/data` (journaled in-place swap, explicit
+  `--recover-restore`, data-dir lock): [restore_inplace.go](../../restore_inplace.go).
+- Supported-predecessor floor and transition refusals:
+  [release_transition_policy.go](../../release_transition_policy.go); durable
+  dispatch record and resume (never re-applies):
+  [release_dispatch_persist.go](../../release_dispatch_persist.go).
+- First-admin claim protection (`CULVERT_SETUP_TOKEN`, header
+  `X-Culvert-Setup-Token`): [setup_token.go](../../setup_token.go).
+  Boot policy posture (`CULVERT_DEFAULT_ACTION`): see
+  [default-policy errata](errata.md#default-policy-posture). AV-fault posture
+  (`CULVERT_AV_UNAVAILABLE`): [errata](errata.md#body-scan-fault-posture).
+- `/ready` and `/health` distinguish services running, setup complete and ready
+  to enforce (report-only `setup_complete` and `policy_posture` rows; gating
+  under `?strict=1`): [healthcheck.go](../../healthcheck.go).
+
 ## Configuration, cluster and delivery
 
 - Config snapshots/versioning, rewrite, upstream transports/credentials,

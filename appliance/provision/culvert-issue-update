@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# culvert-issue-update — refresh the pre-login console banner (/etc/issue.d)
+# with the management URL and readiness state. Run by culvert-issue.timer.
+set -uo pipefail
+out=/etc/issue.d/50-culvert.issue
+tmp="$(mktemp)"
+{
+  /opt/culvert-appliance/bin/culvert-status --brief 2>/dev/null || echo "Culvert appliance: status unavailable"
+  echo
+} > "$tmp"
+install -m 0644 "$tmp" "$out"; rm -f "$tmp"

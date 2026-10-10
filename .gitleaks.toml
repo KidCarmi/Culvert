@@ -1,6 +1,9 @@
 # Gitleaks configuration — allowlist false positives.
 # https://github.com/gitleaks/gitleaks#configuration
 
+[extend]
+  useDefault = true
+
 [allowlist]
   description = "Global allowlist for test fixtures"
 
@@ -18,3 +21,223 @@
     '''testdata/telemetry/v1/sealed/recipient_private_key\.bin''',
     '''testdata/telemetry/v1/sealed/recipient_public_key\.bin''',
   ]
+
+# Audited public fixtures from crewjam/saml v0.5.1. These exact upstream
+# files are byte-pinned by verify_saml_patch.py; CI must run that verifier.
+# No directory-wide or all-rule vendor exemption is permitted.
+
+[[rules]]
+  id = "generic-api-key"
+  [[rules.allowlists]]
+    description = "Byte-pinned public upstream SAML fixtures; see CULVERT-PROVENANCE.json"
+    paths = [
+      '''^third_party/crewjam-saml/samlsp/testdata/saml_response\.xml$''',
+      '''^third_party/crewjam-saml/testdata/SP_SamlResponse$''',
+      '''^third_party/crewjam-saml/testdata/TestIDPCanHandlePostRequestWithExistingSession_http_response_body$''',
+      '''^third_party/crewjam-saml/testdata/TestIDPCanHandleRequestWithExistingSession_http_response_body$''',
+      '''^third_party/crewjam-saml/testdata/TestIDPIDPInitiatedExistingSession_response$''',
+      '''^third_party/crewjam-saml/testdata/TestIDPMarshalAssertion_encrypted_assertion$''',
+      '''^third_party/crewjam-saml/testdata/TestParseXMLArtifactResponse_response$''',
+      '''^third_party/crewjam-saml/testdata/TestSPCanHandleOktaResponseEncryptedAssertionBothSigned_response$''',
+      '''^third_party/crewjam-saml/testdata/TestSPCanHandleOktaResponseEncryptedSignedAssertion_response$''',
+      '''^third_party/crewjam-saml/testdata/TestSPCanHandleOktaSignedResponseEncryptedAssertion_response$''',
+      '''^third_party/crewjam-saml/testdata/TestSPResponseWithNoIssuer_response$''',
+      '''^third_party/crewjam-saml/xmlenc/testdata/ciphertext\.xml$''',
+      '''^third_party/crewjam-saml/xmlenc/testdata/ciphertext_gcm\.xml$''',
+      '''^third_party/crewjam-saml/xmlenc/testdata/input\.xml$''',
+      '''^third_party/crewjam-saml/xmlenc/testdata/input_gcm\.xml$''',
+    ]
+
+# A hash inventory entry named after a key file is not itself key material.
+[[rules.allowlists]]
+  description = "Exact reviewed SHA-256 inventory values in audited upstream provenance"
+  condition = "AND"
+  paths = ['''^third_party/crewjam-saml/CULVERT-PROVENANCE\.json$''']
+  regexTarget = "secret"
+  regexes = ['''^(?:013de938509f1af36a7fbaa396f75b3a92ac91fc87a0ff4899d2f9cd84970887|1303eeb428d92e900a2de14f6ece49f2f0d75a0fcba0c9f5f23d12f87694bd85|2db4616177c15527c1a32cb12a79093153deea51e686898af02c27049d37c027|2dc24b2250b1ef7da2469523725c545c4675f52fffd5e53a2b84a6222455b2e4|6b859f52da07e3c4056216c6d73f08e9431917528cfdb09985d0fc6fbf86c4c2|83a857bead7c29a33a8d5b010b19271b9469535ede50b04eb18dde5c7af7befb|a85bd94ebcd83406f78defc09d5370748bd5552c2e6c0224130f8f99de9d5d0d|b7bd9b5d93f6244b35cbf662982c53c006d44f7361abd6823cc3fbb65a6f7d3d|de46601f6e2db4b1b8ca6e542e10981ce8933742e3dba546f72a1628263b652c|ea3d0389194b309394c325ab77fabff50ef55b8e6f1123efacf75b20061fca11)$''']
+
+[[rules.allowlists]]
+  description = "Exact reviewed SHA-256 inventory values in the badger fork provenance (F-DISK-1)"
+  condition = "AND"
+  paths = ['''^third_party/badger/CULVERT-PROVENANCE\.json$''']
+  regexTarget = "secret"
+  regexes = ['''^(?:91183b50e72557ab5c6b0cc3b3e5f40eaf4720342afec52eb70d763505f4d759|ee6f82c8922af1f10ea36930895765e2834df9a246335f892cc7f5dcd8f9a5be)$''']
+
+[[rules.allowlists]]
+  description = "Exact reviewed SHA-256 inventory values in the rekor-tiles fork provenance (CVE-2026-37236)"
+  condition = "AND"
+  paths = ['''^third_party/rekor-tiles/CULVERT-PROVENANCE\.json$''']
+  regexTarget = "secret"
+  regexes = ['''^(?:0895fa698de09dea193cae18d4679a0eb9fd90f5c71345c73b68e82e16ddf8da|9ab27c01029e4828de4d26faf1ee30ef8cf131d354b53e3be882a63d355d48be)$''']
+
+# Existing public test vectors, public fingerprints, documentation placeholders,
+# and literal source expressions. Both exact file AND exact value must match.
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^appliance/build/manifest\\.env$"]
+  regexes = ["^D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^appliance/console/evidence/esxi\\-hardening\\-smoke\\.json$"]
+  regexes = ["^865cab613e28f292eb5e61013d5a3a52a02e03785bed286acd0332a559b672bf$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^appliance/console/evidence/esxi\\-lifecycle\\-smoke\\.json$", "^appliance/console/evidence/esxi\\-observations\\-smoke\\.json$"]
+  regexes = ["^0f9b372c1ed1677b86609232afcdd8787eafff632e93c7e033e013b5154956ba$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^appliance_firstboot_test\\.go$", "^install_script_env_put_test\\.go$", "^internal/fileutil/writeexclusive_test\\.go$", "^traffic_redaction_test\\.go$"]
+  regexes = ["^0123456789abcdef0123456789abcdef$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^cmd/culvert\\-console/bootstrap_linux_test\\.go$"]
+  regexes = ["^AbCdEfGh23456789$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^cmd/culvert\\-console/bootstrap_view_linux_test\\.go$"]
+  regexes = ["^Fixture23456789A$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^cmd/culvert\\-maint/internal/ops/oplog_test\\.go$"]
+  regexes = ["^01ARZ3NDEKTSV4RRFFQ69G5FA$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^docs/enterprise/IDENTITY\\-AND\\-ACCESS\\-DEPLOYMENT\\.md$", "^docs/enterprise/OPERATIONS\\-RUNBOOK\\.md$"]
+  regexes = ["^NewStr0ngPass$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^frontend/dist/assets/index\\-C3yJCCUP\\.js$"]
+  regexes = ["^n=e\\.subjectMatch$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^internal/mcp/credentials/broker/testkit_test\\.go$", "^internal/mcp/execution/credential_drift_test\\.go$", "^internal/mcp/execution/kill_boundary_race_test\\.go$"]
+  regexes = ["^digest\\-abc123$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^pqc_test\\.go$"]
+  regexes = ["^X25519MLKEM768$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^proxy_tracing_bench_test\\.go$"]
+  regexes = ["^0123456789abcdef$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^roadmap/M0\\-DETAILED\\-DESIGN\\.md$"]
+  regexes = ["^vars\\.R2_PUBLISH_ENABLED$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^testdata/telemetry/v1/sealed/manifest\\.json$"]
+  regexes = ["^425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^upstream_downgrade_test\\.go$"]
+  regexes = ["^01ARZ3NDEKTSV4RRFFQ69G5FAV$"]
+
+[[rules]]
+  id = "private-key"
+  [[rules.allowlists]]
+    description = "Byte-pinned public upstream SAML fixtures; see CULVERT-PROVENANCE.json"
+    paths = [
+      '''^third_party/crewjam-saml/example/idp/idp\.go$''',
+      '''^third_party/crewjam-saml/example/service\.go$''',
+      '''^third_party/crewjam-saml/samlidp/testdata/idp_key\.pem$''',
+      '''^third_party/crewjam-saml/samlidp/testdata/sp_key\.pem$''',
+      '''^third_party/crewjam-saml/samlsp/testdata/key\.pem$''',
+      '''^third_party/crewjam-saml/testdata/idp_key\.pem$''',
+      '''^third_party/crewjam-saml/testdata/key_2017\.pem$''',
+      '''^third_party/crewjam-saml/testdata/sp_key\.pem$''',
+      '''^third_party/crewjam-saml/xmlenc/decrypt_test\.go$''',
+      '''^third_party/crewjam-saml/xmlenc/fuzz\.go$''',
+      '''^third_party/crewjam-saml/xmlenc/testdata/cert\.key$''',
+      '''^third_party/crewjam-saml/xmlenc/testdata/key\.pem$''',
+      '''^third_party/crewjam-saml/xmlenc/testdata/rsapriv\.pem$''',
+    ]
+
+
+# Existing public test vectors, public fingerprints, documentation placeholders,
+# and literal source expressions. Both exact file AND exact value must match.
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^cdr_secretwrite_test\\.go$"]
+  regexes = ["^\\-\\-\\-\\-\\-BEGIN\\ EC\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-\"\\)\\)\\ \\{\\\r\\\n\\\t\\\tt\\.Fatal\\(\"installRenewedPEMs\\ failed\"\\)\\\r\\\n\\\t\\}\\\r\\\n\\\tfi,\\ err\\ :=\\ os\\.Stat\\(inst\\.ClientKeyPath\\)\\\r\\\n\\\tif\\ err\\ !=\\ nil\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"stat\\ key:\\ %v\",\\ err\\)\\\r\\\n\\\t\\}\\\r\\\n\\\tif\\ perm\\ :=\\ fi\\.Mode\\(\\)\\.Perm\\(\\);\\ perm\\ !=\\ 0o600\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"the\\ CDR\\ client\\ private\\ key\\ is\\ mode\\ %v\\ \\(inherited\\ from\\ the\\ planted\\ tmp\\ file\\),\\ want\\ 0600\",\\ perm\\)\\\r\\\n\\\t\\}\\\r\\\n\\}\\\r\\\n\\\r\\\nfunc\\ TestInstallRenewedPEMs_CertStagingDoesNotInheritAPlantedMode\\(t\\ \\*testing\\.T\\)\\ \\{\\\r\\\n\\\tinst\\ :=\\ newRenewalInstance\\(t\\)\\\r\\\n\\\tcertTmp\\ :=\\ inst\\.ClientCertPath\\ \\+\\ \"\\.tmp\"\\\r\\\n\\\tif\\ err\\ :=\\ os\\.WriteFile\\(certTmp,\\ \\[\\]byte\\(\"planted\"\\),\\ 0o600\\);\\ err\\ !=\\ nil\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"seed:\\ %v\",\\ err\\)\\\r\\\n\\\t\\}\\\r\\\n\\\tif\\ err\\ :=\\ os\\.Chmod\\(certTmp,\\ 0o666\\);\\ err\\ !=\\ nil\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"chmod:\\ %v\",\\ err\\)\\\r\\\n\\\t\\}\\\r\\\n\\\tif\\ !installRenewedPEMs\\(inst,\\ \\[\\]byte\\(\"CERT\"\\),\\ \\[\\]byte\\(\"KEY\"\\)\\)\\ \\{\\\r\\\n\\\t\\\tt\\.Fatal\\(\"installRenewedPEMs\\ failed\"\\)\\\r\\\n\\\t\\}\\\r\\\n\\\tfi,\\ err\\ :=\\ os\\.Stat\\(inst\\.ClientCertPath\\)\\\r\\\n\\\tif\\ err\\ !=\\ nil\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"stat\\ cert:\\ %v\",\\ err\\)\\\r\\\n\\\t\\}\\\r\\\n\\\tif\\ perm\\ :=\\ fi\\.Mode\\(\\)\\.Perm\\(\\);\\ perm\\ !=\\ 0o600\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"cert\\ mode\\ =\\ %v,\\ want\\ 0600\",\\ perm\\)\\\r\\\n\\\t\\}\\\r\\\n\\}\\\r\\\n\\\r\\\nfunc\\ TestInstallRenewedPEMs_StagingDoesNotFollowAPlantedSymlink\\(t\\ \\*testing\\.T\\)\\ \\{\\\r\\\n\\\tinst\\ :=\\ newRenewalInstance\\(t\\)\\\r\\\n\\\toutside\\ :=\\ t\\.TempDir\\(\\)\\\r\\\n\\\tcertTarget\\ :=\\ filepath\\.Join\\(outside,\\ \"cert\\-escape\"\\)\\\r\\\n\\\tkeyTarget\\ :=\\ filepath\\.Join\\(outside,\\ \"key\\-escape\"\\)\\\r\\\n\\\tif\\ err\\ :=\\ os\\.Symlink\\(certTarget,\\ inst\\.ClientCertPath\\+\"\\.tmp\"\\);\\ err\\ !=\\ nil\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"plant\\ cert\\ symlink:\\ %v\",\\ err\\)\\\r\\\n\\\t\\}\\\r\\\n\\\tif\\ err\\ :=\\ os\\.Symlink\\(keyTarget,\\ inst\\.ClientKeyPath\\+\"\\.tmp\"\\);\\ err\\ !=\\ nil\\ \\{\\\r\\\n\\\t\\\tt\\.Fatalf\\(\"plant\\ key\\ symlink:\\ %v\",\\ err\\)\\\r\\\n\\\t\\}\\\r\\\n\\\r\\\n\\\tif\\ !installRenewedPEMs\\(inst,\\ \\[\\]byte\\(\"CERT\"\\),\\ \\[\\]byte\\(\"\\-\\-\\-\\-\\-BEGIN\\ EC\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-$"]
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^internal/mcp/execution/matrix_test\\.go$"]
+  regexes = ["^\\-\\-\\-\\-\\-BEGIN\\ RSA\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-\\\\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Q\\\\n\\-\\-\\-\\-\\-END\\ RSA\\ PRIVATE\\ KEY\\-\\-\\-\\-\\-$"]
+
+[[rules]]
+  id = "jwt"
+
+# Existing public test vectors, public fingerprints, documentation placeholders,
+# and literal source expressions. Both exact file AND exact value must match.
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^internal/mcp/inspection/dlp/dlp_test\\.go$", "^internal/mcp/inspection/dlp/fuzz_test\\.go$", "^internal/mcp/inspection/inspection_test\\.go$", "^internal/mcp/runtime/inspection_test\\.go$"]
+  regexes = ["^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U$"]
+
+[[rules]]
+  id = "github-oauth"
+
+# Existing public test vectors, public fingerprints, documentation placeholders,
+# and literal source expressions. Both exact file AND exact value must match.
+
+[[rules.allowlists]]
+  description = "Reviewed exact public fixture or non-secret source literal"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ["^internal/redaction/redactor_retained_test\\.go$"]
+  regexes = ["^gho_012345678901234567890123456789012345$"]

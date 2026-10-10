@@ -7,6 +7,94 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### On-prem appliance readiness (pilot)
+
+- **Restore commits in place and can therefore restore a mounted `/data`.**
+  The commit used to rename the data directory itself, which `rename(2)`
+  refuses for a mount point; every Docker volume is one, so the documented
+  `cli --restore … --confirm` could never commit on a real deployment. The
+  swap is now journaled inside the volume (`.restore-staging.*` →
+  `.restore-bak.*` → promote); an interruption is resolved explicitly with
+  `--recover-restore --confirm=revert|complete` (never automatically; the
+  boot guard refuses while the journal exists). The proxy holds an advisory
+  lock on `/data/.culvert.lock`, so a commit against a running stack is
+  refused — and a proxy started while a commit or recovery holds the lock
+  refuses to boot (fatal) rather than serving a half-moved directory.
+  The proxy's hold is pinned for the process lifetime: a first shape
+  discarded the release closure, the runtime finalizer closed the
+  unreachable lock file, and a commit landed on a running stack after the
+  first GC cycle (found by the lifecycle harness, not by review).
+  Recovery tolerates a staging or previous-data directory that is already
+  gone, and the nested-mount pre-check resolves a symlinked data directory.
+- **Readiness and recovery surfaces say what they can prove.** `policy_posture`
+  counts only enabled rules (an all-disabled rulebase under default-allow is
+  passthrough), `culvert-status` requires that row before reporting "ready to
+  enforce", a replayed reconcile resolve is deduplicated without consuming an
+  attempt, and a dispatch state file that exists but cannot be read at startup
+  is surfaced (`dispatch_state` on `/api/releases`) and never overwritten.
+  New guards: `--accept-root-ca-change` (the inspection root CA
+  would be replaced or removed) and an outright refusal of a restore that
+  would leave no admin account.
+- **Supported upgrade transitions are enforced.** The dispatch planner
+  refuses a running release below the target's `min_upgrade_from`
+  (`unsupported_transition`), an unknown running release without
+  `acknowledge_unknown_current`, and any downgrade without the break-glass
+  `allow_downgrade`; transition refusals are HTTP 409. CI stamps the floor
+  (`release_transition_policy.go`, `1.0.250`) into every catalog manifest.
+- **A release dispatch survives the control-plane restart it causes.** The
+  per-agent dispatch record is persisted (`release_dispatch_state.json`) and
+  resumed at startup (re-poll + verify by digest, never a re-apply); the
+  Release panel keeps polling through the restart.
+- **Maintenance agent:** interrupted operations are classified against
+  Docker truth at startup (`reconcile_on_startup`), safe no-ops and healthy
+  targets resolve automatically, everything else is surfaced on
+  `GET /v1/status` and resolved only through `POST /v1/reconcile/{op_id}`;
+  rollbacks (standalone and inline) use the local image cache before the
+  registry; rollbacks advance the journal; the idempotency index persists
+  across agent restarts (including an outcome the reconciler adopted); a
+  corrupt journal record is quarantined instead of crash-looping the agent.
+  A failed Docker capture is absent evidence (`inputs_unavailable`), never an
+  empty set, so a tag hazard can no longer be retired as a no-op on a
+  transient inspect failure; a resolve refused at admission does not consume
+  the attempt bound.
+- **Readiness tells the states apart:** `/ready` rows `setup_complete` and
+  `policy_posture` (report-only; gating under `?strict=1`) and `/health`
+  fields `setup_complete`, `policy_default_action`, `policy_rules`. The
+  `policy_loaded` diagnostic no longer claims default-deny for an empty
+  policy (it is default-allow). `CULVERT_DEFAULT_ACTION` sets the boot
+  posture when `config.yaml` has none; the installer forwards
+  `CULVERT_INSTALL_DEFAULT_ACTION` and accepts a preinstalled Docker
+  (`CULVERT_INSTALL_ASSUME_DOCKER=1`) without reaching download.docker.com.
+- **Appliance track:** `appliance/` (OVA build path, first-boot
+  provisioning, OS maintenance, SBOM/CVE evidence) and `docs/appliance/`
+  (requirements matrix, questionnaire, transition matrix, state/key-custody
+  matrix, runbooks, readiness report); Docker-driven qualification
+  harnesses under `test/e2e/appliance/` run against real released images.
+- **Owner review round 3 (PR #1528).** `--recover-restore` is restartable:
+  the journal records the chosen direction and the progress of the return,
+  an interrupted revert or complete resumes exactly where it stopped, the
+  other direction is refused once one has begun, and a revert whose previous
+  data is missing is refused instead of "succeeding" over an empty volume.
+  The first-admin wizard is gated by a per-instance **setup token**
+  (`CULVERT_SETUP_TOKEN`, header `X-Culvert-Setup-Token`): minted at first
+  boot, shown on the console and by `sudo culvert-status`, enforced by the
+  proxy on the published admin port. A key-only OVA import gets a usable
+  sudo path (`95-culvert-keyonly`, NOPASSWD — the SSH key is the credential;
+  `culvert-sudo-policy require-password` switches back and refuses while no
+  password exists), an interrupted console-password mint is re-minted, and
+  the maintenance-agent step records a verified install or a degraded
+  `agent.pending` with its reason; `sudo culvert-firstboot --repair-agent` is
+  the explicit retry. ext4's `lost+found` no longer blocks a restore on a
+  dedicated data volume. The real-image lifecycle, real-ClamAV and agent
+  harnesses are blocking Deep PR Gate jobs against the PR-head image, with a
+  full-volume (ENOSPC) restore scenario (first execution: every scenario and
+  the real sidecar passed on the runner; the harness's JSONL writer, which
+  broke on a tar-loaded image's missing digest, is fixed and gated); the OVA
+  build has a labelled
+  candidate mode from a CI image artifact; guest security updates are
+  applied at build time from a pinned archive snapshot; every CVE on the
+  shipped artefacts has a disposition.
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable

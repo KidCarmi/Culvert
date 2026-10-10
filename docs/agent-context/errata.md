@@ -14,6 +14,12 @@ rules and deny with rules; explicit allow/deny is honored. Evidence:
 [loader](../../rewrite_default_action_startup.go) and
 [all-four-case tests](../../rewrite_default_action_startup_test.go).
 Do not change that behavior merely to make the old sentence true.
+Since PR #1528 the startup order is: YAML `default_action`, then the
+`CULVERT_DEFAULT_ACTION` boot posture (`allow`|`deny`, anything else ignored
+with a warning), then the rule-count rule above; a persisted admin choice in
+`admin_settings.json` still wins at load. The appliance's first boot sets
+`deny`. Evidence: [resolver](../../rewrite_default_action_startup_config.go),
+[tests](../../rewrite_default_action_startup_test.go).
 
 ## Admission locations and terminology
 
@@ -88,3 +94,27 @@ PR [#1528](https://github.com/KidCarmi/Culvert/pull/1528), observed head
 `72c827b7f59f4e43ff2a813241be9029f58f23a9`, contains additional instructions
 and a different toolchain pin. Its guide was inspected but is not imported as
 main behavior. See [rebase instructions](migration.md#branch-reconciliation).
+
+## Body-scan fault posture
+
+[Original L209](history/scanning.md#claude-main-l209-l209) says a genuine
+remote-sidecar fault stays fail-open. Since PR #1528 a fault on either back end
+follows the shared `av_unavailable` posture: forwarded unscanned under `open`,
+REFUSED and never cached under `closed` (the appliance default). A ClamAV
+engine fault also distrusts clean verdicts for 60 s and invalidates every clean
+verdict already cached, by fault generation (F-P2; cached blocks stay).
+Evidence: [posture](../../internal/secscan/avposture.go),
+[quarantine](../../internal/secscan/clam_quarantine.go),
+[tests](../../internal/secscan/avposture_test.go),
+[cache tests](../../internal/secscan/clam_quarantine_cache_test.go),
+[operator contract](../appliance/scanning-outage-posture.md).
+
+## Interactive-login state minting
+
+[Original L236](history/authentication-and-identity.md#claude-main-l236-l236)
+says the captive no-credentials and SSO-required paths mint OIDC/SAML state
+themselves. Since PR #1528 only the public `/auth/select` page mints state, per
+render; the captive paths REDIRECT there, because state minted for another host
+cannot be bound to the starting browser. The fair-share eviction described in
+that block is unchanged. Evidence: [binding](../../auth_login_binding.go),
+[tests](../../auth_login_binding_test.go).

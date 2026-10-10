@@ -1,0 +1,2 @@
+# Preserve audited upstream bytes even on core.autocrlf Windows checkouts.
+* -text

@@ -242,6 +242,15 @@ func TestObservationE2E_CONNECTTunnel(t *testing.T) {
 		t.Fatalf("CONNECT: %q %v", line, err)
 	}
 	conn.Close()
+	// The tunnel is relayed by a hijacked goroutine this test does not join,
+	// and httptest.Server.Close does not wait for hijacked connections. Wait
+	// for it to drain so its TUNNEL_CLOSED request-log entry lands before this
+	// test returns — on a loaded runner it landed inside the next test's
+	// isolated ring (Deep determinism, seed 1791014615135233342). This is the
+	// contract waitForActiveConnsZero documents for any such test.
+	if !waitForActiveConnsZero(t, 5*time.Second) {
+		t.Fatalf("CONNECT tunnel did not drain: activeConns=%d", getActiveConns())
+	}
 	_ = eng.Close()
 
 	hostOnly, _, _ := net.SplitHostPort(target)

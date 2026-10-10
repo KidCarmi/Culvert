@@ -133,6 +133,18 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
+	// IP-bound sign-in (F-SSO-SCOPE-1): settings readable by viewers; the
+	// binding list names users and their addresses, so it is admin-only.
+	{Path: "/api/sso-ip-binding", Handler: "apiSSOSurrogate", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/sso-ip-binding/bindings", Handler: "apiSSOSurrogateBindings", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/idp/discover", Handler: "apiIdPDiscover", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true}}},
 	{Path: "/api/idp/test", Handler: "apiIdPTest", Domain: "auth", Public: false,
@@ -153,6 +165,11 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "IdP redirect target; method varies"}}},
 	{Path: "/auth/saml/callback", Handler: "authSAMLCallback", Domain: "auth", Public: true,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RolePublic, Mutating: true, Note: "SAML POST binding"}}},
+	// Second half of a SAML login: the browser-binding check, then the
+	// session (auth_login_binding.go). Public: the browser arrives here from
+	// the ACS's 303 before it has any session.
+	{Path: "/auth/saml/complete", Handler: "authSAMLComplete", Domain: "auth", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
 	{Path: "/auth/saml/metadata", Handler: "authSAMLMetadata", Domain: "auth", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "SP metadata import endpoint for IdP setup"}}},
 	{Path: "/auth/select", Handler: "authSelectProvider", Domain: "auth", Public: true,
@@ -182,6 +199,12 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
 	{Path: "/api/logs/purge", Handler: "apiLogsPurge", Domain: "dashboard", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	// POST (not GET) so the archive passphrase travels in the body. It changes
+	// no state; Mutating follows the POST convention the C1.5 gate pins.
+	{Path: "/api/logs/history/export", Handler: "apiLogsHistoryExport", Domain: "dashboard", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
@@ -533,6 +556,11 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/security-scan/yara/validate", Handler: "apiSecYARAValidate", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, Note: "dry-run validation; no audit"}}},
 	{Path: "/api/security-scan/yara/settings", Handler: "apiSecYARASettings", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/security-scan/av-settings", Handler: "apiSecAVSettings", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},

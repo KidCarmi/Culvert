@@ -131,7 +131,10 @@ type AdminSettings struct {
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
 
 	// Network
-	UIAllowIPs            []string `json:"ui_allow_ips,omitempty"`
+	UIAllowIPs []string `json:"ui_allow_ips,omitempty"`
+	// UIAllowIPsSaved makes an explicitly cleared list authoritative over the
+	// startup seed, while sentinel-less legacy empty settings keep that seed.
+	UIAllowIPsSaved       bool     `json:"ui_allow_ips_saved,omitempty"`
 	BaseURL               string   `json:"base_url,omitempty"`
 	UISANs                []string `json:"ui_sans,omitempty"`
 	TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
@@ -213,6 +216,15 @@ type AdminSettings struct {
 	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
 	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
 
+	// Scanner av_unavailable posture (open|closed): what a body scan does when
+	// the AV engine is faulted. AVUnavailableSaved is a sentinel, but unlike
+	// YARASettingsSaved it is written ONLY by an explicit admin save (the
+	// av-settings PUT, then carried forward), so an unrelated save never
+	// freezes the CULVERT_AV_UNAVAILABLE boot posture into the file. Absent ⇒
+	// the boot posture stands (env, else open — byte-identical).
+	AVUnavailableSaved bool   `json:"av_unavailable_saved,omitempty"`
+	AVUnavailable      string `json:"av_unavailable,omitempty"`
+
 	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
 	// sentinel (like YARASettingsSaved): when false the values below are not applied
 	// on load, so a zero-value field can't override the engine defaults on settings
@@ -259,6 +271,18 @@ type AdminSettings struct {
 	PolicyLearningSaved                   bool     `json:"policy_learning_saved"`
 	PolicyLearningEnabled                 bool     `json:"policy_learning_enabled"`
 	PolicyLearningRecommendableCategories []string `json:"policy_learning_recommendable_categories"`
+
+	// IP-bound sign-in (F-SSO-SCOPE-1, sso_surrogate.go). Sentinel-gated like
+	// the fields above: a file predating the feature keeps it OFF. Node-local
+	// and AdminDurable-only — OFF export/import, version-rollback and CP→DP:
+	// the bindings it governs are node-local and volatile, and a rollback or
+	// sync that silently switched an identity transport ON would widen who is
+	// attributed to whom. No omitempty on the list: an explicitly empty
+	// exclusion list must survive the round trip.
+	SSOSurrogateSaved        bool     `json:"sso_ip_binding_saved"`
+	SSOSurrogateEnabled      bool     `json:"sso_ip_binding_enabled"`
+	SSOSurrogateTTLMinutes   int      `json:"sso_ip_binding_ttl_minutes,omitempty"`
+	SSOSurrogateExcludeCIDRs []string `json:"sso_ip_binding_exclude_cidrs"`
 }
 
 var (
@@ -302,10 +326,13 @@ func snapshotOverriddenSurfaces(s AdminSettings) {
 	add(s.LogRetentionSaved, "log retention")
 	add(s.LogStoreEnabledSaved, "log-store enable")
 	add(s.TrustedProxyCIDRsSaved, "trusted-proxy CIDRs")
+	add(s.UIAllowIPsSaved, "UI access IPs")
 	add(s.BlocklistFeedsSaved, "blocklist feeds")
 	add(s.UpstreamProxiesSaved, "upstream proxy pool")
 	add(s.YARASettingsSaved, "YARA engine settings")
+	add(s.AVUnavailableSaved, "AV-unavailable scan posture")
 	add(s.AutoExcludeTunablesSaved, "decryption auto-exclusion tunables")
+	add(s.SSOSurrogateSaved, "IP-bound sign-in")
 	add(s.SupportRetentionSaved, "support-bundle retention")
 	adminSettingsOverriddenSurfaces.Store(&out)
 }
@@ -327,6 +354,7 @@ func LoadAdminSettings(path string) {
 	// a corrupt load we default and the next save writes a clean file, so the /readyz
 	// row + alert would otherwise vanish while every GUI-saved admin setting stays lost.
 	noteResidualQuarantine("admin_settings", path)
+	noteUIAccessQuarantine(path)
 
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -339,6 +367,7 @@ func LoadAdminSettings(path string) {
 		return
 	}
 	if err != nil {
+		refuseLoadedUIAccessPolicy(nil)
 		// Read error on an EXISTING file (EACCES/EIO): the content may be intact, so do
 		// NOT quarantine (a rename could move a healthy file aside on a transient
 		// permission blip — the documented state-corruption posture). Surface it
@@ -353,7 +382,8 @@ func LoadAdminSettings(path string) {
 		return
 	}
 	var s AdminSettings
-	if err := json.Unmarshal(data, &s); err != nil {
+	if err := decodeAdminSettingsObject(data, &s); err != nil {
+		refuseLoadedUIAccessPolicy(nil)
 		// Present-but-corrupt settings. Previously this logged and returned — and the
 		// NEXT SaveAdminSettings (any admin mutation) then atomically OVERWROTE the
 		// corrupt file with a defaults-only snapshot, destroying the only copy of the
@@ -367,6 +397,11 @@ func LoadAdminSettings(path string) {
 		finalizeRewriteSeedIdentities()
 		return
 	}
+
+	// Establish access authority before any migration or apply callback can
+	// schedule an omnibus save. Otherwise a malformed saved list could be
+	// replaced with the still-empty runtime policy by an unrelated startup save.
+	applyAdminUIAccessPolicy(&s)
 
 	// F3a-1: initialize the SaaS feed-config schema boundary before applying admin
 	// services. Idempotent (marker-guarded), backed up before mutation, atomic, and
@@ -394,9 +429,11 @@ func LoadAdminSettings(path string) {
 	applyLegacyLDAPRetirement(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
+	applyAdminAVUnavailable(&s) // explicit admin choice wins over CULVERT_AV_UNAVAILABLE
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	applyAdminPolicyLearning(&s)               // ADR-0025 M5A: record governed desired state (materialized by loadPolicyLearning)
+	applyAdminSSOSurrogate(&s)                 // F-SSO-SCOPE-1: IP-bound sign-in (off unless governed)
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	snapshotOverriddenSurfaces(s)
@@ -663,9 +700,7 @@ func applyAdminLogStore(s *AdminSettings) {
 
 // applyAdminNetwork applies UI access, TLS, and network settings.
 func applyAdminNetwork(s *AdminSettings) {
-	if len(s.UIAllowIPs) > 0 {
-		_ = SetUIAllowedCIDRs(s.UIAllowIPs)
-	}
+	applyAdminUIAccessPolicy(s)
 	if s.BaseURL != "" {
 		SetProxyBaseURL(s.BaseURL)
 	}
@@ -845,9 +880,13 @@ func snapshotBlocklistFeeds(s *AdminSettings) {
 // snapshotted in saveAdminSettingsWithOverrides or it is silently dropped on the next
 // unrelated mutation.
 type adminSaveOverrides struct {
+	uiAllowIPs       *[]string
 	autoExclude      *autoExcludeTunables
 	supportRetention *supportRetentionConfig
 	policyLearning   *policyLearnSettings
+	// ssoSurrogate carries the TARGET IP-bound sign-in settings for the
+	// persist-before-apply PUT (applyOnSuccess publishes them after the write).
+	ssoSurrogate *ssoSurrogateRuntime
 	// yaraSettings carries the TARGET YARA engine posture for the 2E-A
 	// persist-before-apply settings PUT: the durable file records these
 	// target values while the live engine still runs the old ones;
@@ -855,6 +894,9 @@ type adminSaveOverrides struct {
 	// failure leaves the running posture untouched (never a 200 over a
 	// change that silently reverts on restart).
 	yaraSettings *yaraSettingsTarget
+	// avUnavailable carries the TARGET av_unavailable posture for the
+	// persist-before-apply av-settings PUT (same contract as yaraSettings).
+	avUnavailable *string
 	// decRedaction carries the TARGET destination-privacy state (posture + key
 	// + non-secret generation id) for the persist-before-apply redaction PUT
 	// (2E-B §A/§B/§C): the durable file records the target while the live
@@ -895,8 +937,9 @@ type adminSaveOverrides struct {
 	// It runs INSIDE the save's adminSettingsMu critical section, immediately after a
 	// successful write — so no concurrent omnibus save can snapshot the pre-apply
 	// runtime value and then land its own AtomicWrite after this one, reverting the
-	// just-persisted setting on disk. It runs only on a successful write (persist
-	// failure ⇒ never applied ⇒ runtime and disk stay in agreement).
+	// just-persisted setting on disk. The UI-policy override also runs after a
+	// replacement that landed but whose directory sync failed; its caller reports
+	// uncertain durability while keeping runtime aligned with the landed file.
 	applyOnSuccess func()
 }
 
@@ -906,12 +949,205 @@ type adminSaveOverrides struct {
 // persist failure; the fire-and-forget adminSettingsSave wrapper ignores it.
 func SaveAdminSettings() error { return saveAdminSettingsWithOverrides(adminSaveOverrides{}) }
 
+// snapshotYARASettings records the YARA engine settings — the TARGET posture
+// for a persist-before-apply settings PUT (2E-A), else the live values.
+func snapshotYARASettings(s *AdminSettings, target *yaraSettingsTarget) {
+	s.YARASettingsSaved = true
+	if target != nil {
+		s.YARAEnabled = target.Enabled
+		s.YARATimeoutSecs = target.TimeoutSecs
+		s.YARAMaxInflight = target.MaxInflight
+		s.YARAOnTimeout = target.OnTimeout
+		s.YARAOnSaturation = target.OnSaturation
+		s.YARAAlertDegraded = target.AlertDegraded
+		return
+	}
+	s.YARAEnabled = yaraGetEnabled()
+	s.YARATimeoutSecs = yaraGetTimeoutSecs()
+	s.YARAMaxInflight = yaraGetMaxInflight()
+	s.YARAOnTimeout = yaraGetOnTimeout()
+	s.YARAOnSaturation = yaraGetOnSaturation()
+	s.YARAAlertDegraded = yaraGetAlertDegraded()
+}
+
+// snapshotDecRedaction records destination privacy (ADR-0011 §4 / PR3 Option
+// B / 2E-B): the TARGET posture+key+id for a persist-before-apply redaction
+// PUT, else the live values. The target path is what makes the redaction
+// write durable-before-live and serialized under the caller's
+// adminSettingsMu (which also guards the rotation sequence and receipts).
+func snapshotDecRedaction(s *AdminSettings, target *decRedactionTarget) {
+	if target != nil {
+		s.DecryptionRedactHosts = target.RedactHosts
+		s.TrafficPseudonymKey = target.Key
+		s.TrafficPseudonymKeyID = target.KeyID
+		s.TrafficKeyRotationSeq = target.Seq
+		s.TrafficKeyRotationReceipts = target.Receipts
+		return
+	}
+	s.DecryptionRedactHosts = decRedactHosts()
+	s.TrafficPseudonymKey = getTrafficPseudonymKey() // node-local pseudonym key (nil when unset)
+	s.TrafficPseudonymKeyID = getTrafficPseudonymKeyID()
+	s.TrafficKeyRotationSeq = trafficRotationSeq
+	s.TrafficKeyRotationReceipts = trafficRotationReceipts
+}
+
+// adminSaveTargets is what a save resolves INSIDE adminSettingsMu before it
+// snapshots anything: the rewrite and upstream TARGETS a persist-before-apply
+// mutation will publish once the durable write lands, and the upstream
+// sections a rejected stored document forces the save to carry forward.
+type adminSaveTargets struct {
+	rewrite          []RewriteRule
+	rewriteApply     bool
+	upstreamDoc      upstream.Document
+	upstreamApply    bool
+	retainedLegacy   []UpstreamEntry
+	upstreamRetained bool
+}
+
+// resolveAdminSaveTargets must be called with adminSettingsMu held.
+func resolveAdminSaveTargets(ov adminSaveOverrides) (adminSaveTargets, error) {
+	// Rewrite target construction (2D-C §24/§27): read-current + fence + build
+	// INSIDE the lock, so no other save (or bulk publish, which also enters
+	// adminSettingsMu) can land between the read and this save's publication.
+	var t adminSaveTargets
+	if ov.rewriteMutate != nil {
+		target, err := ov.rewriteMutate(rewriter.List())
+		if err != nil {
+			return t, err
+		}
+		t.rewrite, t.rewriteApply = target, true
+	}
+	// Upstream target construction (2F-C): fence + build + validate INSIDE
+	// the lock against the CURRENT managed document; the pool is untouched
+	// until the durable write lands.
+	t.upstreamDoc = upstreamPool.Document()
+	// Review blocker 3: while the STORED document is rejected the save
+	// carries the rejected sections forward verbatim (never the empty live
+	// pool) and no managed mutation is accepted.
+	var retainedDoc upstream.Document
+	retainedDoc, t.retainedLegacy, t.upstreamRetained = upstreamRetainedSections()
+	if t.upstreamRetained {
+		if ov.upstreamMutate != nil {
+			return t, errUpstreamDocumentRejected
+		}
+		t.upstreamDoc = retainedDoc
+	}
+	if ov.upstreamMutate != nil {
+		target, err := ov.upstreamMutate(t.upstreamDoc)
+		if err != nil {
+			return t, err
+		}
+		if err := upstream.ValidateEffective(upstreamPool.YAMLEntries(), target.Entries); err != nil {
+			return t, err
+		}
+		t.upstreamDoc, t.upstreamApply = target, true
+	}
+	return t, nil
+}
+
+// adminSavePreconditions refuses a save before anything is read or written.
+func adminSavePreconditions(ov adminSaveOverrides) error {
+	if err := uiAccessSavePrecondition(); err != nil {
+		return err
+	}
+	if ov.uiAllowIPs != nil && uiAccessPolicyRefused() {
+		return errors.New("management access policy requires local recovery")
+	}
+	if ov.precondition != nil {
+		return ov.precondition()
+	}
+	return nil
+}
+
+func snapshotRewriteRules(s *AdminSettings, t adminSaveTargets, path string) error {
+	// Rewrite rules: the TARGET set for a rewrite-mutating save (persist-before-
+	// apply), else the live set. Stamped saved-authoritative so an explicit
+	// empty set survives restart (see RewriteRulesSaved) — EXCEPT while the
+	// management-identity degradation is latched: the live StableIDs are
+	// KNOWN-ephemeral, so an unrelated omnibus save must neither record them
+	// as authoritative settings identity nor destroy the refused-but-
+	// recoverable slice the load deliberately preserved on disk. It carries
+	// the existing file's rewrite fields verbatim instead (or makes no rewrite
+	// claim when no file exists), and refuses the whole save rather than
+	// overwrite a slice it cannot read back. A rewrite-mutating save stays
+	// exempt: its target carries durable-artifact identities (rollback/import
+	// via installRewriteRulesDurable), and the interactive mutations are
+	// already refused upstream while degraded.
+	switch {
+	case t.rewriteApply:
+		s.RewriteRules = t.rewrite
+		s.RewriteRulesSaved = true
+	case rewriteIdentityDegraded() != nil:
+		if err := carryFileRewriteFields(s, path); err != nil {
+			logger.Printf("AdminSettings: %v", err)
+			return err
+		}
+	default:
+		s.RewriteRules = rewriter.List()
+		s.RewriteRulesSaved = true
+	}
+	return nil
+}
+
+func snapshotSaaSFeedTarget(s *AdminSettings, target *saasFeedDurable) {
+	// SaaS feed (F3a-2). ALL durable feed-config fields — including the URL —
+	// are snapshotted from the holder (snapshotSaaSFeedDurable is the sole writer
+	// of s.SaaSFeedURL). The legacy syncer no longer owns the URL, so an unrelated
+	// admin mutation preserves the signed-feed config + schema marker without
+	// re-reading (and thereby coupling to) the legacy additive syncer.
+	if target != nil {
+		// 2D-B.0c persist-before-apply: the durable file records the TARGET feed
+		// configuration while the live holder still carries the old one;
+		// applyOnSuccess publishes the target only after the write landed.
+		snapshotSaaSFeedDurableFrom(s, *target)
+		return
+	}
+	snapshotSaaSFeedDurable(s)
+}
+
+func snapshotUpstreamTarget(s *AdminSettings, t adminSaveTargets) {
+	// Upstream proxy pool (2F-C): the managed v2 document (sealed
+	// credentials only) plus the credential-FREE legacy representation.
+	// 2F-D: the file records the schema it is written under.
+	s.AdminSettingsSchema = adminSettingsSchemaCurrent
+	s.UpstreamProxiesSaved = true
+	docCopy := t.upstreamDoc.Clone()
+	s.UpstreamProxiesV2 = &docCopy
+	if t.upstreamRetained {
+		s.UpstreamProxies = t.retainedLegacy
+		return
+	}
+	s.UpstreamProxies = upstreamLegacyFromDocument(t.upstreamDoc)
+}
+
+// publishAdminSaveTargets runs after the durable write succeeded: it applies
+// the persist-before-apply targets to the live runtime — still under
+// adminSettingsMu, so the (disk, runtime) pair moves atomically w.r.t. every
+// other save.
+func publishAdminSaveTargets(ov adminSaveOverrides, t adminSaveTargets) error {
+	if t.rewriteApply {
+		rewriter.SetRules(t.rewrite)
+	}
+	if t.upstreamApply {
+		if err := upstreamPool.SetDocument(t.upstreamDoc); err != nil {
+			// Validated above under the same lock; unreachable in practice.
+			logger.Printf("AdminSettings: upstream document publication refused after a durable write: %v", err)
+			return err
+		}
+		applyUpstreamProxy()
+	}
+	if ov.applyOnSuccess != nil {
+		ov.applyOnSuccess()
+	}
+	return nil
+}
+
 // saveAdminSettingsWithOverrides is SaveAdminSettings with optional per-feature
 // TARGET overrides. When a field is non-nil the durable file records those TARGET
 // values instead of the live ones — the owning PUT persists the target FIRST, then
-// (only on success) applies it to the live runtime. Because those applies are
-// infallible, a persist failure leaves the live state — and any data it governs —
-// untouched.
+// applies it to the live runtime. Pre-replacement failures leave runtime untouched.
+// The UI-policy override handles ErrReplacedNotSynced as a landed replacement,
+// applying the target while retaining the durability error for its caller.
 func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// Hold adminSettingsMu across the ENTIRE snapshot → write → apply sequence, not
 	// just the path read. Every save (omnibus or override-carrying) is thereby
@@ -921,54 +1157,19 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// free; adminSettingsSave already runs this off the request goroutine.
 	adminSettingsMu.Lock()
 	defer adminSettingsMu.Unlock()
-	if ov.precondition != nil {
-		if err := ov.precondition(); err != nil {
-			return err
-		}
+	if err := adminSavePreconditions(ov); err != nil {
+		return err
 	}
-	// Rewrite target construction (2D-C §24/§27): read-current + fence + build
-	// INSIDE the lock, so no other save (or bulk publish, which also enters
-	// adminSettingsMu) can land between the read and this save's publication.
-	var rewriteTarget []RewriteRule
-	rewriteApply := false
-	if ov.rewriteMutate != nil {
-		target, err := ov.rewriteMutate(rewriter.List())
-		if err != nil {
-			return err
-		}
-		rewriteTarget, rewriteApply = target, true
-	}
-	// Upstream target construction (2F-C): fence + build + validate INSIDE
-	// the lock against the CURRENT managed document; the pool is untouched
-	// until the durable write lands.
-	upstreamDoc := upstreamPool.Document()
-	upstreamApply := false
-	// Review blocker 3: while the STORED document is rejected the save
-	// carries the rejected sections forward verbatim (never the empty live
-	// pool) and no managed mutation is accepted.
-	retainedDoc, retainedLegacy, upstreamRetained := upstreamRetainedSections()
-	if upstreamRetained {
-		if ov.upstreamMutate != nil {
-			return errUpstreamDocumentRejected
-		}
-		upstreamDoc = retainedDoc
-	}
-	if ov.upstreamMutate != nil {
-		target, err := ov.upstreamMutate(upstreamDoc)
-		if err != nil {
-			return err
-		}
-		if err := upstream.ValidateEffective(upstreamPool.YAMLEntries(), target.Entries); err != nil {
-			return err
-		}
-		upstreamDoc, upstreamApply = target, true
+	t, err := resolveAdminSaveTargets(ov)
+	if err != nil {
+		return err
 	}
 	path := adminSettingsPath
 	if path == "" {
 		// No persistence configured: the (empty) write trivially succeeds, so a
 		// persist-before-apply target still applies — the caller was promised
 		// "returns nil ⇒ the target is live".
-		return applyAdminSettingsOverridesUnpersisted(ov, rewriteApply, rewriteTarget, upstreamApply, upstreamDoc)
+		return applyAdminSettingsOverridesUnpersisted(ov, t.rewriteApply, t.rewrite, t.upstreamApply, t.upstreamDoc)
 	}
 
 	s := AdminSettings{
@@ -985,6 +1186,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		LogLevel:               effectiveAdminLogLevel().String(),
 		SessionTimeoutHours:    int(getSessionTTL().Hours()),
 		UIAllowIPs:             ListUIAllowedCIDRs(),
+		UIAllowIPsSaved:        uiAccessPolicyExplicit(),
 		TrustForwardedHeaders:  trustForwardedHeaders,
 		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
@@ -992,62 +1194,19 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	}
 
 	snapshotAdminEndpoints(&s)
+	if ov.uiAllowIPs != nil {
+		s.UIAllowIPs = append([]string(nil), (*ov.uiAllowIPs)...)
+		s.UIAllowIPsSaved = true
+	}
 
-	// Rewrite rules: the TARGET set for a rewrite-mutating save (persist-before-
-	// apply), else the live set. Stamped saved-authoritative so an explicit
-	// empty set survives restart (see RewriteRulesSaved) — EXCEPT while the
-	// management-identity degradation is latched: the live StableIDs are
-	// KNOWN-ephemeral, so an unrelated omnibus save must neither record them
-	// as authoritative settings identity nor destroy the refused-but-
-	// recoverable slice the load deliberately preserved on disk. It carries
-	// the existing file's rewrite fields verbatim instead (or makes no rewrite
-	// claim when no file exists), and refuses the whole save rather than
-	// overwrite a slice it cannot read back. A rewrite-mutating save stays
-	// exempt: its target carries durable-artifact identities (rollback/import
-	// via installRewriteRulesDurable), and the interactive mutations are
-	// already refused upstream while degraded.
-	switch {
-	case rewriteApply:
-		s.RewriteRules = rewriteTarget
-		s.RewriteRulesSaved = true
-	case rewriteIdentityDegraded() != nil:
-		if err := carryFileRewriteFields(&s, path); err != nil {
-			logger.Printf("AdminSettings: %v", err)
-			return err
-		}
-	default:
-		s.RewriteRules = rewriter.List()
-		s.RewriteRulesSaved = true
+	if err := snapshotRewriteRules(&s, t, path); err != nil {
+		return err
 	}
 
 	snapshotBlocklistFeeds(&s)
 
-	// SaaS feed (F3a-2). ALL durable feed-config fields — including the URL —
-	// are snapshotted from the holder (snapshotSaaSFeedDurable is the sole writer
-	// of s.SaaSFeedURL). The legacy syncer no longer owns the URL, so an unrelated
-	// admin mutation preserves the signed-feed config + schema marker without
-	// re-reading (and thereby coupling to) the legacy additive syncer.
-	if ov.saasFeed != nil {
-		// 2D-B.0c persist-before-apply: the durable file records the TARGET feed
-		// configuration while the live holder still carries the old one;
-		// applyOnSuccess publishes the target only after the write landed.
-		snapshotSaaSFeedDurableFrom(&s, *ov.saasFeed)
-	} else {
-		snapshotSaaSFeedDurable(&s)
-	}
-
-	// Upstream proxy pool (2F-C): the managed v2 document (sealed
-	// credentials only) plus the credential-FREE legacy representation.
-	// 2F-D: the file records the schema it is written under.
-	s.AdminSettingsSchema = adminSettingsSchemaCurrent
-	s.UpstreamProxiesSaved = true
-	docCopy := upstreamDoc.Clone()
-	s.UpstreamProxiesV2 = &docCopy
-	if upstreamRetained {
-		s.UpstreamProxies = retainedLegacy
-	} else {
-		s.UpstreamProxies = upstreamLegacyFromDocument(upstreamDoc)
-	}
+	snapshotSaaSFeedTarget(&s, ov.saasFeed)
+	snapshotUpstreamTarget(&s, t)
 
 	// History-store enable state + retention (retention remembered even when off)
 	s.LogStoreEnabledSaved = true
@@ -1056,45 +1215,13 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	s.LogRetentionDays, s.LogRetentionMaxGB = getLogStoreDesired()
 	s.LogCriticalDiskPct = getCriticalDiskPct()
 
-	// YARA engine settings — the TARGET posture for a persist-before-apply
-	// settings PUT (2E-A), else the live values.
-	s.YARASettingsSaved = true
-	if ov.yaraSettings != nil {
-		s.YARAEnabled = ov.yaraSettings.Enabled
-		s.YARATimeoutSecs = ov.yaraSettings.TimeoutSecs
-		s.YARAMaxInflight = ov.yaraSettings.MaxInflight
-		s.YARAOnTimeout = ov.yaraSettings.OnTimeout
-		s.YARAOnSaturation = ov.yaraSettings.OnSaturation
-		s.YARAAlertDegraded = ov.yaraSettings.AlertDegraded
-	} else {
-		s.YARAEnabled = yaraGetEnabled()
-		s.YARATimeoutSecs = yaraGetTimeoutSecs()
-		s.YARAMaxInflight = yaraGetMaxInflight()
-		s.YARAOnTimeout = yaraGetOnTimeout()
-		s.YARAOnSaturation = yaraGetOnSaturation()
-		s.YARAAlertDegraded = yaraGetAlertDegraded()
-	}
-
+	snapshotYARASettings(&s, ov.yaraSettings)
+	snapshotAVUnavailable(&s, ov.avUnavailable)
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
 	snapshotPolicyLearning(&s, ov.policyLearning)     // ADR-0025 M5A: governed enablement + recommendable guardrail
-	// Destination privacy (ADR-0011 §4 / PR3 Option B / 2E-B): the TARGET
-	// posture+key+id for a persist-before-apply redaction PUT, else the live
-	// values. The target path is what makes the redaction write durable-
-	// before-live and serialized under this save's adminSettingsMu.
-	if ov.decRedaction != nil {
-		s.DecryptionRedactHosts = ov.decRedaction.RedactHosts
-		s.TrafficPseudonymKey = ov.decRedaction.Key
-		s.TrafficPseudonymKeyID = ov.decRedaction.KeyID
-		s.TrafficKeyRotationSeq = ov.decRedaction.Seq
-		s.TrafficKeyRotationReceipts = ov.decRedaction.Receipts
-	} else {
-		s.DecryptionRedactHosts = decRedactHosts()
-		s.TrafficPseudonymKey = getTrafficPseudonymKey() // node-local pseudonym key (nil when unset)
-		s.TrafficPseudonymKeyID = getTrafficPseudonymKeyID()
-		s.TrafficKeyRotationSeq = trafficRotationSeq // guarded by this save's adminSettingsMu
-		s.TrafficKeyRotationReceipts = trafficRotationReceipts
-	}
+	snapshotSSOSurrogate(&s, ov.ssoSurrogate)         // F-SSO-SCOPE-1: IP-bound sign-in settings
+	snapshotDecRedaction(&s, ov.decRedaction)
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -1105,28 +1232,17 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// goroutine per API mutation, so a fixed ".tmp" name lets concurrent
 	// saves interleave into the same temp file and publish a torn result.
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		// A UI-policy replacement that landed must not diverge from runtime.
+		// Keep the error: the API distinguishes this uncertain durability from
+		// a pre-rename refusal and never reports durable success.
+		if ov.uiAllowIPs != nil && errors.Is(err, fileutil.ErrReplacedNotSynced) && ov.applyOnSuccess != nil {
+			ov.applyOnSuccess()
+		}
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
 	}
 	snapshotOverriddenSurfaces(s)
-	// Persist-before-apply: the durable write succeeded, so apply the target to the
-	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
-	// moves atomically w.r.t. every other save.
-	if rewriteApply {
-		rewriter.SetRules(rewriteTarget)
-	}
-	if upstreamApply {
-		if err := upstreamPool.SetDocument(upstreamDoc); err != nil {
-			// Validated above under the same lock; unreachable in practice.
-			logger.Printf("AdminSettings: upstream document publication refused after a durable write: %v", err)
-			return err
-		}
-		applyUpstreamProxy()
-	}
-	if ov.applyOnSuccess != nil {
-		ov.applyOnSuccess()
-	}
-	return nil
+	return publishAdminSaveTargets(ov, t)
 }
 
 // applyAdminSettingsOverridesUnpersisted is the no-persistence-path half of

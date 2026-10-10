@@ -1,0 +1,38 @@
+# test/e2e/appliance/docker-compose.qualify.yml — qualification override for
+# the lifecycle harness (lifecycle-qualify.sh). Merged over the deploy
+# bundle's docker-compose.yml. TEST-ONLY; never ships to operators.
+#
+# - clamav: replaced by an always-healthy busybox. The REAL ClamAV sidecar
+#   downloads ~250 MB of signatures over HTTPS at first start; in a sandbox
+#   whose egress is a TLS-intercepting proxy that download cannot verify and
+#   the proxy would never start (depends_on: service_healthy). ClamAV
+#   scanning is therefore NOT qualified by this harness — see the evidence
+#   file's BLOCKED rows. Run with CULVERT_QUALIFY_REAL_CLAMAV=1 on a host
+#   with direct egress to exercise the real sidecar.
+# - origin-allowed / origin-blocked: two tiny HTTP origins inside the compose
+#   network so the harness can prove ACTUAL allow/block behaviour through the
+#   proxy (not just HTTP 200 on /health).
+services:
+  clamav:
+    image: busybox:stable
+    # The base service BUILDS the sidecar (appliance/clamav); a stub must drop
+    # that build, or Compose would build the real sidecar and tag it busybox.
+    build: !reset null
+    # The base service never pulls (its tag is local-only); a stub image must.
+    pull_policy: missing
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD-SHELL", "true"]
+      interval: 5s
+      timeout: 3s
+      retries: 1
+      start_period: 0s
+  proxy:
+    healthcheck:
+      start_period: 15s
+  origin-allowed:
+    image: busybox:stable
+    command: ["sh", "-c", "mkdir -p /www && echo origin-allowed-ok > /www/index.html && httpd -f -p 80 -h /www"]
+  origin-blocked:
+    image: busybox:stable
+    command: ["sh", "-c", "mkdir -p /www && echo origin-blocked-ok > /www/index.html && httpd -f -p 80 -h /www"]

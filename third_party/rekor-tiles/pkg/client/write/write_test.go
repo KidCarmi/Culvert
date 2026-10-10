@@ -1,0 +1,251 @@
+//
+// Copyright 2025 The Sigstore Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package write
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+	"time"
+
+	v1 "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+	pbs "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
+	"github.com/sigstore/rekor-tiles/v2/pkg/client"
+	pb "github.com/sigstore/rekor-tiles/v2/pkg/generated/protobuf"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNewWriter(t *testing.T) {
+	writeURL := "http://localhost:3003"
+	tests := []struct {
+		name     string
+		opts     []client.Option
+		expected *writeClient
+	}{
+		{
+			name: "no options",
+			expected: &writeClient{
+				baseURL: &url.URL{Scheme: "http", Host: "localhost:3003"},
+				client:  &http.Client{Transport: http.DefaultTransport, Timeout: 30 * time.Second},
+			},
+		},
+		{
+			name: "with user agent",
+			opts: []client.Option{
+				client.WithUserAgent("test"),
+			},
+			expected: &writeClient{
+				baseURL: &url.URL{Scheme: "http", Host: "localhost:3003"},
+				client:  &http.Client{Transport: client.CreateRoundTripper(nil, "test"), Timeout: 30 * time.Second},
+			},
+		},
+		{
+			name: "with timeout",
+			opts: []client.Option{
+				client.WithTimeout(1 * time.Second),
+			},
+			expected: &writeClient{
+				baseURL: &url.URL{Scheme: "http", Host: "localhost:3003"},
+				client:  &http.Client{Transport: http.DefaultTransport, Timeout: 1 * time.Second},
+			},
+		},
+		{
+			name: "with both",
+			opts: []client.Option{
+				client.WithUserAgent("test"),
+				client.WithTimeout(1 * time.Second),
+			},
+			expected: &writeClient{
+				baseURL: &url.URL{Scheme: "http", Host: "localhost:3003"},
+				client: &http.Client{Transport: client.CreateRoundTripper(nil, "test"),
+					Timeout: 1 * time.Second,
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, gotErr := NewWriter(writeURL, test.opts...)
+			assert.NoError(t, gotErr)
+			assert.Equal(t, test.expected.baseURL, got.(*writeClient).baseURL)
+			assert.Equal(t, test.expected.client, got.(*writeClient).client)
+		})
+	}
+}
+
+func TestAdd(t *testing.T) {
+	tests := []struct {
+		name      string
+		entry     any
+		respBody  []byte
+		respCode  int
+		expectErr error
+	}{
+		{
+			name: "valid hashedrekord",
+			entry: &pb.HashedRekordRequestV002{
+				Signature: &pb.Signature{
+					Content: []byte("sign"),
+					Verifier: &pb.Verifier{
+						Verifier: &pb.Verifier_PublicKey{
+							PublicKey: &pb.PublicKey{
+								RawBytes: []byte("key"),
+							},
+						},
+						KeyDetails: v1.PublicKeyDetails_PKIX_ECDSA_P256_SHA_256,
+					},
+				},
+				Digest: []byte("digest"),
+			},
+			respBody: marshalJSONOrDie(t, pbs.TransparencyLogEntry{
+				LogIndex: 1,
+				InclusionProof: &pbs.InclusionProof{
+					LogIndex: 1,
+					RootHash: b64DecodeOrDie(t, "NmVmNWM2YzY2NzcxNjI0YmZmMDI1ZDRmMGNkODRkYWVmYjI0MzIzMzk4MmU5MDA5M2Y0NDBkNDM5ODliY2ZiYgo="),
+					TreeSize: 2,
+					Hashes: [][]byte{
+						b64DecodeOrDie(t, "d/XeBMMsM7fy/gMiRBFow5u6dOud2RFlKQy20qNSB8w="),
+					},
+					Checkpoint: &pbs.Checkpoint{
+						Envelope: "rekor-local\n2\nbvXGxmdxYkv/Al1PDNhNrvskMjOYLpAJP0QNQ5ibz7s=\n\n— rekor-local 2AtEIKMQNqn1+JpFEwM4yv/nDtVtu0B6yGRkOLpbHP9tQMF493hYOgRKUhp9ZNylWSJebqOThUpdO03LzJn3/6K5HQc=\n",
+					},
+				},
+				CanonicalizedBody: []byte(`{"data":{"algorithm":"SHA2_256","digest":"ZGlnZXN0"},"signature":"c2lnbg==","verifier":{"publicKey":{"rawBytes":"a2V5"}}}`),
+			}),
+			respCode:  http.StatusCreated,
+			expectErr: nil,
+		},
+		{
+			name:      "invalid entry type",
+			entry:     "intoto entry",
+			expectErr: fmt.Errorf("unsupported entry type: string"),
+		},
+		{
+			name: "server error",
+			entry: &pb.HashedRekordRequestV002{
+				Signature: &pb.Signature{
+					Content: []byte("sign"),
+					Verifier: &pb.Verifier{
+						Verifier: &pb.Verifier_PublicKey{
+							PublicKey: &pb.PublicKey{
+								RawBytes: []byte("key"),
+							},
+						},
+						KeyDetails: v1.PublicKeyDetails_PKIX_ECDSA_P256_SHA_256,
+					},
+				},
+				Digest: []byte("digest"),
+			},
+			respBody:  []byte("server died"),
+			respCode:  http.StatusInternalServerError,
+			expectErr: fmt.Errorf("unexpected response: 500 server died"),
+		},
+		{
+			name: "unexpected response body from server",
+			entry: &pb.HashedRekordRequestV002{
+				Signature: &pb.Signature{
+					Content: []byte("sign"),
+					Verifier: &pb.Verifier{
+						Verifier: &pb.Verifier_PublicKey{
+							PublicKey: &pb.PublicKey{
+								RawBytes: []byte("key"),
+							},
+						},
+						KeyDetails: v1.PublicKeyDetails_PKIX_ECDSA_P256_SHA_256,
+					},
+				},
+				Digest: []byte("digest"),
+			},
+			respBody:  []byte("i love ice cream"),
+			respCode:  http.StatusCreated,
+			expectErr: fmt.Errorf("unmarshaling response body: proto"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(test.respCode)
+					w.Write([]byte(test.respBody))
+				}))
+			defer server.Close()
+			client, err := NewWriter(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, gotErr := client.Add(ctx, test.entry)
+			if test.expectErr == nil {
+				assert.NoError(t, gotErr)
+			} else {
+				assert.ErrorContains(t, gotErr, test.expectErr.Error())
+			}
+		})
+	}
+}
+
+func b64DecodeOrDie(t *testing.T, text string) []byte {
+	decoded, err := base64.StdEncoding.DecodeString(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decoded
+}
+
+func marshalJSONOrDie(t *testing.T, obj any) []byte {
+	marshaledResp, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return marshaledResp
+}
+
+func TestAdd_ResponseExceedsLimit(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			// Write 10MB + 1 byte
+			w.Write(make([]byte, 10*1024*1024+1))
+		}))
+	defer server.Close()
+
+	client, err := NewWriter(server.URL)
+	assert.NoError(t, err)
+
+	entry := &pb.HashedRekordRequestV002{
+		Signature: &pb.Signature{
+			Content: []byte("sig"),
+			Verifier: &pb.Verifier{
+				Verifier: &pb.Verifier_PublicKey{
+					PublicKey: &pb.PublicKey{RawBytes: []byte("key")},
+				},
+				KeyDetails: v1.PublicKeyDetails_PKIX_ECDSA_P256_SHA_256,
+			},
+		},
+		Digest: []byte("digest"),
+	}
+
+	_, gotErr := client.Add(ctx, entry)
+	assert.Error(t, gotErr)
+}

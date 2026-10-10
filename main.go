@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -51,95 +52,99 @@ var dataDir = "/data"
 // PR2's main() extraction.
 type startupState struct {
 	// ── CLI flag pointers (all set in parseFlags) ─────────────────────────
-	configPath              *string
-	proxyPort               *int
-	uiPortFlag              *int
-	user                    *string
-	pass                    *string
-	blockFile               *string
-	logFilePath             *string
-	logMaxMB                *int
-	tlsCert                 *string
-	tlsKey                  *string
-	rateLimitRPM            *int
-	ipMode                  *string
-	socks5Port              *int
-	metricsTok              *string
-	cpGRPCAddr              *string
-	cpGRPCCert              *string
-	cpGRPCKey               *string
-	cpGRPCCA                *string
-	haJoin                  *string
-	haToken                 *string
-	haAutoFailover          *bool
-	haEtcdEndpoints         *string
-	haEtcdCert              *string
-	haEtcdKey               *string
-	haEtcdCA                *string
-	haLeaseTTL              *int
-	dpCPAddr                *string
-	dpNodeID                *string
-	dpCert                  *string
-	dpKey                   *string
-	dpCA                    *string
-	policyFile              *string
-	caPath                  *string
-	auditLog                *string
-	requestLogPath          *string
-	requestLogMaxMB         *int
-	syslogAddr              *string
-	syslogFormat            *string
-	otlpEndpoint            *string
-	uiAllowIP               *string
-	trustedProxyCIDRs       *string
-	sessionHrs              *int
-	geoIPDB                 *string
-	clamavAddr              *string
-	yaraRulesDir            *string
-	threatFeedDB            *string
-	uiUsersFile             *string
-	fileProfilesFile        *string
-	idpProfilesFile         *string
-	uiNoTLS                 *bool
-	catFeedDB               *string
-	catFeedURL              *string
-	catSyncIntvl            *string
-	enrollURL               *string
-	clusterDB               *string
-	clusterInsecureFlag     *bool
-	revocationsFile         *string
-	scanSvcListen           *string
-	scanSvcURL              *string
-	updaterURLFlag          *string // deprecated: legacy updater removed; parsed-but-ignored
-	updaterURLAllowFlag     *string // deprecated: legacy updater removed; parsed-but-ignored
-	uiSANsFlag              *string
-	trustFwdHeaders         *bool
-	resetPwUser             *string
-	supportBundleOut        *string
-	backupOut               *string
-	backupEncrypt           *bool
-	restoreIn               *string
-	restoreMode             *string
-	restoreConfirm          *confirmFlag
-	prepareDowngrade        *bool
-	downgradeTargetSchema   *int
-	restoreAcceptDPReenroll *bool
-	restoreAllowCounterRB   *bool
-	listLeftovers           *bool
-	cleanupLeftovers        *bool
-	cleanupOlderThan        *string
-	cleanupKeepLast         *int
-	listBackups             *bool
-	listBackupsDir          *string
-	cdrEnabledFlag          *bool
-	cdrEndpointFlag         *string
-	cdrFailModeFlag         *string
-	cdrProfileFlag          *string
-	cdrModeFlag             *string
-	cdrTimeoutFlag          *int
-	cdrMaxSizeFlag          *int
-	cdrFingerprintFlag      *string
-	cdrCertsDirFlag         *string
+	configPath                *string
+	proxyPort                 *int
+	uiPortFlag                *int
+	user                      *string
+	pass                      *string
+	blockFile                 *string
+	logFilePath               *string
+	logMaxMB                  *int
+	tlsCert                   *string
+	tlsKey                    *string
+	rateLimitRPM              *int
+	ipMode                    *string
+	socks5Port                *int
+	metricsTok                *string
+	cpGRPCAddr                *string
+	cpGRPCCert                *string
+	cpGRPCKey                 *string
+	cpGRPCCA                  *string
+	haJoin                    *string
+	haToken                   *string
+	haAutoFailover            *bool
+	haEtcdEndpoints           *string
+	haEtcdCert                *string
+	haEtcdKey                 *string
+	haEtcdCA                  *string
+	haLeaseTTL                *int
+	dpCPAddr                  *string
+	dpNodeID                  *string
+	dpCert                    *string
+	dpKey                     *string
+	dpCA                      *string
+	policyFile                *string
+	caPath                    *string
+	auditLog                  *string
+	requestLogPath            *string
+	requestLogMaxMB           *int
+	syslogAddr                *string
+	syslogFormat              *string
+	otlpEndpoint              *string
+	uiAllowIP                 *string
+	trustedProxyCIDRs         *string
+	sessionHrs                *int
+	geoIPDB                   *string
+	clamavAddr                *string
+	yaraRulesDir              *string
+	threatFeedDB              *string
+	uiUsersFile               *string
+	fileProfilesFile          *string
+	idpProfilesFile           *string
+	uiNoTLS                   *bool
+	catFeedDB                 *string
+	catFeedURL                *string
+	catSyncIntvl              *string
+	enrollURL                 *string
+	clusterDB                 *string
+	clusterInsecureFlag       *bool
+	revocationsFile           *string
+	scanSvcListen             *string
+	scanSvcURL                *string
+	updaterURLFlag            *string // deprecated: legacy updater removed; parsed-but-ignored
+	updaterURLAllowFlag       *string // deprecated: legacy updater removed; parsed-but-ignored
+	uiSANsFlag                *string
+	trustFwdHeaders           *bool
+	resetPwUser               *string
+	supportBundleOut          *string
+	backupOut                 *string
+	backupEncrypt             *bool
+	restoreIn                 *string
+	historyImportIn           *string
+	historyStoreDir           *string
+	restoreMode               *string
+	restoreConfirm            *confirmFlag
+	recoverRestore            *bool
+	restoreAcceptRootCAChange *bool
+	prepareDowngrade          *bool
+	downgradeTargetSchema     *int
+	restoreAcceptDPReenroll   *bool
+	restoreAllowCounterRB     *bool
+	listLeftovers             *bool
+	cleanupLeftovers          *bool
+	cleanupOlderThan          *string
+	cleanupKeepLast           *int
+	listBackups               *bool
+	listBackupsDir            *string
+	cdrEnabledFlag            *bool
+	cdrEndpointFlag           *string
+	cdrFailModeFlag           *string
+	cdrProfileFlag            *string
+	cdrModeFlag               *string
+	cdrTimeoutFlag            *int
+	cdrMaxSizeFlag            *int
+	cdrFingerprintFlag        *string
+	cdrCertsDirFlag           *string
 
 	// ── Derived locals shared across init functions ──────────────────────
 	fc             *FileConfig
@@ -200,8 +205,21 @@ func main() {
 	// that was killed mid-rename (would otherwise start empty + silently lose
 	// data). Runs AFTER the one-shots so --list/--cleanup-restore-leftovers and
 	// --restore can still operate on the orphaned state.
+	// Hold the data-directory lock for the process lifetime, BEFORE the
+	// interrupted-restore guard: a restore commit or recovery holding it is
+	// mutating /data right now, and a proxy that booted anyway would serve a
+	// half-evacuated directory and write into it (the guard alone cannot see
+	// a commit that has not written its journal yet). A positively HELD lock
+	// is therefore fatal — under `restart: unless-stopped` the proxy simply
+	// comes back once the commit has finished. A lock that cannot be created
+	// (first boot before the dir exists, read-only fs) stays advisory
+	// (adversarial review, PR #1528).
+	if err := holdDataDirLock(dataDir); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	if err := checkInterruptedRestore(dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
 	setInsecureFlag(s)
@@ -344,13 +362,19 @@ func parseFlags(s *startupState) {
 	s.backupOut = flag.String("backup", "", "Pack /data into a tar.gz at the given path and exit (D1.3a)")
 	s.backupEncrypt = flag.Bool("encrypt", false, "Encrypt the --backup tarball with AES-256-GCM (D1.4); requires "+backupPassphraseEnv+" env var. Lose the passphrase, lose the backup.")
 	s.restoreIn = flag.String("restore", "", "Validate a backup tarball and print restore plan (dry-run; D1.3b.1)")
+	// Offline by design, like a restore commit: a running proxy holds the
+	// history store's lock. The export half is the admin API/GUI.
+	s.historyImportIn = flag.String("history-import", "", "Verify a request-history archive (from POST /api/logs/history/export) and, with --confirm, import it into the history store; archive passphrase from CULVERT_HISTORY_PASSPHRASE, store key from CULVERT_LOG_PASSPHRASE (or CULVERT_CA_PASSPHRASE). Stop the proxy first.")
+	s.historyStoreDir = flag.String("history-store", "", "History store directory for --history-import (default <data dir>/logstore)")
 	s.restoreMode = flag.String("mode", "", "Restore mode: full | trust-root-only | state-only (D1.3b.2a; default: full)")
 	s.restoreConfirm = &confirmFlag{}
 	flag.Var(s.restoreConfirm, "confirm", "Commit the restore destructively (D1.3b.2b) or the leftover cleanup; for --prepare-downgrade, --confirm <word> carries the Tier-3 confirmation word printed by the dry-run. Without --confirm every one of these is a dry-run.")
 	s.prepareDowngrade = flag.Bool("prepare-downgrade", false, "Rewrite admin_settings.json for the frozen predecessor binary (unseals parent-proxy credentials into the legacy list, removes upstream_proxies_v2) and exit; dry-run unless --confirm <word> (2F-D)")
 	s.downgradeTargetSchema = flag.Int("target-schema", 0, "Target admin-settings schema for --prepare-downgrade (only the frozen predecessor's schema is supported) (2F-D)")
 	s.restoreAcceptDPReenroll = flag.Bool("accept-dp-reenrollment", false, "Acknowledge that restoring will require enrolled DPs to re-enroll (D1.3b.2a/b)")
+	s.restoreAcceptRootCAChange = flag.Bool("accept-root-ca-change", false, "Acknowledge that restoring replaces or removes the inspection root CA (ca.bundle); clients trusting the current root lose inspected HTTPS")
 	s.restoreAllowCounterRB = flag.Bool("allow-counter-rollback", false, "Acknowledge that restoring will roll back TOTP counters for some users (D1.3b.2a/b)")
+	s.recoverRestore = flag.Bool("recover-restore", false, "Inspect an interrupted restore commit (journal in the data dir) and exit; with --confirm=revert|complete, resolve it in that direction (offline only)")
 	s.listLeftovers = flag.Bool("list-restore-leftovers", false, "List restore leftover .bak/.staging dirs (siblings of dataDir) and exit (D1.3c)")
 	s.cleanupLeftovers = flag.Bool("cleanup-restore-leftovers", false, "Plan/execute cleanup of restore leftover .bak/.staging dirs and exit; dry-run unless --confirm is set (D1.3c)")
 	s.cleanupOlderThan = flag.String("older-than", "", "Cleanup filter: only candidates older than this duration (strict time.ParseDuration syntax, e.g. 168h, 720h) (D1.3c)")
@@ -394,6 +418,19 @@ func handleOneShotCommands(s *startupState) {
 		}
 		os.Exit(0)
 	}
+	// ── One-shot: request-history import — dry-run unless --confirm ──────
+	if *s.historyImportIn != "" {
+		target, err := resolveHistoryImportTarget(dataDir, *s.configPath, *s.historyStoreDir,
+			os.Getenv(logStorePassphraseEnv), os.Getenv(caPassphraseEnv))
+		if err == nil {
+			err = runHistoryImportCommand(*s.historyImportIn, target, dataDir, os.Getenv(historyPassphraseEnv), s.restoreConfirm.Bool(), os.Stdout)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "History import error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	// ── One-shot: prepare-downgrade (2F-D, C10) — dry-run unless --confirm <word> ──
 	if *s.prepareDowngrade {
 		if err := runPrepareDowngradeCommand(s, os.Stdout); err != nil {
@@ -417,6 +454,7 @@ func handleOneShotCommands(s *startupState) {
 			Mode:                 mode,
 			AcceptDPReenrollment: *s.restoreAcceptDPReenroll,
 			AllowCounterRollback: *s.restoreAllowCounterRB,
+			AcceptRootCAChange:   *s.restoreAcceptRootCAChange,
 			BackupPassphrase:     os.Getenv(backupPassphraseEnv),
 		}
 		if s.restoreConfirm.Bool() {
@@ -432,6 +470,22 @@ func handleOneShotCommands(s *startupState) {
 		}
 		os.Exit(0)
 	}
+	// ── One-shot: recover an interrupted in-place restore (restore_inplace.go) ─
+	if *s.recoverRestore {
+		action := restoreRecoverAction("")
+		if s.restoreConfirm.Bool() {
+			action = restoreRecoverAction(strings.ToLower(strings.TrimSpace(s.restoreConfirm.String())))
+			if action == "true" || action == "" {
+				_, _ = fmt.Fprintln(os.Stderr, "Recover-restore error: --confirm needs a direction, written with an equals sign: --confirm=revert or --confirm=complete")
+				os.Exit(1)
+			}
+		}
+		if err := runRecoverRestoreCommand(dataDir, action); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "Recover-restore error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	// ── One-shot: list restore leftovers (D1.3c) ───────────────────────────
 	if *s.listLeftovers {
 		if err := runListLeftovers(dataDir); err != nil {
@@ -442,7 +496,7 @@ func handleOneShotCommands(s *startupState) {
 	}
 	// ── One-shot: list backup archives (D1.6b) ─────────────────────────────
 	if *s.listBackups {
-		if err := runListBackups(*s.listBackupsDir, os.Stdout); err != nil {
+		if err := runListBackupsTimed(*s.listBackupsDir, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintf(os.Stderr, "List backups error: %v\n", err)
 			os.Exit(1)
 		}
@@ -562,6 +616,50 @@ func runBackupCommand(s *startupState) error {
 	fmt.Printf("Backup written to %s\n", *s.backupOut)
 	return nil
 }
+
+// runRecoverRestoreCommand drives --recover-restore. Like the commit it
+// resolves, it is offline-only: a held data-dir lock (a running proxy) is a
+// refusal, because moving entries under a live process is exactly the race
+// the lock exists to prevent.
+func runRecoverRestoreCommand(dataDir string, action restoreRecoverAction) error {
+	if action != "" {
+		release, err := acquireOfflineDataDirLock(dataDir)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+	return runRecoverRestore(dataDir, action, os.Stdout)
+}
+
+// holdDataDirLock takes the proxy's lifetime lock on dataDir. It returns an
+// error ONLY when the lock is positively held by another process (a restore
+// commit or recovery in progress — the proxy must not serve over it). A lock
+// that cannot be created at all (missing dir on first boot, read-only fs) is
+// logged and tolerated: the lock is a safety net, never a reason to refuse to
+// serve when nobody else is mutating the directory.
+func holdDataDirLock(dataDir string) error {
+	release, err := acquireDataDirLock(dataDir)
+	if err != nil {
+		if errors.Is(err, errDataDirLocked) {
+			return fmt.Errorf("%w — refusing to start the proxy over a data directory another Culvert process (a restore commit or --recover-restore) is mutating: %s; retry once it has finished", err, filepath.Join(dataDir, dataDirLockName))
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "WARN: data-dir lock unavailable (%v); continuing without the quiescing guard\n", err)
+		return nil
+	}
+	// The lock is held for the process lifetime and released implicitly at
+	// exit; nothing in the proxy ever unlocks it deliberately. The release
+	// closure is PINNED in a package global on purpose: it is the only
+	// reference to the lock's *os.File, and an unreachable file is closed by
+	// the runtime finalizer, which releases the flock — a commit against a
+	// running stack was measured to succeed exactly that way.
+	dataDirLockHold = release
+	return nil
+}
+
+// dataDirLockHold keeps the proxy's data-dir lock reachable (see
+// holdDataDirLock).
+var dataDirLockHold func()
 
 func runCleanupCommand(s *startupState) error {
 	var older time.Duration
@@ -718,6 +816,9 @@ func initAuth(s *startupState) {
 		s.authP,
 		*s.uiUsersFile,
 	))
+	// Per-instance first-admin setup token (setup_token.go): env read ONCE
+	// here, in the shim, like every other startup-scoped env value.
+	loadSetupToken(os.Getenv("CULVERT_SETUP_TOKEN"))
 }
 
 // initSession is the PR3 expansion shim: resolve the session slice
@@ -931,7 +1032,10 @@ func initSSLBypassAndDPI(s *startupState) {
 // the current policy-rule count so the loader can derive the zero-
 // trust-vs-passthrough default when fc.DefaultAction is unset.
 func initRewriteAndDefaultAction(s *startupState) {
-	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
+	// Env read in the shim (resolvers stay pure): CULVERT_DEFAULT_ACTION is the
+	// appliance's boot-time posture when YAML sets none (see
+	// rewrite_default_action_startup.go).
+	cfg := resolveRewriteDefaultActionStartupConfig(s.fc, os.Getenv(defaultActionEnv))
 	loadRewriteAndDefaultAction(cfg, len(policyStore.List()))
 }
 
@@ -947,6 +1051,9 @@ func initScanning(s *startupState) {
 			ThreatFeedDB:  *s.threatFeedDB,
 			ScanSvcURL:    *s.scanSvcURL,
 			ScanSvcListen: *s.scanSvcListen,
+			// Env read in the shim (resolvers stay pure): the appliance's
+			// av_unavailable boot posture (av_unavailable_posture.go).
+			AVUnavailableEnv: os.Getenv(avUnavailableEnv),
 		}, dataDir),
 		appLifecycleCtx,
 	)
@@ -1586,5 +1693,14 @@ func applyHotReload(fc *FileConfig) {
 		}
 		applyUpstreamProxy()
 		logger.Printf("Reload: upstream %s", formatUpstreamSummary(ucfg.Proxies))
+	}
+}
+
+// releaseDataDirHoldForTest drops the proxy's lifetime hold so a test can
+// take the lock again in the same process.
+func releaseDataDirHoldForTest() {
+	if dataDirLockHold != nil {
+		dataDirLockHold()
+		dataDirLockHold = nil
 	}
 }

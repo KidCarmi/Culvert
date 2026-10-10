@@ -157,7 +157,7 @@ jobs:
               *) code=true ;;
             esac
             case "$f" in
-              cmd/culvert-maint/*) agent=true ;;
+              cmd/culvert-maint/*|pkg/releaseproof/*) agent=true ;;
             esac
             # MCP design surface. Its OWN `case` on purpose: the docs/code
             # classifier above is first-match-wins, so folding these patterns
@@ -283,9 +283,13 @@ jobs:
         # (reviewdog filter_mode: diff_context in code-review.yml) only
         # fails on issues in the PR's changed lines. --new-from-rev is the
         # native equivalent: fail only on issues introduced vs the merge base.
-        # --timeout=10m is the analysis budget, not a lint rule: the same
-        # analysis took 4m26s on a warm run and exceeded 5m with 0 issues on
-        # a cold-cache runner (run 38039945922), so 5m measured runner speed.
+        # --timeout=10m is the analysis budget, not a lint rule: --new-from-rev
+        # filters issues but still type-checks and analyses the whole module, so
+        # the cost tracks the root package, not the diff. Measured: 265 s then
+        # 312 s on consecutive runs of the same tree (PR #1528), and 4m26s warm
+        # vs over 5m cold with 0 issues (run 38039945922) — 5m measured runner
+        # speed. 10m stays inside the job's limit and changes no linter, scope
+        # or finding.
         run: |
           BASE_REF="${GITHUB_BASE_REF:-main}"
           git fetch --no-tags origin "$BASE_REF"
@@ -321,7 +325,7 @@ jobs:
       # mounted at /data). The unprivileged shards only ever reach its t.Skip,
       # so the engine re-runs it as root against the same binary and requires
       # PASS — the pre-5C "Mount-point regression (privileged)" step.
-      privileged-test: TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting
+      privileged-test: TestRestoreCommit_DataDirIsMountPoint_Commits
       fault: ${{ inputs.fault || 'none' }}
 
   # ─── 3b. Coverage floors (global + per-file) on the merged profile ─────────
@@ -407,6 +411,10 @@ jobs:
         working-directory: cmd/culvert-maint
         run: govulncheck ./...
 
+      - name: govulncheck (shared release verifier)
+        working-directory: pkg/releaseproof
+        run: govulncheck ./...
+
       - name: gosec (root module)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
@@ -414,6 +422,10 @@ jobs:
 
       - name: gosec (cmd/culvert-maint)
         working-directory: cmd/culvert-maint
+        run: gosec -exclude=G104,G302,G304,G703,G704 ./...
+
+      - name: gosec (shared release verifier)
+        working-directory: pkg/releaseproof
         run: gosec -exclude=G104,G302,G304,G703,G704 ./...
 
   # ─── 6. Secrets: gitleaks (runs on EVERY PR, docs included) ────────────────
@@ -428,9 +440,24 @@ jobs:
         with:
           fetch-depth: 0    # full history so gitleaks can scan all commits
       - name: Run gitleaks
+        # The canary checks below use this same scanner version.
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.0"
+
+      - uses: ./.github/actions/setup-go-cache
+        if: always()
+      - name: Secret scanner policy and upstream fixture integrity
+        if: always()
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.0
+          python3 appliance/artifact-audit/check_gitleaks_policy.py --gitleaks "$(go env GOPATH)/bin/gitleaks"
+          python3 -m venv /tmp/culvert-secret-policy-env
+          /tmp/culvert-secret-policy-env/bin/pip install cryptography==50.0.2
+          /tmp/culvert-secret-policy-env/bin/python appliance/artifact-audit/verify_saml_patch.py
+          # Every third_party fork (ristretto + badger: F-DISK-1; rekor-tiles: CVE-2026-37236) is its pinned upstream plus exactly the recorded patch.
+          python3 appliance/artifact-audit/verify_dependency_forks.py
 
   # ─── 7. Maintenance agent (nested module) — gated on agent paths ──────────
   agent:
@@ -467,6 +494,13 @@ jobs:
           TEST_SEED: "20260421"
         run: go test -race -count=1 -timeout=10m -v ./...
 
+      - name: Shared release proof verifier
+        working-directory: pkg/releaseproof
+        run: |
+          go mod tidy -diff
+          go vet ./...
+          go test -race -shuffle=on -count=2 ./...
+
       - name: golangci-lint
         # Checksum-verified install (sum.golang.org), not curl|sh off a tag ref.
         run: |
@@ -476,6 +510,12 @@ jobs:
       - name: staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2025.1
+          staticcheck ./...
+
+      - name: Shared verifier lint
+        working-directory: pkg/releaseproof
+        run: |
+          golangci-lint run --timeout=5m
           staticcheck ./...
 
   # ─── 8. MCP design-document predicates — gated on the MCP doc surface ─────

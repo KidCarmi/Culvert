@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -72,7 +73,7 @@ func newSimpleSAMLphpInteropProvider(t *testing.T, metadataURL string) *SAMLProv
 
 func simpleSAMLphpLoginURL(t *testing.T, prov *SAMLProvider) string {
 	t.Helper()
-	loginURL := prov.CaptiveLoginURL("https://app.example.test/", nil)
+	loginURL := prov.CaptiveLoginURL("https://app.example.test/", boundLogin(t, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)))
 	if loginURL == "" {
 		t.Fatal("CaptiveLoginURL returned empty URL")
 	}
@@ -187,7 +188,8 @@ func assertSimpleSAMLphpAssertionExchange(t *testing.T, prov *SAMLProvider, post
 		t.Fatalf("find SimpleSAMLphp SAMLResponse form: %v", err)
 	}
 	callbackReq := httptestSAMLCallbackRequest(t, acsForm.values)
-	id, relayURL, err := prov.ExchangeAssertion(callbackReq)
+	ex, err := prov.ExchangeAssertion(callbackReq)
+	id, relayURL := ex.id, ex.relayURL
 	if err != nil {
 		t.Fatalf("ExchangeAssertion from SimpleSAMLphp response: %v", err)
 	}

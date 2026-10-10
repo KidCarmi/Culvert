@@ -12,13 +12,26 @@ type rewriteDefaultActionStartupConfig struct {
 	// empty, the loader derives a safe default from the policy-rule
 	// count (see loadRewriteAndDefaultAction).
 	DefaultAction string
+	// EnvDefaultAction is CULVERT_DEFAULT_ACTION as read by the shim ("allow",
+	// "deny", or ""). It applies ONLY when DefaultAction (YAML) is empty and
+	// replaces the rule-count auto-detect with an explicit boot posture — the
+	// appliance's first-boot provisioning sets it to "deny" so a freshly
+	// installed gateway does not pass traffic until a rule allows it. A
+	// persisted admin choice (admin_settings.json) still wins at load time,
+	// exactly as it does over the auto-detect. Anything else is ignored with
+	// a warning (fail-safe: a typo must not flip a posture silently).
+	EnvDefaultAction string
 }
 
 // resolveRewriteDefaultActionStartupConfig is the single startup-time
 // reader of fc.Rewrite and fc.DefaultAction.
-func resolveRewriteDefaultActionStartupConfig(fc *FileConfig) rewriteDefaultActionStartupConfig {
+func resolveRewriteDefaultActionStartupConfig(fc *FileConfig, envDefaultAction string) rewriteDefaultActionStartupConfig {
 	return rewriteDefaultActionStartupConfig{
-		Rules:         fc.Rewrite,
-		DefaultAction: fc.DefaultAction,
+		Rules:            fc.Rewrite,
+		DefaultAction:    fc.DefaultAction,
+		EnvDefaultAction: envDefaultAction,
 	}
 }
+
+// defaultActionEnv is the boot-time posture override consumed by the shim.
+const defaultActionEnv = "CULVERT_DEFAULT_ACTION"

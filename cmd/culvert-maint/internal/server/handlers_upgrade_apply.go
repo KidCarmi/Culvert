@@ -2,11 +2,16 @@
 //
 // Flow (with inline auto-rollback, #375):
 //
-//	capture_before → CaptureRunningProxyImage (#357); best-effort — a
-//	                 stack that is down is a valid state, not a failure.
-//	                 Also derives the inline-rollback target (priorRef).
+//	capture_before: capture the actual running digest and baseline.
 //	resolve_target → docker manifest inspect <image_ref> → target digest
 //	                 set; compute already_current (running ∩ target).
+//	preflight_dependencies → refuse (nothing changed) while a service the
+//	                 proxy depends on is unhealthy: `compose up` would
+//	                 remove the proxy and leave the new one stopped.
+//	preflight_space → refuse (nothing pulled) when the Docker data root
+//	                 has less free space than ~3x the target's compressed
+//	                 size + headroom. Then require signed target/baseline
+//	                 authorization and durably persist recovery evidence.
 //	pre_backup     → if requested AND not already_current: encrypted
 //	                 backup; a failure ABORTS before any pull/restart.
 //	pull           → docker pull <pinned repo@sha256> (P1.4; sudo-boundary
@@ -46,7 +51,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KidCarmi/Culvert/releaseproof"
+
 	"culvert-maint/internal/auth"
+	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
@@ -54,9 +62,11 @@ import (
 
 // upgradeApplyRequest is the POST /v1/upgrades/apply body.
 type upgradeApplyRequest struct {
-	ImageRef      string `json:"image_ref"`
-	PreBackup     bool   `json:"pre_backup"`
-	PassphraseRef string `json:"passphrase_ref,omitempty"`
+	ReleaseProof      *releaseproof.Evidence `json:"release_proof,omitempty"`
+	PriorReleaseProof *releaseproof.Evidence `json:"prior_release_proof,omitempty"`
+	ImageRef          string                 `json:"image_ref"`
+	PreBackup         bool                   `json:"pre_backup"`
+	PassphraseRef     string                 `json:"passphrase_ref,omitempty"`
 	// RollbackOnFailure enables inline auto-rollback when the upgrade
 	// fails its post-restart health/verify gate. A pointer so omitted
 	// (nil) DEFAULTS TO TRUE (opt-out); pass false to disable (#375 §1).
@@ -64,6 +74,7 @@ type upgradeApplyRequest struct {
 	IdempotencyKey    string `json:"idempotency_key,omitempty"`
 }
 
+//nolint:cyclop // ordered refusal ladder includes the independent release trust gate
 func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo) {
 	if s.opts.Runner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runner_not_wired"})
@@ -74,7 +85,7 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		return
 	}
 	var req upgradeApplyRequest
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := decodeJSONBodyLimit(r, &req, maxProofBodyBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decode: " + err.Error()})
 		return
 	}
@@ -88,6 +99,10 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("image_ref %q is not permitted by image_allowlist", req.ImageRef),
 		})
+		return
+	}
+	if err := s.checkRelease(req.ImageRef, req.ReleaseProof); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
 	// pre_backup uses the encrypted backup path, so it requires a
@@ -128,26 +143,22 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		"compose_override_configured": composeOverrideConfigured,
 	}
 
-	imageRef := req.ImageRef
-	preBackup := req.PreBackup
-	passRef := req.PassphraseRef
-
 	// acc/racc are shared between the stage closures and the result
 	// computer; acc.actor/opID feed the upgrades.apply:rollback audit.
-	acc := &upgradeApplyAccumulator{actor: peer.String()}
+	acc := &upgradeApplyAccumulator{actor: peer.String(), releaseProof: req.ReleaseProof, priorReleaseProof: req.PriorReleaseProof}
 	racc := &rollbackAccumulator{}
 
 	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindUpgradeApply, req.IdempotencyKey, params,
 		func() ([]ops.FlowStage, *opError) {
 			var resolved string
-			if preBackup {
-				rp, rerr := readPassphraseFromEnv(passRef)
+			if req.PreBackup {
+				rp, rerr := readPassphraseFromEnv(req.PassphraseRef)
 				if rerr != nil {
 					return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
 				}
 				resolved = rp
 			}
-			return s.buildUpgradeApplyStages(acc, racc, imageRef, preBackup, resolved, rollbackOnFailure), nil
+			return s.buildUpgradeApplyStages(acc, racc, req.ImageRef, req.PreBackup, resolved, rollbackOnFailure), nil
 		},
 		withOpIDHook(func(id string) { acc.opID = id }),
 		withResultFn(func(state ops.State, _ ops.FailureReason) map[string]interface{} {
@@ -167,6 +178,8 @@ type stageRun = func(context.Context) ([]byte, []byte, error)
 // upgradeApplyAccumulator carries parsed digests + decisions across the
 // apply stages. It holds ONLY parsed identifiers — never raw inspect JSON.
 type upgradeApplyAccumulator struct {
+	releaseProof        *releaseproof.Evidence
+	priorReleaseProof   *releaseproof.Evidence
 	targetDigests       []string // bare sha256, from manifest inspect
 	pinnedRef           string   // repo@sha256:<digest> actually pulled/restarted
 	pinnedDigest        string   // bare sha256 of pinnedRef
@@ -176,6 +189,13 @@ type upgradeApplyAccumulator struct {
 	runningAfterID      string
 	runningAfterDigests []string
 	healthSummary       string
+	// preserved is the health.Baseline taken before the restart: the
+	// /ready rows that were "ok" and must be "ok" again for health_gate
+	// to pass (owner review, PR #1528). Empty ⇒ 2xx alone gates.
+	targetCompressed int64 // registry size of the pinned target (0 = unknown)
+	preserved        []string
+	before           *health.Snapshot // the full pre-restart /ready answer (nil: stack did not answer)
+	baselineDetail   string
 
 	// Inline auto-rollback state (#375). Set/read across stages + the
 	// result computer; acc.opID/actor feed the rollback audit sub-action.
@@ -192,9 +212,9 @@ type upgradeApplyAccumulator struct {
 }
 
 // buildUpgradeApplyStages constructs the destructive apply flow.
-// requestedRef is the operator's original image_ref (tag or digest); the
-// flow resolves it to a concrete repo@sha256:<digest> pin (acc.pinnedRef)
-// and pulls/restarts/verifies against THAT, never the raw tag.
+// Production authorization requires requestedRef to be a signed pinned digest.
+// Tag resolution remains for isolated orchestration tests only; production
+// signature policy never authorizes a mutable tag.
 //
 //nolint:funlen // single-pass orchestration; splitting hides the capture→resolve→backup→pull→restart→health→verify ordering
 func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rollbackAccumulator, requestedRef string, preBackup bool, resolvedPassphrase string, rollbackOnFailure bool) []ops.FlowStage {
@@ -203,27 +223,11 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 	stages := []ops.FlowStage{
 		{
 			// Capture what is ACTUALLY running before we touch anything.
-			// A capture failure (stack down / fresh deploy) is a valid
-			// state, not an op failure — we proceed without a prior. Also
-			// derive the inline-rollback target (priorRef) here.
+			// Missing or ambiguous baseline fails signed authorization.
+			// Recovery evidence is persisted before the first side effect.
 			Name:          "capture_before",
 			FailureReason: ops.ReasonCommandError,
-			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
-				if err != nil {
-					acc.priorCaptureReason = "no_prior_digest"
-					// Capture step done (no prior to record); advance the journal.
-					s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
-					return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
-				}
-				acc.priorImageID = ri.RunningImageID
-				acc.priorDigests = bareDigests(ri.RepoDigests)
-				s.deriveRollbackTarget(acc, ri.PriorRef())
-				// Prior (rollback target) now known — fold it into the journal record.
-				s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
-				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s",
-					ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc))), nil, nil
-			},
+			Run:           s.captureBefore(acc),
 		},
 		{
 			// Remote registry lookup → target digest set, then PIN a
@@ -263,7 +267,8 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 					acc.pinnedDigest = pd
 					acc.pinnedRef = imageRepo(requestedRef) + "@" + acc.pinnedDigest
 				}
-				if digestSetsIntersect(acc.priorDigests, acc.targetDigests) {
+				acc.targetCompressed = targetCompressedBytes(res.Stdout, acc.pinnedDigest)
+				if containsString(acc.priorDigests, acc.pinnedDigest) {
 					acc.alreadyCurrent = true
 				}
 				// Target pinned — fold TargetRef/TargetDigest into the journal record.
@@ -271,6 +276,23 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				return []byte(fmt.Sprintf("resolve_target: requested_ref=%q pinned_ref=%q target_digests=%s already_current=%v",
 					requestedRef, acc.pinnedRef, joinDigests(acc.targetDigests), acc.alreadyCurrent)), res.Stderr, nil
 			},
+		},
+		{
+			// Refuse before anything is touched when a dependency of the
+			// proxy is unhealthy: `compose up` would leave the proxy
+			// stopped (see preflightDependencies). Not post-restart, so no
+			// rollback fires.
+			Name:          "preflight_dependencies",
+			FailureReason: ops.ReasonValidation,
+			Run:           skipIfCurrent(acc, "preflight_dependencies", s.preflightDependencies()),
+		},
+		{
+			// Refuse before the pull when the Docker data root cannot hold
+			// the target: a full root disk crashed the running proxy and
+			// left Docker unable to restart it (see preflight_space.go).
+			Name:          "preflight_space",
+			FailureReason: ops.ReasonValidation,
+			Run:           s.preflightAuthorizedSpace(acc, requestedRef),
 		},
 		{
 			// Encrypted pre-upgrade backup. Skipped when already current
@@ -299,6 +321,17 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "pull",
 			FailureReason: ops.ReasonCommandError,
 			Run: skipIfCurrent(acc, "pull", func(ctx context.Context) ([]byte, []byte, error) {
+				// Local-first: a pinned digest is content-addressed, so a digest
+				// already in the local store needs no registry round trip (the
+				// same no-offline floor the rollback core applies). Absent ⇒ pull,
+				// byte-identical to the pre-change behaviour.
+				if s.imagePresentLocally(ctx, acc.pinnedRef) {
+					s.advanceJournalPhaseBestEffort(acc, journal.PhasePulled)
+					return []byte("pull: skipped (image present locally)"), nil, nil
+				}
+				if err := s.knownRelease(acc.pinnedRef); err != nil {
+					return nil, nil, err
+				}
 				res, rerr := s.opts.Runner.ComposePullDigest(ctx, acc.pinnedRef)
 				if res == nil {
 					return nil, nil, rerr
@@ -330,13 +363,15 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "health_gate",
 			FailureReason: ops.ReasonHealthFailed,
 			Run: skipIfCurrent(acc, "health_gate", func(ctx context.Context) ([]byte, []byte, error) {
-				hr, herr := s.opts.HealthProbeFactory().Run(ctx)
+				probe := s.opts.HealthProbeFactory()
+				probe.Preserve, probe.Before = acc.preserved, acc.before
+				hr, herr := probe.Run(ctx)
 				if herr != nil {
 					acc.upgradeFailedPostRestart = true
 					return nil, nil, herr
 				}
-				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
-					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
+				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q preserved=[%s] duration=%s",
+					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, strings.Join(acc.preserved, ","), hr.TotalDuration)
 				if hr.Failed() {
 					// Post-restart failure: the new image is running but
 					// unhealthy → this is what triggers inline rollback.
@@ -380,6 +415,35 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 		},
 	})
 	return stages
+}
+
+// captureBefore records what is ACTUALLY running before anything is
+// touched, the inline-rollback target, and the /ready baseline the
+// health gate must preserve. Capture records missing state; the caller then
+// refuses apply when a signed observed baseline cannot be established.
+func (s *Server) captureBefore(acc *upgradeApplyAccumulator) stageRun {
+	return func(ctx context.Context) ([]byte, []byte, error) {
+		ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
+		if err != nil {
+			acc.priorCaptureReason = "no_prior_digest"
+			// Capture step done (no prior to record); advance the journal.
+			s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
+			return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
+		}
+		acc.priorImageID = ri.RunningImageID
+		acc.priorDigests = bareDigests(ri.RepoDigests)
+		s.deriveRollbackTarget(acc, ri)
+		// What the running stack reports as healthy now is what the
+		// upgrade must preserve. Best-effort: no answer ⇒ nothing to keep.
+		acc.before, acc.baselineDetail = s.opts.HealthProbeFactory().Baseline(ctx)
+		if acc.before != nil {
+			acc.preserved = acc.before.Preserved
+		}
+		// Prior (rollback target) now known — fold it into the journal record.
+		s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
+		return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s %s",
+			ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc), acc.baselineDetail)), nil, nil
+	}
 }
 
 // skipIfCurrent wraps a stage Run so it no-ops (success) when the running
@@ -474,4 +538,17 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// preflightAuthorizedSpace persists trust only after the read-only space gate.
+// A normal ENOSPC preflight refusal therefore needs no agent restart to retry.
+// Authorization remains mandatory before backup, pull, retag, or success.
+func (s *Server) preflightAuthorizedSpace(acc *upgradeApplyAccumulator, requestedRef string) stageRun {
+	return func(ctx context.Context) ([]byte, []byte, error) {
+		out, stderr, err := skipIfCurrent(acc, "preflight_space", s.preflightSpace(acc))(ctx)
+		if err != nil {
+			return out, stderr, err
+		}
+		return out, stderr, s.prepareRelease(requestedRef, acc.releaseProof, acc.priorRef, acc.priorReleaseProof)
+	}
 }

@@ -19,6 +19,10 @@ type scanningCLIFlags struct {
 	ThreatFeedDB  string
 	ScanSvcURL    string
 	ScanSvcListen string
+
+	// AVUnavailableEnv is CULVERT_AV_UNAVAILABLE as read by the shim (env,
+	// not a flag, but read in the same place so the resolver stays pure).
+	AVUnavailableEnv string
 }
 
 // scanningStartupConfig carries the resolved scanning inputs. The loader
@@ -59,6 +63,11 @@ type scanningStartupConfig struct {
 
 	// SvcListenAddr != "" runs the scan microservice sidecar.
 	SvcListenAddr string
+
+	// AVUnavailableEnv is the raw CULVERT_AV_UNAVAILABLE boot posture
+	// ("open", "closed", or ""). Validated and applied by the loader in BOTH
+	// scanning modes; a saved admin setting, applied later, still wins.
+	AVUnavailableEnv string
 }
 
 // resolveScanningStartupConfig is the single startup-time reader of
@@ -108,5 +117,6 @@ func resolveScanningStartupConfig(fc *FileConfig, flags scanningCLIFlags, dataDi
 		MaxScanBytes:       maxScanBytes,
 		ScanExclusionsPath: exclusionsPath,
 		SvcListenAddr:      firstStr(flags.ScanSvcListen, secCfg.ScanSvcListen),
+		AVUnavailableEnv:   flags.AVUnavailableEnv,
 	}
 }

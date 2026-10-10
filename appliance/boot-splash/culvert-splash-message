@@ -1,0 +1,34 @@
+#!/bin/sh
+# initramfs init-premount: the line under the Culvert splash, or no splash at
+# all on a machine with no display.
+#
+# With a display: the line is truthful for the whole time the splash is shown
+# (it ends when the console menu starts) and names the key that shows the boot
+# messages, under the title in the theme's blue. Not a "keys:" message:
+# ubuntu-text puts those four rows from the bottom.
+#
+# With no display controller (a serial-only VM): nobody can see the splash, but
+# while Plymouth runs it holds back kernel messages from every console (serial
+# included) once the splash is shown, and it captures /dev/console (systemd's
+# status lines) from the moment it starts. So end Plymouth here and the serial
+# console carries the whole boot. "Display" is the test in culvert-has-display
+# (PCI class 0x0300xx or 0x0380xx); keep the two identical.
+#
+# Best-effort: every failure is ignored. Like Ubuntu's own plymouth calls in the
+# initramfs, a wedged plymouthd could still stall the client.
+PREREQ="plymouth"
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+command -v plymouth >/dev/null 2>&1 || exit 0
+plymouth --ping 2>/dev/null || exit 0
+display=0
+for class in /sys/bus/pci/devices/*/class; do
+    [ -r "$class" ] || continue
+    case "$(cat "$class" 2>/dev/null)" in 0x0300*|0x0380*) display=1; break ;; esac
+done
+if [ "$display" = 0 ]; then
+    plymouth quit 2>/dev/null || true
+    exit 0
+fi
+plymouth display-message --text="Starting system services  -  Esc: boot messages" 2>/dev/null || true
+exit 0

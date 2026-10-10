@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# culvert-sudo-policy — show or change how the 'culvert' console user gets root.
+#
+#   culvert-sudo-policy status            which policy is in force and why
+#   culvert-sudo-policy require-password  password-gated sudo (removes the
+#                                         key-only drop-in; REFUSES while the
+#                                         account has no usable password, so
+#                                         it can never lock the operator out)
+#   culvert-sudo-policy passwordless      retired; fails without changing policy
+#
+# Legacy drop-ins can still be removed safely. New appliances always provision
+# a local console password; SSH keys belong to the separate read-only operator.
+set -euo pipefail
+USER_NAME="${CULVERT_FB_CONSOLE_USER:-culvert}"
+HOME_DIR="${CULVERT_FB_CONSOLE_HOME:-/home/culvert}"
+SUDOERS_DIR="${CULVERT_FB_SUDOERS_DIR:-/etc/sudoers.d}"
+DROPIN="$SUDOERS_DIR/95-culvert-keyonly"
+
+has_password() {
+  local f
+  f="$(getent shadow "$USER_NAME" | cut -d: -f2 || true)"
+  [[ -n "$f" && "$f" != '!'* && "$f" != '*'* ]]
+}
+has_key() { [[ -s "$HOME_DIR/.ssh/authorized_keys" ]]; }
+
+case "${1:-status}" in
+  status)
+    if [[ -f "$DROPIN" ]]; then echo "sudo policy: passwordless (key-only provisioning; $DROPIN)"; else echo "sudo policy: password required"; fi
+    if has_password; then echo "console password: set"; else echo "console password: locked/none"; fi
+    if has_key; then echo "ssh authorized key: present"; else echo "ssh authorized key: none"; fi
+    ;;
+  require-password)
+    if ! has_password; then
+      echo "refusing: '$USER_NAME' has no usable password — run 'sudo passwd $USER_NAME' first, then re-run this (otherwise sudo would become unusable)" >&2
+      exit 1
+    fi
+    rm -f "$DROPIN"
+    echo "sudo policy: password required (removed $DROPIN)"
+    ;;
+  passwordless)
+    echo "refusing: passwordless sudo is retired; use the local VM console with its password" >&2
+    exit 1
+    ;;
+  *) echo "usage: culvert-sudo-policy {status|require-password|passwordless}" >&2; exit 2 ;;
+esac
