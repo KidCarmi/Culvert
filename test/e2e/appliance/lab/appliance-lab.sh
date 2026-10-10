@@ -1634,6 +1634,22 @@ p_clean_url() { local n; n="$(python3 -c 'import time; print(time.time_ns())')"
   printf 'culvert pressure clean body %s\n' "$n" > "$WORK/eicar-origin/c$n.txt"; echo "http://10.0.2.2:$LAB_EICAR_PORT/c$n.txt"; }
 p_proxy_identity() { groot 'docker inspect -f "{{.RestartCount}} {{.State.StartedAt}} {{.State.Status}}" culvert; docker inspect -f "{{.State.Status}} {{.State.Health.Status}}" culvert-clamav' 60 2>/dev/null | tr '\r' ' ' | grep -E '^[0-9]+ |^(running|exited|restarting)' | tr '\n' ' '; }
 # p_sample PHASE TAG — one observation: traffic, AV verdicts, readiness, health.
+# p_enforced ALLOWED BLOCKED — "yes" when enforcement is intact: the blocked
+# destination is 403, and the allowed one is either delivered (200) or refused
+# BECAUSE the AV engine cannot scan it (av_unavailable=closed). The second
+# case is what a ClamAV outage must look like since bad788e5 (owner review
+# 5478346473): a clean verdict cached before the fault is no longer trusted,
+# so the allowed page is re-scanned and refused like any other body. On
+# 72c827b7 the same probe answered 200 from that pre-fault cache — the bypass
+# the review removed — and this check had encoded it as "unchanged". A 403 on
+# the allowed destination for any OTHER reason (a policy block) still fails.
+p_enforced() {
+  [[ "$2" == 403 ]] || { echo no; return; }
+  [[ "$1" == 200 ]] && { echo yes; return; }
+  if [[ "$1" == 403 ]] && curl -sS -m 20 -x "$P" http://example.com/ 2>/dev/null | grep -q 'antivirus scanning is currently unavailable'; then
+    echo yes; return
+  fi
+  echo no; }
 p_sample() { local ph="$1" tag="$2" a b e c rc hc row
   a="$(through_proxy http://example.com/)"; b="$(through_proxy http://example.org/)"
   e="$(eicar_verdict)"
@@ -1806,11 +1822,11 @@ PY2
     img_b="$(grep -m1 '^running-image=' <<<"$up")"; img_a="$(grep '^running-image=' <<<"$up" | tail -1)"
     s="$(p_sample "$name" after-app-update)"; set -- $s
     local why; why="$(grep -oE 'preflight_space[^"]{0,120}|no space left[^"]{0,80}|"error":"[^"]{0,120}' <<<"$up" | head -1)"
-    if [[ "$st0" == op-state=failed && "$img_b" == "$img_a" && "$1 $2" == "200 403" ]]; then
+    if [[ "$st0" == op-state=failed && "$img_b" == "$img_a" && "$(p_enforced "$1" "$2")" == yes ]]; then
       check P "$name-app-update" pass "failed with nothing changed: $st0 ($why); $img_a; traffic $1/$2"
-    elif [[ "$st0" == op-state=none ]] && grep -qE '^HTTP [45][0-9][0-9]$' <<<"$up" && [[ "$img_b" == "$img_a" && "$1 $2" == "200 403" ]]; then
+    elif [[ "$st0" == op-state=none ]] && grep -qE '^HTTP [45][0-9][0-9]$' <<<"$up" && [[ "$img_b" == "$img_a" && "$(p_enforced "$1" "$2")" == yes ]]; then
       check P "$name-app-update" pass "refused before any change: $(grep -m1 -E '^HTTP ' <<<"$up") ($why); $img_a; traffic $1/$2"
-    elif [[ "$st0" == op-state=succeeded && "$1 $2" == "200 403" ]]; then
+    elif [[ "$st0" == op-state=succeeded && "$(p_enforced "$1" "$2")" == yes ]]; then
       P_APP_APPLIED=1; check P "$name-app-update" info "the update SUCCEEDED under pressure ($img_b -> $img_a); traffic $1/$2; rolled back after recovery"
     else check P "$name-app-update" fail "$st0 $img_b -> $img_a traffic $1/$2 (a failed update must leave the running image and enforcement unchanged)"; fi
   else check P "$name-app-update" blocked "no per-phase signed-update fixture in this leg (built only with the OVA build)"; fi
@@ -1825,9 +1841,9 @@ PY2
   # /var/lib/dpkg/updates), after which apt refuses everything: run
   # 38016152802. That state is recorded here and its repair judged by
   # pkg-recovered; it is never a clean failure.
-  if grep -q '^dpkg-journal=[1-9]' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
+  if grep -q '^dpkg-journal=[1-9]' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$(p_enforced "$1" "$2")" == yes ]]; then
     check P "$name-os-update" info "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg left INTERRUPTED ($(grep -m1 '^dpkg-journal=' <<<"$osu") journal entries; apt refuses until dpkg --configure -a) — the repair is judged by $name-pkg-recovered; Docker still held, traffic $1/$2"
-  elif grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q '^dpkg-journal=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
+  elif grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q '^dpkg-journal=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$(p_enforced "$1" "$2")" == yes ]]; then
     check P "$name-os-update" pass "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg consistent (audit empty, journal empty, no half-installed package), Docker still held, traffic $1/$2"
   else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|dpkg-journal|not-installed-ok|holds|fixture)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
   [[ -n "${P_PKG:-}" ]] && p_pkg_judge "$name" "$osu" pressure
