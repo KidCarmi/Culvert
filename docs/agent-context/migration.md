@@ -75,9 +75,11 @@ not an agent's actual decision or implicit skill selection.
 
 `--diff-base <commit>` is the per-PR scope rule the CI job applies: every
 changed guidance-SHAPED path (an `AGENTS.md`/`CLAUDE.md`/`AGENTS.override.md`
-anywhere, anything under `docs/agent-context/`, a native `SKILL.md`, a
-`.claude/rules/` file) must be one the checker registers, so a new nested guide
-or skill is refused until `check.py` lists it. A PR that also changes code
+anywhere, anything under `docs/agent-context/`, ANY file under `.agents/skills/`
+or `.claude/skills/` — a client may load a skill's ancillary files once the skill
+is selected, so a `reference.md` beside a registered `SKILL.md` is guidance too —
+and a `.claude/rules/` file) must be one the checker registers, so a new nested
+guide, skill or ancillary skill file is refused until `check.py` lists it. A PR that also changes code
 passes this rule; `--instruction-only` additionally refuses any non-guidance
 path and is the posture the ORIGINAL migration commits were validated under.
 An unresolvable base is an explicit failure, never an empty diff. The default
@@ -157,9 +159,11 @@ scripts (replayed with the shipped `run` blocks on a disposable merge commit of
 this branch into `main`, the shape `actions/checkout` gives a pull request):
 
 - `check.py --self-test --diff-base 3fcc07e7…` PASS: 108 blocks, 464,534 bytes,
-  blob `84e5b5c0…`, 449 navigation links, 117 route edges, 10 route cases,
-  17 negative controls rejected, 2 future-baseline controls passed; 44 changed
-  paths of which 42 are registered guidance.
+  blob `84e5b5c0…`, 450 navigation links, 117 route edges, 10 route cases,
+  21 negative controls rejected (incl. an ancillary file beside a registered
+  skill in each tree, refused by the full-tree wall and by the `--diff-base`
+  scope rule), 2 future-baseline controls passed; 44 changed paths of which 42
+  are registered guidance.
 - `--instruction-only` REFUSES this round (`Out-of-scope change:
   .github/workflows/pr-fast-gate.yml`), as it must: the round adds a workflow
   job and a Go test, so it is no longer instruction-only. The original two

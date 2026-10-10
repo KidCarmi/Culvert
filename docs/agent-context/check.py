@@ -39,6 +39,11 @@ NO_IMPORTS = ("AGENTS.md", "internal/admission/AGENTS.md", CONVENTIONS)
 SKILLS = {"culvert-verify": "verification.md", "culvert-review": "review-change.md"}
 GUIDANCE_NAMES = {"AGENTS.md", "CLAUDE.md", "AGENTS.override.md"}
 SKILL_RE = re.compile(r"\.(?:agents|claude)/skills/([^/]+)/SKILL\.md")
+# EVERY file under a native skill tree is guidance-shaped, not just SKILL.md: a
+# client may load a skill's ancillary files once the skill is selected, so an
+# unregistered reference.md or helper script beside a registered skill must be
+# refused rather than escape validation by not being named SKILL.md.
+SKILL_TREE_RE = re.compile(r"\.(?:agents|claude)/skills/.+")
 ROOT_BUDGET = 8192          # root AGENTS.md alone (shared Codex/Claude core)
 CLAUDE_EAGER_BUDGET = 16384  # CLAUDE.md + AGENTS.md + conventions.md, loaded in every Claude session
 CHAIN_BUDGET = 32768         # every registered guide + the eager conventions (Codex aggregate default)
@@ -154,7 +159,7 @@ def discovered_guidance(root):
         if not path.is_file() or skip & set(path.relative_to(root).parts):
             continue
         relative = path.relative_to(root).as_posix()
-        if path.name in GUIDANCE_NAMES or SKILL_RE.fullmatch(relative) or relative.startswith(".claude/rules/"):
+        if path.name in GUIDANCE_NAMES or SKILL_TREE_RE.fullmatch(relative) or relative.startswith(".claude/rules/"):
             found.add(relative)
     return found
 
@@ -166,7 +171,7 @@ def registered_skill_paths():
 
 def is_guidance_shaped(path):
     """Would a client or this checker treat the path as agent guidance?"""
-    return (Path(path).name in GUIDANCE_NAMES or path.startswith(CTX) or bool(SKILL_RE.fullmatch(path))
+    return (Path(path).name in GUIDANCE_NAMES or path.startswith(CTX) or bool(SKILL_TREE_RE.fullmatch(path))
             or path.startswith(".claude/rules/"))
 
 
@@ -363,8 +368,10 @@ def self_test(root):
             else:
                 raise ValueError("Historical ownership negative control was not rejected")
         p.write_bytes(before)
-        # An unregistered nested guide and an unregistered skill must be refused.
-        for relative in ("internal/connlimit/AGENTS.md", ".claude/skills/culvert-deploy/SKILL.md"):
+        # An unregistered nested guide, an unregistered skill, and an ancillary
+        # file beside a registered skill in EITHER tree must be refused.
+        for relative in ("internal/connlimit/AGENTS.md", ".claude/skills/culvert-deploy/SKILL.md",
+                         ".agents/skills/culvert-verify/reference.md", ".claude/skills/culvert-review/helper.sh"):
             stray = candidate / relative
             stray.parent.mkdir(parents=True, exist_ok=True)
             stray.write_text("# Unreviewed guidance\n")
@@ -382,9 +389,12 @@ def self_test(root):
         validate(candidate)
         # Scope rule: a mixed PR passes the standing gate; only --instruction-only
         # refuses it; an unregistered guidance change is refused in both modes.
-        mixed = {"proxy.go", "AGENTS.md", CTX + "domains/admission.md"}
-        need(check_scope(mixed, False) == ["AGENTS.md", CTX + "domains/admission.md"], "Scope rule miscounts guidance")
-        for changed, instruction_only in ((mixed, True), ({"internal/connlimit/AGENTS.md"}, False)):
+        mixed = {"proxy.go", "AGENTS.md", CTX + "domains/admission.md", ".claude/skills/culvert-verify/SKILL.md"}
+        need(check_scope(mixed, False) == [".claude/skills/culvert-verify/SKILL.md", "AGENTS.md", CTX + "domains/admission.md"],
+             "Scope rule miscounts guidance")
+        for changed, instruction_only in ((mixed, True), ({"internal/connlimit/AGENTS.md"}, False),
+                                          ({".agents/skills/culvert-verify/reference.md"}, False),
+                                          ({".claude/skills/culvert-review/helper.sh"}, False)):
             try:
                 check_scope(changed, instruction_only)
             except ValueError:
@@ -414,7 +424,7 @@ def self_test(root):
             pass
         else:
             raise ValueError("Unresolvable diff base was not rejected")
-    return {"negative_controls_rejected": len(mutations) + 2 + 2 + 2 + 1, "future_baseline_controls_passed": 2}
+    return {"negative_controls_rejected": len(mutations) + 2 + 4 + 4 + 1, "future_baseline_controls_passed": 2}
 
 
 def main():

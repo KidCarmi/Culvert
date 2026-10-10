@@ -548,6 +548,11 @@ func TestFastGateRace_ClassifierBehaviour(t *testing.T) {
 		{"PR stray nested guide or rules file runs the guidance gate", "pull_request", "none",
 			touch("internal/connlimit/AGENTS.md", ".claude/rules/x.md", "AGENTS.override.md"),
 			map[string]string{"code": "false", "guidance": "true"}},
+		// An ancillary file beside a registered skill, in either tree: the
+		// checker refuses it, so the gate must see it.
+		{"PR ancillary skill-tree file runs the guidance gate", "pull_request", "none",
+			touch(".agents/skills/culvert-verify/reference.md"),
+			map[string]string{"code": "false", "guidance": "true"}},
 		{"PR code change runs code", "pull_request", "none", touch("proxy.go"),
 			map[string]string{"code": "true", "agent": "false", "mcp_docs": "false", "frontend": "false"}},
 		{"PR admission engine and tests run code", "pull_request", "none", touch("internal/admission/engine.go", "internal/admission/security_test.go"),
