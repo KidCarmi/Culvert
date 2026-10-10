@@ -1,0 +1,1531 @@
+{
+  "baseline": "3fcc07e7ab5d1e3bd4d19e6cadc8bb63b682f3af",
+  "source_path": "CLAUDE.md",
+  "source_git_blob": "84e5b5c06e3972862f6ce2c75dce128a5635cddb",
+  "source_bytes": 464534,
+  "source_sha256": "d52076cca7e76045e31000e4abe89d3b0262ed28d1e82a2c20a7f95d0f06853c",
+  "schema_version": 1,
+  "status": "Every original byte has one canonical historical owner. Current guidance and errata are separate; historical blocks retain original spelling.",
+  "blocks": [
+    {
+      "id": "claude-main-L001-L005",
+      "start_line": 1,
+      "end_line": 5,
+      "bytes": 130,
+      "sha256": "b1413f9f2c6312e49ce04c132e5bdd8d9fed57690fc42232cc388ac2a53f835b",
+      "title": "Project identity, summarized in root",
+      "destination": "docs/agent-context/history/project-map.md",
+      "anchor": "claude-main-l001-l005",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L006-L091",
+      "start_line": 6,
+      "end_line": 91,
+      "bytes": 28078,
+      "sha256": "f7105d6caa91e475211629ab69d1075e67f7eb4e8b13cb7ea07ba6f899e56df4",
+      "title": "Project map",
+      "destination": "docs/agent-context/history/project-map.md",
+      "anchor": "claude-main-l006-l091",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L092-L100",
+      "start_line": 92,
+      "end_line": 100,
+      "bytes": 281,
+      "sha256": "84457ffd2c01bbcfa3c072e13680012ccbe2ee40018e5911757aafbdc61a7d7f",
+      "title": "Build and test",
+      "destination": "docs/agent-context/history/build-and-test.md",
+      "anchor": "claude-main-l092-l100",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L101-L113",
+      "start_line": 101,
+      "end_line": 113,
+      "bytes": 211,
+      "sha256": "a2bd42b7dacbcb4e49fa1034b9c5b9b806ceec175e560f1b55f0bdcc4fb2ee51",
+      "title": "Run",
+      "destination": "docs/agent-context/history/run-and-environment.md",
+      "anchor": "claude-main-l101-l113",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L114-L128",
+      "start_line": 114,
+      "end_line": 128,
+      "bytes": 10161,
+      "sha256": "edce61a65b33cf74f07a1277dda61b7f5446a530882ad4669edd1a35f1f915bb",
+      "title": "Environment",
+      "destination": "docs/agent-context/history/run-and-environment.md",
+      "anchor": "claude-main-l114-l128",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L129-L154",
+      "start_line": 129,
+      "end_line": 154,
+      "bytes": 6002,
+      "sha256": "f7e27a08e44646d5266298204549c38333e2c486e589e3a13de07d03e9410b19",
+      "title": "Code conventions; selectively promoted to root",
+      "destination": "docs/agent-context/history/conventions.md",
+      "anchor": "claude-main-l129-l154",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md",
+        "docs/agent-context/conventions.md"
+      ]
+    },
+    {
+      "id": "claude-main-L155-L171",
+      "start_line": 155,
+      "end_line": 171,
+      "bytes": 7236,
+      "sha256": "a9edb4b5eedf367bb3f05b3e719a402633096cde4b7e64f69b6306f6fcd3c1d8",
+      "title": "CI",
+      "destination": "docs/agent-context/history/ci-and-release.md",
+      "anchor": "claude-main-l155-l171",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L172-L173",
+      "start_line": 172,
+      "end_line": 173,
+      "bytes": 23,
+      "sha256": "1bf3094b71bb79c9da7f966f4d9cd69e7e604ab74a941f2214d46ff56f78ef01",
+      "title": "Architecture section marker",
+      "destination": "docs/agent-context/history/architecture-index.md",
+      "anchor": "claude-main-l172-l173",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L174-L174",
+      "start_line": 174,
+      "end_line": 174,
+      "bytes": 85,
+      "sha256": "d66a5bcc97c6cfcd1829b92fc16d5828967e85c033cd87b78724012b6052945a",
+      "title": "Default deny",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l174-l174",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ],
+      "errata": "docs/agent-context/errata.md#default-policy-posture"
+    },
+    {
+      "id": "claude-main-L175-L175",
+      "start_line": 175,
+      "end_line": 175,
+      "bytes": 86,
+      "sha256": "a814e80af5c0ad3389310336e7bf71695a2f93336b8db49f1b8729cd6dcd658c",
+      "title": "SSL inspect",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l175-l175",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L176-L176",
+      "start_line": 176,
+      "end_line": 176,
+      "bytes": 5793,
+      "sha256": "94335e32472c89b5fe2e7a53d2b2cba3f248479726a0fafa254b44104fd44e07",
+      "title": "Adaptive decryption exclusion (fail-open + auto-learn)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l176-l176",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L177-L177",
+      "start_line": 177,
+      "end_line": 177,
+      "bytes": 10485,
+      "sha256": "b729c45e9fc5407edcfaacde8c54c783c3979889bd7e804945589e172948b02e",
+      "title": "The shutdown sequence is BOUNDED end to end, in three phases with a durability RESERVE (CHAOS-56, `main_shutdown.go` + `runtime_shutdown.go`)",
+      "destination": "docs/agent-context/history/startup-shutdown-listeners.md",
+      "anchor": "claude-main-l177-l177",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L178-L178",
+      "start_line": 178,
+      "end_line": 178,
+      "bytes": 5277,
+      "sha256": "372f8d845b644313ee82a4c8cb938733b87282668eea3e77eef1aeb780189046",
+      "title": "The SOCKS5 accept loop backs off, classifies, and reports (CHAOS-54, `socks5.go` `serve` + `socks5_health.go`)",
+      "destination": "docs/agent-context/history/startup-shutdown-listeners.md",
+      "anchor": "claude-main-l178-l178",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L179-L179",
+      "start_line": 179,
+      "end_line": 179,
+      "bytes": 12888,
+      "sha256": "89c70f3aef2ca83333ca31b6fa8f8025acfe5c80273014e6f0b745cad49a2a1b",
+      "title": "An OPTIONAL listener may never terminate the primary one (CHAOS-66, `socks5_bind.go` + `socks5_health.go`)",
+      "destination": "docs/agent-context/history/startup-shutdown-listeners.md",
+      "anchor": "claude-main-l179-l179",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L180-L180",
+      "start_line": 180,
+      "end_line": 180,
+      "bytes": 5399,
+      "sha256": "f89f18932d61762f0c158bcd1262699d8adbbecf7758732cb12b619b16034d9c",
+      "title": "The admin plane may never terminate the data plane (CHAOS-57, `ui.go` `serveAdminUIWithRetry`/`adminUIServeOnce` + `admin_ui_health.go`)",
+      "destination": "docs/agent-context/history/startup-shutdown-listeners.md",
+      "anchor": "claude-main-l180-l180",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L181-L181",
+      "start_line": 181,
+      "end_line": 181,
+      "bytes": 4059,
+      "sha256": "cf49fae02cc244ef55d798f608312c25377a53d620f812b53879a9857a3754b7",
+      "title": "A damaged Layer-2 category store must never stop the boot (CHAOS-50, `internal/catdb/resilient.go`)",
+      "destination": "docs/agent-context/history/storage-and-durability.md",
+      "anchor": "claude-main-l181-l181",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L182-L182",
+      "start_line": 182,
+      "end_line": 182,
+      "bytes": 7053,
+      "sha256": "e5472d4acfa2aae2e0f7f225490e031a594d72dd82992e089be2a4dc342b61d1",
+      "title": "A cluster rate-limit broadcast EXPIRES, and the DP→CP audit queue COUNTS what it drops (CHAOS-61, `security.go` + `cluster_ratelimit_freshness.go` + `internal/audit`)",
+      "destination": "docs/agent-context/history/admission-and-connection-limits.md",
+      "anchor": "claude-main-l182-l182",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md",
+        "docs/agent-context/domains/admission.md"
+      ]
+    },
+    {
+      "id": "claude-main-L183-L183",
+      "start_line": 183,
+      "end_line": 183,
+      "bytes": 4441,
+      "sha256": "935b874a0977f7e9a93a9727c4074cfa6cfe0897f65db94a3a5178169619f089",
+      "title": "A damaged Layer-2 category store must never stop the boot (CHAOS-50, `internal/catdb/resilient.go`)",
+      "destination": "docs/agent-context/history/storage-and-durability.md",
+      "anchor": "claude-main-l183-l183",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L184-L184",
+      "start_line": 184,
+      "end_line": 184,
+      "bytes": 3743,
+      "sha256": "1f08a51d60eaa75811845bb8e8fcc732ffa1fd8414a37698ba77fe52d160c9ac",
+      "title": "A damaged request-history store must never kill the process, and an encryption error must never quarantine it (CHAOS-62, `internal/logstore/resilient.go` + `internal/storeguard`)",
+      "destination": "docs/agent-context/history/storage-and-durability.md",
+      "anchor": "claude-main-l184-l184",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L185-L185",
+      "start_line": 185,
+      "end_line": 185,
+      "bytes": 5809,
+      "sha256": "b01f2e2a468fbc9fa66719173a6f9e01f206102ef7c471b08975a132316cb2e5",
+      "title": "The public admin-login endpoint bounds its username BEFORE any durable write (CHAOS-63, `login_input_bounds.go`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l185-l185",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L186-L186",
+      "start_line": 186,
+      "end_line": 186,
+      "bytes": 16886,
+      "sha256": "e09efc29ba6a2846c641492c5b0c113d50d35ff2320eb8e1026dc8f421c696a7",
+      "title": "An admin-roster mutation is DURABLE-OR-REFUSED, and the login path is fail-open-but-counted (CHAOS-70, `store.go` `mutateRosterDurably` + `roster_persist_durability.go`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l186-l186",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L187-L187",
+      "start_line": 187,
+      "end_line": 187,
+      "bytes": 1706,
+      "sha256": "b74bbbbbbc548467091735e55a09c2e8a8f98967d40d6d338e17d214431daa58",
+      "title": "Audit-log write loss is COUNTED, never silent (`internal/audit`)",
+      "destination": "docs/agent-context/history/storage-and-durability.md",
+      "anchor": "claude-main-l187-l187",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L188-L188",
+      "start_line": 188,
+      "end_line": 188,
+      "bytes": 16265,
+      "sha256": "bbb1284e9b400205c330c06b17b530178112f48dc2ef4a10001eada48b845230",
+      "title": "An OCSP response is a verdict only when it is BOUND, FRESH and AFFIRMATIVE — and the check does not reach inspected HTTPS (CHAOS-65, `internal/ocsp/ocsp.go` + `ocsp_coverage.go`)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l188-l188",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L189-L189",
+      "start_line": 189,
+      "end_line": 189,
+      "bytes": 3192,
+      "sha256": "3897ca46f74a7ee171609e9977212858a3992777e9b34fa9160ad39c369167de",
+      "title": "Root-CA usability is fail-CLOSED and observable (CHAOS-28, `internal/ca/validity.go` + `ca_health.go`)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l189-l189",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L190-L190",
+      "start_line": 190,
+      "end_line": 190,
+      "bytes": 3345,
+      "sha256": "8aef04a5b77448f19c67d380c639c2aab3f5dd5f73d035ffdaeee24369ee52df",
+      "title": "Root-CA load failure has a bounded RECOVERY path (CHAOS-50, `rootca_recovery.go`)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l190-l190",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L191-L191",
+      "start_line": 191,
+      "end_line": 191,
+      "bytes": 4780,
+      "sha256": "f863677bfdc7be5f0e2fab0c58a8d7be863db69d4af8b09a8ea72b294acb833f",
+      "title": "Cluster (enrollment) CA is fail-CLOSED, observable, and NEVER holds its lock across a callback (CHAOS-50, `cluster_ca_validity.go` + `cluster_ca_health.go`)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l191-l191",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L192-L192",
+      "start_line": 192,
+      "end_line": 192,
+      "bytes": 4738,
+      "sha256": "5404e7cff3cd9fa18a25ecf14707c87e3dfd5ccc0640109489aecfcaafeef577",
+      "title": "Log sanitisation is ONE pass, and the leading `strings.ReplaceAll` is load-bearing (`sanitizeLog` in proxy.go, `obs.Sanitize` in internal/obs)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l192-l192",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L193-L193",
+      "start_line": 193,
+      "end_line": 193,
+      "bytes": 5487,
+      "sha256": "7e56dbd731675dd16305ca147a922034ec7107ff954ff358aa1bc88a7f4c13d8",
+      "title": "A benchmark that silences the logger with `io.Discard` measures a DISABLED logger, and the per-request decision line is built by appending, not by `Printf` (`emitPolicyDecision`/`appendQuotedForLog` in proxy.go)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l193-l193",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L194-L194",
+      "start_line": 194,
+      "end_line": 194,
+      "bytes": 5195,
+      "sha256": "6573445f7a6b8a3e7da9c1db718e8917143d4c76b58bdb64dad27cc394489959",
+      "title": "The SOCKS5 destination is RAW ATTACKER BYTES, and the strict host gate is NOT a log sanitiser (SEC-SOCKS5-LOG-1, `socks5.go` + `socks5_log_injection_test.go`)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l194-l194",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L195-L195",
+      "start_line": 195,
+      "end_line": 195,
+      "bytes": 6976,
+      "sha256": "e7f718bbbd79a1c1a309d3a764ee74e6eac62203adb2f564761d2cae80e8899a",
+      "title": "A request header is never a value a root-executed artifact may name (SEC-BOOTSTRAP-HOST-1, `internal/bootstrap/hostsafety.go` + `bootstrap.go` + `ui_cluster.go`)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l195-l195",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L196-L196",
+      "start_line": 196,
+      "end_line": 196,
+      "bytes": 6196,
+      "sha256": "6821f324c2be6aa680630fea24fe01a750dc38773d15558a315bd7bee310b92e",
+      "title": "Destination-host DNS resolution is BOUNDED, SINGLE-FLIGHTED and STALE-SERVING (CHAOS-64 — the resolver half of the CHAOS-60 bullet below, sharing one `hostIPCache`; `geoip.go` + `dns_health.go`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l196-l196",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L197-L197",
+      "start_line": 197,
+      "end_line": 197,
+      "bytes": 476,
+      "sha256": "4a48afb8971d211ef834f40ee99dee2c9714865a801c46b807e3d24e357ed50a",
+      "title": "Cert cache",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l197-l197",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L198-L198",
+      "start_line": 198,
+      "end_line": 198,
+      "bytes": 21839,
+      "sha256": "f6e7408e522e90dfdabd46945e9c86fd2ccc1f8746bf58ab79c11780a45948f5",
+      "title": "The client-supplied destination authority is BOUNDED AT THE ENTRY POINT, and there is no structural half in the leaf (CHAOS-69, `proxy_host_bounds.go`)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l198-l198",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L199-L199",
+      "start_line": 199,
+      "end_line": 199,
+      "bytes": 108,
+      "sha256": "36ff6de45d6eb46c7234bd6b248b01ffcba414363332beab1853908e228f0549",
+      "title": "Hop-by-hop",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l199-l199",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L200-L200",
+      "start_line": 200,
+      "end_line": 200,
+      "bytes": 1177,
+      "sha256": "2d37d05c27679579100b492121b1036cea66455fcd39ae0e99b761d804eca863",
+      "title": "Request-log persistence is ASYNC (`internal/reqlog`)",
+      "destination": "docs/agent-context/history/storage-and-durability.md",
+      "anchor": "claude-main-l200-l200",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L201-L201",
+      "start_line": 201,
+      "end_line": 201,
+      "bytes": 2107,
+      "sha256": "9e0e6ff51ea69e1d5173d1ca32d7601a105642b779ac4f0da752a5948ad775ec",
+      "title": "Process-log writes are ASYNC (`internal/logsink`)",
+      "destination": "docs/agent-context/history/storage-and-durability.md",
+      "anchor": "claude-main-l201-l201",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L202-L202",
+      "start_line": 202,
+      "end_line": 202,
+      "bytes": 788,
+      "sha256": "8c56cfac682443e02f3e5a12dc84471372d06b35bb1ee96f48fe632d797ccef3",
+      "title": "Relay pattern",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l202-l202",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L203-L203",
+      "start_line": 203,
+      "end_line": 203,
+      "bytes": 7054,
+      "sha256": "0255f6fae4070f15403bf955c201def5399debe129241642a81896959529c7f4",
+      "title": "Every hijacked tunnel is registered with the shutdown drain, and the drain can END the wait (CHAOS-57, `proxy_tunnel_drain.go`)",
+      "destination": "docs/agent-context/history/startup-shutdown-listeners.md",
+      "anchor": "claude-main-l203-l203",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L204-L204",
+      "start_line": 204,
+      "end_line": 204,
+      "bytes": 1088,
+      "sha256": "736efb0272892663f485b556731adb4795f095a0cabc9eaa4f75b4b5ecd0ed90",
+      "title": "Raw-tunnel accounting",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l204-l204",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L205-L205",
+      "start_line": 205,
+      "end_line": 205,
+      "bytes": 2342,
+      "sha256": "966b57ed33401c09669dcc668801d608bee621f573783e9134e0b8c7dafe299f",
+      "title": "The plain-HTTP forward path uses the transport, never an `http.Client` (`proxy_http.go`)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l205-l205",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L206-L206",
+      "start_line": 206,
+      "end_line": 206,
+      "bytes": 5527,
+      "sha256": "3b781ffabe8f41e9534db406b83618269af92504f93d967e49d10f35ceb38cd2",
+      "title": "Per-request alert producers must gate on `HasSubscriber`",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l206-l206",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L207-L207",
+      "start_line": 207,
+      "end_line": 207,
+      "bytes": 3759,
+      "sha256": "e60e29e5d9e1f0ec3c20cfe99f402844d19649553d05bd2882881e1f7e0fa52a",
+      "title": "A bounded-enum projection helper takes a TYPE PARAMETER, never an interface (`decEnumOr`, decryption_observability.go)",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l207-l207",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L208-L208",
+      "start_line": 208,
+      "end_line": 208,
+      "bytes": 3113,
+      "sha256": "f49d5b4dac8ff2f5203a9c15610a89469981f022cf0e020a1a0ba002d4c1f3a5",
+      "title": "An unusable webhook signing secret is PRESERVED and REPORTED, never blanked away (SEC-WHSIGN-1, `internal/alerts`)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l208-l208",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L209-L209",
+      "start_line": 209,
+      "end_line": 209,
+      "bytes": 3120,
+      "sha256": "481909004ee06098b564f8898bac5ce6b85f1515ddc17640c92f8456411b1966",
+      "title": "Both body-scan back ends share ONE budget and ONE posture (CHAOS-53, `internal/secscan/remote.go`)",
+      "destination": "docs/agent-context/history/scanning.md",
+      "anchor": "claude-main-l209-l209",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L210-L210",
+      "start_line": 210,
+      "end_line": 210,
+      "bytes": 2465,
+      "sha256": "7b1f3832333092fa68d85df271f989703a10b139e4f7d9fead6356db8305eaf0",
+      "title": "DPI scan ReDoS budget is enforced ONCE PER SCAN, not per pattern (`internal/scanner`)",
+      "destination": "docs/agent-context/history/scanning.md",
+      "anchor": "claude-main-l210-l210",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L211-L211",
+      "start_line": 211,
+      "end_line": 211,
+      "bytes": 6996,
+      "sha256": "789c39d4d422d497731b6ab241e16ce007e252c793d52eec21bbb1d150f24cc5",
+      "title": "The per-minute time series is SHARDED on its current minute (`store.go`)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l211-l211",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L212-L212",
+      "start_line": 212,
+      "end_line": 212,
+      "bytes": 12963,
+      "sha256": "8b9d2c4f12fd3d0f17fa836a0130a9aec6da183f0b49bb1ce0fd862edc901aad",
+      "title": "A client-supplied tracing header is UNTRUSTED INPUT and is bounded at the read site (SEC-REQID-1, `request_tracing_bounds.go` + `proxy.go` `setupRequestTracing`)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l212-l212",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L213-L213",
+      "start_line": 213,
+      "end_line": 213,
+      "bytes": 4512,
+      "sha256": "7318d7d02bb9b1fb82cc22921dc56cc83bb96d31080369cf150c254605fdbe56",
+      "title": "Per-request tracing setup pays no canonicalisation and ONE CSPRNG draw (`proxy.go` `setupRequestTracing` + `connlimit.go`)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l213-l213",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L214-L214",
+      "start_line": 214,
+      "end_line": 214,
+      "bytes": 4679,
+      "sha256": "88578f9233e0191039e990ab25b62777f8cb5b0d630778ede39708fa29e44bbd",
+      "title": "The request-latency histogram is SHARDED (`metrics.go`)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l214-l214",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L215-L215",
+      "start_line": 215,
+      "end_line": 215,
+      "bytes": 2392,
+      "sha256": "7d47c1b241c4f69ee943729ebe07e0116479b7a22330792820c68e44dc7dd83c",
+      "title": "Destination-category resolution is per-SCAN, not per-rule (`policy_hostcat.go`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l215-l215",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L216-L216",
+      "start_line": 216,
+      "end_line": 216,
+      "bytes": 4564,
+      "sha256": "118e6153ddd85ba9f02c209540f9ea65863821e58fe1ca8a30076a8e3450e415",
+      "title": "Host→category resolution is INDEXED in both directions (`internal/urlcat`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l216-l216",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L217-L217",
+      "start_line": 217,
+      "end_line": 217,
+      "bytes": 8742,
+      "sha256": "d6efe82c7a0c2d7b2d04b428082f2e4801d2765ef58dbc6db4e2f1e2d841d682",
+      "title": "The category index key is folded WITHOUT allocating (`internal/urlcat` `categoryKey`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l217-l217",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L218-L218",
+      "start_line": 218,
+      "end_line": 218,
+      "bytes": 2575,
+      "sha256": "95fdeb3d9ef83fdf52c7d3de7cb6438f8af27d41d5f1a170e6af8ecfb8a493d1",
+      "title": "Threat-feed lookups are LOCK-FREE (`internal/threatfeed`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l218-l218",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L219-L219",
+      "start_line": 219,
+      "end_line": 219,
+      "bytes": 4740,
+      "sha256": "fc9d03f4e905e2d8a256be14480a2046ccc2890a6fe6b26305986a474de342c9",
+      "title": "The full-URL threat check never serialises a URL it was handed parsed (`internal/threatfeed` `CheckRequestURL`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l219-l219",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L220-L220",
+      "start_line": 220,
+      "end_line": 220,
+      "bytes": 4429,
+      "sha256": "cfb3522f1e72aefdbf276523cc37358b01f1ab72e2f0bba9a5cca23b285eb785",
+      "title": "The blocklist read lock is SHARDED, not a read view (`internal/blocklist/hotread.go`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l220-l220",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L221-L221",
+      "start_line": 221,
+      "end_line": 221,
+      "bytes": 87,
+      "sha256": "32ec3e7a2c731f69432e490c53983d6d9ffe231a4452ece162505a8dfd51f5c2",
+      "title": "GeoIP policy",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l221-l221",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L222-L222",
+      "start_line": 222,
+      "end_line": 222,
+      "bytes": 7367,
+      "sha256": "5bb05f6a26476a72dda29001cd03e583b218e9db15afdcc16c982f2f678f947c",
+      "title": "The GeoIP policy accessor is CACHE-ONLY, and the enforcement path owns its own warmer (CHAOS-60, `geoip.go` + `geoip_resolve_health.go`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l222-l222",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L223-L223",
+      "start_line": 223,
+      "end_line": 223,
+      "bytes": 85,
+      "sha256": "54f106fca1a1323f56f578e566592a94267ccd2b706ef8b173b2842e1aea1270",
+      "title": "Admin RBAC",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l223-l223",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L224-L224",
+      "start_line": 224,
+      "end_line": 224,
+      "bytes": 3045,
+      "sha256": "b9b86084b20be88624bca7cf64843b204e71c32106b5b2f24dec714a50a0683f",
+      "title": "An unenrolled role never becomes admin (SEC-RBAC-ROLE-1, `store.go` + `ui_session.go` + `ui_middleware.go`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l224-l224",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L225-L225",
+      "start_line": 225,
+      "end_line": 225,
+      "bytes": 117,
+      "sha256": "3c9bdc2057613d9c209a28c9fd45cc81cea6f76c03133b206efd2408fcccedd2",
+      "title": "Session",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l225-l225",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L226-L226",
+      "start_line": 226,
+      "end_line": 226,
+      "bytes": 9218,
+      "sha256": "167b93a4ad2731c9af7e55337c1f2dfb73d7a8323de1b00733b6439bfc0a3902",
+      "title": "A credential write NEVER removes a second factor (SEC-TOTP-1, `store.go` `newUIAdminUserPreservingTOTP`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l226-l226",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L227-L227",
+      "start_line": 227,
+      "end_line": 227,
+      "bytes": 71,
+      "sha256": "f520e95de84ccf06c3c696fac446a90ac89eb1e5dceea09af46352511d87c2ed",
+      "title": "Slowloris",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l227-l227",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L228-L228",
+      "start_line": 228,
+      "end_line": 228,
+      "bytes": 82,
+      "sha256": "d0e9e4c8bf73c76727014e3543a7b1900a5dfcb05291fe1ae7e1d289cc3bc718",
+      "title": "Audit actor",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l228-l228",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L229-L229",
+      "start_line": 229,
+      "end_line": 229,
+      "bytes": 1419,
+      "sha256": "e930dfdbeae022f090d027b419faad61f2446d7a1a5a598c0704d09959e77bcb",
+      "title": "Supportability framework (CSF, appliance track M0–M5 shipped)",
+      "destination": "docs/agent-context/history/support-and-redaction.md",
+      "anchor": "claude-main-l229-l229",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L230-L230",
+      "start_line": 230,
+      "end_line": 230,
+      "bytes": 6715,
+      "sha256": "270f1260131354b296c50a51c3c2ccc8cc50f74b92dc4bb00b3c60e91a63b7f0",
+      "title": "Periodic feeds back off, jitter, and report their freshness (CHAOS-59, `internal/feedsched` + `threatfeed_health.go`)",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l230-l230",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L231-L231",
+      "start_line": 231,
+      "end_line": 231,
+      "bytes": 212,
+      "sha256": "237d4694c6f691df1ac56e37f84e3684dcf262895624658bf999309c46e025a7",
+      "title": "Threat feed allowlist",
+      "destination": "docs/agent-context/history/policy-category-feeds.md",
+      "anchor": "claude-main-l231-l231",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L232-L232",
+      "start_line": 232,
+      "end_line": 232,
+      "bytes": 959,
+      "sha256": "103df3c0b9fdb44387ef438dfc5f50d1f7d3c98324eeb84defc2558f96d8c657",
+      "title": "Default authentication (`defaultAuthOutcome`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l232-l232",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L233-L233",
+      "start_line": 233,
+      "end_line": 233,
+      "bytes": 2819,
+      "sha256": "51c775c84e64f4f99a2a89d3f36ec3b1972312ba10908a65dcc28497f2d6a9e6",
+      "title": "Identity-backend availability (CHAOS-47, `auth_backend_health.go`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l233-l233",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L234-L234",
+      "start_line": 234,
+      "end_line": 234,
+      "bytes": 4049,
+      "sha256": "5484a7eda0e0f1080367352aea1d546111aeee250edae74a6bd1d4d75031fb01",
+      "title": "A directory that ACCEPTS and then STALLS is bounded, not hung (CHAOS-58, `auth_ldap.go`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l234-l234",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L235-L235",
+      "start_line": 235,
+      "end_line": 235,
+      "bytes": 9963,
+      "sha256": "f16eb3ece23b6e42b850eb61ec1fe786aee322c0405305a34a329bea0312e506",
+      "title": "Credential verification is a BOUNDED, observable resource (CHAOS-57, `internal/authcost` + `auth_cost_health.go`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l235-l235",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L236-L236",
+      "start_line": 236,
+      "end_line": 236,
+      "bytes": 2604,
+      "sha256": "d9d0257b156155681621b7444796909a7fa38a99b6ca928b883384fc6577b609",
+      "title": "Interactive-login callback state is bounded FAIRLY, not randomly (`internal/authstate`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l236-l236",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L237-L237",
+      "start_line": 237,
+      "end_line": 237,
+      "bytes": 4039,
+      "sha256": "8eb79d932602946516c77f21bfdf69fafb85e5d9e2d31cf9c1e5de8a8593ae11",
+      "title": "IdP-registry availability + JWKS integrity (CHAOS-49, `auth_oidc_flow.go`)",
+      "destination": "docs/agent-context/history/authentication-and-identity.md",
+      "anchor": "claude-main-l237-l237",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L238-L238",
+      "start_line": 238,
+      "end_line": 238,
+      "bytes": 235,
+      "sha256": "18ec133dd6124b25164095964342298a83a5c3328c5953c109810bfbc6dc5fee",
+      "title": "Performance tuning",
+      "destination": "docs/agent-context/history/admission-and-connection-limits.md",
+      "anchor": "claude-main-l238-l238",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L239-L239",
+      "start_line": 239,
+      "end_line": 239,
+      "bytes": 5262,
+      "sha256": "0c7a271b1889bbb2dafa521e9291de324dfad795fbff929e75665367abf02599",
+      "title": "The IP filter's per-request gate is LOCK-FREE and FLAT in entry count (`security.go`)",
+      "destination": "docs/agent-context/history/admission-and-connection-limits.md",
+      "anchor": "claude-main-l239-l239",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md",
+        "docs/agent-context/domains/admission.md"
+      ]
+    },
+    {
+      "id": "claude-main-L240-L240",
+      "start_line": 240,
+      "end_line": 240,
+      "bytes": 3424,
+      "sha256": "3c2cb576e7e73130186a245ddccac3a741f4b1bf63cb55764696c8b5bd8c1c87",
+      "title": "The per-IP connection limiter is SHARDED (`internal/connlimit`)",
+      "destination": "docs/agent-context/history/admission-and-connection-limits.md",
+      "anchor": "claude-main-l240-l240",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L241-L241",
+      "start_line": 241,
+      "end_line": 241,
+      "bytes": 3905,
+      "sha256": "2c74a8393c7e9341e4ef990307a73cf4bd9e26eb622e61c70279172c2036fcc8",
+      "title": "Header rewrite rules are read LOCK-FREE (`internal/rewrite`)",
+      "destination": "docs/agent-context/history/configuration-and-upstream.md",
+      "anchor": "claude-main-l241-l241",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L242-L242",
+      "start_line": 242,
+      "end_line": 242,
+      "bytes": 4126,
+      "sha256": "4d43a07f623556903d5ecce33016c736b09347ddc0e869dd5f38c33a95776ac6",
+      "title": "The per-IP rate limiter's sliding window is a RING, so its cost is flat in the configured limit (`security.go`, `clientBucket`)",
+      "destination": "docs/agent-context/history/admission-and-connection-limits.md",
+      "anchor": "claude-main-l242-l242",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md",
+        "docs/agent-context/domains/admission.md"
+      ],
+      "errata": "docs/agent-context/errata.md#timestamp-clamp-direction"
+    },
+    {
+      "id": "claude-main-L243-L243",
+      "start_line": 243,
+      "end_line": 243,
+      "bytes": 8192,
+      "sha256": "4a20d7b50db47b4da31890300f13470e7f963c4a7ced009a0face72f96455bde",
+      "title": "The rate-limit exempt check is LOCK-FREE and FLAT in the exempt-CIDR count, and `prefixSet` is now ONE implementation serving both per-request IP gates (`security.go`, `rlExemptView` + `prefixSet`)",
+      "destination": "docs/agent-context/history/admission-and-connection-limits.md",
+      "anchor": "claude-main-l243-l243",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md",
+        "docs/agent-context/domains/admission.md"
+      ]
+    },
+    {
+      "id": "claude-main-L244-L244",
+      "start_line": 244,
+      "end_line": 244,
+      "bytes": 1176,
+      "sha256": "c943890ef420632f3d2a1ec7bc2baa32aeb7b5dff9d7a14b2ff2519d4c190482",
+      "title": "Top-hosts counter bound — ON THE ENTRY-COUNT AXIS ONLY",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l244-l244",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L245-L245",
+      "start_line": 245,
+      "end_line": 245,
+      "bytes": 3447,
+      "sha256": "794997a2eb51d543a6f5bdccc923f35f3a5e94fad29d8a6c5f41da6847cd8f85",
+      "title": "The top-hosts counter's tracked-host path is LOCK-FREE (`hostCounter`, store.go)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l245-l245",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L246-L246",
+      "start_line": 246,
+      "end_line": 246,
+      "bytes": 2679,
+      "sha256": "8b545a06768cae27e112b0e51a1ee6696499824ad9849ca537755716c2438902",
+      "title": "The 60-bucket RING keeps its plain mutex, and that rejection still stands (`timeSeries`, store.go)",
+      "destination": "docs/agent-context/history/observability-and-alerts.md",
+      "anchor": "claude-main-l246-l246",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L247-L247",
+      "start_line": 247,
+      "end_line": 247,
+      "bytes": 131,
+      "sha256": "720ae4070b7883a0ce654257f88807a10994e2243fc2d13a7144270c4a5fb4cc",
+      "title": "Relay buffers",
+      "destination": "docs/agent-context/history/proxy-tls-and-certificates.md",
+      "anchor": "claude-main-l247-l247",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L248-L248",
+      "start_line": 248,
+      "end_line": 248,
+      "bytes": 194,
+      "sha256": "7c3326d7c969fcdaed910f5cc37cea3394796dd769db54baaf98cd0fb17b242b",
+      "title": "Config versioning",
+      "destination": "docs/agent-context/history/configuration-and-upstream.md",
+      "anchor": "claude-main-l248-l248",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L249-L249",
+      "start_line": 249,
+      "end_line": 249,
+      "bytes": 3501,
+      "sha256": "5ac6ee6acb341c8deaf03ad21c26ce495a451de2ca0574a309a20ff48a49a0dd",
+      "title": "Config-surface registry (`config_surfaces.go` — the anti-drift wall for Finding 10.3 / DEBT-004/006/009)",
+      "destination": "docs/agent-context/history/configuration-and-upstream.md",
+      "anchor": "claude-main-l249-l249",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L250-L250",
+      "start_line": 250,
+      "end_line": 250,
+      "bytes": 11462,
+      "sha256": "ba2d70d97cb78f7985a3f7e0940b70353d8b801df44b83331423626452fc20cc",
+      "title": "Upstream v2 (2F-C) — identity, sealed credentials, eligibility, and the legacy transition (`internal/upstream` + `upstream_v2.go` + `ui_upstream.go`)",
+      "destination": "docs/agent-context/history/configuration-and-upstream.md",
+      "anchor": "claude-main-l250-l250",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L251-L251",
+      "start_line": 251,
+      "end_line": 251,
+      "bytes": 173,
+      "sha256": "806518a237d664099a4cffb0d98f2158ab86b14ba1a89e497ca8de4490838643",
+      "title": "Node groups",
+      "destination": "docs/agent-context/history/cluster-and-ha.md",
+      "anchor": "claude-main-l251-l251",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L252-L252",
+      "start_line": 252,
+      "end_line": 252,
+      "bytes": 145,
+      "sha256": "2446b43bf0d943b7439cfe0b6da610e21c3ce62ce7b2c1dcd206bf2e9e23c37c",
+      "title": "Bandwidth/QoS",
+      "destination": "docs/agent-context/history/cluster-and-ha.md",
+      "anchor": "claude-main-l252-l252",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L253-L253",
+      "start_line": 253,
+      "end_line": 253,
+      "bytes": 186,
+      "sha256": "15ac529b72d0b116950ebe368914b13e0d8dafafb7af2ecf21bf7c788cfa5a93",
+      "title": "ConfigSnapshot sync",
+      "destination": "docs/agent-context/history/cluster-and-ha.md",
+      "anchor": "claude-main-l253-l253",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L254-L254",
+      "start_line": 254,
+      "end_line": 254,
+      "bytes": 192,
+      "sha256": "b4895afd814031de84dd958be8f6f28c4464475f05f510ebcad9a262503ccdd8",
+      "title": "Cluster gaps",
+      "destination": "docs/agent-context/history/cluster-and-ha.md",
+      "anchor": "claude-main-l254-l254",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L255-L255",
+      "start_line": 255,
+      "end_line": 255,
+      "bytes": 1642,
+      "sha256": "26eeef1386366b7521ccf38e10ec250868ab8ef33580dc8977bb84c773fedb75",
+      "title": "HA fencing lease (ADR-0005 — PROGRAM COMPLETE S0–S5, closes RISK-001)",
+      "destination": "docs/agent-context/history/cluster-and-ha.md",
+      "anchor": "claude-main-l255-l255",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L256-L256",
+      "start_line": 256,
+      "end_line": 256,
+      "bytes": 6505,
+      "sha256": "3476f3224c06678a9518e7492d3497b3788879113510b63746c32af20344b97e",
+      "title": "The fencing lease has a way BACK (CHAOS-55, `ha_lease_recovery.go`)",
+      "destination": "docs/agent-context/history/cluster-and-ha.md",
+      "anchor": "claude-main-l256-l256",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L257-L257",
+      "start_line": 257,
+      "end_line": 257,
+      "bytes": 891,
+      "sha256": "1366e291a24b921f29ceb5300ea925129d35be8c905bfabdc66b3c37155bac9d",
+      "title": "Compose operator contract (D1.5)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l257-l257",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L258-L258",
+      "start_line": 258,
+      "end_line": 258,
+      "bytes": 3541,
+      "sha256": "2f2f3aeea3c974bf87b73d486d633a59d891bbac6556e87a9a71a827119e5c0e",
+      "title": "Proxy image pin binding (P1.4 — maintenance agent)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l258-l258",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L259-L259",
+      "start_line": 259,
+      "end_line": 259,
+      "bytes": 1483,
+      "sha256": "3f6ac7128c395ffb188b91c850537af08fdf637771cb12624f793b7f7a20597d",
+      "title": "Startup slices — PROGRAM COMPLETE (24 shipped)",
+      "destination": "docs/agent-context/history/startup-shutdown-listeners.md",
+      "anchor": "claude-main-l259-l259",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L260-L260",
+      "start_line": 260,
+      "end_line": 260,
+      "bytes": 2075,
+      "sha256": "3c2fa2e2f2aed39cfba09c62eb30fe8e428d951bad9b53f5a372750d74440631",
+      "title": "Release catalog trust (Phase 1 — enforce-by-default)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l260-l260",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L261-L261",
+      "start_line": 261,
+      "end_line": 261,
+      "bytes": 1094,
+      "sha256": "2475410d2fac2b26229569dd5c6c36a73cfccd2364864a9f49efb01f07048327",
+      "title": "Release catalog pipeline (P2a — `release_gen.go`)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l261-l261",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L262-L262",
+      "start_line": 262,
+      "end_line": 262,
+      "bytes": 1994,
+      "sha256": "65eac59d2fd1d4ccd9d3bc1c7d8ace2fabcf7f209ddf7d0af21abd1bfc53ef57",
+      "title": "Release catalog keyless trust (P2b-1 — Sigstore-identity verifier)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l262-l262",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L263-L263",
+      "start_line": 263,
+      "end_line": 263,
+      "bytes": 1437,
+      "sha256": "f0efc599ffa87b28775ec21bec71dc3381aa92f878f01e08d6bb7b1b412dfa90",
+      "title": "Release catalog keyless trust (P2b-2a — bake official root + activate)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l263-l263",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L264-L264",
+      "start_line": 264,
+      "end_line": 264,
+      "bytes": 1611,
+      "sha256": "26f0e79e2cc463961c825908ea929e7f449fc75d119cc0f02633af0bac737060",
+      "title": "The release catalog has ONE origin: R2 (`https://catalog.culvertlabs.com`)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l264-l264",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L265-L265",
+      "start_line": 265,
+      "end_line": 265,
+      "bytes": 2024,
+      "sha256": "5aee87be3eaa333b7a2632c3ba488324f45d09a77e1285dc478fec9b43c7d836",
+      "title": "Release catalog weekly re-sign (M1-4 — no-bump freshness)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l265-l265",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L266-L266",
+      "start_line": 266,
+      "end_line": 266,
+      "bytes": 1383,
+      "sha256": "62af600bf66f5b055e8b831a7b8d3a86b75c92623939a2c5e97f1c248fef85f4",
+      "title": "Release catalog keyless signing (P2b-2b — produce + prove the signed catalog)",
+      "destination": "docs/agent-context/history/release-and-maintenance.md",
+      "anchor": "claude-main-l266-l266",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L267-L267",
+      "start_line": 267,
+      "end_line": 267,
+      "bytes": 1338,
+      "sha256": "6d82d5fa07654273aa47c49b1acf090f1c9e6bdf2dd6c893b4d1fe60f5c499e5",
+      "title": "MCP Agent Security Gateway (ADR-0024, disabled-by-default)",
+      "destination": "docs/agent-context/history/mcp-gateway.md",
+      "anchor": "claude-main-l267-l267",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L268-L268",
+      "start_line": 268,
+      "end_line": 268,
+      "bytes": 3408,
+      "sha256": "1e1400079635af62f6382cc62412025cd3a59e07c7c8cb42d1d3e80e87ed33c0",
+      "title": "MCP CP/DP production composition + rollout transaction (PR-12, `mcp_distribution_startup.go` + the `applyMCPCapabilityEnvelope` coordinator in `mcp_distribution.go`)",
+      "destination": "docs/agent-context/history/mcp-gateway.md",
+      "anchor": "claude-main-l268-l268",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L269-L269",
+      "start_line": 269,
+      "end_line": 269,
+      "bytes": 16020,
+      "sha256": "88f180ac92ca88d0cf029445ad654334479d1d5ada81dca10c1dc5f8bb0a0aa1",
+      "title": "Policy Learning Mode (ADR-0025, slices M1–M3 — DISABLED infrastructure)",
+      "destination": "docs/agent-context/history/policy-learning.md",
+      "anchor": "claude-main-l269-l269",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L270-L270",
+      "start_line": 270,
+      "end_line": 270,
+      "bytes": 828,
+      "sha256": "a132318050ba399cc4e8aba26bf64a4399a4b603707dc543eaf8056b245e867c",
+      "title": "Roadmap",
+      "destination": "docs/agent-context/history/governance-and-roadmaps.md",
+      "anchor": "claude-main-l270-l270",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L271-L271",
+      "start_line": 271,
+      "end_line": 271,
+      "bytes": 582,
+      "sha256": "8baab7627b9297225ddbcbf19936d29cd91f59774690432f2b1c64ee9ea338e2",
+      "title": "Engineering governance",
+      "destination": "docs/agent-context/history/governance-and-roadmaps.md",
+      "anchor": "claude-main-l271-l271",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L272-L272",
+      "start_line": 272,
+      "end_line": 272,
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "title": "Section separator",
+      "destination": "docs/agent-context/history/architecture-index.md",
+      "anchor": "claude-main-l272-l272",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md"
+      ]
+    },
+    {
+      "id": "claude-main-L273-L346",
+      "start_line": 273,
+      "end_line": 346,
+      "bytes": 11835,
+      "sha256": "05914716349aafcb2eb15253a3478eb471d4698763cf3c16b107fd1e6e88903d",
+      "title": "Admin control plane, invariants, test pitfalls",
+      "destination": "docs/agent-context/history/admin-control-plane.md",
+      "anchor": "claude-main-l273-l346",
+      "classification": "preserved historical source; verify against current implementation",
+      "current_routes": [
+        "docs/agent-context/README.md",
+        "docs/agent-context/domains/admin-control-plane.md"
+      ]
+    }
+  ]
+}

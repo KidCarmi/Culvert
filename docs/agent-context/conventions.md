@@ -1,0 +1,87 @@
+# Current implementation conventions
+
+Scope: implementation work; load the sections relevant to the change. Derived
+from the main baseline in [migration](migration.md), with explicit exceptions
+below. Current implementation and executable contracts take precedence over old
+prose. Original wording remains in [preserved conventions](history/conventions.md).
+
+## Ownership, toolchain and concurrency
+
+- Domain logic/state/unit tests belong to cohesive internal owners; main keeps
+  application wiring and integration. Read the owner's `doc.go`, ADR and boundary
+  tests before moving code. Existing root aliases can be intentional boundaries.
+- Take the compiler from [go.mod](../../go.mod) `toolchain`, not the minimum
+  `go` line. CI and Docker pins must agree; do not set workflow `GOTOOLCHAIN`.
+- Match the owner's concurrency contract. Immutable published views, sharded
+  locks, RWMutex and atomics are different decisions. Do not replace a proven
+  lock-free hot path with a generic RWMutex recommendation.
+- [upstream_transport.go](../../upstream_transport.go) owns the shared transport.
+  Read through `getUpstreamTransport`; mutate through `swapUpstreamTransport`
+  with a new transport/TLS configuration. Never mutate a published transport or
+  the update closure's input, including through a local alias.
+
+## Security-sensitive I/O and logging
+
+- In main, use application `logger.Printf`, not `log.Printf`/`fmt.Printf` for
+  logging. Internal owners retain explicit injected sinks or `internal/obs`; do
+  not add main/singleton dependencies to obtain the application logger. Sanitize untrusted log values with `sanitizeLog` and `%q`. Preserve the leading
+  `strings.ReplaceAll` that CodeQL recognizes and existing single-pass behavior.
+  See [proxy.go](../../proxy.go) and [internal/obs](../../internal/obs).
+- Object-derived log values sometimes require an inline recognized sanitizer
+  (`strings.ReplaceAll`, or format then replace) so CodeQL can trace them.
+- Before outbound HTTP/dials, preserve scheme/URL validation and the appropriate
+  SSRF guard. Existing `isPrivateHost`/inline `url.Parse` patterns matter to
+  CodeQL; a wrapper alone is not evidence the destination is safe. Check the
+  actual domain boundary: LDAP directory transport is deliberately not the
+  generic public-HTTP URL validator (ADR-0027).
+- Use contextual I/O: `http.NewRequestWithContext`, `HandshakeContext`,
+  `DialContext`. Wrap errors with `fmt.Errorf("context: %w", err)`.
+- Keep lint suppressions narrow and explained (`//nolint:errcheck` with reason;
+  appropriate gosec suppression for deliberate dynamic cookie Secure or TLS
+  behavior). Do not add suppressions to conceal a new insecure path.
+- For new internal fields, avoid inadvertent gosec G117 secret-name matches;
+  do not blindly rename an existing public JSON/wire/config contract to satisfy
+  a naming rule. Preserve compatibility and use the established reviewed pattern.
+
+## UI, configuration and API changes
+
+- New operator configuration normally requires admin API and UI parity. Existing
+  reviewed env-only/startup-only trust, deployment or preview exceptions are
+  real exceptions. Record and surface such a deferral instead of inventing a
+  runtime mutation endpoint for a startup-only/security boundary.
+- Use `apiXxx(w, r)`, per-domain `register*Routes` and method-aware `uiRoutes`.
+  Keep handler-level role checks. Read [admin control plane](domains/admin-control-plane.md)
+  before changing routes, auth, audit or persistence behavior.
+- Consult [config_surfaces.go](../../config_surfaces.go) and
+  [configuration-versioning triage](../../roadmap/CONFIG-VERSIONING-TRIAGE.md)
+  for historical rationale, and the current registry/tests for capture decisions.
+  Versioned configuration mutations audit first, then
+  save the configuration version. Credential/password and approved hygiene
+  paths explicitly must NOT create versions: see
+  [password regression](../../auth_password_change_no_versioning_test.go),
+  [CDR hygiene](../../cdr_hygiene_no_versioning_test.go) and
+  [CDR revoke](../../cdr_revoke_rpc_no_versioning_test.go). Never apply the old
+  blanket `saveConfigVersion` instruction to these paths.
+- Legacy panels in `static/index.html` use `data-view`, navigation and load/render
+  functions. The React frontend has its own migration contract; do not apply the
+  legacy pattern to new React code. Use the [frontend route](README.md#frontend).
+
+## Go code and test hygiene
+
+- Prefer index-based range over copying large structs. Keep function complexity
+  within the repository's configured cyclop threshold (currently 15); extract
+  coherent helpers, not a generic shared-state hub.
+- White-box tests sit beside their owner. Cross-domain production wiring stays
+  at root. Preserve build tags, differential oracles and negative controls.
+- The audit ring is bounded. Assert on unique entry content (Action/ObjectID/
+  Detail or a unique test discriminator), not length deltas. Repeated shuffled
+  runs saturate the ring; a new entry may evict an old one.
+- `setupProxyTest` resets state at test START; it does not restore what a test
+  changes afterward. A test adding policy rules must register restoration, such
+  as `snapshotPolicyStoreForTest(t)` or an established wrapper. Restore rules and
+  the corresponding default action together. Read the
+  [original pitfalls](history/admin-control-plane.md#claude-main-l273-l346)
+  and current test helpers before modifying shared globals.
+
+No convention above authorizes a policy/runtime change, dependency upgrade,
+external publication or security-setting change outside the task's scope.
