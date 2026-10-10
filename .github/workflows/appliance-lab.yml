@@ -1009,7 +1009,7 @@ jobs:
               -D ENABLE_TESTS=OFF -D ENABLE_MILTER=OFF -D ENABLE_CLAMONACC=OFF -D ENABLE_MAN_PAGES=OFF -D ENABLE_DOXYGEN=OFF > "$W/evidence/cmake-$v.log"
             cmake --build "$v/build" -j"$(nproc)" > "$W/evidence/build-$v.log" 2>&1 || { tail -50 "$W/evidence/build-$v.log"; exit 1; }
             cmake --install "$v/build" > /dev/null
-            "$W/inst-$v/sbin/clamd" --version | tee "$W/evidence/clamd-$v-version.txt"
+            sha256sum "$W/inst-$v/sbin/clamd" "$W/inst-$v/lib/libclamav.so"* | tee "$W/evidence/clamd-$v-binaries.sha256"
           done
       - name: Run both against the same edge state
         run: |
