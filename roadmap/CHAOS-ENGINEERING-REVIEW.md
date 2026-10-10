@@ -95,6 +95,40 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-10 — CHAOS-74 sweep (the memory-mapped category store after a
+healthy open). Id claimed in this row, per the convention above**; `CHAOS-70`
+was the highest MERGED id, and 71–73 are taken by sweeps that were still open
+when this one started (73 is the public logout endpoint, PR #1591), so this
+sweep took 74 and §41. The sweep extends `storeguard` past the boot path it was
+built for. badger v4 reads every `.sst` through a memory mapping and v4 removed
+the option to do otherwise, so when a volume stops supplying those pages the
+read raises SIGBUS — `fatal error: fault`, not a panic, which `recover()` and
+`crashguard.go` cannot see and which leaves no log line. §34.7 (GEO-1) recorded
+exactly this shape and called it the worst in the register, but recorded rather
+than fixed it because it had no reachable caller; this one is reached from
+`policy_hostcat.go:117` on every request that resolves a host category, so one
+damaged table was a total, evidence-free gateway outage plus a restart loop.
+Reproduced against the real store (seed → close → healthy reopen → truncate the
+tables → lookup) and contained with `debug.SetPanicOnFault`, which turns a fault
+on mapped memory into a recoverable panic; the nil-deref/mapping-fault
+discrimination rests on `Addr()`, measured both ways, because the two carry
+identical message text. The second half is visibility: `catdb` now distinguishes
+`ErrKeyNotFound` from a store fault instead of collapsing both into
+"uncategorised", and `culvert_catfeeddb_available` — whose HELP text promises
+"open and serving lookups" while being sourced purely from the boot record —
+stops reporting 1 for a store whose every lookup has stopped answering. The
+policy outcome on a fault is deliberately UNCHANGED (still uncategorised, Layer 1
+authoritative); turning a store fault into a deny is an owner decision, not a
+containment fix. Honest limit, recorded in §41 rather than glossed:
+`SetPanicOnFault` is per-goroutine, so badger's own compaction goroutines stay
+exposed — the fix closes the reachable, request-driven exposure, not the class.
+§42 records three adjacent domains swept alongside and deliberately NOT fixed
+(a `globalSyslog` publication race that can put a 15 s socket write on a request
+goroutine; a forward clock jump that durably destroys the session revocation
+list; and five backup/restore findings including a never-required backup
+passphrase), each with evidence and each stating whether it was measured or
+reasoned.
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
@@ -8281,3 +8315,563 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-74 — The memory-mapped category store, after a healthy open
+
+**Id claim.** `CHAOS-74` is claimed by this section. `CHAOS-71`–`73` are taken by
+sweeps that were still unmerged when this one opened (`CHAOS-73` is the public
+logout endpoint, PR #1591), and §0's standing warning applies: cite this finding
+by **section number (§41)**, not by id.
+
+### Executive summary
+
+`storeguard` exists because badger can kill this process in a way no caller can
+catch, and it closes that hole **on the boot path**: it refuses to hand badger a
+directory a previous process died inside of (§19, §31). The window it does not
+cover is the one the gateway actually spends its life in — the store is open and
+serving the proxy data path, and the volume underneath it can fail at any point.
+
+In that window a damaged table was not an error. It was `fatal error: fault`.
+
+badger v4 reads an `.sst` through a memory mapping (`table.Table` embeds
+`*z.MmapFile`) and decodes the table index straight out of the mapped region;
+v4 removed the loading-mode option earlier versions offered, so **no
+configuration reads tables through ordinary file I/O instead**. When the pages
+behind that mapping stop existing, touching them raises SIGBUS, which the Go
+runtime delivers as a fatal error rather than a panic. `recover()` cannot see
+it. `crashguard.go` cannot see it. No log line survives it. The process dies.
+
+That is the shape §34.7 (GEO-1) recorded for the GeoIP reader and called the
+worst failure shape in this register, *because containment is not available at
+all*. GEO-1 was recorded rather than fixed for one reason: it had no reachable
+caller. **This one is reached from `policy_hostcat.go:117` on every request that
+resolves a host category.** A single damaged table was therefore a total,
+evidence-free gateway outage, and — since the damage is on disk — a restart loop
+rather than a recovery.
+
+Two things shipped. The fault is now **contained** at the lookup boundary via
+`debug.SetPanicOnFault`, which converts a fault on non-Go memory into a
+recoverable panic; and the store's error handling now **classifies** instead of
+collapsing, so the degradation is counted and surfaced rather than looking like
+an internet full of uncategorised hosts.
+
+Both halves were measured against the real store, not reasoned about.
+
+### What was actually wrong
+
+`catdb.getExact` ended in the shape that hides three different worlds behind one
+answer:
+
+```go
+if err != nil {
+	return "", false
+}
+```
+
+- a **clean miss** — this host is not in the community feed. The overwhelmingly
+  common case, and correct.
+- a **returned error** — `ErrDBClosed`, an I/O error, a read that failed. Served
+  as "uncategorised", counted nowhere, logged nowhere.
+- a **mapping fault** — which never reached this line at all, because the
+  process was already gone.
+
+Measured, pre-fix, against a store seeded with 20 000 entries, closed so the
+memtable flushed to a real `.sst`, reopened cleanly (a *healthy* open — the one
+`catfeeddb_health.go` records as `Available=true`), then truncated underneath the
+live mapping:
+
+```
+unexpected fault address 0x7fe306e8f286
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fe306e8f286 pc=0x6eb8d5]
+
+github.com/google/flatbuffers/go.GetInt32(...)
+github.com/dgraph-io/badger/v4/fb.(*TableIndex).BloomFilterBytes(...)
+github.com/dgraph-io/badger/v4/table.(*Table).DoesNotHave(...)
+github.com/dgraph-io/badger/v4.(*levelHandler).get(...)
+github.com/dgraph-io/badger/v4.(*Txn).Get(...)
+github.com/KidCarmi/Culvert/internal/catdb.(*CommunityDB).getExact
+	/home/user/Culvert/internal/catdb/catdb.go:94
+```
+
+The fault lands on the **caller's** goroutine — the request goroutine — which is
+what makes containment possible at all.
+
+### The surfaces were blind by construction
+
+§19 built real observability for this store, and all of it describes the **boot**.
+`catFeedDBHealth` is, in its own words, "written once during startup"; `metrics.go`
+sourced `culvert_catfeeddb_available` from that record. So the gauge whose HELP
+text promises
+
+> `1 when the Layer-2 community category store is open and serving lookups`
+
+reported `1` for a store that had stopped serving lookups entirely. Not a missing
+metric — a metric actively asserting the opposite of the truth, which is worse,
+because an alerting rule keyed on it reports healthy.
+
+### Failure scenarios
+
+| # | Fault | Pre-fix behavior | Post-fix behavior |
+|---|---|---|---|
+| 1 | `.sst` truncated/removed under the live mapping (operator reclaiming space on a full volume; a cleanup script; badger's own file management meeting a damaged FS) | `fatal error: fault`, process dies, no log line, restart loop | contained; Layer-2 latches off, Layer 1 serves, counted + warned |
+| 2 | Data volume detaches or is force-unmounted (iSCSI/NFS/EBS detach, `umount -f`) while the store is open | same uncatchable kill on the next cold-key lookup | same containment |
+| 3 | Block-level damage / EIO on a page fault for a cold table block | same | same |
+| 4 | Store returns an error without faulting (`ErrDBClosed`, I/O error) | silently "uncategorised", invisible | counted, logged once, diagnostics row warns |
+| 5 | Host simply not in the feed (`ErrKeyNotFound`) | "uncategorised" — correct | unchanged, and explicitly **not** counted (negative control) |
+| 6 | badger's own **compaction** goroutine touches a damaged table | uncatchable kill | **still an uncatchable kill** — see Residual risk |
+
+Scenarios 1–3 are the same mechanism with different triggers: for an mmap-backed
+store, "the file shrank" and "the device went away" are the two ordinary ways a
+production volume produces SIGBUS, and both are in this register's standing
+simulate list.
+
+### The fix
+
+**`internal/storeguard/faultguard.go` (new).** `ContainFault(op) error` arms
+`debug.SetPanicOnFault(true)` on the calling goroutine, runs `op`, restores the
+previous setting, and converts a contained fault into an error wrapping
+`ErrStoreFault`. It sits in `storeguard` because that package is already the
+owner of "surviving a badger directory this process cannot survive"; this is the
+same subject, one lifecycle phase later.
+
+The discrimination is the part worth reviewing. A contained mapping fault and a
+genuine nil-pointer dereference **carry identical message text** — `runtime
+error: invalid memory address or nil pointer dereference` — so the message is
+useless. The runtime attaches an `Addr() uintptr` method only to the error it
+synthesises for a `SetPanicOnFault`-converted fault
+(`runtime.errorAddressString`), which is the documented way to recover the
+faulting address. Measured both ways:
+
+```
+nil deref:  hasAddr=false
+mmap fault: hasAddr=true addr=0x7fd1dafa7286
+```
+
+So `ContainFault` converts only the latter and **re-panics everything else** — a
+bug inside `op` keeps reaching `crashguard` instead of being quietly reported as
+a failing disk. `TestContainFault_NilDerefIsNotAStoreFault` fails if that
+discrimination ever stops holding, which is the gate that keeps this fix from
+becoming a bug-swallower.
+
+**`internal/catdb`.** The guard is armed in `Lookup`, **once for the whole
+domain walk** rather than per point lookup. The walk issues up to four or five
+badger reads for a deep hostname and runs on the proxy data path, so a guard per
+read would pay the defer/recover cost several times per request to protect
+against a fault that makes every one of those reads equally hopeless; one guard
+per walk is the same protection at a fraction of the cost. `getExact` became the
+error-returning leaf — `ErrKeyNotFound` is the only error it reports as a miss,
+everything else aborts the walk and is returned for classification, because
+continuing to walk a store that just failed to answer turns one fault into four.
+`Lookup` then classifies: a contained fault increments `memFaults` and
+**latches `degraded`**; any other error increments `faults`. Once degraded,
+lookups return without arming anything or re-entering badger — the damage is not
+transient, and each retry is another chance to fault on a goroutine that is
+*not* behind the guard. Reporting is once-per-transition, not per lookup: a
+per-request log line here would be a request-volume-driven log flood, which is
+the same class of outage this package exists to prevent.
+
+**The return value on a fault is deliberately unchanged** — still `("", false)`,
+still "uncategorised". Turning a store fault into a deny would change the
+gateway's policy outcome on the data path; that is a different decision with a
+different blast radius, and conventions explicitly withhold authority for a
+runtime policy change from a fix like this one. What changed is that the
+degradation is bounded, survivable and visible. The direction of that trade is
+recorded under Security impact below rather than left implicit.
+
+**Surfaces**, all pre-existing — no new operator vocabulary:
+
+- `catFeedDBState()` now overlays three live counters onto the boot record, so
+  both existing consumers get them without duplication. It stays a
+  side-effect-free read (three atomic loads), per `bandwidth_health.go`'s rule.
+- `culvert_catfeeddb_available` reports **0** when the store has latched
+  degraded, which is what its HELP text already promised.
+- `culvert_catfeeddb_lookup_errors_total` and
+  `culvert_catfeeddb_memory_faults_total` are new counters.
+- the `category_feed_db` diagnostics row warns, names the impact
+  (Layer-1-only) and gives the action (check the volume, restart to re-open and
+  quarantine). Severity reuses §19's rationale — a store that opened and then
+  died has exactly the impact of one that never opened, so `warn`, never `fail`:
+  a `fail` row would take a gateway that is still fully able to serve out of a
+  load-balancer rotation.
+
+### Risk matrix
+
+| Finding | Likelihood | Impact | Pre-fix | Post-fix |
+|---|---|---|---|---|
+| Mapping fault on the data path (§41 scenarios 1–3) | low per node-day, **certain** across a fleet on failing storage | total gateway outage, no evidence, restart loop | **critical** | low (visible degradation) |
+| Silent error-swallow (scenario 4) | medium | Layer-2 control off, invisible | medium | low |
+| `_available` gauge asserting the opposite of the truth | follows the above | alerting reports healthy during an outage | medium | closed |
+| Compaction-goroutine fault (scenario 6) | low | total gateway outage | **critical** | **critical — open**, see below |
+
+### Recovery assessment
+
+- **Automatic:** containment is automatic and immediate. The node keeps serving
+  on Layer 1 (admin-managed, authoritative) with no restart and no operator
+  action. Layer 2 is a derived cache of a downloadable feed, so nothing
+  authoritative is lost.
+- **Manual:** a restart is what re-opens the store, and on restart
+  `storeguard.Open` does the rest — a directory a process died inside of, or one
+  badger reports as corrupt, is quarantined and re-created, and the feed
+  re-syncs. So the two halves now compose: §41 keeps the process alive to be
+  restarted, §19 heals the store when it is.
+- **Degraded-mode duration:** for the life of the process, by design (latched).
+  The diagnostics row says so explicitly rather than implying the store might
+  recover on its own.
+- **Data integrity:** unaffected. No authoritative state lives here, and the fix
+  adds no write path.
+
+### Operational impact
+
+Pre-fix the operator experience was the worst available: a gateway that
+disappeared, with `docker-compose`'s `restart: unless-stopped` turning it into an
+unattended crash-loop, and nothing in the logs — because a fatal fault writes its
+trace to stderr and dies before any sink flushes, and because the only durable
+health record described a boot that had gone fine. Post-fix there is a log line
+naming the volume as the cause, two counters, and a diagnostics row with an
+action. The alerting rule to add is `culvert_catfeeddb_memory_faults_total > 0`,
+which is new and is the signal that a node's data volume is damaging a live
+store.
+
+### Security impact
+
+Honest accounting, in both directions:
+
+- **Improved:** the pre-fix outcome was the whole gateway gone. For an in-line
+  forward proxy that is not merely availability — a gateway that is down is a
+  gateway that is not filtering, and the usual operator response under pressure
+  is to route around it.
+- **Unchanged, and deliberately so:** a degraded Layer 2 means category-keyed
+  rules that depend on the community feed stop matching, and the request is then
+  decided by the remaining rules and the configured default action. This is the
+  **pre-existing** posture for a store that never opened (§19) and for a node
+  started without `-cat-feed-db`; Layer 1 remains authoritative. Per the standing
+  errata the default action is what decides the outcome here, and an operator
+  running with an explicit default is unaffected in the sense that matters.
+  Making a store fault deny is a defensible future posture and is **not** taken
+  here; it is recorded as an owner decision rather than smuggled into a
+  containment fix.
+
+### Required tests (all shipped)
+
+`internal/storeguard/faultguard_test.go` — faults produced with a real
+`syscall.Mmap` of a file truncated to zero, so the primary gate depends on kernel
+behavior and not on badger's internals:
+
+- `TestContainFault_MemoryFaultBecomesError` — the fault becomes
+  `ErrStoreFault`. **This test passing at all is the containment working**: it
+  cannot pass in a process that died.
+- `TestContainFault_NilDerefIsNotAStoreFault` — the negative control on the
+  discriminator described above.
+- `TestContainFault_PassesErrorsAndSuccessThrough` — an ordinary error is not
+  reclassified.
+- `TestContainFault_RestoresPanicOnFault` — no per-goroutine state leaks into a
+  caller with its own setting.
+
+`internal/catdb/catdb_fault_test.go` — the end-to-end realism gate:
+
+- `TestLookup_VolumeDamageAfterHealthyOpenIsContained` — seed → close → reopen
+  healthy → truncate the tables → lookup. Asserts the store does not claim a
+  category, the fault is accounted, `degraded` latches, and 50 further lookups
+  do **not** grow the count (proving the latch stops re-entering badger).
+  Deterministic over `-count=5`.
+- `TestLookup_OrdinaryMissIsNotAFault` — misses and the subdomain walk stay
+  clean and uncounted. Without this, counting every uncategorised host would
+  make the new signal worthless.
+
+`catfeeddb_runtime_fault_chaos_test.go` — the surfaces, against a store that has
+taken a **real** contained fault rather than a flag a test set:
+
+- `TestMetrics_CatFeedDBRuntimeDegradationIsVisible` — same healthy boot record,
+  dead store: `_available` flips to 0 and `_memory_faults_total` reports 1.
+- `TestCheckCategoryFeedDB_RuntimeDegradationWarns` — the row warns, keeps its
+  code, names the Layer-1-only impact and the restart.
+- `TestCheckCategoryFeedDB_HealthyStoreTripsNothing` — negative control; a
+  surface that warned unconditionally would otherwise pass every assertion above.
+
+### Residual risk, and what is deliberately left
+
+- **badger's background goroutines remain exposed. This is the honest limit of
+  the fix.** `SetPanicOnFault` is per-goroutine state, so it protects the
+  goroutines that run through `ContainFault` and nothing else. badger's
+  compaction and GC goroutines touch the same mappings, and a damaged table that
+  a compactor reaches first still kills the process with no containment
+  available. What the fix changes is the **reachable, request-driven** exposure —
+  the one that fires on the data path on every request — from an uncatchable
+  kill into a visible degradation. It does not make a badger store on a failing
+  volume safe in general, and this section should not be read as closing that.
+  Closing it properly needs either a store that does not mmap (badger v4 offers
+  no such option) or process-level isolation of the store, both of which are
+  design decisions rather than chaos remediations.
+- **`internal/logstore` has the identical exposure, unfixed.** It is the other
+  badger store (`internal/logstore/logstore.go:352`) and the other
+  `storeguard.Open` consumer, and its read path collapses errors the same way.
+  Its reads are admin-query-driven rather than per-request, so the reachability
+  is lower, but the kill is the same kill. `ContainFault` is deliberately
+  store-agnostic so that fix is a small follow-up; it is not bundled here
+  because it is a second domain and a separate set of gates.
+- **`internal/geoip`** is a third mmap-backed reader. §34.7 records its
+  *reader-lifetime* hazard (munmap on close) and correctly reports that as
+  unreachable today. A **damaged `.mmdb` on a failing volume** is a different
+  trigger reaching the same uncatchable fault, and is not covered by GEO-1's
+  reachability argument. Recorded; `ContainFault` applies there too.
+- **The policy-outcome posture on a store fault** is unchanged and is an owner
+  decision, as set out under Security impact.
+
+---
+
+## 42. Adjacent domains swept for §41, recorded and not fixed
+
+Three domains were swept alongside §41 because they share its theme — a fault
+that is survivable but invisible, or a guard that protects the wrong half. None
+is fixed here: each is a separate domain with its own gates, and bundling them
+into a containment fix would make one unreviewable change out of four reviewable
+ones. Every item below carries file:line evidence and was checked against
+existing tests before being called a gap.
+
+**Verification status is stated per item and is not uniform.** §41 is measured.
+`OBS-1` and `BKP-4` are read directly off the source and are mechanical.
+`CLK-1`–`CLK-4` and the remaining `BKP-*` items are reasoned from source plus
+documented `time.Time`/stdlib semantics; **no host clock was stepped and no
+archive substitution was executed in this environment**, so they are reported as
+findings to confirm, not as reproductions.
+
+### OBS-1 (recommended first follow-up) — `globalSyslog` is published without synchronization
+
+`syslog.go:38` declares a plain `var globalSyslog *syslogWriter`. It is written
+at runtime from the admin handler goroutine (`syslog.go:65` via `InitSyslog` ←
+`apiSyslogConfig` POST; `ui_config.go:1855` sets it to `nil` on the disable
+branch) and read unsynchronized on the proxy request goroutine at
+`store.go:2398-2399` inside `persistLogEntry`, plus the audit SIEM hook at
+`store.go:417`. 32 non-test references, 2 runtime write sites.
+
+Two consequences. The nil check and the dereference at `store.go:2398-2399` are
+separate unsynchronized loads of the same global, so the disable path can land a
+**nil dereference on the request path**. And `internal/syslog`'s own
+`send()` treats a nil `queue` as "deliver synchronously"
+(`internal/syslog/syslog.go:159-163`), while `NewWriter` sets `queue` *after* the
+struct literal — with no release/acquire edge, a request goroutine can observe a
+non-nil writer whose queue is still zero, fall into the synchronous path, and
+perform a dial plus two socket writes itself. That path's own file documents the
+cost: "~15 s worst case under `s.mu`", with every other logging caller queued
+behind it. That is precisely the proxy-wide stall the async design and
+`TestAsync_WedgedCollectorNeverBlocksCaller` exist to prevent — reachable not
+through the engine but through the pointer holding it.
+
+The fix is mechanical and already idiomatic here: `atomic.Pointer`, read once
+into a local. The codebase does exactly this for every other hot-path-read,
+runtime-reconfigured global — `globalLogStore` (`logstore.go:55`), `logSink`
+(`logger.go:117`), `obs.sink` (`internal/obs/obs.go:18`), and the syslog
+engine's own `panicObserver`. The pointer holding the engine is the one that was
+left plain. Not bundled here only because it touches ~32 sites across a
+different domain; `-race` over a concurrent reconfigure is the gate to add.
+
+### OBS-2 — SIEM and OTLP drop counters are not scrapeable
+
+`syslog.Drops()` (`internal/syslog/syslog.go:361`), OTLP `pushFailures` /
+`droppedSpans` (`internal/otlp/spans.go:66-70`) and the alert plane's
+`RetryDroppedTotal` / `RetryExhaustedTotal` are all counted in-process and
+exposed **only** through their admin JSON endpoints. `culvert_syslog*` and
+`culvert_otlp*` do not exist anywhere in the tree. The local-disk sinks
+(`reqlog`, `logsink`) are scrapeable; the observability *backends* are not.
+
+This is the register's own §1 theme and `internal/otlp/otlp.go:50-53` states the
+standard being missed: "otherwise a broken collector endpoint fails silently
+forever — the only trace is a log line an admin would need to SSH in and grep
+for." The counter was added; it was never wired to the scrape surface. It matters
+most for syslog, because the dropped records include **audit** entries
+(`store.go:417`) — compliance evidence — and the queue drops newest on overflow
+with no log line, so a SIEM gap can persist indefinitely unnoticed.
+
+The export engines themselves were checked and are **sound**: bounded queues
+with counted non-blocking drops, 5 s write deadlines, drain-before-post so no
+mutex is held across `client.Do`, `NewRequestWithContext` plus a client timeout
+on webhooks, and zero hidden or infinite retry anywhere in the domain. A slow
+Prometheus scrape also cannot stall the data path — `metrics.go` renders into a
+`strings.Builder` and touches the socket once, and the hot-path mutators are
+lock-free by construction.
+
+### OBS-3 — the alert retry round is fully serial
+
+`internal/alerts/store.go:1083-1093` delivers the ready retry queue
+sequentially, without taking `webhookSem`. Each attempt is 5 s-bounded and the
+queue caps at 500, so one round is worst-case ~42 minutes, during which the 10 s
+ticker is blocked and no other webhook's retry progresses. Confined to the alert
+plane — the data path is unaffected — but the queue is process-wide, so one
+blackholed endpoint delays every other webhook's alerts, and with `retryMax = 3`
+a real threat alert can exhaust before its turn. Bound the round, or deliver
+concurrently through the semaphore that already exists.
+
+### CLK-1 — a forward clock jump durably destroys the session revocation list
+
+The sharpest of the clock findings, and the one with security impact. Revocation
+expiry is reconstructed from the cookie as `time.Unix(s.Exp, 0)`
+(`session.go:118`), which carries **no monotonic reading** — pure wall clock.
+`ExportRevocations` **deletes** entries it considers expired as a side effect of
+exporting (`internal/session/session.go:186-196`), and `SaveRevocations` calls it
+and then `AtomicWrite`s the survivors (`:269`). So the purge is fsynced.
+`MergeRevocations` drops expired entries on load (`:204-215`), and
+`LoadRevocations` runs **only** at startup (`session_startup.go:30`).
+
+An appliance that boots with a forward-skewed clock (dead RTC battery, VM
+snapshot restore, a bad NTP peer before `makestep` corrects) therefore imports
+zero revocations, and the first logout rewrites `revocations.json` without them;
+in a cluster `revocationSyncLoop` (`controlplane_client.go:599`) publishes the
+pruned set within seconds. Once the clock is corrected **backward**, every
+previously-revoked session cookie is accepted again until its natural `Exp`,
+because `Decode` checks revocation *before* expiry
+(`internal/session/session.go:397` vs `:409`).
+
+The asymmetry is the argument: retaining an expired revocation costs a few bytes
+and nothing else, since `Decode` rejects that session on its own expiry anyway,
+while dropping a live one is an authentication bypass. The remedy that follows is
+to make the durable write non-destructive and to stop letting a single
+wall-clock reading shrink persisted security state. The file's own comment at
+`:264-267` shows the gap precisely — it guards against a *torn* write resurrecting
+revoked cookies, which is the same harm one step removed; this writes a
+well-formed file that is simply missing live entries.
+
+### CLK-2 — admin session lifetime is an absolute wall-clock stamp
+
+`Exp` is minted as `time.Now().Add(getSessionTTL()).Unix()` (`ui_session.go:25`,
+`session.go:139`), stripping the monotonic reading, and checked as
+`time.Now().Unix() > s.Exp` (`internal/session/session.go:409`). There is no
+`iat`, no max-age and no server-side session table. A backward clock jump of Δ
+extends every live admin session by Δ — a host set back a year yields a
+year-long admin session — and with a configured `session_secret` the cookie
+survives restarts. Browser `MaxAge` is no mitigation: it is enforced by the
+client and ignored by `curl`. Forward jumps expire sessions early, which is
+availability-only and benign.
+
+### CLK-3 — TOTP replay counter: the failure direction is already the safe one
+
+Recorded as **correct**, because it is the one worth not "fixing".
+`TOTPLastCounter` is a persisted absolute time-step (`store.go:1463`) and
+`SetTOTPLastCounter` only ever raises it (`store.go:2091-2100`). A forward jump
+followed by a correction therefore rejects **every** TOTP code for the duration
+of the skew — but precisely because the counter is a monotonic high-water mark,
+**no clock movement in either direction reopens the replay window**. It fails
+availability, never security, and break-glass exists (backup codes on the same
+failure path at `ui_auth.go:63-72`, `ClearTOTP`, `--reset-password`). The
+backup/restore analogue is already guarded by `restore.go:961-973`'s
+counter-rollback refusal.
+
+### CLK-4 — a forward-skewed control plane silently stops distributing logouts
+
+`revocationAggregator.MergedExcluding` filters against the CP's own wall clock
+(`controlplane.go:248`, `:256`), so a forward-skewed CP returns nothing and DP
+nodes never learn about logouts performed on peers. Cluster-wide session
+invalidation degrades to per-node, with no log and no metric. Bounded by each DP
+keeping its locally merged copy.
+
+**Already resilient, and not to be "fixed":** account lockout is immune in both
+directions — the deadline is deliberately **not** persisted
+(`internal/lockout/lockout.go:38-39`) and every comparison is
+monotonic-vs-monotonic (`:155`, `:165`, `:177`, `:377`), so a lockout neither
+extends forever on a backward jump nor expires early on a forward one, and an
+admin unlock exists. The same holds for the admin API rate limiter, trusted-IP
+grants, user-level revocation and the credential cache: all in-memory and
+monotonic. Exactly three deadlines survive a restart as absolute wall-clock
+values, and they are CLK-1, CLK-2 and CLK-3.
+
+### BKP-1 — an encrypted-backup passphrase is never *required*
+
+`loadAndMaybeDecrypt` (`restore.go:305-311`) chooses the envelope by magic-byte
+sniff and consults the passphrase **only** in the encrypted branch, so a
+plaintext archive is accepted with the passphrase never examined, and
+`printRestoreSummary` prints no line saying the archive was unencrypted. Anyone
+who can write into the `/backup` volume can therefore substitute a hand-built
+unencrypted tarball; the manifest is self-referential (`restore.go:500-519`), so
+every content check still passes, and neither existing guard fires for a
+substituted `ui_users.json`. A restore would then install an attacker-authored
+admin roster. Since the format carries no other provenance binding, refusing the
+downgrade when a passphrase is set is the only available control — symmetric
+with the KDF-downgrade refusal `backupcrypt` already implements at the header
+level. No test covers passphrase-set-plus-plaintext-archive.
+
+### BKP-2 — the unencrypted backup archive is written world-readable
+
+`backup.go:425` uses `os.Create` (0666 before umask, so typically 0644) with no
+`Chmod` anywhere in the file, while the encrypted writer goes through
+`atomicWriteFile(..., 0o600)` whose `Chmod` makes the mode umask-independent.
+The archive aggregates files that are individually 0600 and contains
+`cluster-ca.key`, `ui_users.json` (password hashes, TOTP secrets) and
+`idp_profiles.json` (OIDC client secrets, LDAP bind credentials). Any local
+account or co-mounted container with read access to `/backup` obtains the
+fleet's MITM-capable CA key. One `0o600`. Partially mitigated by the GUI
+defaulting encryption on. No test asserts the published archive's mode on either
+path.
+
+### BKP-3 — archive memory is not actually bounded
+
+The decompression-bomb guard checks declared entry sizes
+(`restore.go:365-371`) but `restore.go:306` slurps the whole archive with an
+unbounded `os.ReadFile` (≈3× file size peak for the encrypted envelope), and
+entry **count** is uncapped, so N zero-size entries grow the maps unbounded. The
+repository's own pattern two files over is the remedy —
+`release_catalog.go:492-497` uses `io.LimitReader` plus an explicit refusal.
+Compounding: `initMemoryBackstop()` runs at `main.go:215`, *after* the restore
+one-shot at `:198`, so that path has no `GOMEMLIMIT` backstop. Availability only
+— the mutation phase is never reached.
+
+### BKP-4 — the unencrypted writer still uses a fixed `<out>.tmp`
+
+`backup.go:424-425` uses `outPath + ".tmp"` with `os.Create` — no `O_EXCL`, and
+it follows symlinks. The encrypted path deliberately abandoned this pattern and
+pins the abandonment with two tests (`TestBackupEncrypt_NoFixedTmpFile`,
+`…_StaleTmpDoesNotAffect`), the sibling file documenting exactly why. A symlink
+planted at the predictable path redirects an archive carrying the cluster CA
+key; two concurrent backups to the same `outPath` open the same inode and
+interleave, after which the CLI prints success over a corrupt archive. Two-line
+switch to `atomicWriteFile`.
+
+### BKP-5 — `modeFull` silently deletes live artifacts absent from the archive
+
+`stageArtifacts` pass 2 skips every path for which `mode.fromTarball` is true,
+and for `modeFull` that is unconditional (`restore.go:170-172`), so any live
+`/data` file absent from the archive is dropped by the directory swap — never
+reported by `printRestoreSummary` and not covered by either guard. Because
+`policy.json` and `admin_settings.json` are Tier-2 **optional** artifacts
+(`backup.go:77-101`), an archive from a fresh install legitimately contains
+neither, and restoring it onto a configured appliance drops both.
+`admin_settings.json` is where `default_action` persists, and the
+empty-default-plus-zero-rules combination resolves to passthrough — so the wrong
+archive takes the gateway from enforcing to fully permissive, silently. The plan
+should enumerate what a commit will delete, in the shape
+`--accept-dp-reenrollment` already establishes.
+
+### BKP-6 / BKP-7 — recorded, lower severity
+
+No ceiling on the archive-declared PBKDF2 iteration count (`backupcrypt.go:197`
+enforces only a floor, so a declared `0xFFFFFFFF` is ~40 minutes of
+single-core work before the AAD binding fails the open anyway — a cheap header
+check beside the floor that already exists). And `enqueueRetry` fsyncs the whole
+alert retry queue under a process-wide mutex on the producer's goroutine
+(`internal/alerts/store.go:1019-1029`), today bounded because nearly every
+producer is `go fireAlert(...)` — recorded because `pac_metrics.go:129` is a
+client-facing handler one removed `go` away from putting an fsync on the data
+path.
+
+**Pre-existing finding re-confirmed, not re-litigated:** the restore commit
+cannot succeed in the shipped docker-compose topology, because step 6 renames
+`/data`, which is a mount point (`EBUSY`). This is already characterised by its
+own test (`restore_mountpoint_test.go:31`), whose header says so plainly. It
+dominates the DR risk picture and is noted for that reason only. The failure is
+clean — current data is untouched and the stack is brought back up.
+
+**Already resilient in this domain, and the code that provides it:** restore
+validates fully in memory before the first byte is written
+(`runRestoreCommit`, `restore.go:954`), stages into a fresh exclusive directory
+and publishes by rename, so a mid-restore ENOSPC leaves `/data` untouched;
+`fileutil.AtomicWrite` is temp + chmod + fsync + rename + parent fsync with
+cleanup on every branch, and distinguishes a post-rename fsync failure so it
+cannot be mistaken for "nothing was written"; `checkInterruptedRestore`
+(`restore.go:1067`) refuses to boot into an empty `/data` when a `.bak` sibling
+proves a killed commit, and prints both recovery commands; `backupcrypt` binds
+its header as AAD so an iteration downgrade cannot authenticate and collapses
+wrong-passphrase and tamper into one opaque error with no oracle; and
+node-local key material is excluded on the pack side *and* refused on the
+restore side.
+

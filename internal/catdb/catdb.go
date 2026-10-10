@@ -18,17 +18,49 @@
 package catdb
 
 import (
+	"errors"
 	"strings"
+	"sync/atomic"
 
 	badger "github.com/dgraph-io/badger/v4"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
+	"github.com/KidCarmi/Culvert/internal/obs"
+	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
 // CommunityDB wraps a BadgerDB instance for URL category lookups.
 // All exported methods are safe for concurrent use.
 type CommunityDB struct {
 	db *badger.DB
+
+	// CHAOS-74 runtime health. The boot outcome is recorded by the caller
+	// (catfeeddb_health.go); these are the counters for everything that goes
+	// wrong AFTER a healthy open, which that record cannot see because it is
+	// written once during startup.
+	//
+	// faults counts lookups that failed for a reason other than "this host is
+	// not in the list" — a returned badger error. memFaults counts contained
+	// memory faults on the store's mapped tables, which is the signal that the
+	// backing volume can no longer supply the mapping.
+	faults    atomic.Uint64
+	memFaults atomic.Uint64
+	// degraded latches on the first contained memory fault. Once the mapping
+	// has faulted, further lookups are refused WITHOUT touching badger: the
+	// damage is not transient, and every retry is another chance to fault on a
+	// goroutine that is not behind the guard.
+	degraded atomic.Bool
+}
+
+// LookupFaults returns the number of lookups that failed with a badger error
+// rather than a clean miss, the number of contained memory faults, and whether
+// the store has latched degraded.
+//
+// A non-zero memFaults count means the data volume damaged the store's mapped
+// tables while it was open and serving. Layer-2 categorisation is off from that
+// point on; Layer 1 remains authoritative.
+func (c *CommunityDB) LookupFaults() (faults, memFaults uint64, degraded bool) {
+	return c.faults.Load(), c.memFaults.Load(), c.degraded.Load()
 }
 
 // Open opens (or creates) a BadgerDB at the given directory.
@@ -67,12 +99,70 @@ func (c *CommunityDB) Close() error {
 // Uses domain walking: tries host, then strips the leftmost label and retries,
 // stopping when no further parent exists above the TLD.
 // Returns ("", false) when no entry is found.
+//
+// CHAOS-74: this is where memory-fault containment is armed, and it is armed
+// ONCE for the whole walk rather than per point lookup. The walk issues up to
+// four or five badger reads for a deep hostname, and this runs on the proxy
+// data path, so a guard per read would pay the defer/recover cost several times
+// per request to protect against a fault that makes all of them equally
+// hopeless. One guard per walk is the same protection at a fraction of the
+// cost. A store that has already latched degraded returns here without arming
+// anything at all.
 func (c *CommunityDB) Lookup(host string) (string, bool) {
+	if c.degraded.Load() {
+		return "", false
+	}
 	host = hostutil.NormalizeHost(host)
+	var (
+		cat   string
+		found bool
+	)
+	err := storeguard.ContainFault(func() error {
+		var walkErr error
+		cat, found, walkErr = c.walk(host)
+		return walkErr
+	})
+	switch {
+	case err == nil:
+		return cat, found
+	case storeguard.IsStoreFault(err):
+		// The mapping is gone. Latch degraded and report ONCE: a per-request
+		// log line here would be a log flood driven by request volume, which is
+		// the shape of outage this package exists to prevent.
+		c.memFaults.Add(1)
+		if c.degraded.CompareAndSwap(false, true) {
+			// The error text is object-derived and can embed a filesystem
+			// path, so it goes through the recognized sanitizer and %q
+			// rather than %v (CWE-117).
+			obs.Printf("CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: %q", obs.Sanitize(err.Error()))
+		}
+		return "", false
+	default:
+		// A returned badger error: the store is answering, badly. Not latched —
+		// some of these are transient — but counted and reported once.
+		if c.faults.Add(1) == 1 {
+			obs.Printf("CatFeedDB: community category lookup failed (host treated as uncategorised): %q", obs.Sanitize(err.Error()))
+		}
+		return "", false
+	}
+}
+
+// walk performs the domain walk, stopping at the first real store error.
+//
+// A miss is not an error here: getExact reports badger.ErrKeyNotFound as a
+// clean ("", false, nil), because a host that is not in the community feed is
+// the overwhelmingly common outcome and must not be counted as store trouble.
+// Anything else aborts the walk and is returned for classification by the
+// caller — continuing to walk a store that just failed to answer would turn one
+// fault into four.
+func (c *CommunityDB) walk(host string) (string, bool, error) {
 	for {
-		cat, found := c.getExact(host)
+		cat, found, err := c.getExact(host)
+		if err != nil {
+			return "", false, err
+		}
 		if found {
-			return cat, true
+			return cat, true, nil
 		}
 		dot := strings.Index(host, ".")
 		if dot < 0 {
@@ -85,11 +175,26 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 		}
 		host = parent
 	}
-	return "", false
+	return "", false, nil
 }
 
 // getExact performs a single BadgerDB point lookup for the given domain.
-func (c *CommunityDB) getExact(domain string) (string, bool) {
+//
+// CHAOS-74. This used to end in `if err != nil { return "", false }`, which
+// collapsed three different things into one answer: a clean miss, a store that
+// returned an error, and — because the error never arrived as an error at all —
+// a store whose mapped table killed the process.
+//
+// Now badger.ErrKeyNotFound is the ONLY error treated as a miss; everything
+// else is returned so the caller can count it. The fault case is handled one
+// level up, where containment is armed for the whole walk.
+//
+// The policy outcome on a fault is deliberately unchanged — the caller still
+// answers "uncategorised". Converting a store fault into a deny would change
+// the gateway's decision on the data path, which is a different decision with a
+// different blast radius and is not this fix's to make. What changed is that
+// the degradation is bounded, survivable and visible.
+func (c *CommunityDB) getExact(domain string) (string, bool, error) {
 	var cat string
 	err := c.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(domain))
@@ -101,10 +206,14 @@ func (c *CommunityDB) getExact(domain string) (string, bool) {
 			return nil
 		})
 	})
-	if err != nil {
-		return "", false
+	switch {
+	case err == nil:
+		return cat, true, nil
+	case errors.Is(err, badger.ErrKeyNotFound):
+		return "", false, nil
+	default:
+		return "", false, err
 	}
-	return cat, true
 }
 
 // BulkWrite atomically writes a batch of domain→category pairs into BadgerDB.
