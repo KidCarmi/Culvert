@@ -434,6 +434,26 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify current password.
 	if _, ok := cfg.VerifyUIUser(username, body.CurrentPass); !ok {
+		// SEC-PWCHANGE-1: audit the refusal. The success path below is
+		// audited, so before this an incorrect-current-password attempt was
+		// the ONLY credential verification on the admin plane that left no
+		// trace at all — the same missing-compliance-record half of the
+		// defect SEC-BASIC-1 closed for HTTP Basic (ui_basic_auth.go), on a
+		// sibling row of the same surface. username comes from sessionAdmin,
+		// so it is a configured account name and needs no bound; the detail
+		// is a fixed string and never carries the presented secret.
+		//
+		// Charging loginLimiter here is deliberately NOT done, and that
+		// decision is not this change's: it is recorded in the allowance this
+		// caller already carries in
+		// TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller. This endpoint
+		// authenticates by SESSION, so a session holder could lock the real
+		// operator out of the login flow, and an attacker who does not know
+		// the password could do it by replaying any request. Attempts stay
+		// bounded by securityMiddleware's apiLimiter (mutating methods). Only
+		// the audit record was missing from that allowance's reasoning.
+		auditEvent(r, "auth.password_change.fail", username,
+			"incorrect current password")
 		http.Error(w, "current password is incorrect", http.StatusForbidden)
 		return
 	}
