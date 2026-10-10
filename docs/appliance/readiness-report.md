@@ -216,12 +216,46 @@ Findings from the pressure phases:
 | Kernel | `linux-image-virtual-hwe-24.04` 7.0.0-38.38~24.04.4 |
 | Lab | qualification + pressure run 37966305990 (pressure all pass; recovery see above); exact-byte scan run 37973308933; recovery A/B run 37973308933 |
 
+### 3h. Round of 2026-10-10 — corrected candidate `72c827b7` (supersedes `91e05872` as the handoff candidate)
+
+Two product defects found by the `91e05872` qualification are fixed; nothing else changed in product bytes (`git diff 91e05872..72c827b7`: `appliance/os-maintenance/culvert-os-update`, `internal/secscan/clam_quarantine.go` + `secscan.go`, a metric, a status field, tests and docs).
+
+| Defect | Fix | Proof on the exact candidate |
+|---|---|---|
+| **dpkg left interrupted by a full disk blocked the documented recovery.** A package update on a full disk failed AND dpkg could not record it (`/var/lib/dpkg/updates` journal entries left); once space was back every `apt` call refused ("dpkg was interrupted") and `culvert-os-update` failed (rc 100) until someone with a shell ran `dpkg --configure -a` (lab run 38016152802) | `48f45ba5`: `culvert-os-update` replays an interrupted dpkg (`dpkg --force-confold --configure -a`, the same check and command unattended-upgrades uses) before any apt step; a failed replay stops with a message naming space and inodes; `check` reports it | run 38031912707 `P/blocks-pkg-write` left dpkg interrupted (5 journal entries) under block exhaustion; `P/blocks-pkg-recovered` PASS: space released, `culvert-os-update os` rc 0 with no manual step, fixture package at 2.0, `dpkg --audit` empty. Inode and package-write phases (`pkgblocks`, `pkginodes`) rolled back cleanly to 1.0 and recovered the same way |
+| **F-P2 — clamd answered a bare clean verdict for an EICAR it did not scan** (one delivered on `dc57bd76`, run 38013626508; clamd attributed by a tap on its veth) | `72c827b7`: a clean ClamAV verdict is not trusted for 60 s after any clamd engine fault (refused under `av_unavailable=closed`, never cached); `culvert_scan_clam_clean_quarantined_total`; `/ready` clamav fails for the window (`scanning-outage-posture.md` §2) | run 38036111516 on the retained OVA, 14 fill cycles, 140 at-fill samples: clamd answered `stream: OK` to a complete EICAR stream **3 times** (each 0.19–1.70 s after a clamd fault); **0 delivered**, 101 clean verdicts quarantined (`F2/eicar-never-delivered` PASS). **Disposition: MITIGATED, not closed** — a wrong OK that came before an episode's first fault would not be caught; in 4 observed instances none did. Upstream report drafted for ClamAV's private security channel (lab `evidence/fp2-clamav-upstream-report.md`); filing is the owner's action |
+
+Qualification of the exact OVA (`76769f86…`):
+
+| | result |
+|---|---|
+| Build + full qualification + pressure + 3 calibrated reboots + console + engine surface (run 38031912707) | 143 pass, 18 info, 1 blocked (`4b/portal-cookie-replay`: no IdP in the lab, covered by CI and the SAML replay) |
+| Recovery, esxi12 profile (budget 120 s) | 107.7 / 107.6 / 107.6 s; state preserved after each reboot |
+| Adoption (retained `2e3bcc2a` appliance upgraded to the `72c827b7` image, same run) | 75 pass; adopted sidecar exact-byte scan pass |
+| F-DISK-1 against the `72c827b7` image (same run) | survived, 19 pass |
+| Console on the retained OVA (run 38036146549) | 22 pass: build identity on tty1, splash before Esc, Esc shows boot messages, Esc one-way, 0 samples in graphics mode while Plymouth ran |
+| SAML login + cookie-purpose replay at `72c827b7` (run 38036157774) | 9 PASS rows, 0 FAIL, Chromium cookie-scope probe pass; pre-fix `cd8e4450` control fails at the callback as required |
+| Exact-byte scan (run 38036146549) | the same 10,317 findings as `91e05872`, none added or removed; kernel config, kernel CVE inventory and dpkg set byte-identical; kernel matrix regenerated on these bytes: FIXED 35, MITIGATED 18, NOT AFFECTED 17, 0 open |
+| Baked ClamAV sidecar (same run) | `culvert/clamav:1.4.6-culvert.3`, image `50bb8aa0…` (DIFFERENT bytes from `91e05872`'s `0025aba0…`, same tag and pinned base): **0 findings** |
+
+Severity change, not a byte change: the 2026-10-10 vulnerability database raised CVE-2026-78669 (GO-2026-6611, HTTP/2 SETTINGS CPU exhaustion by a malicious peer) on compose from UNKNOWN to HIGH. The disposition gate refused until a symbol-level proof existed: compose links only the HTTP/2 **client** SETTINGS handlers and no HTTP/2 or gRPC server; its peers are the root-only Docker daemon and its BuildKit, and no remote endpoint can be injected — **NOT AFFECTED**; re-scan when Docker ships a compose built with x/net v0.60.0 / go1.26.9 (5.6.0 is still the newest package). The sidecar's bytes moving under a fixed tag is recorded: its build-twice gate proves reproducibility within one build, not across days, which is why each candidate's sidecar is scanned on its own bytes.
+
+**Candidate identity (handoff, supersedes the `91e05872` table above).**
+
+| | value |
+|---|---|
+| Source | `72c827b7f59f4e43ff2a813241be9029f58f23a9` (#1528; later commits on the branch are documentation only) |
+| OVA | `culvert-appliance-1.0.260-candidate.g72c827b7f59f-ubuntu-24.04.ova`, sha256 `76769f86fe1193768cd67d4829ef66749f970acb67d6306ad6d0b1082cb9dbb5` (lab run 38031912707, artifact 11662896534) |
+| App image | `sha256:d6fc9b07ad3921b31aaff0c227e8f7c9a36b03faae5c0b45f41da76dc7f7cc16` (Deep PR Gate run 38030881912, tar `8e51e048…`) |
+| Kernel | `linux-image-virtual-hwe-24.04` 7.0.0-38.38~24.04.4 |
+| Evidence | lab branch `test/appliance-lab` at `7244486a`: `evidence/candidate-72c827b7*.{json,md,tsv}`, `fp2-reproduction.md`, `fp2-72c827b7-clamd-streams.jsonl` |
+
 **4. Coverage — what was and was not exercised**
 
 | Area | Exercised | Not exercised (UNTESTED) |
 |---|---|---|
-| Identity providers | CI interop on the PR source with real IdPs in containers: Keycloak OIDC, SimpleSAMLphp SAML, OpenLDAP — all pass (`auth-idp-interop.yml` run 37936642931 on `41bd1193`; no auth code changed between `41bd1193` and `91e05872`); SAML login + cookie-purpose replay against a candidate OVA (lab `[saml-replay]` runs 37703421967, 37721112238 on earlier heads); unit/integration gates for portal cookie replay | On-appliance OIDC and LDAP against a real directory; any vendor IdP (Entra ID, Okta, ADFS, Google); the appliance lab's `4b/portal-cookie-replay` is BLOCKED (no IdP in the lab) |
-| Boot screen | QEMU with a VMware SVGA adapter and no serial (lab boot-console leg, run 37948667525): tty1 holds only the console UI after first boot, a reboot with failures, post-boot writes and a clean reboot; text mode after the splash; no splash without a display; serial-only boot and shutdown carry the kernel log and a login prompt; Esc during the splash is sent and recorded in captured frames | The ESXi console (VMRC / web console) itself; the guestinfo OVF transport; Esc behaviour judged by a pass/fail row (frames only); slow-storage boot delays on ESXi — ASTRA's ESXi round |
+| Identity providers | CI interop on the PR source with real IdPs in containers: Keycloak OIDC, SimpleSAMLphp SAML, OpenLDAP — all pass (`auth-idp-interop.yml` run 37936642931 on `41bd1193`; no auth code changed between `41bd1193` and `72c827b7`); SAML login + cookie-purpose replay against the exact candidate source (lab `[saml-replay]` run 38036157774 at `72c827b7`, with the pre-fix control failing); unit/integration gates for portal cookie replay | On-appliance OIDC and LDAP against a real directory; any vendor IdP (Entra ID, Okta, ADFS, Google); the appliance lab's `4b/portal-cookie-replay` is BLOCKED (no IdP in the lab) |
+| Boot screen | QEMU with a VMware SVGA adapter and no serial (lab boot-console leg, run 37948667525; on `72c827b7`, run 38036146549): tty1 holds only the console UI after first boot, a reboot with failures, post-boot writes and a clean reboot; text mode after the splash; no splash without a display; serial-only boot and shutdown carry the kernel log and a login prompt; Esc during the splash is sent and recorded in captured frames | The ESXi console (VMRC / web console) itself; the guestinfo OVF transport; slow-storage boot delays on ESXi (Esc is now judged by pass/fail rows: `splash-before-esc`, `esc-shows-boot-messages`, `esc-one-way`) — ASTRA's ESXi round |
 | Restore controller | Restore runbook and lab restore steps use both compose files (`docker-compose.yml` + `docker-compose.maint-agent.yml`) | — |
 
 **First-boot prerequisite for restore (ASTRA's restore controller).** A restore must start only after first boot has COMPLETED: `sudo culvert-status --json` reports `provisioning: complete` (state file `/var/lib/culvert-appliance/state/complete.done`); a controller polls it with a timeout and refuses on anything else (`recovery-restore-runbook.md` §5 step 1). Starting earlier races first boot's own stack bring-up and agent install; that is a harness ordering requirement, not a product defect, and the product is not changed to tolerate it.
