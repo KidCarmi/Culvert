@@ -240,7 +240,7 @@ Qualification of the exact OVA (`76769f86…`):
 
 Severity change, not a byte change: the 2026-10-10 vulnerability database raised CVE-2026-78669 (GO-2026-6611, HTTP/2 SETTINGS CPU exhaustion by a malicious peer) on compose from UNKNOWN to HIGH. The disposition gate refused until a symbol-level proof existed: compose links only the HTTP/2 **client** SETTINGS handlers and no HTTP/2 or gRPC server; its peers are the root-only Docker daemon and its BuildKit, and no remote endpoint can be injected — **NOT AFFECTED**; re-scan when Docker ships a compose built with x/net v0.60.0 / go1.26.9 (5.6.0 is still the newest package). The sidecar's bytes moving under a fixed tag is recorded: its build-twice gate proves reproducibility within one build, not across days, which is why each candidate's sidecar is scanned on its own bytes.
 
-**Candidate identity (`72c827b7`; superseded for handoff by the replacement candidate that carries the cache fix — see the PR thread).**
+**Candidate identity (`72c827b7`; superseded for handoff by `bad788e5`, §3i).**
 
 | | value |
 |---|---|
@@ -249,6 +249,39 @@ Severity change, not a byte change: the 2026-10-10 vulnerability database raised
 | App image | `sha256:d6fc9b07ad3921b31aaff0c227e8f7c9a36b03faae5c0b45f41da76dc7f7cc16` (Deep PR Gate run 38030881912, tar `8e51e048…`) |
 | Kernel | `linux-image-virtual-hwe-24.04` 7.0.0-38.38~24.04.4 |
 | Evidence | lab branch `test/appliance-lab` at `7244486a`: `evidence/candidate-72c827b7*.{json,md,tsv}`, `fp2-reproduction.md`, `fp2-72c827b7-clamd-streams.jsonl` |
+
+### 3i. Round of 2026-10-10 — replacement candidate `bad788e5` (supersedes `72c827b7` as the handoff candidate)
+
+One product change since `72c827b7`: the owner's P1 (review 5478346473). On `72c827b7` a clean verdict cached BEFORE a clamd fault was served from the hash cache without consulting the quarantine, so a body already judged clean kept passing during the outage. Fixed in `ada25c4c` (+ lint in `bad788e5`): every clean verdict carries the clamd fault generation read at scan start; a fault advances it, which invalidates every clean verdict cached before it (`culvert_scan_clam_clean_cache_stale_total`). Cached blocks and fault-free caching are unchanged (`scanning-outage-posture.md` §2). Tests: a cached-clean body faults → refused inside the window, re-scanned and re-cached after it; a scan that spans a fault is not published; cached blocks survive a fault; mutation-checked.
+
+**Correction to §3h.** On `72c827b7` the pressure judge accepted the bypass: under inode exhaustion the "allowed" request answered 200 from the cache, and the harness read 200/403 as enforcement. The defect was the product's; the judge now also accepts the correct refusal (403 with the AV-unavailable body, `p_enforced`), never a delivered EICAR.
+
+Qualification of the exact OVA (`87c8ae61…`):
+
+| | result |
+|---|---|
+| Build + full qualification (run 38040972664) | 141 pass, 17 info, 1 blocked (`4b/portal-cookie-replay`, no IdP in the lab), **3 fail — all the old judge**: `inodes-app-update`, `inodes-os-update`, `pkginodes-os-update` each recorded traffic `403/403`, i.e. the cached-clean request now refused as AV-unavailable. Every other check, including steps E (kernel hardening) and 8 (reboot), passed |
+| Pressure re-run on the retained OVA with the corrected judge (run 38045091498) | 118 pass, 15 info, 1 blocked, 0 fail; inode phases `403/403 x9` with `/ready` failing the clamav row in every refusal; block phases unchanged; dpkg self-repair after the full disk PASS; proxy never restarted |
+| F-P2 on the retained OVA (run 38045099843) | clamd answered `stream: OK` to a complete EICAR stream **2 times** in 140 at-fill samples (1.48 s and 0.47 s after a clamd fault); **0 delivered**, 190 clean verdicts quarantined; 70 pass, 0 fail |
+| Console on the retained OVA (run 38045126206) | 22 pass, 0 fail |
+| SAML login + cookie-purpose replay at `bad788e5` (run 38045136632) | 9 PASS rows, 0 FAIL; Chromium cookie-scope probe: `ps_session` never presented to the destination; pre-fix `cd8e4450` control fails as required |
+| Exact-byte scan (run 38045126206) | findings, kernel CVEs, kernel config and dpkg set byte-identical to `72c827b7`; only Culvert's own four binaries changed hash. Compose is byte-identical (`40343e21…`), so the GO-2026-6611 symbol proof applies unchanged. Kernel matrix: FIXED 35, MITIGATED 18, NOT AFFECTED 17, 0 open. Docker engine packages re-measured 2026-10-10T11:34Z: still the newest |
+| Baked ClamAV sidecar (same run) | image `d62dd495…` (different bytes from `72c827b7`'s `50bb8aa0…`): **0 findings** |
+
+**F-P2 stays OPEN.** The quarantine refuses a wrong OK that follows a fault; a wrong OK that comes before an episode's first fault is delivered at that moment. In 6 observed instances over four runs none came first, which does not bound it. The upstream report is drafted for the owner to file privately.
+
+**Merge with `main` (`019ee743`) changes no shipped source**: only docs, agent guidance, CI workflow/scripts and one test file. A rebuild from the merge head would differ from `bad788e5`'s only in the embedded commit stamp.
+
+**Candidate identity (`bad788e5`).**
+
+| | value |
+|---|---|
+| Source | `bad788e54ffef2a2f8490ba27ebfe027a2a6eb11` (#1528; later commits are documentation and the merge with `main`) |
+| OVA | `culvert-appliance-1.0.260-candidate.gbad788e54ffe-ubuntu-24.04.ova`, sha256 `87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c` (lab run 38040972664, artifact 11666266481) |
+| App image | `sha256:ac1909ec95d7588a86737cfa6d8927b0e7c04a5fe12891706eec86591dbb2ad7` (Deep PR Gate run 38040017115, tar `b1d63190…`) |
+| ClamAV sidecar | `culvert/clamav:1.4.6-culvert.3`, `sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251` (OVA archive `9b95f68b…`) |
+| Kernel | `linux-image-virtual-hwe-24.04` 7.0.0-38.38~24.04.4 |
+| Evidence | lab branch `test/appliance-lab` at `e0fc1bbc`: `evidence/candidate-bad788e5*.{json,md}`, `fp2-reproduction.md`, `fp2-bad788e5-clamd-streams.jsonl` |
 
 **4. Coverage — what was and was not exercised**
 
