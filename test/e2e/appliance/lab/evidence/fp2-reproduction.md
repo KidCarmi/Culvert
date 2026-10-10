@@ -45,7 +45,20 @@ before any fill, and the tap recorded that conversation with its FOUND reply.
   reserved clusters, which even root cannot allocate. All 14 cycles were the
   same full-disk state.
 
-## Disposition: OPEN
+## Disposition: MITIGATED on the product (reactive), root cause OPEN upstream
+
+Owner decision (2026-10-10): options 2 + 3 below; option 1 not taken without
+lab-proven size caps.
+
+* **Option 2 shipped** on PR #1528 as commit `72c827b7`: a 60 s clean-verdict
+  quarantine after any clamd engine fault. It would have refused this instance.
+  It does **not** cover a wrong `OK` before the first fault of an episode, so
+  the risk is narrowed, not closed. It is not yet in any qualified candidate.
+  The next candidate must re-run this reproduction expecting 0 delivered.
+* **Option 3 drafted**: `fp2-clamav-upstream-report.md`, for the owner to file
+  through ClamAV's private security channel.
+
+### Original options (for the record)
 
 The risk is open on both candidates. The remediation needs an owner decision
 (see the PR #1528 handoff), because each option trades something:
