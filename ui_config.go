@@ -1770,6 +1770,7 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		noteAccessCIDRResult(accessCIDRUIAllow, nil)
 		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(body.IPs)), strings.Join(body.IPs, ", "))
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "ips": ListUIAllowedCIDRs()})
