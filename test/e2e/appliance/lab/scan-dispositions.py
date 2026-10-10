@@ -19,6 +19,40 @@ ev, cand_f, out = sys.argv[1:4]
 cand = json.load(open(cand_f))
 rows = list(csv.DictReader(open(os.path.join(ev, "findings.tsv")), delimiter="\t"))
 
+# HIGH/CRITICAL Go findings on the guest need more than a reachability
+# verdict: each is closed by a symbol-level proof against the exact binary's
+# pclntab (candidate JSON "symbol_probe"). absent = must be 0 in the probe,
+# present = must be 1 (the probe is a control: the listing is not empty for
+# the package involved). The renderer FAILS on a HIGH/CRITICAL Go row without
+# an entry, or on a probe that disagrees with the entry.
+HIGH_PROOF = {
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6609"): {
+        "disposition": "NOT AFFECTED",
+        "absent": ["net/http.parseRange", "net/http.serveContent", "net/http.ServeContent", "net/http.serveFile",
+                   "net/http.ServeFile", "net/http.(*fileHandler).ServeHTTP", "net/http.fileTransport.RoundTrip",
+                   "net/http.NewFileTransport", "net/http.FileServer"],
+        "present": ["net/http.(*Transport).RoundTrip"],
+        "text": "The vulnerable code is not in the binary. GO-2026-6609 is CPU exhaustion in `net/http.parseRange` reached through "
+                "`ServeContent`/`ServeFile(FS)`/`FileServer`/`fileTransport.RoundTrip`. None of those functions, and not `parseRange` itself, "
+                "is linked into the shipped compose (all too large to inline); `net/http.(*Transport).RoundTrip` is present as the control "
+                "(the listing does carry net/http). Source mode agrees (`imported`, no path from `main`).",
+    },
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6607"): {
+        "disposition": "NOT AFFECTED",
+        "absent": ["google.golang.org/grpc.NewServer", "github.com/moby/buildkit/session.NewSession",
+                   "golang.org/x/net/http2.(*Server).ServeConn", "net/http.(*http2Server).ServeConn", "net/http.(*Server).Serve",
+                   "crypto/tls.NewListener"],
+        "present": ["crypto/tls.decodeInnerClientHello", "crypto/tls.(*Conn).processECHClientHello"],
+        "text": "The flaw is SERVER-side: a TLS server decoding an attacker's ECH inner ClientHello (`decodeInnerClientHello`). In go1.26.8 "
+                "`handshake_server.go` passes `config.EncryptedClientHelloKeys` (or `GetEncryptedClientHelloKeys`) to `processECHClientHello`, "
+                "which returns at `len(echKeys) == 0` BEFORE any decode. No code in compose v5.6.0 or any of its dependencies sets either field "
+                "(full `go mod vendor` of tag v5.6.0 = binary `vcs.revision` 42f48072, every one of the binary's 107 module versions present; "
+                "the stdlib reads them only inside crypto/tls). The decode is linked (present below), so this rests on the unsatisfiable "
+                "precondition, not on absence; the probe also shows no server constructor at all (no `grpc.NewServer`, no BuildKit session, "
+                "no HTTP/2 or HTTP server `Serve`).",
+    },
+}
+
 # Engine findings that source mode places on a real call path, each with the
 # reasoning tied to that path. Keyed (binary, id).
 CALLED = {
@@ -49,7 +83,7 @@ CALLED = {
     ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6603"): "HTTP/2 framer reached from the gRPC client transport (`http2Client.readServerPreface`) — the advisory's server-side trailer flood needs compose to SERVE HTTP/2, which it never does; compose runs only as root (`install.sh`, the maintenance agent, `culvert-os-update`) and opens no listener; its HTTP and gRPC peers are the root-only local Docker socket and the daemon's own BuildKit.",
     ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6604"): "`os.Root.Mkdir` in go-archive's untar (`createImpliedDirectories`), used by `compose cp` and build-context handling; the appliance never runs `compose cp`, and its only build context is the ClamAV sidecar directory from the verified deploy bundle.",
     ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6605"): "`http.Get` for a REMOTE build context (`build.GetContextFromURL`); the appliance's compose files build only from a local directory, and the desync needs an HTTP proxy rejecting CONNECT.",
-    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6607"): "TLS client handshake in `http.Transport.dialConn`; the advisory concerns ECH outer-extension references, which a client meets only when it is configured for ECH — compose is not, and its daemon connection is a Unix socket without TLS.",
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6607"): "NOT AFFECTED — see HIGH closure below. The flaw is SERVER-side (`decodeInnerClientHello` on a received ClientHello); compose's call paths are TLS CLIENT handshakes (`http.Transport.dialConn`, gRPC `ClientHandshake`, `tls.Dial`), and the server path is unreachable without ECH keys nobody sets.",
     ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6608"): "MIME-header parsing of response trailers (`http.body.readTrailer`); the only servers compose reads responses from are the local root-only daemon and BuildKit (compose runs only as root (`install.sh`, the maintenance agent, `culvert-os-update`) and opens no listener; its HTTP and gRPC peers are the root-only local Docker socket and the daemon's own BuildKit).",
     ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6610"): "HTTP/2 transport reached from the Docker Desktop feature probe (`desktop.IsFeatureActive`); there is no Docker Desktop endpoint on the appliance, and the malformed headers must come from the server compose talks to.",
     ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6611"): "x/net HTTP/2 transport (`transportResponseBody.Close`); the CPU cost needs a hostile HTTP/2 SERVER as the peer — compose's peers are the local daemon and BuildKit (compose runs only as root (`install.sh`, the maintenance agent, `culvert-os-update`) and opens no listener; its HTTP and gRPC peers are the root-only local Docker socket and the daemon's own BuildKit).",
@@ -144,8 +178,10 @@ kver = open(os.path.join(ev, "kernel-cves.tsv")).readline().split()[-1]
 w(f"## Guest OS — kernel `{kver}`")
 w("")
 krows = [r for r in rf if r["package"].startswith("linux-")]
-w(f"{len(krows)} package rows; {len(dist(krows))} distinct CVEs, all Ubuntu-tracker `affected` with no fixed {kver.split('-')[0]} package. "
-  "The kernel is the newest the archive publishes (the scan job's `apt-cache policy` record, `kernel-candidates.txt`). "
+w(f"{len(krows)} package rows; {len(dist(krows))} distinct CVEs; no fixed package for any of them in the security or updates pocket at scan time. "
+  "The kernel is the newest those pockets publish (the scan job's `apt-cache policy` record, `kernel-candidates.txt`). "
+  "Only findings on packages carrying the running kernel's version count against it; header/wrapper packages are attributed separately "
+  "(`kernel-cves-userspace.tsv`). "
   "Every distinct CRITICAL and HIGH CVE is placed on the exact disk by `kernmap.py`:")
 w("")
 c = collections.Counter((x[1], x[3]) for x in k)
@@ -154,7 +190,9 @@ L.extend(table(["severity", "absent (code not on disk)", "denied (cannot load)",
 w("")
 w("- **absent:** the subsystem is in the reviewed table `kernel-absent-review.tsv` and this disk agrees (CONFIG `=m` with the module built but no `.ko` on disk, or unset). The code is not on the appliance.")
 w("- **denied:** the module is on the disk and `/etc/modprobe.d/culvert-unused.conf` makes it unloadable; the booted-guest probe confirms every denied module stays unloaded and that a real SCTP socket is refused.")
-w("- **present:** core kernel code or a loadable module the appliance may use. **Disposition:** no fixed package exists; the next Canonical 6.8.0 kernel update arrives through the security pocket and is applied with `culvert-os-update os --reboot-if-required`.")
+w("- **present:** core kernel code or a loadable module the appliance may use. These are NOT closed by the absence of a fixed package: "
+  + (f"each has its own row (FIXED / MITIGATED / NOT AFFECTED / OPEN / UNDETERMINED, with Canonical status, prerequisites and candidate evidence) in [`{cand['kernel_matrix']}`]({os.path.basename(cand['kernel_matrix'])})."
+     if cand.get("kernel_matrix") else "**no per-CVE matrix is linked for this candidate — these rows are OPEN.**"))
 w("")
 w("### CRITICAL")
 w("")
@@ -270,7 +308,7 @@ for f in os.listdir(os.path.join(ev, "engsrc")):
                 alias[f[:-5]][a] = m["osv"]["id"]
 w("### Trivy's Go-binary rows on the guest filesystem")
 w("")
-body = []
+body, high_rows = [], []
 for r in [r for r in rf if r["type"] == "gobinary"]:
     name = r["target"].replace("/", "-")
     if r["target"].startswith("opt/culvert-appliance/"):
@@ -282,7 +320,13 @@ for r in [r for r in rf if r["type"] == "gobinary"]:
         if name not in idx:
             sys.exit(f"no source-mode record for {r['target']} ({r['id']})")
         lvl = src.get(name, {}).get(gid, {}).get("status") if gid else None
-        if lvl == "called":
+        if r["severity"] in ("HIGH", "CRITICAL"):
+            pr = HIGH_PROOF.get((name, gid))
+            if not pr:
+                sys.exit(f"HIGH/CRITICAL Go finding without a symbol-level proof: {r['target']} {r['id']} ({gid})")
+            high_rows.append((r, gid, pr))
+            verdict = f"{gid}: **{pr['disposition']}** — see HIGH closure below"
+        elif lvl == "called":
             verdict = f"{gid}: called — see the table above"
         elif lvl:
             verdict = f"{gid}: source mode `{lvl}` (not reachable from main)"
@@ -291,6 +335,31 @@ for r in [r for r in rf if r["type"] == "gobinary"]:
     body.append([r["target"], r["package"], r["installed"], r["fixed"], r["severity"], r["id"], verdict])
 L.extend(table(["binary", "module", "shipped", "fixed in", "severity", "ID", "disposition"], body))
 w("")
+if high_rows:
+    probe = {}
+    if not cand.get("symbol_probe"):
+        sys.exit("HIGH Go findings need candidate JSON symbol_probe")
+    pf = os.path.join(os.path.dirname(os.path.abspath(__file__)), cand["symbol_probe"])
+    for l in open(pf):
+        if l.startswith("#") or "\t" not in l:
+            continue
+        n, sym = l.rstrip("\n").split("\t", 1)
+        probe[sym] = int(n)
+    w("### HIGH closure — symbol-level proof on the exact binary")
+    w("")
+    w(f"Probe: [`{cand['symbol_probe']}`]({os.path.basename(cand['symbol_probe'])}) — exact-name lookup in the binary's own pclntab; its header names the binary hash.")
+    w("")
+    for r, gid, pr in high_rows:
+        for sym in pr["absent"]:
+            if probe.get(sym) != 0:
+                sys.exit(f"{gid}: proof says {sym} is absent, probe says {probe.get(sym)}")
+        for sym in pr["present"]:
+            if probe.get(sym) != 1:
+                sys.exit(f"{gid}: proof says {sym} is present, probe says {probe.get(sym)}")
+        w(f"- **{r['id']}** ({gid}, `{r['target']}`, {r['package']} {r['installed']}) — **{pr['disposition']}.** {pr['text']}")
+        w(f"  - absent (0): " + ", ".join(f"`{x}`" for x in pr["absent"]))
+        w(f"  - present (1): " + ", ".join(f"`{x}`" for x in pr["present"]))
+    w("")
 cv = [r for r in rows if r["source"].startswith("govulncheck:host-opt-culvert")]
 if any(r["id"] != "GO-2026-5932" for r in cv):
     sys.exit("undispositioned Culvert host-binary finding")

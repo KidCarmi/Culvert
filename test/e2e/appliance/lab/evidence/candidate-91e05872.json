@@ -1,0 +1,20 @@
+{
+ "source": "91e05872dfe5f96c94ec725b8b2dc2b1002116ab",
+ "ova_artifact": "11634023092",
+ "ova_run": "37966305990",
+ "image_id": "sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4",
+ "image_tar": "ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae",
+ "image_run": "37964407987",
+ "scan_run": "37973308933",
+ "scan_artifact": "11636924016",
+ "sidecar": "`culvert/clamav:1.4.6-culvert.3`, amd64 manifest `sha256:0025aba0b328b5ecb03d155d9207af22f87fec3849493156eab01f84266ba68a` (config `sha256:65f19e6b\u2026` = Trivy ImageID; OVA archive `c5973ba1\u2026`, base `clamav/clamav:1.4` amd64 `sha256:da8463f6\u2026`): exact-byte Trivy 0.69.3 scan of the archive extracted from THIS OVA, **0 findings** at any severity (alpine 3.24.2; lab run 38011420779, artifact 11653227906). This is a DIFFERENT sidecar from 7c7b29ee's (`45dbf003\u2026`), so that earlier result is not reused.",
+ "engine_latest": {
+  "docker-ce": "5:29.9.0-1~ubuntu.24.04~noble",
+  "docker-ce-cli": "5:29.9.0-1~ubuntu.24.04~noble",
+  "containerd.io": "2.4.1-2~ubuntu.24.04~noble",
+  "docker-compose-plugin": "5.6.0-1~ubuntu.24.04~noble"
+ },
+ "engine_latest_measured": "Docker apt repository noble/stable, measured 2026-10-10T01:05Z",
+ "kernel_matrix": "evidence/candidate-91e05872-kernel-matrix.md",
+ "symbol_probe": "evidence/candidate-91e05872-compose-symbols.tsv"
+}

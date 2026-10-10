@@ -1,0 +1,27 @@
+# count	symbol — pclntab of usr/libexec/docker/cli-plugins/docker-compose sha256 40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a (= the OVA's binary, go-binaries.tsv; from docker-compose-plugin_5.6.0-1~ubuntu.24.04~noble_amd64.deb); 33203 functions; exact-name match
+0	google.golang.org/grpc.NewServer
+0	github.com/moby/buildkit/session.NewSession
+0	github.com/moby/buildkit/session.(*Session).Run
+0	golang.org/x/net/http2.(*Server).ServeConn
+0	net/http.(*http2Server).ServeConn
+0	net/http.(*Server).Serve
+0	net/http.(*Server).ListenAndServe
+0	net/http.(*Server).ServeTLS
+0	net/http.ListenAndServe
+0	net/http.Serve
+0	crypto/tls.Server
+0	crypto/tls.NewListener
+0	net/http.ServeContent
+0	net/http.serveContent
+0	net/http.ServeFile
+0	net/http.serveFile
+0	net/http.parseRange
+0	net/http.fileTransport.RoundTrip
+0	net/http.NewFileTransport
+0	net/http.FileServer
+0	net/http.(*fileHandler).ServeHTTP
+1	crypto/tls.decodeInnerClientHello
+1	crypto/tls.(*Conn).processECHClientHello
+1	net/http.(*Transport).RoundTrip
+0	crypto/tls.Client
+1	google.golang.org/grpc.NewClient
