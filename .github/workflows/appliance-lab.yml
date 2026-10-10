@@ -738,12 +738,12 @@ jobs:
             candidate_sha: cd8e44505bd329e5de675592ad4c23f92a534d55
             expect: fail
           # The candidate under qualification, at its exact source commit
-          # (the commit the 72c827b7 image and OVA were built from): SAML login
+          # (the commit the bad788e5 image and OVA were built from): SAML login
           # + browser binding + login-CSRF + cookie-purpose rows, and the real
           # Chromium portal-cookie scope probe. fix-2a82320c / bound-ba93fdcb
           # passed in earlier runs and are superseded by this leg.
-          - label: exact-72c827b7
-            candidate_sha: 72c827b7f59f4e43ff2a813241be9029f58f23a9
+          - label: exact-bad788e5
+            candidate_sha: bad788e54ffef2a2f8490ba27ebfe027a2a6eb11
             expect: pass
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
