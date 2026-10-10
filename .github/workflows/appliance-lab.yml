@@ -51,7 +51,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -581,7 +581,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -961,6 +961,110 @@ jobs:
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
+  # F-P2 CAUSAL control (owner follow-up 6097484537 item 2): ClamAV 1.4.6
+  # built from the release source twice on one runner — STOCK, and PATCHED
+  # with the single line under test (scan_common's per-scan mkdir failure set
+  # to CL_ETMPDIR, a halting error, instead of CL_EACCES, which the done-path
+  # filter rewrites to CL_SUCCESS = clean). Both run natively with the same
+  # config, a one-signature EICAR database, and a 64 MiB loop ext4 temp dir,
+  # and face the same edge state (4 KiB free). Pass = stock answers a bare OK
+  # to EICAR at the edge (the defect, reproduced from source) AND patched
+  # answers ERROR to every one of them.
+  fp2-source:
+    name: "Lab · F-P2 causal: ClamAV 1.4.6 from source, stock vs one-line patch"
+    if: ${{ contains(github.event.head_commit.message, '[fp2-source]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CLAMAV_URL: https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.4.6/clamav-1.4.6.tar.gz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build deps + release source (hash recorded)
+        run: |
+          set -euo pipefail
+          W=/mnt/fp2src; [ -d /mnt ] || W="$HOME/fp2src"; sudo mkdir -p "$W" && sudo chown "$(id -u):$(id -g)" "$W"; mkdir -p "$W/evidence"
+          echo "W=$W" >> "$GITHUB_ENV"
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends cmake ninja-build pkg-config \
+            libssl-dev libcurl4-openssl-dev zlib1g-dev libbz2-dev libxml2-dev libpcre2-dev libjson-c-dev libncurses-dev
+          cargo --version | tee "$W/evidence/cargo-version.txt"
+          curl -fsSL -o "$W/clamav-1.4.6.tar.gz" "$CLAMAV_URL"
+          sha256sum "$W/clamav-1.4.6.tar.gz" | tee "$W/evidence/source.sha256"
+      - name: Build STOCK and PATCHED (the patch is the only difference)
+        run: |
+          set -euo pipefail
+          cd "$W"
+          for v in stock patched; do mkdir -p "$v" && tar -xzf clamav-1.4.6.tar.gz -C "$v" --strip-components=1; done
+          python3 -I - patched/libclamav/scanners.c <<'PY'
+          import sys
+          p=sys.argv[1]; s=open(p).read()
+          old='cli_errmsg("Can\'t create temporary directory for scan: %s.\\n", ctx.sub_tmpdir);\n        status = CL_EACCES;'
+          assert s.count(old)==1, "patch site not found exactly once"
+          s=s.replace(old, old.replace("CL_EACCES","CL_ETMPDIR")); open(p,"w").write(s)
+          PY
+          diff -ru stock/libclamav patched/libclamav > "$W/evidence/patch.diff" || true
+          cat "$W/evidence/patch.diff"
+          for v in stock patched; do
+            cmake -S "$v" -B "$v/build" -G Ninja -D CMAKE_BUILD_TYPE=Release -D CMAKE_INSTALL_PREFIX="$W/inst-$v" \
+              -D ENABLE_TESTS=OFF -D ENABLE_MILTER=OFF -D ENABLE_CLAMONACC=OFF -D ENABLE_MAN_PAGES=OFF -D ENABLE_DOXYGEN=OFF > "$W/evidence/cmake-$v.log"
+            cmake --build "$v/build" -j"$(nproc)" > "$W/evidence/build-$v.log" 2>&1 || { tail -50 "$W/evidence/build-$v.log"; exit 1; }
+            cmake --install "$v/build" > /dev/null
+            "$W/inst-$v/sbin/clamd" --version | tee "$W/evidence/clamd-$v-version.txt"
+          done
+      - name: Run both against the same edge state
+        run: |
+          set -uo pipefail
+          cd "$W"; L="$GITHUB_WORKSPACE/test/e2e/appliance/lab"
+          hex="$(printf '%s%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$' 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' | od -An -tx1 | tr -d ' \n')"
+          port=3311
+          for v in stock patched; do
+            mkdir -p "db-$v"; echo "Lab.EICAR:0:*:$hex" > "db-$v/lab.ndb"
+            truncate -s 64M "tmp-$v.img"; mkfs.ext4 -q -m 0 "tmp-$v.img"; sudo mkdir -p "tmp-$v"; sudo mount -o loop "tmp-$v.img" "tmp-$v"; sudo chmod 1777 "tmp-$v"
+            printf 'TCPSocket %s\nTCPAddr 127.0.0.1\nTemporaryDirectory %s\nDatabaseDirectory %s\nLogFile %s\nLogTime yes\nPidFile %s\n' \
+              "$port" "$W/tmp-$v" "$W/db-$v" "$W/evidence/clamd-$v.log" "$W/clamd-$v.pid" > "clamd-$v.conf"
+            "$W/inst-$v/sbin/clamd" -c "clamd-$v.conf"
+            for _ in $(seq 1 60); do [ "$(printf 'zPING\0' | timeout 5 nc -q2 127.0.0.1 $port 2>/dev/null | tr -d '\0')" = PONG ] && break; sleep 2; done
+            printf 'zVERSION\0' | timeout 5 nc -q2 127.0.0.1 $port | tr -d '\0' | tee -a "$W/evidence/versions.txt"; echo >> "$W/evidence/versions.txt"
+            R="$W/evidence/requests-$v.jsonl"; : > "$R"
+            for spec in "control 1 40 1 -1" "edge 6 10 1 4096" "full 2 10 1 0"; do
+              set -- $spec; python3 -I "$L/fp2-isolated.py" 127.0.0.1 $port "$W/tmp-$v" "$R" "$v-$1" "$2" "$3" "$4" "$5"
+            done
+            python3 -I "$L/fp2-isolated-report.py" "$R" "$W/evidence/REPORT-$v.md" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "mkdir failures logged by $v: $(grep -c "Can't create temporary directory for scan" "$W/evidence/clamd-$v.log")" | tee -a "$W/evidence/verdict.txt"
+            port=$((port + 1))
+          done
+          python3 -I - "$W/evidence" <<'PY' | tee -a "$W/evidence/verdict.txt" "$GITHUB_STEP_SUMMARY"
+          import json, sys, collections
+          e = sys.argv[1]
+          def edge(v):
+              c = collections.Counter()
+              for l in open(f"{e}/requests-{v}.jsonl"):
+                  d = json.loads(l)
+                  if d.get("variant") != f"{v}-edge" or "event" in d or not d["eicar"]: continue
+                  parts = [p.strip() for p in d["reply"].split("\x00") if p.strip()]
+                  k = "FOUND" if any(p.endswith(" FOUND") for p in parts) else "ERROR" if any(p.endswith(" ERROR") for p in parts) else "OK" if parts == ["stream: OK"] else "other"
+                  c[k] += 1
+              return c
+          ctl = {}
+          for v in ("stock", "patched"):
+              for l in open(f"{e}/requests-{v}.jsonl"):
+                  d = json.loads(l)
+                  if d.get("variant") == f"{v}-control" and d.get("eicar"):
+                      ctl.setdefault(v, collections.Counter())["FOUND" if "FOUND" in d["reply"] else "other"] += 1
+          s, p = edge("stock"), edge("patched")
+          print(f"control EICAR: stock {dict(ctl.get('stock', {}))}, patched {dict(ctl.get('patched', {}))}")
+          print(f"edge (4 KiB free) EICAR: stock {dict(s)}, patched {dict(p)}")
+          ok = s["OK"] > 0 and p["OK"] == 0 and p["ERROR"] == sum(p.values()) and ctl.get("stock", {}).get("FOUND") and ctl.get("patched", {}).get("FOUND")
+          print("VERDICT:", "CAUSAL — the one line turns every unscanned clean into ERROR" if ok else "NOT SHOWN — see the tables")
+          sys.exit(0 if ok else 1)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-fp2-source-1.4.6
+          path: ${{ env.W }}/evidence/
+          if-no-files-found: warn
+
   ova-sidecar-scan:
     name: "Lab · candidate OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
     if: ${{ contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
@@ -1078,7 +1182,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:

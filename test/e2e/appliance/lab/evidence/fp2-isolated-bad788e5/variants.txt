@@ -1,0 +1,5 @@
+control done; clamd: PONG
+serial-full done; clamd: PONG
+serial-sweep done; clamd: PONG
+conc8 done; clamd: PONG
+conc8-full done; clamd: PONG
