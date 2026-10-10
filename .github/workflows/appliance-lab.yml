@@ -80,49 +80,23 @@ jobs:
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
-          # NEW CANDIDATE 72c827b7 = 91e05872 + culvert-os-update replays an
-          # interrupted dpkg before apt (48f45ba5; found by the package-write
-          # pressure run 38016152802) + ClamAV clean verdicts quarantined for
-          # 60 s after an engine fault (72c827b7, F-P2). Built from source;
-          # image = that head's own Deep PR Gate tar.
+          # F-P2 REQUALIFICATION on the RETAINED 72c827b7 OVA (run 38031912707,
+          # sha256 76769f86…; built and fully qualified there, incl. the
+          # adoption leg). Same 14-cycle fill reproduction that delivered one
+          # EICAR on dc57bd76 (run 38013626508). Pass = Culvert never delivers
+          # an EICAR; any clamd OK it refused is recorded as upstream evidence
+          # with the quarantine counter. The build leg is restored from
+          # f89fd1e9 for the next candidate.
           - variant: candidate-72c827b7f59f
             provisioning: source
             source_sha: "72c827b7f59f4e43ff2a813241be9029f58f23a9"
             image_run: "38030881912"
             image_tar_sha256: "8e51e048d0f206f3c9952c8651bb7255e0a4ffa6e524fc9c4247368363320483"
             expect_image_id: "sha256:d6fc9b07ad3921b31aaff0c227e8f7c9a36b03faae5c0b45f41da76dc7f7cc16"
-            retained_run: ""
-            retained_sha256: ""
-            # Disk pressure incl. the package-write phases (pkgblocks /
-            # pkginodes): the dpkg journal must end empty with no manual step.
-            pressure: "1"
-            # The calibrated ESXi proxy (12 ms read / 3 ms write).
-            disk: dm
-            recovery_reboots: "3"
-            recovery_profiles: "esxi12:12:3:120"
-            recovery_variants: "base"
-            console: "1"
-            engine_surface: "1"
-          # Adoption (restored from e3d9b4bc): the RETAINED 2e3bcc2a appliance
-          # (old sidecar tag baked in) upgraded to the 72c827b7 image, with
-          # the 72c827b7 installer put in place first.
-          - variant: candidate-2e3bcc2a1095
-            provisioning: source
-            source_sha: "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2"
-            image_run: "37604379502"
-            image_tar_sha256: "db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff"
-            expect_image_id: "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940"
-            retained_run: "37606237892"
-            retained_sha256: "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"
+            retained_run: "38031912707"
+            retained_sha256: "76769f86fe1193768cd67d4829ef66749f970acb67d6306ad6d0b1082cb9dbb5"
             recovery_reboots: "0"
-            adopt_image_run: "38030881912"
-            adopt_image_tar_sha256: "8e51e048d0f206f3c9952c8651bb7255e0a4ffa6e524fc9c4247368363320483"
-            adopt_image_id: "sha256:d6fc9b07ad3921b31aaff0c227e8f7c9a36b03faae5c0b45f41da76dc7f7cc16"
-            adopt_installer_sha: "72c827b7f59f4e43ff2a813241be9029f58f23a9"
-            history: "0"
-            adopt_old_ref: "culvert/clamav:1.4.6-pcre2-10.49"
-            adopt_new_ref: "culvert/clamav:1.4.6-culvert.3"
-            adopt_pkgs: "nghttp2-libs-1.70.0-r0 pcre2-10.49-r0 zlib-1.3.2-r1"
+            fp2: "1"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
