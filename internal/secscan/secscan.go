@@ -147,6 +147,10 @@ type CounterSnapshot struct {
 	// they arrived within clamQuarantineWindow of an engine fault (F-P2):
 	// refused under the closed posture, forwarded uncached under open.
 	ClamCleanQuarantined int64
+
+	// ClamCleanCacheStale counts cached clean verdicts not honoured because
+	// a ClamAV engine fault happened after their scan started.
+	ClamCleanCacheStale int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -168,6 +172,7 @@ func Counters() CounterSnapshot {
 
 		AVUnavailableRefused: atomic.LoadInt64(&statAVUnavailableRefused),
 		ClamCleanQuarantined: atomic.LoadInt64(&statClamCleanQuarantined),
+		ClamCleanCacheStale:  atomic.LoadInt64(&statClamCleanCacheStale),
 	}
 }
 
@@ -260,6 +265,10 @@ type Scanner struct {
 	// lastClamEngineFault is the UnixNano of this daemon's most recent engine
 	// fault (0 = none); it opens the clean-verdict quarantine (clam_quarantine.go).
 	lastClamEngineFault atomic.Int64
+	// clamFaultGen counts this daemon's engine faults. A clean verdict is
+	// cached with the generation read when its scan started and is honoured
+	// only while that generation is current (clam_quarantine.go).
+	clamFaultGen atomic.Uint64
 
 	// ClamAV VERSION cache. Signature databases update at most a few times a
 	// day, so this is cached far longer than the ping status.
@@ -643,7 +652,9 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 		return nil
 	}
 
-	// Cache hit?
+	// Cache hit? A cached BLOCK is always honoured. A cached CLEAN is honoured
+	// only if no ClamAV engine fault has happened since its scan started: a
+	// wrong OK just before a fault (F-P2) must not outlive the quarantine.
 	if cached, ok := ss.cache.Get(hash); ok {
 		if !cached.Clean {
 			return &Result{
@@ -653,7 +664,10 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 				Hash:    hash,
 			}
 		}
-		return nil // cached clean
+		if ss.cleanCacheValid(cached) {
+			return nil // cached clean
+		}
+		atomic.AddInt64(&statClamCleanCacheStale, 1) // re-judged below
 	}
 
 	// Run all scanners under a single timeout.
@@ -878,6 +892,9 @@ func (ss *Scanner) publishVerdict(hash string, r hashcache.ScanCacheResult, aban
 		noteLateCleanDiscarded(hash)
 		return
 	}
+	if r.Clean && !ss.cleanCacheValid(r) {
+		return // a fault landed during this scan; lookups would reject it anyway
+	}
 	ss.cache.Set(hash, r)
 }
 
@@ -927,6 +944,9 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 	ss.mu.RLock()
 	clam := ss.clam
 	ss.mu.RUnlock()
+	// Read BEFORE the scan: a fault that lands while this body is in clamd
+	// moves the generation on, so this scan's clean verdict is never honoured.
+	gen := ss.clamFaultGen.Load()
 
 	// ClamAV scan. An engine error (daemon crash mid-stream) is governed by the
 	// av_unavailable posture. Under "open" (the default) it falls through to
@@ -985,7 +1005,7 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 	// Content is clean — cache the negative result, unless ClamAV errored:
 	// a partial scan is not a clean verdict (the next occurrence rescans).
 	if !clamDark {
-		ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"}, abandoned)
+		ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean", Epoch: gen}, abandoned)
 	}
 	return nil
 }

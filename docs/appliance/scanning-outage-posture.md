@@ -53,13 +53,21 @@ posture is documented in `docs/operator/scan-capacity-and-timeouts.md` §6.2.
   is never cached, and under `closed` the body is **refused** like any other
   AV-unavailable body; under `open` it is forwarded uncached. Detections
   inside the window still block as detections. Our own limits (scan budget,
-  slot queue) are not engine faults and open no window. Surfaced as
+  slot queue) are not engine faults and open no window. **The fault also
+  invalidates every clean verdict already in the scan cache** (review
+  5478346473): each clean entry carries the fault generation read when its
+  scan started, and a lookup honours it only while that generation is
+  current, so a wrong `OK` cached just before the fault is re-judged instead
+  of being served for the rest of the cache TTL, and a scan that was in
+  clamd when the fault landed never yields a usable entry. Cached BLOCKS are
+  untouched. Counted as `culvert_scan_clam_clean_cache_stale_total`. Surfaced as
   `culvert_scan_clam_clean_quarantined_total` and, on
   `/api/security-scan/status`, `clamav_status` =
   `scan_failing: clean verdicts quarantined for Ns after an engine fault`
-  (the `/ready` `clamav` row fails for the same window). **Residual:** this is
-  reactive — a wrong `OK` that comes BEFORE the first fault of an episode is
-  not caught. That case is recorded in
+  (the `/ready` `clamav` row fails for the same window). **Residual (F-P2
+  stays OPEN):** this is reactive — a wrong `OK` that comes BEFORE the first
+  fault of an episode is delivered at that moment (it can no longer outlive
+  the fault through the cache). That case is recorded in
   `test/e2e/appliance/lab/evidence/fp2-reproduction.md` (lab branch) and
   reported to ClamAV upstream; it is not closed by this change.
 * Admin UI → Security Scanning shows the posture (*When ClamAV Is

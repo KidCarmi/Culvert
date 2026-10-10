@@ -30,6 +30,8 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/hashcache"
 )
 
 // clamQuarantineWindow is how long after the last engine fault clean verdicts
@@ -43,6 +45,10 @@ const clamQuarantineWindow = 60 * time.Second
 const ClamQuarantineWindow = clamQuarantineWindow
 
 var (
+	// statClamCleanCacheStale counts cached clean verdicts not honoured
+	// because a clamd engine fault happened after their scan started; each
+	// is re-judged (re-scanned, or refused inside the window).
+	statClamCleanCacheStale int64
 	// statClamCleanQuarantined counts clean ClamAV verdicts not trusted
 	// because they arrived inside the window (refused under closed, forwarded
 	// uncached under open).
@@ -53,7 +59,23 @@ var (
 
 // noteClamEngineFault opens (or extends) the quarantine window. The stamp is
 // per Scanner (one in production): the window describes THIS daemon.
-func (ss *Scanner) noteClamEngineFault() { ss.lastClamEngineFault.Store(quarantineNow().UnixNano()) }
+//
+// It also moves the fault generation on, which invalidates every clean
+// verdict already in the cache (review 5478346473): the window only guards
+// FRESH replies, and the F-P2 residual is a wrong OK just BEFORE the first
+// fault, which the cache would otherwise keep serving for its whole TTL.
+// Cached blocks are untouched.
+func (ss *Scanner) noteClamEngineFault() {
+	ss.clamFaultGen.Add(1)
+	ss.lastClamEngineFault.Store(quarantineNow().UnixNano())
+}
+
+// cleanCacheValid reports whether a cached clean verdict was produced by a scan
+// that started in the current fault generation. Compared by equality, so an
+// entry from any earlier generation stays invalid after the window closes.
+func (ss *Scanner) cleanCacheValid(r hashcache.ScanCacheResult) bool {
+	return r.Epoch == ss.clamFaultGen.Load()
+}
 
 // clamQuarantineRemaining reports how much of the window is left (0 = not
 // quarantined). A fault stamped in the FUTURE (the clock went backwards) keeps
@@ -82,6 +104,9 @@ func clamQuarantineStatus(remaining time.Duration) string {
 	return fmt.Sprintf("%s: clean verdicts quarantined for %ds after an engine fault",
 		ClamStatusScanFailingPrefix, int(remaining.Round(time.Second)/time.Second))
 }
+
+// ClamCleanCacheStaleTotal reports cached clean verdicts re-judged after a fault.
+func ClamCleanCacheStaleTotal() int64 { return atomic.LoadInt64(&statClamCleanCacheStale) }
 
 // ClamCleanQuarantinedTotal reports clean verdicts not trusted so far.
 func ClamCleanQuarantinedTotal() int64 { return atomic.LoadInt64(&statClamCleanQuarantined) }

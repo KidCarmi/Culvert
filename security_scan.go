@@ -424,4 +424,5 @@ func addAVUnavailableStatus(m map[string]interface{}, counters secscan.CounterSn
 	m["av_unavailable"] = secscan.AVUnavailablePosture()
 	m["stat_av_unavailable_refused"] = counters.AVUnavailableRefused
 	m["stat_clam_clean_quarantined"] = counters.ClamCleanQuarantined
+	m["stat_clam_clean_cache_stale"] = counters.ClamCleanCacheStale
 }

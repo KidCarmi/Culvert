@@ -919,6 +919,10 @@ culvert_scan_av_unavailable_refused_total %d
 # TYPE culvert_scan_clam_clean_quarantined_total counter
 culvert_scan_clam_clean_quarantined_total %d
 
+# HELP culvert_scan_clam_clean_cache_stale_total Total cached clean verdicts not honoured because a ClamAV engine fault happened after their scan started (each re-judged)
+# TYPE culvert_scan_clam_clean_cache_stale_total counter
+culvert_scan_clam_clean_cache_stale_total %d
+
 # HELP culvert_scan_av_unavailable_closed The av_unavailable posture in force (1 = closed: unscannable content is refused; 0 = open: forwarded unscanned)
 # TYPE culvert_scan_av_unavailable_closed gauge
 culvert_scan_av_unavailable_closed %d
@@ -993,6 +997,7 @@ culvert_auth_sso_required_total %d
 		scanCounters.RemoteScanInflight,
 		scanCounters.AVUnavailableRefused,
 		scanCounters.ClamCleanQuarantined,
+		scanCounters.ClamCleanCacheStale,
 		avUnavailableClosedGauge(),
 		feedBlocked,
 		feedEntries,
