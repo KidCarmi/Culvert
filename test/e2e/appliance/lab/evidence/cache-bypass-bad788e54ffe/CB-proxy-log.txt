@@ -1,0 +1,17 @@
+[Culvert] 2026/10/10 12:39:44 SecurityScan: av_unavailable=closed set by CULVERT_AV_UNAVAILABLE (boot posture; a saved admin setting still wins)
+[Culvert] 2026/10/10 12:39:44 SecurityScan: ClamAV connected at "tcp:clamav:3310"
+[Culvert] 2026/10/10 12:41:05 SecurityScan: av_unavailable=closed set by CULVERT_AV_UNAVAILABLE (boot posture; a saved admin setting still wins)
+[Culvert] 2026/10/10 12:41:05 SecurityScan: ClamAV connected at "tcp:clamav:3310"
+[Culvert] 2026/10/10 12:42:34 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:42:43 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:42:43 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:42:49 WARN SecurityScan: ClamAV error (connect_failed): clamav: connect: dial tcp 172.18.0.2:3310: connect: connection refused — content REFUSED (av_unavailable=closed); total 1
+[Culvert] 2026/10/10 12:42:49 WARN SecurityScan: AV scan unavailable (clamav: connect_failed) — content REFUSED (av_unavailable=closed) for hash 24362f42d6209f88fa66116c19dad09dd4f2f963dfc6d88d9992dd4ae27fc891; total 1
+[Culvert] 2026/10/10 12:42:49 SCAN_BLOCKED 10.0.2.2 -> "10.0.2.2:18431" ("av_unavailable": "AV scan unavailable")
+[Culvert] 2026/10/10 12:42:49 SecurityScan: refused host="10.0.2.2:18431" — content could not be scanned because AV is unavailable (av_unavailable=closed)
+[Culvert] 2026/10/10 12:42:51 SCAN_BLOCKED 10.0.2.2 -> "10.0.2.2:18431" ("av_unavailable": "AV scan unavailable")
+[Culvert] 2026/10/10 12:42:51 SecurityScan: refused host="10.0.2.2:18431" — content could not be scanned because AV is unavailable (av_unavailable=closed)
+[Culvert] 2026/10/10 12:42:55 SCAN_BLOCKED 10.0.2.2 -> "10.0.2.2:18431" ("av_unavailable": "AV scan unavailable")
+[Culvert] 2026/10/10 12:42:55 SecurityScan: refused host="10.0.2.2:18431" — content could not be scanned because AV is unavailable (av_unavailable=closed)
+[Culvert] 2026/10/10 12:42:59 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:44:08 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"

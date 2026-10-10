@@ -1,0 +1,5 @@
+X streams before=2 stream: OK;stream: OK
+X after window=200 streams=3 stream: OK;stream: OK;stream: OK
+X again=200 streams=3 stream: OK;stream: OK;stream: OK
+Y after window=403:clamav_block
+ctr=7 6 1 2 2

@@ -1,0 +1,4 @@
+X inside window=200 at +6.2s
+c5=3 6 1 1 absent
+X streams (total)=1 stream: OK
+Y inside window=

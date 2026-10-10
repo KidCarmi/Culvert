@@ -1,0 +1,5 @@
+c0=0 2 0 0 0
+X x2=200 200
+c1=1 3 0 0 0
+X streams=1 stream: OK
+Y x2=403:clamav_block 403:clamav_block Y streams=1 stream: Eicar-Signature FOUND

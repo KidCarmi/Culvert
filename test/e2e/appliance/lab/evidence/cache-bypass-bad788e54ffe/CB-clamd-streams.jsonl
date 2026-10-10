@@ -1,0 +1,13 @@
+{"t": 1791636159.778, "dur": 0.0, "cmd": "zVERSION", "up": 9, "eicar": false, "reply": "ClamAV 1.4.6/28149/Sat Oct 10 06:24:04 2026\u0000", "close": "clamd-fin"}
+{"t": 1791636159.816, "dur": 0.014, "cmd": "zINSTREAM", "up": 96, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791636160.761, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791636160.765, "dur": 0.003, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791636163.059, "dur": 0.007, "cmd": "zINSTREAM", "up": 126, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791636169.159, "dur": 0.0, "cmd": "", "up": 0, "eicar": false, "reply": "", "close": "clamd-rst"}
+{"t": 1791636171.818, "dur": 0.015, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791636175.66, "dur": 0.003, "cmd": "zINSTREAM", "up": 96, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791636229.432, "dur": 0.003, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791636229.438, "dur": 0.006, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791636229.44, "dur": 0.002, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791636229.442, "dur": 0.003, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791636238.834, "dur": 0.003, "cmd": "zINSTREAM", "up": 96, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}

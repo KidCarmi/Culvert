@@ -1,0 +1,3 @@
+variant=candidate-bad788e54ffe
+image_source=bad788e54ffef2a2f8490ba27ebfe027a2a6eb11
+superseded_ova_sha256=e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4 (NOT the artifact booted here)

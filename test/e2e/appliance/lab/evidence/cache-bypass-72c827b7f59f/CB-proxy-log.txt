@@ -1,0 +1,15 @@
+[Culvert] 2026/10/10 12:38:27 SecurityScan: av_unavailable=closed set by CULVERT_AV_UNAVAILABLE (boot posture; a saved admin setting still wins)
+[Culvert] 2026/10/10 12:38:27 SecurityScan: ClamAV connected at "tcp:clamav:3310"
+[Culvert] 2026/10/10 12:39:48 SecurityScan: av_unavailable=closed set by CULVERT_AV_UNAVAILABLE (boot posture; a saved admin setting still wins)
+[Culvert] 2026/10/10 12:39:48 SecurityScan: ClamAV connected at "tcp:clamav:3310"
+[Culvert] 2026/10/10 12:41:16 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:41:24 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:41:24 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:41:30 WARN SecurityScan: ClamAV error (connect_failed): clamav: connect: dial tcp 172.18.0.2:3310: connect: connection refused — content REFUSED (av_unavailable=closed); total 1
+[Culvert] 2026/10/10 12:41:30 WARN SecurityScan: AV scan unavailable (clamav: connect_failed) — content REFUSED (av_unavailable=closed) for hash 9f1ef7de6f456b9cfa6dbcec7431251b71eabf62516aeb9c3b742881132c6958; total 1
+[Culvert] 2026/10/10 12:41:30 SCAN_BLOCKED 10.0.2.2 -> "10.0.2.2:18431" ("av_unavailable": "AV scan unavailable")
+[Culvert] 2026/10/10 12:41:30 SecurityScan: refused host="10.0.2.2:18431" — content could not be scanned because AV is unavailable (av_unavailable=closed)
+[Culvert] 2026/10/10 12:41:33 SCAN_BLOCKED 10.0.2.2 -> "10.0.2.2:18431" ("av_unavailable": "AV scan unavailable")
+[Culvert] 2026/10/10 12:41:33 SecurityScan: refused host="10.0.2.2:18431" — content could not be scanned because AV is unavailable (av_unavailable=closed)
+[Culvert] 2026/10/10 12:41:40 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
+[Culvert] 2026/10/10 12:42:46 SecurityScan: blocked host="10.0.2.2:18431" source=clamav reason="Eicar-Signature"
