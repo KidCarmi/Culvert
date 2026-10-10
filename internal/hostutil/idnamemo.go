@@ -71,12 +71,35 @@ import (
 // Sizing: a deployment's set of live internationalized destinations is small —
 // this is the IDN tail of the destination set, not the destination set — so 1024
 // slots hold far more than a real working set while bounding the table at
-// 1024 x (entry header + two hosts of at most 253 bytes each), i.e. well under
-// 1 MB even if every slot were filled with maximum-length hosts, and a few tens
-// of KB in practice. The table is read-mostly (a write happens only on a cold
-// miss), so the 8 KB of pointers sharing cache lines costs nothing measurable;
-// padding each slot to a cache line would trade 56 KB of footprint for no win.
+// 1024 x (entry header + two strings of at most maxMemoHostLen bytes each),
+// i.e. well under 1 MB even if every slot were filled with maximum-length
+// hosts, and a few tens of KB in practice. The table is read-mostly (a write
+// happens only on a cold miss), so the 8 KB of pointers sharing cache lines
+// costs nothing measurable; padding each slot to a cache line would trade
+// 56 KB of footprint for no win.
 const normMemoSlots = 1024
+
+// maxMemoHostLen is the longest string this table will retain, per entry field.
+// It is the RFC 1035 maximum length of a DNS name, and it is what makes the
+// footprint ceiling above a provable bound rather than an expectation.
+//
+// It is load-bearing, not cosmetic. The zero-option idna.ToASCII profile does
+// NOT enforce the DNS length limit (the bidi and length checks are disabled —
+// see NormalizeHostStrict), and on the HTTP path the destination authority
+// reaches here BEFORE the 253-byte canonical refusal: handleRequest's raw
+// pre-cap admits up to maxRawDestAuthorityBytes (1 KiB), canonicalDestHost
+// normalizes it, and only then does rejectOversizeCanonicalHost refuse it. So
+// without this check a client could park ~1 KiB per slot — measured at ~2.1 MB
+// across a full table, four times the ceiling documented above — and the
+// non-request callers (feed parsing, admin patterns) are not bounded by that
+// 1 KiB gate at all.
+//
+// Refusing to memoize such a host costs nothing: a name longer than this cannot
+// be resolved by any DNS server, and both dispatch gates refuse it immediately
+// after canonicalizing it, so it never reaches the ~10x per-request fan-out the
+// memo exists to collapse. The verdict is unaffected either way — an oversize
+// host is still normalized, just not retained.
+const maxMemoHostLen = 253
 
 // normMemoMask turns a hash into a slot index.
 const normMemoMask = normMemoSlots - 1
@@ -109,12 +132,28 @@ func normMemoSlot(host string) *atomic.Pointer[normMemoEntry] {
 // already lowercased, dot-trimmed and established is neither empty nor
 // already-canonical ASCII. On a hit it allocates nothing.
 func normalizeHostStrictMemo(host string) (norm string, ok bool) {
+	// Too long to retain (see maxMemoHostLen): normalize and answer, store
+	// nothing. Checked before the slot lookup because nothing oversize is ever
+	// stored, so the probe could only ever miss.
+	if len(host) > maxMemoHostLen {
+		return normalizeHostStrictUncached(host)
+	}
+
 	slot := normMemoSlot(host)
 	if e := slot.Load(); e != nil && e.host == host {
 		return e.norm, e.ok
 	}
 
 	norm, ok = normalizeHostStrictUncached(host)
+	// An in-limit input can in principle grow past the limit through punycode
+	// encoding. Punycode shrinks the shapes that matter in practice (a 252-byte
+	// CJK host measures 98 bytes as an A-label), so this branch is not expected
+	// to be reached — it is here so the ceiling holds by construction rather
+	// than by that expectation, and TestIDNMemo_StoredEntriesRespectTheBound
+	// asserts the invariant over every entry rather than over this branch.
+	if len(norm) > maxMemoHostLen {
+		return norm, ok
+	}
 
 	// Store a CLONE of the key, never the caller's string. host here is a
 	// substring of whatever the caller passed in (strings.ToLower returns its

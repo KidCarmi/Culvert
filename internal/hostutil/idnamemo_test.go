@@ -47,6 +47,14 @@ import (
 // The ASCII fast path is untouched and must stay 0-alloc: pinned by
 // TestIDNMemo_FastPathNeverTouchesMemo and the existing
 // TestNormalizeHostStrict_AllocRegression.
+//
+// The footprint ceiling this file asserts holds only because no entry may carry
+// a string longer than maxMemoHostLen. That is not incidental: the HTTP raw gate
+// admits a 1 KiB authority and the 253-byte canonical refusal runs after
+// canonicalDestHost has already normalized it, so an oversize ACE host used to be
+// retained whole. TestIDNMemo_OversizeHostsAreNotRetained and
+// TestIDNMemo_StoredEntriesRespectTheBound are the gates for that; both were
+// verified failing against the verbatim pre-fix body.
 
 // idnShapes are the internationalized destination shapes that reach the slow
 // path. ACELabel is the one that matters most: browsers send the A-label in the
@@ -212,6 +220,99 @@ func TestIDNMemo_AllocRegression(t *testing.T) {
 	}
 }
 
+// TestIDNMemo_OversizeHostsAreNotRetained is the regression gate for the bound
+// the first revision of this file asserted but did not hold (CodeRabbit on
+// PR #1598). The HTTP raw pre-cap admits a 1 KiB destination authority and the
+// 253-byte canonical refusal runs AFTER canonicalDestHost has normalized it, and
+// the zero-option idna.ToASCII profile enforces no length limit of its own — so
+// a ~1 KiB ACE authority used to be cloned into a slot whole (measured: a
+// 998-byte host stored as len(host)=998, len(norm)=998, i.e. ~2.1 MB across a
+// full table against the 554 KB this file claims). The verdict is unchanged
+// either way; only retention is.
+func TestIDNMemo_OversizeHostsAreNotRetained(t *testing.T) {
+	oversize := []struct {
+		name string
+		host string
+	}{
+		// What the 1 KiB raw gate admits, with an ACE label so it reaches the
+		// slow path rather than the already-canonical fast path.
+		{"ValidACE", "xn--bcher-kva." + strings.Repeat("a", 980) + ".com"},
+		// The ok=false shape: a malformed ACE label on an oversize authority.
+		{"MalformedACE", "xn--." + strings.Repeat("b", 990) + ".com"},
+		// Non-ASCII, so the fast path rejects it and idna does the work.
+		{"Unicode", strings.Repeat("ü", 400) + ".example.com"},
+		// Exactly one byte over the limit — the boundary.
+		{"OneOverLimit", "xn--bcher-kva." + strings.Repeat("c", maxMemoHostLen-13) + ".de"},
+	}
+	for _, c := range oversize {
+		t.Run(c.name, func(t *testing.T) {
+			normMemoResetForTest()
+			lowered := strings.ToLower(strings.TrimSuffix(c.host, "."))
+			if len(lowered) <= maxMemoHostLen {
+				t.Fatalf("probe host is %d bytes, not oversize — the case proves nothing", len(lowered))
+			}
+			wantNorm, wantOK := normalizeHostStrictUncached(lowered)
+			// The answer must be identical: this is about retention only.
+			for round := 0; round < 3; round++ {
+				gotNorm, gotOK := NormalizeHostStrict(c.host)
+				if gotNorm != wantNorm || gotOK != wantOK {
+					t.Fatalf("round %d: got (%q…, %v), uncached (%q…, %v)",
+						round, truncForLog(gotNorm), gotOK, truncForLog(wantNorm), wantOK)
+				}
+			}
+			if n := normMemoOccupied(); n != 0 {
+				t.Errorf("REGRESSION: %d slots filled by a %d-byte host — an oversize host "+
+					"must be normalized but never retained, or the footprint ceiling does not hold",
+					n, len(lowered))
+			}
+		})
+	}
+}
+
+// truncForLog keeps a failure message from dumping a kilobyte-long host.
+func truncForLog(s string) string {
+	if len(s) > 40 {
+		return s[:40]
+	}
+	return s
+}
+
+// TestIDNMemo_StoredEntriesRespectTheBound asserts the footprint invariant
+// directly, over whatever the table actually ended up holding, rather than over
+// the one code path that enforces it: no live entry may carry a string longer
+// than maxMemoHostLen. That is what makes the ceiling in
+// TestIDNMemo_BoundedFootprint a bound rather than a measurement of one corpus.
+func TestIDNMemo_StoredEntriesRespectTheBound(t *testing.T) {
+	normMemoResetForTest()
+	// A corpus that mixes in-limit, boundary and oversize shapes, plus inputs
+	// whose punycode form is longer than their ASCII byte count suggests.
+	corpus := append([]string{}, fastPathCorpus()...)
+	corpus = append(corpus,
+		"xn--bcher-kva."+strings.Repeat("a", 980)+".com",
+		strings.Repeat("ü", 400)+".example.com",
+		strings.Repeat("日", 80)+".example.com",
+		strings.Repeat("日", 84)+".example.com",
+		"xn--."+strings.Repeat("b", 990)+".com",
+		strings.Repeat("xn--fsq.", 120)+"com",
+	)
+	for i := 0; i < 64; i++ {
+		corpus = append(corpus, fmt.Sprintf("bücher%d.example.com", i))
+	}
+	for _, h := range corpus {
+		NormalizeHostStrict(h)
+	}
+	for i := range normMemo {
+		e := normMemo[i].Load()
+		if e == nil {
+			continue
+		}
+		if len(e.host) > maxMemoHostLen || len(e.norm) > maxMemoHostLen {
+			t.Fatalf("slot %d holds len(host)=%d len(norm)=%d, both must be <= %d",
+				i, len(e.host), len(e.norm), maxMemoHostLen)
+		}
+	}
+}
+
 // TestIDNMemo_BoundedFootprint is the memory test: the key is a client-chosen
 // destination authority, so the table must not grow with the number of distinct
 // hosts seen. Feeding it 64x more distinct IDN hosts than it has slots must leave
@@ -227,8 +328,10 @@ func TestIDNMemo_BoundedFootprint(t *testing.T) {
 		t.Fatalf("memo holds %d entries after %d distinct hosts, ceiling %d", occupied, distinct, normMemoSlots)
 	}
 	// Absolute ceiling: every slot filled with two maximum-length DNS names.
-	const maxHost = 253
-	ceiling := len(normMemo)*8 + normMemoSlots*(40+2*maxHost)
+	// It is a real ceiling only because no entry may exceed maxMemoHostLen —
+	// asserted over the live table by TestIDNMemo_StoredEntriesRespectTheBound
+	// and at the boundary by TestIDNMemo_OversizeHostsAreNotRetained.
+	ceiling := len(normMemo)*8 + normMemoSlots*(40+2*maxMemoHostLen)
 	retained := normMemoRetainedBytes()
 	if retained > ceiling {
 		t.Fatalf("memo retains %d B after %d distinct hosts, ceiling %d B", retained, distinct, ceiling)

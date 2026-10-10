@@ -622,8 +622,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the pre-optimization reference ran 598k executions with no divergence.
 
   The key is a client-chosen authority, so the table is direct-mapped with 1024
-  fixed slots and a per-process random slot seed. It cannot grow — 104 KB
-  retained after 65 536 distinct IDN hosts, against a 554 KB absolute ceiling —
+  fixed slots and a per-process random slot seed, and no entry retains a string
+  longer than the 253-byte DNS name maximum. That last bound is load-bearing
+  rather than decorative: `handleRequest`'s raw pre-cap admits a 1 KiB
+  authority and the 253-byte canonical refusal runs *after* `canonicalDestHost`
+  has normalized it, while the zero-option `idna.ToASCII` profile enforces no
+  length limit of its own, so an oversize A-label host would otherwise be
+  retained whole (~2.1 MB across a full table). Refusing to memoize one costs
+  nothing — no DNS server can resolve a longer name, and both dispatch gates
+  refuse it immediately, so it never reaches the fan-out the memo exists to
+  collapse. The table therefore cannot grow — 104 KB retained after 65 536
+  distinct IDN hosts, against a 554 KB absolute ceiling —
   a collision costs a recomputation rather than a wrong answer, because every
   hit re-verifies the full key, and an adversary who could force collisions
   would obtain today's behaviour. Ordinary ASCII traffic is untouched: it
