@@ -9,7 +9,7 @@ go 1.26.6
 // disagreement. The `go` line above is the module's minimum language version,
 // not the build compiler, and is not raised to match. Upgrade procedure:
 // roadmap/CI-REDESIGN.md §20.
-toolchain go1.26.8
+toolchain go1.26.9
 
 require (
 	github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f
@@ -32,7 +32,7 @@ require (
 	go.etcd.io/etcd/client/v3 v3.7.1
 	go.etcd.io/etcd/server/v3 v3.7.1
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.42.0
 	google.golang.org/grpc v1.83.2
