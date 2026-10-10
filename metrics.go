@@ -915,6 +915,10 @@ culvert_remote_scan_inflight %d
 # TYPE culvert_scan_av_unavailable_refused_total counter
 culvert_scan_av_unavailable_refused_total %d
 
+# HELP culvert_scan_clam_clean_quarantined_total Total clean ClamAV verdicts not trusted because they arrived within the quarantine window after a ClamAV engine fault (refused under av_unavailable=closed, forwarded uncached under open)
+# TYPE culvert_scan_clam_clean_quarantined_total counter
+culvert_scan_clam_clean_quarantined_total %d
+
 # HELP culvert_scan_av_unavailable_closed The av_unavailable posture in force (1 = closed: unscannable content is refused; 0 = open: forwarded unscanned)
 # TYPE culvert_scan_av_unavailable_closed gauge
 culvert_scan_av_unavailable_closed %d
@@ -988,6 +992,7 @@ culvert_auth_sso_required_total %d
 		scanCounters.RemoteScanSaturated,
 		scanCounters.RemoteScanInflight,
 		scanCounters.AVUnavailableRefused,
+		scanCounters.ClamCleanQuarantined,
 		avUnavailableClosedGauge(),
 		feedBlocked,
 		feedEntries,

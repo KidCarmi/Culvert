@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,6 +68,7 @@ func TestAVUnavailable_NormalizeAndSet(t *testing.T) {
 // the daemon answers.
 func TestAVUnavailableClosed_ClamFaultRefusesAndIsNotCached(t *testing.T) {
 	withAlertRecorder(t)
+	clock := withQuarantineClock(t)
 	withAVPosture(t, AVUnavailableClosed)
 	clam := &fakeClam{scanErr: uniqueClamErr(t)}
 	yara := &fakeYARA{loaded: true, enabled: true}
@@ -96,13 +98,23 @@ func TestAVUnavailableClosed_ClamFaultRefusesAndIsNotCached(t *testing.T) {
 		t.Fatal("an infrastructure refusal must NEVER be cached")
 	}
 
-	// Recovery: the daemon comes back and the content is clean.
+	// The daemon comes back and answers clean — but inside the quarantine
+	// window after its fault (F-P2) that verdict is not trusted: refused under
+	// the closed posture, and not cached.
 	clam.scanErr = nil
-	if res := ss.ScanBody(data); res != nil {
-		t.Fatalf("recovered daemon + clean content must pass, got %+v", res)
+	if res := ss.ScanBody(data); res == nil || res.Source != SourceAVUnavailable {
+		t.Fatalf("a clean verdict inside the quarantine window must be refused (closed), got %+v", res)
 	}
-	if clam.calls != 2 {
-		t.Fatalf("engine must be consulted again after the refusal (calls=%d)", clam.calls)
+	if _, ok := ss.cache.Get(hash); ok {
+		t.Fatal("a quarantined clean verdict must NEVER be cached")
+	}
+	// Recovery: once the window has passed with no new fault, clean passes.
+	clock.advance(clamQuarantineWindow + time.Second)
+	if res := ss.ScanBody(data); res != nil {
+		t.Fatalf("recovered daemon + clean content must pass after the window, got %+v", res)
+	}
+	if clam.calls != 3 {
+		t.Fatalf("engine must be consulted on every scan (calls=%d)", clam.calls)
 	}
 	if c, ok := ss.cache.Get(hash); !ok || !c.Clean {
 		t.Fatalf("a real clean verdict must cache as before, got %+v ok=%v", c, ok)
@@ -193,6 +205,7 @@ func TestAVUnavailable_NoClamConfiguredIsNotAnOutage(t *testing.T) {
 // status TTL — the next status read re-pings.
 func TestAVUnavailable_FaultMarksClamStatusStale(t *testing.T) {
 	withAlertRecorder(t)
+	clock := withQuarantineClock(t)
 	clam := &fakeClam{}
 	ss := newEnabledTestScanner(Deps{Clam: clam, Yara: &fakeYARA{}, Excl: fakeExcl{}, Feed: fakeFeed{}})
 	if st := ss.ClamAVStatus(); st != "connected" {
@@ -210,9 +223,14 @@ func TestAVUnavailable_FaultMarksClamStatusStale(t *testing.T) {
 	if st := ss.ClamAVStatus(); st == "connected" {
 		t.Fatal("status still reports connected after the request path saw the daemon fault")
 	}
-	// And it recovers on evidence: a healthy ping clears it.
+	// It recovers on evidence: a healthy ping and probe clear it, once the
+	// clean-verdict quarantine opened by the fault has expired (F-P2).
 	clam.pingErr, clam.scanErr = nil, nil
 	ss.clamStatusExpiry = time.Time{} // let the unreachable entry age out
+	if st := ss.ClamAVStatus(); !strings.HasPrefix(st, ClamStatusScanFailingPrefix) {
+		t.Fatalf("inside the quarantine window the status must not read connected, got %q", st)
+	}
+	clock.advance(clamQuarantineWindow + time.Second)
 	if st := ss.ClamAVStatus(); st != "connected" {
 		t.Fatalf("recovered daemon must report connected, got %q", st)
 	}

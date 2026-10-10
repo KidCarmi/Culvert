@@ -41,8 +41,27 @@ posture is documented in `docs/operator/scan-capacity-and-timeouts.md` §6.2.
   `clamav ok` (lab run 37957097250). `/health` keeps its public enum (this
   state reads `unreachable` there); the cause (`scan_failing: …`) is on
   `GET /api/security-scan/status`. The row recovers on the first status read
-  whose probe gets a clean verdict (at most the 30 s status cache after the
-  daemon can scan again).
+  after the quarantine window below has closed whose probe gets a clean
+  verdict.
+* **Clean verdicts are quarantined for 60 s after any clamd engine fault**
+  (F-P2). In lab run 38013626508 clamd, during a root-filesystem fill, failed
+  one stream ("Error writing to temporary file") and 0.44 s later answered a
+  bare `stream: OK` to a complete EICAR stream, which was delivered. Nothing
+  in that reply distinguishes it from a real clean verdict, so the proxy now
+  stops trusting clean verdicts while clamd is faulting: for 60 s after the
+  LAST engine fault (each further fault restarts the window) a clean verdict
+  is never cached, and under `closed` the body is **refused** like any other
+  AV-unavailable body; under `open` it is forwarded uncached. Detections
+  inside the window still block as detections. Our own limits (scan budget,
+  slot queue) are not engine faults and open no window. Surfaced as
+  `culvert_scan_clam_clean_quarantined_total` and, on
+  `/api/security-scan/status`, `clamav_status` =
+  `scan_failing: clean verdicts quarantined for Ns after an engine fault`
+  (the `/ready` `clamav` row fails for the same window). **Residual:** this is
+  reactive — a wrong `OK` that comes BEFORE the first fault of an episode is
+  not caught. That case is recorded in
+  `test/e2e/appliance/lab/evidence/fp2-reproduction.md` (lab branch) and
+  reported to ClamAV upstream; it is not closed by this change.
 * Admin UI → Security Scanning shows the posture (*When ClamAV Is
   Unavailable*) and the *Refused: AV unavailable* counter;
   `GET /api/security-scan/status` carries `av_unavailable`.

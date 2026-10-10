@@ -71,6 +71,7 @@ func TestClamStatus_ProbeReportedInfectedIsScanFailing(t *testing.T) {
 // Recovery is on evidence: once the cached failure ages out, the next read
 // probes again and a clean verdict reports connected.
 func TestClamStatus_ScanFailingRecoversOnACleanProbe(t *testing.T) {
+	clock := withQuarantineClock(t)
 	clam := &fakeClam{scanErr: errors.New("clamav: empty response (daemon may have closed connection)")}
 	ss := newEnabledTestScanner(Deps{Clam: clam, Yara: &fakeYARA{}, Excl: fakeExcl{}, Feed: fakeFeed{}})
 	if st := ss.ClamAVStatus(); !strings.HasPrefix(st, ClamStatusScanFailingPrefix) {
@@ -78,6 +79,12 @@ func TestClamStatus_ScanFailingRecoversOnACleanProbe(t *testing.T) {
 	}
 	clam.scanErr = nil
 	ss.clamStatusExpiry = time.Time{}
+	// The failed probe opened the clean-verdict quarantine (F-P2): still not
+	// connected inside the window, connected on a clean probe after it.
+	if st := ss.ClamAVStatus(); !strings.Contains(st, "quarantined") {
+		t.Fatalf("inside the window after a failed probe: status %q", st)
+	}
+	clock.advance(clamQuarantineWindow + time.Second)
 	if st := ss.ClamAVStatus(); st != "connected" {
 		t.Fatalf("after the daemon can scan again: status %q", st)
 	}

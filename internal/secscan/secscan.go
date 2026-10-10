@@ -142,6 +142,11 @@ type CounterSnapshot struct {
 	// the open posture it stays zero and the fault counters above carry the
 	// fail-open magnitude instead.
 	AVUnavailableRefused int64
+
+	// ClamCleanQuarantined counts clean ClamAV verdicts not trusted because
+	// they arrived within clamQuarantineWindow of an engine fault (F-P2):
+	// refused under the closed posture, forwarded uncached under open.
+	ClamCleanQuarantined int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -162,6 +167,7 @@ func Counters() CounterSnapshot {
 		RemoteScanInflight:  remoteScanInflight.Load(),
 
 		AVUnavailableRefused: atomic.LoadInt64(&statAVUnavailableRefused),
+		ClamCleanQuarantined: atomic.LoadInt64(&statClamCleanQuarantined),
 	}
 }
 
@@ -251,6 +257,9 @@ type Scanner struct {
 	// clamStatusTTL before the daemon died. Atomic so a failing request never
 	// takes mu for writing; it is only ever stored when not already set.
 	clamStatusStale atomic.Bool
+	// lastClamEngineFault is the UnixNano of this daemon's most recent engine
+	// fault (0 = none); it opens the clean-verdict quarantine (clam_quarantine.go).
+	lastClamEngineFault atomic.Int64
 
 	// ClamAV VERSION cache. Signature databases update at most a few times a
 	// day, so this is cached far longer than the ping status.
@@ -384,6 +393,13 @@ func (ss *Scanner) ClamAVStatus() string {
 		ss.mu.RUnlock()
 		return "disabled"
 	}
+	// F-P2: while clean verdicts are quarantined the request path refuses
+	// (closed) or forwards uncached (open) every clean body, so readiness must
+	// not report "connected" from a cache or a lucky probe.
+	if rem := ss.clamQuarantineRemaining(); rem > 0 {
+		ss.mu.RUnlock()
+		return clamQuarantineStatus(rem)
+	}
 	// Cache hit: return stored status without pinging — unless a request-path
 	// scan has since observed the daemon faulted, in which case the cached
 	// value is no longer evidence of anything.
@@ -402,6 +418,7 @@ func (ss *Scanner) ClamAVStatus() string {
 	if err := clam.Ping(); err != nil {
 		val = fmt.Sprintf("unreachable: %v", err)
 	} else if err := probeClamScan(clam); err != nil {
+		ss.noteClamEngineFault() // a failed probe is an engine fault too
 		val = fmt.Sprintf("%s: %v", ClamStatusScanFailingPrefix, err)
 	} else {
 		val = "connected"
@@ -933,6 +950,15 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"}, abandoned)
 			return &Result{Blocked: true, Reason: name, Source: "clamav", Hash: hash}
+		case ss.clamQuarantineRemaining() > 0:
+			// F-P2 (clam_quarantine.go): a clean verdict inside the window
+			// after an engine fault is not evidence; it is never cached, and
+			// the closed posture refuses the body as it would the fault.
+			clamDark = true
+			atomic.AddInt64(&statClamCleanQuarantined, 1)
+			if !budgetExhausted(ctx) && avUnavailableClosed.Load() {
+				return avUnavailableRefusal(hash, "clamav", "engine_fault_quarantine", "")
+			}
 		}
 	}
 
@@ -1009,6 +1035,8 @@ func (ss *Scanner) recordClamFailure(ctx context.Context, err error) {
 		// The (rate-limited) line carrying the cause is emitted by
 		// clamScanError, beside the counter that carries the magnitude.
 		clamScanError(err)
+		// F-P2: clean verdicts are not trusted while clamd is faulting.
+		ss.noteClamEngineFault()
 		// Readiness truth: a genuine daemon fault means any cached
 		// "connected" is stale. Mark it (never take mu on the request path)
 		// so /ready and /health re-ping on their next read.

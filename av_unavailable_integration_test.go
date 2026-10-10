@@ -232,6 +232,7 @@ func clamavReadinessStatus(t *testing.T) string {
 }
 
 func TestAVUnavailableIT_ClosedRefusesStopCrashStallAndRecovers(t *testing.T) {
+	advance := withSecscanQuarantineClock(t)
 	clamd, origin := avIntegrationSetup(t, secscan.AVUnavailableClosed)
 
 	// Healthy daemon, clean content: delivered.
@@ -284,9 +285,15 @@ func TestAVUnavailableIT_ClosedRefusesStopCrashStallAndRecovers(t *testing.T) {
 		t.Fatalf("stall must be the timeout path (scan timeout moved by %d)", d)
 	}
 
-	// RECOVERY, clean: the very object refused while stopped is now delivered
-	// — the refusal was never cached.
+	// RECOVERY, clean: the daemon answers clean again, but inside the
+	// quarantine window after its faults (F-P2) that verdict is not trusted —
+	// still refused; once the window has passed, the very object refused while
+	// stopped is delivered (the refusals were never cached).
 	clamd.setMode(clamdClean)
+	if w := proxyGet(t, origin, "/while-stopped"); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "antivirus scanning is currently unavailable") {
+		t.Fatalf("clean verdict inside the quarantine window: want 403 AV-unavailable, got %d %q", w.Code, w.Body.String())
+	}
+	advance(secscan.ClamQuarantineWindow + time.Second)
 	if w := proxyGet(t, origin, "/while-stopped"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "payload-for:/while-stopped") {
 		t.Fatalf("recovered daemon, clean content: want 200 + body, got %d %q", w.Code, w.Body.String())
 	}
@@ -366,6 +373,7 @@ func TestAVUnavailableIT_DaemonTempFullIsAFaultNotClean(t *testing.T) {
 // /ready said clamav ok for the whole phase while every scanned body was
 // refused. The status read now scans a probe through the same INSTREAM path.
 func TestAVUnavailableIT_ReadinessReportsADaemonThatCannotScan(t *testing.T) {
+	advance := withSecscanQuarantineClock(t)
 	clamd, origin := avIntegrationSetup(t, secscan.AVUnavailableClosed)
 	if st := clamavReadinessStatus(t); st != "ok" {
 		t.Fatalf("healthy daemon: /ready clamav row %q", st)
@@ -386,10 +394,26 @@ func TestAVUnavailableIT_ReadinessReportsADaemonThatCannotScan(t *testing.T) {
 		t.Fatalf("/health keeps its enum: a daemon that cannot scan is %q, want unreachable", coarseClamAVStatus(h.ClamAV))
 	}
 	// Recovery on evidence: once clamd can spool again, a fresh status read
-	// (Init drops the cached entry, as the 30 s TTL would) reports ok.
+	// (Init drops the cached entry, as the 30 s TTL would) reports ok — after
+	// the clean-verdict quarantine opened by the faults has expired (F-P2);
+	// inside it, readiness keeps failing.
 	clamd.setMode(clamdClean)
 	globalSecScanner.Init("tcp:"+clamd.addr, 0, newHashCache(256, time.Hour))
+	if st := clamavReadinessStatus(t); st != "fail" {
+		t.Fatalf("inside the quarantine window: /ready clamav row %q, want fail", st)
+	}
+	advance(secscan.ClamQuarantineWindow + time.Second)
 	if st := clamavReadinessStatus(t); st != "ok" {
 		t.Fatalf("after recovery: /ready clamav row %q", st)
 	}
+}
+
+// withSecscanQuarantineClock injects a controllable clock into the ClamAV
+// clean-verdict quarantine and returns its advance func.
+func withSecscanQuarantineClock(t *testing.T) (advance func(time.Duration)) {
+	t.Helper()
+	var mu sync.Mutex
+	now := time.Date(2026, 10, 10, 1, 44, 28, 0, time.UTC)
+	t.Cleanup(secscan.SetClamQuarantineClockForTest(func() time.Time { mu.Lock(); defer mu.Unlock(); return now }))
+	return func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
 }
