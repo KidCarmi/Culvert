@@ -674,9 +674,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: candidate-3465add1d614
-            retained_run: "37639017819"
-            retained_sha256: "3438f1b1721440d0bb4ada2757b02f94c42685e08733a4c2f50e84a1e9ab196c"
+          # The candidate under qualification, RETAINED (run 37966305990): the
+          # frames are bound to these bytes (ova-sha256 + .mf + the guest's
+          # own console banner), and Esc is now judged against the documented
+          # contract (esc-shows-boot-messages, esc-one-way).
+          - variant: candidate-91e05872dfe5
+            retained_run: "37966305990"
+            retained_sha256: "060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: KVM, lab directory, tools
@@ -752,16 +756,13 @@ jobs:
           - label: pre-fix-cd8e4450
             candidate_sha: cd8e44505bd329e5de675592ad4c23f92a534d55
             expect: fail
-          - label: fix-2a82320c
-            candidate_sha: 2a82320c746a6d146df19a6f5af9676d76b72286
-            expect: pass
-          # ba93fdcb: browser-bound login (29dae9f2) — the two-step SAML
-          # completion with the binding cookie, plus the login-CSRF row
-          # (completion without the starting browser's binding → 403, no
-          # session) — and IP-bound sign-in (off by default; this replay uses
-          # /auth/select directly and is unaffected by it).
-          - label: bound-ba93fdcb
-            candidate_sha: ba93fdcbd2c3e1c54e7b8cfaa3609995ab2b394a
+          # The candidate under qualification, at its exact source commit
+          # (the commit the 91e05872 image and OVA were built from): SAML login
+          # + browser binding + login-CSRF + cookie-purpose rows, and the real
+          # Chromium portal-cookie scope probe. fix-2a82320c / bound-ba93fdcb
+          # passed in earlier runs and are superseded by this leg.
+          - label: exact-91e05872
+            candidate_sha: 91e05872dfe5f96c94ec725b8b2dc2b1002116ab
             expect: pass
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

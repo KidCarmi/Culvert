@@ -2455,6 +2455,35 @@ echo ---journal; journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep 
 vkdmode_check() { local m; m="$(sed -n 's/^---fg .* kdmode-tty1 \([0-9]*\).*/\1/p' "$3")"
   if [[ "$m" == 0 ]]; then vcheck "$1" "$2" pass "tty1 KD_TEXT; $(sed -n 's/^---fg //p' "$3")"
   else vcheck "$1" "$2" fail "tty1 KD mode '${m:-unread}' (want 0); $(sed -n 's/^---fg //p' "$3")"; fi; }
+# Esc, judged against the documented contract (firstboot-experience.md): the
+# first Esc replaces the splash with the boot messages; a second Esc does not
+# bring the splash back while it runs. Probe samples are aligned to the
+# host's key presses (8 s and 20 s after the splash window opened) through
+# the window marker's guest uptime; 2 s either side is left unjudged.
+vesc_judge() { grep -a 'LAB-VCS\|LAB-SPLASH-WINDOW-START' "$WORK/console.log" | tr -d '\r' > "$EV/V2-vcs-probe.txt" 2>/dev/null || true
+  local r; r="$(python3 - "$EV/V2-vcs-probe.txt" <<'PY'
+import re, sys
+t0 = None; rows = []
+for l in open(sys.argv[1]):
+    m = re.search(r"LAB-SPLASH-WINDOW-START up=([0-9.]+)", l)
+    if m: t0 = float(m.group(1)); rows = []; continue   # the V2 boot's window
+    m = re.search(r"LAB-VCS up=([0-9.]+) plymouth=(\w+) title=(\d) status=(\d+)", l)
+    if m: rows.append((float(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))))
+if t0 is None: print("none no-window"); sys.exit()
+up = [r for r in rows if r[1] == "up"]
+seg = lambda a, b: [r for r in up if t0 + a <= r[0] < t0 + b]
+pre, mid, post = seg(0, 6), seg(10, 18), seg(22, 44)
+def v(s, want_title):
+    if not s: return "unsampled"
+    bad = [r for r in s if r[2] != want_title]
+    return "ok" if not bad else f"bad:{len(bad)}/{len(s)}"
+print(v(pre, 1), v(mid, 0), v(post, 0), f"pre={len(pre)} mid={len(mid)} post={len(post)} mid_status_max={max([r[3] for r in mid] or [0])}")
+PY
+)"
+  set -- $r
+  vcheck V2 splash-before-esc "$( [[ "$1" == ok ]] && echo pass || echo fail)" "title on tty1 before the first Esc: $1 (${*:4})"
+  vcheck V2 esc-shows-boot-messages "$( [[ "$2" == ok ]] && echo pass || echo fail)" "after the first Esc, with the splash still running, tty1 shows the boot messages, not the title: $2 (${*:4}; V2-vcs-probe.txt)"
+  vcheck V2 esc-one-way "$( [[ "$3" == ok ]] && echo pass || echo fail)" "after the second Esc the splash title does not come back while Plymouth runs: $3 (${*:4})"; }
 # Whether systemd's TTYReset could run for getty@tty1: it skips the whole reset
 # (KD_TEXT included) when it cannot open /dev/console within 1 s.
 vttyreset() { groot "systemctl show getty@tty1 -p TTYReset -p TTYVHangup -p TTYPath; echo ---devconsole; readlink -f /dev/console; cat /sys/class/tty/console/active
@@ -2502,7 +2531,13 @@ cmd_console() { local ova got vmdk f t1 t2 t3
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
   ova="${LAB_OVA:?LAB_OVA}"; got="$(sha256sum "$ova" | cut -d' ' -f1)"
   [[ "$got" == "${LAB_OVA_SHA256:?LAB_OVA_SHA256}" ]] || { vcheck V ova-sha256 fail "got $got want $LAB_OVA_SHA256"; return 1; }
+  # Producer identity: every frame below comes from THIS OVA (sha256 checked
+  # against the pinned candidate, every .mf digest checked by extract_ova),
+  # and V1 checks the guest names the same build on its own console.
+  OVA_NAME="$(basename "$ova")"; OVA_SHA256="$got"
+  vcheck V ova-sha256 pass "$OVA_NAME sha256 $got (= the pinned candidate)"
   rm -rf "$WORK/ova"; extract_ova "$ova" "$WORK/ova" || { vcheck V ova-manifest fail ".mf mismatch"; return 1; }
+  vcheck V ova-manifest pass "every file digest in the OVA's .mf verified"
   vmdk="$(ls "$WORK/ova/"*.vmdk)"; qemu-img convert -O qcow2 "$vmdk" "$WORK/cbase.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/cbase.qcow2"
   qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/cbase.qcow2" "$WORK/coverlay.qcow2"
   rm -f "$SEC/id_ed25519"* "$SEC/console-pass"; ssh-keygen -q -t ed25519 -N '' -C "culvert-console-$RUN_ID" -f "$SEC/id_ed25519"
@@ -2532,6 +2567,14 @@ OVFENV
     vcheck V1 first-boot fail "not ready within ${LAB_FIRSTBOOT_TIMEOUT}s"; vcapture_stop; vsheet V1-first-boot 0 99999; return 1; fi
   vmark "first boot complete (status-json complete, /health 200)"; sleep 30
   f="$EV/V1-tty.txt"; vtty "$f"; t1="$(vtime)"
+  local want_ver; want_ver="$(sed -n 's/^culvert-appliance-\(.*\)-ubuntu-[0-9.]*\.ova$/\1/p' <<<"$OVA_NAME")"
+  # tty1's Build field is width-limited ("1.0.260-candidate.g91e..."): the
+  # shown text, ellipsis removed, must be a prefix of the version (>= 12 chars).
+  local shown; shown="$(grep -m1 -o 'Build  *[^ ]*' "$f" | awk '{print $2}')"; shown="${shown%...}"
+  if [[ -n "$want_ver" ]] && tr -d '\r' < "$WORK/console.log" | grep -qaF "Culvert appliance $want_ver (" \
+     && (( ${#shown} >= 12 )) && [[ "$want_ver" == "$shown"* ]]; then
+    vcheck V1 console-build-identity pass "the guest's console banner and tty1 Build line name $want_ver, the version of the booted OVA $OVA_SHA256"
+  else vcheck V1 console-build-identity fail "want '$want_ver' on the console banner and tty1 Build line; banner: $(tr -d '\r' < "$WORK/console.log" | grep -a -m1 -o 'Culvert appliance [^ ]*' ); tty1: $(grep -m1 -o 'Build  *[^ ]*' "$f")"; fi
   # On ESXi with no serial port the 8250 legacy port still registers, so
   # /dev/console is a ttyS0 with no hardware behind it (baseline run
   # 37631873993). Recorded, not judged: it is the topology ESXi has.
@@ -2552,8 +2595,32 @@ Before=systemd-user-sessions.service plymouth-quit.service plymouth-quit-wait.se
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'echo LAB-SPLASH-WINDOW-START > /dev/hvc0; echo "<6>LAB-KMSG-INFO during the splash" > /dev/kmsg; echo "<3>LAB-KMSG-ERR during the splash" > /dev/kmsg; echo "LAB-CONSOLE-LINE written to /dev/console during the splash"; sleep 45; echo LAB-SPLASH-WINDOW-END > /dev/hvc0'
+ExecStart=/bin/sh -c 'echo "LAB-SPLASH-WINDOW-START up=$(cut -d" " -f1 /proc/uptime)" > /dev/hvc0; echo "<6>LAB-KMSG-INFO during the splash" > /dev/kmsg; echo "<3>LAB-KMSG-ERR during the splash" > /dev/kmsg; echo "LAB-CONSOLE-LINE written to /dev/console during the splash"; sleep 45; echo LAB-SPLASH-WINDOW-END > /dev/hvc0'
 StandardOutput=journal+console
+[Install]
+WantedBy=sysinit.target
+U
+# What tty1 SHOWS through the splash, every 0.5 s: the title (splash) or not
+# (Esc's details view), and how many systemd status lines are on screen.
+cat > /usr/local/sbin/lab-console-vcsprobe <<'P'
+#!/bin/sh
+i=0
+while [ $i -lt 180 ]; do
+  t=0; grep -qa 'C U L V E R T' /dev/vcs1 2>/dev/null && t=1
+  n=$(fold -w 80 /dev/vcs1 2>/dev/null | grep -cE '\[ *(OK|FAILED|DEPEND) *\]|Start(ing|ed) ')
+  echo "LAB-VCS up=$(cut -d' ' -f1 /proc/uptime) plymouth=$(pidof plymouthd >/dev/null && echo up || echo down) title=$t status=$n" > /dev/hvc0
+  i=$((i+1)); sleep 0.5
+done
+P
+chmod 0755 /usr/local/sbin/lab-console-vcsprobe
+cat > /etc/systemd/system/lab-console-vcsprobe.service <<'U'
+[Unit]
+Description=Lab console qualification: what tty1 shows through the splash (no ordering effect)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lab-console-vcsprobe
 [Install]
 WantedBy=sysinit.target
 U
@@ -2567,7 +2634,7 @@ ExecStart=/bin/false
 [Install]
 WantedBy=multi-user.target
 U
-systemctl daemon-reload && systemctl enable lab-console-delay.service lab-console-fail.service
+systemctl daemon-reload && systemctl enable lab-console-delay.service lab-console-fail.service lab-console-vcsprobe.service
 EOS
   : > "$WORK/console.log"; vmark "maintenance reboot requested (slow + failing unit installed)"
   gpriv --nowait > "$EV/V2-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
@@ -2579,6 +2646,7 @@ EOS
   vwait_ready 900 || vcheck V2 maintenance-reboot fail "not ready after the maintenance reboot"
   vmark "ready after maintenance reboot"; sleep 20
   f="$EV/V2-tty.txt"; vtty "$f"; vstray_check V2 tty1-after-reboot-with-failures "$f"; vkdmode_check V2 tty1-text-mode "$f"
+  vesc_judge
   # V3 after boot: kernel messages and /dev/console output while the console UI is up.
   gpriv --timeout 300 > "$EV/V3-writes.txt" 2>&1 <<'EOS' || true
 echo "<6>LAB-KMSG-POSTBOOT info" > /dev/kmsg; echo "<3>LAB-KMSG-POSTBOOT err" > /dev/kmsg
@@ -2589,7 +2657,7 @@ EOS
   f="$EV/V3-tty.txt"; vtty "$f"; vstray_check V3 tty1-after-postboot-writes "$f"
   vmark "Alt+F12"; vkey alt-f12; sleep 4; vmark "Alt+F1"; vkey alt-f1; sleep 4
   # V4 clean maintenance reboot.
-  groot 'systemctl disable lab-console-delay.service lab-console-fail.service; rm -f /etc/systemd/system/lab-console-delay.service /etc/systemd/system/lab-console-fail.service; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
+  groot 'systemctl disable lab-console-delay.service lab-console-fail.service lab-console-vcsprobe.service; rm -f /etc/systemd/system/lab-console-delay.service /etc/systemd/system/lab-console-fail.service /etc/systemd/system/lab-console-vcsprobe.service /usr/local/sbin/lab-console-vcsprobe; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
   # Guest-side truth for the clean reboot's frames: the foreground VT and
   # tty1's KD mode every 0.25 s from early boot (a frozen frame is either a
   # VT left in graphics mode or the emulated display not refreshing).
