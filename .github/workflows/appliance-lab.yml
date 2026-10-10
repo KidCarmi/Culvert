@@ -879,6 +879,22 @@ jobs:
           done
           sudo chmod 0644 /boot/vmlinuz-*
           if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+      - name: "Docker 29.9.0 on the containerd image store (the appliance's engine; the runner's cannot load this OCI archive)"
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker-lab.list >/dev/null
+          sudo apt-get update -q
+          v="$(apt-cache madison docker-ce | awk '$3 ~ /^5:29\.9\.0-/{print $3; exit}')"
+          [ -n "$v" ] || { echo "::error::docker-ce 29.9.0 not available"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
+          sudo mkdir -p /etc/docker
+          [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d.setdefault("features",{})["containerd-snapshotter"]=True; json.dump(d,open(p,"w"))'
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+          docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee "$W/evidence/docker-engine.txt" | grep -q 'server=29.9.0 .*io.containerd.snapshotter.v1'
       - name: Retained OVA → the baked sidecar archive (hash-checked at each step)
         env:
           GH_TOKEN: ${{ github.token }}
