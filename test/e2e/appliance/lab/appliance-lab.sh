@@ -1669,11 +1669,59 @@ p_backup() { local out="$1" op st jar; api POST /api/backups '{"encrypt":false}'
     case "$st" in succeeded|failed|cancelled) break ;; esac; sleep 5; done; api GET "/api/backups/operations/$op" >> "$out" 2>&1 || true; fi
   echo "op=${op:-none} state=${st:-none} http=$(code < "$out" | head -1)"; }
 p_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
-p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /run/culvert-lab-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
+p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; grep -E "culvert-lab-pkgfix|^(E|W):|No space|dpkg: error" /run/culvert-lab-osu.log | head -n 20; tail -n 15 /run/culvert-lab-osu.log; echo "fixture=$(dpkg-query -W -f="\${Status} \${Version}" culvert-lab-pkgfix 2>/dev/null)"; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
 p_app_update() { local U="$LAB_UPDATE_DIR" ph="$1" rc=0
   { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-pressure-$ph.json"
     printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
                   'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'echo "after:"' 'running'; } | gpriv --timeout 2100 2>&1 || rc=$?; echo "rc=$rc"; }
+# Package-write fixture (ASTRA, #1528: "partial package-write failure" was
+# unqualified — with the snapshot already newest, `culvert-os-update os` made 0
+# package actions under pressure, so dpkg never wrote anything). A harmless
+# local package, culvert-lab-pkgfix, is installed at 1.0 and offered at 2.0 from
+# a file: repository, so `culvert-os-update os` (apt-get upgrade from every
+# configured source) really unpacks a package under pressure. 2.0 carries a
+# 64 MiB blob and 3000 small files: more than the pkg* phases leave free, so the
+# unpack fails PART WAY, after dpkg has started writing. Built inside the
+# disposable guest; the OVA is untouched. Removed at the end of the scenario.
+LAB_PKGFIX_DIR=/var/lib/culvert-lab-pkgfix
+p_pkg_setup() { groot "set -e; d=$LAB_PKGFIX_DIR; rm -rf \$d; mkdir -p \$d/repo
+mk() { v=\$1; r=\$d/build-\$v; mkdir -p \$r/DEBIAN \$r/usr/share/culvert-lab-pkgfix
+  printf 'Package: culvert-lab-pkgfix\nVersion: %s\nArchitecture: all\nMaintainer: lab <lab@invalid>\nDescription: Culvert lab package-write fixture (inert data only)\n' \$v > \$r/DEBIAN/control
+  echo \$v > \$r/usr/share/culvert-lab-pkgfix/version
+  if [ \$v = 2.0 ]; then head -c 67108864 /dev/urandom > \$r/usr/share/culvert-lab-pkgfix/blob
+    mkdir -p \$r/usr/share/culvert-lab-pkgfix/many; for i in \$(seq 1 3000); do echo \$i > \$r/usr/share/culvert-lab-pkgfix/many/f\$i; done; fi
+  dpkg-deb -Znone --root-owner-group --build \$r \$d/repo/culvert-lab-pkgfix_\${v}_all.deb >/dev/null; rm -rf \$r; }
+mk 1.0; mk 2.0
+cd \$d/repo; f=culvert-lab-pkgfix_2.0_all.deb
+{ dpkg-deb -f \$f; echo \"Filename: ./\$f\"; echo \"Size: \$(stat -c %s \$f)\"; echo \"SHA256: \$(sha256sum \$f | cut -d' ' -f1)\"; echo; } > Packages
+echo 'deb [trusted=yes] file:$LAB_PKGFIX_DIR/repo ./' > /etc/apt/sources.list.d/culvert-lab-pkgfix.list
+apt-get update -qq; dpkg -i \$d/repo/culvert-lab-pkgfix_1.0_all.deb >/dev/null
+echo fixture=\$(dpkg-query -W -f='\${Status} \${Version}' culvert-lab-pkgfix); apt-cache policy culvert-lab-pkgfix | grep -E 'Installed|Candidate' | tr -s ' ' | tr '\n' ' '; echo
+ls -l \$d/repo" 900 > "$EV/P-pkgfix-setup.txt" 2>&1 || true
+  if grep -q 'fixture=install ok installed 1.0' "$EV/P-pkgfix-setup.txt" && grep -q 'Candidate: 2.0' "$EV/P-pkgfix-setup.txt"; then
+    check P pkgfix-setup pass "culvert-lab-pkgfix 1.0 installed, 2.0 offered (64 MiB blob + 3000 files) from a local file: repository"
+  else check P pkgfix-setup fail "fixture not ready: $(tail -3 "$EV/P-pkgfix-setup.txt" | tr '\n' ' ')"; return 1; fi; }
+# p_pkg_arm — back to 1.0 before a phase so 2.0 is pending again.
+p_pkg_arm() { groot "dpkg -i $LAB_PKGFIX_DIR/repo/culvert-lab-pkgfix_1.0_all.deb >/dev/null 2>&1; echo fixture=\$(dpkg-query -W -f='\${Status} \${Version}' culvert-lab-pkgfix)" 300 2>&1 | grep -m1 '^fixture='; }
+p_pkg_teardown() { groot "dpkg -P culvert-lab-pkgfix >/dev/null 2>&1; rm -f /etc/apt/sources.list.d/culvert-lab-pkgfix.list; rm -rf $LAB_PKGFIX_DIR; apt-get update -qq; echo removed=\$(dpkg-query -W culvert-lab-pkgfix >/dev/null 2>&1 && echo no || echo yes)" 600 > "$EV/P-pkgfix-teardown.txt" 2>&1 || true
+  check P pkgfix-teardown "$(grep -q removed=yes "$EV/P-pkgfix-teardown.txt" && echo pass || echo fail)" "fixture package, source and repository removed from the disposable guest"; }
+# p_pkg_judge NAME OSU WHEN — the package write, under pressure or after recovery.
+p_pkg_judge() { local name="$1" osu="$2" when="$3" rc fx reached
+  rc="$(grep -m1 -oE '^osu-rc=[0-9]+' <<<"$osu" | cut -d= -f2)"; fx="$(grep -m1 '^fixture=' <<<"$osu" | cut -d= -f2-)"
+  reached="$(grep -cE 'Unpacking culvert-lab-pkgfix|culvert-lab-pkgfix_2.0_all.deb' <<<"$osu" || true)"
+  local audit_ok=0; grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && audit_ok=1
+  if [[ "$when" == recovered ]]; then
+    [[ "$rc" == 0 && "$fx" == "install ok installed 2.0" && $audit_ok == 1 ]] \
+      && check P "$name-pkg-recovered" pass "space back: culvert-os-update os rc=0, culvert-lab-pkgfix now 2.0, dpkg audit empty" \
+      || check P "$name-pkg-recovered" fail "after release: osu-rc=$rc fixture=[$fx] audit_ok=$audit_ok ($(grep -E 'dpkg-audit' <<<"$osu" | head -c 200))"
+    return; fi
+  if [[ "$reached" == 0 ]]; then
+    check P "$name-pkg-write" info "dpkg never reached the package (osu-rc=$rc; apt stopped first: $(grep -m1 -E '^(E|W):' <<<"$osu" | head -c 160)); fixture=[$fx]"
+  elif [[ "$rc" != 0 && "$fx" == "install ok installed 1.0" && $audit_ok == 1 ]]; then
+    check P "$name-pkg-write" pass "dpkg started writing 2.0 and failed (osu-rc=$rc: $(grep -m1 -iE 'no space|cannot copy|failed to write|error processing' <<<"$osu" | head -c 140)); rolled back to 1.0 fully installed, dpkg audit empty"
+  elif [[ "$rc" == 0 && "$fx" == "install ok installed 2.0" && $audit_ok == 1 ]]; then
+    check P "$name-pkg-write" info "the package write SUCCEEDED under pressure (root's reserve); 2.0 fully installed, audit empty"
+  else check P "$name-pkg-write" fail "osu-rc=$rc fixture=[$fx] audit_ok=$audit_ok — a package left part-written or a failure reported as success ($(grep -E '^dpkg-audit' <<<"$osu" | head -c 200))"; fi; }
 # p_phase NAME FILLCMD — fill, observe, exercise backup/updates, release, recover.
 p_phase() { local name="$1" fill="$2" s id0 id1 inv0 inv1 bk osu up ok lc
   local since; since="$(date -u -d '-2 min' +%FT%TZ)"
@@ -1682,6 +1730,7 @@ p_phase() { local name="$1" fill="$2" s id0 id1 inv0 inv1 bk osu up ok lc
   # the full disk takes the SSH path with it; cancelled by the normal release.
   groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; systemd-run --quiet --unit=culvert-pressure-release --on-active=5400 /bin/rm -rf /var/lib/culvert-pressure && echo backstop=armed' 60 > "$EV/P-$name-backstop.txt" 2>&1 || true
   grep -q backstop=armed "$EV/P-$name-backstop.txt" || { check P "$name-filled" blocked "release backstop timer could not be armed; phase not run"; return 1; }
+  [[ -n "${P_PKG:-}" ]] && echo "armed $(p_pkg_arm)" > "$EV/P-$name-pkgfix-arm.txt"
   groot "$fill" 3600 > "$EV/P-$name-fill.txt" 2>&1 || true
   check P "$name-filled" info "$(grep -E '^(filled|files)' "$EV/P-$name-fill.txt" | tr '\n' ' ') host disk file +$(( $(p_host_alloc_mb) - P_ALLOC0 )) MiB"
   p_bounded || return 1
@@ -1747,7 +1796,8 @@ PY2
     else check P "$name-backup-clean" fail "$bk; archive set changed: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | tr '\n' ' ' | head -c 300)"; fi
   else check P "$name-backup-clean" pass "$bk; no new archive, no .tmp, $(sed -n '/^---$/,$p' <<<"$inv0" | grep -c ' ') existing archive(s) byte-identical"; fi
   # app update under pressure (signed fixture only exists in build mode)
-  if [[ -n "${LAB_UPDATE_DIR:-}" && -f "${LAB_UPDATE_DIR}/apply-pressure-$name.json" ]]; then
+  if [[ "${P_NO_APP:-0}" == 1 ]]; then check P "$name-app-update" info "not exercised in this phase (the blocks and inodes phases cover it); this phase targets the package write"
+  elif [[ -n "${LAB_UPDATE_DIR:-}" && -f "${LAB_UPDATE_DIR}/apply-pressure-$name.json" ]]; then
     up="$(p_app_update "$name")"
     if grep -q '"deduped":true' <<<"$up"; then check P "$name-app-update" fail "the agent returned an EARLIER operation (deduped): nothing was exercised under pressure"; fi; printf '%s\n' "$up" > "$EV/P-$name-app-update.txt"
     local st0 img_b img_a; st0="$(grep -m1 '^op-state=' <<<"$up" || echo op-state=none)"
@@ -1767,7 +1817,8 @@ PY2
   s="$(p_sample "$name" after-os-update)"; set -- $s
   if grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
     check P "$name-os-update" pass "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg consistent (audit empty, no half-installed package), Docker still held, traffic $1/$2"
-  else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|not-installed-ok|holds)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
+  else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|not-installed-ok|holds|fixture)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
+  [[ -n "${P_PKG:-}" ]] && p_pkg_judge "$name" "$osu" pressure
   # release and recover without a restart
   groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; rm -rf /var/lib/culvert-pressure; sync; df -B1 / | tail -1; df -i / | tail -1; echo released=$([ -e /var/lib/culvert-pressure ] && echo no || echo yes)' 3600 > "$EV/P-$name-release.txt" 2>&1 || true
   grep -q 'released=yes' "$EV/P-$name-release.txt" || check P "$name-release" fail "the release over SSH did not complete (see P-$name-release.txt); the guest's backstop timer frees the space"
@@ -1779,6 +1830,7 @@ PY2
   [[ "$hh" == *docker-ce\ * ]] || ok=0
   [[ $ok == 1 ]] && check P "$name-recovered" pass "space released; /ready 200 with clamav ok, enforcement, EICAR blocked by ClamAV ($s); held: $hh" \
     || check P "$name-recovered" fail "within 300 s of release: $s; held: [$hh]"
+  if [[ -n "${P_PKG:-}" ]]; then osu="$(p_os_update)"; printf '%s\n' "$osu" > "$EV/P-$name-os-update-recovered.txt"; p_pkg_judge "$name" "$osu" recovered; fi
   if [[ "${P_APP_APPLIED:-0}" == 1 ]]; then P_APP_APPLIED=0; local rb rc=0
     rb="$({ printf '%s' "$AGENT_LIB"; embed rollback.json "$LAB_UPDATE_DIR/rollback-pressure-$name.json"
            printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 1500' \
@@ -1805,6 +1857,7 @@ cmd_pressure() { local free
   if (( free < LAB_PRESSURE_MIN_HOST_FREE_GB )); then check P host-bound blocked "host has $free GiB free (< $LAB_PRESSURE_MIN_HOST_FREE_GB); pressure phase not run"; return 0; fi
   check P host-bound pass "host free $free GiB; disk file allocated ${P_ALLOC0} MiB; caps: growth <= $LAB_PRESSURE_MAX_HOST_GROWTH_MB MiB, abort below $(( LAB_PRESSURE_MIN_HOST_FREE_GB / 2 )) GiB free"
   : > "$EV/P-samples.jsonl"; p_sample baseline 0 > /dev/null
+  P_PKG=""; p_pkg_setup && P_PKG=1
   p_phase blocks 'python3 - <<"PY"
 import os, errno
 d="/var/lib/culvert-pressure"; os.makedirs(d, exist_ok=True)
@@ -1840,6 +1893,32 @@ while True:
         raise
 st=os.statvfs("/"); print(f"files={n} free_inodes={st.f_ffree} free_blocks_bytes={st.f_bfree*st.f_frsize} secs={time.time()-t:.0f}")
 PY' || return 0
+  # Headroom phases: enough left for apt and dpkg's own database, not for the
+  # 2.0 payload, so the unpack itself is what fails (a part-written package).
+  if [[ -n "$P_PKG" ]]; then
+    P_NO_APP=1 p_phase pkgblocks "python3 - <<\"PY\"
+import os
+d=\"/var/lib/culvert-pressure\"; os.makedirs(d, exist_ok=True)
+fd=os.open(d+\"/fill\", os.O_CREAT|os.O_WRONLY, 0o600); st=os.statvfs(\"/\")
+keep=${LAB_PKG_HEADROOM_MB:-24}<<20
+os.posix_fallocate(fd, 0, max(st.f_bfree*st.f_frsize-keep, 4096)); os.fsync(fd); os.close(fd)
+st=os.statvfs(\"/\"); print(f\"filled headroom_target={keep} free_root={st.f_bfree*st.f_frsize} free_user={st.f_bavail*st.f_frsize}\")
+PY" || true
+    P_NO_APP=1 p_phase pkginodes "python3 - <<\"PY\"
+import os, errno
+d=\"/var/lib/culvert-pressure/inodes\"; os.makedirs(d, exist_ok=True)
+keep=${LAB_PKG_HEADROOM_INODES:-400}; n=0; sub=None
+target=os.statvfs(\"/\").f_ffree-keep
+try:
+    while n < target:
+        if n%10000==0: sub=f\"{d}/{n//10000}\"; os.mkdir(sub)
+        os.close(os.open(f\"{sub}/{n}\", os.O_CREAT|os.O_WRONLY, 0o600)); n+=1
+except OSError as e:
+    if e.errno!=errno.ENOSPC: raise
+st=os.statvfs(\"/\"); print(f\"files={n} headroom_target={keep} free_inodes={st.f_ffree} free_blocks_bytes={st.f_bfree*st.f_frsize}\")
+PY" || true
+    p_pkg_teardown
+  fi
 }
 cmd_collect() {
   mkdir -p "$EV/guest"

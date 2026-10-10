@@ -86,46 +86,22 @@ jobs:
             image_run: "37964407987"
             image_tar_sha256: "ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae"
             expect_image_id: "sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4"
-            # Built from source: a new candidate (readiness probe). dc57bd76's
-            # OVA stays retained in run 37948667525 (sha256 855b4a09…) and was
-            # re-qualified under pressure in run 37957097250.
-            retained_run: ""
-            retained_sha256: ""
+            # RETAINED: the exact OVA ASTRA qualified on ESXi (run 37966305990,
+            # sha256 060a3dc6…), not a rebuild. This run adds the package-write
+            # qualification (ASTRA #1528 item 2): a real pending package under
+            # block/inode exhaustion and under headroom just short of its
+            # payload. Recovery timing, console and engine surface were
+            # evidenced in runs 37966305990 / 37973308933 and are not repeated.
+            retained_run: "37966305990"
+            retained_sha256: "060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e"
             # Disk-pressure scenario (block + inode exhaustion, backup/update
             # under pressure, recovery) on this disposable guest, after history.
             pressure: "1"
-            # The calibrated ESXi proxy (12 ms read / 3 ms write).
-            disk: dm
-            recovery_reboots: "3"
-            recovery_profiles: "esxi12:12:3:120"
-            recovery_variants: "base"
-            console: "1"
-            # who can reach dockerd/containerd/runc (scanner dispositions)
-            engine_surface: "1"
-          # Adoption (ASTRA, #1528): an appliance that already has the OLD
-          # sidecar tag (the RETAINED 2e3bcc2a OVA, culvert/clamav:1.4.6-pcre2-10.49
-          # baked in) is upgraded to the 91e05872 image; the host-component
-          # refresh then runs with the 91e05872 installer put in place first
-          # (an appliance runs the installer its OVA baked, A1b).
-          - variant: candidate-2e3bcc2a1095
-            provisioning: source
-            source_sha: "2e3bcc2a1095f3e26e4f0b73a6a5515bdd069ee2"
-            image_run: "37604379502"
-            image_tar_sha256: "db4f5ce8784e2a8e5145fdf59126a8e675a27f6628ac3b70e0d2ac16daf5ffff"
-            expect_image_id: "sha256:536403fc9ba8a4bc15d229a12a7586ce6ccc35ba99148b71869a81596e0ea940"
-            retained_run: "37606237892"
-            retained_sha256: "55e98116ba2c020789b3f5de4eabab7e29af611c83b9c972b82a6319a19f145e"
             recovery_reboots: "0"
-            adopt_image_run: "37964407987"
-            adopt_image_tar_sha256: "ef489550e18f10209ea05e03fedab8c14180a7e0f29242c087462a8afad721ae"
-            adopt_image_id: "sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4"
-            adopt_installer_sha: "91e05872dfe5f96c94ec725b8b2dc2b1002116ab"
-            # The history step needs the candidate's own CLI and compose; this
-            # leg runs the RETAINED 2e3bcc2a appliance (only the image is new).
-            history: "0"
-            adopt_old_ref: "culvert/clamav:1.4.6-pcre2-10.49"
-            adopt_new_ref: "culvert/clamav:1.4.6-culvert.3"
-            adopt_pkgs: "nghttp2-libs-1.70.0-r0 pcre2-10.49-r0 zlib-1.3.2-r1"
+          # The adoption leg (retained 2e3bcc2a appliance upgraded to the
+          # 91e05872 image) PASSED in run 37966305990 and is not part of this
+          # package-write run; restore it from commit e3d9b4bc for the next
+          # full candidate run.
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -587,7 +563,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -962,7 +938,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
