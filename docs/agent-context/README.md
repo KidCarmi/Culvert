@@ -9,6 +9,7 @@ that every paragraph in its history bucket is current or fully re-audited.
 
 For unknown ownership, use the [preserved project map](history/project-map.md)
 as a search aid, then verify paths in the checkout. Avoid stale package counts.
+Current [conventions](conventions.md) reconcile the [original conventions](history/conventions.md).
 For checks use [verification](workflows/verification.md); for an explicit review
 use [review-change](workflows/review-change.md). Source paths below are relative
 to this checkout, not to an unmerged branch.
@@ -69,6 +70,7 @@ to this checkout, not to an unmerged branch.
   [internal/ocsp](../../internal/ocsp). Use the matching tests and
   [proxy/TLS history](history/proxy-tls-and-certificates.md), including raw attacker
   log bytes, hop-by-hop stripping, no-redirect forwarding and fail-open/closed boundaries.
+  See also [transport/relay cost context](history/admission-and-connection-limits.md#claude-main-l238-l238).
 - Policy, GeoIP/DNS, category/blocklist/threat feeds: [policy.go](../../policy.go),
   [host/category composition](../../policy_hostcat.go), [geoip.go](../../geoip.go),
   [internal/urlcat](../../internal/urlcat), [internal/blocklist](../../internal/blocklist),
@@ -137,6 +139,8 @@ to this checkout, not to an unmerged branch.
   [coverage-floor implementation](../../.github/scripts/coverage-floor.sh),
   [CI history](history/ci-and-release.md). Read current workflow predicates;
   documentation and old PR statuses do not prove today's gates passed.
+  The [original build/test examples](history/build-and-test.md) are retained as
+  provenance; choose current commands from the verification workflow.
 - Startup/run environment lookup: [config.go](../../config.go),
   [data_dir.go](../../data_dir.go), [go.mod](../../go.mod),
   [preserved run/environment reference](history/run-and-environment.md).

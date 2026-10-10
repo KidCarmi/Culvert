@@ -31,7 +31,10 @@ There were no other tracked AGENTS/CLAUDE/native skill files at this baseline.
   The validator deliberately excludes those frozen embedded links from relocation
   checks; all newly authored navigation is checked.
 - [preservation-map.json](preservation-map.json) records original source ranges,
-  hashes, byte lengths, destinations, anchors and current routes. Multiple domains
+  hashes, byte lengths, destinations, anchors and scoped current-route obligations.
+  Each declared task section must link directly to its exact block or to its
+  history document whose Topics list links to that block; an inventory link in
+  another section cannot silently substitute for the task route. Multiple domains
   can reference one block. No paragraph is discarded as “obsolete.”
 - Two narrow workflows have native entry points in both `.agents/skills` and
   `.claude/skills`; thin wrappers explicitly load the same canonical procedure.
@@ -73,12 +76,13 @@ inline occurrences; it intentionally does not attempt to emulate every client pa
 ## Actual execution record
 
 Environment: isolated cloud checkout; Git 2.52.0; Python 3.12.14; Codex CLI 0.159.2.
-No Claude CLI was found. No authenticated model run was attempted.
+No Claude CLI was found. No local authenticated model run was attempted.
 
 - Structural checker PASS: 108 source blocks, 464,534 reconstructed bytes and
-  original Git blob identity; 434 newly authored navigation links/anchors; 10
+  original Git blob identity; 441 newly authored navigation links/anchors; 117 declared task-section-to-block
+  edges; 10
   static route fixtures; native wrapper parity/frontmatter; change allowlist.
-  All 8 corruption/route/import/drift/budget negative controls were rejected.
+  All 10 corruption/route/import/drift/budget negative controls were rejected.
   Two future-baseline controls passed: unrelated source changes preserve source
   integrity, and a committed future runtime change is excluded by a new PR base.
   `git diff --cached --check` PASS (including all newly staged files). These are deterministic checks, not model evaluations.
@@ -91,8 +95,8 @@ No Claude CLI was found. No authenticated model run was attempted.
   A private writable CODEX_HOME/XDG_RUNTIME_DIR and read-only/no-approval mode did
   not resolve it. No system/security settings or credentials were changed.
 - Codex focused-directory loading, model-guided root routing, explicit/implicit
-  skill invocation, Claude root/nested loading, hosted Codex Review behavior and
-  resumed/compacted task trials: NOT RUN. Static predictions are not substitutes.
+  skill invocation, Claude root/nested loading, controlled hosted-review loading
+  trials and resumed/compacted task trials: NOT RUN. Static predictions are not substitutes.
 - Application Go tests: NOT RUN. The computer's `/usr/bin/go` is not a working
   Go compiler (`go version` returns “Unknown option”). No Go/runtime files change.
 - No application performance benchmark, token measurement, model-quality comparison,
@@ -106,6 +110,23 @@ client/version/model/settings/cwd, use fresh sessions, capture actual loaded sou
 and task decisions, and include safe counterexamples. Test explicit, implicit and
 negative skill triggers separately. Do not mark the PR behaviorally proven until
 these rows have evidence.
+
+## Initial hosted review and follow-up
+
+The PR was created as draft. The owner marked it ready on 10 October 2026;
+this implementation did not toggle it. Hosted Codex and CodeRabbit then reviewed
+initial commit `ef9fcbb9b39f1a9836e0d4a7734ed27dcd1c07b0`.
+[Codex identified](https://github.com/KidCarmi/Culvert/pull/1592#discussion_r4236812506)
+that existing-file/link checks could miss a misdirected task route. The follow-up
+adds all 117 declared section-to-block obligations plus retargeted-link and
+wrong-TOC-anchor negative controls. A generic inventory link cannot mask either.
+[CodeRabbit requested](https://github.com/KidCarmi/Culvert/pull/1592#discussion_r4236808227)
+clarification of timestamp reference frames; current prose now distinguishes
+sampled, recorded and lock/append times without changing runtime behavior.
+
+Both required CI aggregates passed on that initial commit. A new follow-up SHA
+requires its own CI verdict. This actual hosted review is useful evidence, but
+it is not a controlled baseline/candidate instruction-loading or quality trial.
 
 ## Branch reconciliation
 

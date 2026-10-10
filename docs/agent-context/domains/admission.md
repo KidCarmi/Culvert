@@ -33,7 +33,7 @@ Use `AddAll` / `AddExemptions` for bulk append/restore, rather than per-entry pu
 
 ## Sliding window
 
-Keep lazy ring growth and prefix expiry. A timestamp equal to the cutoff expires. Sampling before the shard lock can produce out-of-order samples; `clientBucket.add` clamps an earlier sample **up** to the newest retained stamp, maintaining nondecreasing order. Relative to that earlier sample, expiry is **later or equal**, conservatively retaining the count longer. Older prose in code/test comments reverses this direction; do not copy that explanation or change the algorithm to match it. [Window tests](../../../internal/admission/security_ratelimit_window_test.go) cover differential verdicts, the exact expiry boundary, growth and ordering.
+Keep lazy ring growth and prefix expiry. A timestamp equal to the cutoff expires. Sampling before the shard lock can produce out-of-order samples; `clientBucket.add` clamps an earlier sample **up** to the newest retained stamp, maintaining nondecreasing order. Relative to that earlier sample, expiry is **later or equal**, conservatively retaining the count longer. Older comments also compare with later true arrival/append time, a different reference frame. Read the [timestamp clarification](../errata.md#timestamp-clamp-direction); do not change the algorithm to reconcile ambiguous prose. [Window tests](../../../internal/admission/security_ratelimit_window_test.go) cover differential verdicts, the exact expiry boundary, growth and ordering.
 
 ## Verification
 
@@ -53,3 +53,10 @@ go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v . ./inter
 Snapshot/rollback edits additionally need the linked root integration tests. `TestChaos61_` needs no chaos tag. Most admission `TestBenchGate_` tests are in default-tag files; the two rate-window gates require `benchgate`. Do not infer build tags from test names.
 
 The [coverage script](../../../.github/scripts/coverage-floor.sh) requires global 55% plus function-average per-file floors of 70% for root `security.go`, admission `engine.go` and `freshness.go`, alongside its other floors. Missing implementation files must fail; a package-only percentage is not a substitute. [Migration checks](../../../admission_contract_test.go) protect coverage omissions and both-package CI selectors. Use the [verification workflow](../workflows/verification.md) for wider change-dependent checks and honest completion reporting.
+
+## Historical rationale
+
+The [preserved admission evidence](../history/admission-and-connection-limits.md)
+contains the original freshness incident, immutable publication decisions, ring
+measurements and exemption/bulk-load controls. Reconcile relevant failure cases
+with the current owner/tests; see [errata](../errata.md) for explanatory conflicts.

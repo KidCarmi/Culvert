@@ -30,13 +30,22 @@ not the old overview's “delta gossip” shorthand. Root aliases are intentiona
 ## Timestamp clamp direction
 
 [Original L242](history/admission-and-connection-limits.md#claude-main-l242-l242)
-says an upward-clamped timestamp expires no later. Actual
-[ring implementation](../../internal/admission/engine.go) clamps a sampled time
-up to the prior newest stamp; expiry is later or equal relative to that sample.
-Similar reversed prose remains in code/test comments; this PR does not edit
-runtime/test files. Keep the actual ordering/cutoff contract and
-[differential tests](../../internal/admission/security_ratelimit_window_test.go).
-The test against the final maximum stamp does not prove the old per-entry prose.
+and the code/test comments use “true arrival” alongside sampled/observed time.
+Those reference times must be distinguished. In the
+[ring implementation](../../internal/admission/engine.go), let `s` be the caller's
+pre-lock sample and `r = max(s, previous newest)` the recorded stamp. Then `r >= s`:
+expiry is later or equal relative to that sample. Relative to the later actual
+lock/append time `a`, the recorded stamp is normally earlier or equal (`r <= a`).
+Those two comparisons can coexist; do not label the true-arrival comparison as
+reversed merely because the sample-based comparison has the opposite direction.
+
+The phrase “earlier than the caller observed” is still ambiguous if “observed”
+means the passed sample. The [window test](../../internal/admission/security_ratelimit_window_test.go)
+feeds sampled offsets, checks ordering and the final maximum/empty-at-cutoff
+behavior; it does not capture actual append/arrival times or establish a per-entry
+arrival-based bound. Preserve the actual ordering/cutoff algorithm and tests.
+This PR clarifies the reference frames; it does not change runtime/test comments
+or claim a new runtime failure or a newly proved admission bound.
 
 ## Configuration versioning exclusions
 

@@ -4,7 +4,7 @@
   "source_git_blob": "84e5b5c06e3972862f6ce2c75dce128a5635cddb",
   "source_bytes": 464534,
   "source_sha256": "d52076cca7e76045e31000e4abe89d3b0262ed28d1e82a2c20a7f95d0f06853c",
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "Every original byte has one canonical historical owner. Current guidance and errata are separate; historical blocks retain original spelling.",
   "blocks": [
     {
@@ -18,7 +18,10 @@
       "anchor": "claude-main-l001-l005",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "task-routes-and-evidence"
+        }
       ]
     },
     {
@@ -32,7 +35,10 @@
       "anchor": "claude-main-l006-l091",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "task-routes-and-evidence"
+        }
       ]
     },
     {
@@ -46,7 +52,10 @@
       "anchor": "claude-main-l092-l100",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -60,7 +69,10 @@
       "anchor": "claude-main-l101-l113",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -74,7 +86,10 @@
       "anchor": "claude-main-l114-l128",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -88,8 +103,14 @@
       "anchor": "claude-main-l129-l154",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md",
-        "docs/agent-context/conventions.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "task-routes-and-evidence"
+        },
+        {
+          "source": "docs/agent-context/conventions.md",
+          "section": "current-implementation-conventions"
+        }
       ]
     },
     {
@@ -103,7 +124,10 @@
       "anchor": "claude-main-l155-l171",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -117,7 +141,10 @@
       "anchor": "claude-main-l172-l173",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "historical-source-inventory"
+        }
       ]
     },
     {
@@ -131,7 +158,10 @@
       "anchor": "claude-main-l174-l174",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ],
       "errata": "docs/agent-context/errata.md#default-policy-posture"
     },
@@ -146,7 +176,10 @@
       "anchor": "claude-main-l175-l175",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -160,7 +193,10 @@
       "anchor": "claude-main-l176-l176",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -174,7 +210,10 @@
       "anchor": "claude-main-l177-l177",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -188,7 +227,10 @@
       "anchor": "claude-main-l178-l178",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -202,7 +244,10 @@
       "anchor": "claude-main-l179-l179",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -216,7 +261,10 @@
       "anchor": "claude-main-l180-l180",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -230,7 +278,10 @@
       "anchor": "claude-main-l181-l181",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -244,8 +295,18 @@
       "anchor": "claude-main-l182-l182",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md",
-        "docs/agent-context/domains/admission.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "core-admission-and-connections"
+        },
+        {
+          "source": "docs/agent-context/domains/admission.md",
+          "section": "historical-rationale"
+        },
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -259,7 +320,10 @@
       "anchor": "claude-main-l183-l183",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -273,7 +337,10 @@
       "anchor": "claude-main-l184-l184",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -287,7 +354,10 @@
       "anchor": "claude-main-l185-l185",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -301,7 +371,10 @@
       "anchor": "claude-main-l186-l186",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -315,7 +388,10 @@
       "anchor": "claude-main-l187-l187",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -329,7 +405,10 @@
       "anchor": "claude-main-l188-l188",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -343,7 +422,10 @@
       "anchor": "claude-main-l189-l189",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -357,7 +439,10 @@
       "anchor": "claude-main-l190-l190",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -371,7 +456,10 @@
       "anchor": "claude-main-l191-l191",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -385,7 +473,10 @@
       "anchor": "claude-main-l192-l192",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -399,7 +490,10 @@
       "anchor": "claude-main-l193-l193",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -413,7 +507,10 @@
       "anchor": "claude-main-l194-l194",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -427,7 +524,10 @@
       "anchor": "claude-main-l195-l195",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -441,7 +541,10 @@
       "anchor": "claude-main-l196-l196",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -455,7 +558,10 @@
       "anchor": "claude-main-l197-l197",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -469,7 +575,10 @@
       "anchor": "claude-main-l198-l198",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -483,7 +592,10 @@
       "anchor": "claude-main-l199-l199",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -497,7 +609,10 @@
       "anchor": "claude-main-l200-l200",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -511,7 +626,10 @@
       "anchor": "claude-main-l201-l201",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -525,7 +643,10 @@
       "anchor": "claude-main-l202-l202",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -539,7 +660,10 @@
       "anchor": "claude-main-l203-l203",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -553,7 +677,10 @@
       "anchor": "claude-main-l204-l204",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -567,7 +694,10 @@
       "anchor": "claude-main-l205-l205",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -581,7 +711,10 @@
       "anchor": "claude-main-l206-l206",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -595,7 +728,10 @@
       "anchor": "claude-main-l207-l207",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -609,7 +745,10 @@
       "anchor": "claude-main-l208-l208",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -623,7 +762,10 @@
       "anchor": "claude-main-l209-l209",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -637,7 +779,10 @@
       "anchor": "claude-main-l210-l210",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -651,7 +796,10 @@
       "anchor": "claude-main-l211-l211",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -665,7 +813,10 @@
       "anchor": "claude-main-l212-l212",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -679,7 +830,10 @@
       "anchor": "claude-main-l213-l213",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -693,7 +847,10 @@
       "anchor": "claude-main-l214-l214",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -707,7 +864,10 @@
       "anchor": "claude-main-l215-l215",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -721,7 +881,10 @@
       "anchor": "claude-main-l216-l216",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -735,7 +898,10 @@
       "anchor": "claude-main-l217-l217",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -749,7 +915,10 @@
       "anchor": "claude-main-l218-l218",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -763,7 +932,10 @@
       "anchor": "claude-main-l219-l219",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -777,7 +949,10 @@
       "anchor": "claude-main-l220-l220",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -791,7 +966,10 @@
       "anchor": "claude-main-l221-l221",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -805,7 +983,10 @@
       "anchor": "claude-main-l222-l222",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -819,7 +1000,10 @@
       "anchor": "claude-main-l223-l223",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -833,7 +1017,10 @@
       "anchor": "claude-main-l224-l224",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -847,7 +1034,10 @@
       "anchor": "claude-main-l225-l225",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -861,7 +1051,10 @@
       "anchor": "claude-main-l226-l226",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -875,7 +1068,10 @@
       "anchor": "claude-main-l227-l227",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -889,7 +1085,10 @@
       "anchor": "claude-main-l228-l228",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -903,7 +1102,10 @@
       "anchor": "claude-main-l229-l229",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -917,7 +1119,10 @@
       "anchor": "claude-main-l230-l230",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -931,7 +1136,10 @@
       "anchor": "claude-main-l231-l231",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -945,7 +1153,10 @@
       "anchor": "claude-main-l232-l232",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -959,7 +1170,10 @@
       "anchor": "claude-main-l233-l233",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -973,7 +1187,10 @@
       "anchor": "claude-main-l234-l234",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -987,7 +1204,10 @@
       "anchor": "claude-main-l235-l235",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -1001,7 +1221,10 @@
       "anchor": "claude-main-l236-l236",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -1015,7 +1238,10 @@
       "anchor": "claude-main-l237-l237",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "authentication-and-identity"
+        }
       ]
     },
     {
@@ -1029,7 +1255,18 @@
       "anchor": "claude-main-l238-l238",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "core-admission-and-connections"
+        },
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        },
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -1043,8 +1280,14 @@
       "anchor": "claude-main-l239-l239",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md",
-        "docs/agent-context/domains/admission.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "core-admission-and-connections"
+        },
+        {
+          "source": "docs/agent-context/domains/admission.md",
+          "section": "historical-rationale"
+        }
       ]
     },
     {
@@ -1058,7 +1301,10 @@
       "anchor": "claude-main-l240-l240",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "core-admission-and-connections"
+        }
       ]
     },
     {
@@ -1072,7 +1318,10 @@
       "anchor": "claude-main-l241-l241",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1086,8 +1335,14 @@
       "anchor": "claude-main-l242-l242",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md",
-        "docs/agent-context/domains/admission.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "core-admission-and-connections"
+        },
+        {
+          "source": "docs/agent-context/domains/admission.md",
+          "section": "historical-rationale"
+        }
       ],
       "errata": "docs/agent-context/errata.md#timestamp-clamp-direction"
     },
@@ -1102,8 +1357,14 @@
       "anchor": "claude-main-l243-l243",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md",
-        "docs/agent-context/domains/admission.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "core-admission-and-connections"
+        },
+        {
+          "source": "docs/agent-context/domains/admission.md",
+          "section": "historical-rationale"
+        }
       ]
     },
     {
@@ -1117,7 +1378,10 @@
       "anchor": "claude-main-l244-l244",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -1131,7 +1395,10 @@
       "anchor": "claude-main-l245-l245",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -1145,7 +1412,10 @@
       "anchor": "claude-main-l246-l246",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -1159,7 +1429,10 @@
       "anchor": "claude-main-l247-l247",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "proxy-policy-and-scanning"
+        }
       ]
     },
     {
@@ -1173,7 +1446,10 @@
       "anchor": "claude-main-l248-l248",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1187,7 +1463,10 @@
       "anchor": "claude-main-l249-l249",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1201,7 +1480,10 @@
       "anchor": "claude-main-l250-l250",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1215,7 +1497,10 @@
       "anchor": "claude-main-l251-l251",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1229,7 +1514,10 @@
       "anchor": "claude-main-l252-l252",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1243,7 +1531,10 @@
       "anchor": "claude-main-l253-l253",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1257,7 +1548,10 @@
       "anchor": "claude-main-l254-l254",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1271,7 +1565,10 @@
       "anchor": "claude-main-l255-l255",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1285,7 +1582,10 @@
       "anchor": "claude-main-l256-l256",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1299,7 +1599,10 @@
       "anchor": "claude-main-l257-l257",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1313,7 +1616,10 @@
       "anchor": "claude-main-l258-l258",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1327,7 +1633,10 @@
       "anchor": "claude-main-l259-l259",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "lifecycle-storage-and-observability"
+        }
       ]
     },
     {
@@ -1341,7 +1650,10 @@
       "anchor": "claude-main-l260-l260",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1355,7 +1667,10 @@
       "anchor": "claude-main-l261-l261",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1369,7 +1684,10 @@
       "anchor": "claude-main-l262-l262",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1383,7 +1701,10 @@
       "anchor": "claude-main-l263-l263",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1397,7 +1718,10 @@
       "anchor": "claude-main-l264-l264",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1411,7 +1735,10 @@
       "anchor": "claude-main-l265-l265",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1425,7 +1752,10 @@
       "anchor": "claude-main-l266-l266",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "configuration-cluster-and-delivery"
+        }
       ]
     },
     {
@@ -1439,7 +1769,10 @@
       "anchor": "claude-main-l267-l267",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "mcp-and-policy-learning"
+        }
       ]
     },
     {
@@ -1453,7 +1786,10 @@
       "anchor": "claude-main-l268-l268",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "mcp-and-policy-learning"
+        }
       ]
     },
     {
@@ -1467,7 +1803,10 @@
       "anchor": "claude-main-l269-l269",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "mcp-and-policy-learning"
+        }
       ]
     },
     {
@@ -1481,7 +1820,10 @@
       "anchor": "claude-main-l270-l270",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "governance"
+        }
       ]
     },
     {
@@ -1495,7 +1837,10 @@
       "anchor": "claude-main-l271-l271",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "governance"
+        }
       ]
     },
     {
@@ -1509,7 +1854,10 @@
       "anchor": "claude-main-l272-l272",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "historical-source-inventory"
+        }
       ]
     },
     {
@@ -1523,8 +1871,14 @@
       "anchor": "claude-main-l273-l346",
       "classification": "preserved historical source; verify against current implementation",
       "current_routes": [
-        "docs/agent-context/README.md",
-        "docs/agent-context/domains/admin-control-plane.md"
+        {
+          "source": "docs/agent-context/README.md",
+          "section": "admin-api-and-configuration-mutations"
+        },
+        {
+          "source": "docs/agent-context/domains/admin-control-plane.md",
+          "section": "verification-sources"
+        }
       ]
     }
   ]

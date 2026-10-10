@@ -19,15 +19,18 @@ GUIDES = ("AGENTS.md", "CLAUDE.md", "internal/admission/AGENTS.md", "internal/ad
 
 
 def need(value, message):
+    """Reject an invariant violation with a reviewable diagnostic."""
     if not value:
         raise ValueError(message)
 
 
 def clean_text(path):
+    """Exclude immutable source blocks when checking authored navigation."""
     return BLOCK.sub(b"", path.read_bytes()).decode()
 
 
 def anchors(text):
+    """Collect explicit anchors and GitHub-style heading anchors."""
     result = set(re.findall(r'<a\s+id="([^"]+)"', text))
     counts = {}
     for line in text.splitlines():
@@ -42,6 +45,7 @@ def anchors(text):
 
 
 def resolve(root, source, link):
+    """Resolve a checked relative link within the repository boundary."""
     path, _, anchor = link.partition("#")
     target = ((root / source).parent / path).resolve() if path else (root / source).resolve()
     need(target.is_relative_to(root.resolve()), f"Link escapes checkout: {source}: {link}")
@@ -51,13 +55,57 @@ def resolve(root, source, link):
     return target.relative_to(root.resolve()).as_posix()
 
 
+
+def section_text(text, anchor):
+    """Select one authored heading body, excluding later sibling/child headings."""
+    lines = text.splitlines(keepends=True)
+    matches = []
+    counts = {}
+    for index, line in enumerate(lines):
+        if not re.match(r"^#{1,6} ", line):
+            continue
+        title = re.sub(r"^#+ | +#+$", "", line).strip().lower()
+        title = re.sub(r"[^\w\- ]", "", title).replace(" ", "-")
+        count = counts.get(title, 0)
+        counts[title] = count + 1
+        matches.append((index, title + (f"-{count}" if count else "")))
+    for pos, (start, name) in enumerate(matches):
+        if name == anchor:
+            end = matches[pos + 1][0] if pos + 1 < len(matches) else len(lines)
+            return "".join(lines[start + 1:end])
+    raise ValueError(f"Missing route source section: {anchor}")
+
+
+def route_reaches_block(root, block, route):
+    """Require the task section to reach the exact block directly or via its TOC."""
+    source = route["source"]
+    section = section_text(clean_text(root / source), route["section"])
+    for link in LINK.findall(section):
+        if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", link):
+            continue
+        if resolve(root, source, link) != block["destination"]:
+            continue
+        anchor = link.partition("#")[2]
+        if anchor == block["anchor"]:
+            return True
+        if anchor:
+            continue  # Another block in the same history is not this block.
+        # A bucket route is valid only if its authored TOC links to this block.
+        topics = section_text(clean_text(root / block["destination"]), "topics")
+        if "#" + block["anchor"] in LINK.findall(topics):
+            return True
+    return False
+
+
 def changed_paths(root, diff_base):
+    """Include tracked differences and task-local untracked files."""
     tracked = subprocess.check_output(["git", "diff", "--name-only", diff_base, "--"], cwd=root, text=True).splitlines()
     untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=root, text=True).splitlines()
     return set(tracked + untracked)
 
 
 def validate(root, diff_base=None):
+    """Check frozen provenance, current routes, discovery structure and scope."""
     ledger = json.loads((root / CTX / "preservation-map.json").read_text())
     need((ledger["baseline"], ledger["source_git_blob"], ledger["source_sha256"], ledger["source_bytes"]) ==
          (BASE, BLOB, DIGEST, SIZE), "Pinned provenance changed")
@@ -87,8 +135,9 @@ def validate(root, diff_base=None):
         need(hashlib.sha256(raw).hexdigest() == block["sha256"], f"Block hash mismatch: {name}")
         need(len(raw.splitlines()) == block["end_line"] - block["start_line"] + 1, f"Line range mismatch: {name}")
         need(block["anchor"] in anchors((root / destination).read_text()), f"Missing block anchor: {name}")
+        need(block["current_routes"], f"No current route declared: {name}")
         for route in block["current_routes"]:
-            need((root / route).is_file(), f"Missing current route: {name}: {route}")
+            need((root / route["source"]).is_file(), f"Missing current route: {name}: {route}")
         rebuilt.extend(raw)
     need(ids == set(found) and len(ids) == 108 and next_line == 347, "Incomplete source inventory")
     need(len(rebuilt) == SIZE and hashlib.sha256(rebuilt).hexdigest() == DIGEST, "Full source reconstruction mismatch")
@@ -109,6 +158,13 @@ def validate(root, diff_base=None):
                 continue
             graph[source].add(resolve(root, source, link))
             link_count += 1
+
+    route_edges = 0
+    for block in ledger["blocks"]:
+        for route in block["current_routes"]:
+            need(route_reaches_block(root, block, route),
+                 f"Broken declared route-to-block edge: {block['id']}: {route}")
+            route_edges += 1
 
     for path in GUIDES:
         need((root / path).is_file(), f"Missing native guide: {path}")
@@ -154,17 +210,20 @@ def validate(root, diff_base=None):
             allowed = path in GUIDES or path.startswith(CTX) or bool(re.fullmatch(r"\.(?:agents|claude)/skills/culvert-(?:verify|review)/SKILL\.md", path))
             need(allowed, f"Out-of-scope change: {path}")
     return bytes(rebuilt), {"blocks": len(ids), "source_bytes": len(rebuilt), "git_blob": git_blob,
-        "checked_navigation_links": link_count, "static_route_cases": len(cases),
+        "checked_navigation_links": link_count, "declared_route_edges": route_edges, "static_route_cases": len(cases),
         "diff_base_checked": diff_base, "root_bytes": sizes["AGENTS.md"], "codex_root_admission_bytes": sizes["AGENTS.md"] + sizes["internal/admission/AGENTS.md"],
         "claude_root_admission_with_adapters_bytes": sum(sizes.values()), "kind": "static integrity only; client behavior not tested"}
 
 
 def self_test(root):
+    """Reject damaged candidates and retain future-baseline compatibility."""
     mutations = [
         (CTX + "history/admission-and-connection-limits.md", b"RATE_LIMITED", b"RATE_LIMITeD"),
         ("CLAUDE.md", b"@AGENTS.md", b"@docs/agent-context/history/conventions.md"),
         ("AGENTS.md", b"# Culvert contributor guide", b"# Culvert contributor guide\nRead @docs/agent-context/history/conventions.md now."),
         ("AGENTS.md", b"docs/agent-context/domains/admission.md", b"docs/agent-context/domains/missing.md"),
+        (CTX + "README.md", b"[proxy/TLS history](history/proxy-tls-and-certificates.md)", b"[proxy/TLS history](history/scanning.md)"),
+        (CTX + "history/proxy-tls-and-certificates.md", b"(#claude-main-l175-l175)", b"(#claude-main-l176-l176)"),
         (".claude/skills/culvert-verify/SKILL.md", b"verification.md", b"review-change.md"),
         ("AGENTS.md", b"# Culvert contributor guide", b"x" * 8192 + b"\n# Culvert contributor guide"),
     ]
@@ -207,6 +266,7 @@ def self_test(root):
         fixture = Path(tmp) / "future-git"
         fixture.mkdir()
         def git(*args):
+            """Run Git only in the disposable future-history fixture."""
             return subprocess.check_output(["git", *args], cwd=fixture, stderr=subprocess.DEVNULL, text=True).strip()
         git("init", "-q")
         (fixture / "proxy.go").write_text("package main\n")
@@ -222,6 +282,7 @@ def self_test(root):
 
 
 def main():
+    """Run integrity checks and optional reconstruction/regression fixtures."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reconstruct", type=Path, help="Write reconstructed original bytes to this path")
     parser.add_argument("--diff-base", help="Optional task/PR base for instruction-only diff allowlist; independent of frozen source provenance")
