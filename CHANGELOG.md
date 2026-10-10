@@ -9,6 +9,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- A refused self-service password change left no audit record
+  (SEC-PWCHANGE-1). `apiAuthChangePassword` audits a successful change but
+  wrote nothing when the presented *current* password was wrong, which made it
+  the only credential verification on the admin plane with no compliance
+  record — the missing-audit element of the control set SEC-BASIC-1 had just
+  restored for HTTP Basic, surviving on a sibling row of the same surface. A
+  session holder guessing the account's current password (the step that turns
+  session access into durable account takeover, since the plaintext is
+  required to set a new one) produced no trace, so the audit trail could not
+  distinguish an operator's routine rotation from an attacker's.
+
+  The refusal now writes `auth.password_change.fail` with the session-derived
+  account name. Additive only: no new denial path, the detail is a fixed
+  string that never carries the presented secret, and no config version is
+  created (passwords stay off the rollback surface). Charging `loginLimiter`
+  here is still deliberately not done — this endpoint authenticates by
+  session, so a lock would let a session holder lock the real operator out of
+  the login flow — and that trade stays as recorded in the allowance this
+  caller carries in `TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller`.
+  Gates: 3 new tests (negative, positive control, malformed input), with the
+  negative one verified failing against the pre-fix handler while its controls
+  pass. Full review:
+  `docs/engineering/security-reviews/2026-10-10-admission-extraction-and-basic-auth-completeness-window.md`.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
