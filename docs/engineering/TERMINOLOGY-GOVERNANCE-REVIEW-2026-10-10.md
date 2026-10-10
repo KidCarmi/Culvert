@@ -22,12 +22,12 @@ this PR (net 0). No new open backlog item.
 
 | Business concept | Canonical name (GUI) | Other names found |
 |---|---|---|
-| Accounts that may sign in to the admin UI | **Admin Users** (panel, `/api/users`, `auth.users.*`) | "admin roster" (docs, comments, metric `culvert_ui_roster_role_clamped_total`, `UIUsers` log prefix) |
+| Accounts that may sign in to the admin UI | **Admin Users** (panel, `/api/auth/users`, `auth.users.*`) | "admin roster" (docs, comments, metric `culvert_ui_roster_role_clamped_total`, `UIUsers` log prefix) |
 
 ## Finding R-1 (Low) — "admin roster" never tied to "Admin Users"
 
 - **Business concept:** the set of admin-UI accounts.
-- **Current names:** GUI "Admin Users"; API `/api/users`; audit `auth.users.set|delete`; docs
+- **Current names:** GUI "Admin Users"; API `/api/auth/users`; audit `auth.users.set|delete`; docs
   `docs/operator/admin-roster-durability.md` and a new metric say "roster".
 - **Recommended canonical name:** Admin Users (user-visible). "Roster" stays as the internal term for
   the persisted collection, but must be introduced once against the canonical name.
