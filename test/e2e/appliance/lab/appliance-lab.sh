@@ -1813,6 +1813,10 @@ PY2
     else check P "$name-app-update" fail "$st0 $img_b -> $img_a traffic $1/$2 (a failed update must leave the running image and enforcement unchanged)"; fi
   else check P "$name-app-update" blocked "no per-phase signed-update fixture in this leg (built only with the OVA build)"; fi
   # OS update under pressure
+  # P_PRE_OSU: set the exact headroom right before the update (the stack
+  # consumes inodes while the phase runs: 400 left at the fill were gone by
+  # the update in run 38012314515, so apt failed before dpkg was reached).
+  [[ -n "${P_PRE_OSU:-}" ]] && groot "$P_PRE_OSU" 600 > "$EV/P-$name-pre-osu.txt" 2>&1
   osu="$(p_os_update)"; printf '%s\n' "$osu" > "$EV/P-$name-os-update.txt"
   s="$(p_sample "$name" after-os-update)"; set -- $s
   if grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
@@ -1856,6 +1860,15 @@ cmd_pressure() { local free
   free="$(p_host_free_gb)"; P_ALLOC0="$(p_host_alloc_mb)"
   if (( free < LAB_PRESSURE_MIN_HOST_FREE_GB )); then check P host-bound blocked "host has $free GiB free (< $LAB_PRESSURE_MIN_HOST_FREE_GB); pressure phase not run"; return 0; fi
   check P host-bound pass "host free $free GiB; disk file allocated ${P_ALLOC0} MiB; caps: growth <= $LAB_PRESSURE_MAX_HOST_GROWTH_MB MiB, abort below $(( LAB_PRESSURE_MIN_HOST_FREE_GB / 2 )) GiB free"
+  # The lab EICAR origin's allow rule normally comes from the recovery step;
+  # without it every EICAR/clean sample is a POLICY 403 and the AV checks
+  # measure nothing (run 38012314515). Install it and require a real ClamAV
+  # block before any fill.
+  p_login > /dev/null
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/P-eicar-rule.txt"
+  local v0; v0="$(eicar_verdict)"
+  if [[ "$v0" != av ]]; then check P clamav-baseline fail "EICAR through the proxy did not draw a ClamAV block before any fill ($v0); the AV checks would be vacuous"; return 0; fi
+  check P clamav-baseline pass "a fresh EICAR draws the ClamAV block before any fill"
   : > "$EV/P-samples.jsonl"; p_sample baseline 0 > /dev/null
   P_PKG=""; p_pkg_setup && P_PKG=1
   p_phase blocks 'python3 - <<"PY"
@@ -1904,7 +1917,17 @@ keep=${LAB_PKG_HEADROOM_MB:-24}<<20
 os.posix_fallocate(fd, 0, max(st.f_bfree*st.f_frsize-keep, 4096)); os.fsync(fd); os.close(fd)
 st=os.statvfs(\"/\"); print(f\"filled headroom_target={keep} free_root={st.f_bfree*st.f_frsize} free_user={st.f_bavail*st.f_frsize}\")
 PY" || true
-    P_NO_APP=1 p_phase pkginodes "python3 - <<\"PY\"
+    P_PRE_OSU="python3 - <<\"PY\"
+import os
+d=\"/var/lib/culvert-pressure/inodes\"; want=${LAB_PKG_HEADROOM_INODES_AT_UPDATE:-1500}
+need=max(want-os.statvfs(\"/\").f_ffree, 0)
+for e in os.scandir(d):
+    if need <= 0: break
+    for f in os.scandir(e.path):
+        if need <= 0: break
+        os.unlink(f.path); need-=1
+print(f\"inode headroom before the update: {os.statvfs('/').f_ffree} (target {want}; the 2.0 payload needs 3000+)\")
+PY" P_NO_APP=1 p_phase pkginodes "python3 - <<\"PY\"
 import os, errno
 d=\"/var/lib/culvert-pressure/inodes\"; os.makedirs(d, exist_ok=True)
 keep=${LAB_PKG_HEADROOM_INODES:-400}; n=0; sub=None

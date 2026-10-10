@@ -80,22 +80,11 @@ jobs:
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
-          # F-P2 CONTROLLED REPRODUCTION (ASTRA #1528 item 1): both RETAINED
-          # OVAs — dc57bd76, where one EICAR was delivered at the moment of a
-          # disk fill (run 37948667525), and the candidate 91e05872 — booted,
-          # qualified, then cycled through fills with clamd's conversations
-          # recorded on tmpfs (cmd_fp2, clamd-tap.py). Nothing is rebuilt.
-          # The pressure-only leg of commit ca7e29b4 is restored after this.
-          - variant: candidate-dc57bd76c201
-            provisioning: source
-            source_sha: "dc57bd76c201db11874d08a8d37accba8646b458"
-            image_run: "37948225581"
-            image_tar_sha256: "74c44b59f99ea0ea090929852e5891813276c22c3ae5dc3c63851210c3775447"
-            expect_image_id: "sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b"
-            retained_run: "37948667525"
-            retained_sha256: "855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9"
-            recovery_reboots: "0"
-            fp2: "1"
+          # RETAINED: the exact OVA ASTRA qualified on ESXi (run 37966305990,
+          # sha256 060a3dc6…), not a rebuild. Package-write qualification
+          # (ASTRA #1528 item 2), second pass: the AV checks now run against a
+          # real ClamAV baseline, and the inode headroom is set right before
+          # the update so dpkg is reached. F-P2 legs ran in 38013626508.
           - variant: candidate-91e05872dfe5
             provisioning: source
             source_sha: "91e05872dfe5f96c94ec725b8b2dc2b1002116ab"
@@ -104,8 +93,8 @@ jobs:
             expect_image_id: "sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4"
             retained_run: "37966305990"
             retained_sha256: "060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e"
+            pressure: "1"
             recovery_reboots: "0"
-            fp2: "1"
           # The adoption leg (retained 2e3bcc2a appliance upgraded to the
           # 91e05872 image) PASSED in run 37966305990 and is not part of this
           # package-write run; restore it from commit e3d9b4bc for the next
