@@ -80,21 +80,9 @@ jobs:
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
-          # Cache-bypass regression (owner review 5478346473, follow-up 6097484537):
-          # the SAME leg on both RETAINED OVAs. Pre-fix 72c827b7 must FAIL
-          # [CB] cached-clean-in-quarantine (a body cached clean before a clamd
-          # fault delivered 200 while the quarantine refused fresh bodies);
-          # bad788e5 must pass every [CB] check. Disposable guests only.
-          - variant: candidate-72c827b7f59f
-            provisioning: source
-            source_sha: "72c827b7f59f4e43ff2a813241be9029f58f23a9"
-            image_run: "38030881912"
-            image_tar_sha256: "8e51e048d0f206f3c9952c8651bb7255e0a4ffa6e524fc9c4247368363320483"
-            expect_image_id: "sha256:d6fc9b07ad3921b31aaff0c227e8f7c9a36b03faae5c0b45f41da76dc7f7cc16"
-            retained_run: "38031912707"
-            retained_sha256: "76769f86fe1193768cd67d4829ef66749f970acb67d6306ad6d0b1082cb9dbb5"
-            recovery_reboots: "0"
-            cachebypass: "1"
+          # On-appliance LDAP/AD (owner follow-up 6097484537 item 4): the RETAINED
+          # bad788e5 OVA against a Samba AD DC provisioned on the runner from
+          # Ubuntu packages (an AD stand-in, not Microsoft AD).
           - variant: candidate-bad788e54ffe
             provisioning: source
             source_sha: "bad788e54ffef2a2f8490ba27ebfe027a2a6eb11"
@@ -104,7 +92,7 @@ jobs:
             retained_run: "38040972664"
             retained_sha256: "87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c"
             recovery_reboots: "0"
-            cachebypass: "1"
+            ldap: "1"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -489,6 +477,33 @@ jobs:
           set -euo pipefail
           sudo modprobe dm_delay 2>/dev/null || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe dm_delay; }
           lsmod | grep -E '^dm_delay' && sudo dmsetup targets | grep -E '^(delay|linear) '
+      - name: "LDAP/AD lab: Samba AD DC on the runner (Ubuntu packages, loopback only)"
+        if: env.LAB_STAGE == 'full' && matrix.ldap == '1'
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends samba samba-ad-dc samba-ad-provision ldap-utils
+          sudo systemctl stop smbd nmbd winbind samba-ad-dc 2>/dev/null || true
+          sudo systemctl disable smbd nmbd 2>/dev/null || true
+          sudo rm -f /etc/samba/smb.conf
+          D="$LAB_ROOT/ldap"; mkdir -p "$D"; chmod 700 "$D"
+          pw() { echo "Lab-$(openssl rand -hex 8)-Aa1x"; }
+          { for v in ADMIN SVC ALICE BOB CAROL DAVE; do echo "LDAP_${v}_PASS=$(pw)"; done; } > "$D/passwords.env"; chmod 600 "$D/passwords.env"
+          set -a; . "$D/passwords.env"; set +a
+          sudo samba-tool domain provision --realm=CORP.EXAMPLE --domain=CORP --server-role=dc --dns-backend=NONE \
+            --adminpass="$LDAP_ADMIN_PASS" --option="server services = -dns" --option="ldap server require strong auth = no" \
+            --option="interfaces = lo" --option="bind interfaces only = yes" > "$D/provision.log"
+          sudo systemctl unmask samba-ad-dc; sudo systemctl start samba-ad-dc
+          for _ in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/389) 2>/dev/null && break; sleep 2; done
+          sudo samba-tool user create svc-culvert "$LDAP_SVC_PASS" >/dev/null
+          for u in alice bob carol dave; do U=$(echo "$u" | tr a-z A-Z); v="LDAP_${U}_PASS"; sudo samba-tool user create "$u" "${!v}" --mail-address="$u@corp.example" >/dev/null; done
+          sudo samba-tool group add ProxyUsers >/dev/null
+          sudo samba-tool group addmembers ProxyUsers alice,dave >/dev/null
+          sudo samba-tool user disable carol >/dev/null
+          LDAPTLS_REQCERT=never ldapsearch -LLL -H ldaps://127.0.0.1:636 -D "CN=svc-culvert,CN=Users,DC=corp,DC=example" -w "$LDAP_SVC_PASS" \
+            -b "CN=Users,DC=corp,DC=example" "(sAMAccountName=alice)" dn memberOf | tee "$D/alice.ldif"
+          grep -q 'memberOf: CN=ProxyUsers' "$D/alice.ldif"
+          samba --version | tee "$D/samba-version.txt"
+          { echo "LAB_LDAP_SECRETS=$D"; echo "LAB_LDAP_STOP=sudo systemctl stop samba-ad-dc"; echo "LAB_LDAP_START=sudo systemctl start samba-ad-dc"; } >> "$GITHUB_ENV"
       - name: "Lab: preflight → up → qualify → recovery (collect + down always run)"
         if: env.LAB_STAGE == 'full'
         env:
@@ -504,7 +519,7 @@ jobs:
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
           export LAB_HISTORY="${{ matrix.history || '1' }}"
           export LAB_ENGINE_SURFACE="${{ matrix.engine_surface || '0' }}"
-          export LAB_PRESSURE="${{ matrix.pressure || '0' }}" LAB_FP2="${{ matrix.fp2 || '0' }}" LAB_CACHEBYPASS="${{ matrix.cachebypass || '0' }}"
+          export LAB_PRESSURE="${{ matrix.pressure || '0' }}" LAB_FP2="${{ matrix.fp2 || '0' }}" LAB_CACHEBYPASS="${{ matrix.cachebypass || '0' }}" LAB_LDAP="${{ matrix.ldap || '0' }}"
           # [fail-fast] in the commit message: an ITERATION run stops at the
           # first phase with a failed check (evidence still collected). Never
           # use it for the run whose evidence is handed off.
@@ -566,7 +581,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -1047,7 +1062,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:

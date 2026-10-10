@@ -2168,6 +2168,98 @@ systemctl stop culvert-cb-tap 2>/dev/null; systemd-run --quiet --unit=culvert-cb
   check CB scan-spanning-fault info "not judged on the appliance: a scan that starts before a fault and answers inside the 60 s window is refused by the window on BOTH builds, so only a scan longer than the window separates them; covered by TestScanSpanningAFaultIsNotHonoured (internal/secscan, mutation-checked)"
   groot 'systemctl stop culvert-cb-tap 2>/dev/null; cat /run/culvert-cb/streams.jsonl' 60 > "$EV/CB-clamd-streams.jsonl" 2>/dev/null || true
   grep -E 'SecurityScan|ClamAV|av_unavailable|quarantin' <(groot "docker logs --since 15m culvert 2>&1 | tail -n 300" 120 2>/dev/null) > "$EV/CB-proxy-log.txt" || true; }
+# cmd_ldap — on-appliance LDAP/AD qualification (owner follow-up 6097484537
+# item 4) against a REAL directory: Samba provisioned as an Active Directory
+# domain controller on the runner from Ubuntu's own packages (the workflow
+# does that; the guest reaches it at 10.0.2.2). It is an AD stand-in, not
+# Microsoft AD: Kerberos/NTLM/Negotiate, channel binding, LDAP signing policy
+# and nested groups are out of scope and recorded as such.
+#   L1 the admin directory test (POST /api/idp/test) reaches the directory,
+#      binds the service account, finds alice and returns her groups
+#   L2 the LDAP IdP profile is created through the admin API; auth becomes
+#      required; a group-scoped allow precedes a block for the same origin
+#   L3 credential matrix through the proxy (Proxy-Authorization: Basic)
+#   L4 the authenticated identity reaches the request log
+#   L5 LDAPS: certificate verification against the directory's own CA, then
+#      the unsafe skip-verify opt-in (recorded, never recommended)
+#   L6 directory outage: an uncached user fails closed; recovery on evidence
+LDAP_DOM="DC=corp,DC=example"; LDAP_USERS="CN=Users,$LDAP_DOM"
+ldap_proxy() { curl -sS -m 30 -x "$P" ${2:+--proxy-user "$2"} -o "$WORK/ldap-body" -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+cmd_ldap() { local u c r prof pid
+  [[ -s "${LAB_LDAP_SECRETS:-/nonexistent}/passwords.env" ]] || { check L directory blocked "no directory provisioned on the runner (LAB_LDAP_SECRETS)"; return 0; }
+  # shellcheck disable=SC1090
+  source "$LAB_LDAP_SECRETS/passwords.env"
+  ensure_admin_pass; [[ -f "$WORK/eicar-origin.pid" ]] || rec_origin_start
+  echo "ldap qualification origin page" > "$WORK/eicar-origin/ldap-ok.txt"; u="http://10.0.2.2:$LAB_EICAR_PORT/ldap-ok.txt"
+  p_login > /dev/null
+  prof="$(python3 -c 'import json,sys
+print(json.dumps({"name":"lab-samba-ad","type":"ldap","enabled":True,"priority":1,"emailDomains":[],
+ "ldap":{"url":sys.argv[1],"bindDn":sys.argv[2],"bindPassword":sys.argv[3],"baseDn":sys.argv[4],
+         "userFilter":"(sAMAccountName=%s)","groupAttribute":"memberOf","cacheTtlSeconds":30}}))' \
+    "ldap://10.0.2.2:389" "CN=svc-culvert,$LDAP_USERS" "$LDAP_SVC_PASS" "$LDAP_DOM")"
+  # ---- L1 admin directory test
+  r="$(api POST /api/idp/test "{\"profile\":$prof,\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-idp-test.txt")"
+  if [[ "$(code <<<"$r")" == 200 ]] && body <<<"$r" | python3 -c 'import json,sys
+d=json.load(sys.stdin); g=(d.get("identity") or {}).get("groups") or []
+sys.exit(0 if d.get("ok") and any("CN=ProxyUsers" in x for x in g) else 1)' 2>/dev/null; then
+    check L directory-test pass "POST /api/idp/test: dial, service bind, user search and alice's bind succeeded against the Samba AD DC; groups include CN=ProxyUsers"
+  else check L directory-test fail "directory test did not succeed: $(body <<<"$r" | tr '\n' ' ' | head -c 400)"; return 0; fi
+  # ---- L2 profile + policy
+  c="$(api POST /api/idp "$prof" | tee "$EV/L2-idp-create.txt" | code)"
+  [[ "$c" == 200 || "$c" == 201 ]] && check L idp-create pass "LDAP profile created and enabled (http $c); bind password write-only: $(body < "$EV/L2-idp-create.txt" | grep -c "$LDAP_SVC_PASS") occurrences in the response" \
+    || { check L idp-create fail "http $c $(body < "$EV/L2-idp-create.txt" | head -c 300)"; return 0; }
+  api GET /api/idp | body > "$EV/L2-idp-list.json"
+  grep -q "$LDAP_SVC_PASS" "$EV/L2-idp-list.json" && check L bind-secret-not-returned fail "the bind password is returned by GET /api/idp" || check L bind-secret-not-returned pass "GET /api/idp does not return the bind password"
+  api POST /api/policy "{\"name\":\"lab-ldap-allow-proxyusers\",\"priority\":3,\"action\":\"Allow\",\"destFQDN\":\"10.0.2.2\",\"sourceGroup\":\"CN=ProxyUsers,$LDAP_USERS\",\"sslAction\":\"Bypass\",\"enabled\":true}" > "$EV/L2-rule-allow.txt"
+  api POST /api/policy '{"name":"lab-ldap-block-others","priority":4,"action":"Block","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/L2-rule-block.txt"
+  c="$(api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Default"}' | tee "$EV/L2-auth-required.txt" | code)"
+  [[ "$c" == 200 ]] && check L auth-required pass "default auth outcome = Default (authentication required)" || { check L auth-required fail "http $c"; return 0; }
+  # ---- L3 credential matrix
+  local m=() exp got name cred bad=0 row
+  while IFS='|' read -r name cred exp; do
+    got="$(ldap_proxy "$u" "$cred")"; m+=("$name=$got(want $exp)")
+    [[ "$got" == "$exp" ]] || bad=1
+  done <<EOF2
+no-credentials||407
+alice (ProxyUsers)|alice:$LDAP_ALICE_PASS|200
+alice wrong password|alice:not-the-password|407
+bob (no group)|bob:$LDAP_BOB_PASS|403
+carol (account disabled)|carol:$LDAP_CAROL_PASS|407
+unknown user|mallory:$LDAP_BOB_PASS|407
+filter metacharacter|*:$LDAP_ALICE_PASS|407
+DN as username|CN=alice,$LDAP_USERS:$LDAP_ALICE_PASS|407
+EOF2
+  printf '%s\n' "${m[@]}" > "$EV/L3-matrix.txt"
+  [[ $bad == 0 ]] && check L credential-matrix pass "$(IFS='; '; echo "${m[*]}")" || check L credential-matrix fail "$(IFS='; '; echo "${m[*]}")"
+  # ---- L4 identity in the request log
+  sleep 2; api GET "/api/logs?limit=500" | body > "$EV/L4-logs.json"
+  if python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); es=d if isinstance(d,list) else d.get("logs",d.get("entries",[]))
+s=json.dumps(es); sys.exit(0 if "alice" in s and "bob" in s else 1)' "$EV/L4-logs.json" 2>/dev/null; then
+    check L identity-logged pass "request-log entries for the origin name alice (allowed) and bob (blocked)"
+  else check L identity-logged fail "identities not found in the request log ($(head -c 300 "$EV/L4-logs.json"))"; fi
+  # ---- L5 LDAPS
+  pid="$(api GET /api/idp | body | python3 -c 'import json,sys
+d=json.load(sys.stdin); ps=d if isinstance(d,list) else d.get("profiles",[])
+print(next(p["id"] for p in ps if p.get("name")=="lab-samba-ad"))' 2>/dev/null)"
+  r="$(api POST /api/idp/test "{\"profile\":$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#' <<<"$prof"),\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L5-ldaps-verify.txt")"
+  if body <<<"$r" | grep -q '"ok":true'; then check L ldaps-verify-internal-ca info "LDAPS verified against the directory's self-issued CA (unexpected: the appliance has no CA setting; see L5-ldaps-verify.txt)"
+  else check L ldaps-verify-internal-ca info "FINDING: LDAPS to a directory whose certificate is issued by an internal CA FAILS verification and the appliance offers no CA setting (ldapTLSConfig trusts the image's public roots only): $(body <<<"$r" | tr '\n' ' ' | head -c 300)"; fi
+  r="$(api POST /api/idp/test "{\"profile\":$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#; s#"bindDn"#"tlsSkipVerify":true,"bindDn"#' <<<"$prof"),\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L5-ldaps-skipverify.txt")"
+  body <<<"$r" | grep -q '"ok":true' && check L ldaps-skip-verify info "LDAPS works only with tlsSkipVerify=true (unsafe opt-in; recorded, not recommended)" \
+    || check L ldaps-skip-verify info "LDAPS failed even with tlsSkipVerify: $(body <<<"$r" | tr '\n' ' ' | head -c 300)"
+  # ---- L6 outage
+  if [[ -n "${LAB_LDAP_STOP:-}" ]]; then
+    eval "$LAB_LDAP_STOP" > "$EV/L6-stop.txt" 2>&1 || true; sleep 3
+    got="$(ldap_proxy "$u" "dave:$LDAP_DAVE_PASS")"
+    api GET /api/diagnostics | body > "$EV/L6-diagnostics-down.json"
+    [[ "$got" == 407 ]] && check L outage-fail-closed pass "directory stopped: uncached dave (ProxyUsers) refused 407" || check L outage-fail-closed fail "directory stopped: dave answered $got"
+    eval "$LAB_LDAP_START" > "$EV/L6-start.txt" 2>&1 || true
+    r=000; for _ in $(seq 1 30); do r="$(ldap_proxy "$u" "dave:$LDAP_DAVE_PASS")"; [[ "$r" == 200 ]] && break; sleep 5; done
+    api GET /api/diagnostics | body > "$EV/L6-diagnostics-up.json"
+    [[ "$r" == 200 ]] && check L outage-recovery pass "directory restarted: dave 200 without any appliance action" || check L outage-recovery fail "directory restarted: dave still $r after 150 s"
+  else check L outage blocked "no LAB_LDAP_STOP/START provided"; fi
+  api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Exempt"}' > /dev/null; }
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -2930,6 +3022,7 @@ case "${1:-}" in
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
   cachebypass) cmd_cachebypass; [[ "$(failures)" == 0 ]] ;;
+  ldap) cmd_ldap; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
@@ -2937,6 +3030,7 @@ case "${1:-}" in
     cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
     if [[ "${LAB_FP2:-0}" == 1 ]]; then cmd_fp2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_CACHEBYPASS:-0}" == 1 ]]; then cmd_cachebypass; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
+    if [[ "${LAB_LDAP:-0}" == 1 ]]; then cmd_ldap; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
     cmd_recovery; fail_fast_after recovery
     if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi
