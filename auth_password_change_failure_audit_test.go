@@ -28,10 +28,19 @@ import (
 	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
-// changePasswordRequest builds a POST /api/auth/change-password carrying a
-// valid session for user and the RoleViewer-satisfying context the production
-// middleware chain would have installed.
+// changePasswordRequest builds a POST /api/auth/change-password whose body is
+// a well-formed change of current → next.
 func changePasswordRequest(t *testing.T, user, current, next string) *http.Request {
+	t.Helper()
+	return changePasswordRequestRaw(t, user,
+		`{"current_password":"`+current+`","new_password":"`+next+`"}`)
+}
+
+// changePasswordRequestRaw is the same request with an ARBITRARY body, so the
+// malformed-input cases can send bytes no well-formed builder would produce.
+// It carries a valid session for user and the RoleViewer-satisfying context
+// the production middleware chain would have installed.
+func changePasswordRequestRaw(t *testing.T, user, body string) *http.Request {
 	t.Helper()
 	cookieValue, err := encodeSession(&Session{
 		Sub:      user,
@@ -44,8 +53,8 @@ func changePasswordRequest(t *testing.T, user, current, next string) *http.Reque
 		t.Fatalf("encodeSession: %v", err)
 	}
 	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
-	body := strings.NewReader(`{"current_password":"` + current + `","new_password":"` + next + `"}`)
-	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/auth/change-password", body)
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/auth/change-password",
+		strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	// Cookie attributes are inert here — the request never crosses the
 	// network; they satisfy gosec G124 without a //nolint suppression.
@@ -64,10 +73,14 @@ func changePasswordRequest(t *testing.T, user, current, next string) *http.Reque
 // carries a ULID and stays empty on this path), so the pair is the entry's
 // unique content: a saturated ring cannot make the assertion pass or fail by
 // accident, as a length delta would.
+// Indexed rather than ranged by value: AuditEntry is 136 bytes and the
+// repository's conventions prefer index-based range over copying large
+// structs (gocritic rangeValCopy).
 func auditEntryFor(action, object string) (AuditEntry, bool) {
-	for _, entry := range auditGet() {
-		if entry.Action == action && entry.Object == object {
-			return entry, true
+	entries := auditGet()
+	for i := range entries {
+		if entries[i].Action == action && entries[i].Object == object {
+			return entries[i], true
 		}
 	}
 	return AuditEntry{}, false
@@ -185,13 +198,8 @@ func TestSECPWCHANGE1_MalformedAndMissingFieldsAreRefusedBeforeVerification(t *t
 			restoreAudit := audit.SwapRingForTest()
 			t.Cleanup(restoreAudit)
 
-			r := changePasswordRequest(t, user, "placeholder", "placeholder")
-			r.Body = http.NoBody
-			r = r.Clone(r.Context())
-			r.Body = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body)).Body
-
 			w := httptest.NewRecorder()
-			apiAuthChangePassword(w, r)
+			apiAuthChangePassword(w, changePasswordRequestRaw(t, user, tc.body))
 
 			if w.Code != tc.want {
 				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.want, w.Body.String())
