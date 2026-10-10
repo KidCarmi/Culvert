@@ -590,7 +590,27 @@ snapshots `cfg.uiUsers` so shuffled runs do not interact.
    masks a real regression later: a guard test that fails for environmental
    reasons trains its readers to re-run it. Recommended: give it a stubbed
    resolver or a hostname the suite controls.
-7. **The window's largest change is still a refactor, and refactors of this
+7. **The AegisDiff security-triage bot has analyzed nothing on at least the
+   last two PRs, while presenting as a pass.** On this review's own PR (#1597,
+   commit `42424d4`) and on #1592 (commit `28a43ef`) it posted
+   `Verdict: ERROR`, `Confidence 0%`, `Analyzed by: unknown`, with
+   "All LLM providers exhausted. Last error: Client error '404 Not Found' for
+   url 'https://api.groq.com/openai/v1/chat/completions'". The #1592 report is
+   explicit that no analysis survived: `Chunks errored: 8 / 8`,
+   `Inline comments posted: 0`, 45 of 51 files skipped. This is a **detection
+   control that is down**, not a finding about any diff, and it is the kind
+   that stays down: the report's severity row renders as `✅ N/A` and the bot
+   posts no check run and no commit status, so nothing goes red and nothing
+   blocks — a reviewer skimming the PR conversation sees a green tick next to
+   the word "Severity" on a scan that never ran. Two data points is not a
+   census; the next run should check whether it predates #1592. A 404 from
+   that endpoint (which is the correct Groq chat-completions URL) most often
+   means the configured model name is retired rather than the base URL being
+   wrong, but AegisDiff is a separate repository and was not inspected here.
+   Recommended, in the bot rather than in this repository: fail loudly — post
+   a failing check run, or at minimum drop the `✅` from a row that carries no
+   verdict — so an exhausted-provider run cannot read as coverage.
+8. **The window's largest change is still a refactor, and refactors of this
    kind are only as good as their differential tests.** The equivalence
    argument in §4.1 rests on a line-level diff plus the package's own
    ownership and boundary tests; it does not rest on a behavioural oracle
