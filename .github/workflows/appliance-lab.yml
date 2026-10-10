@@ -655,13 +655,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The candidate under qualification, RETAINED (run 38031912707): the
+          # The candidate under qualification, RETAINED (run 38040972664): the
           # frames are bound to these bytes (ova-sha256 + .mf + the guest's
           # own console banner), and Esc is judged against the documented
           # contract (esc-shows-boot-messages, esc-one-way).
-          - variant: candidate-72c827b7f59f
-            retained_run: "38031912707"
-            retained_sha256: "76769f86fe1193768cd67d4829ef66749f970acb67d6306ad6d0b1082cb9dbb5"
+          - variant: candidate-bad788e54ffe
+            retained_run: "38040972664"
+            retained_sha256: "87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: KVM, lab directory, tools
@@ -818,18 +818,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Candidate 72c827b7 OVA (lab run 38031912707). The archive and index pins
+      # Candidate bad788e5 OVA (lab run 38040972664). The archive and index pins
       # are the OVA's own build record (build-info.json clamav_baked_tar_sha256
       # and clamav_sidecar_image_id; on 2e3bcc2a these equalled the measured
       # pins). The amd64 manifest and config are DERIVED from the re-hashed
       # index (not pinned: derived and exported through GITHUB_ENV), so every link stays hash-bound.
-      # This sidecar is NOT the one the 91e05872 scan covered (index 0025aba0…):
+      # This sidecar is NOT the one the 72c827b7 scan covered (index 50bb8aa0…):
       # same tag and pinned base, different bytes, so that 0-findings result
-      # cannot be reused (72c827b7 build-info: image id 50bb8aa0…).
-      OVA_ARTIFACT_ID: "11662896534"   # appliance-lab-ova-candidate-72c827b7f59f, run 38031912707
-      OVA_SHA256: 76769f86fe1193768cd67d4829ef66749f970acb67d6306ad6d0b1082cb9dbb5
-      SIDECAR_ARCHIVE_SHA256: 302c53749ff2ecd151d369dbf70f3d210f05e02be377712caaf703e5b27f9f2f
-      SIDECAR_INDEX: sha256:50bb8aa0a202add9758dfef7b6a9cfc356aa18af2df2d210f5feb020972f7826
+      # cannot be reused (bad788e5 build-info: image id d62dd495…).
+      OVA_ARTIFACT_ID: "11666266481"   # appliance-lab-ova-candidate-bad788e54ffe, run 38040972664
+      OVA_SHA256: 87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c
+      SIDECAR_ARCHIVE_SHA256: b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445
+      SIDECAR_INDEX: sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -916,7 +916,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-72c827b7f59f
+          name: appliance-lab-sidecar-scan-bad788e54ffe
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
@@ -1246,12 +1246,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      OVA_ARTIFACT_ID: "11662896534"   # appliance-lab-ova-candidate-72c827b7f59f, run 38031912707
-      OVA_SHA256: 76769f86fe1193768cd67d4829ef66749f970acb67d6306ad6d0b1082cb9dbb5
-      SOURCE_IMAGE_RUN_ID: "38030881912"
-      SOURCE_IMAGE_TAR_SHA256: 8e51e048d0f206f3c9952c8651bb7255e0a4ffa6e524fc9c4247368363320483
-      IMAGE_ID: sha256:d6fc9b07ad3921b31aaff0c227e8f7c9a36b03faae5c0b45f41da76dc7f7cc16
-      SRC_SHA: 72c827b7f59f4e43ff2a813241be9029f58f23a9
+      OVA_ARTIFACT_ID: "11666266481"   # appliance-lab-ova-candidate-bad788e54ffe, run 38040972664
+      OVA_SHA256: 87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c
+      SOURCE_IMAGE_RUN_ID: "38040017115"
+      SOURCE_IMAGE_TAR_SHA256: b1d63190dec3f45a733fc78e40fd4f844390f4b918c66c9f1ae3f573d6835790
+      IMAGE_ID: sha256:ac1909ec95d7588a86737cfa6d8927b0e7c04a5fe12891706eec86591dbb2ad7
+      SRC_SHA: bad788e54ffef2a2f8490ba27ebfe027a2a6eb11
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -1400,7 +1400,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-72c827b7f59f
+          name: appliance-lab-exact-scan-bad788e54ffe
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
