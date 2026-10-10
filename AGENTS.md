@@ -18,9 +18,14 @@ shared, current task guidance. `CLAUDE.md` is a compatibility adapter.
   shutdown ownership. Fail-open/fail-closed is domain-specific, not a slogan.
   For example, empty configured default action allows with zero rules, denies
   with rules; explicit configuration wins. See [errata](docs/agent-context/errata.md).
-- For implementation, use [current conventions](docs/agent-context/conventions.md)
-  as relevant: contextual I/O, SSRF/log sanitization, immutable publication,
-  approved GUI/configuration exceptions, and global-test cleanup.
+- Before changing code, read [current conventions](docs/agent-context/conventions.md).
+  It is MANDATORY for implementation work, not optional background: the Claude
+  adapter imports it eagerly and a Codex session must open it. It carries the
+  rules CI and CodeQL enforce — `logger.Printf` for application logging,
+  `sanitizeLog` + `%q` on untrusted log values, inline SSRF guards
+  (`isPrivateHost`), contextual I/O (`http.NewRequestWithContext`), handler-level
+  `requireRole`, audit-then-`saveConfigVersion` with its recorded exclusions,
+  GUI/API parity with its recorded exceptions, and global-test cleanup.
 
 ## Read the applicable guidance, not the entire archive
 
@@ -90,5 +95,10 @@ Put durable contracts beside their owner and executable tests, repeatable
 procedures in shared workflows, and incident chronology in history. Update this
 root only for universal guidance or changed routes. For instruction changes run
 `python3 docs/agent-context/check.py`, use realistic positive/negative retrieval
-cases, and obtain an independent pass. The [migration record](docs/agent-context/migration.md)
-explains preservation, branch reconciliation and actual validation limits.
+cases, and obtain an independent pass. The Fast PR Gate's `docs-guidance` job
+runs the same checker (self-test plus the PR-base scope rule) on every pull
+request that touches a guidance path: every automatically discovered
+`AGENTS.md`, `CLAUDE.md` and native skill must be registered in `check.py`, and
+the Claude adapters' eager imports are an exact allowlist, never a count. The
+[migration record](docs/agent-context/migration.md) explains preservation,
+branch reconciliation and actual validation limits.
