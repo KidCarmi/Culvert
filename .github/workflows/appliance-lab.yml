@@ -51,7 +51,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -566,7 +566,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -826,6 +826,110 @@ jobs:
   # every link re-hashed, then the Deep gate's own Trivy gate plus a full
   # all-severity record and an SBOM, bound to that config by Trivy's ImageID.
   # Runs only when the head commit says [sidecar-scan].
+  # F-P2 ISOLATED reproduction (owner follow-up 6097484537 item 2). No
+  # Culvert, no appliance: the exact sidecar extracted from the RETAINED
+  # bad788e5 OVA (archive -> index -> config, every link re-hashed), its stock
+  # clamd.conf, freshclam OFF so the signature set is fixed and recorded, and
+  # clamd's /tmp (its TemporaryDirectory) on its own 256 MiB loop ext4 so the
+  # fill exhausts the spool and nothing else on the runner. The client
+  # (fp2-isolated.py) frames INSTREAM by hand and records the full sent bytes'
+  # sha256, the reply, timing and temp free space per conversation. Variants
+  # separate the explanations: no-pressure control, serial at a full temp,
+  # serial headroom sweep (the appliance runs' shape), 8-way concurrency.
+  fp2-isolated:
+    name: "Lab · F-P2 isolated: exact sidecar, temp-dir exhaustion, scripted client"
+    if: ${{ contains(github.event.head_commit.message, '[fp2-isolated]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      OVA_ARTIFACT_ID: "11666266481"   # appliance-lab-ova-candidate-bad788e54ffe, run 38040972664
+      OVA_SHA256: 87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c
+      SIDECAR_ARCHIVE_SHA256: b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445
+      SIDECAR_INDEX: sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Workspace + libguestfs (read-only disk access)
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          if [ -f /etc/apt/apt-mirrors.txt ]; then sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt; fi
+          sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/fp2iso" && sudo chown "$(id -u):$(id -g)" "$best/fp2iso"
+          echo "W=$best/fp2iso" >> "$GITHUB_ENV"; mkdir -p "$best/fp2iso/evidence"
+          for _ in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends libguestfs-tools qemu-utils && break
+            sleep 15
+          done
+          sudo chmod 0644 /boot/vmlinuz-*
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+      - name: Retained OVA → the baked sidecar archive (hash-checked at each step)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$W"; E="$W/evidence"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OVA_ARTIFACT_ID/zip" > ova.zip
+          unzip -q ova.zip -d ova && rm -f ova.zip
+          ova="$(ls ova/*.ova)"; got="$(sha256sum "$ova" | cut -d' ' -f1)"
+          echo "$got  $(basename "$ova")" | tee "$E/ova.sha256"
+          [ "$got" = "$OVA_SHA256" ] || { echo "::error::OVA sha256 $got, expected $OVA_SHA256"; exit 1; }
+          mkdir x && tar -xf "$ova" -C x && rm -rf ova
+          disk="$(ls "$W"/x/*.vmdk)"
+          sudo env LIBGUESTFS_BACKEND=direct virt-copy-out -a "$disk" /var/lib/culvert-appliance/images/clamav.tar.gz "$W/"
+          sudo chown "$(id -u):$(id -g)" "$W/clamav.tar.gz"; rm -rf x
+          got="$(sha256sum clamav.tar.gz | cut -d' ' -f1)"
+          echo "$got  /var/lib/culvert-appliance/images/clamav.tar.gz" | tee "$E/archive.sha256"
+          [ "$got" = "$SIDECAR_ARCHIVE_SHA256" ] || { echo "::error::archive sha256 $got, expected $SIDECAR_ARCHIVE_SHA256"; exit 1; }
+          gunzip -c clamav.tar.gz > clamav.tar
+          cfg="$(test/e2e/appliance/lab/sidecar-scan.sh bind "$W/clamav.tar" "$SIDECAR_INDEX" top "$E/binding.json")"
+          docker load -i clamav.tar | tee "$E/docker-load.txt"
+          ref="$(sed -n 's/^Loaded image: //p; s/^Loaded image ID: //p' "$E/docker-load.txt" | head -1)"
+          id="$(docker image inspect -f '{{.Id}}' "$ref")"
+          echo "loaded image id $id; bound config $cfg" | tee -a "$E/docker-load.txt"
+          [ "$id" = "$cfg" ] || [ "$id" = "$SIDECAR_INDEX" ] || { echo "::error::loaded image $id is neither the bound config $cfg nor the index"; exit 1; }
+          echo "IMG=$id" >> "$GITHUB_ENV"
+      - name: Stock clamd.conf + bounded temp filesystem + clamd up (freshclam off, signatures recorded)
+        run: |
+          set -euo pipefail
+          E="$W/evidence"
+          docker run --rm --entrypoint cat "$IMG" /etc/clamav/clamd.conf > "$E/clamd.conf"
+          sha256sum "$E/clamd.conf" | tee "$E/clamd.conf.sha256"
+          grep -nE '^(TemporaryDirectory|LocalSocket|TCPSocket|MaxThreads|StreamMaxLength|ConcurrentDatabaseReload|SelfCheck|MaxQueue|LogFile|LogVerbose)' "$E/clamd.conf" | tee "$E/clamd.conf-relevant.txt" || true
+          truncate -s 256M "$W/tmp.img"; mkfs.ext4 -q -m 0 "$W/tmp.img"
+          sudo mkdir -p "$W/tmpfs"; sudo mount -o loop "$W/tmp.img" "$W/tmpfs"; sudo chmod 1777 "$W/tmpfs"
+          df -B1 "$W/tmpfs" | tee "$E/tmpfs-df.txt"
+          docker run -d --name clamd-iso -e CLAMAV_NO_FRESHCLAMD=true -e CLAMAV_NO_MILTERD=true \
+            -v "$W/tmpfs:/tmp" -p 127.0.0.1:3310:3310 "$IMG" > "$E/container.id"
+          for i in $(seq 1 120); do
+            r="$(printf 'zPING\0' | timeout 5 nc -q2 127.0.0.1 3310 2>/dev/null | tr -d '\0' || true)"
+            [ "$r" = PONG ] && break; sleep 5
+          done
+          [ "$r" = PONG ] || { docker logs clamd-iso | tail -50; echo "::error::clamd did not answer PING"; exit 1; }
+          printf 'zVERSION\0' | timeout 5 nc -q2 127.0.0.1 3310 | tr -d '\0' | tee "$E/clamd-version.txt"; echo
+          docker exec clamd-iso sh -c 'ls -l /var/lib/clamav; sha256sum /var/lib/clamav/*.c?d 2>/dev/null' | tee "$E/signatures.txt"
+      - name: "Reproduction variants (control, serial-full, serial-sweep, conc8)"
+        run: |
+          set -uo pipefail
+          L=test/e2e/appliance/lab; R="$W/evidence/requests.jsonl"; : > "$R"
+          H=0,4096,16384,65536,262144,1048576,4194304
+          alive() { printf 'zPING\0' | timeout 5 nc -q2 127.0.0.1 3310 2>/dev/null | tr -d '\0'; }
+          for v in "control 2 50 1 -1" "serial-full 14 10 1 0" "serial-sweep 28 10 1 $H" "conc8 14 10 8 $H" "conc8-full 14 10 8 0"; do
+            set -- $v
+            python3 -I "$L/fp2-isolated.py" 127.0.0.1 3310 "$W/tmpfs" "$R" "$@"
+            echo "$1 done; clamd: $(alive)" | tee -a "$W/evidence/variants.txt"
+          done
+          python3 -I "$L/fp2-isolated-report.py" "$R" "$W/evidence/REPORT.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          docker logs clamd-iso > "$W/evidence/clamd-container.log" 2>&1 || true
+          df -B1 "$W/tmpfs" >> "$W/evidence/tmpfs-df.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-fp2-isolated-bad788e54ffe
+          path: ${{ env.W }}/evidence/
+          if-no-files-found: warn
+
   ova-sidecar-scan:
     name: "Lab · candidate OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
     if: ${{ contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
@@ -943,7 +1047,7 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') }}
+    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
