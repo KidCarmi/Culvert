@@ -29,7 +29,7 @@ $env:ESXI_HOST_KEY_ALIAS = $owned.name
 $env:ESXI_OPERATOR_ENROLLED = '1'
 $env:ESXI_HOST_KEY_PINNED = '1'
 $env:ESXI_EXTENDED_CAMPAIGN = '1'
-$env:ESXI_ENGINE_SURFACE = if ($configuration.source_sha -in @('7c7b29ee3be40af6a0809c73ad04d4337303263d','91e05872dfe5f96c94ec725b8b2dc2b1002116ab','72c827b7f59f4e43ff2a813241be9029f58f23a9')) { '1' } else { '0' }
+$env:ESXI_ENGINE_SURFACE = if ($configuration.source_sha -in @('7c7b29ee3be40af6a0809c73ad04d4337303263d','91e05872dfe5f96c94ec725b8b2dc2b1002116ab','72c827b7f59f4e43ff2a813241be9029f58f23a9','bad788e54ffef2a2f8490ba27ebfe027a2a6eb11')) { '1' } else { '0' }
 $env:ESXI_ENGINE_SOURCE = $configuration.source_sha
 $env:ESXI_BIND = $Bind
 if ($ContinueUndispatched) {

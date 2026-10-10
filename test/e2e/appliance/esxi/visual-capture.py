@@ -40,7 +40,7 @@ def candidate_profile(scope):
     spec = importlib.util.spec_from_file_location('visual_candidates', HERE / 'candidate-identities.py')
     profiles = importlib.util.module_from_spec(spec); spec.loader.exec_module(profiles)
     profile = profiles.scope_profile(scope)
-    need(profile['source_sha'] in (profiles.E7E, profiles.E7C, profiles.E91, profiles.E72), 'reviewed visual candidate required')
+    need(profile['source_sha'] in (profiles.E7E, profiles.E7C, profiles.E91, profiles.E72, profiles.EBAD788), 'reviewed visual candidate required')
     return profile
 
 

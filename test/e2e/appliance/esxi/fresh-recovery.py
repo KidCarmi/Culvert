@@ -221,7 +221,7 @@ def run(args):
     identities = importlib.util.module_from_spec(profile_spec); profile_spec.loader.exec_module(identities)
     source = identities.scope_profile(lab.c)['source_sha']
     history = getattr(args, 'history', False)
-    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72), 'History qualification requires a reviewed history-capable candidate.')
+    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788), 'History qualification requires a reviewed history-capable candidate.')
     require(lab.c['source_sha'] == source and lab.c['max_vms'] == 1)
     console.b.module.validate_scope(lab.c)
     escrow = private_escrow(args.escrow, lab.run)

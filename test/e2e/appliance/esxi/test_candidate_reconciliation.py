@@ -2,6 +2,8 @@
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 import unittest
@@ -18,14 +20,32 @@ def load(name):
 
 
 class CandidateReconciliationTests(unittest.TestCase):
-    def test_72_profile_and_engine_pins_match_product_and_build_evidence(self):
-        ids=load('candidate-identities');profile=ids.source_profile(ids.E72)
-        engine=load('engine-surface-proof').PROFILES[ids.E72]
+    def test_shared_pressure_enforcement_accepts_av_refusal_not_policy_failure(self):
+        script=(HERE.parent/'lab/appliance-lab.sh').read_text(encoding='utf-8')
+        function=script[script.index('p_enforced() {'):script.index('p_sample() {')]
+        bash=shutil.which('bash')
+        if os.name=='nt':bash='C:/Program Files/Git/bin/bash.exe'
+        self.assertTrue(bash and Path(bash).is_file())
+        for allowed,blocked,body,rc,want in (
+                ('200','403','','0','yes'),
+                ('403','403','antivirus scanning is currently unavailable','0','yes'),
+                ('403','403','blocked by policy','0','no'),
+                ('403','200','antivirus scanning is currently unavailable','0','no'),
+                ('403','403','antivirus scanning is currently unavailable','28','no')):
+            source='set -euo pipefail\nP=fixture\ncurl() { printf "%s" "$FAKE_BODY"; return "$FAKE_RC"; }\n'+function+'\np_enforced "$ALLOW" "$BLOCK"\n'
+            result=subprocess.run([bash,'-c',source],capture_output=True,text=True,
+                                  env=dict(os.environ,FAKE_BODY=body,FAKE_RC=rc,ALLOW=allowed,BLOCK=blocked),timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(result.stdout.strip(),want)
+
+    def test_72_profile_and_engine_pins_match_product_and_build_evidence(self, source=None):
+        ids=load('candidate-identities');source=source or ids.E72;profile=ids.source_profile(source)
+        engine=load('engine-surface-proof').PROFILES[source]
         for name,key in (('culvert-net','network_helper_sha256'),('culvert-appliance-reset-identity','reset_helper_sha256')):
-            raw=subprocess.check_output(['git','show',ids.E72+':appliance/provision/'+name],cwd=HERE.parents[3])
+            raw=subprocess.check_output(['git','show',source+':appliance/provision/'+name],cwd=HERE.parents[3])
             self.assertEqual(hashlib.sha256(raw).hexdigest(),profile[key])
         for name,key in (('modprobe-culvert-unused.conf','denylist_sha256'),('72-culvert-drm.rules','drm_rule_sha256'),('net-autoload-reviewed.txt','net_reviewed_sha256')):
-            raw=subprocess.check_output(['git','show',ids.E72+':appliance/provision/'+name],cwd=HERE.parents[3])
+            raw=subprocess.check_output(['git','show',source+':appliance/provision/'+name],cwd=HERE.parents[3])
             self.assertEqual(hashlib.sha256(raw).hexdigest(),engine[key])
             if name.endswith('unused.conf'):
                 self.assertEqual([line.split()[1] for line in raw.decode().splitlines() if line.startswith('install ')],engine['modules'])
@@ -33,7 +53,10 @@ class CandidateReconciliationTests(unittest.TestCase):
         self.assertNotEqual(profile['clamav_sidecar_image_id'],ids.source_profile(ids.E91)['clamav_sidecar_image_id'])
         self.assertEqual(load('visual-capture').candidate_profile(profile),profile)
         self.assertEqual(load('qualify-clamav-outage').attempt_context(Path('unused'),profile,'initial',None,'owner'),(Path('unused/clamav-outage'),{}))
-        self.assertIn(ids.E72,load('visual-service-fixture').generate('install','11111111-1111-4111-8111-111111111111','seven-two',ids.E72))
+        self.assertIn(source,load('visual-service-fixture').generate('install','11111111-1111-4111-8111-111111111111','seven-two',source))
+
+    def test_bad788_exact_profile_helpers_and_engine_controls(self):
+        self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').EBAD788)
 
     def test_91_profile_helpers_and_kernel_controls_match_exact_source(self):
         ids=load('candidate-identities')
@@ -62,7 +85,7 @@ class CandidateReconciliationTests(unittest.TestCase):
         self.assertNotEqual(load('import-observer-continuation').SOURCE,ids.E91)
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -76,7 +99,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)
@@ -85,7 +108,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], '7244486a375ce772a7b3d8530db2d8763cb47adf')
+        self.assertEqual(record['upstream_revision'], 'e0fc1bbca53e01a1d4e7c0dcd3a49631637b6ff5')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')

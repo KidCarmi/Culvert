@@ -159,7 +159,7 @@ def generate(action, owner, campaign=None, source=SOURCE):
     locks, digest = lock_code()
     spec = importlib.util.spec_from_file_location('visual_fixture_profiles', HERE / 'candidate-identities.py')
     profiles = importlib.util.module_from_spec(spec); spec.loader.exec_module(profiles)
-    if source not in (profiles.E7E, profiles.E7C, profiles.E91, profiles.E72): raise ValueError('reviewed visual candidate required')
+    if source not in (profiles.E7E, profiles.E7C, profiles.E91, profiles.E72, profiles.EBAD788): raise ValueError('reviewed visual candidate required')
     profiles.source_profile(source)
     config = {'action': action, 'source': source, 'owner_uuid': owner, 'units': units(campaign),
               'campaign': campaign, 'fixture_root': root,
