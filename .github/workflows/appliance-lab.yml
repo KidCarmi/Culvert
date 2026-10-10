@@ -490,7 +490,7 @@ jobs:
           { for v in ADMIN SVC ALICE BOB CAROL DAVE; do echo "LDAP_${v}_PASS=$(pw)"; done; } > "$D/passwords.env"; chmod 600 "$D/passwords.env"
           set -a; . "$D/passwords.env"; set +a
           sudo samba-tool domain provision --realm=CORP.EXAMPLE --domain=CORP --server-role=dc --dns-backend=NONE \
-            --adminpass="$LDAP_ADMIN_PASS" --option="server services = -dns" --option="ldap server require strong auth = no" \
+            --adminpass="$LDAP_ADMIN_PASS" --option="server services = -dns" \
             --option="interfaces = lo" --option="bind interfaces only = yes" > "$D/provision.log"
           sudo systemctl unmask samba-ad-dc; sudo systemctl start samba-ad-dc
           for _ in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/389) 2>/dev/null && break; sleep 2; done

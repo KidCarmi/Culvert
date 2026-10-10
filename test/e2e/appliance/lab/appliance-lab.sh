@@ -2174,14 +2174,13 @@ systemctl stop culvert-cb-tap 2>/dev/null; systemd-run --quiet --unit=culvert-cb
 # does that; the guest reaches it at 10.0.2.2). It is an AD stand-in, not
 # Microsoft AD: Kerberos/NTLM/Negotiate, channel binding, LDAP signing policy
 # and nested groups are out of scope and recorded as such.
-#   L1 the admin directory test (POST /api/idp/test) reaches the directory,
-#      binds the service account, finds alice and returns her groups
+#   L1 transport matrix via the admin directory test: plain ldap:// (refused
+#      by the directory), LDAPS verified against its internal CA (the
+#      appliance has no CA setting), LDAPS with the unsafe skip-verify opt-in
 #   L2 the LDAP IdP profile is created through the admin API; auth becomes
 #      required; a group-scoped allow precedes a block for the same origin
 #   L3 credential matrix through the proxy (Proxy-Authorization: Basic)
 #   L4 the authenticated identity reaches the request log
-#   L5 LDAPS: certificate verification against the directory's own CA, then
-#      the unsafe skip-verify opt-in (recorded, never recommended)
 #   L6 directory outage: an uncached user fails closed; recovery on evidence
 LDAP_DOM="DC=corp,DC=example"; LDAP_USERS="CN=Users,$LDAP_DOM"
 ldap_proxy() { curl -sS -m 30 -x "$P" ${2:+--proxy-user "$2"} -o "$WORK/ldap-body" -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
@@ -2197,13 +2196,28 @@ print(json.dumps({"name":"lab-samba-ad","type":"ldap","enabled":True,"priority":
  "ldap":{"url":sys.argv[1],"bindDn":sys.argv[2],"bindPassword":sys.argv[3],"baseDn":sys.argv[4],
          "userFilter":"(sAMAccountName=%s)","groupAttribute":"memberOf","cacheTtlSeconds":30}}))' \
     "ldap://10.0.2.2:389" "CN=svc-culvert,$LDAP_USERS" "$LDAP_SVC_PASS" "$LDAP_DOM")"
-  # ---- L1 admin directory test
-  r="$(api POST /api/idp/test "{\"profile\":$prof,\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-idp-test.txt")"
-  if [[ "$(code <<<"$r")" == 200 ]] && body <<<"$r" | python3 -c 'import json,sys
+  # ---- L1 transport matrix through the admin directory test. The directory
+  # keeps Samba's AD default (simple binds need transport encryption), as a
+  # hardened Microsoft AD does. Expected: plain ldap:// refused by the
+  # directory; LDAPS verified against the directory's own (internal) CA fails
+  # because the appliance only trusts the image's public roots; LDAPS with
+  # the unsafe skip-verify opt-in works. The rest of the leg can only use the
+  # last one, and says so.
+  local plain verify skip
+  plain="$(api POST /api/idp/test "{\"profile\":$prof,\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-plain.txt" | body)"
+  verify="$(api POST /api/idp/test "{\"profile\":$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#' <<<"$prof"),\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-ldaps-verify.txt" | body)"
+  prof="$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#; s#"bindDn"#"tlsSkipVerify":true,"bindDn"#' <<<"$prof")"
+  skip="$(api POST /api/idp/test "{\"profile\":$prof,\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-ldaps-skipverify.txt" | body)"
+  steps() { python3 -c 'import json,sys
+d=json.loads(sys.stdin.read()); print(("ok " if d.get("ok") else "FAILED ")+"; ".join(s["name"]+"="+("ok" if s.get("ok") else "FAIL:"+(s.get("error") or "")[:140]) for s in d.get("steps",[])))' 2>/dev/null || echo unreadable; }
+  check L plain-ldap info "ldap:// (no TLS): $(steps <<<"$plain") — the directory refuses a simple bind without transport encryption"
+  if grep -q '"ok":true' <<<"$verify"; then check L ldaps-verify-internal-ca info "LDAPS verified against the directory's internal CA: $(steps <<<"$verify")"
+  else check L ldaps-verify-internal-ca info "FINDING: LDAPS against a directory whose certificate comes from an internal CA cannot be verified, and the appliance offers no CA setting (ldapTLSConfig trusts the image's public roots only): $(steps <<<"$verify")"; fi
+  if grep -q '"ok":true' <<<"$skip" && body <<<"$(cat "$EV/L1-ldaps-skipverify.txt")" | python3 -c 'import json,sys
 d=json.load(sys.stdin); g=(d.get("identity") or {}).get("groups") or []
-sys.exit(0 if d.get("ok") and any("CN=ProxyUsers" in x for x in g) else 1)' 2>/dev/null; then
-    check L directory-test pass "POST /api/idp/test: dial, service bind, user search and alice's bind succeeded against the Samba AD DC; groups include CN=ProxyUsers"
-  else check L directory-test fail "directory test did not succeed: $(body <<<"$r" | tr '\n' ' ' | head -c 400)"; return 0; fi
+sys.exit(0 if any("CN=ProxyUsers" in x for x in g) else 1)' 2>/dev/null; then
+    check L directory-test pass "LDAPS with tlsSkipVerify (the only transport that works with an internal-CA directory): dial, TLS, service bind, user search and alice's bind succeeded; her groups include CN=ProxyUsers. The leg below runs on this UNSAFE transport."
+  else check L directory-test fail "LDAPS with skip-verify did not succeed either: $(steps <<<"$skip")"; return 0; fi
   # ---- L2 profile + policy
   c="$(api POST /api/idp "$prof" | tee "$EV/L2-idp-create.txt" | code)"
   [[ "$c" == 200 || "$c" == 201 ]] && check L idp-create pass "LDAP profile created and enabled (http $c); bind password write-only: $(body < "$EV/L2-idp-create.txt" | grep -c "$LDAP_SVC_PASS") occurrences in the response" \
@@ -2238,16 +2252,6 @@ d=json.load(open(sys.argv[1])); es=d if isinstance(d,list) else d.get("logs",d.g
 s=json.dumps(es); sys.exit(0 if "alice" in s and "bob" in s else 1)' "$EV/L4-logs.json" 2>/dev/null; then
     check L identity-logged pass "request-log entries for the origin name alice (allowed) and bob (blocked)"
   else check L identity-logged fail "identities not found in the request log ($(head -c 300 "$EV/L4-logs.json"))"; fi
-  # ---- L5 LDAPS
-  pid="$(api GET /api/idp | body | python3 -c 'import json,sys
-d=json.load(sys.stdin); ps=d if isinstance(d,list) else d.get("profiles",[])
-print(next(p["id"] for p in ps if p.get("name")=="lab-samba-ad"))' 2>/dev/null)"
-  r="$(api POST /api/idp/test "{\"profile\":$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#' <<<"$prof"),\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L5-ldaps-verify.txt")"
-  if body <<<"$r" | grep -q '"ok":true'; then check L ldaps-verify-internal-ca info "LDAPS verified against the directory's self-issued CA (unexpected: the appliance has no CA setting; see L5-ldaps-verify.txt)"
-  else check L ldaps-verify-internal-ca info "FINDING: LDAPS to a directory whose certificate is issued by an internal CA FAILS verification and the appliance offers no CA setting (ldapTLSConfig trusts the image's public roots only): $(body <<<"$r" | tr '\n' ' ' | head -c 300)"; fi
-  r="$(api POST /api/idp/test "{\"profile\":$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#; s#"bindDn"#"tlsSkipVerify":true,"bindDn"#' <<<"$prof"),\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L5-ldaps-skipverify.txt")"
-  body <<<"$r" | grep -q '"ok":true' && check L ldaps-skip-verify info "LDAPS works only with tlsSkipVerify=true (unsafe opt-in; recorded, not recommended)" \
-    || check L ldaps-skip-verify info "LDAPS failed even with tlsSkipVerify: $(body <<<"$r" | tr '\n' ' ' | head -c 300)"
   # ---- L6 outage
   if [[ -n "${LAB_LDAP_STOP:-}" ]]; then
     eval "$LAB_LDAP_STOP" > "$EV/L6-stop.txt" 2>&1 || true; sleep 3

@@ -1,103 +1,98 @@
-# Draft upstream report to ClamAV — clean verdict for an unscanned INSTREAM under temp-filesystem exhaustion
+# Draft upstream report to ClamAV — INSTREAM answers "OK" for a file it never scanned when the per-scan temp directory cannot be created
 
 **Status: DRAFT, not filed.** Filing is the owner's action. Recommended channel:
 ClamAV's private security reporting route (see `SECURITY.md` in
-`Cisco-Talos/clamav`), not a public issue, because the effect is a detection
-bypass an attacker could try to induce by filling the scanner's disk.
+`Cisco-Talos/clamav`), not a public issue: the effect is a detection bypass
+that a remote party may be able to induce by filling the scanner's temp
+directory (for example with concurrent large uploads to a scanning gateway).
 
 ---
 
 ## Summary
 
-During root-filesystem exhaustion, clamd 1.4.6 answered a bare `stream: OK`
-to a complete INSTREAM carrying the EICAR test file. The streams 250 ms before
-and after, with identical bytes, were answered `Eicar-Signature FOUND`. The
-`OK` came 2 ms after the stream was sent, against 8–11 ms for every detection
-in the same run, so it looks as if the content was not scanned. 0.44 s
-earlier, clamd had failed a different stream with
-`Error writing to temporary file`.
+In libclamav 1.4.6, when `scan_common()` cannot create its per-scan
+temporary directory, the scan returns `CL_CLEAN` without scanning anything,
+and clamd answers `stream: OK` to INSTREAM. No error reaches the client.
 
-We could not find this path by reading 1.4.6. A failed temp write answers
-`ERROR` (`clamd/server-th.c`), and a failed per-scan mkdir answers `ERROR`
-(`libclamav/scanners.c`). We are asking for help locating it.
+`libclamav/scanners.c`, `scan_common()`:
 
-## Environment
-
-* clamd **1.4.6**, official image
-  `docker.io/clamav/clamav@sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23`.
-  Our derivative only upgrades the Alpine packages pcre2 10.49, zlib 1.3.2-r1
-  and nghttp2-libs 1.70.0-r0. The image's **stock `clamd.conf`** is used
-  unchanged: temporary directory `/tmp` inside the container, which is on the
-  overlay root filesystem of the host.
-* Host: Ubuntu 24.04 VM, ext4 root, Docker 29.x. freshclam running
-  (`CLAMAV_NO_FRESHCLAMD=false`).
-* Client: TCP INSTREAM (`zINSTREAM\0`, one 4-byte big-endian length-prefixed
-  chunk, zero-length terminator), one connection per scan.
-
-## Reproduction
-
-The run was automated: 14 cycles × 10 EICAR + 10 clean scans, each cycle at a
-full root filesystem. The steps:
-
-1. Fill the host root filesystem until `fallocate` fails. On ext4 this
-   stops at about 16 MiB free (reserved clusters), so every cycle reached the
-   same state.
-2. While full, send INSTREAM scans alternating between EICAR (124-byte body,
-   142 bytes on the wire) and a small clean body. Record every conversation on
-   the container's host-side veth.
-3. Release the fill, then repeat.
-
-**Result:** 1 of 140 EICAR streams answered `stream: OK` in the first run,
-**3 of 140** in a second run on a newer build of the same image, and **2 of
-140** in a third (6 in 560 samples across four runs). All six were complete
-142-byte streams, answered in 1–2 ms, each 0.19–1.70 s after clamd failed
-another stream (`Error writing to temporary file` or `Can't write to file`). The other image gave 0 of 140, which we do NOT read as evidence
-of absence. Every other EICAR reply was `FOUND`, `ERROR`, or
-`<error> ERROR\0stream: OK\0` (an error reply followed by an OK in the same
-response).
-
-## The decisive sequence (UTC, one connection per line)
-
-```
-01:44:28.486  INSTREAM  66 B        'Error writing to temporary file ERROR\0stream: OK\0'
-01:44:28.681  INSTREAM 142 B EICAR  'stream: Eicar-Signature FOUND\0'   8 ms
-01:44:28.929  INSTREAM 142 B EICAR  'stream: OK\0'                      2 ms
-01:44:29.190  INSTREAM 142 B EICAR  'stream: Eicar-Signature FOUND\0'   8 ms
+```c
+    if (mkdir(ctx.sub_tmpdir, 0700)) {
+        cli_errmsg("Can't create temporary directory for scan: %s.\n", ctx.sub_tmpdir);
+        status = CL_EACCES;
+        goto done;
+    }
+    ...
+done:
+    // Filter the result from the post-scan hooks and stuff, so we don't propagate non-fatal errors.
+    (void)result_should_goto_done(&ctx, status, &status);
 ```
 
-* The client sent the whole stream: 142 B = command (10) + length (4) +
-  body (124) + terminator (4), byte-for-byte the same as the detected streams.
-* The reply carried no `ERROR`.
+`result_should_goto_done()` halts and keeps the code only for `CL_VIRUS`,
+`CL_EUNLINK`, `CL_ESTAT`, `CL_ESEEK`, `CL_EWRITE`, `CL_EDUP`, `CL_ETMPFILE`,
+`CL_ETMPDIR` and `CL_EMEM`. `CL_EACCES` falls to `default:`, which sets the
+result to `CL_SUCCESS` (== `CL_CLEAN`). `clamd/scanner.c` `scanfd()` then
+replies `OK` because the result is `CL_CLEAN`. `cli_magic_scan()` never ran.
 
-## Two side observations
+Suggested fix: report the failure as a halting error (for example
+`status = CL_ETMPDIR;`), so clamd replies `... ERROR`. The same
+`CL_EACCES` pattern exists in `cli_magic_scan()` for the per-layer directory
+(line ~4290), reachable only with `keeptmp` enabled.
 
-1. **A combined response.** The first line above contains an error reply AND
-   `stream: OK` in one response. A client that reads only the last NUL-delimited
-   token would treat that as clean. Is this response shape intended?
-2. **No reply at all.** The temp-file-creation failure path in 1.4.6 appears
-   to close the connection without any reply.
+## Reproduction (deterministic)
 
-## What we ask
+* Official image `docker.io/clamav/clamav:1.4` (1.4.6) with Alpine package
+  upgrades only (pcre2, zlib, nghttp2), **stock `clamd.conf`**
+  (`TemporaryDirectory` = `/tmp`), freshclam off, signatures
+  `ClamAV 1.4.6/28136`.
+* clamd's `/tmp` is a 256 MiB ext4 filesystem of its own (`-m 0`), so the
+  test exhausts only the spool.
+* Fill it until exactly **4096 bytes** are free (one ext4 block). Send one
+  INSTREAM per connection: `zINSTREAM\0`, one 4-byte big-endian length,
+  the 124-byte EICAR test file (the 68-byte string plus 56 bytes of
+  space/tab padding), the zero terminator. 142 bytes on the wire.
 
-* Where in 1.4.6 an INSTREAM can complete with `OK` without the scan having
-  run, under ENOSPC on the temp directory.
-* Whether an ENOSPC during spooling or scanning can be reported to the client
-  as anything other than `ERROR`.
+Result: the body fits in the last free block; the per-scan `mkdir` then
+fails with ENOSPC. **Every** EICAR is answered `stream: OK` (40 of 40 over
+four fills), in a median 0.61 ms against 4.45 ms for a real detection.
+clamd logs `Can't create temporary directory for scan` each time and sends
+the client no error. With 0 bytes free, the write fails and the reply is
+`... ERROR\0stream: OK\0`. From 16 KiB free up, every EICAR is `FOUND`.
+With 8 concurrent clients the same bare `OK` also occurs at 16–64 KiB free,
+because concurrent spools consume the headroom.
+
+## Second, related observation
+
+When the body write itself fails (`handle_stream()` in
+`clamd/server-th.c`), clamd sends `Error writing to temporary file ERROR`
+and, if the terminator is already in the buffer, still dispatches
+`INSTREAMSCAN` on the short temp file. The client gets
+`... ERROR\0stream: OK\0` in one response. A client that reads only the last
+NUL-delimited token sees a clean result.
+
+## How we found it
+
+In a full-disk test of an appliance, clamd answered `stream: OK` to complete
+EICAR streams 6 times in 560 samples across four runs, each 0.19–1.70 s
+after another stream failed with a temp-file write error. An isolated
+reproduction then showed it is deterministic at the edge described above
+and does NOT need an earlier error.
+
+## Causal confirmation
+
+ClamAV 1.4.6 built from the release source twice on one host, stock and
+with only the line above changed to `CL_ETMPDIR`, with the same config, a
+one-signature database and the same 4 KiB edge state. Result: PENDING
+(`fp2-source-1.4.6/verdict.txt` once the run completes).
 
 ## Attachments
 
-* `fp2-dc57bd76-clamd-streams.jsonl`: the 366 recorded conversations of the
-  run containing the event. Each line has the close time, command, bytes up,
-  an EICAR flag, the verbatim reply and which side closed. It contains no
-  customer data: only test bodies.
-* `fp2-91e05872-clamd-streams.jsonl`: the same for the second image, with no
-  event.
-* `fp2-72c827b7-clamd-streams.jsonl`: the second run with events (3).
-* `fp2-bad788e5-clamd-streams.jsonl`: the third run with events (2).
+* `fp2-isolated-bad788e5/`: every conversation (sha256 of the full bytes
+  sent, verbatim reply, timing, temp free space before and after), the
+  clamd log errors, the clamd.conf hash, the signature set, the image
+  binding.
+* `fp2-source-1.4.6/`: the stock-vs-patched control.
+* Earlier appliance runs: `fp2-dc57bd76-`, `fp2-72c827b7-`,
+  `fp2-bad788e5-clamd-streams.jsonl`.
 
-## Our mitigation, for context
-
-The client (Culvert) now distrusts clean verdicts for 60 s after any clamd
-engine fault, including verdicts it cached before the fault. In the second
-and third runs it refused all five wrong `OK`s; nothing was delivered. It cannot catch a wrong `OK` that comes before the first fault of an episode,
-which is why we are reporting.
+All bodies are test files; no customer data.
