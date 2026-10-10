@@ -80,7 +80,7 @@ jobs:
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
-          # RETAINED bad788e5 OVA (run 38040972664, sha256 87c8ae61…): pressure re-run under the corrected enforcement judge (p_enforced). The build leg is restored from b91bd1a0 for the next candidate.
+          # RETAINED bad788e5 OVA (run 38040972664, sha256 87c8ae61…): F-P2 14-cycle fill reproduction. Pass = Culvert never delivers an EICAR.
           - variant: candidate-bad788e54ffe
             provisioning: source
             source_sha: "bad788e54ffef2a2f8490ba27ebfe027a2a6eb11"
@@ -90,7 +90,7 @@ jobs:
             retained_run: "38040972664"
             retained_sha256: "87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c"
             recovery_reboots: "0"
-            pressure: "1"
+            fp2: "1"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
