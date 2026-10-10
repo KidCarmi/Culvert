@@ -1669,7 +1669,7 @@ p_backup() { local out="$1" op st jar; api POST /api/backups '{"encrypt":false}'
     case "$st" in succeeded|failed|cancelled) break ;; esac; sleep 5; done; api GET "/api/backups/operations/$op" >> "$out" 2>&1 || true; fi
   echo "op=${op:-none} state=${st:-none} http=$(code < "$out" | head -1)"; }
 p_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
-p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; grep -E "culvert-lab-pkgfix|^(E|W):|No space|dpkg: error" /run/culvert-lab-osu.log | head -n 20; tail -n 15 /run/culvert-lab-osu.log; echo "fixture=$(dpkg-query -W -f="\${Status} \${Version}" culvert-lab-pkgfix 2>/dev/null)"; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
+p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; grep -E "culvert-lab-pkgfix|^(E|W):|No space|dpkg: error" /run/culvert-lab-osu.log | head -n 20; tail -n 15 /run/culvert-lab-osu.log; echo "fixture=$(dpkg-query -W -f="\${Status} \${Version}" culvert-lab-pkgfix 2>/dev/null)"; echo "dpkg-journal=$(ls /var/lib/dpkg/updates 2>/dev/null | grep -c "^[0-9]")"; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
 p_app_update() { local U="$LAB_UPDATE_DIR" ph="$1" rc=0
   { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-pressure-$ph.json"
     printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
@@ -1709,7 +1709,9 @@ p_pkg_teardown() { groot "dpkg -P culvert-lab-pkgfix >/dev/null 2>&1; rm -f /etc
 p_pkg_judge() { local name="$1" osu="$2" when="$3" rc fx reached
   rc="$(grep -m1 -oE '^osu-rc=[0-9]+' <<<"$osu" | cut -d= -f2)"; fx="$(grep -m1 '^fixture=' <<<"$osu" | cut -d= -f2-)"
   reached="$(grep -cE 'Unpacking culvert-lab-pkgfix|culvert-lab-pkgfix_2.0_all.deb' <<<"$osu" || true)"
-  local audit_ok=0; grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && audit_ok=1
+  local audit_ok=0; grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q '^dpkg-journal=0$' <<<"$osu" && audit_ok=1
+  if [[ "$when" == pressure ]] && grep -q '^dpkg-journal=[1-9]' <<<"$osu"; then
+    check P "$name-pkg-write" info "dpkg wrote part of 2.0, failed (osu-rc=$rc) and could not record it: left INTERRUPTED ($(grep -m1 '^dpkg-journal=' <<<"$osu") journal entries); fixture=[$fx]; repair judged by $name-pkg-recovered"; return; fi
   if [[ "$when" == recovered ]]; then
     [[ "$rc" == 0 && "$fx" == "install ok installed 2.0" && $audit_ok == 1 ]] \
       && check P "$name-pkg-recovered" pass "space back: culvert-os-update os rc=0, culvert-lab-pkgfix now 2.0, dpkg audit empty" \
@@ -1819,9 +1821,15 @@ PY2
   [[ -n "${P_PRE_OSU:-}" ]] && groot "$P_PRE_OSU" 600 > "$EV/P-$name-pre-osu.txt" 2>&1
   osu="$(p_os_update)"; printf '%s\n' "$osu" > "$EV/P-$name-os-update.txt"
   s="$(p_sample "$name" after-os-update)"; set -- $s
-  if grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
-    check P "$name-os-update" pass "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg consistent (audit empty, no half-installed package), Docker still held, traffic $1/$2"
-  else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|not-installed-ok|holds|fixture)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
+  # dpkg --audit cannot see an INTERRUPTED dpkg (unfinished journal entries in
+  # /var/lib/dpkg/updates), after which apt refuses everything: run
+  # 38016152802. That state is recorded here and its repair judged by
+  # pkg-recovered; it is never a clean failure.
+  if grep -q '^dpkg-journal=[1-9]' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
+    check P "$name-os-update" info "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg left INTERRUPTED ($(grep -m1 '^dpkg-journal=' <<<"$osu") journal entries; apt refuses until dpkg --configure -a) — the repair is judged by $name-pkg-recovered; Docker still held, traffic $1/$2"
+  elif grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q '^dpkg-journal=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
+    check P "$name-os-update" pass "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg consistent (audit empty, journal empty, no half-installed package), Docker still held, traffic $1/$2"
+  else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|dpkg-journal|not-installed-ok|holds|fixture)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
   [[ -n "${P_PKG:-}" ]] && p_pkg_judge "$name" "$osu" pressure
   # release and recover without a restart
   groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; rm -rf /var/lib/culvert-pressure; sync; df -B1 / | tail -1; df -i / | tail -1; echo released=$([ -e /var/lib/culvert-pressure ] && echo no || echo yes)' 3600 > "$EV/P-$name-release.txt" 2>&1 || true
