@@ -492,6 +492,20 @@ jobs:
           sudo samba-tool domain provision --realm=CORP.EXAMPLE --domain=CORP --server-role=dc --dns-backend=NONE \
             --adminpass="$LDAP_ADMIN_PASS" --option="server services = -dns" \
             --option="interfaces = lo" --option="bind interfaces only = yes" > "$D/provision.log"
+          # An enterprise AD presents a certificate from an INTERNAL CA. Samba's
+          # auto-generated self-signed one has a negative serial, which Go's
+          # crypto/x509 refuses to parse at all (run 38053967889: even
+          # skip-verify failed). Issue the DC a certificate from a lab CA,
+          # as an enterprise CA would.
+          sudo mkdir -p /var/lib/samba/private/tls-lab
+          ( cd "$D" && openssl req -x509 -newkey rsa:3072 -nodes -days 7 -subj "/CN=Culvert Lab Internal CA" -keyout ca.key -out ca.crt >/dev/null 2>&1 \
+            && openssl req -newkey rsa:3072 -nodes -subj "/CN=dc.corp.example" -keyout dc.key -out dc.csr >/dev/null 2>&1 \
+            && printf 'subjectAltName=DNS:dc.corp.example,IP:10.0.2.2,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > dc.ext \
+            && openssl x509 -req -in dc.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 7 -extfile dc.ext -out dc.crt >/dev/null 2>&1 )
+          sudo install -m 0600 "$D/dc.key" /var/lib/samba/private/tls-lab/dc.key
+          sudo install -m 0644 "$D/dc.crt" "$D/ca.crt" /var/lib/samba/private/tls-lab/
+          sudo sed -i '/^\[global\]/a\        tls enabled = yes\n        tls keyfile = /var/lib/samba/private/tls-lab/dc.key\n        tls certfile = /var/lib/samba/private/tls-lab/dc.crt\n        tls cafile = /var/lib/samba/private/tls-lab/ca.crt' /etc/samba/smb.conf
+          openssl x509 -in "$D/dc.crt" -noout -serial -issuer -subject | tee "$D/dc-cert.txt"
           sudo systemctl unmask samba-ad-dc; sudo systemctl start samba-ad-dc
           for _ in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/389) 2>/dev/null && break; sleep 2; done
           sudo samba-tool user create svc-culvert "$LDAP_SVC_PASS" >/dev/null
@@ -499,7 +513,7 @@ jobs:
           sudo samba-tool group add ProxyUsers >/dev/null
           sudo samba-tool group addmembers ProxyUsers alice,dave >/dev/null
           sudo samba-tool user disable carol >/dev/null
-          LDAPTLS_REQCERT=never ldapsearch -LLL -H ldaps://127.0.0.1:636 -D "CN=svc-culvert,CN=Users,DC=corp,DC=example" -w "$LDAP_SVC_PASS" \
+          LDAPTLS_CACERT="$D/ca.crt" ldapsearch -LLL -H ldaps://127.0.0.1:636 -D "CN=svc-culvert,CN=Users,DC=corp,DC=example" -w "$LDAP_SVC_PASS" \
             -b "CN=Users,DC=corp,DC=example" "(sAMAccountName=alice)" dn memberOf | tee "$D/alice.ldif"
           grep -q 'memberOf: CN=ProxyUsers' "$D/alice.ldif"
           samba --version | tee "$D/samba-version.txt"
