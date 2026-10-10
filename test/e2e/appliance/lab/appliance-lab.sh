@@ -1938,6 +1938,13 @@ cmd_fp2() { local free k h hs rc
   free="$(p_host_free_gb)"; P_ALLOC0="$(p_host_alloc_mb)"
   (( free >= LAB_PRESSURE_MIN_HOST_FREE_GB )) || { check F2 host-bound blocked "host has $free GiB free"; return 0; }
   : > "$EV/P-samples.jsonl"; p_login > /dev/null
+  # The lab's EICAR origin (10.0.2.2) needs the same allow rule the recovery
+  # and adoption steps install; without it the policy, not ClamAV, answers
+  # 403 and clamd never sees the body (run 38012773269 — both legs).
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/F2-eicar-rule.txt"
+  local v0; v0="$(eicar_verdict)"
+  if [[ "$v0" != av ]]; then check F2 clamav-baseline fail "EICAR through the proxy did not draw a ClamAV block before any fill ($v0)"; return 0; fi
+  check F2 clamav-baseline pass "a fresh EICAR draws the ClamAV block before any fill"
   groot "mkdir -p /run/culvert-fp2; echo '$(base64 -w0 "$HERE/clamd-tap.py")' | base64 -d > /run/culvert-fp2/tap.py
 i=\$(docker exec culvert-clamav cat /sys/class/net/eth0/iflink); v=\$(grep -lx \"\$i\" /sys/class/net/*/ifindex | cut -d/ -f5); echo veth=\$v
 systemctl stop culvert-fp2-tap 2>/dev/null; systemd-run --quiet --unit=culvert-fp2-tap python3 -I /run/culvert-fp2/tap.py \"\$v\" /run/culvert-fp2/streams.jsonl && echo tap=started" 120 > "$EV/F2-tap-start.txt" 2>&1 || true
