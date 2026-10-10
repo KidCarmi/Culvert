@@ -30,6 +30,10 @@ func runOSUpdate(t *testing.T, mode string, env ...string) (out, calls string, c
 // path before the script starts (to pre-arm it, as a reboot would have).
 var osUpdateResumeHook func(markerPath string)
 
+// osUpdateDpkgHook, when set, receives the relocated dpkg journal directory
+// before the script starts (to leave dpkg "interrupted").
+var osUpdateDpkgHook func(updatesDir string)
+
 // osUpdateHook, when set, runs with the relocated agent state dir before
 // the script starts (to take the agent's host maintenance lock).
 var osUpdateHook func(agentStateDir string)
@@ -71,8 +75,17 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 		t.Fatal(err)
 	}
 	script = strings.Replace(script, "BOOT_ID_FILE=/proc/sys/kernel/random/boot_id", "BOOT_ID_FILE="+bootPath, 1)
+	dpkgUpdates := filepath.Join(dir, "dpkg-updates")
+	if err := os.MkdirAll(dpkgUpdates, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	script = strings.Replace(script, "DPKG_UPDATES=/var/lib/dpkg/updates", "DPKG_UPDATES="+dpkgUpdates, 1)
+	if osUpdateDpkgHook != nil {
+		osUpdateDpkgHook(dpkgUpdates)
+	}
 	if !strings.Contains(script, "MAINT_STATE="+mstate) || !strings.Contains(script, "LOCK="+filepath.Join(dir, "lock")) ||
-		!strings.Contains(script, "STACK="+stack) || !strings.Contains(script, "STACK_RESUME="+resume) || !strings.Contains(script, "BOOT_ID_FILE="+bootPath) {
+		!strings.Contains(script, "STACK="+stack) || !strings.Contains(script, "STACK_RESUME="+resume) || !strings.Contains(script, "BOOT_ID_FILE="+bootPath) ||
+		!strings.Contains(script, "DPKG_UPDATES="+dpkgUpdates) {
 		t.Fatal("could not relocate maintenance paths in culvert-os-update")
 	}
 	if osUpdateResumeHook != nil {
@@ -96,10 +109,13 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 		t.Fatal(err)
 	}
 	stubs := map[string]string{
-		"id":        `echo 0`,
-		"apt-mark":  `echo "apt-mark $*" >> "$CALLS"; [[ "$1" == hold && "${FAIL_HOLD:-0}" == 1 ]] && exit 100; [[ "$1" == unhold && "${FAIL_UNHOLD:-0}" == 1 ]] && exit 100; exit 0`,
-		"apt-get":   `echo "apt-get $*" >> "$CALLS"; [[ "$*" == *only-upgrade* && "${FAIL_UPGRADE:-0}" == 1 ]] && exit 100; exit 0`,
-		"apt-cache": `echo "Candidate: 29.0"; exit 0`,
+		"id":                 `echo 0`,
+		"apt-mark":           `echo "apt-mark $*" >> "$CALLS"; [[ "$1" == hold && "${FAIL_HOLD:-0}" == 1 ]] && exit 100; [[ "$1" == unhold && "${FAIL_UNHOLD:-0}" == 1 ]] && exit 100; exit 0`,
+		"apt-get":            `echo "apt-get $*" >> "$CALLS"; [[ "$*" == *only-upgrade* && "${FAIL_UPGRADE:-0}" == 1 ]] && exit 100; exit 0`,
+		"apt-cache":          `echo "Candidate: 29.0"; exit 0`,
+		"unattended-upgrade": `echo "unattended-upgrade $*" >> "$CALLS"; exit 0`,
+		// dpkg --configure -a replays (empties) the journal unless told to fail.
+		"dpkg":      `echo "dpkg $*" >> "$CALLS"; [[ "$*" == *--configure* ]] && { [[ "${FAIL_DPKG_CONFIGURE:-0}" == 1 ]] && exit 1; rm -f "$DPKG_UPDATES_DIR"/[0-9]*; }; exit 0`,
 		"systemctl": `echo "systemctl $*" >> "$CALLS"; [[ "$1" == restart && "${FAIL_RESTART:-0}" == 1 ]] && exit 1; [[ "$1" == reboot && "${FAIL_REBOOT:-0}" == 1 ]] && exit 1; exit 0`,
 		"docker":    `echo "docker $*" >> "$CALLS"; [[ "$1 $2" == "compose stop" ]] && { [[ -e "$RESUME_MARKER" ]] && echo "resume-marker:armed" >> "$CALLS" || echo "resume-marker:absent" >> "$CALLS"; [[ -e "$OSU_MAINT_STATE/host-shutdown.pending" ]] && echo "shutdown-fence:armed" >> "$CALLS" || echo "shutdown-fence:absent" >> "$CALLS"; }; [[ "$1 $2" == "compose stop" && "${FAIL_STOP:-0}" == 1 ]] && exit 1; [[ "$1 $2" == "compose up" && "${FAIL_START:-0}" == 1 ]] && exit 1; exit 0`,
 	}
@@ -111,7 +127,7 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 	callsPath := filepath.Join(dir, "calls")
 	cmd := exec.CommandContext(t.Context(), "bash", append([]string{scriptPath}, args...)...) //nolint:gosec // test-owned copy of the script in t.TempDir(); args are test constants
 	cmd.Env = append([]string{"PATH=" + bin + ":" + os.Getenv("PATH"), "CALLS=" + callsPath, "RESUME_MARKER=" + resume,
-		"OSU_MAINT_STATE=" + mstate}, env...)
+		"OSU_MAINT_STATE=" + mstate, "DPKG_UPDATES_DIR=" + dpkgUpdates}, env...)
 	b, _ := cmd.CombinedOutput()
 	code = cmd.ProcessState.ExitCode()
 	c, _ := os.ReadFile(callsPath)

@@ -38,6 +38,8 @@ MAINT_JOURNAL="$MAINT_STATE/reconcile"
 SHUTDOWN_FENCE="$MAINT_STATE/host-shutdown.pending"
 BOOT_ID_FILE=/proc/sys/kernel/random/boot_id
 LOCK=/run/culvert-os-update.lock
+# dpkg's journal of unfinished status updates (see heal_interrupted_dpkg).
+DPKG_UPDATES=/var/lib/dpkg/updates
 # Armed by `reboot` BEFORE the stack is stopped; consumed at boot by
 # culvert-stack-resume.service (`resume-stack`). `docker compose stop` marks
 # the containers manually stopped, so their `restart: unless-stopped` policy
@@ -96,6 +98,27 @@ check_interrupted_journal() {
 
 # Shared with the Go agent: exactly one bounded ASCII line, version, boot UUID,
 # action, phase, newline. This is an admission fence, not proof power completed.
+# heal_interrupted_dpkg: a dpkg run that dies part way leaves numbered entries
+# in its journal (DPKG_UPDATES), and apt then refuses EVERY operation ("dpkg was
+# interrupted, you must manually run 'sudo dpkg --configure -a'"). A disk that
+# fills during an update does exactly that: the unpack fails and so does
+# dpkg's own status write (lab run 38016152802). The daily unattended-upgrades
+# run repairs it itself (AutoFixInterruptedDpkg, the same check and command as
+# here); this operator path did not, so once space was back the documented
+# recovery — run this command again — kept failing until someone with a shell
+# ran dpkg by hand. Replaying the journal is dpkg's own recovery: it finishes
+# or rolls back what was in flight and changes nothing else.
+dpkg_journal_dirty() { compgen -G "$DPKG_UPDATES/[0-9]*" > /dev/null; }
+heal_interrupted_dpkg() {
+  dpkg_journal_dirty || return 0
+  log "dpkg was interrupted (unfinished entries in $DPKG_UPDATES): running dpkg --configure -a first"
+  if ! dpkg --force-confold --configure -a; then
+    echo "culvert-os-update: dpkg --configure -a failed — check free space and inodes (df -h /; df -i /), then run this command again" >&2
+    exit 1
+  fi
+  log "dpkg journal replayed"
+}
+
 read_boot_id() {
   local value
   value="$(head -c 65 "$BOOT_ID_FILE")" || return 1
@@ -264,10 +287,12 @@ case "$mode" in
     apt-mark showhold | grep -E 'docker|containerd' || true
     echo "--- last unattended-upgrades run:"
     tail -n 3 /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null || echo "(none yet)"
+    dpkg_journal_dirty && echo "--- dpkg: INTERRUPTED (unfinished journal entries); the next mutating run repairs it first (dpkg --configure -a)"
     report_reboot
     ;;
   security)
     guard_maintenance
+    heal_interrupted_dpkg
     apt-get update -qq
     log "running unattended-upgrade (security pocket only, Docker blacklisted)"
     unattended-upgrade -v
@@ -275,6 +300,7 @@ case "$mode" in
     ;;
   os)
     guard_maintenance
+    heal_interrupted_dpkg
     apt-get update -qq
     # --with-new-pkgs: a kernel ABI bump (linux-virtual -> a NEW
     # linux-image-<abi> package) is "kept back" by a plain `upgrade`, so the
@@ -290,6 +316,7 @@ case "$mode" in
     ;;
   docker)
     guard_maintenance
+    heal_interrupted_dpkg
     apt-get update -qq
     echo "--- candidate Docker versions:"
     apt-cache policy "${DOCKER_PKGS[@]}" | grep -E '^[a-z]|Installed|Candidate'
