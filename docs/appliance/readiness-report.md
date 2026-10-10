@@ -270,7 +270,7 @@ Qualification of the exact OVA (`87c8ae61…`):
 
 **F-P2 stays OPEN.** The quarantine refuses a wrong OK that follows a fault; a wrong OK that comes before an episode's first fault is delivered at that moment. In 6 observed instances over four runs none came first, which does not bound it. The upstream report is drafted for the owner to file privately.
 
-**Merge with `main` (`019ee743`) changes no shipped source**: only docs, agent guidance, CI workflow/scripts and one test file. A rebuild from the merge head would differ from `bad788e5`'s only in the embedded commit stamp.
+**Merge with `main` (`019ee743`) changes no build input** (corrected wording, §3j): `candidate-equivalence.py` classifies every changed file against the image and OVA build inputs; `bad788e5 → 8bbc770b` changes 48 files and 0 inputs. That is not a byte-identity claim — a rebuild is a new artifact (VCS stamp, commit-named OVA, build-time GeoLite/apt fetches). The qualified OVA is evidence for its own hash only.
 
 **Candidate identity (`bad788e5`).**
 
@@ -282,6 +282,45 @@ Qualification of the exact OVA (`87c8ae61…`):
 | ClamAV sidecar | `culvert/clamav:1.4.6-culvert.3`, `sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251` (OVA archive `9b95f68b…`) |
 | Kernel | `linux-image-virtual-hwe-24.04` 7.0.0-38.38~24.04.4 |
 | Evidence | lab branch `test/appliance-lab` at `e0fc1bbc`: `evidence/candidate-bad788e5*.{json,md}`, `fp2-reproduction.md`, `fp2-bad788e5-clamd-streams.jsonl` |
+
+### 3j. Round of 2026-10-10 (owner follow-up 6097484537) — cache-bypass proof, F-P2 root cause, equivalence, LDAP/AD on the appliance
+
+No product bytes changed in this round; the candidate is still `bad788e5` (OVA `87c8ae61…`). All runs use disposable guests or runners; ASTRA's controller, OVA and guest are untouched. Evidence: lab branch `test/appliance-lab` at `9469425c`.
+
+**1. The harness now rejects the cache bypass (red on `72c827b7`, green on `bad788e5`).** `p_enforced` accepts an allowed 200 at any time, so it could not tell the bypass from health (it remains the enforcement judge under pressure, not a cache test). New leg `CB` (run 38052333202) establishes the fault state first: warm a clean body X and an EICAR body Y; reset clamd's connections from inside its namespace (engine fault, `stat_clam_scan_error` 0→1); lift the reset and show a fresh clean body is refused (`stat_clam_clean_quarantined` 0→1: quarantine active); then X inside the window must be refused (**200 fails**), Y must stay blocked, and after the window X must be re-scanned before it is re-cached.
+
+| row | `72c827b7` | `bad788e5` |
+|---|---|---|
+| fault + quarantine established | pass | pass |
+| cached clean inside the window | **FAIL — delivered 200 at +6.2 s, never re-scanned** | pass — re-scanned, refused, stale 0→1 |
+| re-scan before re-cache after the window | **FAIL — still served from the pre-fault cache** | pass — streams 2→3, then a cache hit |
+| cached block during/after | pass | pass |
+
+Scan-spanning-fault is not separable on the appliance (both builds refuse inside the window); `TestScanSpanningAFaultIsNotHonoured` covers it. Record: `cache-bypass-regression.md`.
+
+**2. F-P2 root cause found and proven causal — it is NOT caught by the quarantine. F-P2 stays OPEN and blocks production readiness.**
+* *Mechanism (libclamav 1.4.6 `scanners.c` `scan_common`):* when the per-scan temp directory cannot be created, `status = CL_EACCES`; the done-path filter `result_should_goto_done()` rewrites `CL_EACCES` to `CL_SUCCESS`, and clamd answers `stream: OK` for a file it never scanned. No error reaches the client, so nothing arms Culvert's quarantine.
+* *Deterministic, fault-free reproduction* (run 38053156677): the exact sidecar from the retained OVA, stock config, scripted client (no Culvert), clamd's /tmp on its own small filesystem. At 4 KiB free every EICAR (40/40) got a bare OK in 0.6 ms (detections: 4.5 ms) with no earlier error; clamd logged 118 directory failures. With 8 concurrent clients the edge is reached from 16–64 KiB free.
+* *Causal control* (run 38053729565): 1.4.6 built from source twice; stock 60/60 OK at the edge, the one-line patch (`CL_ETMPDIR`) 60/60 ERROR; controls 40/40 FOUND on both.
+* *Attribution:* scanner, not Culvert's client, not concurrency, not the harness. The private upstream report is ready (not filed — owner action).
+* *Remediation options (owner decision; each is a new candidate):* (a) ship a sidecar built with the one-line fix — the only option that closes the defect; an edge state then produces ERROR, which the closed posture already refuses; proven by the causal control as its failing pre-fix comparison; other codes the same filter rewrites still need an audit; (b) give clamd's spool its own volume sized above clamd's worst-case concurrent use, which removes host-disk pressure as a trigger but guarantees nothing on its own; (a)+(b) together for defence in depth.
+
+**3. Candidate-to-head equivalence is now checked mechanically** (`candidate-equivalence.py`): every changed file is classified against the image build (Go sources, `go.mod`/`go.sum`, `go:embed` paths, final-stage COPYs) and the OVA build (`appliance/`, `packaging/`, installer, compose files, build workflows); unclassified files count as inputs. `bad788e5 → 8bbc770b`: 48 files, **0 inputs**. Control `72c827b7 → bad788e5`: flags the 5 Go files of the cache fix. Explicitly not a byte-identity claim.
+
+**4. LDAP/AD on the appliance** (run 38054826481, 75 pass, 0 fail): Samba provisioned as an AD domain controller on the runner from Ubuntu packages, AD default transport policy, certificate from a lab internal CA. **An AD stand-in, not Microsoft AD.**
+
+| | result |
+|---|---|
+| plain `ldap://` | refused by the directory (`Strong Auth Required`) |
+| **LDAPS verified against the internal CA** | **FAILS — the appliance has no setting for a directory CA; it trusts only the image's public roots. Pilot gap.** |
+| LDAPS with `tlsSkipVerify` (unsafe) | works; the rows below ran on it |
+| proxy credential matrix | no creds 407 · alice (group member) 200 · wrong password 407 · bob (no group) 403 · disabled account 407 · unknown 407 · `*` 407 · DN as username 407 |
+| identity in the request log | full user DN + matched rule |
+| directory stopped / restarted | uncached user 407 (fail closed) / 200 with no appliance action |
+
+Correction: the leg's intended block rule was never created (invalid action, unchecked 400), so bob's 403 came from default deny; the harness is fixed. Also found: Samba's auto-generated LDAPS certificate has a negative serial that Go refuses to parse even with skip-verify.
+
+**Still BLOCKED / untested:** Microsoft AD itself (Kerberos/NTLM/Negotiate, channel binding, LDAP signing policy, nested groups); Entra ID and any other vendor IdP (no tenant); the identity flow intended for the pilot needs naming by the owner.
 
 **4. Coverage — what was and was not exercised**
 

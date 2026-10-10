@@ -67,9 +67,17 @@ posture is documented in `docs/operator/scan-capacity-and-timeouts.md` §6.2.
   (the `/ready` `clamav` row fails for the same window). **Residual (F-P2
   stays OPEN):** this is reactive — a wrong `OK` that comes BEFORE the first
   fault of an episode is delivered at that moment (it can no longer outlive
-  the fault through the cache). That case is recorded in
-  `test/e2e/appliance/lab/evidence/fp2-reproduction.md` (lab branch) and
-  reported to ClamAV upstream; it is not closed by this change.
+  the fault through the cache). The root cause is now known and it is NOT
+  rare: libclamav 1.4.6 answers `OK` for a file it never scanned when it
+  cannot create its per-scan temp directory (`scan_common` rewrites the
+  `mkdir` failure to success), and it sends no error, so the quarantine never
+  arms. It is deterministic when clamd's temp filesystem has room for the
+  spooled body but not for a directory, and concurrent scans reach that
+  state from more headroom. Evidence and the source-built causal control:
+  `test/e2e/appliance/lab/evidence/fp2-reproduction.md` (lab branch). A
+  private upstream report is drafted and NOT yet filed (owner action). It is
+  not closed by this change; readiness report §3j lists the remediation
+  options.
 * Admin UI → Security Scanning shows the posture (*When ClamAV Is
   Unavailable*) and the *Refused: AV unavailable* counter;
   `GET /api/security-scan/status` carries `av_unavailable`.
