@@ -2035,9 +2035,22 @@ PY2
 )"
   set -- $res
   printf '%s\n' "$res" > "$EV/F2-summary.txt"
-  if [[ "$2" == 0 && "$3" == 0 ]]; then check F2 eicar-never-delivered pass "$1 at-fill samples over $LAB_FP2_CYCLES fill cycles (headroom 0..4 MiB): EICAR never delivered and clamd never answered OK to an EICAR stream; ${*:4}"
-  elif [[ "$3" != 0 ]]; then check F2 eicar-never-delivered fail "REPRODUCED — clamd answered a plain OK to $3 EICAR stream(s) (Culvert delivered $2 of $1): clamd attribution; ${*:4} (F2-clamd-streams.jsonl)"
-  else check F2 eicar-never-delivered fail "REPRODUCED — $2 of $1 EICAR delivered with NO clamd OK on any EICAR stream: Culvert attribution; ${*:4} (F2-clamd-streams.jsonl)"; fi; }
+  # Two separate questions (F-P2, #1528 72c827b7). The PRODUCT check: did
+  # Culvert ever deliver an EICAR? The UPSTREAM record: did clamd ever answer
+  # a plain OK to an EICAR stream? Since the clean-verdict quarantine, a clamd
+  # OK that Culvert refused is the mitigation working, not a product failure;
+  # it is recorded (with the quarantine counter) for the ClamAV report.
+  local q; : > "$JAR"
+  api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" >/dev/null 2>&1 || true
+  q="$(api GET /api/security-scan/status | body | python3 -c 'import json,sys
+v=json.load(sys.stdin).get("stat_clam_clean_quarantined"); print("absent" if v is None else v)' 2>/dev/null || echo unreadable)"
+  printf 'clam_clean_quarantined=%s\n' "$q" >> "$EV/F2-summary.txt"
+  if [[ "$2" == 0 ]]; then check F2 eicar-never-delivered pass "$1 at-fill samples over $LAB_FP2_CYCLES fill cycles: Culvert never delivered an EICAR; clean verdicts quarantined=$q; ${*:4}"
+  elif [[ "$3" != 0 ]]; then check F2 eicar-never-delivered fail "REPRODUCED — Culvert delivered $2 of $1 EICAR; clamd answered a plain OK to $3 EICAR stream(s); quarantined=$q; ${*:4} (F2-clamd-streams.jsonl)"
+  else check F2 eicar-never-delivered fail "REPRODUCED — $2 of $1 EICAR delivered with NO clamd OK on any EICAR stream: Culvert attribution; quarantined=$q; ${*:4} (F2-clamd-streams.jsonl)"; fi
+  if [[ "$3" == 0 ]]; then check F2 clamd-ok-to-eicar info "clamd never answered a plain OK to an EICAR stream in this run (absence over $1 samples is not proof the upstream defect is gone)"
+  elif [[ "$2" == 0 ]]; then check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s): clamd answered a plain OK to an EICAR stream and Culvert refused every one (quarantined=$q) — upstream evidence, F2-clamd-streams.jsonl"
+  else check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s) and NOT contained (see eicar-never-delivered)"; fi; }
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
