@@ -3,7 +3,8 @@
 **Applies to:** every node running the admin UI · **Operator action required:**
 none by default; two alerting rules are recommended.
 
-`ui_users.json` is the **only** durable home of the admin roster: every account,
+`ui_users.json` is the **only** durable home of the admin roster (the accounts
+listed in the GUI's **Admin Users** panel and managed through `/api/users`): every account,
 password hash, role, TOTP secret, consumed-backup-code list and TOTP replay
 counter. Every change to that state is applied to memory first and written to
 disk second, so the two can disagree — and the disagreement is resolved at the
