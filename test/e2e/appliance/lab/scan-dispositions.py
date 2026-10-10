@@ -51,6 +51,21 @@ HIGH_PROOF = {
                 "precondition, not on absence; the probe also shows no server constructor at all (no `grpc.NewServer`, no BuildKit session, "
                 "no HTTP/2 or HTTP server `Serve`).",
     },
+    ("usr-libexec-docker-cli-plugins-docker-compose", "GO-2026-6611"): {
+        "disposition": "NOT AFFECTED",
+        "absent": ["net/http.(*http2serverConn).processSettings", "net/http.(*Server).Serve", "golang.org/x/net/http2.(*Server).ServeConn",
+                   "google.golang.org/grpc.NewServer", "github.com/moby/buildkit/session.NewSession"],
+        "present": ["net/http.(*http2clientConnReadLoop).processSettings", "google.golang.org/grpc/internal/transport.(*http2Client).handleSettings"],
+        "text": "CPU exhaustion driven by a MALICIOUS HTTP/2 PEER (many streams, then many small SETTINGS_INITIAL_WINDOW_SIZE frames). compose links "
+                "only the CLIENT side of it (present below: the stdlib HTTP/2 client's and grpc-go's SETTINGS handlers) and no HTTP/2 or gRPC "
+                "server at all (absent below), so the peer would have to be a server compose connects to. On the appliance those are the local "
+                "Docker daemon (root-only socket) and the daemon's own BuildKit; compose loads only the local compose files (no `include:`, "
+                "remote, git or OCI sources), and it runs only as root from `install.sh`, the maintenance agent (fixed environment allowlist; "
+                "sudo keeps only `CULVERT_BACKUP_PASSPHRASE`, so no `DOCKER_HOST`/`OTEL_*` endpoint can be injected) and `culvert-os-update`. "
+                "A hostile peer therefore already needs root. The fixed builds (x/net v0.60.0, go1.26.9) are not yet in Docker's "
+                "docker-compose-plugin 5.6.0, still the newest package (measured); re-scan when it ships. Severity rose from UNKNOWN to HIGH "
+                "between the 2026-10-09 and 2026-10-10 vulnerability databases; the bytes did not change.",
+    },
 }
 
 # Engine findings that source mode places on a real call path, each with the

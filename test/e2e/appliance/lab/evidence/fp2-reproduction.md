@@ -55,6 +55,17 @@ lab-proven size caps.
   It does **not** cover a wrong `OK` before the first fault of an episode, so
   the risk is narrowed, not closed. It is not yet in any qualified candidate.
   The next candidate must re-run this reproduction expecting 0 delivered.
+* **Verified on the corrected candidate, run 38036111516** (retained 72c827b7
+  OVA `76769f86…`, same 14-cycle fill reproduction, same tap). The upstream
+  defect recurred **3 times in 140 at-fill samples**: complete 142-byte EICAR
+  streams answered a bare `stream: OK` in 1–2 ms, each 0.19 s, 0.95 s and
+  1.70 s after a clamd fault. **Culvert delivered none of them**: every
+  clean verdict inside the window was refused (`clam_clean_quarantined=101`).
+  Check `F2 eicar-never-delivered` PASS; `F2 clamd-ok-to-eicar` records the
+  upstream evidence. Streams: `fp2-72c827b7-clamd-streams.jsonl`.
+  Margin: the latest wrong OK came 1.7 s after a fault against a 60 s window.
+  This does not bound the residual (a wrong OK BEFORE an episode's first
+  fault): in 4 observed instances (1 on dc57bd76, 3 here) none was first.
 * **Option 3 drafted**: `fp2-clamav-upstream-report.md`, for the owner to file
   through ClamAV's private security channel.
 
