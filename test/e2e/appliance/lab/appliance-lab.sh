@@ -2567,14 +2567,6 @@ OVFENV
     vcheck V1 first-boot fail "not ready within ${LAB_FIRSTBOOT_TIMEOUT}s"; vcapture_stop; vsheet V1-first-boot 0 99999; return 1; fi
   vmark "first boot complete (status-json complete, /health 200)"; sleep 30
   f="$EV/V1-tty.txt"; vtty "$f"; t1="$(vtime)"
-  local want_ver; want_ver="$(sed -n 's/^culvert-appliance-\(.*\)-ubuntu-[0-9.]*\.ova$/\1/p' <<<"$OVA_NAME")"
-  # tty1's Build field is width-limited ("1.0.260-candidate.g91e..."): the
-  # shown text, ellipsis removed, must be a prefix of the version (>= 12 chars).
-  local shown; shown="$(grep -m1 -o 'Build  *[^ ]*' "$f" | awk '{print $2}')"; shown="${shown%...}"
-  if [[ -n "$want_ver" ]] && tr -d '\r' < "$WORK/console.log" | grep -qaF "Culvert appliance $want_ver (" \
-     && (( ${#shown} >= 12 )) && [[ "$want_ver" == "$shown"* ]]; then
-    vcheck V1 console-build-identity pass "the guest's console banner and tty1 Build line name $want_ver, the version of the booted OVA $OVA_SHA256"
-  else vcheck V1 console-build-identity fail "want '$want_ver' on the console banner and tty1 Build line; banner: $(tr -d '\r' < "$WORK/console.log" | grep -a -m1 -o 'Culvert appliance [^ ]*' ); tty1: $(grep -m1 -o 'Build  *[^ ]*' "$f")"; fi
   # On ESXi with no serial port the 8250 legacy port still registers, so
   # /dev/console is a ttyS0 with no hardware behind it (baseline run
   # 37631873993). Recorded, not judged: it is the topology ESXi has.
@@ -2604,8 +2596,12 @@ U
 # (Esc's details view), and how many systemd status lines are on screen.
 cat > /usr/local/sbin/lab-console-vcsprobe <<'P'
 #!/bin/sh
-i=0
+# Stops once Plymouth has quit: /dev/hvc0 is also the lab's authenticated
+# console transport, and a probe still writing there collides with it (the
+# V2 tty read of run 38012981822 came back empty).
+i=0; seen=0
 while [ $i -lt 180 ]; do
+  if pidof plymouthd >/dev/null; then seen=1; elif [ $seen = 1 ]; then break; fi
   t=0; grep -qa 'C U L V E R T' /dev/vcs1 2>/dev/null && t=1
   n=$(fold -w 80 /dev/vcs1 2>/dev/null | grep -cE '\[ *(OK|FAILED|DEPEND) *\]|Start(ing|ed) ')
   echo "LAB-VCS up=$(cut -d' ' -f1 /proc/uptime) plymouth=$(pidof plymouthd >/dev/null && echo up || echo down) title=$t status=$n" > /dev/hvc0
@@ -2702,6 +2698,16 @@ EOS
   # The text splash draws at once (DeviceTimeout=0.1): while plymouth is up
   # tty1 is in graphics mode only briefly, never for Ubuntu's 8 s wait.
   vcheck V4 splash-graphics-window info "$(tr -d '\r' < "$EV/V4-probe.txt" | grep 'plymouth=up' | grep -c 'kdmode=1' || true) samples (x0.25 s) in graphics mode while plymouth was up"
+  # Producer identity, read once the guest has printed its login banner on
+  # the console (it does after a reboot; at first boot the check ran before).
+  local want_ver; want_ver="$(sed -n 's/^culvert-appliance-\(.*\)-ubuntu-[0-9.]*\.ova$/\1/p' <<<"$OVA_NAME")"
+  # tty1's Build field is width-limited ("1.0.260-candidate.g91e..."): the
+  # shown text, ellipsis removed, must be a prefix of the version (>= 12 chars).
+  local shown; shown="$(grep -m1 -o 'Build  *[^ ]*' "$EV/V4-tty.txt" | awk '{print $2}')"; shown="${shown%...}"
+  if [[ -n "$want_ver" ]] && tr -d '\r' < "$WORK/console.log" | grep -qaF "Culvert appliance $want_ver (" \
+     && (( ${#shown} >= 12 )) && [[ "$want_ver" == "$shown"* ]]; then
+    vcheck V4 console-build-identity pass "the guest's console banner and tty1 Build line name $want_ver, the version of the booted OVA $OVA_SHA256"
+  else vcheck V4 console-build-identity fail "want '$want_ver' on the console banner and tty1 Build line; banner: $(tr -d '\r' < "$WORK/console.log" | grep -a -m1 -o 'Culvert appliance [0-9][^ ]*' ); tty1: $(grep -m1 -o 'Build  *[^ ]*' "$EV/V4-tty.txt")"; fi
   groot 'systemctl disable lab-console-probe.service; rm -f /etc/systemd/system/lab-console-probe.service /usr/local/sbin/lab-console-probe; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
   t3="$(vtime)"; vcapture_stop
   vsheet V1-first-boot 0 "$t1"; vsheet V2-V3-reboot-esc-postboot "$t1" "$t2"; vsheet V4-clean-reboot "$t2" "$t3"
