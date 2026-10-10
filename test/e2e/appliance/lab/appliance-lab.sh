@@ -2067,6 +2067,107 @@ v=json.load(sys.stdin).get("stat_clam_clean_quarantined"); print("absent" if v i
   if [[ "$3" == 0 ]]; then check F2 clamd-ok-to-eicar info "clamd never answered a plain OK to an EICAR stream in this run (absence over $1 samples is not proof the upstream defect is gone)"
   elif [[ "$2" == 0 ]]; then check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s): clamd answered a plain OK to an EICAR stream and Culvert refused every one (quarantined=$q) — upstream evidence, F2-clamd-streams.jsonl"
   else check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s) and NOT contained (see eicar-never-delivered)"; fi; }
+# cmd_cachebypass — the owner's cache-bypass regression (review 5478346473,
+# follow-up 6097484537), on a disposable guest booted from a RETAINED OVA.
+# p_enforced accepts an allowed 200 at any time, so it cannot tell the bypass
+# from health; this leg can, because it ESTABLISHES the fault state first.
+#   CB1 warm: clean body X served 200 and then from the cache (one clamd
+#       stream for X on the tap); EICAR body Y blocked and cached.
+#   CB2 fault: new TCP connections to clamd are reset from inside its network
+#       namespace (a deterministic engine fault, clamd itself untouched);
+#       a fresh body Z is refused and stat_clam_scan_error moves; the reset
+#       is lifted; a fresh clean body W reaches clamd, is answered OK, and is
+#       REFUSED with stat_clam_clean_quarantined moving: the quarantine is
+#       active (on both builds — it shipped in 72c827b7).
+#   CB3 inside the window: X must be refused as AV-unavailable. 200 FAILS:
+#       a body cached clean before the fault was delivered while the
+#       quarantine refused fresh bodies. Y must stay the ClamAV block.
+#   CB4 after the window: X must be re-scanned (a new clamd stream for X,
+#       after expiry) before it is served 200; a second request is then a
+#       cache hit with no further stream.
+# Healthy 200s outside the established fault state stay valid (CB1).
+LAB_CB_WINDOW="${LAB_CB_WINDOW:-60}"
+cb_ctr() { api GET /api/security-scan/status | body | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(" ".join(str(d.get(k,"absent")) for k in ("cache_hits","cache_misses","stat_clam_scan_error","stat_clam_clean_quarantined","stat_clam_clean_cache_stale")))' 2>/dev/null || echo "x x x x x"; }
+cb_get() { local out c; out="$(curl -sS -m 20 -x "$P" -w '\n%{http_code}' "$1" 2>/dev/null || printf '\n000')"; c="$(tail -n1 <<<"$out")"
+  if [[ "$c" == 403 ]] && grep -q 'antivirus scanning is currently unavailable' <<<"$out"; then echo 403:av_unavailable
+  elif [[ "$c" == 403 ]] && grep -q 'Blocked by CLAMAV scan' <<<"$out"; then echo 403:clamav_block
+  else echo "$c"; fi; }
+# cb_streams UP — clamd INSTREAM conversations of exactly UP bytes (body + 18:
+# 10-byte command, 4-byte chunk length, 4-byte terminator) and their replies,
+# in order. Judged by COUNT deltas, never by time: the tap stamps with the
+# guest clock and the harness runs on the host.
+cb_streams() { groot 'cat /run/culvert-cb/streams.jsonl' 60 2>/dev/null | python3 -c 'import json,sys
+up=int(sys.argv[1]); n=0; r=[]
+for l in sys.stdin:
+    try: d=json.loads(l)
+    except Exception: continue
+    if d.get("cmd")=="zINSTREAM" and d.get("up")==up:
+        n+=1; r.append(d.get("reply","").replace("\x00","|").strip("|"))
+print(n, ";".join(r) or "-")' "$1"; }
+cb_fault() { groot "p=\$(docker inspect -f '{{.State.Pid}}' culvert-clamav); nsenter -t \$p -n iptables -$1 INPUT -p tcp --dport 3310 --syn -j REJECT --reject-with tcp-reset && echo rule=$1" 60 2>&1 | grep -m1 '^rule='; }
+cmd_cachebypass() { local X Y Z W ux uy uz uw upx upy c0 c1 c2 c3 c4 c5 s r tf el v
+  ensure_admin_pass; [[ -f "$WORK/eicar-origin.pid" ]] || rec_origin_start
+  p_login > /dev/null
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/CB-eicar-rule.txt"
+  v="$(eicar_verdict)"; [[ "$v" == av ]] || { check CB clamav-baseline blocked "a fresh EICAR did not draw the ClamAV block ($v); nothing below would be meaningful"; return 0; }
+  groot "mkdir -p /run/culvert-cb; echo '$(base64 -w0 "$HERE/clamd-tap.py")' | base64 -d > /run/culvert-cb/tap.py
+i=\$(docker exec culvert-clamav cat /sys/class/net/eth0/iflink); v=\$(grep -lx \"\$i\" /sys/class/net/*/ifindex | cut -d/ -f5); echo veth=\$v
+systemctl stop culvert-cb-tap 2>/dev/null; systemd-run --quiet --unit=culvert-cb-tap python3 -I /run/culvert-cb/tap.py \"\$v\" /run/culvert-cb/streams.jsonl && echo tap=started" 120 > "$EV/CB-tap-start.txt" 2>&1 || true
+  sleep 2
+  # Distinct sizes so the tap attributes each conversation to its body.
+  X="cb-x-$RANDOM.txt"; Y="cb-y-$RANDOM.txt"
+  python3 -c 'import sys; sys.stdout.write(("culvert cache-bypass clean body "+sys.argv[1]).ljust(77,".")+"\n")' "$RUN_ID" > "$WORK/eicar-origin/$X"
+  { cat "$WORK/eicar-origin/eicar.txt"; printf '%40s' ''; } > "$WORK/eicar-origin/$Y"
+  ux="http://10.0.2.2:$LAB_EICAR_PORT/$X"; uy="http://10.0.2.2:$LAB_EICAR_PORT/$Y"
+  upx=$(( $(stat -c %s "$WORK/eicar-origin/$X") + 18 )); upy=$(( $(stat -c %s "$WORK/eicar-origin/$Y") + 18 ))
+  # ---- CB1 warm
+  c0="$(cb_ctr)"; r="$(cb_get "$ux") $(cb_get "$ux")"; c1="$(cb_ctr)"; s="$(cb_streams $upx)"
+  printf 'c0=%s\nX x2=%s\nc1=%s\nX streams=%s\n' "$c0" "$r" "$c1" "$s" > "$EV/CB1-warm.txt"
+  if [[ "$r" == "200 200" && "${s%% *}" == 1 ]]; then check CB warm-clean pass "X ($X) served 200 twice with ONE clamd stream ($s): the second answer came from the clean-verdict cache; counters hits/misses/err/quar/stale $c0 -> $c1"
+  else check CB warm-clean blocked "X not served from a warmed cache ($r; X streams $s); the scenario cannot be established"; return 0; fi
+  r="$(cb_get "$uy") $(cb_get "$uy")"; s="$(cb_streams $upy)"; echo "Y x2=$r Y streams=$s" >> "$EV/CB1-warm.txt"
+  if [[ "$r" == "403:clamav_block 403:clamav_block" && "${s%% *}" == 1 ]]; then check CB warm-block pass "Y blocked twice by ClamAV with ONE clamd stream ($s): the block is cached"
+  else check CB warm-block blocked "Y not blocked from a warmed cache ($r; Y streams $s)"; return 0; fi
+  # ---- CB2 fault, then establish the quarantine
+  Z="$(p_clean_url)"; [[ "$(cb_fault I)" == rule=I ]] || { check CB fault-inject blocked "could not install the clamd connection reset in its network namespace"; return 0; }
+  c2="$(cb_ctr)"; r="$(cb_get "$Z")"; tf="$(date +%s.%N)"; c3="$(cb_ctr)"
+  [[ "$(cb_fault D)" == rule=D ]] || { check CB fault-inject fail "the clamd connection reset could not be REMOVED; the guest is left faulted"; return 0; }
+  printf 'fault Z=%s\nc2=%s\nc3=%s\ntf=%s\n' "$r" "$c2" "$c3" "$tf" > "$EV/CB2-fault.txt"
+  if [[ "$r" == 403:av_unavailable && "$(cut -d' ' -f3 <<<"$c3")" -gt "$(cut -d' ' -f3 <<<"$c2")" ]]; then check CB fault-inject pass "fresh body refused AV-unavailable while clamd connections were reset; stat_clam_scan_error $(cut -d' ' -f3 <<<"$c2") -> $(cut -d' ' -f3 <<<"$c3") (an engine fault); reset lifted"
+  else check CB fault-inject blocked "no engine fault recorded (Z=$r; err $(cut -d' ' -f3 <<<"$c2") -> $(cut -d' ' -f3 <<<"$c3"))"; return 0; fi
+  W="$(p_clean_url)"; uw="$W"; r="$(cb_get "$uw")"; c4="$(cb_ctr)"
+  # W and Z share a size; Z never reached clamd (its connection was reset),
+  # so every stream of that size is W's.
+  s="$(cb_streams $(( $(stat -c %s "$WORK/eicar-origin/$(basename "$uw")") + 18 )))"
+  printf 'W=%s %s\nc4=%s\nW-size streams=%s\n' "$uw" "$r" "$c4" "$s" >> "$EV/CB2-fault.txt"
+  if [[ "$r" == 403:av_unavailable && "$s" == *"stream: OK"* && "$(cut -d' ' -f4 <<<"$c4")" -gt "$(cut -d' ' -f4 <<<"$c3")" ]]; then
+    check CB quarantine-active pass "a fresh clean body reached clamd (answered OK: $s) and was REFUSED; stat_clam_clean_quarantined $(cut -d' ' -f4 <<<"$c3") -> $(cut -d' ' -f4 <<<"$c4"): the closed-posture quarantine is active"
+  else check CB quarantine-active blocked "quarantine not established (W=$r; W streams $s; quarantined $(cut -d' ' -f4 <<<"$c3") -> $(cut -d' ' -f4 <<<"$c4"))"; return 0; fi
+  # ---- CB3 inside the window
+  r="$(cb_get "$ux")"; el="$(python3 -c 'import sys,time; print(round(time.time()-float(sys.argv[1]),1))' "$tf")"; c5="$(cb_ctr)"; s="$(cb_streams $upx)"
+  v="$(cb_get "$uy")"
+  printf 'X inside window=%s at +%ss\nc5=%s\nX streams (total)=%s\nY inside window=%s\n' "$r" "$el" "$c5" "$s" > "$EV/CB3-window.txt"
+  if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < float(sys.argv[2])-10 else 1)' "$el" "$LAB_CB_WINDOW"; then :; else
+    check CB cached-clean-in-quarantine blocked "X requested at +${el}s, too close to the ${LAB_CB_WINDOW}s window to judge"; return 0; fi
+  if [[ "$r" == 403:av_unavailable ]]; then check CB cached-clean-in-quarantine pass "X, cached clean BEFORE the fault, refused AV-unavailable at +${el}s inside the window; X streams in total: $s (2 = re-scanned, answered OK, refused by the window); stale $(cut -d' ' -f5 <<<"$c4") -> $(cut -d' ' -f5 <<<"$c5")"
+  elif [[ "$r" == 200 ]]; then check CB cached-clean-in-quarantine fail "CACHE BYPASS — X, cached clean before the fault, was DELIVERED (200) at +${el}s while the quarantine refused a fresh clean body; X streams in total: $s (still 1 = never re-scanned: served from the pre-fault cache)"
+  else check CB cached-clean-in-quarantine fail "unexpected answer for X inside the window: $r"; fi
+  if [[ "$v" == 403:clamav_block ]]; then check CB cached-block-in-quarantine pass "Y (cached block) still the ClamAV block inside the window"
+  else check CB cached-block-in-quarantine fail "Y inside the window answered $v (a cached block must survive a fault)"; fi
+  # ---- CB4 after the window
+  python3 -c 'import sys,time; t=float(sys.argv[1])+float(sys.argv[2])+5-time.time(); time.sleep(max(t,0))' "$tf" "$LAB_CB_WINDOW"
+  local s0 r2 s2 n0; s0="$(cb_streams $upx)"; n0="${s0%% *}"
+  r="$(cb_get "$ux")"; s="$(cb_streams $upx)"; r2="$(cb_get "$ux")"; s2="$(cb_streams $upx)"; v="$(cb_get "$uy")"
+  printf 'X streams before=%s\nX after window=%s streams=%s\nX again=%s streams=%s\nY after window=%s\nctr=%s\n' "$s0" "$r" "$s" "$r2" "$s2" "$v" "$(cb_ctr)" > "$EV/CB4-after.txt"
+  if [[ "$r" == 200 && "${s%% *}" == $(( n0 + 1 )) && "${s##*;}" == "stream: OK" && "$r2" == 200 && "${s2%% *}" == $(( n0 + 1 )) ]]; then
+    check CB rescan-before-recache pass "after the window X was re-scanned by clamd (streams $n0 -> ${s%% *}, last reply OK) before it was served 200; the next request was a cache hit (streams unchanged)"
+  else check CB rescan-before-recache fail "after the window: X=$r (streams $n0 -> $s), again=$r2 ($s2) — expected exactly one fresh scan, then a cache hit"; fi
+  if [[ "$v" == 403:clamav_block ]]; then check CB cached-block-after pass "Y still the ClamAV block after the window"; else check CB cached-block-after fail "Y after the window: $v"; fi
+  check CB scan-spanning-fault info "not judged on the appliance: a scan that starts before a fault and answers inside the 60 s window is refused by the window on BOTH builds, so only a scan longer than the window separates them; covered by TestScanSpanningAFaultIsNotHonoured (internal/secscan, mutation-checked)"
+  groot 'systemctl stop culvert-cb-tap 2>/dev/null; cat /run/culvert-cb/streams.jsonl' 60 > "$EV/CB-clamd-streams.jsonl" 2>/dev/null || true
+  grep -E 'SecurityScan|ClamAV|av_unavailable|quarantin' <(groot "docker logs --since 15m culvert 2>&1 | tail -n 300" 120 2>/dev/null) > "$EV/CB-proxy-log.txt" || true; }
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -2828,12 +2929,14 @@ case "${1:-}" in
   engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
+  cachebypass) cmd_cachebypass; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
     cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
     if [[ "${LAB_FP2:-0}" == 1 ]]; then cmd_fp2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
+    if [[ "${LAB_CACHEBYPASS:-0}" == 1 ]]; then cmd_cachebypass; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
     cmd_recovery; fail_fast_after recovery
     if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi
