@@ -1233,7 +1233,14 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   local recd; recd="$(printf '%.1f' "$rec")"
   if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
     check R "recovery-$name-$i" pass "recovered in ${recd}s (budget ${budget}s; unrounded $rec): $tl"
-  else check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl"; fi
+  else
+    # Still a FAIL. The excess read service time over the injected delay
+    # (r ms, from cmd_recovery's profile) says how much of it is the runner's
+    # disk: >1 ms means re-measure on one runner, interleaved A/B, before
+    # calling it the candidate (evidence/candidate-91e05872-recovery-causation.md).
+    local ex; ex="$(python3 "$HERE/recovery-timeline.py" --svc-excess "$EV/$tag-timeline.json" "${r:-0}")"
+    check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl; host read service ${ex} ms/request above the injected ${r:-0} ms$(python3 -c 'import sys; print("" if float(sys.argv[1]) <= 1 else " — runner disk slower than the profile: attribute only after a same-runner A/B")' "$ex" 2>/dev/null)"
+  fi
   recovery_guest "$tag"
   recovery_state "$name" "$i"
   printf '%s\t%s\t%s\t%s\t%s\n' "${REC_VARIANT:-base}" "$name" "$i" "$rec" "$budget" >> "$EV/R-summary.tsv"
