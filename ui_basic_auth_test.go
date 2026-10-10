@@ -31,6 +31,19 @@ func secBasicEnv(t *testing.T) {
 	t.Helper()
 	setupProxyTest(t)
 	snapshotLoginLimiter(t)
+	// The roster is process-wide and `setupProxyTest` resets state at test
+	// START, so it does not undo what this test adds afterwards (see the
+	// shared-global pitfall in docs/agent-context/conventions.md). Without
+	// this, TestSECBASIC1_OversizeUsernameIsBounded left its deliberately
+	// over-long (261-byte) admin account in `cfg.uiUsers` for the rest of the
+	// process, and any later test that READS the roster inherited it:
+	// TestApiDiagnostics_UsernameLengthOKByDefault then saw
+	// `admin_username_length` at warn and failed. That test snapshots the
+	// roster too, but a snapshot preserves and restores — it does not CLEAN —
+	// so it could not defend itself. Order-dependent, and therefore invisible
+	// in source order (diagnostics_test.go sorts before this file) and only
+	// reproducible under `-shuffle`: seeds 1, 2 and 4 fail, seed 3 passes.
+	snapshotCfgUIUsers(t)
 	cfg.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
 	t.Cleanup(func() { cfg.SetUIUsersFile("") })
 	if err := cfg.SetAuth("setup-anchor", "Anchor-Password-1!"); err != nil {
