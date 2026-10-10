@@ -1453,6 +1453,14 @@ func (c *Config) SetUIUsersFile(path string) {
 	c.mu.Unlock()
 }
 
+// UIUsersFilePersisted reports whether admin-roster changes are written to a
+// roster file. False means the roster is in-memory only (no -ui-users-file).
+func (c *Config) UIUsersFilePersisted() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersFile != ""
+}
+
 // uiUserRecord is the on-disk representation of a UI admin user.
 type uiUserRecord struct {
 	Username        string   `json:"username"`
