@@ -1,0 +1,20 @@
+{
+ "source": "bad788e54ffef2a2f8490ba27ebfe027a2a6eb11",
+ "ova_artifact": "11666266481",
+ "ova_run": "38040972664",
+ "image_id": "sha256:ac1909ec95d7588a86737cfa6d8927b0e7c04a5fe12891706eec86591dbb2ad7",
+ "image_tar": "b1d63190dec3f45a733fc78e40fd4f844390f4b918c66c9f1ae3f573d6835790",
+ "image_run": "38040017115",
+ "scan_run": "38045126206",
+ "scan_artifact": "11667143367",
+ "sidecar": "`culvert/clamav:1.4.6-culvert.3`, amd64 manifest `sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251` (config `sha256:821766fe…`; OVA archive `9b95f68b…`): exact-byte Trivy 0.69.3 scan of the archive extracted from THIS OVA, **0 findings** at any severity (lab run 38045126206, artifact 11666942605). Different bytes from 72c827b7's sidecar (`50bb8aa0…`), so that result is not reused.",
+ "engine_latest": {
+  "docker-ce": "5:29.9.0-1~ubuntu.24.04~noble",
+  "docker-ce-cli": "5:29.9.0-1~ubuntu.24.04~noble",
+  "containerd.io": "2.4.1-2~ubuntu.24.04~noble",
+  "docker-compose-plugin": "5.6.0-1~ubuntu.24.04~noble"
+ },
+ "engine_latest_measured": "Docker apt repository noble/stable, re-measured 2026-10-10T11:34Z; dpkg set byte-identical to 72c827b7's scan",
+ "kernel_matrix": "evidence/candidate-bad788e5-kernel-matrix.md",
+ "symbol_probe": "evidence/candidate-72c827b7-compose-symbols.tsv"
+}

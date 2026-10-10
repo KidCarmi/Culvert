@@ -1,0 +1,483 @@
+{"t": 1791628786.717, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628786.764, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628787.381, "dur": 0.001, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791628787.385, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.179, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.215, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.302, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.368, "dur": 0.001, "cmd": "zINSTREAM", "up": 138, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791628797.423, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.541, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.642, "dur": 0.019, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.691, "dur": 0.001, "cmd": "zINSTREAM", "up": 62, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791628797.811, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628797.895, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628797.942, "dur": 0.015, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.03, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.095, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628798.142, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.233, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.3, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628798.347, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.44, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.504, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628798.551, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.64, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.705, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628798.752, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.841, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628798.922, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628798.968, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628799.054, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628799.119, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628799.166, "dur": 0.014, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628859.041, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791628859.047, "dur": 0.005, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628862.291, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628867.407, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791628867.563, "dur": 0.031, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628867.615, "dur": 0.003, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628867.74, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628867.828, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628867.88, "dur": 0.002, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628867.994, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628868.076, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791628868.139, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628868.255, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628868.347, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628868.392, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628868.506, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628868.594, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628868.659, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628868.779, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628868.865, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628868.927, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.044, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.133, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628869.196, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.31, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.396, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628869.46, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.572, "dur": 0.005, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.662, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628869.724, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.837, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628869.928, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628869.989, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628931.885, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791628931.888, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791628931.896, "dur": 0.008, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628931.896, "dur": 0.01, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628933.144, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628938.261, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628938.322, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628938.358, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791628938.448, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628938.538, "dur": 0.0, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628938.59, "dur": 0.001, "cmd": "zINSTREAM", "up": 62, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791628938.714, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791628938.803, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628938.853, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628938.976, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628939.07, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628939.131, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628939.247, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628939.332, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628939.396, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628939.515, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628939.606, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628939.675, "dur": 0.021, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628939.791, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628939.877, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628939.947, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628940.064, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628940.152, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628940.221, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628940.338, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628940.425, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628940.489, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628940.603, "dur": 0.005, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791628940.695, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791628940.755, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629002.889, "dur": 0.001, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629002.904, "dur": 0.015, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629003.913, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629009.03, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.09, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.126, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.22, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.306, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.356, "dur": 0.002, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.516, "dur": 0.014, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.611, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.724, "dur": 0.003, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.838, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629009.919, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629009.985, "dur": 0.023, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.096, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.184, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629010.248, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.36, "dur": 0.005, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.446, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629010.504, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.615, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.703, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629010.743, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.856, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629010.94, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629010.998, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629011.109, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629011.198, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629011.261, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629011.372, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629011.457, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629011.518, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629069.896, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629069.903, "dur": 0.003, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629069.905, "dur": 0.008, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629069.91, "dur": 0.007, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629074.675, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629079.791, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629079.852, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629079.89, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629079.981, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.066, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.128, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.252, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.351, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629080.416, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.528, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.617, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629080.679, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.794, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629080.887, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629080.948, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.059, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.153, "dur": 0.013, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629081.217, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.337, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.426, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629081.49, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.609, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.701, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629081.763, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.878, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629081.964, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629082.033, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629082.151, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629082.236, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629082.278, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629144.839, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629144.839, "dur": 0.002, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629144.845, "dur": 0.005, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629144.845, "dur": 0.002, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629145.448, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629150.567, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629150.692, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629150.744, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629150.864, "dur": 0.0, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629150.951, "dur": 0.003, "cmd": "zINSTREAM", "up": 138, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629151.005, "dur": 0.002, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629151.123, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629151.215, "dur": 0.015, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629151.275, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629151.39, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629151.481, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629151.545, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629151.662, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629151.753, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629151.813, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629151.928, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.016, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629152.077, "dur": 0.021, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.19, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.278, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629152.345, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.46, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.55, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629152.611, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.723, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.815, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629152.879, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629152.995, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629153.084, "dur": 0.011, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629153.141, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629211.186, "dur": 0.001, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629211.189, "dur": 0.003, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629211.27, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629216.389, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629216.447, "dur": 0.0, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629216.483, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629216.57, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629216.636, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629216.702, "dur": 0.001, "cmd": "zINSTREAM", "up": 62, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629216.819, "dur": 0.001, "cmd": "zINSTREAM", "up": 591, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629216.91, "dur": 0.003, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629216.96, "dur": 0.0, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629217.079, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629217.166, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629217.207, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629217.324, "dur": 0.005, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629217.407, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629217.469, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629217.581, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629217.667, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629217.732, "dur": 0.023, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629217.841, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629217.924, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629217.985, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629218.101, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629218.184, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629218.248, "dur": 0.023, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629218.36, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629218.441, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629218.5, "dur": 0.015, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629218.608, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629218.692, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629218.758, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629280.56, "dur": 0.001, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629280.564, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629280.568, "dur": 0.005, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629280.571, "dur": 0.005, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629281.901, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629287.016, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.075, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.111, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.195, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629287.255, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.371, "dur": 0.033, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.486, "dur": 0.0, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.567, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.616, "dur": 0.001, "cmd": "zINSTREAM", "up": 62, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629287.731, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.817, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629287.876, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629287.985, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629288.07, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629288.131, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629288.24, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629288.319, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629288.383, "dur": 0.022, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629288.498, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629288.582, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629288.644, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629288.752, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629288.837, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629288.897, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629289.015, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629289.095, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629289.163, "dur": 0.022, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629289.275, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629289.357, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629289.422, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629347.685, "dur": 0.001, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629347.69, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629352.577, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629357.693, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629357.753, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629357.793, "dur": 0.003, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629357.906, "dur": 0.026, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629357.991, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629358.045, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629358.167, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629358.293, "dur": 0.0, "cmd": "zINSTREAM", "up": 138, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629358.324, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629358.443, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629358.531, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629358.588, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629358.699, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629358.784, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629358.846, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629358.959, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.045, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629359.107, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.219, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.311, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629359.367, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.476, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.564, "dur": 0.011, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629359.624, "dur": 0.015, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.737, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.821, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629359.879, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629359.987, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629360.071, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629360.129, "dur": 0.013, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: Can't write to file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629423.207, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629423.211, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629423.294, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629428.411, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629428.474, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629428.511, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629428.602, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629428.688, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629428.737, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629428.857, "dur": 0.001, "cmd": "zINSTREAM", "up": 591, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629428.947, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.007, "dur": 0.005, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.137, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.224, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629429.293, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.405, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.498, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629429.559, "dur": 0.021, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.673, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.759, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629429.825, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629429.939, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629430.029, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629430.09, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629430.208, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629430.295, "dur": 0.011, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629430.346, "dur": 0.012, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: Can't write to file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629430.46, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629430.548, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629430.617, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629430.73, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629430.811, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629430.874, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629491.239, "dur": 0.005, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629491.243, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629491.244, "dur": 0.003, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629491.248, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629494.023, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629499.136, "dur": 0.001, "cmd": "zINSTREAM", "up": 591, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629499.195, "dur": 0.0, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629499.231, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.32, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.407, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.456, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.577, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.663, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.712, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.825, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629499.901, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.0, "dur": 0.052, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.117, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.207, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629500.272, "dur": 0.024, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.382, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.463, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629500.533, "dur": 0.026, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.645, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.728, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629500.773, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.887, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629500.972, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629501.032, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629501.146, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629501.23, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629501.293, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629501.408, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629501.496, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629501.557, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629560.745, "dur": 0.001, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629560.751, "dur": 0.002, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629560.754, "dur": 0.001, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629560.761, "dur": 0.015, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629564.708, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629569.821, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629569.881, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629569.919, "dur": 0.002, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.04, "dur": 0.0, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.124, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.176, "dur": 0.0, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.301, "dur": 0.0, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.363, "dur": 0.003, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.402, "dur": 0.002, "cmd": "zINSTREAM", "up": 62, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629570.499, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.586, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629570.647, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.769, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629570.858, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629570.922, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: Can't write to file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629571.046, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629571.131, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629571.195, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629571.317, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629571.402, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629571.468, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629571.582, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629571.67, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629571.728, "dur": 0.012, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: Can't write to file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629571.845, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629571.927, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629571.989, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629572.095, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629572.163, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629572.211, "dur": 0.015, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629631.795, "dur": 0.002, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629631.795, "dur": 0.002, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629631.799, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629631.8, "dur": 0.005, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629635.327, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629640.446, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629640.505, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629640.54, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629640.698, "dur": 0.069, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629640.956, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629641.009, "dur": 0.002, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629641.129, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629641.215, "dur": 0.01, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629641.28, "dur": 0.021, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629641.394, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629641.48, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629641.543, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629641.658, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629641.744, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629641.803, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: Can't write to file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629641.921, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.016, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629642.077, "dur": 0.018, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.194, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.28, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629642.344, "dur": 0.022, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.46, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.544, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629642.605, "dur": 0.015, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.718, "dur": 0.004, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.803, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629642.867, "dur": 0.02, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629642.984, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629643.065, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629643.13, "dur": 0.021, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629702.016, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629702.017, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629702.023, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629702.024, "dur": 0.006, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629706.284, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629711.401, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.461, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.496, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.585, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.645, "dur": 0.001, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.683, "dur": 0.002, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.771, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.831, "dur": 0.002, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.865, "dur": 0.001, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629711.951, "dur": 0.001, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629712.01, "dur": 0.001, "cmd": "zINSTREAM", "up": 138, "eicar": true, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629712.05, "dur": 0.0, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629712.138, "dur": 0.002, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "Error writing to temporary file ERROR\u0000", "close": "clamd-fin"}
+{"t": 1791629712.221, "dur": 0.011, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629712.279, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629712.391, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629712.478, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629712.537, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629712.652, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629712.737, "dur": 0.007, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629712.797, "dur": 0.017, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629712.943, "dur": 0.033, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629713.03, "dur": 0.008, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629713.093, "dur": 0.022, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629713.197, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629713.284, "dur": 0.009, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629713.343, "dur": 0.016, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629713.455, "dur": 0.003, "cmd": "zINSTREAM", "up": 595, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629713.558, "dur": 0.021, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}
+{"t": 1791629713.62, "dur": 0.019, "cmd": "zINSTREAM", "up": 66, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629773.837, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629773.837, "dur": 0.0, "cmd": "zPING", "up": 6, "eicar": false, "reply": "PONG\u0000", "close": "clamd-fin"}
+{"t": 1791629773.841, "dur": 0.004, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629773.842, "dur": 0.005, "cmd": "zINSTREAM", "up": 49, "eicar": false, "reply": "stream: OK\u0000", "close": "clamd-fin"}
+{"t": 1791629776.77, "dur": 0.006, "cmd": "zINSTREAM", "up": 142, "eicar": true, "reply": "stream: Eicar-Signature FOUND\u0000", "close": "clamd-fin"}

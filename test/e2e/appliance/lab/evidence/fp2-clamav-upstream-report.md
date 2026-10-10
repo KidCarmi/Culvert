@@ -48,10 +48,10 @@ full root filesystem. The steps:
 3. Release the fill, then repeat.
 
 **Result:** 1 of 140 EICAR streams answered `stream: OK` in the first run,
-and **3 of 140** in a second run on a newer build of the same image (4 in
-420 samples across three runs). All four were complete 142-byte streams,
-answered in 1–2 ms, each 0.19–1.70 s after clamd failed another stream with
-`Error writing to temporary file`. The other image gave 0 of 140, which we do NOT read as evidence
+**3 of 140** in a second run on a newer build of the same image, and **2 of
+140** in a third (6 in 560 samples across four runs). All six were complete
+142-byte streams, answered in 1–2 ms, each 0.19–1.70 s after clamd failed
+another stream (`Error writing to temporary file` or `Can't write to file`). The other image gave 0 of 140, which we do NOT read as evidence
 of absence. Every other EICAR reply was `FOUND`, `ERROR`, or
 `<error> ERROR\0stream: OK\0` (an error reply followed by an OK in the same
 response).
@@ -93,10 +93,11 @@ response).
 * `fp2-91e05872-clamd-streams.jsonl`: the same for the second image, with no
   event.
 * `fp2-72c827b7-clamd-streams.jsonl`: the second run with events (3).
+* `fp2-bad788e5-clamd-streams.jsonl`: the third run with events (2).
 
 ## Our mitigation, for context
 
 The client (Culvert) now distrusts clean verdicts for 60 s after any clamd
-engine fault (commit 72c827b7). In the second run it refused all three
-wrong `OK`s; nothing was delivered. It cannot catch a wrong `OK` that comes before the first fault of an episode,
+engine fault, including verdicts it cached before the fault. In the second
+and third runs it refused all five wrong `OK`s; nothing was delivered. It cannot catch a wrong `OK` that comes before the first fault of an episode,
 which is why we are reporting.

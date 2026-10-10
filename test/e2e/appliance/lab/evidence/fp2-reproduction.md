@@ -53,8 +53,7 @@ lab-proven size caps.
 * **Option 2 shipped** on PR #1528 as commit `72c827b7`: a 60 s clean-verdict
   quarantine after any clamd engine fault. It would have refused this instance.
   It does **not** cover a wrong `OK` before the first fault of an episode, so
-  the risk is narrowed, not closed. It is not yet in any qualified candidate.
-  The next candidate must re-run this reproduction expecting 0 delivered.
+  the risk is narrowed, not closed.
 * **Verified on the corrected candidate, run 38036111516** (retained 72c827b7
   OVA `76769f86…`, same 14-cycle fill reproduction, same tap). The upstream
   defect recurred **3 times in 140 at-fill samples**: complete 142-byte EICAR
@@ -66,6 +65,27 @@ lab-proven size caps.
   Margin: the latest wrong OK came 1.7 s after a fault against a 60 s window.
   This does not bound the residual (a wrong OK BEFORE an episode's first
   fault): in 4 observed instances (1 on dc57bd76, 3 here) none was first.
+* **72c827b7 had a cache bypass (owner review, P1).** A clean verdict cached
+  BEFORE the fault was served from the hash cache without consulting the
+  quarantine, so a body already judged clean kept passing during the outage.
+  The run above could not see it: its EICAR bodies were never cached clean.
+  The pressure phases did see it, and the harness accepted it: under inode
+  exhaustion the "allowed" request answered 200 from the cache. Fixed in
+  `bad788e5`: every clean verdict is bound to the clamd fault generation at
+  scan start, and a fault invalidates every clean verdict cached before it
+  (cached blocks are kept). 72c827b7 is superseded.
+* **Verified on the replacement candidate, run 38045099843** (retained
+  bad788e5 OVA `87c8ae61…`, same reproduction, same tap). The defect recurred
+  **2 times in 140 at-fill samples**: complete 142-byte EICAR streams answered
+  a bare `stream: OK` in 1 ms, 1.48 s and 0.47 s respectively after a clamd
+  fault.
+  **Culvert delivered none** (`clam_clean_quarantined=190`). Check
+  `F2 eicar-never-delivered` PASS. Streams: `fp2-bad788e5-clamd-streams.jsonl`.
+  In the pressure phases the allowed request is now refused as
+  AV-unavailable under inode exhaustion (403/403), where 72c827b7 served it
+  200 from the cache (run 38045091498, judge `p_enforced`). 6 instances
+  observed in total; none was first in its episode. The residual stands and
+  F-P2 stays OPEN.
 * **Option 3 drafted**: `fp2-clamav-upstream-report.md`, for the owner to file
   through ClamAV's private security channel.
 
