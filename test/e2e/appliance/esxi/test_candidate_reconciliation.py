@@ -18,6 +18,23 @@ def load(name):
 
 
 class CandidateReconciliationTests(unittest.TestCase):
+    def test_72_profile_and_engine_pins_match_product_and_build_evidence(self):
+        ids=load('candidate-identities');profile=ids.source_profile(ids.E72)
+        engine=load('engine-surface-proof').PROFILES[ids.E72]
+        for name,key in (('culvert-net','network_helper_sha256'),('culvert-appliance-reset-identity','reset_helper_sha256')):
+            raw=subprocess.check_output(['git','show',ids.E72+':appliance/provision/'+name],cwd=HERE.parents[3])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(),profile[key])
+        for name,key in (('modprobe-culvert-unused.conf','denylist_sha256'),('72-culvert-drm.rules','drm_rule_sha256'),('net-autoload-reviewed.txt','net_reviewed_sha256')):
+            raw=subprocess.check_output(['git','show',ids.E72+':appliance/provision/'+name],cwd=HERE.parents[3])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(),engine[key])
+            if name.endswith('unused.conf'):
+                self.assertEqual([line.split()[1] for line in raw.decode().splitlines() if line.startswith('install ')],engine['modules'])
+        self.assertEqual(len(engine['modules']),67)
+        self.assertNotEqual(profile['clamav_sidecar_image_id'],ids.source_profile(ids.E91)['clamav_sidecar_image_id'])
+        self.assertEqual(load('visual-capture').candidate_profile(profile),profile)
+        self.assertEqual(load('qualify-clamav-outage').attempt_context(Path('unused'),profile,'initial',None,'owner'),(Path('unused/clamav-outage'),{}))
+        self.assertIn(ids.E72,load('visual-service-fixture').generate('install','11111111-1111-4111-8111-111111111111','seven-two',ids.E72))
+
     def test_91_profile_helpers_and_kernel_controls_match_exact_source(self):
         ids=load('candidate-identities')
         profile=ids.source_profile(ids.E91)
@@ -45,7 +62,7 @@ class CandidateReconciliationTests(unittest.TestCase):
         self.assertNotEqual(load('import-observer-continuation').SOURCE,ids.E91)
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -59,7 +76,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)
@@ -68,7 +85,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], '4eabd8d4f3eee7d4d305163bd48786a340019cff')
+        self.assertEqual(record['upstream_revision'], '7244486a375ce772a7b3d8530db2d8763cb47adf')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')
@@ -82,6 +99,10 @@ class CandidateReconciliationTests(unittest.TestCase):
                     self.assertEqual(raw.count(addition), 1)
                     raw = raw.replace(addition, b'')
                 raw = raw.replace(b'  if [[ "$LAB_EXTERNAL" == 1 ]]; then check P disk-pressure fail "BLOCKED: bounded QEMU disk-pressure fixture cannot run on ESXi"; return 0; fi\n', b'')
+                fp2 = b'  if [[ "$LAB_EXTERNAL" == 1 ]]; then check P fp2 fail "BLOCKED: bounded QEMU fault fixture cannot run on ESXi"; return 0; fi\n'
+                self.assertEqual(raw.count(fp2),1)
+                self.assertIn(b'cmd_fp2() { local free k h hs rc\n'+fp2,raw)
+                raw=raw.replace(fp2,b'')
             elif name.endswith('console-session.py'):
                 raw = raw.replace(b'        if not hasattr(socket, "AF_UNIX"):\n'
                                   b'            raise OSError("Unix console transport is unavailable on this controller")\n', b'')

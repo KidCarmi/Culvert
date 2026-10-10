@@ -30,6 +30,18 @@ with mock.patch.dict(sys.modules, {'fcntl': SimpleNamespace(LOCK_EX=2, LOCK_NB=4
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_archive_identity_keeps_exact_backup_separate_from_history(self):
+        cfg={'mode':'restore','archive_name':'fresh-'+'a'*24+'.tar.gz.enc'}
+        metadata={'archive_sha256':'b'*64,'archive_bytes':11697}
+        scope={'source_sha':'c'*40,'ova_sha256':'d'*64,'image_id':'sha256:'+'e'*64}
+        value=controller.archive_identity(cfg,metadata,scope,{'uuid':'owner'})
+        self.assertEqual(value['filename'],cfg['archive_name'])
+        self.assertEqual(value['sha256'],metadata['archive_sha256'])
+        self.assertEqual(value['size_bytes'],11697)
+        for bad in ('history-'+'a'*24+'.cvst','../backup.tar.gz.enc'):
+            with self.assertRaises(ValueError):controller.archive_identity(dict(cfg,archive_name=bad),metadata,scope,{'uuid':'owner'})
+        with self.assertRaises(ValueError):controller.archive_identity(cfg,dict(metadata,archive_bytes=0),scope,{'uuid':'owner'})
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix='culvert-recovery-offline-')
         self.addCleanup(self.directory.cleanup)

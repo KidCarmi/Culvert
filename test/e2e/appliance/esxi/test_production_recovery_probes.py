@@ -12,6 +12,18 @@ spec = importlib.util.spec_from_file_location('production_probes', Path(__file__
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
 NS = 1_000_000_000
+
+class ExactBackupSelectionTests(unittest.TestCase):
+    def test_newer_history_does_not_weaken_explicit_backup_encryption_gate(self):
+        archive={'filename':'fresh-fixture.tar.gz.enc','size_bytes':123,'encrypted':True}
+        history={'filename':'history-fixture.cvst','size_bytes':456,'encrypted':False}
+        client=mock.Mock();client.api.return_value={'available':True,'count':2,'backups':[history,archive]}
+        observed={'healthy':True,'probes':{'authenticated':{'snapshot':{}}}}
+        with mock.patch.object(p,'sample',return_value=observed):
+            with self.assertRaisesRegex(ValueError,'encrypted archive invalid'):p.capture_baseline(client,'source','image')
+            self.assertEqual(p.capture_baseline(client,'source','image',archive['filename'])['backup'],archive)
+            archive['encrypted']=False
+            with self.assertRaisesRegex(ValueError,'encrypted archive invalid'):p.capture_baseline(client,'source','image',archive['filename'])
 OLD = '11111111-1111-4111-8111-111111111111'
 NEW = '22222222-2222-4222-8222-222222222222'
 BASELINE = {'schema': 1, 'source_sha': 'a' * 40, 'image_id': 'sha256:' + 'b' * 64,

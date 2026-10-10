@@ -1,16 +1,17 @@
 {
   "schema": 1,
-  "upstream_revision": "4eabd8d4f3eee7d4d305163bd48786a340019cff",
+  "upstream_revision": "7244486a375ce772a7b3d8530db2d8763cb47adf",
   "normalization": "LF bytes; controller freeze records runtime raw hashes",
   "files": {
     "test/e2e/appliance/lab/appliance-lab.sh": {
-      "upstream_sha256": "bbb9c1d456c9d39215647070442b8cf187e62e1dfdaa2be398cf7be0cb20007c",
-      "controller_lf_sha256": "2358a7ff41c51167419cb3fbf16458ca0a9dc7de1c1b76c412bafa9088a90fe0",
+      "upstream_sha256": "9172d5915d1931eb8baefd14b16c37f111dd88cbcb482dc8be44635a26025229",
+      "controller_lf_sha256": "4ef18326590501c1d23ae76a60b0f8d86fc77a820326dea71e7338b545c45448",
       "local_changes": [
         "guarded restore before signed lifecycle",
         "pre-reboot ESXi observations",
         "post-reboot ESXi observations",
-        "refuse QEMU-only disk-pressure fixture for external ESXi"
+        "refuse QEMU-only disk-pressure fixture for external ESXi",
+        "refuse QEMU-only clamd fault fixture for external ESXi"
       ]
     },
     "test/e2e/appliance/lab/console-session.py": {
@@ -21,13 +22,28 @@
       ]
     },
     "test/e2e/appliance/lab/recovery-timeline.py": {
-      "upstream_sha256": "26e9d9af45b8f8fa3142a76b172b5d0c16405c659dba6ef206c3ea931f31431d",
-      "controller_lf_sha256": "26e9d9af45b8f8fa3142a76b172b5d0c16405c659dba6ef206c3ea931f31431d",
+      "upstream_sha256": "4a5c75d5da10733d42a68cb696c34292e68a75018a9059e4c47f7ba533b3e147",
+      "controller_lf_sha256": "4a5c75d5da10733d42a68cb696c34292e68a75018a9059e4c47f7ba533b3e147",
       "local_changes": []
     },
     "test/e2e/appliance/lab/vga-capture.py": {
       "upstream_sha256": "7d0e4060680cb1f1208163484d0162dd930f42030f79427d077eab84699e96c9",
       "controller_lf_sha256": "7d0e4060680cb1f1208163484d0162dd930f42030f79427d077eab84699e96c9",
+      "local_changes": []
+    },
+    "test/e2e/appliance/lab/clamd-tap.py": {
+      "upstream_sha256": "b0072bdf18744b78075c9872416ec01c865f5e4aae0e0c7b1aa614122e94540c",
+      "controller_lf_sha256": "b0072bdf18744b78075c9872416ec01c865f5e4aae0e0c7b1aa614122e94540c",
+      "local_changes": []
+    },
+    "test/e2e/appliance/lab/recovery-phases.py": {
+      "upstream_sha256": "c7ba796d1f6c8514abdf21eb3c9c2259871a9e93e526a1ac719fd2da0265e68c",
+      "controller_lf_sha256": "c7ba796d1f6c8514abdf21eb3c9c2259871a9e93e526a1ac719fd2da0265e68c",
+      "local_changes": []
+    },
+    "test/e2e/appliance/lab/scan-dispositions.py": {
+      "upstream_sha256": "33525f0df84d095454027aa04377cf449ac987d8a448ee4264ba06e55626a2e1",
+      "controller_lf_sha256": "33525f0df84d095454027aa04377cf449ac987d8a448ee4264ba06e55626a2e1",
       "local_changes": []
     }
   }

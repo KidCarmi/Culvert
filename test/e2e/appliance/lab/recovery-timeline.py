@@ -44,11 +44,21 @@ def describe(path):
     d = json.load(open(path))
     p, h = d["seconds_after_acceptance"], d["host_device"]
     parts = [f"{k}=+{v:.1f}s" if v is not None else f"{k}=never" for k, v in p.items()]
-    return " ".join(parts) + f"; samples={d['joint_samples_taken']}; host disk: {h['reads']} reads/{h['read_mib']} MiB, {h['writes']} writes/{h['write_mib']} MiB"
+    svc = (f", service {h['read_ms'] / h['reads']:.2f} ms/read {h['write_ms'] / h['writes']:.2f} ms/write"
+           if h.get("reads") and h.get("writes") else "")
+    return " ".join(parts) + f"; samples={d['joint_samples_taken']}; host disk: {h['reads']} reads/{h['read_mib']} MiB, {h['writes']} writes/{h['write_mib']} MiB{svc}"
+
+
+def svc_excess(path, inj_read_ms):
+    """Mean read service time above the injected delay, in ms (environment share)."""
+    h = json.load(open(path))["host_device"]
+    return "%.2f" % (h["read_ms"] / h["reads"] - float(inj_read_ms)) if h.get("reads") else "nan"
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--describe"]:
         print(describe(sys.argv[2]))
+    elif sys.argv[1:2] == ["--svc-excess"]:
+        print(svc_excess(sys.argv[2], sys.argv[3]))
     else:
         print(build(sys.argv[1:]))

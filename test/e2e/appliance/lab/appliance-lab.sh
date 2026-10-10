@@ -1238,7 +1238,14 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   local recd; recd="$(printf '%.1f' "$rec")"
   if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
     check R "recovery-$name-$i" pass "recovered in ${recd}s (budget ${budget}s; unrounded $rec): $tl"
-  else check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl"; fi
+  else
+    # Still a FAIL. The excess read service time over the injected delay
+    # (r ms, from cmd_recovery's profile) says how much of it is the runner's
+    # disk: >1 ms means re-measure on one runner, interleaved A/B, before
+    # calling it the candidate (evidence/candidate-91e05872-recovery-causation.md).
+    local ex; ex="$(python3 "$HERE/recovery-timeline.py" --svc-excess "$EV/$tag-timeline.json" "${r:-0}")"
+    check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl; host read service ${ex} ms/request above the injected ${r:-0} ms$(python3 -c 'import sys; print("" if float(sys.argv[1]) <= 1 else " — runner disk slower than the profile: attribute only after a same-runner A/B")' "$ex" 2>/dev/null)"
+  fi
   recovery_guest "$tag"
   recovery_state "$name" "$i"
   printf '%s\t%s\t%s\t%s\t%s\n' "${REC_VARIANT:-base}" "$name" "$i" "$rec" "$budget" >> "$EV/R-summary.tsv"
@@ -1667,11 +1674,61 @@ p_backup() { local out="$1" op st jar; api POST /api/backups '{"encrypt":false}'
     case "$st" in succeeded|failed|cancelled) break ;; esac; sleep 5; done; api GET "/api/backups/operations/$op" >> "$out" 2>&1 || true; fi
   echo "op=${op:-none} state=${st:-none} http=$(code < "$out" | head -1)"; }
 p_login() { : > "$JAR"; api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code; }
-p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; tail -n 15 /run/culvert-lab-osu.log; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
+p_os_update() { groot 'culvert-os-update os > /run/culvert-lab-osu.log 2>&1; echo "osu-rc=$?"; grep -E "culvert-lab-pkgfix|^(E|W):|No space|dpkg: error" /run/culvert-lab-osu.log | head -n 20; tail -n 15 /run/culvert-lab-osu.log; echo "fixture=$(dpkg-query -W -f="\${Status} \${Version}" culvert-lab-pkgfix 2>/dev/null)"; echo "dpkg-journal=$(ls /var/lib/dpkg/updates 2>/dev/null | grep -c "^[0-9]")"; echo "dpkg-audit=[$(dpkg --audit 2>&1 | head -c 300)]"; echo "not-installed-ok=$(dpkg -l | awk "NR>5 && \$1 !~ /^(ii|hi|rc)\$/" | wc -l)"; echo "holds=$(dpkg-query -W -f="\${Package} \${db:Status-Want}\n" 2>/dev/null | awk "\$2==\"hold\"{print \$1}" | tr "\n" " ")"' 1800 2>&1; }
 p_app_update() { local U="$LAB_UPDATE_DIR" ph="$1" rc=0
   { printf '%s' "$AGENT_LIB"; embed apply.json "$U/apply-pressure-$ph.json"
     printf '%s\n' 'running' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/apply.json http://agent/v1/upgrades/apply); echo "$r" | tail -c 1500' \
                   'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"' 'echo "after:"' 'running'; } | gpriv --timeout 2100 2>&1 || rc=$?; echo "rc=$rc"; }
+# Package-write fixture (ASTRA, #1528: "partial package-write failure" was
+# unqualified — with the snapshot already newest, `culvert-os-update os` made 0
+# package actions under pressure, so dpkg never wrote anything). A harmless
+# local package, culvert-lab-pkgfix, is installed at 1.0 and offered at 2.0 from
+# a file: repository, so `culvert-os-update os` (apt-get upgrade from every
+# configured source) really unpacks a package under pressure. 2.0 carries a
+# 64 MiB blob and 3000 small files: more than the pkg* phases leave free, so the
+# unpack fails PART WAY, after dpkg has started writing. Built inside the
+# disposable guest; the OVA is untouched. Removed at the end of the scenario.
+LAB_PKGFIX_DIR=/var/lib/culvert-lab-pkgfix
+p_pkg_setup() { groot "set -e; d=$LAB_PKGFIX_DIR; rm -rf \$d; mkdir -p \$d/repo
+mk() { v=\$1; r=\$d/build-\$v; mkdir -p \$r/DEBIAN \$r/usr/share/culvert-lab-pkgfix
+  printf 'Package: culvert-lab-pkgfix\nVersion: %s\nArchitecture: all\nMaintainer: lab <lab@invalid>\nDescription: Culvert lab package-write fixture (inert data only)\n' \$v > \$r/DEBIAN/control
+  echo \$v > \$r/usr/share/culvert-lab-pkgfix/version
+  if [ \$v = 2.0 ]; then head -c 67108864 /dev/urandom > \$r/usr/share/culvert-lab-pkgfix/blob
+    mkdir -p \$r/usr/share/culvert-lab-pkgfix/many; for i in \$(seq 1 3000); do echo \$i > \$r/usr/share/culvert-lab-pkgfix/many/f\$i; done; fi
+  dpkg-deb -Znone --root-owner-group --build \$r \$d/repo/culvert-lab-pkgfix_\${v}_all.deb >/dev/null; rm -rf \$r; }
+mk 1.0; mk 2.0
+cd \$d/repo; f=culvert-lab-pkgfix_2.0_all.deb
+{ dpkg-deb -f \$f; echo \"Filename: ./\$f\"; echo \"Size: \$(stat -c %s \$f)\"; echo \"SHA256: \$(sha256sum \$f | cut -d' ' -f1)\"; echo; } > Packages
+echo 'deb [trusted=yes] file:$LAB_PKGFIX_DIR/repo ./' > /etc/apt/sources.list.d/culvert-lab-pkgfix.list
+apt-get update -qq; dpkg -i \$d/repo/culvert-lab-pkgfix_1.0_all.deb >/dev/null
+echo fixture=\$(dpkg-query -W -f='\${Status} \${Version}' culvert-lab-pkgfix); apt-cache policy culvert-lab-pkgfix | grep -E 'Installed|Candidate' | tr -s ' ' | tr '\n' ' '; echo
+ls -l \$d/repo" 900 > "$EV/P-pkgfix-setup.txt" 2>&1 || true
+  if grep -q 'fixture=install ok installed 1.0' "$EV/P-pkgfix-setup.txt" && grep -q 'Candidate: 2.0' "$EV/P-pkgfix-setup.txt"; then
+    check P pkgfix-setup pass "culvert-lab-pkgfix 1.0 installed, 2.0 offered (64 MiB blob + 3000 files) from a local file: repository"
+  else check P pkgfix-setup fail "fixture not ready: $(tail -3 "$EV/P-pkgfix-setup.txt" | tr '\n' ' ')"; return 1; fi; }
+# p_pkg_arm — back to 1.0 before a phase so 2.0 is pending again.
+p_pkg_arm() { groot "dpkg -i $LAB_PKGFIX_DIR/repo/culvert-lab-pkgfix_1.0_all.deb >/dev/null 2>&1; echo fixture=\$(dpkg-query -W -f='\${Status} \${Version}' culvert-lab-pkgfix)" 300 2>&1 | grep -m1 '^fixture='; }
+p_pkg_teardown() { groot "dpkg -P culvert-lab-pkgfix >/dev/null 2>&1; rm -f /etc/apt/sources.list.d/culvert-lab-pkgfix.list; rm -rf $LAB_PKGFIX_DIR; apt-get update -qq; echo removed=\$(dpkg-query -W culvert-lab-pkgfix >/dev/null 2>&1 && echo no || echo yes)" 600 > "$EV/P-pkgfix-teardown.txt" 2>&1 || true
+  check P pkgfix-teardown "$(grep -q removed=yes "$EV/P-pkgfix-teardown.txt" && echo pass || echo fail)" "fixture package, source and repository removed from the disposable guest"; }
+# p_pkg_judge NAME OSU WHEN — the package write, under pressure or after recovery.
+p_pkg_judge() { local name="$1" osu="$2" when="$3" rc fx reached
+  rc="$(grep -m1 -oE '^osu-rc=[0-9]+' <<<"$osu" | cut -d= -f2)"; fx="$(grep -m1 '^fixture=' <<<"$osu" | cut -d= -f2-)"
+  reached="$(grep -cE 'Unpacking culvert-lab-pkgfix|culvert-lab-pkgfix_2.0_all.deb' <<<"$osu" || true)"
+  local audit_ok=0; grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q '^dpkg-journal=0$' <<<"$osu" && audit_ok=1
+  if [[ "$when" == pressure ]] && grep -q '^dpkg-journal=[1-9]' <<<"$osu"; then
+    check P "$name-pkg-write" info "dpkg wrote part of 2.0, failed (osu-rc=$rc) and could not record it: left INTERRUPTED ($(grep -m1 '^dpkg-journal=' <<<"$osu") journal entries); fixture=[$fx]; repair judged by $name-pkg-recovered"; return; fi
+  if [[ "$when" == recovered ]]; then
+    [[ "$rc" == 0 && "$fx" == "install ok installed 2.0" && $audit_ok == 1 ]] \
+      && check P "$name-pkg-recovered" pass "space back: culvert-os-update os rc=0, culvert-lab-pkgfix now 2.0, dpkg audit empty" \
+      || check P "$name-pkg-recovered" fail "after release: osu-rc=$rc fixture=[$fx] audit_ok=$audit_ok ($(grep -E 'dpkg-audit' <<<"$osu" | head -c 200))"
+    return; fi
+  if [[ "$reached" == 0 ]]; then
+    check P "$name-pkg-write" info "dpkg never reached the package (osu-rc=$rc; apt stopped first: $(grep -m1 -E '^(E|W):' <<<"$osu" | head -c 160)); fixture=[$fx]"
+  elif [[ "$rc" != 0 && "$fx" == "install ok installed 1.0" && $audit_ok == 1 ]]; then
+    check P "$name-pkg-write" pass "dpkg started writing 2.0 and failed (osu-rc=$rc: $(grep -m1 -iE 'no space|cannot copy|failed to write|error processing' <<<"$osu" | head -c 140)); rolled back to 1.0 fully installed, dpkg audit empty"
+  elif [[ "$rc" == 0 && "$fx" == "install ok installed 2.0" && $audit_ok == 1 ]]; then
+    check P "$name-pkg-write" info "the package write SUCCEEDED under pressure (root's reserve); 2.0 fully installed, audit empty"
+  else check P "$name-pkg-write" fail "osu-rc=$rc fixture=[$fx] audit_ok=$audit_ok — a package left part-written or a failure reported as success ($(grep -E '^dpkg-audit' <<<"$osu" | head -c 200))"; fi; }
 # p_phase NAME FILLCMD — fill, observe, exercise backup/updates, release, recover.
 p_phase() { local name="$1" fill="$2" s id0 id1 inv0 inv1 bk osu up ok lc
   local since; since="$(date -u -d '-2 min' +%FT%TZ)"
@@ -1680,6 +1737,7 @@ p_phase() { local name="$1" fill="$2" s id0 id1 inv0 inv1 bk osu up ok lc
   # the full disk takes the SSH path with it; cancelled by the normal release.
   groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; systemd-run --quiet --unit=culvert-pressure-release --on-active=5400 /bin/rm -rf /var/lib/culvert-pressure && echo backstop=armed' 60 > "$EV/P-$name-backstop.txt" 2>&1 || true
   grep -q backstop=armed "$EV/P-$name-backstop.txt" || { check P "$name-filled" blocked "release backstop timer could not be armed; phase not run"; return 1; }
+  [[ -n "${P_PKG:-}" ]] && echo "armed $(p_pkg_arm)" > "$EV/P-$name-pkgfix-arm.txt"
   groot "$fill" 3600 > "$EV/P-$name-fill.txt" 2>&1 || true
   check P "$name-filled" info "$(grep -E '^(filled|files)' "$EV/P-$name-fill.txt" | tr '\n' ' ') host disk file +$(( $(p_host_alloc_mb) - P_ALLOC0 )) MiB"
   p_bounded || return 1
@@ -1745,7 +1803,8 @@ PY2
     else check P "$name-backup-clean" fail "$bk; archive set changed: $(diff <(sed -n '/^---$/,$p' <<<"$inv0") <(sed -n '/^---$/,$p' <<<"$inv1") | tr '\n' ' ' | head -c 300)"; fi
   else check P "$name-backup-clean" pass "$bk; no new archive, no .tmp, $(sed -n '/^---$/,$p' <<<"$inv0" | grep -c ' ') existing archive(s) byte-identical"; fi
   # app update under pressure (signed fixture only exists in build mode)
-  if [[ -n "${LAB_UPDATE_DIR:-}" && -f "${LAB_UPDATE_DIR}/apply-pressure-$name.json" ]]; then
+  if [[ "${P_NO_APP:-0}" == 1 ]]; then check P "$name-app-update" info "not exercised in this phase (the blocks and inodes phases cover it); this phase targets the package write"
+  elif [[ -n "${LAB_UPDATE_DIR:-}" && -f "${LAB_UPDATE_DIR}/apply-pressure-$name.json" ]]; then
     up="$(p_app_update "$name")"
     if grep -q '"deduped":true' <<<"$up"; then check P "$name-app-update" fail "the agent returned an EARLIER operation (deduped): nothing was exercised under pressure"; fi; printf '%s\n' "$up" > "$EV/P-$name-app-update.txt"
     local st0 img_b img_a; st0="$(grep -m1 '^op-state=' <<<"$up" || echo op-state=none)"
@@ -1761,11 +1820,22 @@ PY2
     else check P "$name-app-update" fail "$st0 $img_b -> $img_a traffic $1/$2 (a failed update must leave the running image and enforcement unchanged)"; fi
   else check P "$name-app-update" blocked "no per-phase signed-update fixture in this leg (built only with the OVA build)"; fi
   # OS update under pressure
+  # P_PRE_OSU: set the exact headroom right before the update (the stack
+  # consumes inodes while the phase runs: 400 left at the fill were gone by
+  # the update in run 38012314515, so apt failed before dpkg was reached).
+  [[ -n "${P_PRE_OSU:-}" ]] && groot "$P_PRE_OSU" 600 > "$EV/P-$name-pre-osu.txt" 2>&1
   osu="$(p_os_update)"; printf '%s\n' "$osu" > "$EV/P-$name-os-update.txt"
   s="$(p_sample "$name" after-os-update)"; set -- $s
-  if grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
-    check P "$name-os-update" pass "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg consistent (audit empty, no half-installed package), Docker still held, traffic $1/$2"
-  else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|not-installed-ok|holds)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
+  # dpkg --audit cannot see an INTERRUPTED dpkg (unfinished journal entries in
+  # /var/lib/dpkg/updates), after which apt refuses everything: run
+  # 38016152802. That state is recorded here and its repair judged by
+  # pkg-recovered; it is never a clean failure.
+  if grep -q '^dpkg-journal=[1-9]' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
+    check P "$name-os-update" info "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg left INTERRUPTED ($(grep -m1 '^dpkg-journal=' <<<"$osu") journal entries; apt refuses until dpkg --configure -a) — the repair is judged by $name-pkg-recovered; Docker still held, traffic $1/$2"
+  elif grep -q '^dpkg-audit=\[\]$' <<<"$osu" && grep -q '^not-installed-ok=0$' <<<"$osu" && grep -q '^dpkg-journal=0$' <<<"$osu" && grep -q 'docker-ce' <<<"$(grep '^holds=' <<<"$osu")" && [[ "$1 $2" == "200 403" ]]; then
+    check P "$name-os-update" pass "$(grep -m1 '^osu-rc=' <<<"$osu"); dpkg consistent (audit empty, journal empty, no half-installed package), Docker still held, traffic $1/$2"
+  else check P "$name-os-update" fail "$(grep -E '^(osu-rc|dpkg-audit|dpkg-journal|not-installed-ok|holds|fixture)=' <<<"$osu" | tr '\n' ' ') traffic $1/$2"; fi
+  [[ -n "${P_PKG:-}" ]] && p_pkg_judge "$name" "$osu" pressure
   # release and recover without a restart
   groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; rm -rf /var/lib/culvert-pressure; sync; df -B1 / | tail -1; df -i / | tail -1; echo released=$([ -e /var/lib/culvert-pressure ] && echo no || echo yes)' 3600 > "$EV/P-$name-release.txt" 2>&1 || true
   grep -q 'released=yes' "$EV/P-$name-release.txt" || check P "$name-release" fail "the release over SSH did not complete (see P-$name-release.txt); the guest's backstop timer frees the space"
@@ -1777,6 +1847,7 @@ PY2
   [[ "$hh" == *docker-ce\ * ]] || ok=0
   [[ $ok == 1 ]] && check P "$name-recovered" pass "space released; /ready 200 with clamav ok, enforcement, EICAR blocked by ClamAV ($s); held: $hh" \
     || check P "$name-recovered" fail "within 300 s of release: $s; held: [$hh]"
+  if [[ -n "${P_PKG:-}" ]]; then osu="$(p_os_update)"; printf '%s\n' "$osu" > "$EV/P-$name-os-update-recovered.txt"; p_pkg_judge "$name" "$osu" recovered; fi
   if [[ "${P_APP_APPLIED:-0}" == 1 ]]; then P_APP_APPLIED=0; local rb rc=0
     rb="$({ printf '%s' "$AGENT_LIB"; embed rollback.json "$LAB_UPDATE_DIR/rollback-pressure-$name.json"
            printf '%s\n' 'r=$(agent -X POST --data-binary @/run/culvert-lab-upd/rollback.json http://agent/v1/rollbacks); echo "$r" | tail -c 1500' \
@@ -1803,7 +1874,17 @@ cmd_pressure() { local free
   free="$(p_host_free_gb)"; P_ALLOC0="$(p_host_alloc_mb)"
   if (( free < LAB_PRESSURE_MIN_HOST_FREE_GB )); then check P host-bound blocked "host has $free GiB free (< $LAB_PRESSURE_MIN_HOST_FREE_GB); pressure phase not run"; return 0; fi
   check P host-bound pass "host free $free GiB; disk file allocated ${P_ALLOC0} MiB; caps: growth <= $LAB_PRESSURE_MAX_HOST_GROWTH_MB MiB, abort below $(( LAB_PRESSURE_MIN_HOST_FREE_GB / 2 )) GiB free"
+  # The lab EICAR origin's allow rule normally comes from the recovery step;
+  # without it every EICAR/clean sample is a POLICY 403 and the AV checks
+  # measure nothing (run 38012314515). Install it and require a real ClamAV
+  # block before any fill.
+  p_login > /dev/null
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/P-eicar-rule.txt"
+  local v0; v0="$(eicar_verdict)"
+  if [[ "$v0" != av ]]; then check P clamav-baseline fail "EICAR through the proxy did not draw a ClamAV block before any fill ($v0); the AV checks would be vacuous"; return 0; fi
+  check P clamav-baseline pass "a fresh EICAR draws the ClamAV block before any fill"
   : > "$EV/P-samples.jsonl"; p_sample baseline 0 > /dev/null
+  P_PKG=""; p_pkg_setup && P_PKG=1
   p_phase blocks 'python3 - <<"PY"
 import os, errno
 d="/var/lib/culvert-pressure"; os.makedirs(d, exist_ok=True)
@@ -1839,7 +1920,144 @@ while True:
         raise
 st=os.statvfs("/"); print(f"files={n} free_inodes={st.f_ffree} free_blocks_bytes={st.f_bfree*st.f_frsize} secs={time.time()-t:.0f}")
 PY' || return 0
+  # Headroom phases: enough left for apt and dpkg's own database, not for the
+  # 2.0 payload, so the unpack itself is what fails (a part-written package).
+  if [[ -n "$P_PKG" ]]; then
+    P_NO_APP=1 p_phase pkgblocks "python3 - <<\"PY\"
+import os
+d=\"/var/lib/culvert-pressure\"; os.makedirs(d, exist_ok=True)
+fd=os.open(d+\"/fill\", os.O_CREAT|os.O_WRONLY, 0o600); st=os.statvfs(\"/\")
+keep=${LAB_PKG_HEADROOM_MB:-24}<<20
+os.posix_fallocate(fd, 0, max(st.f_bfree*st.f_frsize-keep, 4096)); os.fsync(fd); os.close(fd)
+st=os.statvfs(\"/\"); print(f\"filled headroom_target={keep} free_root={st.f_bfree*st.f_frsize} free_user={st.f_bavail*st.f_frsize}\")
+PY" || true
+    P_PRE_OSU="python3 - <<\"PY\"
+import os
+d=\"/var/lib/culvert-pressure/inodes\"; want=${LAB_PKG_HEADROOM_INODES_AT_UPDATE:-1500}
+need=max(want-os.statvfs(\"/\").f_ffree, 0)
+for e in os.scandir(d):
+    if need <= 0: break
+    for f in os.scandir(e.path):
+        if need <= 0: break
+        os.unlink(f.path); need-=1
+print(f\"inode headroom before the update: {os.statvfs('/').f_ffree} (target {want}; the 2.0 payload needs 3000+)\")
+PY" P_NO_APP=1 p_phase pkginodes "python3 - <<\"PY\"
+import os, errno
+d=\"/var/lib/culvert-pressure/inodes\"; os.makedirs(d, exist_ok=True)
+keep=${LAB_PKG_HEADROOM_INODES:-400}; n=0; sub=None
+target=os.statvfs(\"/\").f_ffree-keep
+try:
+    while n < target:
+        if n%10000==0: sub=f\"{d}/{n//10000}\"; os.mkdir(sub)
+        os.close(os.open(f\"{sub}/{n}\", os.O_CREAT|os.O_WRONLY, 0o600)); n+=1
+except OSError as e:
+    if e.errno!=errno.ENOSPC: raise
+st=os.statvfs(\"/\"); print(f\"files={n} headroom_target={keep} free_inodes={st.f_ffree} free_blocks_bytes={st.f_bfree*st.f_frsize}\")
+PY" || true
+    p_pkg_teardown
+  fi
 }
+# F-P2 controlled reproduction (ASTRA, #1528 item 1). One EICAR was DELIVERED
+# at "+0" of the blocks phase in run 37948667525 (dc57bd76, parser fix
+# present, /ready 200), with no log surviving the full disk. A reading of
+# both sides found no path where clamd answers a plain OK on a write fault,
+# and none where Culvert skips ClamAV — so it is reproduced here with the
+# clamd conversation itself on record: clamd-tap.py on the ClamAV
+# container's host veth, writing to tmpfs, logs what Culvert sent (bytes,
+# EICAR or not) and clamd's verbatim reply for every connection. Cycles of
+# fill -> immediate EICAR/clean burst -> release, with the headroom left at the
+# fill varied from 0 to 4 MiB, since the moment of filling is where it was
+# seen. A delivered EICAR is then attributed by its own stream: clamd said
+# OK to the EICAR bytes (clamd), or no EICAR stream carries an OK (Culvert).
+LAB_FP2_CYCLES="${LAB_FP2_CYCLES:-14}"; LAB_FP2_BURST="${LAB_FP2_BURST:-10}"
+cmd_fp2() { local free k h hs rc
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then check P fp2 fail "BLOCKED: bounded QEMU fault fixture cannot run on ESXi"; return 0; fi
+  ensure_admin_pass; [[ -f "$WORK/eicar-origin.pid" ]] || rec_origin_start
+  free="$(p_host_free_gb)"; P_ALLOC0="$(p_host_alloc_mb)"
+  (( free >= LAB_PRESSURE_MIN_HOST_FREE_GB )) || { check F2 host-bound blocked "host has $free GiB free"; return 0; }
+  : > "$EV/P-samples.jsonl"; p_login > /dev/null
+  # The lab's EICAR origin (10.0.2.2) needs the same allow rule the recovery
+  # and adoption steps install; without it the policy, not ClamAV, answers
+  # 403 and clamd never sees the body (run 38012773269 — both legs).
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/F2-eicar-rule.txt"
+  local v0; v0="$(eicar_verdict)"
+  if [[ "$v0" != av ]]; then check F2 clamav-baseline fail "EICAR through the proxy did not draw a ClamAV block before any fill ($v0)"; return 0; fi
+  check F2 clamav-baseline pass "a fresh EICAR draws the ClamAV block before any fill"
+  groot "mkdir -p /run/culvert-fp2; echo '$(base64 -w0 "$HERE/clamd-tap.py")' | base64 -d > /run/culvert-fp2/tap.py
+i=\$(docker exec culvert-clamav cat /sys/class/net/eth0/iflink); v=\$(grep -lx \"\$i\" /sys/class/net/*/ifindex | cut -d/ -f5); echo veth=\$v
+systemctl stop culvert-fp2-tap 2>/dev/null; systemd-run --quiet --unit=culvert-fp2-tap python3 -I /run/culvert-fp2/tap.py \"\$v\" /run/culvert-fp2/streams.jsonl && echo tap=started" 120 > "$EV/F2-tap-start.txt" 2>&1 || true
+  sleep 2; p_sample fp2 baseline > /dev/null; sleep 2
+  groot 'cat /run/culvert-fp2/streams.jsonl' 60 > "$EV/F2-tap-baseline.jsonl" 2>/dev/null || true
+  if grep -q '"eicar": true' "$EV/F2-tap-baseline.jsonl" && grep -q 'FOUND' "$EV/F2-tap-baseline.jsonl"; then
+    check F2 tap pass "clamd conversations recorded on $(grep -m1 -o 'veth=[^ ]*' "$EV/F2-tap-start.txt"); baseline EICAR stream seen with a FOUND reply"
+  else check F2 tap fail "the tap did not record the baseline EICAR conversation ($(tr '\n' ' ' < "$EV/F2-tap-start.txt" | head -c 200)); attribution would be blind"; return 0; fi
+  hs=(0 4096 16384 65536 262144 1048576 4194304)
+  for k in $(seq 1 "$LAB_FP2_CYCLES"); do h="${hs[$(( (k - 1) % ${#hs[@]} ))]}"
+    groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; systemd-run --quiet --unit=culvert-pressure-release --on-active=1800 /bin/rm -rf /var/lib/culvert-pressure && echo backstop=armed' 60 2>&1 | grep -q backstop=armed \
+      || { check F2 "cycle-$k" blocked "release backstop could not be armed; stopping"; break; }
+    groot "python3 - <<\"PY\"
+import os, errno
+d='/var/lib/culvert-pressure'; os.makedirs(d, exist_ok=True)
+fd=os.open(d+'/fill', os.O_CREAT|os.O_WRONLY, 0o600); keep=$h
+st=os.statvfs('/'); off=max(st.f_bfree*st.f_frsize-keep-(16<<20), 0)
+try: os.posix_fallocate(fd, 0, off)
+except OSError: off=os.fstat(fd).st_size
+for step in (1<<20, 1<<16, 4096):
+    while os.statvfs('/').f_bfree*os.statvfs('/').f_frsize > keep:
+        try: os.posix_fallocate(fd, off, step); off+=step
+        except OSError as e:
+            if e.errno==errno.ENOSPC: break
+            raise
+os.close(fd); st=os.statvfs('/'); print(f'filled headroom={keep} free_root={st.f_bfree*st.f_frsize}')
+PY" 1800 >> "$EV/F2-fills.txt" 2>&1 || true
+    p_bounded || break
+    p_burst fp2 "c$k-h$h" "$LAB_FP2_BURST"
+    groot 'systemctl stop culvert-pressure-release.timer 2>/dev/null; rm -rf /var/lib/culvert-pressure; sync; echo released' 1800 > /dev/null 2>&1 || true
+    rc=0; for _ in $(seq 1 60); do ready_clamav_ok && [[ "$(eicar_verdict)" == av ]] && { rc=1; break; }; sleep 5; done
+    [[ $rc == 1 ]] || check F2 "cycle-$k" fail "not recovered within 300 s of release (headroom $h)"
+  done
+  groot 'systemctl stop culvert-fp2-tap 2>/dev/null; cat /run/culvert-fp2/streams.jsonl' 120 > "$EV/F2-clamd-streams.jsonl" 2>/dev/null || true
+  grep -E '^filled' "$EV/F2-fills.txt" | sort | uniq -c > "$EV/F2-fills-summary.txt" || true
+  local res; res="$(python3 - "$EV/P-samples.jsonl" "$EV/F2-clamd-streams.jsonl" <<'PY2'
+import json, sys, collections
+rows = [d for d in map(json.loads, open(sys.argv[1])) if d["phase"] == "fp2" and d["tag"] != "baseline"]
+deliv = [d for d in rows if d["eicar"].startswith("2")]
+st = []
+for l in open(sys.argv[2]):
+    try: st.append(json.loads(l))
+    except Exception: pass
+def cls(r):
+    parts = [p.strip() for p in r["reply"].split("\x00") if p.strip()]
+    if not parts: return "empty"
+    if any(p.endswith(" FOUND") for p in parts): return "FOUND"
+    if any(p.endswith(" ERROR") for p in parts): return "ERROR" + ("+OK" if any(p.endswith(" OK") for p in parts) else "")
+    if parts == ["stream: OK"]: return "OK"
+    return "other:" + "|".join(parts)[:60]
+ec = collections.Counter(cls(r) for r in st if r["eicar"])
+cc = collections.Counter(cls(r) for r in st if r["cmd"] == "zINSTREAM" and not r["eicar"])
+full = len(set(r["up"] for r in st if r["eicar"]))
+print(len(rows), len(deliv), ec.get("OK", 0), "eicar_streams=" + ",".join(f"{k}:{v}" for k, v in sorted(ec.items())),
+      "other_streams=" + ",".join(f"{k}:{v}" for k, v in sorted(cc.items())), f"eicar_stream_sizes={full}")
+PY2
+)"
+  set -- $res
+  printf '%s\n' "$res" > "$EV/F2-summary.txt"
+  # Two separate questions (F-P2, #1528 72c827b7). The PRODUCT check: did
+  # Culvert ever deliver an EICAR? The UPSTREAM record: did clamd ever answer
+  # a plain OK to an EICAR stream? Since the clean-verdict quarantine, a clamd
+  # OK that Culvert refused is the mitigation working, not a product failure;
+  # it is recorded (with the quarantine counter) for the ClamAV report.
+  local q; : > "$JAR"
+  api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" >/dev/null 2>&1 || true
+  q="$(api GET /api/security-scan/status | body | python3 -c 'import json,sys
+v=json.load(sys.stdin).get("stat_clam_clean_quarantined"); print("absent" if v is None else v)' 2>/dev/null || echo unreadable)"
+  printf 'clam_clean_quarantined=%s\n' "$q" >> "$EV/F2-summary.txt"
+  if [[ "$2" == 0 ]]; then check F2 eicar-never-delivered pass "$1 at-fill samples over $LAB_FP2_CYCLES fill cycles: Culvert never delivered an EICAR; clean verdicts quarantined=$q; ${*:4}"
+  elif [[ "$3" != 0 ]]; then check F2 eicar-never-delivered fail "REPRODUCED — Culvert delivered $2 of $1 EICAR; clamd answered a plain OK to $3 EICAR stream(s); quarantined=$q; ${*:4} (F2-clamd-streams.jsonl)"
+  else check F2 eicar-never-delivered fail "REPRODUCED — $2 of $1 EICAR delivered with NO clamd OK on any EICAR stream: Culvert attribution; quarantined=$q; ${*:4} (F2-clamd-streams.jsonl)"; fi
+  if [[ "$3" == 0 ]]; then check F2 clamd-ok-to-eicar info "clamd never answered a plain OK to an EICAR stream in this run (absence over $1 samples is not proof the upstream defect is gone)"
+  elif [[ "$2" == 0 ]]; then check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s): clamd answered a plain OK to an EICAR stream and Culvert refused every one (quarantined=$q) — upstream evidence, F2-clamd-streams.jsonl"
+  else check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s) and NOT contained (see eicar-never-delivered)"; fi; }
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -2295,6 +2513,35 @@ echo ---journal; journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep 
 vkdmode_check() { local m; m="$(sed -n 's/^---fg .* kdmode-tty1 \([0-9]*\).*/\1/p' "$3")"
   if [[ "$m" == 0 ]]; then vcheck "$1" "$2" pass "tty1 KD_TEXT; $(sed -n 's/^---fg //p' "$3")"
   else vcheck "$1" "$2" fail "tty1 KD mode '${m:-unread}' (want 0); $(sed -n 's/^---fg //p' "$3")"; fi; }
+# Esc, judged against the documented contract (firstboot-experience.md): the
+# first Esc replaces the splash with the boot messages; a second Esc does not
+# bring the splash back while it runs. Probe samples are aligned to the
+# host's key presses (8 s and 20 s after the splash window opened) through
+# the window marker's guest uptime; 2 s either side is left unjudged.
+vesc_judge() { grep -a 'LAB-VCS\|LAB-SPLASH-WINDOW-START' "$WORK/console.log" | tr -d '\r' > "$EV/V2-vcs-probe.txt" 2>/dev/null || true
+  local r; r="$(python3 - "$EV/V2-vcs-probe.txt" <<'PY'
+import re, sys
+t0 = None; rows = []
+for l in open(sys.argv[1]):
+    m = re.search(r"LAB-SPLASH-WINDOW-START up=([0-9.]+)", l)
+    if m: t0 = float(m.group(1)); rows = []; continue   # the V2 boot's window
+    m = re.search(r"LAB-VCS up=([0-9.]+) plymouth=(\w+) title=(\d) status=(\d+)", l)
+    if m: rows.append((float(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))))
+if t0 is None: print("none no-window"); sys.exit()
+up = [r for r in rows if r[1] == "up"]
+seg = lambda a, b: [r for r in up if t0 + a <= r[0] < t0 + b]
+pre, mid, post = seg(0, 6), seg(10, 18), seg(22, 44)
+def v(s, want_title):
+    if not s: return "unsampled"
+    bad = [r for r in s if r[2] != want_title]
+    return "ok" if not bad else f"bad:{len(bad)}/{len(s)}"
+print(v(pre, 1), v(mid, 0), v(post, 0), f"pre={len(pre)} mid={len(mid)} post={len(post)} mid_status_max={max([r[3] for r in mid] or [0])}")
+PY
+)"
+  set -- $r
+  vcheck V2 splash-before-esc "$( [[ "$1" == ok ]] && echo pass || echo fail)" "title on tty1 before the first Esc: $1 (${*:4})"
+  vcheck V2 esc-shows-boot-messages "$( [[ "$2" == ok ]] && echo pass || echo fail)" "after the first Esc, with the splash still running, tty1 shows the boot messages, not the title: $2 (${*:4}; V2-vcs-probe.txt)"
+  vcheck V2 esc-one-way "$( [[ "$3" == ok ]] && echo pass || echo fail)" "after the second Esc the splash title does not come back while Plymouth runs: $3 (${*:4})"; }
 # Whether systemd's TTYReset could run for getty@tty1: it skips the whole reset
 # (KD_TEXT included) when it cannot open /dev/console within 1 s.
 vttyreset() { groot "systemctl show getty@tty1 -p TTYReset -p TTYVHangup -p TTYPath; echo ---devconsole; readlink -f /dev/console; cat /sys/class/tty/console/active
@@ -2342,7 +2589,13 @@ cmd_console() { local ova got vmdk f t1 t2 t3
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
   ova="${LAB_OVA:?LAB_OVA}"; got="$(sha256sum "$ova" | cut -d' ' -f1)"
   [[ "$got" == "${LAB_OVA_SHA256:?LAB_OVA_SHA256}" ]] || { vcheck V ova-sha256 fail "got $got want $LAB_OVA_SHA256"; return 1; }
+  # Producer identity: every frame below comes from THIS OVA (sha256 checked
+  # against the pinned candidate, every .mf digest checked by extract_ova),
+  # and V1 checks the guest names the same build on its own console.
+  OVA_NAME="$(basename "$ova")"; OVA_SHA256="$got"
+  vcheck V ova-sha256 pass "$OVA_NAME sha256 $got (= the pinned candidate)"
   rm -rf "$WORK/ova"; extract_ova "$ova" "$WORK/ova" || { vcheck V ova-manifest fail ".mf mismatch"; return 1; }
+  vcheck V ova-manifest pass "every file digest in the OVA's .mf verified"
   vmdk="$(ls "$WORK/ova/"*.vmdk)"; qemu-img convert -O qcow2 "$vmdk" "$WORK/cbase.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/cbase.qcow2"
   qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/cbase.qcow2" "$WORK/coverlay.qcow2"
   rm -f "$SEC/id_ed25519"* "$SEC/console-pass"; ssh-keygen -q -t ed25519 -N '' -C "culvert-console-$RUN_ID" -f "$SEC/id_ed25519"
@@ -2392,8 +2645,36 @@ Before=systemd-user-sessions.service plymouth-quit.service plymouth-quit-wait.se
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'echo LAB-SPLASH-WINDOW-START > /dev/hvc0; echo "<6>LAB-KMSG-INFO during the splash" > /dev/kmsg; echo "<3>LAB-KMSG-ERR during the splash" > /dev/kmsg; echo "LAB-CONSOLE-LINE written to /dev/console during the splash"; sleep 45; echo LAB-SPLASH-WINDOW-END > /dev/hvc0'
+ExecStart=/bin/sh -c 'echo "LAB-SPLASH-WINDOW-START up=$(cut -d" " -f1 /proc/uptime)" > /dev/hvc0; echo "<6>LAB-KMSG-INFO during the splash" > /dev/kmsg; echo "<3>LAB-KMSG-ERR during the splash" > /dev/kmsg; echo "LAB-CONSOLE-LINE written to /dev/console during the splash"; sleep 45; echo LAB-SPLASH-WINDOW-END > /dev/hvc0'
 StandardOutput=journal+console
+[Install]
+WantedBy=sysinit.target
+U
+# What tty1 SHOWS through the splash, every 0.5 s: the title (splash) or not
+# (Esc's details view), and how many systemd status lines are on screen.
+cat > /usr/local/sbin/lab-console-vcsprobe <<'P'
+#!/bin/sh
+# Stops once Plymouth has quit: /dev/hvc0 is also the lab's authenticated
+# console transport, and a probe still writing there collides with it (the
+# V2 tty read of run 38012981822 came back empty).
+i=0; seen=0
+while [ $i -lt 180 ]; do
+  if pidof plymouthd >/dev/null; then seen=1; elif [ $seen = 1 ]; then break; fi
+  t=0; grep -qa 'C U L V E R T' /dev/vcs1 2>/dev/null && t=1
+  n=$(fold -w 80 /dev/vcs1 2>/dev/null | grep -cE '\[ *(OK|FAILED|DEPEND) *\]|Start(ing|ed) ')
+  echo "LAB-VCS up=$(cut -d' ' -f1 /proc/uptime) plymouth=$(pidof plymouthd >/dev/null && echo up || echo down) title=$t status=$n" > /dev/hvc0
+  i=$((i+1)); sleep 0.5
+done
+P
+chmod 0755 /usr/local/sbin/lab-console-vcsprobe
+cat > /etc/systemd/system/lab-console-vcsprobe.service <<'U'
+[Unit]
+Description=Lab console qualification: what tty1 shows through the splash (no ordering effect)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lab-console-vcsprobe
 [Install]
 WantedBy=sysinit.target
 U
@@ -2407,7 +2688,7 @@ ExecStart=/bin/false
 [Install]
 WantedBy=multi-user.target
 U
-systemctl daemon-reload && systemctl enable lab-console-delay.service lab-console-fail.service
+systemctl daemon-reload && systemctl enable lab-console-delay.service lab-console-fail.service lab-console-vcsprobe.service
 EOS
   : > "$WORK/console.log"; vmark "maintenance reboot requested (slow + failing unit installed)"
   gpriv --nowait > "$EV/V2-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
@@ -2419,6 +2700,7 @@ EOS
   vwait_ready 900 || vcheck V2 maintenance-reboot fail "not ready after the maintenance reboot"
   vmark "ready after maintenance reboot"; sleep 20
   f="$EV/V2-tty.txt"; vtty "$f"; vstray_check V2 tty1-after-reboot-with-failures "$f"; vkdmode_check V2 tty1-text-mode "$f"
+  vesc_judge
   # V3 after boot: kernel messages and /dev/console output while the console UI is up.
   gpriv --timeout 300 > "$EV/V3-writes.txt" 2>&1 <<'EOS' || true
 echo "<6>LAB-KMSG-POSTBOOT info" > /dev/kmsg; echo "<3>LAB-KMSG-POSTBOOT err" > /dev/kmsg
@@ -2429,7 +2711,7 @@ EOS
   f="$EV/V3-tty.txt"; vtty "$f"; vstray_check V3 tty1-after-postboot-writes "$f"
   vmark "Alt+F12"; vkey alt-f12; sleep 4; vmark "Alt+F1"; vkey alt-f1; sleep 4
   # V4 clean maintenance reboot.
-  groot 'systemctl disable lab-console-delay.service lab-console-fail.service; rm -f /etc/systemd/system/lab-console-delay.service /etc/systemd/system/lab-console-fail.service; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
+  groot 'systemctl disable lab-console-delay.service lab-console-fail.service lab-console-vcsprobe.service; rm -f /etc/systemd/system/lab-console-delay.service /etc/systemd/system/lab-console-fail.service /etc/systemd/system/lab-console-vcsprobe.service /usr/local/sbin/lab-console-vcsprobe; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
   # Guest-side truth for the clean reboot's frames: the foreground VT and
   # tty1's KD mode every 0.25 s from early boot (a frozen frame is either a
   # VT left in graphics mode or the emulated display not refreshing).
@@ -2474,6 +2756,16 @@ EOS
   # The text splash draws at once (DeviceTimeout=0.1): while plymouth is up
   # tty1 is in graphics mode only briefly, never for Ubuntu's 8 s wait.
   vcheck V4 splash-graphics-window info "$(tr -d '\r' < "$EV/V4-probe.txt" | grep 'plymouth=up' | grep -c 'kdmode=1' || true) samples (x0.25 s) in graphics mode while plymouth was up"
+  # Producer identity, read once the guest has printed its login banner on
+  # the console (it does after a reboot; at first boot the check ran before).
+  local want_ver; want_ver="$(sed -n 's/^culvert-appliance-\(.*\)-ubuntu-[0-9.]*\.ova$/\1/p' <<<"$OVA_NAME")"
+  # tty1's Build field is width-limited ("1.0.260-candidate.g91e..."): the
+  # shown text, ellipsis removed, must be a prefix of the version (>= 12 chars).
+  local shown; shown="$(grep -m1 -o 'Build  *[^ ]*' "$EV/V4-tty.txt" | awk '{print $2}')"; shown="${shown%...}"
+  if [[ -n "$want_ver" ]] && tr -d '\r' < "$WORK/console.log" | grep -qaF "Culvert appliance $want_ver (" \
+     && (( ${#shown} >= 12 )) && [[ "$want_ver" == "$shown"* ]]; then
+    vcheck V4 console-build-identity pass "the guest's console banner and tty1 Build line name $want_ver, the version of the booted OVA $OVA_SHA256"
+  else vcheck V4 console-build-identity fail "want '$want_ver' on the console banner and tty1 Build line; banner: $(tr -d '\r' < "$WORK/console.log" | grep -a -m1 -o 'Culvert appliance [0-9][^ ]*' ); tty1: $(grep -m1 -o 'Build  *[^ ]*' "$EV/V4-tty.txt")"; fi
   groot 'systemctl disable lab-console-probe.service; rm -f /etc/systemd/system/lab-console-probe.service /usr/local/sbin/lab-console-probe; systemctl daemon-reload' 120 > /dev/null 2>&1 || true
   t3="$(vtime)"; vcapture_stop
   vsheet V1-first-boot 0 "$t1"; vsheet V2-V3-reboot-esc-postboot "$t1" "$t2"; vsheet V4-clean-reboot "$t2" "$t3"
@@ -2526,11 +2818,13 @@ case "${1:-}" in
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
   engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
+  fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
     cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
+    if [[ "${LAB_FP2:-0}" == 1 ]]; then cmd_fp2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
     cmd_recovery; fail_fast_after recovery
     if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi

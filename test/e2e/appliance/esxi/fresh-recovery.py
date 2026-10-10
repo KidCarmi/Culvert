@@ -104,6 +104,18 @@ def verify_export(escrow):
     return receipt
 
 
+def archive_identity(cfg, metadata, scope, owned):
+    """Name the exact state backup separately from newer encrypted history files."""
+    require(cfg['mode'] in ('export', 'restore') and
+            re.fullmatch(r'fresh-[a-f0-9]{24}\.tar\.gz\.enc', cfg['archive_name']))
+    require(re.fullmatch(r'[a-f0-9]{64}', metadata['archive_sha256']) and
+            type(metadata['archive_bytes']) is int and 0 < metadata['archive_bytes'] <= MAX_ARCHIVE)
+    return {'schema': 1, 'result': 'pass', 'mode': cfg['mode'], 'uuid': owned['uuid'],
+            **{key: scope[key] for key in ('source_sha', 'ova_sha256', 'image_id')},
+            'filename': cfg['archive_name'], 'sha256': metadata['archive_sha256'],
+            'size_bytes': metadata['archive_bytes']}
+
+
 def verify_source_absent(lab, source, deleted, receipt):
     """The owner orchestrator supplies disk-deletion evidence; recheck inventory.
 
@@ -209,7 +221,7 @@ def run(args):
     identities = importlib.util.module_from_spec(profile_spec); profile_spec.loader.exec_module(identities)
     source = identities.scope_profile(lab.c)['source_sha']
     history = getattr(args, 'history', False)
-    require(not history or source in (identities.E7E, identities.E7C, identities.E91), 'History qualification requires a reviewed history-capable candidate.')
+    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72), 'History qualification requires a reviewed history-capable candidate.')
     require(lab.c['source_sha'] == source and lab.c['max_vms'] == 1)
     console.b.module.validate_scope(lab.c)
     escrow = private_escrow(args.escrow, lab.run)
@@ -302,6 +314,11 @@ def run(args):
                 write_new(transport_dir / 'restored-history.json', json.dumps(checked).encode())
                 observed['historical_encrypted_log_recovery'] = checked
             write_new(transport_dir / 'restored-observation.json', json.dumps(observed).encode())
+        # Created only after transfer, restore/export validation and behavioral
+        # oracles pass. The recovery baseline must explicitly select this name;
+        # inventory order can put a newer CVST history archive first.
+        write_new(lab.sec / ('fresh-recovery-' + args.mode + '-archive.json'),
+                  json.dumps(archive_identity(cfg, metadata, lab.c, lab.state)).encode())
         print(json.dumps({'phase': args.mode, 'result': 'pass', 'archive_sha256': metadata['archive_sha256'],
                           'behavioral_recovery': 'pass' if args.mode == 'restore' else 'not-yet-run',
                           'historical_encrypted_log_recovery': ('pass' if args.mode == 'restore' else 'exported-and-validated')

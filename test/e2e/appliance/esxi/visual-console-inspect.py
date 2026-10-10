@@ -16,7 +16,7 @@ import subprocess
 import time
 
 SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
-SOURCES = (SOURCE, '7c7b29ee3be40af6a0809c73ad04d4337303263d', '91e05872dfe5f96c94ec725b8b2dc2b1002116ab')
+SOURCES = (SOURCE, '7c7b29ee3be40af6a0809c73ad04d4337303263d', '91e05872dfe5f96c94ec725b8b2dc2b1002116ab', '72c827b7f59f4e43ff2a813241be9029f58f23a9')
 
 
 def command(argv, timeout=8):
