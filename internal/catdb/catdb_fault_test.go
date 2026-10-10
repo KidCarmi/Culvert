@@ -11,7 +11,7 @@ import (
 // tables, and returns the reopened store plus the table paths. The reopen is
 // the part that matters: it is a HEALTHY open, the one the boot-health record
 // (catfeeddb_health.go) observes and reports as Available=true.
-func seedOnDisk(t *testing.T, n int) (*CommunityDB, []string) {
+func seedOnDisk(t *testing.T, n int) (store *CommunityDB, tables []string) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := Open(dir)

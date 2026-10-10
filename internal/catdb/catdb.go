@@ -155,13 +155,13 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 // Anything else aborts the walk and is returned for classification by the
 // caller — continuing to walk a store that just failed to answer would turn one
 // fault into four.
-func (c *CommunityDB) walk(host string) (string, bool, error) {
+func (c *CommunityDB) walk(host string) (category string, found bool, err error) {
 	for {
-		cat, found, err := c.getExact(host)
-		if err != nil {
-			return "", false, err
+		cat, hit, lookupErr := c.getExact(host)
+		if lookupErr != nil {
+			return "", false, lookupErr
 		}
-		if found {
+		if hit {
 			return cat, true, nil
 		}
 		dot := strings.Index(host, ".")
@@ -194,12 +194,12 @@ func (c *CommunityDB) walk(host string) (string, bool, error) {
 // the gateway's decision on the data path, which is a different decision with a
 // different blast radius and is not this fix's to make. What changed is that
 // the degradation is bounded, survivable and visible.
-func (c *CommunityDB) getExact(domain string) (string, bool, error) {
+func (c *CommunityDB) getExact(domain string) (category string, found bool, err error) {
 	var cat string
-	err := c.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(domain))
-		if err != nil {
-			return err
+	viewErr := c.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get([]byte(domain))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(val []byte) error {
 			cat = string(val)
@@ -207,12 +207,12 @@ func (c *CommunityDB) getExact(domain string) (string, bool, error) {
 		})
 	})
 	switch {
-	case err == nil:
+	case viewErr == nil:
 		return cat, true, nil
-	case errors.Is(err, badger.ErrKeyNotFound):
+	case errors.Is(viewErr, badger.ErrKeyNotFound):
 		return "", false, nil
 	default:
-		return "", false, err
+		return "", false, viewErr
 	}
 }
 
