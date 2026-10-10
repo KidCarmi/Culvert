@@ -1,0 +1,3 @@
+{"ok":false,"steps":[{"name":"reachable","label":"Server reachable","ok":false,"durationMs":7,"error":"LDAP Result Code 200 \"Network Error\": tls: failed to verify certificate: x509: certificate signed by unknown authority","action":"TLS certificate is not trusted — install the directory's CA on this appliance or fix the certificate."}]}
+
+200

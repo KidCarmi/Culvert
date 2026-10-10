@@ -1,0 +1,8 @@
+no-credentials=407(want 407)
+alice (ProxyUsers)=200(want 200)
+alice wrong password=407(want 407)
+bob (no group)=403(want 403)
+carol (account disabled)=407(want 407)
+unknown user=407(want 407)
+filter metacharacter=407(want 407)
+DN as username=407(want 407)

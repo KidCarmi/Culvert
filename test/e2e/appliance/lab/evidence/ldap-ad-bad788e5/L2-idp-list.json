@@ -1,0 +1,2 @@
+{"persisted":true,"profiles":[{"id":"66f7fe8489f1","name":"lab-samba-ad","type":"ldap","emailDomains":null,"enabled":true,"priority":1,"ldap":{"url":"ldaps://10.0.2.2:636","tlsSkipVerify":true,"bindDn":"CN=svc-culvert,CN=Users,DC=corp,DC=example","bindCredentialConfigured":true,"baseDn":"DC=corp,DC=example","userFilter":"(sAMAccountName=%s)","groupAttribute":"memberOf","cacheTtlSeconds":30}}]}
+

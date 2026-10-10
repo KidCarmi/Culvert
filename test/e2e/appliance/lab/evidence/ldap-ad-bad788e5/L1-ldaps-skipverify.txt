@@ -1,0 +1,3 @@
+{"ok":true,"steps":[{"name":"reachable","label":"Server reachable","ok":true,"durationMs":7},{"name":"tls","label":"TLS handshake","ok":true,"detail":"Certificate verification is DISABLED (unsafe) — the channel is vulnerable to interception."},{"name":"service_bind","label":"Service account bind","ok":true,"durationMs":3},{"name":"base_dn","label":"Base DN search","ok":true},{"name":"user_lookup","label":"User lookup","ok":true},{"name":"user_auth","label":"User authentication","ok":true,"durationMs":7}],"identity":{"sub":"CN=alice,CN=Users,DC=corp,DC=example","email":"alice@corp.example","name":"alice","groupCount":1,"groups":["CN=ProxyUsers,CN=Users,DC=corp,DC=example"]}}
+
+200

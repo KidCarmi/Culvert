@@ -1,0 +1,3 @@
+{"ok":false,"steps":[{"name":"reachable","label":"Server reachable","ok":true},{"name":"tls","label":"Transport security","ok":true,"detail":"Plain LDAP — credentials are transmitted unencrypted. Use LDAPS or StartTLS in production."},{"name":"service_bind","label":"Service account bind","ok":false,"durationMs":2,"error":"LDAP Result Code 8 \"Strong Auth Required\": BindSimple: Transport encryption required.","action":"Check the service-account DN and credential."}]}
+
+200

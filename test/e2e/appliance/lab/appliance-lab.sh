@@ -2224,8 +2224,11 @@ sys.exit(0 if any("CN=ProxyUsers" in x for x in g) else 1)' 2>/dev/null; then
     || { check L idp-create fail "http $c $(body < "$EV/L2-idp-create.txt" | head -c 300)"; return 0; }
   api GET /api/idp | body > "$EV/L2-idp-list.json"
   grep -q "$LDAP_SVC_PASS" "$EV/L2-idp-list.json" && check L bind-secret-not-returned fail "the bind password is returned by GET /api/idp" || check L bind-secret-not-returned pass "GET /api/idp does not return the bind password"
-  api POST /api/policy "{\"name\":\"lab-ldap-allow-proxyusers\",\"priority\":3,\"action\":\"Allow\",\"destFQDN\":\"10.0.2.2\",\"sourceGroup\":\"CN=ProxyUsers,$LDAP_USERS\",\"sslAction\":\"Bypass\",\"enabled\":true}" > "$EV/L2-rule-allow.txt"
-  api POST /api/policy '{"name":"lab-ldap-block-others","priority":4,"action":"Block","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/L2-rule-block.txt"
+  local ra rb
+  ra="$(api POST /api/policy "{\"name\":\"lab-ldap-allow-proxyusers\",\"priority\":3,\"action\":\"Allow\",\"destFQDN\":\"10.0.2.2\",\"sourceGroup\":\"CN=ProxyUsers,$LDAP_USERS\",\"sslAction\":\"Bypass\",\"enabled\":true}" | tee "$EV/L2-rule-allow.txt" | code)"
+  rb="$(api POST /api/policy '{"name":"lab-ldap-block-others","priority":4,"action":"Block_Page","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' | tee "$EV/L2-rule-block.txt" | code)"
+  [[ "$ra $rb" == "200 200" ]] && check L rules pass "group-scoped allow (priority 3) and a block for everyone else (priority 4) created" \
+    || { check L rules fail "rule creation: allow http $ra, block http $rb"; return 0; }
   c="$(api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Default"}' | tee "$EV/L2-auth-required.txt" | code)"
   [[ "$c" == 200 ]] && check L auth-required pass "default auth outcome = Default (authentication required)" || { check L auth-required fail "http $c"; return 0; }
   # ---- L3 credential matrix
