@@ -115,6 +115,11 @@ var crashMetricRe = regexp.MustCompile(`culvert_crash_records_total\{component="
 // crashCount reads the current culvert_crash_records_total value for one
 // component out of the Prometheus rendering — the same accessor crashguard_test
 // uses. An absent label reads as 0.
+//
+// Callers that expect a SPECIFIC label must reset the crash plane first (see
+// resetCrashPlaneForGate): `crashCounter.record` folds a new label into "other"
+// once the process-global map holds maxCrashLabels entries, so a saturating test
+// earlier in the binary makes a later component's own label unreachable.
 func crashCount(component string) int64 {
 	var b strings.Builder
 	crashByComponent.writePrometheus(&b)
@@ -125,6 +130,17 @@ func crashCount(component string) int64 {
 		}
 	}
 	return 0
+}
+
+// resetCrashPlaneForGate gives a gate a clean, order-independent crash-plane
+// baseline. Needed because the plane is process-global and shared: the label map
+// is capped at maxCrashLabels and folds the overflow into "other", so without
+// this a per-component assertion here passes or fails on `-shuffle` luck. The
+// reset is the same helper every crashguard test uses at its start.
+func resetCrashPlaneForGate(t *testing.T) {
+	t.Helper()
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
 }
 
 // ─── the silent false success, at unit level ────────────────────────────────
@@ -176,6 +192,7 @@ func TestCHAOS75_RespondPreApply_WorkerFailedIs500(t *testing.T) {
 // agent's single-flight — the per-agent status slot is left untouched so it
 // cannot clobber a concurrently running op's record (P2).
 func TestCHAOS75_DispatchWorkerPanicBeforeApply_Answers500(t *testing.T) {
+	resetCrashPlaneForGate(t)
 	agent := &panicAgent{panicAt: "running", opID: "op-unreached"}
 	rm := newPanicReleaseFixture(t, agent)
 	before := crashCount(crashComponentReleaseDispatch)
@@ -241,6 +258,7 @@ func TestCHAOS75_DispatchWorkerPanicBeforeApply_DoesNotClobberAnotherOp(t *testi
 // terminal there, not a phantom phase=dispatched record that is
 // indistinguishable from a slow but healthy op.
 func TestCHAOS75_DispatchWorkerPanicAfterApply_MarksTerminal(t *testing.T) {
+	resetCrashPlaneForGate(t)
 	agent := &panicAgent{panicAt: "wait", opID: "op-live", runningSeq: freshDispatchSeq()}
 	rm := newPanicReleaseFixture(t, agent)
 	before := crashCount(crashComponentReleaseDispatch)
@@ -280,6 +298,7 @@ func TestCHAOS75_DispatchWorkerPanicAfterApply_MarksTerminal(t *testing.T) {
 // no op, and its dispatch_id is newer than the running op's, so any write would
 // win the slot and overwrite the real owner's record.
 func TestCHAOS75_ResumeWorkerPanic_ContainedAndDoesNotClobber(t *testing.T) {
+	resetCrashPlaneForGate(t)
 	agent := &panicAgent{panicAt: "wait", opID: "op-live"}
 	rm := newPanicReleaseFixture(t, agent)
 	before := crashCount(crashComponentReleaseResume)
