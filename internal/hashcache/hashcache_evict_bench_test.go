@@ -39,16 +39,22 @@ func fillCache(maxSize int, expiredFrac float64) *HashCache {
 }
 
 // benchEvictLocked times ONE evictLocked call on a full cache. Each iteration
-// needs a fresh full cache — an evicted one is no longer at capacity — so the
-// caches are built up front and excluded from the timed region.
+// needs a fresh full cache, because an evicted one is no longer at capacity.
+//
+// The fixture is rebuilt inside the loop with the timer stopped, so exactly one
+// cache is live at a time. Building all b.N of them up front instead would
+// retain b.N x maxSize entries, and b.N grows with -benchtime: at the
+// -benchtime 1s suggested above that is ~2 GB for the 10 000 case and ~1.3 GB
+// for the 100 000 one, which exhausts a constrained runner before the first
+// timed call. The StopTimer/StartTimer pair costs ~100 ns against a measured
+// 0.5-9 ms, so it does not move the figures.
 func benchEvictLocked(b *testing.B, maxSize int, expiredFrac float64) {
-	caches := make([]*HashCache, b.N)
-	for i := range caches {
-		caches[i] = fillCache(maxSize, expiredFrac)
-	}
-	b.ResetTimer()
+	b.StopTimer()
 	for i := 0; i < b.N; i++ {
-		caches[i].evictLocked()
+		c := fillCache(maxSize, expiredFrac)
+		b.StartTimer()
+		c.evictLocked()
+		b.StopTimer()
 	}
 }
 
@@ -114,27 +120,71 @@ func BenchmarkGet_Miss(b *testing.B) {
 	}
 }
 
+// readHitRate runs c.Get across the seeded keyspace on every available core and
+// reports the share of lookups that HIT as a %hit metric.
+//
+// The hit rate is reported because it is not a constant across these two
+// benchmarks: a writer that trips eviction deletes seeded keys, so the
+// contended benchmark below reads a mix of hits and misses where the
+// uncontended one reads hits only. A miss is CHEAPER than a hit (roughly 24 ns
+// against 77 ns), so a falling hit rate pushes ns/op DOWN and cannot manufacture
+// the slowdown the contended case shows — but the two are not a like-for-like
+// read workload, and %hit is what lets a reader see by how much. Hits are
+// counted in a per-goroutine local and folded in once at the end, so the
+// counting costs nothing measurable inside the loop.
+func readHitRate(b *testing.B, c *HashCache, keyspace int) {
+	var hits, total atomic.Int64
+	b.RunParallel(func(pb *testing.PB) {
+		var localHits, localTotal int64
+		i := 0
+		for pb.Next() {
+			if _, ok := c.Get("k" + strconv.Itoa(i%keyspace)); ok {
+				localHits++
+			}
+			localTotal++
+			i++
+		}
+		hits.Add(localHits)
+		total.Add(localTotal)
+	})
+	b.StopTimer()
+	if n := total.Load(); n > 0 {
+		b.ReportMetric(float64(hits.Load())/float64(n)*100, "%hit")
+	}
+}
+
 // Concurrent read throughput under the RWMutex, with the cache full and no
-// writer present: the ceiling the eviction stall interrupts.
+// writer present: the ceiling the eviction stall interrupts. Nothing evicts
+// here, so this one reads a fully populated keyspace (%hit = 100).
 func BenchmarkGet_Parallel(b *testing.B) {
 	c := fillCache(10_000, 0)
 	b.ReportAllocs()
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		i := 0
-		for pb.Next() {
-			c.Get("k" + strconv.Itoa(i%10_000))
-			i++
-		}
-	})
+	readHitRate(b, c, 10_000)
 }
 
 // Readers contending with a writer that keeps tripping eviction — the shape
-// that makes the lock hold a system-wide cost rather than a local one: reads
-// cost ~3x their uncontended figure here. Reader throughput is what a bounded
-// eviction would be trying to protect, so this is the benchmark to re-read if
-// that follow-up is attempted — and the one that caught the rejected layout
-// change making this case 13% WORSE while the stall itself got faster.
+// that makes the lock hold a system-wide cost rather than a local one.
+//
+// Read %hit against BenchmarkGet_Parallel's before drawing a ratio from the two.
+// The writer runs for the whole benchmark, and each Set it lands at capacity
+// evicts 25 % of the map, so the seeded k keys are steadily displaced by the
+// writer's own w keys: measured, this reads only **a few percent hits** against
+// the uncontended benchmark's 100 % — 4.7 % at -benchtime 500ms, 1.4 % at 1s,
+// falling as the run lengthens and the writer displaces more. (An earlier
+// revision of this comment guessed ~75 % from the first eviction alone; the
+// %hit metric exists because that guess was wrong by more than an order of
+// magnitude.) The pair therefore INDICATES contention rather than isolating it.
+//
+// It does not flatter the contended side: a miss costs ~24 ns against a hit's
+// ~75 ns, so the changed mix pushes this figure DOWN, and it is still ~3x
+// slower while doing the cheaper work. But the raw ratio is not attributable
+// to lock contention alone, and %hit on both is what makes that visible.
+//
+// Reader throughput is what a bounded eviction would be trying to protect, so
+// this is the benchmark to re-read if that follow-up is attempted — and the one
+// that caught the rejected layout change making this case 13 % WORSE while the
+// stall itself got faster.
 func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	const maxSize = 10_000
 	c := fillCache(maxSize, 0)
@@ -165,14 +215,7 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		i := 0
-		for pb.Next() {
-			c.Get("k" + strconv.Itoa(i%maxSize))
-			i++
-		}
-	})
-	b.StopTimer()
+	readHitRate(b, c, maxSize)
 	close(stop)
 	if writes.Load() == 0 {
 		b.Fatal("writer never ran; the contention this measures did not happen")

@@ -2,8 +2,8 @@
 
 > Status: **MEASURED, NO IMPLEMENTATION CHANGE (2026-10-11).** Verdict: the scan
 > cache's eviction stall is real, grows linearly with the operator's
-> `cache_size`, and reaches 115 ms at `cache_size: 1000000` — but at the shipped
-> 10 000 default it amortizes to ~25 ns per Set against a scan that costs
+> `cache_size`, and reaches 123 ms at `cache_size: 1000000` — but at the shipped
+> 10 000 default it amortizes to ~152 ns per Set against a scan that costs
 > milliseconds, so it is not a bottleneck. The obvious layout fix (holding
 > entries by value rather than behind a pointer) was implemented, measured
 > against an interleaved baseline, and **rejected**: it buys 9–40 % on the stall
@@ -27,9 +27,14 @@ problem?
 
 - **Benchmarks:** `internal/hashcache/hashcache_evict_bench_test.go`, added by
   this change. In-package, because the stall is a property of `evictLocked` and
-  the unexported `entries` map. Caches are seeded by writing `entries` directly
-  and built outside the timed region: an already-evicted cache is no longer at
-  capacity, so each iteration needs a fresh full one.
+  the unexported `entries` map. Caches are seeded by writing `entries` directly;
+  an already-evicted cache is no longer at capacity, so each iteration rebuilds
+  one with the timer stopped. Exactly one fixture is live at a time — building
+  all `b.N` of them up front retains `b.N x maxSize` entries, which at
+  `-benchtime 1s` is ~2 GB for the 10 000 case, enough to distort the figures
+  through GC pressure and to exhaust a constrained runner (CodeRabbit, PR #1604;
+  the absolute figures above are post-fix and ~30 % lower than the first
+  revision's).
 - **Before/after:** parent `fbf6a37` vs the candidate, compiled as separate test
   binaries from a `git worktree`, with byte-identical benchmark sources except
   the one line that constructs an entry (`&hashCacheEntry{…}` vs
@@ -45,24 +50,38 @@ holds):
 
 | `cache_size` | one `evictLocked` | recurs every | amortized per Set |
 |---|---|---|---|
-| 10 000 | 0.55 ms | 2 500 inserts | ~25 ns |
-| 100 000 | 8.51 ms | 25 000 inserts | ~102 ns |
-| 1 000 000 | **115 ms** | 250 000 inserts | ~115 ns |
+| 10 000 | 0.38 ms | 2 500 inserts | **152 ns** |
+| 100 000 | 7.39 ms | 25 000 inserts | **296 ns** |
+| 1 000 000 | **122.57 ms** | 250 000 inserts | **490 ns** |
 
-Decomposed at `cache_size: 10000`: the **expiry sweep is 496 µs of the 698 µs
-(71 %)**, the 25 % delete batch 235 µs. The sweep is O(maxSize) because proving
-that nothing is expired means looking at everything; it is dominated not by the
+The amortized column is one call's cost divided by the `maxSize/4` inserts it
+makes room for. It is this implementation's own per-Set cost and is **not** the
+same quantity as the base-vs-candidate *saving* in the rejection table below;
+an earlier revision of this note conflated the two and understated the column
+by roughly 9x (CodeRabbit, PR #1604).
+
+Decomposed at `cache_size: 10000`: the **expiry sweep is ~71 % of the call**,
+the 25 % delete batch the rest. The sweep is O(maxSize) because proving that
+nothing is expired means looking at everything; it is dominated not by the
 comparison but by one random-access dereference of `*hashCacheEntry` per entry.
 
 Two further properties worth having pinned:
 
-- Eviction gets **slower the more reclaimable the cache is** — 1.08 ms at 10 000
-  fully expired against 0.55 ms with none expired — because a sweep that finds
+- Eviction gets **slower the more reclaimable the cache is** — 0.68 ms at 10 000
+  fully expired against 0.38 ms with none expired — because a sweep that finds
   expired entries also deletes them. This is the opposite of the intuitive
   direction.
 - The stall is **system-wide, not local**: `BenchmarkGet_ParallelDuringEviction`
-  shows concurrent reads at ~554 ns/op against ~248 ns/op uncontended, i.e. the
-  write lock makes every other scanner's lookup pay.
+  shows concurrent reads at ~641 ns/op against ~205 ns/op uncontended, i.e. the
+  write lock makes every other scanner's lookup pay. Read the `%hit` metric
+  before drawing a ratio from that pair: the contended run reads only **a few
+  percent hits** against the uncontended run's **100 %** (4.7 % at
+  `-benchtime 500ms`, 1.4 % at `1s`, falling as the writer displaces more),
+  because the continuously-writing goroutine evicts the seeded keys. The pair
+  therefore *indicates* contention rather than isolating it. It does not flatter the contended side —
+  a miss costs ~24 ns against a hit's ~75 ns, so the changed mix pushes the
+  contended figure DOWN, and it is still 3x slower while doing the cheaper work
+  — but the raw ratio is not attributable to lock contention alone.
 
 `cache_size` is an operator YAML knob (`config.go`) that validation only
 **floors** (non-positive → 10 000, `scanning_startup_config.go`) and never caps.
@@ -74,7 +93,15 @@ warning them.
 Holding entries in the map **by value** instead of behind a pointer removes the
 per-entry dereference from the sweep and the per-`Set` heap allocation of the
 entry. It does what it was meant to do, and is still not worth shipping
-(`benchstat`, n=8 interleaved):
+(`benchstat`, n=8 interleaved).
+
+These are **deltas between two builds**, not absolute costs, and they were
+measured with the pre-fix fixture harness compiled identically into both sides,
+so the comparison holds even though the absolute `EvictLocked_*` figures there
+run high. Correcting the harness can only shrink the candidate's *wins* (the
+`EvictLocked_*` rows) while leaving its *regressions* untouched — `Get_*` and
+`SetChurn_*` build a single cache and were never affected — so the verdict is
+if anything firmer than the table shows:
 
 | benchmark | base | candidate | delta |
 |---|---|---|---|
@@ -112,7 +139,7 @@ It was reverted. The benchmarks that caught it are what this change ships.
 
 At the shipped `cache_size: 10000` default, **leave `evictLocked` alone**. A Set
 happens only on a scan MISS, and a miss then costs a ClamAV/YARA scan measured
-in milliseconds; 25 ns of amortized eviction is noise against the work it
+in milliseconds; 152 ns of amortized eviction is noise against the work it
 guards. Optimizing it would be spending complexity on a path that is not the
 bottleneck.
 
@@ -135,7 +162,7 @@ change and their own review:
    real concurrency-contract change.
 
 A cheaper, non-structural mitigation worth considering on its own: **cap or warn
-on `cache_size`** at startup, so the 115 ms cliff at 1 000 000 is not reachable
+on `cache_size`** at startup, so the 123 ms cliff at 1 000 000 is not reachable
 by a config edit alone.
 
 ## Scope

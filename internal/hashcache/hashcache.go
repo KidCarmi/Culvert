@@ -182,29 +182,33 @@ func (c *HashCache) Clear() {
 // whichever scan arrives when the map is full — so its duration stalls every
 // concurrent verdict lookup, not just that one caller. The expiry sweep is
 // O(maxSize): proving no entry is expired means looking at all of them. The
-// 25 % drop is then amortized over the maxSize/4 inserts it makes room for, so
-// throughput is fine (~0.5 µs per Set at steady-state churn) and the cost that
-// matters is the lock-hold spike:
+// 25 % drop then makes room for maxSize/4 inserts, over which one call's cost
+// amortizes:
 //
-//	cache_size │ one evictLocked, nothing expired │ recurs every
-//	   10 000  │   0.55 ms                        │ 2 500 inserts
-//	  100 000  │   8.51 ms                        │ 25 000 inserts
-//	1 000 000  │    115 ms                        │ 250 000 inserts
+//	cache_size │ one evictLocked │ recurs every      │ amortized per Set
+//	   10 000  │    0.38 ms      │ 2 500 inserts     │  152 ns
+//	  100 000  │    7.39 ms      │ 25 000 inserts    │  296 ns
+//	1 000 000  │  122.57 ms      │ 250 000 inserts   │  490 ns
+//
+// (Nothing expired — the state a busy gateway holds, and the worst realistic
+// one. The amortized column is this implementation's own per-Set cost; do not
+// confuse it with the base-vs-candidate SAVING reported in the roadmap note.)
 //
 // cache_size is an operator YAML knob that config validation only FLOORS
 // (non-positive → 10 000) and never caps, so the spike grows with it without
 // anything warning the operator. Eviction also gets SLOWER the more
-// reclaimable the cache is (1.08 ms at 10 000 fully expired, against 0.55 ms
+// reclaimable the cache is (0.68 ms at 10 000 fully expired, against 0.38 ms
 // with none expired), because a sweep that finds expired entries also deletes
 // them.
 //
-// At the 10 000 default this is deliberately left alone: 0.55 ms amortizes to
-// ~25 ns per Set, and a Set happens only on a scan MISS, which then costs a
-// ClamAV/YARA scan measured in MILLISECONDS. The spike is noise against the
-// work it guards. Bounding it independent of maxSize means giving up the
-// "no expired entry survives an eviction" invariant that TestSet_EvictsExpiredFirst
-// pins (an early exit cannot know what it did not look at) or sharding the map
-// — both change observable behaviour and need their own change and review.
+// At the 10 000 default this is deliberately left alone: 152 ns amortized per
+// Set, and a Set happens only on a scan MISS, which then costs a ClamAV/YARA
+// scan measured in MILLISECONDS — four to five orders of magnitude more. The
+// spike is noise against the work it guards. Bounding it independent of
+// maxSize means giving up the "no expired entry survives an eviction"
+// invariant that TestSet_EvictsExpiredFirst pins (an early exit cannot know
+// what it did not look at) or sharding the map — both change observable
+// behaviour and need their own change and review.
 //
 // Do not reach for the obvious layout fix first: holding entries by value
 // instead of behind a pointer makes this sweep 9-40 % faster and was MEASURED
