@@ -164,6 +164,7 @@ func buildOperatorContract() OperatorContract {
 		checkKeyAtRest(),
 		checkPlaintextKeyBackups(),
 		checkAuditPersistence(),
+		checkAdminRosterDurability(),
 		checkCategoryFeedDB(),
 		checkThreatFeed(),
 		checkRequestHistory(),
@@ -741,6 +742,30 @@ func checkAuditPersistence() OperatorContractCheck {
 		Code:    "audit_log_persistence",
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
+	}
+}
+
+// checkAdminRosterDurability reports whether the admin roster has a durable home
+// (-ui-users-file). Without one every account delete, role change and password
+// rotation answers 2xx but reverts on restart; the only signals were a boot log
+// line (warnRosterNotDurable) and a per-change log line (noteRosterNotDurable),
+// both invisible to an operator working from the GUI. Report-only: it reads the
+// same accessors those signals use and changes no roster behaviour. A node with
+// no admin credentials at all has nothing to lose, so it reports ok.
+func checkAdminRosterDurability() OperatorContractCheck {
+	const code = "admin_roster_durability"
+	if cfg == nil || cfg.rosterPathConfigured() || (!cfg.AuthEnabled() && len(cfg.ListUIUsers()) == 0) {
+		return OperatorContractCheck{Code: code, Status: diagOK, Message: "admin roster is persisted to disk (or no admin accounts are configured)"}
+	}
+	msg := "no roster file is configured — admin account deletes, role changes and password rotations apply in memory only and are LOST on restart"
+	if n := rosterNotDurable.Load(); n > 0 {
+		msg += fmt.Sprintf(" (%d such change(s) since boot)", n)
+	}
+	return OperatorContractCheck{
+		Code:           code,
+		Status:         diagWarn,
+		Message:        msg,
+		OperatorAction: "Set the admin users file (-ui-users-file, e.g. /data/ui_users.json) on a persistent volume and restart; re-apply any account changes made since boot.",
 	}
 }
 
