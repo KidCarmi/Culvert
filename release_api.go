@@ -247,7 +247,7 @@ const (
 // detached dispatch goroutine. It is a server-side fault with NO op started, so
 // it maps to a 500 and is safe to retry — unlike errDispatchInFlight (409) or a
 // planner refusal, which are client-correctable.
-var errDispatchWorkerFailed = errors.New("dispatch worker failed before the upgrade started")
+var errDispatchWorkerFailed = errors.New("dispatch worker failed; no op was recorded for this dispatch")
 
 // ─── bounded per-agent status store ──────────────────────────────────────────
 
@@ -725,10 +725,11 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 					}
 				})
 		})
-		// ownedAgent / settleDispatchPanic make the same call: claim the per-agent
+		// ownedAgent / recordDispatchPanic make the same call: claim the per-agent
 		// status slot only if THIS dispatch owned the agent (P2: status-clobber).
 		if panicked {
-			rep, derr = nil, rm.settleDispatchPanic(ep.Key, dispatchID, appliedFlag.Load())
+			rm.recordDispatchPanic(ep.Key, dispatchID, appliedFlag.Load())
+			rep, derr = nil, errDispatchWorkerFailed
 		} else if ownedAgent(rep, derr) {
 			rm.store.markTerminal(ep.Key, dispatchID, rep)
 		}
@@ -779,15 +780,18 @@ func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchRe
 	if rep == nil && err == nil {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
 			"status": "internal_error",
-			"detail": "dispatch produced no outcome; no upgrade was started",
+			"detail": "dispatch produced no outcome; no op was recorded for this dispatch",
 		})
 		return
 	}
 	switch {
 	case errors.Is(err, errDispatchWorkerFailed):
-		// A recovered panic in the detached executor goroutine. No op reached the
-		// agent (appliedFlag was false, or this branch would not run), so this is
-		// a definite, retryable server-side failure — never a success.
+		// A recovered panic in the detached executor goroutine. This branch is
+		// reached only with appliedFlag false, so no op was recorded: a definite,
+		// retryable server-side failure — never a success. (The one case where an
+		// op could nonetheless be live on the agent is a panic in the onApplied
+		// callback itself, between the agent's accept and markDispatched; the
+		// reused idempotency key keeps the retry from applying twice. §41.)
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
 			"status": "internal_error",
 			"detail": errDispatchWorkerFailed.Error(),
@@ -828,7 +832,7 @@ func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchRe
 // dispatch worker — CHAOS-75: a panic here used to take the whole gateway down
 // from one admin POST.
 //
-// The recovery is deliberately ASYMMETRIC with settleDispatchPanic: on a panic
+// The recovery is deliberately ASYMMETRIC with recordDispatchPanic: on a panic
 // this worker writes NOTHING to the status store. A resume starts no op (it only
 // re-polls an existing one) and its dispatch_id is NEWER than the running op's,
 // so the ULID ordering in dispatchStore.update would make any write WIN the slot
@@ -855,10 +859,10 @@ func (rm *releaseManager) runResumeWorker(actor string, ep AgentEndpoint, rc Dis
 	}
 }
 
-// settleDispatchPanic converts a recovered panic in the detached dispatch
-// goroutine into a definite outcome, and decides whether the per-agent status
-// slot may be written. It always returns errDispatchWorkerFailed so no caller
-// can be handed the (nil report, nil error) pair that respondPreApply rejects.
+// recordDispatchPanic decides whether a recovered panic in the detached dispatch
+// goroutine may write the per-agent status slot, and writes it when it may. The
+// caller converts the panic into errDispatchWorkerFailed, so no handler is ever
+// handed the (nil report, nil error) pair respondPreApply rejects.
 //
 // The split on `applied` is the whole substance of the fix (CHAOS-75):
 //
@@ -883,14 +887,14 @@ func (rm *releaseManager) runResumeWorker(actor string, ep AgentEndpoint, rc Dis
 // existing `ownedAgent(rep, derr)` line run would pass (nil, nil), which reads
 // as owned, and write a terminal record with an EMPTY terminal over whatever
 // was there. That is the clobber this function exists to avoid.
-func (rm *releaseManager) settleDispatchPanic(agentKey, dispatchID string, applied bool) error {
-	if applied {
-		rm.store.markTerminal(agentKey, dispatchID, &DispatchReport{
-			Terminal: TerminalFailedNeedsAttn,
-			Detail:   detailDispatchWorkerPanicAfterApply,
-		})
+func (rm *releaseManager) recordDispatchPanic(agentKey, dispatchID string, applied bool) {
+	if !applied {
+		return
 	}
-	return errDispatchWorkerFailed
+	rm.store.markTerminal(agentKey, dispatchID, &DispatchReport{
+		Terminal: TerminalFailedNeedsAttn,
+		Detail:   detailDispatchWorkerPanicAfterApply,
+	})
 }
 
 // ownedAgent reports whether a dispatch outcome actually claimed the agent
