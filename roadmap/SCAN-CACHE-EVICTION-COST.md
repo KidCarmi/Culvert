@@ -6,8 +6,11 @@
 > 10 000 default it amortizes to ~152 ns per Set against a scan that costs
 > milliseconds, so it is not a bottleneck. The obvious layout fix (holding
 > entries by value rather than behind a pointer) was implemented, measured
-> against an interleaved baseline, and **rejected**: it buys 9–40 % on the stall
-> and loses it again on the far more frequent `Get` and `Set` paths. This change
+> against an interleaved baseline, and **not shipped** — because the result is
+> mixed and immaterial (tens of nanoseconds either way against a millisecond
+> scan), not because it is harmful. An earlier revision of this note claimed it
+> "loses it again on the far more frequent Get and Set paths"; that framing did
+> not survive re-measurement and is retracted below. This change
 > therefore ships the missing benchmarks and this record, and leaves
 > `internal/hashcache` as it was.
 
@@ -35,10 +38,14 @@ problem?
   through GC pressure and to exhaust a constrained runner (CodeRabbit, PR #1604;
   the absolute figures above are post-fix and ~30 % lower than the first
   revision's).
-- **Before/after:** parent `fbf6a37` vs the candidate, compiled as separate test
-  binaries from a `git worktree`, with byte-identical benchmark sources except
-  the one line that constructs an entry (`&hashCacheEntry{…}` vs
-  `hashCacheEntry{…}`). Binaries alternated round-by-round (A,B,A,B…) over 8
+- **Before/after:** the shipped pointer layout vs the by-value candidate,
+  compiled as separate test binaries from a `git worktree`, with byte-identical
+  benchmark sources except the one line that constructs an entry
+  (`&hashCacheEntry{…}` vs `hashCacheEntry{…}`). `hashcache.go`'s logic is
+  identical to `fbf6a37`'s on both sides — only the map's value type differs.
+  The table below is the **post-fix** run, with the corrected fixture harness
+  compiled into both sides; the pre-fix run it replaces is kept only in the
+  retraction, for the comparison. Binaries alternated round-by-round (A,B,A,B…) over 8
   rounds at `-benchtime 300ms`, compared with `benchstat`.
 - **Decomposition:** the sweep and the 25 % delete batch were timed separately
   to attribute the cost before changing anything.
@@ -96,48 +103,112 @@ warning them.
 
 Holding entries in the map **by value** instead of behind a pointer removes the
 per-entry dereference from the sweep and the per-`Set` heap allocation of the
-entry. It does what it was meant to do, and is still not worth shipping
-(`benchstat`, n=8 interleaved).
+entry. It does what it was meant to do. Nothing ships anyway, but **not for the
+reason an earlier revision of this note gave** — see the retraction below.
 
-These are **deltas between two builds**, not absolute costs, and they were
-measured with the pre-fix fixture harness compiled identically into both sides,
-so the comparison holds even though the absolute `EvictLocked_*` figures there
-run high. Correcting the harness can only shrink the candidate's *wins* (the
-`EvictLocked_*` rows) while leaving its *regressions* untouched — `Get_*` and
-`SetChurn_*` build a single cache and were never affected — so the verdict is
-if anything firmer than the table shows:
+Measured post-fix (corrected fixture harness compiled identically into both
+sides), separate binaries from a `git worktree`, 8 alternating rounds,
+`benchstat`:
 
 | benchmark | base | candidate | delta |
 |---|---|---|---|
-| `EvictLocked_NothingExpired_10k` | 654.0 µs | 591.9 µs | **−9.50 %** (p=0.028) |
-| `EvictLocked_NothingExpired_100k` | 9.110 ms | 6.562 ms | **−27.97 %** (p=0.000) |
-| `EvictLocked_HalfExpired_10k` | 920.2 µs | 550.4 µs | **−40.18 %** (p=0.000) |
-| `EvictLocked_AllExpired_10k` | 1116.8 µs | 766.5 µs | **−31.37 %** (p=0.000) |
-| `SetChurn_AtCapacity_10k` | 568.3 ns | 551.0 ns | ~ (p=0.234) |
-| `SetChurn_AtCapacity_100k` | 787.6 ns | 893.1 ns | **+13.40 %** (p=0.000) |
-| `Get_Hit` | 84.66 ns | 91.55 ns | ~ (p=0.105) |
-| `Get_Miss` | 24.82 ns | 35.73 ns | **+43.98 %** (p=0.000) |
-| `Get_Parallel` | 212.1 ns | 190.2 ns | ~ (p=0.195) |
-| `Get_ParallelDuringEviction` | 621.1 ns | 704.2 ns | **+13.39 %** (p=0.005) |
+| `EvictLocked_NothingExpired_10k` | 356.2 µs | 316.0 µs | **−11.30 %** (p=0.000) |
+| `EvictLocked_NothingExpired_100k` | 7.060 ms | 4.821 ms | **−31.72 %** (p=0.000) |
+| `EvictLocked_HalfExpired_10k` | 461.0 µs | 337.5 µs | **−26.80 %** (p=0.000) |
+| `EvictLocked_AllExpired_10k` | 590.0 µs | 461.4 µs | **−21.80 %** (p=0.000) |
+| `SetChurn_AtCapacity_10k` | 558.8 ns | 533.4 ns | **−4.55 %** (p=0.010) |
+| `SetChurn_AtCapacity_100k` | 760.6 ns | 837.9 ns | **+10.17 %** (p=0.028) |
+| `Get_Hit` | 84.60 ns | 93.19 ns | ~ (p=0.279) |
+| `Get_Miss` | 25.39 ns | 33.92 ns | **+33.60 %** (p=0.002) |
+| `Get_Parallel` | 217.9 ns | 192.1 ns | ~ (p=0.161) |
+| `Get_ParallelDuringEviction` | 598.6 ns | 627.8 ns | ~ (p=0.083) |
 | `SetChurn` allocs/op | 3 | 2 | −33 % (p=0.000) |
-| `SetChurn_10k` B/op | 115.5 | 36.5 | −68 % (p=0.000) |
+| `SetChurn_10k` B/op | 115.5 | 35.0 | −69.70 % (p=0.000) |
 
-The regressions are the reason. `hashCacheEntry` is 88 bytes, so a value map
-copies 88 bytes where a pointer map copied 8 — on **every** `Get`, including a
-miss, which must zero the destination (hence `Get_Miss` +44 %) — and its bucket
-array is an order of magnitude larger, which is what costs `Set` 13 % at
-`cache_size: 100000`. Netting the eviction saving against the per-`Set`
-regression over the inserts each eviction makes room for:
+### Retraction: "correcting the harness can only shrink the candidate's wins"
 
-- `cache_size: 10000` — **+42 ns per Set** (marginally positive)
-- `cache_size: 100000` — **−3.6 ns per Set** (a wash, slightly negative)
+An earlier revision of this note carried the pre-fix deltas plus that claim, on
+the reasoning that both sides compiled the same faulty harness so its distortion
+cancelled. **That was wrong, and CodeRabbit was right to refuse it** (PR #1604):
+the two layouts respond differently to retained fixtures, because the pointer
+build allocates one 88-byte entry per element while the value build stores them
+inline, so `b.N × maxSize` retention gives them materially different GC
+profiles. Same harness is not the same distortion.
 
-So the change makes the **frequent** operations slower to speed up a **rare**
-one, and nets to zero. `Get_ParallelDuringEviction` is the clearest refutation:
-the stall itself got 9–28 % shorter and aggregate reader throughput still got
-13 % **worse**, because the per-`Get` copy cost outweighs the shorter block.
+Re-measuring moved the wins in **both** directions and changed two conclusions:
 
-It was reverted. The benchmarks that caught it are what this change ships.
+| | pre-fix | post-fix |
+|---|---|---|
+| `EvictLocked_NothingExpired_10k` | −9.50 % | −11.30 % (win **grew**) |
+| `EvictLocked_NothingExpired_100k` | −27.97 % | −31.72 % (win **grew**) |
+| `EvictLocked_HalfExpired_10k` | −40.18 % | −26.80 % (win shrank) |
+| `SetChurn_AtCapacity_10k` | ~ | −4.55 % (now a **win**) |
+| `Get_ParallelDuringEviction` | +13.39 % | **~ (n.s.)** — regression gone |
+
+Netting the eviction saving against the per-`Set` delta over the inserts each
+eviction makes room for, post-fix:
+
+- `cache_size: 10000` — **+41.5 ns per Set** (favours the candidate)
+- `cache_size: 100000` — **+12.3 ns per Set** (favours the candidate)
+
+So the earlier framing — "it makes the frequent operations slower to speed up a
+rare one, and nets to zero", with `Get_ParallelDuringEviction` as "the clearest
+refutation" — **does not survive the corrected measurement**. The netting is
+weakly positive at both sizes and that reader-throughput regression is not
+significant. Both of those were load-bearing in the old argument and both are
+withdrawn.
+
+### What the numbers actually support
+
+What survives against the candidate is narrower: `Get_Miss` **+33.60 %**
+(p=0.002) and `SetChurn_AtCapacity_100k` **+10.17 %** (p=0.028). `hashCacheEntry`
+is 88 bytes, so a value map copies 88 bytes where a pointer map copied 8 — on
+every `Get`, a miss included, which must zero the destination — and its bucket
+array is an order of magnitude larger. What survives for it is the eviction
+sweep (11–32 % faster), one fewer allocation per `Set`, and 70 % less `B/op` at
+the default size.
+
+That is a **mixed and immaterial result, not a refutation**. In absolute terms
+the whole argument is tens of nanoseconds: `Get_Miss` costs +8.5 ns, `Set` at
+`cache_size: 100000` costs +77 ns, the eviction saving returns 16–90 ns per
+`Set`. Every one of those sits four to five orders of magnitude below the
+ClamAV/YARA scan that a `Set` follows and a `Get` precedes.
+
+So the verdict is unchanged and its reasoning is not: there is **no performance
+case for the layout change, and none against it either**. Rewriting how a
+shared cache stores its entries — touching `Get`, `Set`, `SetTTLUnless`,
+`Clear` and a white-box test's mutation semantics — to buy a result this small
+and this mixed is churn without a payoff. The allocation reduction is the one
+non-noise argument in its favour (GC pressure lands in the heap the proxy's
+latency-critical goroutines share, the point
+[scanbuffer](../internal/secscan/scanbuffer.go) makes for its own path); it is
+not enough on its own, and it is the thing to re-examine first if this is ever
+revisited.
+
+### Contention, measured like-for-like
+
+`BenchmarkGet_ParallelDuringEviction` compared against `BenchmarkGet_Parallel`
+cannot isolate lock contention, because the writer displaces the seeded keys and
+the two sides end up reading different keyspaces (100 % hits against a few
+percent). A control pair suggested by CodeRabbit (PR #1604) fixes that by
+pinning **both** sides to an `m`-prefixed keyspace nothing ever inserts, so
+every lookup is a guaranteed miss and the read workload is identical:
+
+| benchmark | run A | run B | %hit |
+|---|---|---|---|
+| `Get_ParallelMissOnly` | 190.5 ns | 225.0 ns | 0 |
+| `Get_ParallelMissOnlyDuringEviction` | 381.0 ns | 612.3 ns | 0 |
+| ratio | 2.0x | 2.7x | |
+
+**2.0–2.7x across runs**, with the workload held fixed — so the slowdown is
+attributable to the writer rather than to a shifting hit rate. The spread is
+why two runs are quoted rather than one number: the absolute figures move with
+how fast the writer trips eviction and with scheduling, so treat the ratio as
+an order of magnitude, not a constant. Read the pair as a control, not a
+replacement: it measures the cheaper miss path, and the writer's cost here is
+eviction plus ordinary `Set` work rather than eviction alone. What it
+establishes is that the slowdown survives holding the read workload fixed,
+which is more than the confounded original pair could show.
 
 ## Verdict and what would actually help
 

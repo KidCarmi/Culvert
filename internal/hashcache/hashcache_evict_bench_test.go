@@ -120,8 +120,8 @@ func BenchmarkGet_Miss(b *testing.B) {
 	}
 }
 
-// readHitRate runs c.Get across the seeded keyspace on every available core and
-// reports the share of lookups that HIT as a %hit metric.
+// readParallel runs c.Get across a keyspace on every available core and returns
+// how many of those lookups HIT. The caller reports it as a %hit metric.
 //
 // The hit rate is reported because it is not a constant across these two
 // benchmarks: a writer that trips eviction deletes seeded keys, so the
@@ -132,24 +132,30 @@ func BenchmarkGet_Miss(b *testing.B) {
 // read workload, and %hit is what lets a reader see by how much. Hits are
 // counted in a per-goroutine local and folded in once at the end, so the
 // counting costs nothing measurable inside the loop.
-func readHitRate(b *testing.B, c *HashCache, keyspace int) {
-	var hits, total atomic.Int64
+func readParallel(b *testing.B, c *HashCache, prefix string, keyspace int) (hits, total int64) {
+	var h, t atomic.Int64
 	b.RunParallel(func(pb *testing.PB) {
 		var localHits, localTotal int64
 		i := 0
 		for pb.Next() {
-			if _, ok := c.Get("k" + strconv.Itoa(i%keyspace)); ok {
+			if _, ok := c.Get(prefix + strconv.Itoa(i%keyspace)); ok {
 				localHits++
 			}
 			localTotal++
 			i++
 		}
-		hits.Add(localHits)
-		total.Add(localTotal)
+		h.Add(localHits)
+		t.Add(localTotal)
 	})
-	b.StopTimer()
-	if n := total.Load(); n > 0 {
-		b.ReportMetric(float64(hits.Load())/float64(n)*100, "%hit")
+	return h.Load(), t.Load()
+}
+
+// reportHitRate publishes the %hit metric. The caller stops the timer, because
+// only the caller knows what else it needs to sample at the edge of the timed
+// region (see the write accounting in BenchmarkGet_ParallelDuringEviction).
+func reportHitRate(b *testing.B, hits, total int64) {
+	if total > 0 {
+		b.ReportMetric(float64(hits)/float64(total)*100, "%hit")
 	}
 }
 
@@ -160,7 +166,9 @@ func BenchmarkGet_Parallel(b *testing.B) {
 	c := fillCache(10_000, 0)
 	b.ReportAllocs()
 	b.ResetTimer()
-	readHitRate(b, c, 10_000)
+	hits, total := readParallel(b, c, "k", 10_000)
+	b.StopTimer()
+	reportHitRate(b, hits, total)
 }
 
 // Readers contending with a writer that keeps tripping eviction — the shape
@@ -219,14 +227,25 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	// could not fail, so a run whose writer never got scheduled during
 	// RunParallel would report UNCONTENDED reads under a name promising
 	// contention and still pass (Codex P2, PR #1604).
-	writesBefore := writes.Load()
-
+	//
+	// The counter is sampled immediately either side of RunParallel, so the
+	// only writes it can misattribute are those landing in the statement
+	// between the sample and the first/last read. That is not airtight by
+	// construction — proving overlap would need the readers themselves to
+	// observe writer progress, and a shared atomic in the measured read path
+	// would distort the ns/op this benchmark exists to report (CodeRabbit
+	// minor, PR #1604). With ~200 000 writes landing in a half-second timed
+	// window, a false pass needs zero of them inside it and one in a
+	// two-statement gap, so the count is evidence rather than proof.
 	b.ReportAllocs()
 	b.ResetTimer()
-	readHitRate(b, c, maxSize)
+	writesBefore := writes.Load()
+	hits, total := readParallel(b, c, "k", maxSize)
+	landed := writes.Load() - writesBefore
+	b.StopTimer()
 	close(stop)
 
-	landed := writes.Load() - writesBefore
+	reportHitRate(b, hits, total)
 	b.ReportMetric(float64(landed), "writes")
 
 	// The b.N=1 calibration pass times a window of microseconds, in which the
@@ -236,4 +255,72 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	if b.N >= 1000 && landed == 0 {
 		b.Fatal("no write landed inside the timed window; the contention this benchmark measures did not happen")
 	}
+}
+
+// ── Like-for-like contention control ────────────────────────────────────────
+//
+// The pair above cannot isolate lock contention, because the writer displaces
+// the seeded keys and so the contended run reads a different keyspace from the
+// uncontended one. These two pin BOTH sides to a keyspace nothing ever inserts
+// — neither fillCache's "k" entries nor the writer's "w" ones — so every lookup
+// is a guaranteed MISS and the read workload is identical with and without the
+// writer. The delta between them is then attributable to the writer rather than
+// to a shifting hit rate (construction suggested by CodeRabbit, PR #1604).
+//
+// Read it as a control, not as a replacement: it measures the MISS path, which
+// is cheaper than the hit path the scanners actually take, and the writer's
+// cost here is eviction plus ordinary Set work, not eviction alone. What it
+// does establish is that the slowdown survives holding the workload fixed.
+
+// benchMissOnlyParallel reads a never-inserted keyspace on every core, with an
+// eviction-tripping writer when withWriter is set. %hit must be 0 in both.
+func benchMissOnlyParallel(b *testing.B, withWriter bool) {
+	const maxSize = 10_000
+	c := fillCache(maxSize, 0)
+	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
+
+	stop := make(chan struct{})
+	var writes atomic.Int64
+	if withWriter {
+		ready := make(chan struct{})
+		go func() {
+			c.Set("w0", res)
+			writes.Add(1)
+			close(ready)
+			for i := 1; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				c.Set("w"+strconv.Itoa(i), res)
+				writes.Add(1)
+			}
+		}()
+		<-ready
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	writesBefore := writes.Load()
+	hits, total := readParallel(b, c, "m", maxSize) // "m" is never inserted
+	landed := writes.Load() - writesBefore
+	b.StopTimer()
+	close(stop)
+
+	reportHitRate(b, hits, total)
+	if hits != 0 {
+		b.Fatalf("control benchmark must read only misses, got %d hits", hits)
+	}
+	if withWriter {
+		b.ReportMetric(float64(landed), "writes")
+		if b.N >= 1000 && landed == 0 {
+			b.Fatal("no write landed inside the timed window; nothing was contended")
+		}
+	}
+}
+
+func BenchmarkGet_ParallelMissOnly(b *testing.B) { benchMissOnlyParallel(b, false) }
+func BenchmarkGet_ParallelMissOnlyDuringEviction(b *testing.B) {
+	benchMissOnlyParallel(b, true)
 }

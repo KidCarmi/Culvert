@@ -210,10 +210,15 @@ func (c *HashCache) Clear() {
 // what it did not look at) or sharding the map — both change observable
 // behaviour and need their own change and review.
 //
-// Do not reach for the obvious layout fix first: holding entries by value
-// instead of behind a pointer makes this sweep 9-40 % faster and was MEASURED
-// AND REJECTED, because it slows the far more frequent Get and Set paths and
-// nets to zero. See roadmap/SCAN-CACHE-EVICTION-COST.md for the numbers.
+// Do not reach for the obvious layout fix without reading the measurements
+// first. Holding entries by value instead of behind a pointer makes this sweep
+// 11-32 % faster and removes one allocation per Set; it also costs ~8 ns on
+// every Get miss and ~77 ns per Set at cache_size 100000. That is a MIXED and
+// IMMATERIAL result — tens of nanoseconds either way, against a ClamAV/YARA
+// scan measured in milliseconds — so it was measured and NOT shipped, for want
+// of a payoff rather than because it is harmful. roadmap/SCAN-CACHE-EVICTION-COST.md
+// has the interleaved benchstat numbers, and the retraction of an earlier,
+// stronger claim that the comparison refuted it.
 func (c *HashCache) evictLocked() {
 	now := time.Now()
 	for k, e := range c.entries {
