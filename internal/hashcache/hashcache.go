@@ -175,6 +175,41 @@ func (c *HashCache) Clear() {
 // evictLocked removes all expired entries.  If the map is still at capacity
 // afterward, it drops approximately 25 % of the remaining entries.
 // Must be called with c.mu held for writing.
+//
+// ── Measured cost (Go 1.26, 4-core amd64, hashcache_evict_bench_test.go) ────
+//
+// This runs on the Set path, synchronously, under the EXCLUSIVE write lock, on
+// whichever scan arrives when the map is full — so its duration stalls every
+// concurrent verdict lookup, not just that one caller. The expiry sweep is
+// O(maxSize): proving no entry is expired means looking at all of them. The
+// 25 % drop is then amortized over the maxSize/4 inserts it makes room for, so
+// throughput is fine (~0.5 µs per Set at steady-state churn) and the cost that
+// matters is the lock-hold spike:
+//
+//	cache_size │ one evictLocked, nothing expired │ recurs every
+//	   10 000  │   0.55 ms                        │ 2 500 inserts
+//	  100 000  │   8.51 ms                        │ 25 000 inserts
+//	1 000 000  │    115 ms                        │ 250 000 inserts
+//
+// cache_size is an operator YAML knob that config validation only FLOORS
+// (non-positive → 10 000) and never caps, so the spike grows with it without
+// anything warning the operator. Eviction also gets SLOWER the more
+// reclaimable the cache is (1.08 ms at 10 000 fully expired, against 0.55 ms
+// with none expired), because a sweep that finds expired entries also deletes
+// them.
+//
+// At the 10 000 default this is deliberately left alone: 0.55 ms amortizes to
+// ~25 ns per Set, and a Set happens only on a scan MISS, which then costs a
+// ClamAV/YARA scan measured in MILLISECONDS. The spike is noise against the
+// work it guards. Bounding it independent of maxSize means giving up the
+// "no expired entry survives an eviction" invariant that TestSet_EvictsExpiredFirst
+// pins (an early exit cannot know what it did not look at) or sharding the map
+// — both change observable behaviour and need their own change and review.
+//
+// Do not reach for the obvious layout fix first: holding entries by value
+// instead of behind a pointer makes this sweep 9-40 % faster and was MEASURED
+// AND REJECTED, because it slows the far more frequent Get and Set paths and
+// nets to zero. See roadmap/SCAN-CACHE-EVICTION-COST.md for the numbers.
 func (c *HashCache) evictLocked() {
 	now := time.Now()
 	for k, e := range c.entries {
