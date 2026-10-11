@@ -1,11 +1,28 @@
 package session
 
-// revocation_expiry_test.go — SEC-REVEXP-1 gates.
+// revocation_expiry_test.go — SEC-REVEXP-1.
 //
 // The defect was a disagreement between two expiry predicates, so the tests
 // are written as a DIFFERENTIAL against the verifier (Decode) rather than
 // against a hand-copied constant: a future change to either side that
 // reintroduces the gap fails here even if the numbers move.
+//
+// ── GATES vs CONTROLS, and why the difference is worth stating ──────────────
+//
+// 9 tests here, and they are NOT interchangeable as evidence:
+//
+//   7 REGRESSION GATES fail against the pre-fix `!now.After(exp)` predicate
+//     and pass against the corrected one. They are the reproducible evidence
+//     that the defect was real and is closed.
+//
+//   2 CONTROLS pass under BOTH predicates, by design — that is what makes
+//     them controls. They are marked CONTROL below. They are not evidence
+//     that anything was broken; they are evidence that the fix did not buy
+//     its result by breaking something else (eviction still happens, and a
+//     peer still cannot inject a degenerate expiry).
+//
+// Quoting a control as a confirmed pre-fix failure would make the evidence
+// irreproducible for the next person who re-runs it, so don't.
 //
 // Several tests must observe behaviour INSIDE a particular wall-clock second:
 // the defect only appears when the revocation expiry equals the current second
@@ -161,10 +178,14 @@ func TestRevocationExpiry_DifferentialAcrossOffsets(t *testing.T) {
 
 // ─── Negative controls: the fix must not retain forever ─────────────────────
 
-// TestRevocationExpiry_UnambiguouslyPastEntriesStillEvict is the negative
-// control. A fix in the fail-closed direction is only correct if eviction
-// still happens once the expiry second has genuinely passed — otherwise the
-// list grows without bound.
+// TestRevocationExpiry_UnambiguouslyPastEntriesStillEvict is a CONTROL: it
+// passes both before and after the fix (see the file header).
+//
+// A fix in the fail-closed direction is only correct if eviction still happens
+// once the expiry second has genuinely passed — otherwise the list grows
+// without bound. Had this flipped to FAIL, the fix would have turned a bounded
+// list into an unbounded leak, so its PASS is load-bearing even though it is
+// not regression evidence.
 func TestRevocationExpiry_UnambiguouslyPastEntriesStillEvict(t *testing.T) {
 	rl := NewRevocationList()
 	for _, age := range []time.Duration{2 * time.Second, time.Minute, 24 * time.Hour} {
@@ -235,9 +256,13 @@ func TestRevocationExpiry_MergeAdmitsTheFinalSecond(t *testing.T) {
 
 // ─── Malformed / boundary input ─────────────────────────────────────────────
 
-// TestRevocationExpiry_MalformedPeerExpiries checks the degenerate Expiry
-// values a peer or a hand-edited revocations file can carry. None may be
-// admitted, and none may panic.
+// TestRevocationExpiry_MalformedPeerExpiries is a CONTROL: it passes both
+// before and after the fix (see the file header).
+//
+// It checks the degenerate Expiry values a peer or a hand-edited revocations
+// file can carry. None may be admitted, and none may panic. Both predicates
+// agree on every case, which is the point — widening the retention window by
+// under a second must not widen what an untrusted origin can inject.
 func TestRevocationExpiry_MalformedPeerExpiries(t *testing.T) {
 	rl := NewRevocationList()
 	for _, exp := range []int64{0, -1, -(1 << 40), 1} {

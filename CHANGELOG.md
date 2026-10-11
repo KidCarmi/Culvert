@@ -37,15 +37,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   list. Applied at all four sites that decided the question: `IsRevoked`,
   `IsUserRevoked`, `ExportRevocations` and `MergeRevocations`.
 
-  Gates: 7 new tests in `internal/session/revocation_expiry_test.go`, each
-  confirmed to fail against the pre-fix predicate — the differential against
-  `Decode`, the map-level boundary, a negative control that eviction still
-  happens once the second has passed, the persistence and cluster-merge paths,
-  malformed peer expiries, the username-keyed list, and 8×300 concurrent
-  operations under `-race`. One pre-existing assertion
-  (`TestRevocationList_PastExpiryEvicts`) used a `-1ms` expiry, which is inside
-  the current second and therefore no longer expired; it now uses `-1m` and the
-  boundary it used to straddle is pinned by two of the new tests.
+  Gates: 9 new tests in `internal/session/revocation_expiry_test.go` — **7
+  regression gates**, each measured to fail against the pre-fix predicate and
+  pass after it (the differential against `Decode`, the map-level boundary, the
+  persistence and cluster-merge paths, the username-keyed list that gates a
+  deleted account, and a concurrent storm across all five entry points under
+  `-race`), plus **2 controls** that pass under both predicates by design and
+  are therefore not regression evidence: `UnambiguouslyPastEntriesStillEvict`
+  (2 s / 1 min / 24 h old entries still evict — had it flipped, the fix would
+  have made the list an unbounded leak) and `MalformedPeerExpiries` (`Expiry` of
+  `0`, `-1`, `-(1<<40)` refused, none panics — widening retention must not
+  widen what a peer can inject). An earlier revision of this entry claimed all
+  of them failed pre-fix; that was wrong and is corrected here, because
+  presenting a control as a regression gate makes the evidence irreproducible.
+
+  One pre-existing assertion (`TestRevocationList_PastExpiryEvicts`) used a
+  `-1ms` expiry, which is inside the current second and therefore no longer
+  expired; it now uses `-1m` and the boundary it used to straddle is pinned by
+  two of the new gates.
 
   Review of the rest of the in-flight change set — the IDNA memo, the urlcat
   lock-free read view, the config BOM fix, and four reported findings against

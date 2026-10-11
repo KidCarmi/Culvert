@@ -118,25 +118,56 @@ ships in a cookie — a wire-contract change to settle an internal disagreement.
 
 ### Required tests — all present
 
-`internal/session/revocation_expiry_test.go`. Every one was confirmed to
-**fail** against the pre-fix predicate and pass after it:
+`internal/session/revocation_expiry_test.go` adds **9** tests: **7 regression
+gates**, each measured to fail against the pre-fix predicate and pass after it,
+and **2 controls**, which pass under BOTH predicates by design.
+
+The split matters and an earlier revision of this document got it wrong — it
+claimed all of them failed pre-fix, which is not true and would have made this
+section's evidence irreproducible for anyone re-running it. Corrected after
+review (Codex P2 on PR #1603); the per-test verdict under the pre-fix predicate
+is now measured rather than asserted:
+
+```
+--- FAIL: TestRevocationExpiry_ConcurrentReadersAndWriters
+--- FAIL: TestRevocationExpiry_DifferentialAcrossOffsets
+--- FAIL: TestRevocationExpiry_EntrySurvivesTheFinalSecond
+--- FAIL: TestRevocationExpiry_EvictionNeverPrecedesDecode
+--- FAIL: TestRevocationExpiry_ExportDropsOnlyWhatDecodeRejects
+--- FAIL: TestRevocationExpiry_MergeAdmitsTheFinalSecond
+--- FAIL: TestRevocationExpiry_UserRevocationHonoursTheSameOracle
+--- PASS: TestRevocationExpiry_MalformedPeerExpiries              ← control
+--- PASS: TestRevocationExpiry_UnambiguouslyPastEntriesStillEvict ← control
+```
+
+**The 7 regression gates** — each fails pre-fix, passes post-fix:
 
 - **Regression / differential:** `EvictionNeverPrecedesDecode` (the probe above,
   inverted); `DifferentialAcrossOffsets` (property: "Decode accepts" ⇒ "the
   revocation is live", swept ±5 s).
 - **Boundary:** `EntrySurvivesTheFinalSecond` — the entry is still *in the map*,
   not merely reported.
-- **Negative control:** `UnambiguouslyPastEntriesStillEvict` — 2 s / 1 min / 24 h
-  old entries still evict, so the fail-closed direction did not become a leak.
 - **Persistence + cluster:** `ExportDropsOnlyWhatDecodeRejects`,
   `MergeAdmitsTheFinalSecond`.
-- **Malformed input:** `MalformedPeerExpiries` — `Expiry` of `0`, `-1`,
-  `-(1<<40)`, `1` all refused, none panics.
 - **Authentication/authorization surface:** `UserRevocationHonoursTheSameOracle`
   — the username-keyed list that gates every session of a deleted account.
-- **Concurrency:** `ConcurrentReadersAndWriters` — 8 goroutines × 300 iterations
-  across all five entry points under `-race`, asserting the entry survives
-  concurrent eviction passes.
+- **Concurrency:** `ConcurrentReadersAndWriters` — a storm across all five entry
+  points under `-race`, then the boundary observed under live concurrent
+  traffic.
+
+**The 2 controls** — these pass under both predicates, and that is exactly what
+makes them controls. They are not regression evidence; they are what proves the
+fix did not buy its result by breaking something else:
+
+- **Negative control:** `UnambiguouslyPastEntriesStillEvict` — 2 s / 1 min / 24 h
+  old entries still evict. A fix in the fail-closed direction is only correct if
+  eviction still happens once the expiry has genuinely passed; had this one
+  flipped to FAIL, the fix would have turned the list into an unbounded leak.
+- **Malformed input:** `MalformedPeerExpiries` — `Expiry` of `0`, `-1`,
+  `-(1<<40)` refused, a far-future value admitted (that is CHAOS-73's bounding
+  concern, not this one's), none panics. Both predicates agree on all four,
+  which is the point: widening the retention window must not widen what a peer
+  can inject.
 
 ### One existing assertion was tightened, deliberately
 
