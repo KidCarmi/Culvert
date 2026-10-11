@@ -7,35 +7,65 @@ package session
 // against a hand-copied constant: a future change to either side that
 // reintroduces the gap fails here even if the numbers move.
 //
-// Several tests must observe behaviour INSIDE a particular wall-clock second.
-// `settleWithinSecond` parks the goroutine in the comfortable middle of a
-// second so the sub-second remainder is unambiguous in both directions; it
-// costs at most one second and makes every assertion below deterministic
-// rather than probabilistic. Without it, a test that happened to run at
-// X.000 would pass against the pre-fix code too.
+// Several tests must observe behaviour INSIDE a particular wall-clock second:
+// the defect only appears when the revocation expiry equals the current second
+// AND `time.Now()` carries a sub-second remainder, so an observation that
+// straddles a second boundary proves nothing (and would pass against the
+// pre-fix code).
+//
+// That makes these tests clock-dependent, which is a flake risk worth removing
+// rather than tolerating — a security gate that flakes is a security gate
+// somebody switches off. `observeWithinSecond` handles it the only sound way:
+// it settles into the comfortable middle of a second, takes the observation,
+// and then CHECKS WHETHER THE SECOND ROLLED OVER MID-OBSERVATION. If it did,
+// the observation is void and is retried; it is never reported as a failure.
+// Only a verdict reached wholly inside one second can fail the test.
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// settleWithinSecond blocks until the current instant is between 300ms and
-// 800ms past a second boundary.
+// settleWithinSecond blocks until the current instant is between 200ms and
+// 600ms past a second boundary, leaving at least 400ms of headroom for the
+// observation that follows.
 func settleWithinSecond(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		ns := time.Now().Nanosecond()
-		if ns >= int(300*time.Millisecond) && ns <= int(800*time.Millisecond) {
+		if ns >= int(200*time.Millisecond) && ns <= int(600*time.Millisecond) {
 			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("could not settle inside a second — clock is not advancing")
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// observeWithinSecond settles inside a second, hands `observe` that second,
+// and accepts its verdict only if the clock was still in that same second when
+// it returned. A rollover voids the attempt and retries. `observe` reports the
+// problem it found, or "" when the observation held.
+func observeWithinSecond(t *testing.T, observe func(sec int64) string) {
+	t.Helper()
+	for attempt := 0; attempt < 25; attempt++ {
+		settleWithinSecond(t)
+		sec := time.Now().Unix()
+		problem := observe(sec)
+		if time.Now().Unix() != sec {
+			continue // straddled a second boundary — proves nothing either way
+		}
+		if problem != "" {
+			t.Error(problem)
+		}
+		return
+	}
+	t.Fatal("could not complete an observation inside a single second after 25 attempts")
 }
 
 // revokeToken encodes a session, revokes it the way the production logout path
@@ -61,17 +91,18 @@ func revokeToken(t *testing.T, s *Session) (cookie, b64 string) {
 func TestRevocationExpiry_EvictionNeverPrecedesDecode(t *testing.T) {
 	initSecret(t)
 	withFreshRevocationList(t)
-	settleWithinSecond(t)
 
-	s := &Session{Sub: "victim", Exp: time.Now().Unix()}
-	cookie, b64 := revokeToken(t, s)
-
-	if _, err := Decode(cookie); err == nil {
-		t.Fatal("logged-out cookie was accepted inside its final second (fail-open)")
-	}
-	if !Revoked.IsRevoked(b64) {
-		t.Error("revocation was evicted while the cookie it revokes is still within its lifetime")
-	}
+	observeWithinSecond(t, func(sec int64) string {
+		s := &Session{Sub: "victim", Exp: sec}
+		cookie, b64 := revokeToken(t, s)
+		if _, err := Decode(cookie); err == nil {
+			return "logged-out cookie was accepted inside its final second (fail-open)"
+		}
+		if !Revoked.IsRevoked(b64) {
+			return "revocation was evicted while the cookie it revokes is still within its lifetime"
+		}
+		return ""
+	})
 }
 
 // TestRevocationExpiry_EntrySurvivesTheFinalSecond pins the retention half
@@ -80,20 +111,20 @@ func TestRevocationExpiry_EvictionNeverPrecedesDecode(t *testing.T) {
 // and to peers.
 func TestRevocationExpiry_EntrySurvivesTheFinalSecond(t *testing.T) {
 	rl := NewRevocationList()
-	settleWithinSecond(t)
 
-	exp := time.Unix(time.Now().Unix(), 0) // the current second, truncated
-	rl.Revoke("tok", exp)
-
-	if !rl.IsRevoked("tok") {
-		t.Error("IsRevoked = false inside the revocation's own final second")
-	}
-	rl.mu.Lock()
-	_, exists := rl.tokens["tok"]
-	rl.mu.Unlock()
-	if !exists {
-		t.Error("entry was deleted inside its own final second")
-	}
+	observeWithinSecond(t, func(sec int64) string {
+		rl.Revoke("tok", time.Unix(sec, 0)) // the current second, truncated
+		if !rl.IsRevoked("tok") {
+			return "IsRevoked = false inside the revocation's own final second"
+		}
+		rl.mu.Lock()
+		_, exists := rl.tokens["tok"]
+		rl.mu.Unlock()
+		if !exists {
+			return "entry was deleted inside its own final second"
+		}
+		return ""
+	})
 }
 
 // TestRevocationExpiry_DifferentialAcrossOffsets is the property: across a
@@ -104,27 +135,28 @@ func TestRevocationExpiry_EntrySurvivesTheFinalSecond(t *testing.T) {
 func TestRevocationExpiry_DifferentialAcrossOffsets(t *testing.T) {
 	initSecret(t)
 	withFreshRevocationList(t)
-	settleWithinSecond(t)
 
-	base := time.Now().Unix()
-	for _, off := range []int64{-5, -2, -1, 0, 1, 2, 5} {
-		s := &Session{Sub: "u", Exp: base + off}
-		cookie, b64 := revokeToken(t, s)
+	observeWithinSecond(t, func(sec int64) string {
+		for _, off := range []int64{-5, -2, -1, 0, 1, 2, 5} {
+			s := &Session{Sub: "u", Exp: sec + off}
+			cookie, b64 := revokeToken(t, s)
 
-		accepted := func() bool { _, err := Decode(cookie); return err == nil }()
-		// Decode consults IsRevoked itself, so ask the list directly for the
-		// live/evicted verdict rather than inferring it from Decode.
-		live := Revoked.IsRevoked(b64)
+			accepted := func() bool { _, err := Decode(cookie); return err == nil }()
+			// Decode consults IsRevoked itself, so ask the list directly for
+			// the live/evicted verdict rather than inferring it from Decode.
+			live := Revoked.IsRevoked(b64)
 
-		if accepted {
-			t.Errorf("offset %+ds: Decode accepted a revoked cookie", off)
+			if accepted {
+				return fmt.Sprintf("offset %+ds: Decode accepted a revoked cookie", off)
+			}
+			// A session Decode would accept on expiry grounds alone must have
+			// a live revocation.
+			if sec <= s.Exp && !live {
+				return fmt.Sprintf("offset %+ds: revocation evicted while the session is still within its lifetime", off)
+			}
 		}
-		// A session Decode would accept on expiry grounds alone must have a
-		// live revocation.
-		if time.Now().Unix() <= s.Exp && !live {
-			t.Errorf("offset %+ds: revocation evicted while the session is still within its lifetime", off)
-		}
-	}
+		return ""
+	})
 }
 
 // ─── Negative controls: the fix must not retain forever ─────────────────────
@@ -156,45 +188,49 @@ func TestRevocationExpiry_UnambiguouslyPastEntriesStillEvict(t *testing.T) {
 // one well past must be dropped.
 func TestRevocationExpiry_ExportDropsOnlyWhatDecodeRejects(t *testing.T) {
 	rl := NewRevocationList()
-	settleWithinSecond(t)
 
-	nowSec := time.Now().Unix()
-	rl.Revoke("final-second", time.Unix(nowSec, 0))
-	rl.Revoke("long-dead", time.Unix(nowSec-60, 0))
+	observeWithinSecond(t, func(sec int64) string {
+		rl.Revoke("final-second", time.Unix(sec, 0))
+		rl.Revoke("long-dead", time.Unix(sec-60, 0))
 
-	got := map[string]bool{}
-	for _, e := range rl.ExportRevocations() {
-		got[e.Token] = true
-	}
-	if !got["final-second"] {
-		t.Error("export dropped an entry still inside its final second — it would vanish from disk and from every peer")
-	}
-	if got["long-dead"] {
-		t.Error("export retained an entry a minute past its expiry")
-	}
+		got := map[string]bool{}
+		for _, e := range rl.ExportRevocations() {
+			got[e.Token] = true
+		}
+		if !got["final-second"] {
+			return "export dropped an entry still inside its final second — it would vanish from disk and from every peer"
+		}
+		if got["long-dead"] {
+			return "export retained an entry a minute past its expiry"
+		}
+		return ""
+	})
 }
 
 // TestRevocationExpiry_MergeAdmitsTheFinalSecond is the inbound half: a peer's
 // entry for a session Decode would still accept must be admitted, not refused
 // as "already expired".
 func TestRevocationExpiry_MergeAdmitsTheFinalSecond(t *testing.T) {
-	rl := NewRevocationList()
-	settleWithinSecond(t)
-
-	nowSec := time.Now().Unix()
-	added := rl.MergeRevocations([]RevocationEntry{
-		{Token: "from-peer", Expiry: nowSec},
-		{Token: "stale-peer", Expiry: nowSec - 60},
+	observeWithinSecond(t, func(sec int64) string {
+		// A fresh list per attempt: `added` counts only what THIS merge
+		// admitted, so a retried attempt must not see the previous one's entry
+		// already present.
+		fresh := NewRevocationList()
+		added := fresh.MergeRevocations([]RevocationEntry{
+			{Token: "from-peer", Expiry: sec},
+			{Token: "stale-peer", Expiry: sec - 60},
+		})
+		if added != 1 {
+			return fmt.Sprintf("merged %d entries, want 1 (the final-second entry admitted, the stale one refused)", added)
+		}
+		if !fresh.IsRevoked("from-peer") {
+			return "a peer's revocation for a still-valid session was refused"
+		}
+		if fresh.IsRevoked("stale-peer") {
+			return "a peer's long-expired revocation was admitted"
+		}
+		return ""
 	})
-	if added != 1 {
-		t.Fatalf("merged %d entries, want 1 (the final-second entry admitted, the stale one refused)", added)
-	}
-	if !rl.IsRevoked("from-peer") {
-		t.Error("a peer's revocation for a still-valid session was refused")
-	}
-	if rl.IsRevoked("stale-peer") {
-		t.Error("a peer's long-expired revocation was admitted")
-	}
 }
 
 // ─── Malformed / boundary input ─────────────────────────────────────────────
@@ -221,19 +257,21 @@ func TestRevocationExpiry_MalformedPeerExpiries(t *testing.T) {
 // username-keyed list, which gates every session of a deleted account.
 func TestRevocationExpiry_UserRevocationHonoursTheSameOracle(t *testing.T) {
 	rl := NewRevocationList()
-	settleWithinSecond(t)
 
-	rl.mu.Lock()
-	rl.users["inside"] = time.Unix(time.Now().Unix(), 0)
-	rl.users["past"] = time.Unix(time.Now().Unix()-60, 0)
-	rl.mu.Unlock()
+	observeWithinSecond(t, func(sec int64) string {
+		rl.mu.Lock()
+		rl.users["inside"] = time.Unix(sec, 0)
+		rl.users["past"] = time.Unix(sec-60, 0)
+		rl.mu.Unlock()
 
-	if !rl.IsUserRevoked("inside") {
-		t.Error("user revocation evicted inside its final second")
-	}
-	if rl.IsUserRevoked("past") {
-		t.Error("user revocation a minute past its expiry still reported")
-	}
+		if !rl.IsUserRevoked("inside") {
+			return "user revocation evicted inside its final second"
+		}
+		if rl.IsUserRevoked("past") {
+			return "user revocation a minute past its expiry still reported"
+		}
+		return ""
+	})
 }
 
 // ─── Concurrency ────────────────────────────────────────────────────────────
@@ -241,39 +279,74 @@ func TestRevocationExpiry_UserRevocationHonoursTheSameOracle(t *testing.T) {
 // TestRevocationExpiry_ConcurrentReadersAndWriters runs the predicate under
 // -race from every path that reaches it. The eviction sites mutate the map
 // while holding r.mu; this asserts the fix did not move any read outside it.
+//
+// The storm and the boundary assertion are deliberately SEPARATE phases. An
+// earlier draft ran 2400 operations and only then asserted a condition that
+// requires still being inside the starting wall-clock second — which is a
+// flake waiting for a loaded CI runner, because the storm's duration is
+// exactly the thing that is not bounded here. Phase 1 is therefore
+// time-independent (it exists to shake out races and panics across every entry
+// point), and phase 2 takes the boundary observation on its own, inside a
+// single settled second, while the same concurrent traffic is still running.
 func TestRevocationExpiry_ConcurrentReadersAndWriters(t *testing.T) {
 	rl := NewRevocationList()
-	settleWithinSecond(t)
-	nowSec := time.Now().Unix()
+	// A far-future expiry for the storm: phase 1 asserts nothing about the
+	// boundary, so it must not depend on the clock.
+	stormExp := time.Now().Add(time.Hour).Unix()
 
 	const workers = 8
 	const iters = 300
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
-			for i := 0; i < iters; i++ {
-				switch (w + i) % 5 {
-				case 0:
-					rl.Revoke("tok", time.Unix(nowSec, 0))
-				case 1:
-					rl.IsRevoked("tok")
-				case 2:
-					rl.ExportRevocations()
-				case 3:
-					rl.MergeRevocations([]RevocationEntry{{Token: "peer", Expiry: nowSec}})
-				case 4:
-					rl.IsUserRevoked("someone")
-				}
-			}
-		}(w)
-	}
-	wg.Wait()
 
-	// The entry revoked inside its final second must have survived every
-	// concurrent eviction pass.
-	if !rl.IsRevoked("tok") {
-		t.Error("entry inside its final second was evicted by a concurrent pass")
+	// ── Phase 1: the storm. Races and panics only. ──────────────────────────
+	hammer := func(stop <-chan struct{}) func() {
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				for i := 0; i < iters; i++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					switch (w + i) % 5 {
+					case 0:
+						rl.Revoke("storm", time.Unix(stormExp, 0))
+					case 1:
+						rl.IsRevoked("storm")
+					case 2:
+						rl.ExportRevocations()
+					case 3:
+						rl.MergeRevocations([]RevocationEntry{{Token: "peer", Expiry: stormExp}})
+					case 4:
+						rl.IsUserRevoked("someone")
+					}
+				}
+			}(w)
+		}
+		return wg.Wait
 	}
+	never := make(chan struct{})
+	hammer(never)()
+
+	if !rl.IsRevoked("storm") {
+		t.Error("a far-future entry did not survive the concurrent storm")
+	}
+
+	// ── Phase 2: the boundary, under live concurrent traffic. ───────────────
+	// Background traffic keeps the eviction sites running against the entry
+	// under test; the observation itself is microseconds and is voided and
+	// retried if it straddles a second boundary.
+	stop := make(chan struct{})
+	wait := hammer(stop)
+	defer func() { close(stop); wait() }()
+
+	observeWithinSecond(t, func(sec int64) string {
+		rl.Revoke("final-second", time.Unix(sec, 0))
+		if !rl.IsRevoked("final-second") {
+			return "entry inside its final second was evicted by a concurrent pass"
+		}
+		return ""
+	})
 }
