@@ -82,6 +82,10 @@ Two further properties worth having pinned:
   a miss costs ~24 ns against a hit's ~75 ns, so the changed mix pushes the
   contended figure DOWN, and it is still 3x slower while doing the cheaper work
   — but the raw ratio is not attributable to lock contention alone.
+  A `writes` metric reports how many Sets landed *inside* the timed window, so
+  a run that never actually contended is visible rather than silent: at
+  `-benchtime 1x` the window is short enough that `%hit` is still 100 % and the
+  figure means nothing. Read both metrics before quoting the ns/op.
 
 `cache_size` is an operator YAML knob (`config.go`) that validation only
 **floors** (non-positive → 10 000, `scanning_startup_config.go`) and never caps.

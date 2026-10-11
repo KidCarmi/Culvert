@@ -213,11 +213,27 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	}()
 	<-ready
 
+	// Count writes that land INSIDE the timed window, not writes that ever
+	// happened. The handshake above already guarantees one Set before timing
+	// starts, which made an earlier `writes.Load() == 0` guard vacuous: it
+	// could not fail, so a run whose writer never got scheduled during
+	// RunParallel would report UNCONTENDED reads under a name promising
+	// contention and still pass (Codex P2, PR #1604).
+	writesBefore := writes.Load()
+
 	b.ReportAllocs()
 	b.ResetTimer()
 	readHitRate(b, c, maxSize)
 	close(stop)
-	if writes.Load() == 0 {
-		b.Fatal("writer never ran; the contention this measures did not happen")
+
+	landed := writes.Load() - writesBefore
+	b.ReportMetric(float64(landed), "writes")
+
+	// The b.N=1 calibration pass times a window of microseconds, in which the
+	// writer legitimately may not be scheduled at all — failing there is the
+	// flake the handshake was added to avoid. Assert only once b.N is large
+	// enough that no overlapping write means something is actually wrong.
+	if b.N >= 1000 && landed == 0 {
+		b.Fatal("no write landed inside the timed window; the contention this benchmark measures did not happen")
 	}
 }
