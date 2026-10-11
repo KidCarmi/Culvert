@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -481,13 +482,15 @@ func validCDRTimeoutSec(t int) string {
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied -config path
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// Windows editors prepend a UTF-8 BOM; it is not YAML content and would
+	// otherwise be glued onto the first key ("unknown field").
+	raw = bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
 
-	dec := yaml.NewDecoder(f, yaml.DisallowUnknownField())
+	dec := yaml.NewDecoder(bytes.NewReader(raw), yaml.DisallowUnknownField())
 	var fc FileConfig
 	if err := dec.Decode(&fc); err != nil {
 		// An empty, whitespace-only, or comment-only document is not
