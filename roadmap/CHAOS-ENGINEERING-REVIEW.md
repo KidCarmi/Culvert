@@ -95,6 +95,14 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-11 — `CHAOS-75` CLAIMED (placeholder, commit one). Domain: the
+release-dispatch plane's detached executor goroutines — the admin API that
+starts and resumes a maintenance-agent upgrade.** Claimed in a committed line
+before any code is written, per the convention the header above reaches twice
+independently after ten collisions. `CHAOS-74` was the highest id claimed on any
+open branch when this row landed; 71–74 are allocated to other sweeps, so this
+one takes 75 and does not move. Findings and gates are written up in §41 below.
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
