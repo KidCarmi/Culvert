@@ -158,6 +158,64 @@ func TestCDRBreaker_ProbeTimeoutExceedsPerFileDeadline(t *testing.T) {
 	}
 }
 
+// TestCDRBreaker_DeadlineSeededFromAppliedConfigNotActiveConfig pins the
+// construction ORDERING that makes the deadline-derived probe timeout actually
+// work. initCDRClient builds the pool — and therefore every breaker — BEFORE it
+// publishes cdrActiveCfg:
+//
+//	newPool, err := buildCDRPoolFromRegistry(cfg, oldPool)   // breakers built here
+//	cdrPool.replace(newPool)
+//	cdrActiveCfg = cfg                                       // published only now
+//
+// So a breaker that resolved the deadline from the ACTIVE config at
+// construction time would read the previous config — the zero value on first
+// boot — and derive the 90s floor no matter what cdr.timeout_sec says, silently
+// reinstating the preemption bug. Breakers must be seeded from the config being
+// applied, via cdrConfigPerFileDeadline.
+func TestCDRBreaker_DeadlineSeededFromAppliedConfigNotActiveConfig(t *testing.T) {
+	// Simulate the init ordering: the published config is still empty (first
+	// boot) while a config with a long deadline is being applied.
+	cdrClientMu.Lock()
+	prev := cdrActiveCfg
+	cdrActiveCfg = CDRConfig{}
+	cdrClientMu.Unlock()
+	t.Cleanup(func() {
+		cdrClientMu.Lock()
+		cdrActiveCfg = prev
+		cdrClientMu.Unlock()
+	})
+
+	applied := CDRConfig{Enabled: true, TimeoutSec: 600} // 10 minutes, valid config
+
+	// The active-config fallback cannot see it — this is the trap.
+	if got := cdrEffectivePerFileDeadline(); got != cdrDefaultTimeout {
+		t.Fatalf("cdrEffectivePerFileDeadline() = %s during the init window, want the "+
+			"%s default; the premise of this test no longer holds", got, cdrDefaultTimeout)
+	}
+	// The applied config must be resolved from cfg.
+	wantDeadline := 600 * time.Second
+	if got := cdrConfigPerFileDeadline(applied); got != wantDeadline {
+		t.Fatalf("cdrConfigPerFileDeadline(TimeoutSec=600) = %s, want %s", got, wantDeadline)
+	}
+
+	// A breaker built the way the pool builds it must outlast that deadline.
+	b := newCDRCircuitBreaker(cdrBreakerConfig{
+		PerFileDeadline: cdrConfigPerFileDeadline(applied),
+	})
+	if b.cfg.HalfOpenProbeTimeout <= wantDeadline {
+		t.Errorf("breaker seeded from the applied config has HalfOpenProbeTimeout=%s, "+
+			"must exceed the configured %s deadline", b.cfg.HalfOpenProbeTimeout, wantDeadline)
+	}
+
+	// And the zero-value construction the pool USED to do must be shown to be
+	// insufficient, so a regression back to it fails here.
+	stale := newCDRCircuitBreaker(cdrBreakerConfig{})
+	if stale.cfg.HalfOpenProbeTimeout > wantDeadline {
+		t.Errorf("a zero-value breaker resolved %s during the init window, which would "+
+			"make this test vacuous", stale.cfg.HalfOpenProbeTimeout)
+	}
+}
+
 // TestCDRBreaker_BudgetSurvivesConcurrentDenials pins the half-open budget
 // under a burst. The budget used to be acquired by optimistically incrementing
 // and undoing on denial, so a denied caller's decrement could land AFTER the

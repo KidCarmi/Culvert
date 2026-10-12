@@ -414,7 +414,11 @@ func dialEnrolledInstance(inst CDREnrolledInstance, cfg CDRConfig, oldPool []*cd
 		return nil, fmt.Errorf("dial: %w", derr)
 	}
 	if carriedBreaker == nil {
-		carriedBreaker = newCDRCircuitBreaker(cdrBreakerConfig{})
+		// Seeded from cfg, not the active config: initCDRClient publishes
+		// cdrActiveCfg only AFTER this pool is built.
+		carriedBreaker = newCDRCircuitBreaker(cdrBreakerConfig{
+			PerFileDeadline: cdrConfigPerFileDeadline(cfg),
+		})
 	}
 	return &cdrPooledClient{
 		Name:    inst.Name,
@@ -469,8 +473,11 @@ func dialSingleFromConfig(cfg CDRConfig) (*cdrPooledClient, error) {
 		return nil, err
 	}
 	return &cdrPooledClient{
-		Name:    "default",
-		Client:  client,
-		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{}),
+		Name:   "default",
+		Client: client,
+		// Seeded from cfg, not the active config — see dialEnrolledInstance.
+		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{
+			PerFileDeadline: cdrConfigPerFileDeadline(cfg),
+		}),
 	}, nil
 }

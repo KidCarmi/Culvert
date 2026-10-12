@@ -106,13 +106,32 @@ func cdrHalfOpenProbeTimeout(reset, perFile time.Duration) time.Duration {
 	return d
 }
 
-// cdrEffectivePerFileDeadline reports the per-file Sluice deadline currently in
-// force, mirroring newCDRClient's resolution (0 ⇒ cdrDefaultTimeout).
-func cdrEffectivePerFileDeadline() time.Duration {
-	if secs := cdrActiveConfig().TimeoutSec; secs > 0 {
-		return time.Duration(secs) * time.Second
+// cdrConfigPerFileDeadline resolves the per-file Sluice deadline a given
+// CDRConfig implies, mirroring newCDRClient's own resolution
+// (0 ⇒ cdrDefaultTimeout) and the clientCfg.Timeout assignment in
+// dialEnrolledInstance.
+//
+// Every breaker built during a config apply MUST be seeded from the config
+// being applied, via this function — never from cdrEffectivePerFileDeadline
+// below. initCDRClient builds the pool (and therefore the breakers) BEFORE it
+// publishes cdrActiveCfg, so a breaker that resolved the deadline from the
+// active config at construction time would read the PREVIOUS config — the zero
+// value on first boot — and derive a 90s probe timeout no matter what
+// cdr.timeout_sec says. That silently reinstated the preemption bug this
+// derivation exists to prevent.
+func cdrConfigPerFileDeadline(cfg CDRConfig) time.Duration {
+	if cfg.TimeoutSec > 0 {
+		return time.Duration(cfg.TimeoutSec) * time.Second
 	}
 	return cdrDefaultTimeout
+}
+
+// cdrEffectivePerFileDeadline reports the deadline implied by the currently
+// PUBLISHED config. It is the fallback for a breaker built outside a config
+// apply (a test, or a zero-value cdrBreakerConfig); see the ordering warning on
+// cdrConfigPerFileDeadline before using it anywhere else.
+func cdrEffectivePerFileDeadline() time.Duration {
+	return cdrConfigPerFileDeadline(cdrActiveConfig())
 }
 
 // cdrCircuitBreaker tracks one instance's health.  The pool owns one
