@@ -192,6 +192,7 @@ func buildOperatorContract() OperatorContract {
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
+	checks = append(checks, authKillSwitchDiagnostics(authBypassDisabled(), authExemptDisabledRuntimeState())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
 	// LDAP profile hygiene diagnostics (ADR-0027). Report-only; contribute
 	// nothing when no LDAP profiles exist.
@@ -1726,6 +1727,36 @@ func policyActionFromDefault() PolicyAction {
 	}
 	return ActionDrop
 }
+
+// authKillSwitchDiagnostics surfaces the Auth Exempt break-glass kill switch on
+// the operator contract. Engaging it is a deliberate, secure-direction action
+// (exemptions fail closed to "authentication required"), but the runtime layer
+// is in-memory and silent: an operator who engaged it during an incident can
+// forget it, and exempt clients then keep being challenged with no health
+// signal explaining why. Report-only; contributes nothing when released.
+func authKillSwitchDiagnostics(envDisabled, runtimeDisabled bool) []OperatorContractCheck {
+	if !envDisabled && !runtimeDisabled {
+		return nil
+	}
+	var layers []string
+	action := ""
+	if runtimeDisabled {
+		layers = append(layers, "runtime toggle (reverts on restart)")
+		action = "Release the runtime toggle in Auth Policy once the incident is resolved. "
+	}
+	if envDisabled {
+		layers = append(layers, "CULVERT_AUTHBYPASS_DISABLE environment variable")
+		action += "Unset CULVERT_AUTHBYPASS_DISABLE and restart to release the environment layer. "
+	}
+	return []OperatorContractCheck{{
+		Code:   "auth_exempt_kill_switch_engaged",
+		Status: diagWarn,
+		Message: "Auth Exempt kill switch is engaged via " + strings.Join(layers, " and ") +
+			": all Exempt rules and the Open default are forced to require authentication",
+		OperatorAction: strings.TrimSpace(action),
+	}}
+}
+
 func authExemptDiagnostics(rules []PolicyRule, defaultAction PolicyAction) []OperatorContractCheck {
 	var exempt []*PolicyRule
 	for i := range rules {

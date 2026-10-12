@@ -231,3 +231,19 @@ func TestSlice6_AuthExemptExpired(t *testing.T) {
 		t.Error("unparseable expiry must be treated as expired (fail-closed)")
 	}
 }
+
+func TestSlice6_Diag_KillSwitchEngagedSurfaced(t *testing.T) {
+	if got := authKillSwitchDiagnostics(false, false); len(got) != 0 {
+		t.Fatalf("released kill switch must add no check, got %+v", got)
+	}
+	rt := authKillSwitchDiagnostics(false, true)
+	mustWarn(t, rt, "auth_exempt_kill_switch_engaged")
+	if !strings.Contains(rt[0].Message, "runtime toggle") || strings.Contains(rt[0].Message, "CULVERT_AUTHBYPASS_DISABLE") {
+		t.Errorf("runtime-only message wrong: %q", rt[0].Message)
+	}
+	env := authKillSwitchDiagnostics(true, true)
+	mustWarn(t, env, "auth_exempt_kill_switch_engaged")
+	if !strings.Contains(env[0].OperatorAction, "restart") || !strings.Contains(env[0].Message, "runtime toggle") {
+		t.Errorf("both-layer check wrong: %+v", env[0])
+	}
+}
