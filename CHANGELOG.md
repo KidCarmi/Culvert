@@ -9,6 +9,64 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The CDR circuit breaker could strand itself in half-open for the whole
+  process lifetime, silently disabling content sanitization (CHAOS-72).
+  `Allow()` hands out a half-open probe reservation that only
+  `OnSuccess`/`OnFailure`/`Reset` release, and the half-open branch had no
+  timer of its own — the `ResetTimeout` re-check lives only under
+  `cbStateOpen`. A single caller that took a reservation and never recorded
+  an outcome therefore denied every later `Allow()`, verified to still deny a
+  simulated year later.
+
+  `runCDRStage` guaranteed exactly that unpaired `Allow()` on the first
+  inspected upload past `ResetTimeout`: its liveness gate ran
+  `cdrActiveClient()` → `Pick()` → `Allow()`, which issues no RPC and so can
+  never report an outcome, and `safeCDRSanitize`'s own `Pick()` was then
+  denied and took the skip-CDR branch. `Reset()` has no production caller and
+  `cdrClientPool.replace` deliberately carries breaker state across pool
+  rebuilds, so nothing cleared it short of a restart. Under the default
+  fail-OPEN `cdr.fail_mode` every document was then forwarded **unsanitized**,
+  indefinitely, signalled only by the `culvert_cdr_pool_breaker_state` gauge.
+
+  Two independent guarantees now hold. `HalfOpenProbeTimeout` re-arms a budget
+  whose reserved probe never reported an outcome, so the breaker self-heals
+  against any non-recording caller; it defaults to 2×`ResetTimeout` with a 90s
+  floor, comfortably above the 35s per-file deadline, so it cannot preempt a
+  probe that is merely slow, and each re-arm is counted as `staleProbes` in the
+  breaker stats because a non-zero value means some caller is taking a
+  reservation it cannot release. And `Breaker.Available()` /
+  `cdrAnyInstanceAvailable()` give the hot path a non-consuming liveness gate,
+  leaving the probe for the call that can record the outcome. No persisted
+  state, wire format or configuration default changes.
+
+### Fixed
+
+- A Data Plane could not escalate its Control-Plane retry backoff, so a
+  CP-tier outage became a self-sustaining retry storm (CHAOS-71). Three
+  defects interacted. `failover()` cleared `failCount` on a connection it
+  never verified — `grpc.NewClient` dials lazily, so `connect()` succeeds
+  against a dead address and `failover()` always reports success — so with
+  two or more CP addresses configured (every HA deployment) the rotation every
+  third failure kept zeroing the ladder and the 60s ceiling was unreachable.
+  Measured steady state under a total outage was 2s → 8s → 2s → 8s forever,
+  with a fresh TCP+TLS handshake every other cycle, which also resets gRPC's
+  own transport-level reconnect backoff. `failCount` was separately
+  incremented twice per failed poll (in `pollConfig` and again in `backoff`),
+  so the documented 2s/4s/8s ladder was really 4s/16s/60s and the documented
+  "failover after 3 consecutive failures" fired on the second. And nothing in
+  the path was jittered, so every DP failing on the same outage walked an
+  identical deterministic ladder and retried in lockstep, arriving together
+  exactly when the recovering CP was least able to serve.
+
+  Only a call that actually returns a reply now clears the ladder; `backoff`
+  solely owns `failCount` while a separate `sinceFailover` counter paces
+  rotation, so rotating addresses never shortens the next delay; and retries
+  are spread ±15%, re-rolled per attempt (a fixed per-node offset would
+  preserve the fleet's relative phase for the whole outage, which is precisely
+  what must decorrelate here — unlike `feedsched.StableJitter`'s
+  steady-cadence case). The initial poll at loop start is deliberately left
+  un-jittered: a starting DP should converge on policy immediately.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
