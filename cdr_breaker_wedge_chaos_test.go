@@ -31,8 +31,9 @@ import (
 	"time"
 )
 
-// fixedClock returns a breaker driven by a caller-advanced clock.
-func wedgeBreaker(t *testing.T, cfg cdrBreakerConfig) (*cdrCircuitBreaker, func(time.Duration)) {
+// wedgeBreaker returns a breaker driven by a caller-advanced clock, plus the
+// function that advances it.
+func wedgeBreaker(t *testing.T, cfg cdrBreakerConfig) (breaker *cdrCircuitBreaker, advance func(time.Duration)) {
 	t.Helper()
 	b := newCDRCircuitBreaker(cfg)
 	now := time.Now()

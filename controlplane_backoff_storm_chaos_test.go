@@ -38,15 +38,16 @@ import (
 )
 
 // newStormClient builds a DP client whose CP calls always fail, with addrs
-// configured so the failover rotation path is live. Registers cleanup for the
-// CP-poll probe globals and for any gRPC ClientConn failover constructs.
-func newStormClient(t *testing.T, addrs ...string) (*DataPlaneClient, *int) {
+// configured so the failover rotation path is live. Returns the client and a
+// live counter of RPCs attempted. Registers cleanup for the CP-poll probe
+// globals and for any gRPC ClientConn failover constructs.
+func newStormClient(t *testing.T, addrs ...string) (client *DataPlaneClient, calls *int) {
 	t.Helper()
 	swapCPPollState(t, false, time.Time{}) // never leak probe state
-	calls := 0
+	attempts := 0
 	c := &DataPlaneClient{addrs: addrs}
 	c.callForTest = func(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
-		calls++
+		attempts++
 		return nil, errors.New("control plane unavailable")
 	}
 	t.Cleanup(func() {
@@ -56,7 +57,7 @@ func newStormClient(t *testing.T, addrs ...string) (*DataPlaneClient, *int) {
 			_ = c.conn.Close()
 		}
 	})
-	return c, &calls
+	return c, &attempts
 }
 
 // deadCtx is a already-cancelled context: backoff's select then takes the
