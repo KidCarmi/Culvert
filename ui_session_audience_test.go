@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -215,6 +216,158 @@ func TestSECUISESS1_LocalEnrolledRolesPassThrough(t *testing.T) {
 				t.Fatalf("injected role = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// ── /api/auth/status: the public endpoint the middleware never sees ─────────
+//
+// Codex P2 on this PR, and correct: /api/auth/status is on
+// isPublicUIAuthPath, so uiAuthMiddleware never runs for it and the handler
+// resolved the cookie itself. Its comment claimed it applied "the same
+// fail-closed resolution uiAuthMiddleware applies" while checking strictly
+// less, so the first version of this fix refused the replayed proxy token on
+// every gated route and still reported it here as `loggedIn: true,
+// role: admin` — the console renders the whole admin surface for a principal
+// that then gets 401 on every call it makes. The same drift already
+// mis-reported a DELETED user as an admin, because the roster check lived
+// only in the middleware.
+//
+// Both call sites now share resolveUISession. These gates pin the status
+// endpoint's half of that contract.
+
+// statusFor drives apiAuthStatus with sess under the admin cookie name and
+// returns the decoded body.
+func statusFor(t *testing.T, sess *Session) map[string]any {
+	t.Helper()
+	value, err := encodeSession(sess)
+	if err != nil {
+		t.Fatalf("encodeSession: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apiAuthStatus status = %d, want 200", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	return body
+}
+
+// TestSECUISESS1_StatusRefusesProxyIssuedToken is the DEFECT GATE for the
+// status endpoint. Pre-fix it answered loggedIn=true, role=admin.
+func TestSECUISESS1_StatusRefusesProxyIssuedToken(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	// Premise: this endpoint really is public, so the middleware really is not
+	// standing in front of it. If that changes, this gate's reasoning changes.
+	if !isPublicUIAuthPath("/api/auth/status") {
+		t.Fatal("premise broken: /api/auth/status is no longer on the public allowlist")
+	}
+
+	value := proxyIssuedSessionValue(t, &Identity{
+		Sub:      "browsing-user@corp.example",
+		Email:    "browsing-user@corp.example",
+		Provider: "oidc-corp",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, req)
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if body["loggedIn"] != false {
+		t.Errorf("loggedIn = %v, want false — the status endpoint reports a proxy-issued token as an "+
+			"authenticated principal while every gated route refuses it", body["loggedIn"])
+	}
+	if got, ok := body["role"]; ok {
+		t.Errorf("role = %v was reported for a refused session; want no role at all", got)
+	}
+	if got, ok := body["user"]; ok {
+		t.Errorf("user = %v was reported for a refused session; want no user at all", got)
+	}
+}
+
+// TestSECUISESS1_StatusRefusesDeletedUser pins the half of the drift that
+// predates this PR: the roster check (Finding 5.2) lived only in the
+// middleware, so a deleted admin's own cookie still reported role=admin here.
+func TestSECUISESS1_StatusRefusesDeletedUser(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	body := statusFor(t, &Session{
+		Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+	})
+	if body["loggedIn"] != false {
+		t.Errorf("loggedIn = %v for a user absent from the roster, want false", body["loggedIn"])
+	}
+}
+
+// TestSECUISESS1_StatusReportsLocalSessions is the CONTROL: a real admin login
+// still reports its exact role, and the pre-RBAC empty-role session still
+// reports admin. Refusing either would pass the gates above while breaking the
+// console for legitimate operators.
+func TestSECUISESS1_StatusReportsLocalSessions(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	for _, tc := range []struct {
+		name string
+		role string
+		want UIRole
+	}{
+		{"pre-RBAC empty role", "", RoleAdmin},
+		{"viewer", string(RoleViewer), RoleViewer},
+		{"operator", string(RoleOperator), RoleOperator},
+		{"admin", string(RoleAdmin), RoleAdmin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := statusFor(t, &Session{
+				Sub: "bob", Provider: "local", Role: tc.role,
+				Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+			})
+			if body["loggedIn"] != true {
+				t.Fatalf("loggedIn = %v, want true for a local roster session", body["loggedIn"])
+			}
+			if body["user"] != "bob" {
+				t.Errorf("user = %v, want %q", body["user"], "bob")
+			}
+			if body["role"] != string(tc.want) {
+				t.Errorf("role = %v, want %q", body["role"], tc.want)
+			}
+		})
+	}
+}
+
+// TestSECUISESS1_StatusPreSetupStillBootstraps is the CONTROL for the
+// bootstrap window: before setup completes the endpoint reports admin with no
+// cookie at all, and sharing resolveUISession must not have disturbed that
+// branch — it runs before any cookie is read.
+func TestSECUISESS1_StatusPreSetupStillBootstraps(t *testing.T) {
+	withSessionKey(t)
+	prev := cfg
+	t.Cleanup(func() { cfg = prev })
+	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	if cfg.IsConfigured() {
+		t.Fatal("precondition: cfg must be unconfigured")
+	}
+
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody))
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if body["loggedIn"] != true || body["role"] != string(RoleAdmin) {
+		t.Fatalf("pre-setup status = %v, want loggedIn=true role=admin (the setup wizard reads this)", body)
 	}
 }
 

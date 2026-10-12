@@ -229,17 +229,18 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
-	sess, err := readUISessionCookie(r)
-	if err == nil && sess != nil {
-		// Same fail-closed resolution uiAuthMiddleware applies. Reporting a
-		// session whose role this build does not enroll as `role: admin` would
-		// have the console render the full admin surface for a principal every
-		// gated endpoint is about to refuse; treating it as not-logged-in is
-		// both honest and the safe direction.
-		if role, ok := sessionRoleOrReject(sess.Role); ok {
-			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
-			return
-		}
+	// The SAME admission decision uiAuthMiddleware applies, now by sharing it
+	// rather than by restating it (resolveUISession, SEC-UISESS-1). This
+	// endpoint is on the public allowlist, so the middleware never runs for it
+	// and this is the only gate on what it reports. Reporting more authority
+	// than the middleware will honour has the console render the full admin
+	// surface for a principal every gated endpoint is about to refuse with 401
+	// — dishonest, and the unsafe direction. A refused session is reported as
+	// logged out; it is not cleared here, because this is a status read and
+	// clearing stays the middleware's and logout's business.
+	if sess, role, verdict := resolveUISession(r); verdict == uiSessionValid {
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
+		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
