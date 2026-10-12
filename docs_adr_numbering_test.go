@@ -134,7 +134,12 @@ func TestADRCitationsInSourceResolve(t *testing.T) {
 	owners := adrDocumentOwners(t)
 	citationRe := regexp.MustCompile(`ADR-(\d{4})`)
 
-	var checked int
+	// Collect paths during the walk and read them AFTER it returns: doing no
+	// filesystem operation inside the callback avoids the gosec G122
+	// race-prone-path warning, the same shape
+	// TestSealedGoldenTestKeyIsConfinedToTestData and
+	// TestPublicationGating_NoDraftBlindReleaseLookup use.
+	var goFiles []string
 	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -149,9 +154,18 @@ func TestADRCitationsInSourceResolve(t *testing.T) {
 		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		data, err := os.ReadFile(path) // #nosec G304 -- repo-relative .go files discovered by this walk
+		goFiles = append(goFiles, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the tree for ADR citations: %v", err)
+	}
+
+	var checked int
+	for _, path := range goFiles {
+		data, err := os.ReadFile(path) // #nosec G304 -- repository-owned paths collected above
 		if err != nil {
-			return err
+			t.Fatalf("read %s: %v", path, err)
 		}
 		for _, m := range citationRe.FindAllStringSubmatch(string(data), -1) {
 			num := m[1]
@@ -163,10 +177,6 @@ func TestADRCitationsInSourceResolve(t *testing.T) {
 					"written (drop the citation rather than point a reader at nothing)", path, num)
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking the tree for ADR citations: %v", err)
 	}
 	if checked == 0 {
 		t.Fatal("wall inspected no ADR citations — the scan stopped matching non-test Go source")
