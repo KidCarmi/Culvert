@@ -2082,6 +2082,17 @@ ensure_agent_traversal() {
   return 1
 }
 
+# set_maint_compose_project_dir CFG DIR — rewrite compose_project_dir in the
+# agent's config.toml. DIR lands in the REPLACEMENT side of a sed s|…|…|, where
+# an unescaped `&` expands to the whole matched line and `\` starts an escape;
+# escape them (and the `|` delimiter) as sed_escape_replacement does in
+# packaging/culvert-maint/install.sh.
+set_maint_compose_project_dir() {
+  local cfg="$1" dir="$2" esc
+  esc="$(printf '%s' "$dir" | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g')"
+  sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$esc\"|" "$cfg"
+}
+
 maint_toml_string() {
   local key="$1" file="${2:-/etc/culvert-maint/config.toml}"
   # Strip from the first quote onward (rather than requiring the closing
@@ -2785,7 +2796,7 @@ install_maint_agent() {
   if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
      && sudo grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
-    sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$INSTALL_DIR\"|" /etc/culvert-maint/config.toml
+    set_maint_compose_project_dir /etc/culvert-maint/config.toml "$INSTALL_DIR"
     if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
       warn "Re-rendering the sudoers binding for $INSTALL_DIR failed."
       warn "Fix compose_project_dir in /etc/culvert-maint/config.toml and re-run the installer."
