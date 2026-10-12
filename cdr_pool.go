@@ -216,6 +216,28 @@ func (p *cdrClientPool) shutdown() {
 
 // ─── Package-level conveniences ────────────────────────────────────────────
 
+// anyAvailable reports whether ANY pooled instance would plausibly admit a
+// request, without consuming a half-open probe reservation from any breaker.
+// Pick() mutates breaker state; a liveness nil-check must not.
+func (p *cdrClientPool) anyAvailable() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, c := range p.clients {
+		if c.Breaker.Available() {
+			return true
+		}
+	}
+	return false
+}
+
+// cdrAnyInstanceAvailable is the hot path's non-consuming liveness gate. Use
+// it for "is CDR usable at all?"; use cdrPickPooled when actually calling,
+// because only the caller that issues the RPC can report the outcome that
+// releases a half-open reservation.
+func cdrAnyInstanceAvailable() bool {
+	return cdrPool.anyAvailable()
+}
+
 // cdrPickPooled returns the pool-aware selected client with full
 // per-instance state (profileCap, breaker, health).  Returns nil when
 // no instance is available — callers treat nil as "skip CDR" and apply

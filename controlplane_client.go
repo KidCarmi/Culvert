@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -74,19 +75,62 @@ type DataPlaneClient struct {
 	lastVersion       atomic.Int64
 	lastPolicyVersion atomic.Int64
 	failCount         int  // consecutive fetch failures for exponential backoff
+	sinceFailover     int  // consecutive failures since the last failover attempt
 	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
 	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
-// backoff sleeps for an exponentially increasing duration after consecutive
-// Control Plane failures: 2s, 4s, 8s, … capped at 60s.
+// Control-Plane retry ladder. dpBackoffBase is the first delay and doubles per
+// consecutive failure up to dpBackoffCap; dpFailoverThreshold is how many
+// consecutive failures rotate to the next CP address.
+const (
+	dpBackoffBase       = 2 * time.Second
+	dpBackoffCap        = 60 * time.Second
+	dpFailoverThreshold = 3
+	// dpBackoffJitterFrac spreads each retry instant ±15%. Without it every DP
+	// in the fleet fails on the same CP outage, walks an identical deterministic
+	// ladder, and therefore retries in lockstep — a synchronized stampede that
+	// lands on the CP at the moment it is least able to serve it (cold start,
+	// snapshot rebuild). Re-rolled per attempt, NOT drawn once per node like
+	// feedsched.StableJitter: a fixed per-node offset preserves the fleet's
+	// relative phase for the whole outage, which is exactly what must decorrelate
+	// here. A steady cadence wants the stable draw; a recovery ladder does not.
+	dpBackoffJitterFrac = 0.15
+)
+
+// dpBackoffDelay returns the ladder delay for the failCount'th consecutive
+// failure: 2s, 4s, 8s, 16s, 32s, 60s, 60s, … each ±dpBackoffJitterFrac.
+// Pure except for the jitter draw, so the ladder is unit-testable without
+// sleeping; the shift is bounded before it can overflow.
+func dpBackoffDelay(failCount int) time.Duration {
+	if failCount < 1 {
+		failCount = 1
+	}
+	steps := failCount - 1
+	if steps > 6 { // 2s<<6 == 128s, already past the cap
+		steps = 6
+	}
+	delay := dpBackoffBase << steps
+	if delay > dpBackoffCap {
+		delay = dpBackoffCap
+	}
+	span := float64(delay) * dpBackoffJitterFrac
+	off := (rand.Float64()*2 - 1) * span // #nosec G404 -- fleet spread, not crypto
+	delay += time.Duration(off)
+	if delay <= 0 {
+		delay = dpBackoffBase
+	}
+	return delay
+}
+
+// backoff sleeps for the jittered ladder delay after consecutive Control Plane
+// failures. backoff is the SOLE owner of failCount: every failure path in
+// pollConfig funnels through here exactly once, so the ladder advances one step
+// per failed poll cycle.
 func (c *DataPlaneClient) backoff(ctx context.Context) {
 	c.failCount++
-	delay := time.Duration(1<<min(c.failCount, 6)) * time.Second // 2s…64s
-	if delay > 60*time.Second {
-		delay = 60 * time.Second
-	}
+	delay := dpBackoffDelay(c.failCount)
 	logger.Printf("DataPlane: backing off %s (failure #%d)", delay, c.failCount)
 	select {
 	case <-time.After(delay):
@@ -94,8 +138,11 @@ func (c *DataPlaneClient) backoff(ctx context.Context) {
 	}
 }
 
+// resetBackoff clears the ladder. Only a CP call that actually SUCCEEDED may
+// call this — establishing a connection is not success (see failover).
 func (c *DataPlaneClient) resetBackoff() {
 	c.failCount = 0
+	c.sinceFailover = 0
 }
 
 // NewDataPlaneClient connects to the Control Plane at addr. The addr parameter
@@ -183,6 +230,18 @@ func (c *DataPlaneClient) reconnectActive() error {
 
 // failover tries the next CP address in the list. Returns true if a new
 // connection was established, false if all addresses have been tried.
+//
+// "Established" means only that grpc.NewClient accepted the target: it dials
+// LAZILY, so connect() succeeds against a CP that is down, unreachable, or
+// serving errors. failover therefore must NOT reset failCount — doing so made
+// the ladder unreachable past its second step whenever two or more CP addresses
+// were configured (every HA deployment), because a rotation every
+// dpFailoverThreshold failures kept zeroing it. During a total CP-tier outage
+// the fleet then retried every few seconds forever instead of escalating to the
+// 60s ceiling, and churned a fresh gRPC ClientConn (new TCP + TLS handshake,
+// and a reset of gRPC's own transport-level reconnect backoff) on every
+// rotation. Only a CP call that actually returns a reply clears the ladder, via
+// resetBackoff in pollConfig.
 func (c *DataPlaneClient) failover() bool {
 	if len(c.addrs) <= 1 {
 		return false
@@ -199,7 +258,6 @@ func (c *DataPlaneClient) failover() bool {
 			continue
 		}
 		c.activeIdx = nextIdx
-		c.failCount = 0
 		return true
 	}
 	return false
@@ -248,14 +306,20 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 	}
 	if err != nil {
 		dpMarkCPPollFailing()
-		c.failCount++
+		// sinceFailover paces CP rotation; failCount (owned by backoff) paces the
+		// retry ladder. They are deliberately separate: rotating addresses must
+		// not shorten the delay before the next attempt, and the ladder must keep
+		// escalating across rotations.
+		c.sinceFailover++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
-		// Only attempt failover after 3 consecutive failures with a peer to
-		// fail over to; otherwise back off and retry the same CP next tick.
-		if c.failCount < 3 || len(c.addrs) <= 1 {
+		// Only attempt failover after dpFailoverThreshold consecutive failures
+		// with a peer to fail over to; otherwise back off and retry the same CP
+		// next tick.
+		if c.sinceFailover < dpFailoverThreshold || len(c.addrs) <= 1 {
 			c.backoff(ctx)
 			return nil, false
 		}
+		c.sinceFailover = 0
 		if !c.failover() {
 			c.backoff(ctx)
 			return nil, false

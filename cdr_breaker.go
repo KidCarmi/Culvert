@@ -38,6 +38,18 @@ type cdrBreakerConfig struct {
 	FailureThreshold int           // consecutive failures to open (default 5)
 	ResetTimeout     time.Duration // time in open before half-open (default 30s)
 	HalfOpenProbes   int32         // probes allowed in half-open (default 1)
+	// HalfOpenProbeTimeout bounds how long a reserved half-open probe may go
+	// without reporting an outcome before the budget is re-armed. It is a
+	// WEDGE ESCAPE, not a concurrency control: Allow() hands out a reservation
+	// that only OnSuccess/OnFailure/Reset release, and half-open has no other
+	// timer, so a single caller that takes a reservation and never records an
+	// outcome used to strand the breaker in half-open for the whole process
+	// lifetime — every later Allow() denied, CDR silently skipped on every
+	// file, and (under the default fail-OPEN FailMode) every document
+	// forwarded unsanitized. It must comfortably exceed a legitimate probe:
+	// the per-file deadline is cdrDefaultTimeout (35s), so the default is
+	// 2×ResetTimeout with a 90s floor.
+	HalfOpenProbeTimeout time.Duration
 }
 
 func (c cdrBreakerConfig) withDefaults() cdrBreakerConfig {
@@ -50,8 +62,19 @@ func (c cdrBreakerConfig) withDefaults() cdrBreakerConfig {
 	if c.HalfOpenProbes <= 0 {
 		c.HalfOpenProbes = 1
 	}
+	if c.HalfOpenProbeTimeout <= 0 {
+		c.HalfOpenProbeTimeout = 2 * c.ResetTimeout
+		if c.HalfOpenProbeTimeout < cdrHalfOpenProbeTimeoutFloor {
+			c.HalfOpenProbeTimeout = cdrHalfOpenProbeTimeoutFloor
+		}
+	}
 	return c
 }
+
+// cdrHalfOpenProbeTimeoutFloor keeps the wedge escape above any legitimate
+// probe duration even when ResetTimeout is tuned very low. cdrDefaultTimeout
+// (the per-file Sluice deadline) is 35s.
+const cdrHalfOpenProbeTimeoutFloor = 90 * time.Second
 
 // cdrCircuitBreaker tracks one instance's health.  The pool owns one
 // breaker per enrolled Sluice.
@@ -62,6 +85,11 @@ type cdrCircuitBreaker struct {
 	openedAt      atomic.Int64 // UnixNano when state transitioned to open
 	consecFails   atomic.Int64
 	halfOpenTried atomic.Int32 // probes currently being served in half-open
+	halfOpenAt    atomic.Int64 // UnixNano when the current half-open budget was armed
+	// staleProbes counts half-open budgets re-armed because a reserved probe
+	// never reported an outcome. Non-zero means some caller is taking a
+	// reservation it cannot release — surfaced in Stats for exactly that.
+	staleProbes atomic.Int64
 
 	// totalOpens counts state transitions into open for observability.
 	totalOpens atomic.Int64
@@ -118,6 +146,7 @@ func (b *cdrCircuitBreaker) Allow() bool {
 		// makes exactly one succeed).
 		if b.state.CompareAndSwap(cbStateOpen, cbStateHalfOpen) {
 			b.halfOpenTried.Store(0)
+			b.halfOpenAt.Store(b.now().UnixNano())
 		}
 		// Fall through to half-open handling below.
 		fallthrough
@@ -125,6 +154,22 @@ func (b *cdrCircuitBreaker) Allow() bool {
 		// Budget: only N concurrent probes.
 		if b.halfOpenTried.Add(1) > b.cfg.HalfOpenProbes {
 			b.halfOpenTried.Add(-1) // undo the reservation
+			// Wedge escape. A reservation is released only by
+			// OnSuccess/OnFailure/Reset, and half-open has no other timer, so a
+			// caller that takes one and never records an outcome would otherwise
+			// deny every later Allow() for the rest of the process lifetime. If
+			// the budget has gone that long without an outcome, treat the
+			// reservation as abandoned, re-arm, and admit one fresh probe so the
+			// breaker can still find its way back to closed. HalfOpenProbeTimeout
+			// is set well above a legitimate probe, so this cannot preempt one
+			// that is merely slow.
+			armed := b.halfOpenAt.Load()
+			if armed != 0 && b.now().UnixNano()-armed >= int64(b.cfg.HalfOpenProbeTimeout) &&
+				b.halfOpenAt.CompareAndSwap(armed, b.now().UnixNano()) {
+				b.staleProbes.Add(1)
+				b.halfOpenTried.Store(1)
+				return true
+			}
 			b.totalTrips.Add(1)
 			return false
 		}
@@ -144,6 +189,7 @@ func (b *cdrCircuitBreaker) OnSuccess() {
 		// concurrent OnFailure.
 		if b.state.CompareAndSwap(cbStateHalfOpen, cbStateClosed) {
 			b.halfOpenTried.Store(0)
+			b.halfOpenAt.Store(0)
 		}
 	}
 }
@@ -166,6 +212,7 @@ func (b *cdrCircuitBreaker) OnFailure() {
 			b.openedAt.Store(b.now().UnixNano())
 			b.totalOpens.Add(1)
 			b.halfOpenTried.Store(0)
+			b.halfOpenAt.Store(0)
 		}
 	case cbStateOpen:
 		// Already open — nothing to do.
@@ -177,7 +224,33 @@ func (b *cdrCircuitBreaker) Reset() {
 	b.state.Store(cbStateClosed)
 	b.consecFails.Store(0)
 	b.halfOpenTried.Store(0)
+	b.halfOpenAt.Store(0)
 	b.openedAt.Store(0)
+}
+
+// Available reports whether Allow() would plausibly admit a request, WITHOUT
+// consuming a half-open probe reservation.
+//
+// A liveness nil-check must use this, never Allow(): the hot path asked
+// "is any instance up?" through Allow(), which spent the single half-open
+// probe on a check that issues no RPC and so can never report an outcome. The
+// real sanitize call that followed was then denied, and the breaker wedged.
+// The reservation belongs to the caller that can actually record the result.
+func (b *cdrCircuitBreaker) Available() bool {
+	switch b.state.Load() {
+	case cbStateClosed:
+		return true
+	case cbStateOpen:
+		return b.now().UnixNano()-b.openedAt.Load() >= int64(b.cfg.ResetTimeout)
+	case cbStateHalfOpen:
+		if b.halfOpenTried.Load() < b.cfg.HalfOpenProbes {
+			return true
+		}
+		armed := b.halfOpenAt.Load()
+		return armed != 0 && b.now().UnixNano()-armed >= int64(b.cfg.HalfOpenProbeTimeout)
+	default:
+		return true
+	}
 }
 
 // Stats returns a snapshot suitable for /api/cdr/instances exposure.
@@ -187,6 +260,10 @@ type cdrBreakerStats struct {
 	TotalOpens  int64  `json:"totalOpens"` // total transitions into open
 	TotalTrips  int64  `json:"totalTrips"` // Allow() denials while open
 	OpenedAt    int64  `json:"openedAt"`   // UnixNano; 0 if never opened
+	// StaleProbes counts half-open budgets re-armed after a reserved probe
+	// never reported an outcome. Any non-zero value is a bug signal: some
+	// caller is taking a reservation it cannot release.
+	StaleProbes int64 `json:"staleProbes"`
 }
 
 // Stats returns a lock-free snapshot of current breaker state.
@@ -197,6 +274,7 @@ func (b *cdrCircuitBreaker) Stats() cdrBreakerStats {
 		TotalOpens:  b.totalOpens.Load(),
 		TotalTrips:  b.totalTrips.Load(),
 		OpenedAt:    b.openedAt.Load(),
+		StaleProbes: b.staleProbes.Load(),
 	}
 }
 
