@@ -22,7 +22,16 @@ import (
 	"time"
 )
 
-// gateSink keeps the ratio gate's two arms symmetric — see its comment.
+// gateSink keeps the ratio gate's two arms symmetric — see its comment. It is
+// written ONLY from serial code (the ratio gate and the serial benchmarks).
+// The parallel arms deliberately consume their value through a branch instead:
+// writing one shared bool from every RunParallel worker is a data race that
+// `go test -race -bench . ./internal/reqlog` reports, and it would have put a
+// contended store inside the loop whose cost is the thing being measured. The
+// branch form is also what the sibling arms in
+// internal/threatfeed/checkrequesturl_bench_test.go use, and it asserts what
+// the sink could not: that these benchmarks really did measure the DISABLED
+// gate, rather than silently timing the enabled path.
 var gateSink bool
 
 // raceDetectorOn is set true by the //go:build race companion file
@@ -84,18 +93,23 @@ func BenchmarkPersistGate_LegacyGateParallel(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			gateSink = legacyEnqueueGate()
+			if legacyEnqueueGate() {
+				b.Fatal("persistence is running: this arm must measure the disabled gate")
+			}
 		}
 	})
 }
 
+// BenchmarkPersistGateParallel is the shipped shape's scaling half.
 func BenchmarkPersistGateParallel(b *testing.B) {
 	disableGateForBench(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			gateSink = persistRunning.Load()
+			if persistRunning.Load() {
+				b.Fatal("persistence is running: this arm must measure the disabled gate")
+			}
 		}
 	})
 }
@@ -111,25 +125,30 @@ func BenchmarkAddLegacyGateParallel(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			addWithLegacyGate(e)
+			if addWithLegacyGate(e) {
+				b.Fatal("persistence is running: this arm must measure the disabled gate")
+			}
 		}
 	})
 }
 
+// BenchmarkAddLegacyGate is the serial baseline for BenchmarkAdd.
 func BenchmarkAddLegacyGate(b *testing.B) {
 	disableGateForBench(b)
 	e := benchEntry(0)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		addWithLegacyGate(e)
+		gateSink = addWithLegacyGate(e)
 	}
 }
 
 // addWithLegacyGate mirrors Add with the pre-change gate in place. It
 // deliberately duplicates Add's ring write instead of calling Add: calling Add
 // would measure the shipped gate AND the legacy one.
-func addWithLegacyGate(e Entry) {
+// It returns the legacy gate's verdict rather than writing gateSink, so the
+// parallel arm above can consume it without a shared store — see gateSink.
+func addWithLegacyGate(e Entry) bool {
 	ringMu.Lock()
 	if ringBuf == nil {
 		ringBuf = make([]Entry, MaxRing)
@@ -140,10 +159,11 @@ func addWithLegacyGate(e Entry) {
 		ringLen++
 	}
 	ringMu.Unlock()
-	gateSink = legacyEnqueueGate()
+	gate := legacyEnqueueGate()
 	if h := history; h != nil {
 		h(e)
 	}
+	return gate
 }
 
 // ── Regression gates ─────────────────────────────────────────────────────────

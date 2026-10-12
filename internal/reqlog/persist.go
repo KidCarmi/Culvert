@@ -100,25 +100,44 @@ var (
 // from a commit message), medians of count=5 at 2 s.
 //
 // The gate in isolation — BenchmarkPersistGate_LegacyGateParallel vs
-// BenchmarkPersistGateParallel:
+// BenchmarkPersistGateParallel. These are RunParallel arms, so ns/op is wall
+// time per op across ALL workers: a cost that is genuinely per-core-parallel
+// FALLS as cores are added, and one that serialises rises.
 //
-//	GOMAXPROCS          │    1    │    2    │    4    │ 1→4 cost
-//	mutex gate (before) │ 15.5 ns │ 43.7 ns │ 80.1 ns │ 5.2x  (cores made it WORSE)
-//	atomic gate (after) │  1.70ns │  2.17ns │  2.92ns │ 1.7x
+//	GOMAXPROCS          │    1    │    2    │    4    │ 1→4
+//	mutex gate (before) │ 15.5 ns │ 28.6 ns │ 74.4 ns │ 4.8x WORSE — it serialises
+//	atomic gate (after) │  1.72ns │  0.86ns │  0.43ns │ 4.0x better — linear
 //
-// and the whole of Add on top of it — BenchmarkAddLegacyGateParallel vs
+// That is the whole point of the change, and it is the sharper statement of it:
+// the mutex did not merely cost more per request, it converted a read every
+// core could do at once into a word every core had to take turns owning. The
+// atomic load halves as the cores double, which is what reading a shared
+// (unmodified) cache line should do.
+//
+// And the whole of Add on top of it — BenchmarkAddLegacyGateParallel vs
 // BenchmarkAddParallel:
 //
 //	GOMAXPROCS          │    1    │    2    │    4
-//	mutex gate (before) │ 51.8 ns │ 105.2ns │ 188.8 ns
-//	atomic gate (after) │ 49.6 ns │  93.0ns │ 156.9 ns
+//	mutex gate (before) │ 52.2 ns │ 104.1ns │ 185.5 ns
+//	atomic gate (after) │ 49.0 ns │  96.1ns │ 157.4 ns
 //
-// So ~4% off one logged request serially and ~17% off it at four cores, at
-// zero allocations either way. State the rest honestly: Add is still flat in
+// So ~6% off one logged request serially and ~15% off it at four cores, at
+// zero allocations either way. State the rest honestly: Add is still ~flat in
 // core count after this change, because the remaining ceiling is ringMu's
 // 328-byte copy in Add. That is a different lock, it guards real shared state
 // rather than a nil check, and it is a separate concern — see the note on
 // BenchmarkAddParallel.
+//
+// A note on how these numbers were obtained, because an earlier revision of
+// this comment got it wrong. The parallel arms first published each iteration's
+// result into one shared package-level bool. That store was itself a contended
+// write on a shared word, so it dominated the very quantity being measured and
+// made the atomic gate look like it RISES with core count (1.70 → 2.17 → 2.92)
+// when it in fact falls. It was also a data race the detector reports under
+// `go test -race -bench`. The arms now consume the value through a branch that
+// doubles as an assertion; the numbers above are from that shape. The lesson is
+// the one this package keeps relearning: a benchmark that writes shared state
+// per iteration is measuring its own instrument.
 //
 // ORDERING, and why each direction is safe:
 //

@@ -603,12 +603,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   constant cost, the same shape already removed from `internal/threatfeed`,
   `internal/connlimit` and the top-hosts counter. A lock-free `atomic.Bool`
   gate now short-circuits the disabled path. Measured on a 4-core Xeon @
-  2.80 GHz, both arms in one run, medians of `-count=5`: the gate itself falls
-  from **15.5 / 43.7 / 80.1 ns** at GOMAXPROCS 1/2/4 to **1.70 / 2.17 /
-  2.92 ns**, and one whole logged request from **51.8 / 105.2 / 188.8 ns** to
-  **49.6 / 93.0 / 156.9 ns** — ~4% serially, ~17% at four cores, zero
-  allocations either way — and the gate's own cost stops rising with core count
-  (5.2× from one to four cores before, 1.7× after). No entry, field or byte on
+  2.80 GHz, both arms in one run, medians of `-count=5`: in `RunParallel` arms
+  (where ns/op is wall time per op across all workers, so a genuinely parallel
+  cost *falls* as cores are added) the gate goes from **15.5 / 28.6 / 74.4 ns**
+  at GOMAXPROCS 1/2/4 — rising 4.8×, because it serialises — to **1.72 / 0.86 /
+  0.43 ns**, halving as the cores double. That is the sharper statement of the
+  defect: the mutex converted a read every core could do at once into a word
+  every core had to take turns owning. One whole logged request goes from
+  **52.2 / 104.1 / 185.5 ns** to **49.0 / 96.1 / 157.4 ns** — ~6% serially,
+  ~15% at four cores, zero allocations either way. No entry, field or byte on
   any sink changes, and the enabled path is untouched: the shutdown-sweep
   invariant (every sender registered in the same critical section that
   published the channel) still holds, because the gate can only short-circuit
