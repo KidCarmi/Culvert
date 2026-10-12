@@ -518,6 +518,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- The audit action recorded when an administrator starts an on-demand backup
+  (`POST /api/backups`) is now `backup.create`, matching the maintenance
+  operation kind, the `createBackup` operation and the `support.bundle.create`
+  pattern. It was `backup.trigger` for the short window since the feature
+  shipped; update any SIEM filter that matched the old value.
+
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
   line and the digest-pinned `golang:1.26.9-alpine` builder images, index
   `sha256:cdfd4fe2…`, verified against Docker Hub), and `golang.org/x/net`

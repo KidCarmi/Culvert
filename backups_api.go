@@ -211,7 +211,7 @@ func buildBackupsPayload(ctx context.Context) map[string]any {
 	return out
 }
 
-// ─── POST /api/backups (backup.create trigger) ────────────────────────────
+// ─── POST /api/backups (backup.create) ────────────────────────────
 
 // backupCreateAgentRequest is the wire shape the agent's POST /v1/backups
 // expects (handlers_d16b.go backupCreateRequest). PassphraseRef must be
@@ -332,7 +332,7 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 			"the backup may still have started — check the archive listing", http.StatusBadGateway)
 		return
 	}
-	auditEvent(r, "backup.trigger", filename, fmt.Sprintf("encrypt=%v op_id=%s", encrypt, opID))
+	auditEvent(r, "backup.create", filename, fmt.Sprintf("encrypt=%v op_id=%s", encrypt, opID))
 	// The listing is cached for backupsCacheTTL — drop it so the next GET
 	// (e.g. right after this op reaches a terminal state) shows the new
 	// archive instead of a stale pre-trigger snapshot.
