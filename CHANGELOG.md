@@ -591,6 +591,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The request log's JSONL persistence gate no longer takes a process-wide
+  mutex on every logged request. `reqlog.Add` runs once per logged request on
+  the proxy request goroutine, and the `enqueue` it calls opened with an
+  unconditional `persistMu.Lock()` purely to read two pointers that are `nil`
+  for the whole life of the process in the **default** configuration — no
+  request-log file is configured, so no drain goroutine is ever started. A
+  `sync.Mutex` Lock/Unlock pair is two atomic read-modify-writes on one shared
+  word, so every request in the process was writing the same cache line to
+  discover that persistence is switched off: a throughput ceiling rather than a
+  constant cost, the same shape already removed from `internal/threatfeed`,
+  `internal/connlimit` and the top-hosts counter. A lock-free `atomic.Bool`
+  gate now short-circuits the disabled path. Measured on a 4-core Xeon @
+  2.80 GHz, both arms in one run, medians of `-count=5`: the gate itself falls
+  from **15.5 / 43.7 / 80.1 ns** at GOMAXPROCS 1/2/4 to **1.70 / 2.17 /
+  2.92 ns**, and one whole logged request from **51.8 / 105.2 / 188.8 ns** to
+  **49.6 / 93.0 / 156.9 ns** — ~4% serially, ~17% at four cores, zero
+  allocations either way — and the gate's own cost stops rising with core count
+  (5.2× from one to four cores before, 1.7× after). No entry, field or byte on
+  any sink changes, and the enabled path is untouched: the shutdown-sweep
+  invariant (every sender registered in the same critical section that
+  published the channel) still holds, because the gate can only short-circuit
+  ahead of that section. `Add` remains flat in core count; the ceiling left is
+  the ring's own lock, which guards real shared state and is recorded on
+  `BenchmarkAddParallel` rather than changed.
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
   request, on the request goroutine, before the policy engine — and called it
