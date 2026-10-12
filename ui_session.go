@@ -10,6 +10,20 @@ import (
 
 const uiSessionCookieName = "ps_ui_session"
 
+// uiSessionProvider is the Provider stamped on every session the ADMIN plane
+// mints, and the token-class discriminator uiAuthMiddleware requires (
+// SEC-UISESS-1). setUISessionCookie below is the only minter of
+// uiSessionCookieName and has always set this value; the proxy end-user
+// cookie (ps_session, session.go setSessionCookie) carries the IdP profile id
+// instead. Both cookies share one signing key and one payload schema, so
+// without this check the cookie NAME — which the caller chooses — was the only
+// thing separating a proxy end user's session from an admin operator's.
+//
+// Read by setUISessionCookie and by uiAuthMiddleware. Keep it ONE constant: a
+// second spelling at either site is how the issuer and the gate drift into
+// disagreeing, and the direction that drift fails is open.
+const uiSessionProvider = "local"
+
 // isSecureRequest returns true when the request was received over TLS, either
 // directly or via a reverse proxy that set X-Forwarded-Proto: https. Used to
 // drive the dynamic Secure flag on UI session cookies.
@@ -20,7 +34,7 @@ func isSecureRequest(r *http.Request) bool {
 func setUISessionCookie(w http.ResponseWriter, r *http.Request, username string, role UIRole) error {
 	s := &Session{
 		Sub:      username,
-		Provider: "local",
+		Provider: uiSessionProvider,
 		Role:     string(role),
 		Exp:      time.Now().Add(getSessionTTL()).Unix(),
 		Jti:      newSessionJti(),

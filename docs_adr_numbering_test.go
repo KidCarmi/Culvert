@@ -31,13 +31,35 @@ import (
 // catch it (before either branch's number choice has propagated into cross-references,
 // GUI copy, or other ADRs' "Relates to" lines).
 func TestADRNumberingNoCollisions(t *testing.T) {
-	headerRe := regexp.MustCompile(`^#\s*ADR-(\d+)\b`)
+	byNumber := adrDocumentOwners(t)
 
-	type owner struct {
-		file   string
-		number string
+	var collidingNumbers []string
+	for num, owners := range byNumber {
+		if len(owners) > 1 {
+			collidingNumbers = append(collidingNumbers, num)
+		}
 	}
-	byNumber := map[string][]owner{}
+	sort.Strings(collidingNumbers)
+
+	for _, num := range collidingNumbers {
+		files := append([]string(nil), byNumber[num]...)
+		sort.Strings(files)
+		t.Errorf("ADR-%s is claimed by %d documents (must be exactly 1): %v — renumber the newer/less-established "+
+			"one to the next number confirmed clean against every '# ADR-NNNN' header in docs/adr/ and "+
+			"docs/support/rfc/, and update its downstream citations", num, len(files), files)
+	}
+}
+
+// adrDocumentOwners maps each ADR number to the document files that claim it in
+// their title. It is the ONE scan of the shared docs/adr + docs/support/rfc
+// numbering space: the collision wall above and the citation wall below must
+// agree on what "an ADR document exists" means, and a second copy of this scan
+// is how the two drift into disagreeing.
+func adrDocumentOwners(t *testing.T) map[string][]string {
+	t.Helper()
+
+	headerRe := regexp.MustCompile(`^#\s*ADR-(\d+)\b`)
+	byNumber := map[string][]string{}
 
 	dirs := []string{
 		filepath.Join("docs", "adr"),
@@ -77,28 +99,77 @@ func TestADRNumberingNoCollisions(t *testing.T) {
 			if num == "" {
 				continue // not every docs/adr file self-titles "ADR-NNNN" in its header (e.g. ADR-FE-*)
 			}
-			byNumber[num] = append(byNumber[num], owner{file: path, number: num})
+			byNumber[num] = append(byNumber[num], path)
 		}
 	}
+	return byNumber
+}
 
-	var collidingNumbers []string
-	for num, owners := range byNumber {
-		if len(owners) > 1 {
-			collidingNumbers = append(collidingNumbers, num)
+// TestADRCitationsInSourceResolve is the OTHER half of the numbering contract.
+//
+// The collision wall above polices the documents. Nothing polices the
+// CITATIONS, and a source comment is where an ADR number is read by the next
+// engineer deciding whether a contract may change: "(ADR-0037)" beside
+// shutdownRegistry is how a reviewer finds the decision that says the engine
+// owns phase execution and main owns the hooks. A citation that resolves to no
+// document sends that reader nowhere, and the renumbering that produces one is
+// routine — docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-08.md
+// renumbered an RFC precisely to clear a collision, and the governance review
+// that recommended this file's collision gate asked for the downstream
+// citations to be updated with it.
+//
+// SCOPE, stated so the next reader does not over-trust this gate: it proves a
+// cited number EXISTS, not that it is the RIGHT one. A renumber that frees a
+// number which a later document then takes turns a stale citation into a
+// citation that still resolves — to the wrong decision — and no mechanical
+// check can see that. That is exactly what happened to runtime_shutdown.go,
+// which cited ADR-0036 for the shutdown registry after the shutdown ADR moved
+// to 0037, while 0036 names the unrelated AI-evidence boundary; it was found
+// by reading, and fixed in the same change as this test. Keep reading.
+//
+// Test files are excluded: they legitimately build synthetic "# ADR-0099"
+// fixtures (TestFirstMarkdownHeading_NoLineCountCap below) that name no real
+// decision and must not be read as citations.
+func TestADRCitationsInSourceResolve(t *testing.T) {
+	owners := adrDocumentOwners(t)
+	citationRe := regexp.MustCompile(`ADR-(\d{4})`)
+
+	var checked int
+	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor", "testdata", "dist":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path) // #nosec G304 -- repo-relative .go files discovered by this walk
+		if err != nil {
+			return err
+		}
+		for _, m := range citationRe.FindAllStringSubmatch(string(data), -1) {
+			num := m[1]
+			checked++
+			if len(owners[num]) == 0 {
+				t.Errorf("%s cites ADR-%s, which no document in docs/adr/ or docs/support/rfc/ claims "+
+					"in its title — either the decision was renumbered and this citation was left "+
+					"behind (update it to the number the document carries now), or the ADR was never "+
+					"written (drop the citation rather than point a reader at nothing)", path, num)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the tree for ADR citations: %v", err)
 	}
-	sort.Strings(collidingNumbers)
-
-	for _, num := range collidingNumbers {
-		owners := byNumber[num]
-		files := make([]string, len(owners))
-		for i, o := range owners {
-			files[i] = o.file
-		}
-		sort.Strings(files)
-		t.Errorf("ADR-%s is claimed by %d documents (must be exactly 1): %v — renumber the newer/less-established "+
-			"one to the next number confirmed clean against every '# ADR-NNNN' header in docs/adr/ and "+
-			"docs/support/rfc/, and update its downstream citations", num, len(owners), files)
+	if checked == 0 {
+		t.Fatal("wall inspected no ADR citations — the scan stopped matching non-test Go source")
 	}
 }
 

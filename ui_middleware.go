@@ -267,8 +267,28 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// Check session cookie (browser login via login overlay).
 		sess, err := readUISessionCookie(r)
 		if err == nil && sess != nil {
-			// Reject sessions for deleted users (Finding 5.2).
-			if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
+			// SEC-UISESS-1: refuse any session the ADMIN plane did not mint,
+			// then reject sessions for deleted users (Finding 5.2).
+			//
+			// setUISessionCookie is the only minter of ps_ui_session and always
+			// stamps uiSessionProvider; the PROXY end-user cookie (ps_session)
+			// shares this signing key and payload schema, sets no Role, and
+			// carries an IdP profile id as its provider. A verified session
+			// here naming any other provider is therefore a proxy token
+			// replayed under the admin cookie name — and because it sets no
+			// Role, sessionRoleOrReject's pre-RBAC compatibility branch would
+			// resolve it to ADMIN. That made an ordinary proxy end user who
+			// completed a normal captive-portal IdP login a control-plane
+			// admin on every node sharing the CP's signing key, with no
+			// forgery and no key knowledge.
+			//
+			// The roster check is no longer gated on the provider. That is not
+			// a widening: it already applied to every local session, and a
+			// non-local one is refused by the clause before it. Together they
+			// leave the empty-role compatibility branch reachable only for a
+			// local session whose user is still on the roster — the pre-RBAC
+			// single-admin deployment it was written for.
+			if sess.Provider != uiSessionProvider || !cfg.UIUserExists(sess.Sub) {
 				clearUISessionCookie(w, r)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
