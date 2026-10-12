@@ -38,6 +38,10 @@ type cdrBreakerConfig struct {
 	FailureThreshold int           // consecutive failures to open (default 5)
 	ResetTimeout     time.Duration // time in open before half-open (default 30s)
 	HalfOpenProbes   int32         // probes allowed in half-open (default 1)
+	// PerFileDeadline is the effective per-file Sluice deadline this
+	// breaker's probes run under (cdr.timeout_sec, else cdrDefaultTimeout).
+	// It only feeds HalfOpenProbeTimeout. Zero resolves from the active config.
+	PerFileDeadline time.Duration
 	// HalfOpenProbeTimeout bounds how long a reserved half-open probe may go
 	// without reporting an outcome before the budget is re-armed. It is a
 	// WEDGE ESCAPE, not a concurrency control: Allow() hands out a reservation
@@ -46,9 +50,14 @@ type cdrBreakerConfig struct {
 	// outcome used to strand the breaker in half-open for the whole process
 	// lifetime — every later Allow() denied, CDR silently skipped on every
 	// file, and (under the default fail-OPEN FailMode) every document
-	// forwarded unsanitized. It must comfortably exceed a legitimate probe:
-	// the per-file deadline is cdrDefaultTimeout (35s), so the default is
-	// 2×ResetTimeout with a 90s floor.
+	// forwarded unsanitized.
+	//
+	// It MUST exceed any legitimate probe, or it preempts a live one: the
+	// preempted call's late OnFailure can reopen the breaker after the
+	// replacement probe already succeeded, reintroducing a fail-open bypass
+	// window. cdr.timeout_sec is bounded below at 30s but NOT above
+	// (validCDRTimeoutSec), so this cannot derive from ResetTimeout alone.
+	// See cdrHalfOpenProbeTimeout.
 	HalfOpenProbeTimeout time.Duration
 }
 
@@ -62,19 +71,49 @@ func (c cdrBreakerConfig) withDefaults() cdrBreakerConfig {
 	if c.HalfOpenProbes <= 0 {
 		c.HalfOpenProbes = 1
 	}
+	if c.PerFileDeadline <= 0 {
+		c.PerFileDeadline = cdrEffectivePerFileDeadline()
+	}
 	if c.HalfOpenProbeTimeout <= 0 {
-		c.HalfOpenProbeTimeout = 2 * c.ResetTimeout
-		if c.HalfOpenProbeTimeout < cdrHalfOpenProbeTimeoutFloor {
-			c.HalfOpenProbeTimeout = cdrHalfOpenProbeTimeoutFloor
-		}
+		c.HalfOpenProbeTimeout = cdrHalfOpenProbeTimeout(c.ResetTimeout, c.PerFileDeadline)
 	}
 	return c
 }
 
-// cdrHalfOpenProbeTimeoutFloor keeps the wedge escape above any legitimate
-// probe duration even when ResetTimeout is tuned very low. cdrDefaultTimeout
-// (the per-file Sluice deadline) is 35s.
-const cdrHalfOpenProbeTimeoutFloor = 90 * time.Second
+const (
+	// cdrHalfOpenProbeTimeoutFloor keeps the wedge escape above any legitimate
+	// probe even when ResetTimeout is tuned very low.
+	cdrHalfOpenProbeTimeoutFloor = 90 * time.Second
+	// cdrHalfOpenProbeGrace is the margin over the per-file deadline, so a probe
+	// that runs right up to its deadline (plus dial, queueing and the outcome
+	// write) is never mistaken for abandoned.
+	cdrHalfOpenProbeGrace = 30 * time.Second
+)
+
+// cdrHalfOpenProbeTimeout derives the wedge-escape timeout. A probe can
+// legitimately run for the whole per-file Sluice deadline, and cdr.timeout_sec
+// may be set arbitrarily high (validCDRTimeoutSec bounds it below at 30s, not
+// above), so the deadline — not ResetTimeout alone — sets the floor. Pure, so
+// the relationship is testable across the whole configurable range.
+func cdrHalfOpenProbeTimeout(reset, perFile time.Duration) time.Duration {
+	d := 2 * reset
+	if overDeadline := perFile + cdrHalfOpenProbeGrace; overDeadline > d {
+		d = overDeadline
+	}
+	if d < cdrHalfOpenProbeTimeoutFloor {
+		d = cdrHalfOpenProbeTimeoutFloor
+	}
+	return d
+}
+
+// cdrEffectivePerFileDeadline reports the per-file Sluice deadline currently in
+// force, mirroring newCDRClient's resolution (0 ⇒ cdrDefaultTimeout).
+func cdrEffectivePerFileDeadline() time.Duration {
+	if secs := cdrActiveConfig().TimeoutSec; secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return cdrDefaultTimeout
+}
 
 // cdrCircuitBreaker tracks one instance's health.  The pool owns one
 // breaker per enrolled Sluice.
@@ -151,29 +190,44 @@ func (b *cdrCircuitBreaker) Allow() bool {
 		// Fall through to half-open handling below.
 		fallthrough
 	case cbStateHalfOpen:
-		// Budget: only N concurrent probes.
-		if b.halfOpenTried.Add(1) > b.cfg.HalfOpenProbes {
-			b.halfOpenTried.Add(-1) // undo the reservation
+		// Budget: only N concurrent probes. Acquired with a CAS loop, NOT by
+		// optimistically incrementing and undoing on denial: a denied caller's
+		// Add(-1) could land after the wedge-escape re-arm below reset the
+		// counter, driving it to 0 (or, under a burst, negative) while a
+		// replacement probe was in flight. That silently defeated the budget
+		// and let a recovering Sluice be flooded. A denied caller must leave
+		// the counter untouched.
+		for {
+			tried := b.halfOpenTried.Load()
+			if tried < b.cfg.HalfOpenProbes {
+				if b.halfOpenTried.CompareAndSwap(tried, tried+1) {
+					return true
+				}
+				continue // lost the race; re-read the budget
+			}
 			// Wedge escape. A reservation is released only by
 			// OnSuccess/OnFailure/Reset, and half-open has no other timer, so a
 			// caller that takes one and never records an outcome would otherwise
 			// deny every later Allow() for the rest of the process lifetime. If
 			// the budget has gone that long without an outcome, treat the
 			// reservation as abandoned, re-arm, and admit one fresh probe so the
-			// breaker can still find its way back to closed. HalfOpenProbeTimeout
-			// is set well above a legitimate probe, so this cannot preempt one
+			// breaker can still find its way back to closed. The CAS on
+			// halfOpenAt elects exactly one re-armer; HalfOpenProbeTimeout is
+			// derived to exceed any legitimate probe, so this cannot preempt one
 			// that is merely slow.
 			armed := b.halfOpenAt.Load()
 			if armed != 0 && b.now().UnixNano()-armed >= int64(b.cfg.HalfOpenProbeTimeout) &&
 				b.halfOpenAt.CompareAndSwap(armed, b.now().UnixNano()) {
 				b.staleProbes.Add(1)
+				// Reclaim the abandoned reservation(s): exactly this probe is
+				// outstanding. Safe as a Store only because denied callers never
+				// touch the counter.
 				b.halfOpenTried.Store(1)
 				return true
 			}
 			b.totalTrips.Add(1)
 			return false
 		}
-		return true
 	default:
 		return true
 	}

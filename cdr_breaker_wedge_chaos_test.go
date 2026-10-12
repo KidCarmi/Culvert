@@ -27,6 +27,8 @@ package main
 // creates one (Available / cdrAnyInstanceAvailable).
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -104,29 +106,111 @@ func TestCDRBreaker_AbandonedProbeDoesNotWedgeHalfOpenForever(t *testing.T) {
 }
 
 // TestCDRBreaker_ProbeTimeoutExceedsPerFileDeadline guards the one way the
-// wedge escape could do harm: preempting a legitimate probe that is merely
-// slow. The per-file Sluice deadline is cdrDefaultTimeout, so the escape must
-// be comfortably longer — including when ResetTimeout is tuned very low.
+// wedge escape can do harm: preempting a probe that is merely slow. The
+// preempted call's late OnFailure can reopen the breaker after the replacement
+// probe already succeeded, which is another fail-open bypass window.
+//
+// The deadline is operator-controlled and effectively unbounded above:
+// validCDRTimeoutSec rejects cdr.timeout_sec below 30s but imposes NO upper
+// bound, so a deployment may legitimately run 5- or 10-minute per-file
+// deadlines. Deriving the escape from ResetTimeout alone (a flat 90s floor)
+// preempted a live probe on every such deployment.
 func TestCDRBreaker_ProbeTimeoutExceedsPerFileDeadline(t *testing.T) {
-	for _, reset := range []time.Duration{0, time.Second, 5 * time.Second, 30 * time.Second, 10 * time.Minute} {
-		cfg := cdrBreakerConfig{ResetTimeout: reset}.withDefaults()
-		if cfg.HalfOpenProbeTimeout <= cdrDefaultTimeout {
-			t.Errorf("ResetTimeout=%s → HalfOpenProbeTimeout=%s, must exceed the "+
-				"%s per-file deadline or it can preempt a live probe",
-				reset, cfg.HalfOpenProbeTimeout, cdrDefaultTimeout)
+	resets := []time.Duration{0, time.Second, 5 * time.Second, 30 * time.Second, 10 * time.Minute}
+	// Includes values validCDRTimeoutSec accepts well above the 90s floor.
+	deadlines := []time.Duration{
+		0, 30 * time.Second, cdrDefaultTimeout, 90 * time.Second,
+		2 * time.Minute, 5 * time.Minute, time.Hour,
+	}
+	for _, reset := range resets {
+		for _, deadline := range deadlines {
+			cfg := cdrBreakerConfig{ResetTimeout: reset, PerFileDeadline: deadline}.withDefaults()
+			if cfg.HalfOpenProbeTimeout <= cfg.PerFileDeadline {
+				t.Errorf("ResetTimeout=%s deadline=%s -> HalfOpenProbeTimeout=%s, must exceed "+
+					"the effective per-file deadline %s or it preempts a live probe",
+					reset, deadline, cfg.HalfOpenProbeTimeout, cfg.PerFileDeadline)
+			}
+			if cfg.HalfOpenProbeTimeout < cdrHalfOpenProbeTimeoutFloor {
+				t.Errorf("ResetTimeout=%s deadline=%s -> HalfOpenProbeTimeout=%s, below the %s floor",
+					reset, deadline, cfg.HalfOpenProbeTimeout, cdrHalfOpenProbeTimeoutFloor)
+			}
 		}
 	}
-	// A slow-but-live probe must NOT be preempted.
-	b, advance := wedgeBreaker(t, cdrBreakerConfig{})
+
+	// A probe running right up to a long configured deadline must NOT be
+	// preempted. With a 10-minute deadline the old flat 90s escape fired first.
+	const longDeadline = 10 * time.Minute
+	b, advance := wedgeBreaker(t, cdrBreakerConfig{PerFileDeadline: longDeadline})
 	tripOpen(t, b)
 	advance(b.cfg.ResetTimeout + time.Second)
 	if !b.Allow() {
 		t.Fatal("recovery probe denied")
 	}
-	advance(cdrDefaultTimeout) // the slowest legitimate per-file call
+	advance(longDeadline) // the slowest legitimate per-file call
 	if b.Allow() {
-		t.Fatal("the budget was re-armed while a legitimate probe could still " +
-			"be in flight — HalfOpenProbeTimeout is too short")
+		t.Fatalf("the budget was re-armed after %s while a probe under a %s deadline "+
+			"could still be in flight", longDeadline, longDeadline)
+	}
+	// Past the deadline plus its grace, it is genuinely abandoned.
+	advance(cdrHalfOpenProbeGrace + time.Second)
+	if !b.Allow() {
+		t.Fatal("a probe abandoned past deadline+grace must still be reclaimed")
+	}
+}
+
+// TestCDRBreaker_BudgetSurvivesConcurrentDenials pins the half-open budget
+// under a burst. The budget used to be acquired by optimistically incrementing
+// and undoing on denial, so a denied caller's decrement could land AFTER the
+// wedge escape re-armed the counter — driving it to 0, or negative under a
+// burst, while a replacement probe was in flight. The budget then admitted
+// everything and flooded a recovering Sluice. A denied caller must leave the
+// counter untouched.
+func TestCDRBreaker_BudgetSurvivesConcurrentDenials(t *testing.T) {
+	for _, budget := range []int32{1, 2, 4} {
+		b := newCDRCircuitBreaker(cdrBreakerConfig{HalfOpenProbes: budget})
+		var clockMu sync.Mutex
+		now := time.Now()
+		b.setNowFn(func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		})
+		for i := 0; i < b.cfg.FailureThreshold; i++ {
+			b.OnFailure()
+		}
+		clockMu.Lock()
+		now = now.Add(b.cfg.ResetTimeout + time.Second)
+		clockMu.Unlock()
+
+		// A burst far larger than the budget, all contending at once.
+		const contenders = 64
+		var wg sync.WaitGroup
+		var admitted atomic.Int64
+		start := make(chan struct{})
+		for i := 0; i < contenders; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if b.Allow() {
+					admitted.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if got := admitted.Load(); got > int64(budget) {
+			t.Errorf("budget %d: %d of %d contenders admitted concurrently — the "+
+				"half-open limit does not hold", budget, got, contenders)
+		}
+		if got := b.halfOpenTried.Load(); got < 0 {
+			t.Errorf("budget %d: halfOpenTried = %d, must never go negative — a "+
+				"negative count admits every later request", budget, got)
+		}
+		if got := b.halfOpenTried.Load(); got > budget {
+			t.Errorf("budget %d: halfOpenTried = %d, must never exceed the budget", budget, got)
+		}
 	}
 }
 

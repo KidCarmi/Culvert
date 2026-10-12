@@ -64,8 +64,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   are spread ±15%, re-rolled per attempt (a fixed per-node offset would
   preserve the fleet's relative phase for the whole outage, which is precisely
   what must decorrelate here — unlike `feedsched.StableJitter`'s
-  steady-cadence case). The initial poll at loop start is deliberately left
-  un-jittered: a starting DP should converge on policy immediately.
+  steady-cadence case).
+
+  Two limits of that jitter are deliberate. The initial poll at loop start is
+  un-jittered: a starting DP should converge on policy immediately, and
+  smoothing a rolling-restart herd is not worth delaying enforcement. And
+  because `backoff` sleeps inside the poll goroutine while `pollLoop` is driven
+  by a fixed `time.Ticker`, a ladder delay SHORTER than the poll interval
+  (default 30s — so the 2s/4s/8s/16s steps) does not move the next poll: the
+  loop still waits for the same tick. The jitter therefore takes effect from
+  the 32s step onward, which is the sustained-outage regime where the fleet
+  actually converges on the ceiling and where a recovering CP gets hit; the
+  early steps are paced by the ticker at the normal poll rate and form no
+  storm. Making the ladder drive the schedule directly would require moving
+  backoff ownership out of `pollConfig`/`fetchAndApply` into a timer-driven
+  `pollLoop`, which changes production poll cadence — left as a follow-up.
 
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
