@@ -172,7 +172,9 @@ func Add(e Entry) {
 
 	// Hand the entry to the JSONL drain goroutine. Never blocks and never
 	// touches the disk on this goroutine — see persist.go for why the
-	// marshal and the write(2) must not run on the request path.
+	// marshal and the write(2) must not run on the request path. When
+	// persistence is off (the default) this is one atomic load: persistRunning
+	// in persist.go records why it is not persistMu.Lock().
 	enqueue(e)
 
 	// Persist to the queryable history store (async, non-blocking, nil-safe).

@@ -55,6 +55,19 @@ func BenchmarkAdd(b *testing.B) {
 // BenchmarkAddParallel measures Add under concurrent callers — the proxy
 // records entries from many request goroutines, so ringMu hold time is
 // contention on the request hot path.
+//
+// Read it against BenchmarkAddLegacyGateParallel (persist_gate_bench_test.go),
+// which is the same path with the pre-change persistMu gate still in it.
+//
+// This benchmark is still FLAT in core count after that gate was removed
+// (49.6 / 93.0 / 156.9 ns at GOMAXPROCS 1/2/4 on the Xeon the gate comment
+// records). The remaining ceiling is ringMu itself: every logged request
+// copies a 328-byte Entry under one process-wide exclusive lock. That is NOT
+// the same kind of finding as the gate was — the lock guards real shared
+// state, not a nil check — and removing it means changing what Get()
+// guarantees about ordering (a lock-free shared ring would race the reader;
+// sharding it would reorder entries inside a millisecond, which is all the
+// resolution Entry.TS has). Measure before building either.
 func BenchmarkAddParallel(b *testing.B) {
 	restore := SwapRingForTest()
 	defer restore()

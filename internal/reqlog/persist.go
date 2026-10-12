@@ -79,6 +79,71 @@ var (
 	backpressure int64
 )
 
+// persistRunning is the lock-free gate enqueue consults before it touches
+// persistMu — a plain atomic LOAD of a shared word, with no read-modify-write
+// on it.
+//
+// enqueue runs once per logged request, on the request goroutine, from
+// Add. It used to open with persistMu.Lock() unconditionally, purely to read
+// two pointers that are nil for the whole life of the process in the DEFAULT
+// configuration (Init("") is a no-op, so no drain goroutine is ever started).
+// A sync.Mutex Lock/Unlock pair is two atomic read-modify-writes on ONE
+// process-wide word, so every request in the process was writing the same
+// cache line to discover that persistence is switched off. That is not a
+// constant cost but a throughput ceiling — the identical shape this repository
+// has already found and removed three times (internal/threatfeed,
+// internal/connlimit, and the top-hosts counter in store.go, whose comment
+// records the same measurement).
+//
+// Measured on a 4-core Xeon @ 2.80 GHz, go1.26.9, persistence disabled, both
+// arms in ONE run (so the comparison is reproducible in-tree, not a number
+// from a commit message), medians of count=5 at 2 s.
+//
+// The gate in isolation — BenchmarkPersistGate_LegacyGateParallel vs
+// BenchmarkPersistGateParallel:
+//
+//	GOMAXPROCS          │    1    │    2    │    4    │ 1→4 cost
+//	mutex gate (before) │ 15.5 ns │ 43.7 ns │ 80.1 ns │ 5.2x  (cores made it WORSE)
+//	atomic gate (after) │  1.70ns │  2.17ns │  2.92ns │ 1.7x
+//
+// and the whole of Add on top of it — BenchmarkAddLegacyGateParallel vs
+// BenchmarkAddParallel:
+//
+//	GOMAXPROCS          │    1    │    2    │    4
+//	mutex gate (before) │ 51.8 ns │ 105.2ns │ 188.8 ns
+//	atomic gate (after) │ 49.6 ns │  93.0ns │ 156.9 ns
+//
+// So ~4% off one logged request serially and ~17% off it at four cores, at
+// zero allocations either way. State the rest honestly: Add is still flat in
+// core count after this change, because the remaining ceiling is ringMu's
+// 328-byte copy in Add. That is a different lock, it guards real shared state
+// rather than a nil check, and it is a separate concern — see the note on
+// BenchmarkAddParallel.
+//
+// ORDERING, and why each direction is safe:
+//
+//   - startPersist stores true BEFORE it takes persistMu, so a sender that
+//     observes true while the channel is still unpublished simply takes the
+//     mutex, reads a nil persistCh and returns — byte-for-byte the pre-change
+//     path.
+//   - stopPersist stores false INSIDE the critical section that nils
+//     persistCh, so a sender that observes false has observed a point at or
+//     after that nil-ing, where the pre-change path also took the mutex, read
+//     nil and returned without a counter charge. Identical, including the
+//     accounting.
+//   - The enabled path is untouched: the enqueueWG registration still happens
+//     in the same persistMu critical section that published the channel, which
+//     is the invariant stopPersist's final sweep depends on. The gate can only
+//     short-circuit ahead of that section, never inside it.
+//
+// What the gate does NOT change is the pre-existing start race: an entry
+// in flight while persistence is being switched ON may miss the newly started
+// sink. That was already true of the mutex gate (a sender could acquire
+// persistMu before startPersist did) and it is the same race in kind, not a
+// new one — Init runs before the listeners in production, and the admin
+// re-init path has always had it.
+var persistRunning atomic.Bool
+
 // Backpressure reports how many request-log entries had to wait for room in
 // the persistence queue. Non-zero means the JSONL sink is not keeping up with
 // the request rate and proxy latency is once again coupled to disk latency —
@@ -92,6 +157,11 @@ func Backpressure() int64 { return atomic.LoadInt64(&backpressure) }
 // non-blocking send onto the buffered queue. No-op when persistence is
 // disabled.
 func enqueue(e Entry) {
+	// Persistence disabled (the default): return without touching persistMu.
+	// See persistRunning for the measurement and the ordering argument.
+	if !persistRunning.Load() {
+		return
+	}
 	persistMu.Lock()
 	ch, stop := persistCh, stopCh
 	if ch != nil {
@@ -146,6 +216,11 @@ var enqueueWG sync.WaitGroup
 // startPersist brings up the drain goroutine if it is not already running.
 // Idempotent; callers hold no lock.
 func startPersist() {
+	// Before the mutex, deliberately: a sender that observes the gate open
+	// while persistCh is still nil takes persistMu and returns on the nil
+	// exactly as it did pre-change. Opening it after publication would instead
+	// let a sender observe a CLOSED gate for a channel that already exists.
+	persistRunning.Store(true)
 	persistMu.Lock()
 	defer persistMu.Unlock()
 	if persistCh != nil {
@@ -156,6 +231,13 @@ func startPersist() {
 	stopCh = make(chan struct{})
 	persistWG.Add(1)
 	go drainLoop(persistCh, flushCh, stopCh)
+	// Re-assert INSIDE the critical section that publishes the channel. The
+	// pre-lock store above is the conservative one; this one is the
+	// authoritative one, and it is what makes start/stop interleaving safe: a
+	// stopPersist that squeezed in between the pre-lock store and this lock
+	// saw a nil persistCh, closed the gate and returned, and without this
+	// store the channel published here would be live behind a closed gate.
+	persistRunning.Store(true)
 }
 
 // stopPersist drains everything still queued, then stops the goroutine.
@@ -163,11 +245,20 @@ func startPersist() {
 func stopPersist() {
 	persistMu.Lock()
 	if persistCh == nil {
+		// Also closes the gate on the one state startPersist can leave behind:
+		// gate open, channel not yet published (it stores before locking). A
+		// stop that lands in that window must not leave enqueue paying the
+		// mutex forever for a sink that is not running.
+		persistRunning.Store(false)
 		persistMu.Unlock()
 		return
 	}
 	ch, stop := persistCh, stopCh
 	persistCh, flushCh, stopCh = nil, nil, nil
+	// Inside the section that nils persistCh: a sender observing a closed gate
+	// has observed a point at or after this nil-ing, where the pre-change path
+	// also read nil and returned uncharged.
+	persistRunning.Store(false)
 	persistMu.Unlock()
 
 	close(stop)
