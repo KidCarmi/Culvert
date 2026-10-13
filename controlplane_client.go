@@ -981,8 +981,13 @@ func updateDPAddresses(addrs []string) {
 			break
 		}
 	}
-	logger.Printf("DataPlane: CP address list updated: %v -> %v (active %q at index %d)",
-		old, addrs, sanitizeLog(active), c.activeIdx)
+	// Both lists are peer-supplied — addrs arrives verbatim in the CP's config
+	// snapshot — so they are untrusted log values under the CWE-117 rule in
+	// docs/agent-context/conventions.md: format, then sanitize with the barrier
+	// CodeQL recognises, and print with %q. The pre-fix line logged both with a
+	// bare %v.
+	logger.Printf("DataPlane: CP address list updated: %q -> %q (active %q at index %d)",
+		sanitizeLog(fmt.Sprint(old)), sanitizeLog(fmt.Sprint(addrs)), sanitizeLog(active), c.activeIdx)
 }
 
 func slicesEqual(a, b []string) bool {

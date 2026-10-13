@@ -1523,8 +1523,13 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// startup (where buildCPAddressList returns nil both times) does not spend
 	// a config version on a no-op.
 	if republished := CurrentConfigSnapshot(); !slicesEqual(snap.CPAddresses, republished.CPAddresses) {
-		logger.Printf("ControlPlane: republishing config with the committed CP address list %v (was %v)",
-			republished.CPAddresses, snap.CPAddresses)
+		// CPAddresses is operator- and peer-supplied (the HA peer address and
+		// this node's configured listen address), so it is an untrusted log
+		// value under the CWE-117 rule in docs/agent-context/conventions.md:
+		// format then sanitize with the barrier CodeQL recognises, and print
+		// with %q. The line below does the same thing for grpcAddr inline.
+		logger.Printf("ControlPlane: republishing config with the committed CP address list %q (was %q)",
+			sanitizeLog(fmt.Sprint(republished.CPAddresses)), sanitizeLog(fmt.Sprint(snap.CPAddresses)))
 		_ = globalConfigStore.Update(republished)
 	}
 

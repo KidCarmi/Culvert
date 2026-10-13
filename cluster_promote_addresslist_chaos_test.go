@@ -19,6 +19,7 @@ package main
 //         reconnectActive (the certificate-renewal redial) indexes it directly.
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -194,5 +195,41 @@ func TestChaos72b_PromotingLeaderPublishesAListNamingItself(t *testing.T) {
 	}
 	if !names {
 		t.Errorf("post-commit list = %v, which does not name the promoted node %q — a DP applying it would be left with only the dead leader", after, promoted)
+	}
+}
+
+// TestChaos72c_AddressListLogIsInjectionSafe is the CWE-117 gate on the line
+// updateDPAddresses writes. The address list arrives verbatim in the Control
+// Plane's config snapshot, so it is peer-supplied: a newline in an address
+// would otherwise forge whole log lines in the process log an operator reads
+// after a failover. The pre-fix line logged both lists with a bare %v.
+//
+// CodeQL flagged the sibling line in enableControlPlane for exactly this during
+// review of PR #1618, which is what prompted auditing this one.
+func TestChaos72c_AddressListLogIsInjectionSafe(t *testing.T) {
+	const forged = "10.0.0.9:50051\nFORGED ControlPlane: enabled via GUI (gRPC evil:1)"
+
+	c := &DataPlaneClient{
+		nodeID:    "dp-chaos72c",
+		addrs:     []string{"cp1:50051"},
+		activeIdx: 0,
+	}
+	prev := activeDPClient.Load()
+	activeDPClient.Store(c)
+	t.Cleanup(func() { activeDPClient.Store(prev) })
+
+	sink := captureLoggerForTest(t)
+	updateDPAddresses([]string{forged})
+
+	got := sink.String()
+	if got == "" {
+		t.Fatal("updateDPAddresses logged nothing, so this gate asserts nothing")
+	}
+	if strings.Contains(got, "\nFORGED") {
+		t.Errorf("a newline in a peer-supplied CP address reached the process log unescaped, forging a line:\n%s", got)
+	}
+	// The address must still be identifiable — sanitizing is not redacting.
+	if !strings.Contains(got, "10.0.0.9:50051") {
+		t.Errorf("the sanitized line no longer names the address, so the log is useless for diagnosing a failover:\n%s", got)
 	}
 }
