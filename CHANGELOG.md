@@ -536,10 +536,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   The second gate pins that the stored key is a CLONE of the caller's string.
   The key arrives as a substring of whatever buffer the caller holds — on the
   request path, net/http's header buffer — so an entry that kept it would pin
-  that whole backing array per slot. Measured against the un-cloned shape: a
-  1 048 601-byte buffer held alive behind a 25-byte key, which every
-  byte-counting test reports as 25 bytes, so the bounded-footprint ceiling would
-  have remained green while the process retained the buffers.
+  that whole backing array per slot, and every byte-counting test would report
+  that key as 25 bytes while the process retained the buffers. The gate therefore
+  drops every reference it holds to a 16 MiB buffer the probe host was sliced out
+  of and asks the collector what is still reachable: 112 bytes when the key is
+  cloned, 16 785 712 against the un-cloned shape.
 
   The third covers the one destination shape that is simultaneously legitimate,
   resolvable, over the retention bound in raw bytes and under it once

@@ -3,9 +3,9 @@ package hostutil
 import (
 	"fmt"
 	"hash/maphash"
+	"runtime"
 	"strings"
 	"testing"
-	"unsafe"
 
 	"golang.org/x/net/idna"
 )
@@ -230,39 +230,92 @@ func TestIDNMemo_RejectionIsNeverUpgradedToAcceptance(t *testing.T) {
 // backing array for the life of the entry: at 1024 slots that is gigabytes held
 // alive by hosts whose own length accounting (len(e.host)) reports a few dozen
 // bytes each, so TestIDNMemo_BoundedFootprint would still pass while the process
-// retained the buffers. The failure is invisible to every byte-counting test,
-// which is why it is pinned on the pointer.
+// retained the buffers.
+//
+// That is why the assertion is on RETENTION rather than on size: the test drops
+// every reference it holds to a large buffer the probe host was sliced out of,
+// then asks the collector how much is still reachable. A cloned key lets the
+// buffer go; an aliased one cannot. The margin is three orders of magnitude
+// (aliased retains >= aliasProbePadding, cloned retains a few dozen bytes), so
+// the threshold is nowhere near GC or allocator noise.
+//
+// Pointer identity via unsafe.StringData would say the same thing in one
+// comparison, and this file deliberately does not use it: internal/hostutil is
+// on the request path, internal/blocklist's shard test records the house rule
+// that a security-critical package does not import unsafe, and gosec's G103
+// would need a suppression on every call site. Retention is the property that
+// actually matters here anyway — aliasing is only a defect because of what it
+// keeps alive.
 func TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer(t *testing.T) {
 	normMemoResetForTest()
-	// A host that is a genuine substring of a large buffer, as r.Host is.
-	const padding = 1 << 20
-	backing := strings.Repeat("a", padding) + "bücher-alias.example.com"
-	host := backing[padding:]
-	if unsafe.StringData(host) == unsafe.StringData(backing) {
-		t.Fatal("the probe host is not a substring of the padded buffer; the case proves nothing")
-	}
+	runtime.GC()
+	runtime.GC() // the first cycle may leave the previous one's garbage unswept
+	baseline := heapAllocBytes()
 
-	norm, ok := NormalizeHostStrict(host)
-	if !ok {
-		t.Fatalf("NormalizeHostStrict(%q) rejected a valid IDN host", host)
-	}
-	e := normMemoSlot(host).Load()
-	if e == nil || e.host != host {
+	// probe is an independent short copy of the host, kept only so the slot can
+	// be found again once the padded buffer is unreachable. At ~25 bytes it
+	// retains nothing of consequence.
+	var probe string
+
+	// The substring and the value the memo returned both live ONLY inside this
+	// call. Nothing is reassigned to drop them: they go out of scope when it
+	// returns, which the language guarantees and no linter can mistake for a
+	// wasted write. norm matters as much as the key — every caller keys a store,
+	// a log line or a policy decision on it and outlives the call, so it must
+	// not alias the caller's buffer either.
+	e := func() *normMemoEntry {
+		host := aliasProbeHost()
+		probe = strings.Clone(host)
+		norm, ok := NormalizeHostStrict(host)
+		if !ok {
+			t.Fatalf("NormalizeHostStrict(%q) rejected a valid IDN host", probe)
+		}
+		if norm == "" {
+			t.Fatalf("NormalizeHostStrict(%q) returned an empty host with ok=true", probe)
+		}
+		return normMemoSlot(probe).Load()
+	}()
+	if e == nil || e.host != probe {
 		t.Fatalf("the probe host was not retained (entry=%+v); the case proves nothing", e)
 	}
-	if unsafe.StringData(e.host) == unsafe.StringData(host) {
-		t.Fatalf("REGRESSION: the memo stored the caller's string rather than a clone, pinning its "+
-			"%d-byte backing array behind a %d-byte key — the bounded-footprint ceiling does not hold",
-			len(backing), len(e.host))
+	if len(e.host) >= aliasProbePadding {
+		t.Fatalf("the entry's key is %d bytes; the probe is built wrong", len(e.host))
 	}
-	if unsafe.StringData(e.norm) == unsafe.StringData(host) {
-		t.Fatalf("REGRESSION: the memoized normalized form aliases the caller's %d-byte buffer",
-			len(backing))
+
+	runtime.GC()
+	runtime.GC()
+	retained := heapAllocBytes() - baseline
+
+	// A cloned key retains the entry and its two short strings. An aliased one
+	// retains the whole padded buffer, so anything approaching it is the defect.
+	if retained > aliasProbePadding/8 {
+		t.Fatalf("REGRESSION: %d bytes still reachable after dropping the caller's buffer, "+
+			"against a %d-byte probe — the memo stored the caller's string rather than a clone, "+
+			"pinning its backing array behind a %d-byte key, and the bounded-footprint ceiling "+
+			"does not hold", retained, aliasProbePadding, len(e.host))
 	}
-	// The returned value must not alias it either: it outlives the call in every
-	// caller that keys a store, a log line or a policy decision on it.
-	if unsafe.StringData(norm) == unsafe.StringData(host) {
-		t.Fatalf("REGRESSION: the returned normalized host aliases the caller's %d-byte buffer",
-			len(backing))
-	}
+	t.Logf("retained %d bytes after dropping a %d-byte buffer sliced behind a %d-byte key",
+		retained, aliasProbePadding, len(e.host))
+}
+
+// aliasProbePadding is the buffer the probe host is sliced out of. It stands in
+// for net/http's header buffer and is sized so that retaining it is unmistakable
+// against GC and allocator noise.
+const aliasProbePadding = 16 << 20
+
+// aliasProbeHost returns a host that is a genuine SUBSTRING of a large buffer,
+// exactly as r.Host is a slice of the header buffer. The buffer is built and
+// dropped inside this function so the caller's frame holds no reference to it
+// other than the returned substring — which is what makes dropping that
+// substring sufficient to make the buffer unreachable.
+func aliasProbeHost() string {
+	backing := strings.Repeat("a", aliasProbePadding) + "bücher-alias.example.com"
+	return backing[aliasProbePadding:]
+}
+
+// heapAllocBytes reports currently reachable heap bytes. Callers must GC first.
+func heapAllocBytes() uint64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
 }

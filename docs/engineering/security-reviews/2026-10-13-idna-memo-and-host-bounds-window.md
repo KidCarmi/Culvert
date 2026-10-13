@@ -171,11 +171,15 @@ mis-attributed audit. CWE-290 / CWE-807; OWASP A01:2021.
 The key reaches the memo as a substring of whatever the caller holds — on the
 request path, a slice of net/http's header buffer. Had the entry kept it instead
 of a clone, each slot would pin that entire backing array. Measured against the
-un-cloned shape: **1 048 601 bytes held alive behind a 25-byte key**. The failure
-is invisible to every byte-counting test, because `len(e.host)` reports 25 — so
+un-cloned shape: **16 785 712 bytes still reachable** after the test drops every
+reference it holds to the 16 MiB buffer the probe host was sliced out of, against
+**112 bytes** when the key is cloned. The failure is invisible to every
+byte-counting test, because `len(e.host)` reports 25 — so
 `TestIDNMemo_BoundedFootprint` would have stayed green while the process retained
-one buffer per slot. An attacker needs only requests with large headers and
-distinct short IDN hosts. CWE-401 / CWE-770; OWASP A04:2021.
+one buffer per slot, which is why the gate asks the collector what is still
+reachable rather than measuring string lengths. An attacker needs only requests
+with large headers and distinct short IDN hosts. CWE-401 / CWE-770;
+OWASP A04:2021.
 
 **S3 — Ceiling escape by re-deriving the bound from the canonical form
 (prospective; now gated).** SEC-IDNAMEMO-1's refactor. `maxMemoHostLen` moves
@@ -209,7 +213,7 @@ the mutation reverted (`git diff` empty) before the final run.
 | Gate | Defect injected | Observed failure |
 |---|---|---|
 | `TestIDNMemo_RejectionIsNeverUpgradedToAcceptance` | hit returns the resident entry without `&& e.host == host` | `NormalizeHostStrict("xn--0.example.com") = ("xn--bcher8063-q9a.example.com", true), want ("", false)` — the fail-open of S1 |
-| `TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer` | `key := host` in place of `strings.Clone(host)` | `the memo stored the caller's string rather than a clone, pinning its 1048601-byte backing array behind a 25-byte key` |
+| `TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer` | `key := host` in place of `strings.Clone(host)` | `16785712 bytes still reachable after dropping the caller's buffer, against a 16777216-byte probe` (112 bytes when cloned, threshold 2 MiB) |
 | `TestIDNMemo_MaximalLegitimateIDNIsAnswerTransparent` | the `len(host) > maxMemoHostLen` pre-check removed (bound left on `norm` only) | `1 slots filled by an 883-byte legitimate IDN host` |
 
 Coverage of the task's required test classes: **positive** (the accepted host
@@ -243,11 +247,19 @@ Checked at this revision, beyond the diff:
   run before or outside the application logger (`main.go` break-glass reset and
   backup output, `dp_enrollment.go`, `ui_tls_custom.go`, `ui_support.go`), not on
   request or admin-handler paths. Consistent with the recorded convention.
-- **`unsafe`** is used by the new gate in a test file only, with existing
-  precedent (`metrics_histogram_shard_test.go`,
-  `internal/blocklist/hotread_test.go`) and one production site
-  (`internal/mcp/limits/limits.go`). Pointer identity is the only way to observe
-  the clone; no byte-counting assertion can.
+- **`unsafe` is NOT introduced.** The first revision of the alias gate used
+  `unsafe.StringData` to compare pointer identity, which `golangci-lint`'s gosec
+  flagged as G103 on three call sites (reviewdog, PR #1617). The two existing
+  uses in the tree are `unsafe.Sizeof` only, and
+  `internal/blocklist/hotread_test.go` records the house rule in so many words —
+  *"a security-critical package does not import unsafe for a padding figure"* —
+  so the gate was re-instrumented on **retention** instead of pointer identity
+  rather than carrying three suppressions into `internal/hostutil`, which is on
+  the request path. Retention is the property that actually matters: aliasing is
+  only a defect because of what it keeps alive. The separation is 18 724x below
+  the threshold when the key is cloned and 8x above it when it is not, so the
+  gate is not near GC or allocator noise; verified failing in both the default
+  and `-race -count=2 -shuffle=on` lanes.
 - **CI/dependency window (`28a43ef`)** re-read for a weakened gate, since
   "lint budget" in a commit subject is the shape that usually is one. It is not:
   the change raises golangci-lint's `--timeout` from 5 m to 10 m (under a 15 m
