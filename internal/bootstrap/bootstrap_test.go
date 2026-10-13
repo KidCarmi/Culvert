@@ -178,3 +178,37 @@ func TestRenderScript_And_Compose(t *testing.T) {
 		}
 	}
 }
+
+// A registry override is a repository, to which Image appends the tag. Two
+// operator-typical shapes used to pass SafeImageRef and render a reference
+// `docker compose up` cannot pull, leaving the DP node unable to start:
+// a trailing slash ("repo/:tag") and an override that already carries a tag or
+// digest ("repo:1.0:tag", "repo@sha256:…:tag").
+func TestImage_RegistryOverrideMalformedRepository(t *testing.T) {
+	write := func(t *testing.T, reg string) string {
+		p := filepath.Join(t.TempDir(), "registry_settings.json")
+		if err := os.WriteFile(p, []byte(`{"registry_url":"`+reg+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	if got, want := Image(write(t, "registry.corp/culvert/"), "2.0.0"), "registry.corp/culvert:2.0.0"; got != want {
+		t.Errorf("trailing slash: Image = %q, want %q", got, want)
+	}
+
+	for _, reg := range []string{
+		"registry.corp/culvert:1.0",
+		"registry.corp/culvert@sha256:" + strings.Repeat("a", 64),
+	} {
+		got := Image(write(t, reg), "2.0.0")
+		if got != DefaultImage+":2.0.0" {
+			t.Errorf("override %q already names a tag/digest: Image = %q, want fallback %q", reg, got, DefaultImage+":2.0.0")
+		}
+	}
+
+	// A registry host:port is not a tag.
+	if got, want := Image(write(t, "registry.corp:5000/culvert"), "2.0.0"), "registry.corp:5000/culvert:2.0.0"; got != want {
+		t.Errorf("host:port override: Image = %q, want %q", got, want)
+	}
+}
