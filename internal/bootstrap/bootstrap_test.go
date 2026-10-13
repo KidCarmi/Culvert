@@ -207,6 +207,11 @@ func TestImage_RegistryOverrideMalformedRepository(t *testing.T) {
 		}
 	}
 
+	// "host/" names no repository; trimming it must not turn it into a Docker Hub image.
+	if got := Image(write(t, "registry.corp/"), "2.0.0"); got != DefaultImage+":2.0.0" {
+		t.Errorf("host-only override: Image = %q, want fallback %q", got, DefaultImage+":2.0.0")
+	}
+
 	// A registry host:port is not a tag.
 	if got, want := Image(write(t, "registry.corp:5000/culvert"), "2.0.0"), "registry.corp:5000/culvert:2.0.0"; got != want {
 		t.Errorf("host:port override: Image = %q, want %q", got, want)
