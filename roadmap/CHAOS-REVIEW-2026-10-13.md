@@ -64,7 +64,7 @@ failure survivable made it worse.
    exact hazard. The fix was never carried across. **Verified by direct source
    read** (no cleanup function for it exists anywhere in the tree).
 
-Beyond these, the round opened a backlog of 20 further findings across
+Beyond these, the round opened a backlog of 29 further findings across
 durability, retry shaping, resource exhaustion and lifecycle. They are recorded
 in §4 with explicit verification status, because several are consequential
 enough that an owner decision — not a drive-by patch — is the right next step.
@@ -423,13 +423,25 @@ across a sweep.
 | `python3 docs/agent-context/check.py` | pass (static integrity) |
 | Pre-fix regression check | each defect re-introduced individually; the matching tests fail, and the CHAOS-72 case wedges the test binary until its own timeout panic — the deadlock end to end |
 | `golangci-lint run` | **could not run locally.** The pre-installed binary is 2.5.0 built with go1.25 and aborts with `package requires newer Go version go1.26`, identically on packages this change does not touch. CI's pinned action is the authority. |
-| `go test -race ./...` | **not run** — see below. |
+| `go test -race -run 'TestChaos71\|TestChaos72\|TestChaos73' .` | pass, clean under `-race` |
+| `go test .` (serial, whole root package, 468s) | 10 failures, **all pre-existing and environmental** — see below |
+| `go test -race ./...` | **not run** |
 
-Two gaps stated plainly: the full-module race-detector run and the aggregate CI
-suite were not executed here, and local lint could not run at all for the
-toolchain reason above. The Fast PR Gate, the hosted `golangci-lint` job and
-CodeQL for the PR's SHA are the authority on all three. A passing local check is
-not a passing merge gate.
+The 10 full-suite failures are all IdP tests (`TestIdPRegistry_*`,
+`TestAPIIdP*`) failing with `idp oidc issuer: URL must be https:// and must not
+point to a private address`. Their fixture uses `https://example.com` and its
+own comment states it relies on that host resolving to a public address so the
+fail-closed DNS check in `validateExternalURL` passes. This sandbox has no
+outbound DNS (`getent hosts example.com` returns nothing), so the guard
+correctly refuses. **Confirmed not caused by this round:** the identical three
+failures reproduce on the parent revision `77c0c58` in a clean worktree, and the
+change touches no SSRF, URL-validation, IdP or auth code. They are an artefact
+of the review environment, not a finding and not a regression.
+
+Two gaps stated plainly: the full-module race-detector run was not executed
+here, and local lint could not run at all for the toolchain reason above. The
+Fast PR Gate, the hosted `golangci-lint` job and CodeQL for the PR's SHA are the
+authority on both. A passing local check is not a passing merge gate.
 
 **Tests this round did NOT write:** nothing in §4. Several of those would need
 fault-injection harnesses that already exist in-tree (write-failure observers,

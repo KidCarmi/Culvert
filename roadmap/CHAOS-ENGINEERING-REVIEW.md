@@ -11,7 +11,7 @@ posture — **default deny, fail closed when recovery is impossible, graceful de
 **Later rounds:** the 2026-10-13 round is recorded separately in
 [CHAOS-REVIEW-2026-10-13.md](CHAOS-REVIEW-2026-10-13.md) — CHAOS-71/72/73 (the HA
 promotion self-deadlock on `clusterRoleMu`, the DP→CP backoff ladder, and the
-unbounded unenrolled-pull map), plus a 20-item backlog. Rows below that it
+unbounded unenrolled-pull map), plus a 29-item backlog. Rows below that it
 changes are annotated inline.
 
 This document is a standing register. It records where Culvert already survives failure safely
