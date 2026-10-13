@@ -284,18 +284,35 @@ func TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer(t *testing.T) {
 
 	runtime.GC()
 	runtime.GC()
-	retained := heapAllocBytes() - baseline
+	after := heapAllocBytes()
 
 	// A cloned key retains the entry and its two short strings. An aliased one
 	// retains the whole padded buffer, so anything approaching it is the defect.
-	if retained > aliasProbePadding/8 {
+	//
+	// The predicate is `after > baseline+ceiling` rather than a
+	// `retained := after - baseline` subtraction, and that is not a style
+	// preference. Both are uint64, and HeapAlloc can legitimately read BELOW the
+	// baseline: garbage that was still live when the baseline was taken may be
+	// swept afterwards, and other goroutines free memory between the two reads.
+	// With a cloned key the margin is ~112 bytes, i.e. the measurement sits ON
+	// that boundary rather than near it, so one byte of downward drift would wrap
+	// the subtraction to ~2^64, clear this ceiling, and report a FALSE
+	// "REGRESSION" — most readily in the -shuffle=on lane, where the test that
+	// ran before this one varies (CodeRabbit, PR #1617).
+	//
+	// Comparing against baseline+ceiling needs no clamp: a reading at or below
+	// the baseline means nothing was retained, which is the passing answer, and
+	// the branch can only be entered when after exceeds the baseline, so the
+	// subtraction in the message is safe by construction.
+	const ceiling = aliasProbePadding / 8
+	if after > baseline+ceiling {
 		t.Fatalf("REGRESSION: %d bytes still reachable after dropping the caller's buffer, "+
 			"against a %d-byte probe — the memo stored the caller's string rather than a clone, "+
 			"pinning its backing array behind a %d-byte key, and the bounded-footprint ceiling "+
-			"does not hold", retained, aliasProbePadding, len(e.host))
+			"does not hold", after-baseline, aliasProbePadding, len(e.host))
 	}
-	t.Logf("retained %d bytes after dropping a %d-byte buffer sliced behind a %d-byte key",
-		retained, aliasProbePadding, len(e.host))
+	t.Logf("heap after dropping a %d-byte buffer sliced behind a %d-byte key: %d bytes against a "+
+		"%d-byte baseline (ceiling %d)", aliasProbePadding, len(e.host), after, baseline, ceiling)
 }
 
 // aliasProbePadding is the buffer the probe host is sliced out of. It stands in
