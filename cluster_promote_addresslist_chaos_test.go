@@ -29,7 +29,7 @@ import (
 // reach updateDPAddresses through the activeDPClient global, so an
 // unsynchronised read here would be a real -race finding rather than a
 // theoretical one.
-func dpAddrState(c *DataPlaneClient) ([]string, int) {
+func dpAddrState(c *DataPlaneClient) (addrs []string, activeIdx int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.addrs...), c.activeIdx
