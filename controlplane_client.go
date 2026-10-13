@@ -951,8 +951,38 @@ func updateDPAddresses(addrs []string) {
 		return
 	}
 	old := c.addrs
+	// CHAOS-72c (found while fixing CHAOS-72b): activeIdx is an index INTO
+	// c.addrs naming the address c.conn is connected to, so replacing the slice
+	// without re-resolving it leaves a stale index. A shrinking list then makes
+	// reconnectActive's `c.addrs[c.activeIdx]` panic — its len==0 guard does not
+	// cover an index past a non-empty slice — and reconnectActive is the
+	// certificate-renewal redial (CHAOS-12), so the crash lands on a path that
+	// runs unattended on a healthy node.
+	//
+	// Reachable before this fix and newly easy to reach: a DP configured with
+	// two CP addresses sits at activeIdx=1 after one failover, and an HA
+	// promotion published a ONE-element list (CHAOS-72b), which is exactly the
+	// shrink that panics.
+	//
+	// Re-resolve by ADDRESS, not by clamping the index: clamping would silently
+	// re-point activeIdx at a different CP than the one c.conn actually holds.
+	// When the active address is gone from the authoritative list, index 0 is
+	// the honest answer — the CP has said that address is no longer a member, so
+	// the next redial should go to a listed one.
+	active := ""
+	if c.activeIdx >= 0 && c.activeIdx < len(old) {
+		active = old[c.activeIdx]
+	}
 	c.addrs = addrs
-	logger.Printf("DataPlane: CP address list updated: %v -> %v", old, addrs)
+	c.activeIdx = 0
+	for i := range addrs {
+		if addrs[i] == active {
+			c.activeIdx = i
+			break
+		}
+	}
+	logger.Printf("DataPlane: CP address list updated: %v -> %v (active %q at index %d)",
+		old, addrs, sanitizeLog(active), c.activeIdx)
 }
 
 func slicesEqual(a, b []string) bool {

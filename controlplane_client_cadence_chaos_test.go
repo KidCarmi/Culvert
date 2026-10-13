@@ -230,8 +230,8 @@ func TestChaos71_JitterDecorrelatesTheRetryInstant(t *testing.T) {
 	if len(seen) < fleet/2 {
 		t.Errorf("%d distinct retry instants across %d nodes — the fleet is still correlated", len(seen), fleet)
 	}
-	if max := mostCommonCount(seen); max > fleet/4 {
-		t.Errorf("%d of %d nodes drew the SAME retry instant", max, fleet)
+	if worst := mostCommonCount(seen); worst > fleet/4 {
+		t.Errorf("%d of %d nodes drew the SAME retry instant", worst, fleet)
 	}
 
 	// A client with no jitter installed must stay exactly on the ladder, which

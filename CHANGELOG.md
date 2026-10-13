@@ -549,6 +549,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   test vacuous, so the new gates pin the premise (that the function really does
   take the lock) as well as the behaviour.
 
+- **A promoted leader published a CP address list naming the node that had just
+  died, and a shrinking list crashed the Data Plane (CHAOS-72b / CHAOS-72c).**
+  Both of these sit *downstream* of the publish in `enableControlPlane`, so
+  neither had ever executed on the promotion path: the deadlock above reached
+  the publish and stopped there. Fixing the hang made both live at once.
+
+  `buildCPAddressList` composes the Data Plane failover list from the HA peer
+  address and `clusterRole.grpcAddr`, and `grpcAddr` is deliberately assigned
+  only *after* the listener binds ("only set role after gRPC is successfully
+  started"). For a promoting standby the peer is **the leader that just died**,
+  so the published list named the dead node and omitted the one taking over —
+  and `updateDPAddresses` *replaces* a Data Plane's list rather than merging into
+  it, so a node that had just reached the new leader would overwrite its working
+  address with the dead one and have nothing live left to redial. Fixed by
+  republishing once the role fields are committed, outside the write lock
+  (inside it would be the deadlock again), and only when the list actually
+  changed — so an ordinary non-HA startup does not spend a config version on a
+  no-op.
+
+  `activeIdx` is an index *into* `c.addrs` naming the address the live
+  connection holds, and `updateDPAddresses` replaced that slice without
+  re-resolving it. `reconnectActive` indexes it directly and its `len == 0`
+  guard does not cover an index past a *non-empty* slice, so a shrinking list
+  panicked with `index out of range [1] with length 1` — and
+  `reconnectActive` is the certificate-renewal redial, which runs unattended on
+  a healthy node. The one-element list the first defect published is exactly
+  the shrink that triggers it. Fixed by re-resolving the active entry by
+  **address** rather than clamping the index: clamping also stops the panic but
+  silently re-points the client at a different Control Plane than the one its
+  connection actually holds.
+
 - **The Data Plane's backoff against its Control Plane was defeated three ways
   (CHAOS-71).** Measured, not inferred:
 

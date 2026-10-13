@@ -1495,12 +1495,53 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// unaffected — building a snapshot is not publishing it.
 	snap := CurrentConfigSnapshot()
 
+	if err := commitControlPlaneRole(snap, grpcAddr, certFile, keyFile, caFile, clusterDBPath); err != nil {
+		return err
+	}
+
+	// CHAOS-72b (Codex review of PR #1618): republish now that the role fields
+	// are committed, because the snapshot published above cannot name this node.
+	//
+	// buildCPAddressList composes the DP failover list from the HA peer address
+	// and clusterRole.grpcAddr, and grpcAddr is deliberately assigned only
+	// AFTER the listener is up ("only set role after gRPC is successfully
+	// started"). On an HA promotion that leaves the first snapshot naming the
+	// peer — which, for a promoting standby, is the leader that just DIED — and
+	// not the node that is taking over. updateDPAddresses REPLACES a DP's list
+	// rather than merging into it, so a data plane that had just found the new
+	// leader would overwrite its working address with the dead one and have
+	// nothing live left to redial.
+	//
+	// Republishing is preferred over building the first list from the
+	// prospective address: it keeps "the published list describes committed
+	// state" true by construction, rather than making one caller predict state
+	// it has not reached yet, and it cannot publish an address that then fails
+	// to bind. It must happen OUT of the write lock — CurrentConfigSnapshot
+	// reads clusterRoleMu, which is the whole of CHAOS-72 above.
+	//
+	// Only published when the list actually changed, so the ordinary non-HA
+	// startup (where buildCPAddressList returns nil both times) does not spend
+	// a config version on a no-op.
+	if republished := CurrentConfigSnapshot(); !slicesEqual(snap.CPAddresses, republished.CPAddresses) {
+		logger.Printf("ControlPlane: republishing config with the committed CP address list %v (was %v)",
+			republished.CPAddresses, snap.CPAddresses)
+		_ = globalConfigStore.Update(republished)
+	}
+
+	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
+	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
+	return nil
+}
+
+// commitControlPlaneRole is enableControlPlane's write-locked section: the
+// idempotency guard, the initial publish, the CA, the listener, and the role
+// fields the guard protects, which must all be atomic against a concurrent
+// enable. Split out so the lock is RELEASED before the caller rebuilds a
+// snapshot — see CHAOS-72 and CHAOS-72b above.
+func commitControlPlaneRole(snap ConfigSnapshot, grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
 	clusterRoleMu.Lock()
 	defer clusterRoleMu.Unlock()
 
-	// Still inside the write lock: the idempotency guard and the role
-	// transition it protects must stay atomic with respect to a concurrent
-	// enable.
 	if clusterRole.role == "control-plane" {
 		return fmt.Errorf("already running as control-plane")
 	}
@@ -1524,8 +1565,6 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	clusterRole.certFile = certFile
 	clusterRole.keyFile = keyFile
 	clusterRole.caFile = caFile
-	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
 }
 

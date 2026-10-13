@@ -141,11 +141,52 @@ Severity is impact × reachability on a **supported default deployment**.
 | CHAOS-71a | Failure streak double-incremented → wrong ladder (`4s/16s/60s`) and failover on the 2nd failure | **HIGH** | **FIXED** | `controlplane_client.go` `backoff`/`pollConfig`; empirical |
 | CHAOS-71b | Redial cleared the streak → HA deployments never back off; permanent CP flapping | **HIGH** | **FIXED** | `controlplane_client.go` `failover`; empirical |
 | CHAOS-71c | No jitter on the ladder, no phase offset on five CP-facing tickers → fleet lockstep + mass reconnect (instantiates registered **WK-13 / HA-11**, P2) | **MEDIUM** | **FIXED** | `controlplane_client.go`; empirical |
+| CHAOS-72b | The snapshot a promoted leader publishes names the **dead** peer and not itself, and `updateDPAddresses` REPLACES a DP's failover list rather than merging — so a DP that had just found the new leader overwrote its working address with the dead one | **HIGH** | **FIXED** | `main.go` `enableControlPlane`; raised by Codex review of PR #1618, mechanics source-verified |
+| CHAOS-72c | `updateDPAddresses` replaced `c.addrs` without re-resolving `activeIdx`, which indexes it; a shrinking list left the index past the end and `reconnectActive` — the **certificate-renewal redial** — panicked on it | **HIGH** | **FIXED** | `controlplane_client.go`; empirical (`index out of range [1] with length 1`) |
 | CHAOS-73 | `unenrolledConfigPull.attempts` unbounded per peer IP; sibling has a janitor | **MEDIUM** | **FIXED** | `controlplane_server.go`; source-verified |
 
 Registered rows this round touches: **WK-13** (jitter on every feed/poll ticker)
 and **HA-11** are now closed *for the cluster control/data plane*. They remain
 open for `internal/blocklistfeed` and `internal/otlp` — see §4.2.
+
+---
+
+### 3.1 Two defects the CHAOS-72 fix uncovered
+
+Worth recording as a method note, not just as rows. CHAOS-72 was a deadlock, and
+a deadlock is a *perfect* mask: the promotion path never reached its own publish,
+so two further defects downstream of that publish had never executed on this
+path. Fixing the hang made both live at once, and the Codex review of the PR
+caught the first within minutes of it becoming reachable.
+
+- **CHAOS-72b** — `buildCPAddressList` composes the DP failover list from the HA
+  peer address and `clusterRole.grpcAddr`, and `grpcAddr` is deliberately
+  assigned only *after* the listener binds ("only set role after gRPC is
+  successfully started"). For a promoting standby the peer is **the leader that
+  just died**, so the published list named the dead node and omitted the one
+  taking over — and `updateDPAddresses` replaces a DP's list rather than merging
+  into it, so a data plane that had just reached the new leader would overwrite
+  its working address with the dead one and have nothing live left to redial.
+  Fixed by republishing once the role fields are committed, outside the write
+  lock (inside it would be CHAOS-72 again), and only when the list actually
+  changed so ordinary non-HA startup does not spend a config version on a no-op.
+
+- **CHAOS-72c** — found while fixing 72b, and worse. `activeIdx` is an index
+  *into* `c.addrs` naming the address the live connection holds, and
+  `updateDPAddresses` replaced the slice without re-resolving it.
+  `reconnectActive` indexes it directly, and its `len == 0` guard does not cover
+  an index past a *non-empty* slice — so a shrinking list panicked with
+  `index out of range [1] with length 1`. `reconnectActive` is the
+  certificate-renewal redial, which runs unattended on a healthy node, and the
+  one-element list CHAOS-72b published is exactly the shrink that triggers it.
+  Fixed by re-resolving by **address** rather than clamping the index: clamping
+  also stops the panic but silently re-points the client at a different control
+  plane than the one its connection actually holds.
+
+The lesson for the backlog in §4: a fix that unblocks a path can promote latent
+defects downstream of it into live ones. Any work on L-1/L-5 (listeners that
+exit or die silently) should expect the same, and should look at what has never
+actually run past the failure being fixed.
 
 ---
 
