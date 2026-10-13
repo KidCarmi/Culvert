@@ -248,6 +248,8 @@ change wider than a chaos round should make unreviewed.
 | L-4 | `logFatalf` bypasses the shutdown registry entirely, including from the live proxy serve loop, so a lost listening socket severs in-flight tunnels with no accounting and closes the stores uncleanly. The *exit posture* is a recorded owner decision; exiting via `os.Exit` rather than signalling `quit` is the defect. | **MED** | delegated |
 | L-5 | Two listeners die silently with no retry, alert, metric or health row: the **CP gRPC serve loop** (after which every surface still reports a healthy CP while no DP receives config) and the **scan sidecar**. Contrast the admin UI and SOCKS5, which have the full treatment. | **HIGH** | **source-verified** (CP gRPC half: the serve goroutine's only reaction to `Serve` returning is one `logger.Printf`; no role demotion, no rebind, and no CP-gRPC health surface exists anywhere in the tree). Scan sidecar half: delegated. |
 | L-6 | Five background workers lack the repo's own per-round panic guard (SSE broadcaster — every second, over the widest set of mutable globals in the binary; support retention janitor, whose boot sweep is synchronous; support upload worker; debug-level watchdog; decryption-trend sampler), so a panic in a round terminates the gateway. | **MED** | delegated |
+| X-8 | **`TestBenchGate_IPFilterBulkLoadIsLinear` is a marginal timing gate.** Observed at **8.65x against an 8.0x bound** on two heads of PR #1618, in a package that PR does not touch. The test's own comment records CI previously seeing **8.28x** on the same shuffled determinism run, which is why it already carries `runtime.GC()` settling and best-of-nine sampling. A ratio of two sub-millisecond samples on a shared runner is the underlying fragility; the bound is not the finding, the measurement's variance is. | **LOW** (CI reliability, not product) | **source-verified** (the prior overshoot is recorded in the test) |
+
 | L-7 | Lifecycle handles built to be awaited are discarded (hit-counter persistence `done`, SSE `Done()`, SIGHUP reloader `Done()`), and MCP telemetry loops are parented to `context.Background()` 25 lines after the same file argues they must not be. Loss mode is a missed checkpoint, not corruption. | **LOW** | delegated |
 
 ---
@@ -469,7 +471,9 @@ across a sweep.
 | `golangci-lint run` | **could not run locally.** The pre-installed binary is 2.5.0 built with go1.25 and aborts with `package requires newer Go version go1.26`, identically on packages this change does not touch. CI's pinned action is the authority. |
 | `go test -race -run 'TestChaos71\|TestChaos72\|TestChaos73' .` | pass, clean under `-race` |
 | `go test .` (serial, whole root package, 468s) | 10 failures, **all pre-existing and environmental** — see below |
-| `go test -race ./...` | **not run** |
+| `go test -race .` (whole root package, 2307s) | **0 data races, 0 panics, 0 CHAOS-7x failures.** The only failures are the same 9 environmental IdP tests described below. |
+| `golangci-lint run --timeout=10m --new-from-rev origin/main` | **0 issues** — see the note below on why this became runnable |
+| `go test -race ./...` (every package) | **not run** |
 
 The 10 full-suite failures are all IdP tests (`TestIdPRegistry_*`,
 `TestAPIIdP*`) failing with `idp oidc issuer: URL must be https:// and must not
@@ -482,10 +486,32 @@ failures reproduce on the parent revision `77c0c58` in a clean worktree, and the
 change touches no SSRF, URL-validation, IdP or auth code. They are an artefact
 of the review environment, not a finding and not a regression.
 
-Two gaps stated plainly: the full-module race-detector run was not executed
-here, and local lint could not run at all for the toolchain reason above. The
-Fast PR Gate, the hosted `golangci-lint` job and CodeQL for the PR's SHA are the
-authority on both. A passing local check is not a passing merge gate.
+**On the lint claim above, corrected.** "Could not run locally" was wrong, and
+accepting it cost three CI round-trips on findings a local run would have caught
+first. The gate's own recipe is `go install
+github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0`, and it produces
+a working binary only because the CI job sets `GOTOOLCHAIN: local`. In this
+environment `GOTOOLCHAIN` defaults to `auto`, so Go silently honours
+golangci-lint's own `toolchain go1.24.7` directive and builds a linter that then
+refuses a go1.26 module. Rebuilt with the toolchain pinned to the repository's
+own go1.26.9, the gate's exact command runs here and reports 0 issues on this
+diff. Anyone reproducing this review should pin `GOTOOLCHAIN` before concluding
+the linter is unavailable.
+
+**A second process note, because it polluted this round's own evidence.** Seven
+heads were pushed in 52 minutes, several within 3–7 minutes of each other. Each
+push cancels the previous in-flight run, and both aggregate gates and the race
+verdict fail on ANY producer that is not `success` — cancelled included (the
+verdict's "Every producer must have succeeded" step). That manufactured most of
+the red checks this round then spent time investigating: on one head 2 of 21
+jobs "failed" and both were aggregates, with lint green and no shard failing. The
+genuinely real CI failures were two lint findings (both fixed) and the
+`internal/admission` determinism gate (row X-8 below).
+
+One gap remains stated plainly: the full-module race-detector run across every
+package was not executed here. The Fast PR Gate, the hosted `golangci-lint` job
+and CodeQL for the PR's SHA are the authority. A passing local check is not a
+passing merge gate.
 
 **Tests this round did NOT write:** nothing in §4. Several of those would need
 fault-injection harnesses that already exist in-tree (write-failure observers,
