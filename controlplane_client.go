@@ -345,7 +345,7 @@ const dpStartupStaggerMax = 5 * time.Second
 // The offset is drawn PER LOOP rather than once per node, so the five loops of
 // a single data plane also stop firing as one burst against the CP.
 func staggerLoopStart(ctx context.Context, interval time.Duration) bool {
-	d := dpStartupStagger(interval)
+	d := dpStaggerDelay(interval)
 	if d <= 0 {
 		return ctx.Err() == nil
 	}
@@ -358,6 +358,17 @@ func staggerLoopStart(ctx context.Context, interval time.Duration) bool {
 		return true
 	}
 }
+
+// dpStaggerDelay is the phase-offset source. It exists as a variable only so a
+// test can install a KNOWN offset: the ordering contract "the cold-start poll is
+// never staggered" cannot otherwise be asserted, because a real offset is drawn
+// from [0, 5s) and a test that merely waits 5s for the first poll passes whether
+// the fetch runs before the wait or after it (CodeRabbit review of PR #1618).
+// Same test-seam precedent as callForTest above and the logger global.
+//
+// Production never reassigns it; a test that does must restore it only after
+// joining the loop goroutine it affected.
+var dpStaggerDelay = dpStartupStagger
 
 // dpStartupStagger draws the phase offset: uniform over [0, interval) and
 // never more than dpStartupStaggerMax, so a sub-second loop is staggered
@@ -966,21 +977,46 @@ func updateDPAddresses(addrs []string) {
 	//
 	// Re-resolve by ADDRESS, not by clamping the index: clamping would silently
 	// re-point activeIdx at a different CP than the one c.conn actually holds.
-	// When the active address is gone from the authoritative list, index 0 is
-	// the honest answer — the CP has said that address is no longer a member, so
-	// the next redial should go to a listed one.
 	active := ""
 	if c.activeIdx >= 0 && c.activeIdx < len(old) {
 		active = old[c.activeIdx]
 	}
-	c.addrs = addrs
-	c.activeIdx = 0
+	nextIdx, activeListed := 0, false
 	for i := range addrs {
 		if addrs[i] == active {
-			c.activeIdx = i
+			nextIdx, activeListed = i, true
 			break
 		}
 	}
+
+	// The active address is no longer a member, so REDIAL (CodeRabbit review of
+	// PR #1618). Re-pointing activeIdx alone is not enough and the first version
+	// of this fix got that wrong: `call` invokes over c.conn, not over
+	// c.addrs[c.activeIdx], so the index and the connection are independent, and
+	// nothing else redials on a list change — reconnectActive runs only for a
+	// certificate renewal, and failover only off a failure streak.
+	//
+	// Leaving c.conn alone is therefore not merely untidy. A de-listed CP that is
+	// still RESPONSIVE — the ordinary shape right after an HA promotion, where
+	// the old leader is up but no longer authoritative — keeps answering this
+	// node's polls, so every poll SUCCEEDS, resetBackoff clears the streak, the
+	// failover gate is never reached, and the data plane applies a demoted CP's
+	// configuration indefinitely. With the fencing lease unset (the default until
+	// S5 wires it) the snapshot carries epoch 0, so the DP-side ratchet does not
+	// reject it either.
+	//
+	// A failed redial keeps BOTH the old list and the old connection, rather than
+	// adopting a list this node cannot reach: the snapshot is re-applied on the
+	// next poll, so the update is deferred, not lost.
+	if !activeListed && c.conn != nil {
+		if err := c.connect(addrs[0]); err != nil {
+			logger.Printf("DataPlane: CP address list dropped the active address %q but redial to %q failed, keeping the current list and connection: %v",
+				sanitizeLog(active), sanitizeLog(addrs[0]), err)
+			return
+		}
+	}
+	c.addrs = addrs
+	c.activeIdx = nextIdx
 	// Both lists are peer-supplied — addrs arrives verbatim in the CP's config
 	// snapshot — so they are untrusted log values under the CWE-117 rule in
 	// docs/agent-context/conventions.md: format, then sanitize with the barrier

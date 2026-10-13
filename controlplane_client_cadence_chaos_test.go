@@ -345,16 +345,34 @@ func TestChaos71_ColdStartPollIsNeverStaggered(t *testing.T) {
 			return nil, errors.New("chaos71: control plane unreachable")
 		},
 	}
-	// An interval far longer than the stagger bound: if the first fetch were
-	// behind the offset, it could not possibly land inside the window below.
+	// Install a KNOWN, long phase offset. Waiting out the real offset would not
+	// test the ordering: it is drawn from [0, 5s), so a 5s deadline is satisfied
+	// whether the fetch runs BEFORE the wait or after it. With a fixed 10s offset
+	// and a 2s deadline, only the correct ordering can pass.
+	const (
+		stagger  = 10 * time.Second
+		deadline = 2 * time.Second
+	)
+	prevStagger := dpStaggerDelay
+	dpStaggerDelay = func(time.Duration) time.Duration { return stagger }
+
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.pollLoop(ctx, time.Hour)
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		c.pollLoop(ctx, time.Hour)
+	}()
+	// Join the loop BEFORE restoring the seam, so nothing reads it concurrently.
+	defer func() {
+		cancel()
+		<-loopDone
+		dpStaggerDelay = prevStagger
+	}()
 
 	select {
 	case <-polled:
-	case <-time.After(dpStartupStaggerMax):
-		t.Fatalf("no config poll within %s of start — the cold-start fetch is behind the startup stagger, so a node with no last-known-good snapshot enforces nothing for that whole window", dpStartupStaggerMax)
+	case <-time.After(deadline):
+		t.Fatalf("no config poll within %s, against a %s startup stagger — the cold-start fetch is behind the stagger, so a node with no last-known-good snapshot enforces nothing for that whole window", deadline, stagger)
 	}
 }
 

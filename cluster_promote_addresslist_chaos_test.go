@@ -120,6 +120,94 @@ func TestChaos72c_DroppedActiveAddressFallsBackToAListedOne(t *testing.T) {
 	}
 }
 
+// TestChaos72c_DroppedActiveAddressRedialsRatherThanOnlyReindexing is the
+// CodeRabbit finding from the review of PR #1618, and it is the part that
+// actually matters. Re-pointing activeIdx is cosmetic on its own: `call`
+// invokes over c.conn, not over c.addrs[c.activeIdx], and nothing else redials
+// when the list changes (reconnectActive runs only for a certificate renewal;
+// failover only off a failure streak).
+//
+// So a de-listed CP that is still RESPONSIVE — the ordinary shape right after
+// an HA promotion, where the old leader is up but no longer authoritative —
+// would keep answering this node's polls. Every poll would SUCCEED, resetBackoff
+// would clear the streak, the failover gate would never be reached, and the data
+// plane would apply a demoted CP's configuration indefinitely. With the fencing
+// lease unset the snapshot carries epoch 0, so the DP-side ratchet does not
+// reject it either.
+func TestChaos72c_DroppedActiveAddressRedialsRatherThanOnlyReindexing(t *testing.T) {
+	c := &DataPlaneClient{
+		nodeID:    "dp-chaos72c",
+		addrs:     []string{"cp1:50051", "cp2:50051"},
+		activeIdx: 1, // connected to cp2
+	}
+	// A real (lazy) connection, so the redial has something to replace and the
+	// nil-conn guard does not short-circuit the branch under test.
+	if err := c.connect("cp2:50051"); err != nil {
+		t.Fatalf("seed connect: %v", err)
+	}
+	before := c.conn
+	t.Cleanup(func() {
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
+	prev := activeDPClient.Load()
+	activeDPClient.Store(c)
+	t.Cleanup(func() { activeDPClient.Store(prev) })
+
+	// The authoritative list drops cp2 entirely.
+	updateDPAddresses([]string{"cp3:50051", "cp4:50051"})
+
+	c.mu.Lock()
+	after, idx, addrs := c.conn, c.activeIdx, append([]string(nil), c.addrs...)
+	c.mu.Unlock()
+
+	if after == before {
+		t.Error("the connection still points at the de-listed CP — a responsive but demoted control plane would keep serving this node config forever, because every poll succeeds and the failover gate is never reached")
+	}
+	if idx != 0 || addrs[idx] != "cp3:50051" {
+		t.Errorf("activeIdx=%d names %q, want index 0 naming %q", idx, addrs[idx], "cp3:50051")
+	}
+}
+
+// TestChaos72c_RetainedActiveAddressKeepsItsConnection is the negative control
+// for the redial: when the active address is STILL a member, the connection must
+// be left alone. Redialling unconditionally would throw away a working link on
+// every unrelated list change — a reorder, or a peer being added.
+func TestChaos72c_RetainedActiveAddressKeepsItsConnection(t *testing.T) {
+	c := &DataPlaneClient{
+		nodeID:    "dp-chaos72c",
+		addrs:     []string{"cp1:50051", "cp2:50051"},
+		activeIdx: 1,
+	}
+	if err := c.connect("cp2:50051"); err != nil {
+		t.Fatalf("seed connect: %v", err)
+	}
+	before := c.conn
+	t.Cleanup(func() {
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
+	prev := activeDPClient.Load()
+	activeDPClient.Store(c)
+	t.Cleanup(func() { activeDPClient.Store(prev) })
+
+	// cp2 is still listed, just reordered, and a third CP joins.
+	updateDPAddresses([]string{"cp2:50051", "cp1:50051", "cp5:50051"})
+
+	c.mu.Lock()
+	after, idx, addrs := c.conn, c.activeIdx, append([]string(nil), c.addrs...)
+	c.mu.Unlock()
+
+	if after != before {
+		t.Error("the connection was redialled although the active address is still a member — an unrelated list change must not drop a working CP link")
+	}
+	if addrs[idx] != "cp2:50051" {
+		t.Errorf("activeIdx names %q, want the address the connection holds (%q)", addrs[idx], "cp2:50051")
+	}
+}
+
 // TestChaos72c_EmptyListIsIgnored pins the existing guard that an empty
 // CPAddresses (every non-HA snapshot carries one) must not wipe a DP's
 // configured addresses.

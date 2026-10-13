@@ -595,10 +595,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   Worse, `failover()` cleared the streak on a successful *dial*. A Control
   Plane pair that answered TCP while failing `GetConfig` — overloaded, fenced
   out, or timing out an oversized snapshot — therefore held every Data Plane on
-  the ladder's low rungs **indefinitely**, flapping between Control Planes
-  every few polls and never reaching the ceiling at all: sustained ~3s-cadence
-  polling plus a fresh gRPC connection every few polls, aimed at a Control
-  Plane that was already failing. Connectivity is not evidence that a Control
+  the ladder's low rungs **indefinitely**: the streak never passed the failover
+  threshold, so no delay ever grew beyond the 30s poll ticker and the ladder
+  never engaged at all. `pollLoop` is ticker-driven and `backoff` sleeps inside
+  a tick, so the effect was not a faster poll rate — it was a Control Plane that
+  was already failing being polled at the full 30s cadence by every node
+  forever, with a fresh gRPC connection every other poll. Connectivity is not evidence that a Control
   Plane is serving config; only a successful poll is. The failover gate is now
   re-crossed every `dpFailoverAfterFailures` rather than tested once, so a
   sustained outage still probes each configured address periodically without

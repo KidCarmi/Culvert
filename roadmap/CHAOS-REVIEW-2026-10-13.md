@@ -50,7 +50,9 @@ failure survivable made it worse.
    Worse, `failover()` cleared the streak on a successful *dial*, so an HA pair
    that answered TCP while failing `GetConfig` (overloaded, fenced out, or
    timing out an oversized snapshot) held every data plane on the ladder's low
-   rungs **forever**, flapping between control planes every few polls. And
+   rungs **forever**, so no delay ever exceeded the 30s poll ticker and the
+   backoff never engaged at all, while the client flapped between control
+   planes every other poll. And
    nothing — neither the ladder nor any of the five CP-facing tickers — was
    jittered or phase-offset, so a fleet that failed together retried together
    and reconnected in one instant. **Verified empirically** (observed ladder and
@@ -105,9 +107,10 @@ the PR's SHA is claimed — see §9.
 | | |
 |---|---|
 | **Trigger** | Any control-plane unavailability: restart, rolling upgrade, HA failover, node reboot, overload, or an oversized snapshot timing out. |
-| **Current behavior (pre-fix), measured** | Single CP, successive failed polls: `failCount` 2, 4, 6, 8 and delays **4s, 16s, 60s, 60s**. Two CPs: failover on the **2nd** consecutive failure; thereafter the redial reset the streak, so the client settled into a permanent `2s, 8s, 2s, 8s, …` cycle with a **failover on every other poll**, and **never reached the 16s rung, let alone the 60s ceiling**. |
+| **Current behavior (pre-fix), measured** | Single CP, successive failed polls: `failCount` 2, 4, 6, 8 and delays **4s, 16s, 60s, 60s**. Two CPs: failover on the **2nd** consecutive failure; thereafter the redial reset the streak, so the ladder settled into a permanent `2s, 8s, 2s, 8s, …` cycle with a **failover on every other poll**, and **never reached the 16s rung, let alone the 60s ceiling**. |
+| **What that cost, precisely** | `pollLoop` is **ticker**-driven at the 30s poll interval and `backoff` sleeps *inside* a tick, so a delay below 30s does not lengthen the poll period at all. Correcting an earlier overstatement in this row (CodeRabbit review of PR #1618, which was right): the HA case did **not** poll every ~5s. It polled every 30s — the point is that it polled every 30s **forever**, because no delay ever grew past the ticker, so the backoff ladder was **inert on every HA deployment**: the one mechanism meant to take load off a struggling control plane never engaged. The single-CP case is the opposite error — it reached the 60s ceiling on the third failed poll, so the ladder engaged far too aggressively. |
 | **Expected behavior** | `2s, 4s, 8s, 16s, 32s, 60s`, converging on the ceiling; failover every 3rd consecutive failure; delays decorrelated across the fleet. |
-| **Failure mode** | (a) convergence latency up to 60s after only ~3 polls on a single-CP deployment; (b) on every HA deployment, a *permanent* ~5s-average poll cadence plus a fresh gRPC connection every other poll against a control plane that is already failing — congestion-collapse fuel, and exactly the "spurious failover churn against a healthy leader" the snapshot-scaled call deadline was introduced to avoid; (c) fleet-synchronized retry and one-instant mass reconnect on recovery. |
+| **Failure mode** | (a) convergence latency up to 60s after only ~3 polls on a single-CP deployment; (b) on every HA deployment the ladder never engaged at all, so a failing control plane kept being polled at the full 30s cadence by every data plane indefinitely, with a fresh gRPC connection every other poll — exactly the "spurious failover churn against a healthy leader" the snapshot-scaled call deadline was introduced to avoid; (c) fleet-synchronized retry and one-instant mass reconnect on recovery. |
 | **Recovery path** | Automatic on the first successful poll (`resetBackoff`). |
 | **Customer impact** | Degraded, not down: a data plane keeps enforcing its last-known-good snapshot. The cost is config convergence latency and, in a fleet, a control plane that is harder to bring back than it should be. |
 | **Security impact** | Policy, blocklist and revocation updates converge late. Bounded by the ladder, but on an HA deployment the pathological case is sustained load on the control plane rather than a long gap. |
