@@ -516,6 +516,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- Three security-regression gates added for the memoized IDNA slow path
+  (`internal/hostutil/idnamemo.go`), each verified failing against the specific
+  defect it claims to catch. No runtime behaviour changes.
+
+  `NormalizeHostStrict` is the fail-closed dispatch gate: `ok=false` means the
+  request is REFUSED, so a host that cannot be canonicalized never reaches FQDN,
+  blocklist or category matching un-normalized (RISK-013). The memo's slots are
+  shared by design — the table is direct-mapped and a colliding host overwrites
+  the entry that was there — so the crossing that matters is a REJECTED host
+  meeting a resident ACCEPTED entry, which the existing collision test cannot
+  observe because it alternates two accepted hosts. Against a memo whose hit
+  skips the full-key re-verification, `xn--0.example.com` is now shown being
+  answered as `xn--bcher8063-q9a.example.com` with `ok=true`: a client-chosen
+  unnormalizable authority admitted, and evaluated as a different destination
+  than the one it names. The new gate pins both directions of that crossing from
+  both residencies.
+
+  The second gate pins that the stored key is a CLONE of the caller's string.
+  The key arrives as a substring of whatever buffer the caller holds — on the
+  request path, net/http's header buffer — so an entry that kept it would pin
+  that whole backing array per slot. Measured against the un-cloned shape: a
+  1 048 601-byte buffer held alive behind a 25-byte key, which every
+  byte-counting test reports as 25 bytes, so the bounded-footprint ceiling would
+  have remained green while the process retained the buffers.
+
+  The third covers the one destination shape that is simultaneously legitimate,
+  resolvable, over the retention bound in raw bytes and under it once
+  canonicalized (measured from the real `x/net/idna`: 883 raw, 251 canonical) —
+  the shape `maxRawDestAuthorityBytes` is sized to admit, and the shape no
+  existing case exercised. It asserts the un-retained branch answers identically
+  AND that the host is not retained, which pull in opposite directions on
+  purpose: moving the length check onto the normalized form keeps the first and
+  breaks the second.
+
+  Writing it also corrected the bound's own rationale, which claimed "a name
+  longer than this cannot be resolved by any DNS server". That is true of a
+  canonical name and false of the raw input the check measures — the same
+  raw-versus-canonical conflation `maxDestHostLen` already carries a warning
+  about — and it invited exactly the refactor the third gate now blocks.
+
 ### Changed
 
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
@@ -628,10 +668,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   authority and the 253-byte canonical refusal runs *after* `canonicalDestHost`
   has normalized it, while the zero-option `idna.ToASCII` profile enforces no
   length limit of its own, so an oversize A-label host would otherwise be
-  retained whole (~2.1 MB across a full table). Refusing to memoize one costs
-  nothing — no DNS server can resolve a longer name, and both dispatch gates
-  refuse it immediately, so it never reaches the fan-out the memo exists to
-  collapse. The table therefore cannot grow — 104 KB retained after 65 536
+  retained whole (~2.1 MB across a full table). The bound is measured on the
+  **raw** key rather than on the canonical form, because the key is what an
+  entry retains and therefore what the ceiling is derived from. For the shape an
+  attacker wants that is free: dot-dense ASCII does not shrink under IDNA, so a
+  1 KiB authority measures 1 KiB canonical and both dispatch gates refuse it
+  before it reaches the fan-out. It also excludes a *legitimate* internationalized
+  destination whose canonical form fits — Punycode shrinks a wide IDN, and the
+  widest such host measures 883 raw bytes against 251 canonical — which both
+  gates admit and which therefore keeps paying the full un-memoized fan-out.
+  That band is left at exactly its pre-memo behaviour deliberately: covering it
+  would mean retaining keys up to the 1 KiB raw cap and multiplying the ceiling
+  below to ~1.3 MB. The table therefore cannot grow — 104 KB retained after 65 536
   distinct IDN hosts, against a 554 KB absolute ceiling —
   a collision costs a recomputation rather than a wrong answer, because every
   hit re-verifies the full key, and an adversary who could force collisions

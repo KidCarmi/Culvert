@@ -94,11 +94,39 @@ const normMemoSlots = 1024
 // non-request callers (feed parsing, admin patterns) are not bounded by that
 // 1 KiB gate at all.
 //
-// Refusing to memoize such a host costs nothing: a name longer than this cannot
-// be resolved by any DNS server, and both dispatch gates refuse it immediately
-// after canonicalizing it, so it never reaches the ~10x per-request fan-out the
-// memo exists to collapse. The verdict is unaffected either way — an oversize
-// host is still normalized, just not retained.
+// The check is on the RAW key, not on the canonical form, because the key is
+// what an entry RETAINS and therefore what the ceiling above is derived from.
+// That has two consequences, and only the first one is free.
+//
+// A raw host whose CANONICAL form is also oversize is refused by the dispatch
+// gates immediately after canonicalizing it (rejectOversizeCanonicalHost, or
+// rejectOversizeUnnormalizableHost when it has no canonical form at all), so it
+// never reaches the ~10x per-request fan-out the memo exists to collapse. Not
+// retaining such a host costs nothing. Dot-dense ASCII is this shape: it does
+// not shrink under IDNA, so 1 KiB raw measures 1 KiB canonical and is refused.
+//
+// A raw host whose canonical form FITS is a different case, and it is a
+// LEGITIMATE one — which is why this paragraph exists rather than the single
+// sentence that used to stand here ("a name longer than this cannot be resolved
+// by any DNS server"). That sentence is true of a canonical name and false of
+// the raw input this check measures: Punycode SHRINKS a wide IDN, and the widest
+// legitimate internationalized destination measures 883 raw bytes against 251
+// canonical. proxy_host_bounds.go's maxRawDestAuthorityBytes (1 KiB) is sized
+// for exactly that host, both dispatch gates therefore ADMIT it, and it resolves
+// — so it is never memoized and keeps paying the full un-memoized fan-out.
+//
+// That gap is deliberate and accepted, not an oversight: covering it means
+// retaining keys up to the raw cap, which multiplies the ceiling above by the
+// same factor (1024 slots x ~1.3 KB of strings = ~1.3 MB, against the ~554 KB
+// TestIDNMemo_BoundedFootprint asserts). The band therefore keeps exactly the
+// behaviour it had before this memo existed, which is the one outcome that is
+// never a regression. Do NOT move this check onto the normalized form on the
+// strength of the retired sentence above without re-deriving that ceiling;
+// TestIDNMemo_MaximalLegitimateIDNIsAnswerTransparent re-measures the 883/251
+// figure against the real x/net/idna and fails if either half moves.
+//
+// The verdict is unaffected either way — an oversize host is still normalized,
+// just not retained.
 const maxMemoHostLen = 253
 
 // normMemoMask turns a hash into a slot index.
