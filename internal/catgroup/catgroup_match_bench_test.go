@@ -31,7 +31,7 @@ import (
 // benchGroups installs n groups of production shape and returns the store plus
 // the ID and name of a group in the MIDDLE of the insertion order, so neither
 // an early-exit nor a worst-case scan is reported as the typical cost.
-func benchGroups(tb testing.TB, n int) (*Store, string, string) {
+func benchGroups(tb testing.TB, n int) (store *Store, groupID, groupName string) {
 	tb.Helper()
 	groups := make([]Group, n)
 	for i := 0; i < n; i++ {
