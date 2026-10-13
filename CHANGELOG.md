@@ -591,6 +591,76 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- Category groups are indexed by ID, so resolving a policy rule's group no
+  longer walks the whole group map on every rule of every request.
+  `catgroup.Store.groups` is keyed by lowercase NAME, and
+  `MatchesCategoryByID` — reached once per category-group-scoped rule per
+  request through `categoryGroupMatchesHostScratch` → `matchDestNorm` —
+  iterated that map looking for a matching `Group.ID`. The `catSet` membership
+  probe at the end was O(1), as its comment claimed; what the comment also
+  said, and nobody had measured, was that *reaching* the group was
+  "O(groups), a small admin set".
+
+  That is the resolution production rules actually take. `DestCategoryGroupID`
+  is the authoritative, rename-safe link and is stamped name→id on every
+  interactive/import write, and it is preferred over the denormalized name, so
+  the walk applied to essentially every category-group rule — and it scaled
+  with a term nothing else in the rule scan depends on: the number of
+  configured GROUPS, independent of the rule count.
+
+  Measured on the development box (linux/amd64, Intel Xeon @ 2.10GHz, 4 core,
+  Go 1.26.9). `MatchesCategoryByID`, for a resolved hit and for the
+  un-migrated/dangling-ID miss that paid the full walk before falling back to
+  the name:
+
+  | groups | hit before | hit after | miss before | miss after |
+  | -----: | ---------: | --------: | ----------: | ---------: |
+  |      1 |   101.6 ns |   65.9 ns |     45.6 ns |    17.5 ns |
+  |      8 |   107.5 ns |   69.6 ns |     66.5 ns |    23.1 ns |
+  |     32 |   239.6 ns |   81.6 ns |    324.7 ns |    19.7 ns |
+  |    128 |   766.1 ns |   69.2 ns |   1174.0 ns |    15.7 ns |
+
+  And one full `PolicyStore.Evaluate` over 50 ID-stamped category-group rules
+  against a host that does resolve to a category — 41.3 µs of CPU inside the
+  request goroutine at 128 groups, now 4.8 µs:
+
+  | groups |   before |    after |
+  | -----: | -------: | -------: |
+  |      1 |  5875 ns |  4527 ns |
+  |      8 |  7679 ns |  5035 ns |
+  |     32 | 16136 ns |  5162 ns |
+  |    128 | 41257 ns |  4765 ns |
+
+  Both are now flat in the group count instead of linear in it; the name path,
+  already a map lookup, is the ~75 ns reference they match.
+
+  The index holds the SAME `*Group` values as `groups` and is derived WHOLESALE
+  from it by `reindexByIDLocked` at every write site, inside that site's
+  existing critical section, rather than patched per mutation — a second index
+  each write path has to remember to patch is how such an index comes to
+  disagree with its source, and one rebuilt from the authoritative map cannot.
+  Aliasing the pointer rather than copying is what makes an in-place `Update`
+  visible through the index and lets `Rename` re-key the name map without a
+  rebuild. Admin writes pay O(groups) per mutation, which is rare and already
+  bounded by the durable write beside it.
+
+  Behavior is unchanged except for duplicate IDs, which cannot be configured
+  through the API and already resolved unpredictably: the previous walk ranged
+  over a Go map, whose iteration order is deliberately randomized, so a
+  duplicate resolved differently from call to call. The index resolves one of
+  them consistently. An index-consistency oracle runs after every mutation the
+  store exposes (`ReplaceAll`, `Add`, `Update`, `UpdateByID`, `Rename`,
+  case-only `Rename`, `Delete`, `DeleteByID`, `Load`, `restoreSnapshot`) and
+  was verified to fail when a reindex call is removed; a differential oracle
+  pins the ID and name paths to the same membership answer.
+
+  The pre-existing category-group benchmarks could not see any of this: their
+  fixtures set `DestCategoryGroup` (the name) and never
+  `DestCategoryGroupID`, and they evaluate an UNCATEGORIZED host, which returns
+  from `MatchesCategoryByID` before it looks a group up at all. The new
+  benchmarks stamp the ID, resolve the host to a real category, and vary the
+  group count independently of the rule count.
+
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
   `hostutil.NormalizeHostStrict` already had an already-canonical fast path

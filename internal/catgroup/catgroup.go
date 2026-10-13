@@ -133,6 +133,29 @@ type Store struct {
 	order  []string          // insertion order for stable list output
 	path   string
 
+	// byID indexes the SAME *Group values as groups, keyed by Group.ID, so a
+	// lookup by the authoritative ID is a map hit instead of a walk of groups.
+	//
+	// It exists for the proxy hot path. DestCategoryGroupID is the
+	// authoritative, rename-safe link from a policy rule to its group and is
+	// stamped name->id on every write, so MatchesCategoryByID is the resolution
+	// essentially every category-group rule takes, once per rule per request
+	// (categoryGroupMatchesHostScratch -> matchDestNorm). groups is keyed by
+	// lowercase NAME, so that resolution used to iterate the whole map: the
+	// membership check was O(1) as documented, but REACHING the group was
+	// O(groups) and measured 766 ns at 128 groups against 75 ns for the name
+	// path, with a miss (un-migrated / dangling ID) paying the full walk at
+	// 1174 ns. See catgroup_match_bench_test.go.
+	//
+	// It is DERIVED WHOLESALE from groups by reindexByIDLocked at every write
+	// site, inside that site's existing critical section, rather than patched
+	// per mutation. A second index that each write path has to remember to
+	// patch is how such an index comes to disagree with its source; one
+	// rebuilt from the authoritative map cannot. The cost is O(groups) per
+	// ADMIN mutation, which is rare and already bounded by the durable write
+	// beside it, in exchange for O(1) on the request path.
+	byID map[string]*Group // keyed by Group.ID; values alias groups
+
 	// version is the DURABLE per-store mutation generation (2D-A object
 	// concurrency): bumped on every successful admin mutation and on bulk
 	// installs (ReplaceAll), persisted ATOMICALLY WITH THE CONTENT in the
@@ -195,7 +218,31 @@ func (s *Store) Revision() uint64 { return s.rev.Load() }
 
 // New builds an empty store.
 func New() *Store {
-	return &Store{groups: make(map[string]*Group)}
+	return &Store{groups: make(map[string]*Group), byID: make(map[string]*Group)}
+}
+
+// reindexByIDLocked rebuilds the ID index from groups, which is authoritative.
+// The caller must hold s.mu for writing; every write path that can change the
+// set of groups or any group's ID calls this before releasing it, so no reader
+// can observe groups and byID disagreeing.
+//
+// A group with an empty ID is not indexed: MatchesCategoryByID and GetByID
+// both reject an empty id before looking anything up, so indexing one could
+// only ever produce an entry nothing can reach. Every persisted group is ID
+// backfilled on Load/ReplaceAll anyway.
+//
+// Duplicate IDs resolve to one group, as before. The previous walk ranged over
+// a Go map, whose iteration order is deliberately randomized, so a duplicate
+// already resolved unpredictably from call to call; it is not behavior a
+// caller could have depended on.
+func (s *Store) reindexByIDLocked() {
+	byID := make(map[string]*Group, len(s.groups))
+	for _, g := range s.groups {
+		if g.ID != "" {
+			byID[g.ID] = g
+		}
+	}
+	s.byID = byID
 }
 
 // normCats normalizes a category list to lowercase, trimmed, deduplicated.
@@ -264,6 +311,7 @@ func (s *Store) Load(path string) error {
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
+	s.reindexByIDLocked()
 	s.version = loadedVersion
 	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
 	// the new contents, so any reader that can observe them already sees the
@@ -441,6 +489,7 @@ func (s *Store) restoreSnapshot(groups []Group, version int64) {
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
+	s.reindexByIDLocked()
 	s.version = version
 	s.rev.Add(1) // contents may have changed twice (mutate + restore) — memo readers must refresh
 	s.mu.Unlock()
@@ -552,6 +601,7 @@ func (s *Store) Add(name string, categories []string) (*Group, error) {
 	}
 	s.groups[key] = g
 	s.order = append(s.order, key)
+	s.reindexByIDLocked()
 	s.rev.Add(1)
 	return g, nil
 }
@@ -593,6 +643,7 @@ func (s *Store) Delete(name string) error {
 			break
 		}
 	}
+	s.reindexByIDLocked()
 	s.rev.Add(1)
 	return nil
 }
@@ -605,12 +656,10 @@ func (s *Store) GetByID(id string) *Group {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, g := range s.groups {
-		if g.ID == id {
-			cp := *g
-			cp.catSet = nil // internal index; not part of the public copy
-			return &cp
-		}
+	if g := s.byID[id]; g != nil {
+		cp := *g
+		cp.catSet = nil // internal index; not part of the public copy
+		return &cp
 	}
 	return nil
 }
@@ -655,6 +704,7 @@ func (s *Store) DeleteByID(id string) (string, error) {
 					break
 				}
 			}
+			s.reindexByIDLocked()
 			s.rev.Add(1)
 			return name, nil
 		}
@@ -704,6 +754,10 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 	}
 	cur.Name = newName
 	cur.UpdatedAt = now
+	// Re-keys the NAME map only. The ID and the *Group are both unchanged and
+	// byID holds that same pointer, so the ID index still resolves this group
+	// (to its new name) without being rebuilt — which is the point of indexing
+	// the pointer rather than a copy.
 	delete(s.groups, curKey)
 	s.groups[newKey] = cur
 	for i, k := range s.order {
@@ -721,24 +775,24 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 // EXISTS; matched is whether that group contains the (already-resolved) category.
 // The ID is AUTHORITATIVE: a resolved group returns its own membership result so
 // the caller does NOT fall back to a possibly-stale denormalized name (which
-// could match a DIFFERENT group). No-copy fast path (one RLock + a catSet probe);
-// O(groups), a small admin set. Empty id / not found ⇒ resolved=false so the
-// caller may fall back to the name.
+// could match a DIFFERENT group). No-copy fast path: one RLock, one byID probe
+// and one catSet probe, all O(1) — this runs once per category-group rule per
+// request, so it was indexed rather than left to walk the name-keyed map.
+// Empty id / not found ⇒ resolved=false so the caller may fall back to the name.
 func (s *Store) MatchesCategoryByID(id, category string) (matched, resolved bool) {
 	if id == "" {
 		return false, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, g := range s.groups {
-		if g.ID == id {
-			if category == "" {
-				return false, true
-			}
-			return g.catSet[strings.ToLower(category)], true
-		}
+	g := s.byID[id]
+	if g == nil {
+		return false, false
 	}
-	return false, false
+	if category == "" {
+		return false, true
+	}
+	return g.catSet[strings.ToLower(category)], true
 }
 
 // ReplaceAll atomically replaces all groups (used by cluster config sync,
@@ -770,6 +824,7 @@ func (s *Store) ReplaceAll(groups []Group) {
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
+	s.reindexByIDLocked()
 	// Bulk install = a content change: advance the client-visible fence so any
 	// admin edit loaded against the pre-install contents conflicts instead of
 	// silently overwriting the installed truth.
