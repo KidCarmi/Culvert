@@ -36,7 +36,7 @@ EAGER_IMPORTS = {
 }
 # Documents that terminate the import chain: nothing they contain may import.
 NO_IMPORTS = ("AGENTS.md", "internal/admission/AGENTS.md", CONVENTIONS)
-SKILLS = {"culvert-verify": "verification.md", "culvert-review": "review-change.md"}
+SKILLS = {"culvert-verify": "verification.md", "culvert-review": "review-change.md", "steward": "pr-stewardship.md"}
 GUIDANCE_NAMES = {"AGENTS.md", "CLAUDE.md", "AGENTS.override.md"}
 SKILL_RE = re.compile(r"\.(?:agents|claude)/skills/([^/]+)/SKILL\.md")
 # EVERY file under a native skill tree is guidance-shaped, not just SKILL.md: a
@@ -335,6 +335,7 @@ def self_test(root):
         (CTX + "README.md", b"[proxy/TLS history](history/proxy-tls-and-certificates.md)", b"[proxy/TLS history](history/scanning.md)"),
         (CTX + "history/proxy-tls-and-certificates.md", b"(#claude-main-l175-l175)", b"(#claude-main-l176-l176)"),
         (".claude/skills/culvert-verify/SKILL.md", b"verification.md", b"review-change.md"),
+        (".agents/skills/steward/SKILL.md", b"does not grant permission", b"grants permission"),
         ("AGENTS.md", b"# Culvert contributor guide", b"x" * 8192 + b"\n# Culvert contributor guide"),
     ]
     # Each candidate is a full lightweight checkout copy to keep tests hermetic.

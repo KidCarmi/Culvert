@@ -44,9 +44,13 @@ There were no other tracked AGENTS/CLAUDE/native skill files at this baseline.
   history document whose Topics list links to that block; an inventory link in
   another section cannot silently substitute for the task route. Multiple domains
   can reference one block. No paragraph is discarded as “obsolete.”
-- Two narrow workflows have native entry points in both `.agents/skills` and
+- Three narrow workflows have native entry points in both `.agents/skills` and
   `.claude/skills`; thin wrappers explicitly load the same canonical procedure.
   Ordinary-document links remain available when a client does not advertise skills.
+  `steward` ([pr-stewardship](workflows/pr-stewardship.md), added after the
+  2026-10-12/13 fleet clean-up) is read by cloud sessions from a PR's head
+  branch before they act on CI/review events; it sets conventions and defaults
+  and grants no merge, force-push or gate-skipping permission.
 - Only admission gets additional scoped instructions in this first migration:
   its ownership and review cases were inspected in depth. Other domains get
   explicit source/history routes rather than invented new authoritative manuals.

@@ -11,8 +11,9 @@ For unknown ownership, use the [preserved project map](history/project-map.md)
 as a search aid, then verify paths in the checkout. Avoid stale package counts.
 Current [conventions](conventions.md) reconcile the [original conventions](history/conventions.md).
 For checks use [verification](workflows/verification.md); for an explicit review
-use [review-change](workflows/review-change.md). Source paths below are relative
-to this checkout, not to an unmerged branch.
+use [review-change](workflows/review-change.md); for pull-request CI/review
+events, duplicate PRs and readiness use [pr-stewardship](workflows/pr-stewardship.md).
+Source paths below are relative to this checkout, not to an unmerged branch.
 
 ## Core admission and connections
 

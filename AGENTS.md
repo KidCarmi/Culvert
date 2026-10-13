@@ -77,6 +77,10 @@ merely because its rationale is historical. Verify it in the current owner/tests
 - For an explicit review or readiness assessment, use `culvert-review`, or read
   [review-change](docs/agent-context/workflows/review-change.md). Trace relevant
   callers, concurrency, lifecycle and error paths beyond the diff.
+- For a CI, review or comment event on a pull request, duplicate or stale PRs,
+  or a readiness report, use `steward`, or read
+  [pr-stewardship](docs/agent-context/workflows/pr-stewardship.md). The steward
+  drives a PR to ready; merging needs explicit human approval for that PR.
 - Review findings need a concrete supported failure scenario, affected contract,
   file/line evidence and impact. Prioritize security, compatibility, ownership,
   durability and test gaps. Avoid speculative, style-only or duplicate lint findings.
