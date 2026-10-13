@@ -1469,14 +1469,40 @@ func initClusterCA(clusterDBPath string) {
 // initialises the cluster CA, and starts the heartbeat monitor.
 // Safe to call at runtime from the admin API (idempotent — returns error if already CP).
 func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
+	if grpcAddr == "" {
+		return fmt.Errorf("gRPC listen address is required")
+	}
+
+	// CHAOS-72: build the initial snapshot BEFORE taking clusterRoleMu.
+	//
+	// CurrentConfigSnapshot reads clusterRoleMu itself — via buildCPAddressList,
+	// which needs clusterRole.grpcAddr for the DP failover address list — and
+	// sync.RWMutex is not reentrant, so an RLock from inside the write-locked
+	// section blocks on this same goroutine and never wakes. That turned every
+	// HA standby→leader promotion into a permanent hang: buildCPAddressList
+	// returns early only when HA is DISABLED, and a standby's role makes
+	// Status().Enabled true for its whole stint, so the guard was open on
+	// exactly the path that uses it. Worse than a failed promotion, the hung
+	// goroutine keeps holding the clusterRoleMu WRITE lock, so every reader —
+	// diagnostics, /healthz, the PAC mutation gate, the support bundle — wedges
+	// behind it, and the node that was supposed to become the control plane
+	// becomes neither a control plane nor a diagnosable one.
+	//
+	// Hoisting is behaviour-preserving as well as sufficient: the snapshot is
+	// pure reads, and clusterRole.grpcAddr is assigned only AFTER the publish
+	// below, so this snapshot never observed the new address under the old
+	// ordering either. The arm-before-publish requirement of CHAOS-01 is
+	// unaffected — building a snapshot is not publishing it.
+	snap := CurrentConfigSnapshot()
+
 	clusterRoleMu.Lock()
 	defer clusterRoleMu.Unlock()
 
+	// Still inside the write lock: the idempotency guard and the role
+	// transition it protects must stay atomic with respect to a concurrent
+	// enable.
 	if clusterRole.role == "control-plane" {
 		return fmt.Errorf("already running as control-plane")
-	}
-	if grpcAddr == "" {
-		return fmt.Errorf("gRPC listen address is required")
 	}
 
 	// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
@@ -1486,7 +1512,7 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// Initial publish. A commit-time rejection (startup config already over a
 	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
 	// the CP still serves locally, so boot continues.
-	_ = globalConfigStore.Update(CurrentConfigSnapshot())
+	_ = globalConfigStore.Update(snap)
 	initClusterCA(clusterDBPath)
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err

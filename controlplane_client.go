@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -77,21 +78,122 @@ type DataPlaneClient struct {
 	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
 	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	// jitter decorrelates this node's retry delays from the rest of the fleet
+	// (CHAOS-71). Assigned once by NewDataPlaneClient and never mutated, so the
+	// loop goroutines that read it need no synchronisation. A nil value — every
+	// struct-literal client in the tests — means "no jitter", which is exactly
+	// what a cadence assertion wants: see jitterDelay.
+	jitter func(time.Duration) time.Duration
 }
 
-// backoff sleeps for an exponentially increasing duration after consecutive
-// Control Plane failures: 2s, 4s, 8s, … capped at 60s.
+// dpBackoffCeiling caps the post-failure retry delay. A DP that cannot reach
+// its CP keeps the last-known-good snapshot it is already enforcing, so the
+// cost of a longer retry delay is convergence latency, not an outage — and the
+// benefit is that N data planes do not hold a struggling control plane down.
+const dpBackoffCeiling = 60 * time.Second
+
+// dpFailoverAfterFailures is how many CONSECUTIVE failed config polls must
+// accumulate before the client redials a peer CP.
+//
+// The threshold is re-crossed every dpFailoverAfterFailures failures rather
+// than tested once, so a sustained outage probes each configured CP
+// periodically (a CP can come back on an address the client is not currently
+// pinned to) while the backoff ladder below keeps growing toward the ceiling.
+// Testing `failCount < 3` once instead would make EVERY failed poll past the
+// third redial, turning a dead CP pair into permanent connection churn.
+const dpFailoverAfterFailures = 3
+
+// backoff sleeps for an exponentially increasing, jittered duration after
+// consecutive Control Plane failures: 2s, 4s, 8s, … capped at dpBackoffCeiling.
+//
+// CHAOS-71 — two corrections to the original implementation, both of which the
+// empirical ladder disproved rather than inspection:
+//
+//  1. It no longer increments failCount. It used to, on top of the increment
+//     its only caller (pollConfig) had already applied, so the streak advanced
+//     by TWO per failed poll: the ladder a fleet actually ran was 4s, 16s, 60s
+//     — the documented 60s ceiling reached on the THIRD failed poll instead of
+//     the sixth, and the "3 consecutive failures" failover gate tripping on the
+//     SECOND. The streak now has exactly one writer.
+//
+//  2. The delay is jittered. A control plane is a shared dependency, and the
+//     event that makes every data plane start backing off is usually the single
+//     event of the CP going away — a restart, a rolling upgrade, a node reboot.
+//     An unjittered ladder is deterministic in the failure count alone, so a
+//     fleet that failed together retries together forever and then reconnects
+//     in one instant when the CP returns, each node asking for a config
+//     snapshot that can legitimately reach tens of MiB (see the deadline model
+//     below). Jitter is applied PER ATTEMPT, not drawn once per node as
+//     internal/feedsched does: feedsched spreads a steady-state cadence, where
+//     a stable offset is both sufficient and reproducible, whereas this spreads
+//     a thundering herd triggered by one shared instant, and two nodes that
+//     happened to draw neighbouring stable offsets would stay in phase through
+//     exactly the outage the jitter exists for.
 func (c *DataPlaneClient) backoff(ctx context.Context) {
-	c.failCount++
-	delay := time.Duration(1<<min(c.failCount, 6)) * time.Second // 2s…64s
-	if delay > 60*time.Second {
-		delay = 60 * time.Second
-	}
+	delay := c.jitterDelay(dpBackoffDelay(c.failCount))
 	logger.Printf("DataPlane: backing off %s (failure #%d)", delay, c.failCount)
+	t := time.NewTimer(delay)
+	defer t.Stop()
 	select {
-	case <-time.After(delay):
+	case <-t.C:
 	case <-ctx.Done():
 	}
+}
+
+// dpBackoffDelay is the un-jittered retry ladder for a given consecutive-failure
+// streak: 2s, 4s, 8s, 16s, 32s, then dpBackoffCeiling. Pure, so the contract is
+// asserted directly instead of being inferred from a log line or a stopwatch.
+//
+// A streak of 0 cannot happen on this path (the caller increments before
+// backing off) but is clamped to the first rung rather than returning 1s, so a
+// future caller cannot accidentally shorten the floor.
+func dpBackoffDelay(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	d := time.Duration(1<<min(failures, 6)) * time.Second // 2s…64s
+	if d > dpBackoffCeiling {
+		return dpBackoffCeiling
+	}
+	return d
+}
+
+// dpRetryJitterFrac is the ±fraction applied to every retry delay, matching
+// internal/feedsched's DefaultJitterFrac so the two cadence planes are tuned
+// alike. It is deliberately modest: the point is to decorrelate a fleet, not to
+// reshape the ladder, and a wide spread on the 2s rung would start eating into
+// the convergence latency the ladder exists to bound.
+const dpRetryJitterFrac = 0.10
+
+// dpRetryJitter returns the per-attempt jitter function installed on every
+// production client. See backoff for why this is drawn per attempt rather than
+// once per node as internal/feedsched.StableJitter does.
+func dpRetryJitter(frac float64) func(time.Duration) time.Duration {
+	if frac <= 0 {
+		return func(d time.Duration) time.Duration { return d }
+	}
+	return func(d time.Duration) time.Duration {
+		if d <= 0 {
+			return d
+		}
+		off := (rand.Float64()*2 - 1) * frac // #nosec G404 -- fleet spread, not crypto
+		j := d + time.Duration(float64(d)*off)
+		if j <= 0 {
+			return d
+		}
+		return j
+	}
+}
+
+// jitterDelay applies the client's fleet-decorrelation jitter, falling back to
+// the exact delay when no jitter function is installed. The fallback is load
+// bearing for the tests: a struct-literal DataPlaneClient asserts the ladder
+// itself, and a randomised delay would make that assertion a range check.
+func (c *DataPlaneClient) jitterDelay(d time.Duration) time.Duration {
+	if c.jitter == nil {
+		return d
+	}
+	return c.jitter(d)
 }
 
 func (c *DataPlaneClient) resetBackoff() {
@@ -114,6 +216,7 @@ func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPl
 		certFile: certFile,
 		keyFile:  keyFile,
 		caFile:   caFile,
+		jitter:   dpRetryJitter(dpRetryJitterFrac),
 	}
 
 	// Connect to the first reachable CP.
@@ -183,6 +286,16 @@ func (c *DataPlaneClient) reconnectActive() error {
 
 // failover tries the next CP address in the list. Returns true if a new
 // connection was established, false if all addresses have been tried.
+//
+// CHAOS-71: a successful redial deliberately does NOT clear failCount. It used
+// to, and that single assignment defeated the entire backoff ladder on every
+// HA deployment: a reachable-but-not-serving CP pair (overloaded, fenced out,
+// or timing out an oversized snapshot) answers the TCP/TLS dial while failing
+// GetConfig, so each failover reset the streak to zero, the streak re-crossed
+// the threshold two polls later, and the client flapped between CPs every few
+// seconds FOREVER — never reaching even the second rung, let alone the 60s
+// ceiling. Connectivity to a CP is not evidence that the CP is serving config;
+// only a successful poll is, and that is what resetBackoff marks.
 func (c *DataPlaneClient) failover() bool {
 	if len(c.addrs) <= 1 {
 		return false
@@ -199,10 +312,62 @@ func (c *DataPlaneClient) failover() bool {
 			continue
 		}
 		c.activeIdx = nextIdx
-		c.failCount = 0
 		return true
 	}
 	return false
+}
+
+// dpStartupStaggerMax caps the one-time phase offset applied before each
+// CP-facing ticker starts (CHAOS-71).
+//
+// Five seconds is chosen against the ONE deadline a stagger can actually
+// endanger: heartbeatTimeout (enrollment.go) marks a node disconnected after
+// 90s of silence, and the heartbeat rides metricsLoop at 2× the 30s poll
+// interval, so the slack is 30s. A ≤5s offset spends at most a sixth of that
+// and cannot, on its own or combined with one slow round, make a healthy node
+// look disconnected — while still converting a fleet-wide instantaneous burst
+// into a smooth rate.
+const dpStartupStaggerMax = 5 * time.Second
+
+// staggerLoopStart waits a one-time random phase offset before a CP-facing
+// ticker starts, and reports false when ctx was cancelled during the wait (the
+// caller must then run its own teardown and return).
+//
+// Why a phase offset and not per-tick jitter: time.Ticker's period is fixed
+// from the moment it is created, so the fleet's spread is decided entirely by
+// WHEN each node's ticker starts. Offsetting the start therefore breaks
+// lockstep permanently, for the whole process lifetime, at the cost of one
+// sub-interval delay and with every existing cadence semantic — including
+// Ticker's tick-coalescing when a round runs long — left exactly as it was.
+// Rewriting the five loops onto resettable timers would spread the fleet no
+// better and would change that coalescing behaviour as a side effect.
+//
+// The offset is drawn PER LOOP rather than once per node, so the five loops of
+// a single data plane also stop firing as one burst against the CP.
+func staggerLoopStart(ctx context.Context, interval time.Duration) bool {
+	d := dpStartupStagger(interval)
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// dpStartupStagger draws the phase offset: uniform over [0, interval) and
+// never more than dpStartupStaggerMax, so a sub-second loop is staggered
+// within its own period instead of being delayed past it.
+func dpStartupStagger(interval time.Duration) time.Duration {
+	span := min(interval, dpStartupStaggerMax)
+	if span <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(span))) // #nosec G404 -- fleet spread, not crypto
 }
 
 // Run starts background loops for config sync, metrics, and cluster gossip.
@@ -215,10 +380,17 @@ func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 }
 
 func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) {
+	// Fetch immediately on start — deliberately NOT staggered. A node with no
+	// last-known-good snapshot enforces nothing until this lands, so delaying
+	// it to smooth a one-time boot burst would trade a security property for
+	// load. The stagger below spreads every SUBSEQUENT poll, which is the
+	// sustained herd; the cold-start burst is recorded as residual risk.
+	c.fetchAndApply(ctx)
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	// Fetch immediately on start.
-	c.fetchAndApply(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -250,9 +422,12 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 		dpMarkCPPollFailing()
 		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
-		// Only attempt failover after 3 consecutive failures with a peer to
-		// fail over to; otherwise back off and retry the same CP next tick.
-		if c.failCount < 3 || len(c.addrs) <= 1 {
+		// Only attempt failover every dpFailoverAfterFailures consecutive
+		// failures, and only with a peer to fail over to; otherwise back off
+		// and retry the same CP next tick. The modulo (rather than `<`) is what
+		// keeps a sustained outage probing both CPs periodically WITHOUT
+		// redialling on every single failed poll — see dpFailoverAfterFailures.
+		if c.failCount%dpFailoverAfterFailures != 0 || len(c.addrs) <= 1 {
 			c.backoff(ctx)
 			return nil, false
 		}
@@ -505,6 +680,9 @@ func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
 }
 
 func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duration) {
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -534,12 +712,19 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 // Control Plane. Only sends data when the rate limiter is enabled and there
 // are IPs exceeding the hot threshold (>50% of limit).
 func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time.Duration, limiter *RateLimiter) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	// Enable cluster-aware rate limiting now that we're connected to CP.
+	// Enable cluster-aware rate limiting now that we're connected to CP. This
+	// is local arming, not an RPC, so it stays un-staggered.
 	limiter.SetClusterEnabled(true)
 	logger.Printf("DataPlane: distributed rate limiting enabled (gossip every %s)", interval)
+	// A cancellation during the stagger must still disarm, exactly as the
+	// ctx.Done() branch below does.
+	if !staggerLoopStart(ctx, interval) {
+		limiter.SetClusterEnabled(false)
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -587,9 +772,12 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 // revocationSyncLoop syncs session revocation entries with the CP every few
 // seconds, enabling cluster-wide session invalidation on logout.
 func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.Duration) {
+	logger.Printf("DataPlane: distributed session revocation enabled (sync every %s)", interval)
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	logger.Printf("DataPlane: distributed session revocation enabled (sync every %s)", interval)
 
 	for {
 		select {
@@ -629,9 +817,12 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 
 // auditPushLoop forwards local audit events to the CP for centralized logging.
 func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Duration) {
+	logger.Printf("DataPlane: centralized audit log enabled (push every %s)", interval)
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	logger.Printf("DataPlane: centralized audit log enabled (push every %s)", interval)
 
 	for {
 		select {
