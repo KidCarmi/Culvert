@@ -109,21 +109,50 @@ func TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
 // have passed pre-fix too and guarded nothing.
 const chaos72PromotionAddr = "culvert-chaos72.invalid:50051"
 
-// chaos72Isolate points the writes enableControlPlane performs before it fails
-// (the armed config-version floor and the cluster CA) at a temp dir, and
-// restores the cluster-role global afterwards.
+// chaos72Isolate gives enableControlPlane a private world and gives it back
+// afterwards. It returns the cluster-DB path to pass in.
+//
+// Every global the call touches is swapped, not just redirected. Getting this
+// wrong is how a test poisons the ones that run after it, and the first version
+// of this helper did exactly that: it redirected dataDir and restored
+// clusterRole, but left initClusterCA's `globalClusterCA.InitOrLoad` to mint a
+// CA into a t.TempDir() that is then deleted — so every later test in the same
+// binary inherited a global cluster CA pointing at a directory that no longer
+// exists. Roughly ten test files read globalClusterCA, and which of them follow
+// this one depends on the shard partition and on -test.shuffle, which is exactly
+// the shape that shows up as an unreproducible CI failure rather than a local
+// one. Same reasoning for globalConfigStore, which armVersionPersistence arms at
+// a temp path and Update then bumps.
+//
+// The swap-and-restore pattern follows the repository's existing precedent
+// (bootstrap_host_injection_test.go for the CA, controlplane_idp_sync_test.go
+// for the config store); conventions.md states the rule it implements — a test
+// that changes shared global state must register its restoration, because the
+// shared setup helpers reset state at test START and do not undo what a test
+// does afterwards.
 func chaos72Isolate(t *testing.T) string {
 	t.Helper()
+
 	prevDir := dataDir
 	dataDir = t.TempDir()
+
 	clusterRoleMu.Lock()
 	prevRole := clusterRole
 	clusterRoleMu.Unlock()
+
+	prevCA := globalClusterCA
+	globalClusterCA = &clusterCA{}
+
+	prevStore := globalConfigStore
+	globalConfigStore = &ConfigStore{}
+
 	t.Cleanup(func() {
 		StopControlPlaneGRPC()
 		clusterRoleMu.Lock()
 		clusterRole = prevRole
 		clusterRoleMu.Unlock()
+		globalConfigStore = prevStore
+		globalClusterCA = prevCA
 		dataDir = prevDir
 	})
 	return t.TempDir()
