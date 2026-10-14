@@ -1466,7 +1466,9 @@ is_fresh_deployment() {
 secret_already_set() {
   local var="$1" envfile="$2"
   [[ -n "${!var:-}" ]] && return 0
-  [[ -f "$envfile" ]] && grep -Eq "^${var}=.+" "$envfile" 2>/dev/null
+  # Require a non-whitespace character: a CRLF .env's empty "VAR=\r" must not
+  # count as configured (env_put only normalizes CRLF when it is called).
+  [[ -f "$envfile" ]] && grep -Eq "^${var}=.*[^[:space:]]" "$envfile" 2>/dev/null
 }
 
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
