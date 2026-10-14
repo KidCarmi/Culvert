@@ -516,6 +516,62 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+### Fixed
+
+- **A fault in any of the Data Plane's five control-plane sync workers killed
+  the whole gateway** (CHAOS-71). `DataPlaneClient.Run` starts the config poll,
+  the heartbeat, the rate-limit gossip, the revocation sync and the audit push
+  inside the proxy's own process, and Go terminates the process on an
+  unrecovered panic in any goroutine — so a fault in one auxiliary sync round
+  dropped every in-flight tunnel and took the admin UI and health endpoint with
+  it. A deterministic fault became an unattended crash loop under
+  `restart: unless-stopped`, because the node replays the same last-known-good
+  snapshot on every boot. Every round here parses and then *applies* state the
+  node does not author (a snapshot that can reach ~60 MiB and drives the
+  blocklist, IP filter, rate limiter, policy/SSL-bypass/rewrite compilers, URL
+  categories, the IdP registry and a signed MCP envelope), so CP/DP version skew
+  during a rolling upgrade reaches all of it.
+
+  Each round now runs under the per-round guard the rest of the tree has carried
+  since CHAOS-24 — including `dpCertRenewalLoop`, started one line below `Run`,
+  which was already guarded. Containment is per ROUND, never per goroutine: a
+  `recover` at the top of these goroutines would convert a loud crash into a
+  silent permanent stall, with config never syncing again, revocations never
+  propagating (a security fail-open) and cluster rate limiting frozen. A
+  contained round costs one interval, keeps the ticker alive, and is counted
+  under its own `culvert_crash_records_total{component}` label
+  (`dp_config_poll`, `dp_metrics_push`, `dp_ratelimit_gossip`,
+  `dp_revocation_sync`, `dp_audit_push`).
+
+  Two rounds needed more than a wrapper, because containment alone would have
+  made them worse than the crash. The **audit push** drains its batch out of the
+  pending queue before sending, so a contained panic would have destroyed a
+  batch every ten seconds, forever, with the process alive and every dashboard
+  green; a panicked push is now treated exactly as a failed push and the batch
+  goes back for the next tick. The **config poll** records an outcome at every
+  payload-content rejection point, and a panic was the one way the apply step
+  could fail without reaching one — leaving the apply-health surface reporting
+  the previous success while the node enforced a half-applied snapshot; a
+  panicked round now fails that surface closed. Recovery is unchanged:
+  `lastVersion` advances only after a complete apply, so the next poll
+  re-applies the same version. 13 gates, each verified failing against the
+  pre-fix shape. See `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-14.md`.
+- A Data Plane boot **silently discarded the bandwidth/QoS and node-group
+  slices** of its last-known-good config snapshot and still recorded a complete,
+  version-advancing apply (CHAOS-72). `initCluster` replays that snapshot
+  synchronously, 27 lines of `main()` before `initPersistentAdminState`
+  constructs either store, so the apply's `!= nil` store guards — which read
+  like the presence contract beside them — dropped both slices on every boot;
+  the version ratchet then suppressed any re-apply until the control plane
+  published a new version. Enforcement usually still converges because both
+  stores reload the same content from their own node-local JSON moments later,
+  but that is a property of those files: a restored or re-imaged volume breaks
+  it and the node then enforces stale or absent bandwidth and node-group state
+  while every surface reports a current config. A dropped slice is now logged
+  with the slice and the config version. The ordering itself is unchanged here —
+  it is an init-slice contract needing its own analysis, tracked in the review
+  above.
+
 ### Changed
 
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`

@@ -205,6 +205,51 @@ func (c *DataPlaneClient) failover() bool {
 	return false
 }
 
+// ── CHAOS-71: the DP control-plane sync plane runs its rounds guarded ────────
+//
+// Run launches FIVE long-lived workers inside the proxy's own process, and Go
+// terminates that process on an unrecovered panic in ANY goroutine. Until
+// CHAOS-71 none of the five ran its round under the per-round guard CHAOS-24
+// (crashguard.go, runGuarded) established for every other background worker in
+// the tree — including dpCertRenewalLoop, started by the SAME startDataPlane a
+// line below Run. These five were simply never in that sweep's scope, so they
+// were the odd ones out rather than a reasoned exception.
+//
+// The exposure is not abstract. Every round here parses and APPLIES a payload
+// the node does not author: a config snapshot that can reach ~60 MiB and drives
+// the blocklist, IP filter, rate limiter, policy/SSL-bypass/rewrite compilers,
+// IdP registry, URL categories and a signed MCP envelope; a rate-limit
+// broadcast; a revocation set; a heartbeat reply. A fault anywhere under that
+// fan-out — in CP/DP version skew during a rolling upgrade, or from a fenced-out
+// zombie leader the epoch ratchet exists precisely to distrust — killed the
+// gateway, dropping every in-flight tunnel. Under the shipped compose file's
+// `restart: unless-stopped` a deterministic fault becomes a crash loop, because
+// the node replays the same last-known-good snapshot on every boot.
+//
+// Per round, never per goroutine (the CHAOS-24 rule, unchanged): a recover at
+// the top of one of these goroutines would convert a loud crash into a SILENT
+// permanent stall — config never syncs again, revocations never propagate,
+// cluster rate limiting never refreshes — with the process up and every
+// dashboard green. Guarding the round keeps the ticker alive, so a transient
+// fault costs one interval and self-heals, and the crash plane counts and
+// reports it (culvert_crash_records_total{component}).
+//
+// Two rounds additionally need the §12.2 fail-closed treatment, because
+// containment alone would make them worse than the crash:
+//
+//   - the config round must mark the apply REJECTED (guardedConfigRound), or a
+//     panic mid-apply leaves a partially applied config reported as healthy;
+//   - the audit round must RETURN its drained batch to the queue
+//     (auditPushRound), or containment destroys evidence once per interval,
+//     forever, with the process alive.
+const (
+	dpComponentConfigPoll    = "dp_config_poll"
+	dpComponentMetricsPush   = "dp_metrics_push"
+	dpComponentRateLimitSync = "dp_ratelimit_gossip"
+	dpComponentRevocation    = "dp_revocation_sync"
+	dpComponentAuditPush     = "dp_audit_push"
+)
+
 // Run starts background loops for config sync, metrics, and cluster gossip.
 func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 	go c.pollLoop(ctx, pollInterval)
@@ -218,14 +263,36 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	// Fetch immediately on start.
-	c.fetchAndApply(ctx)
+	c.guardedConfigRound(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.fetchAndApply(ctx)
+			c.guardedConfigRound(ctx)
 		}
+	}
+}
+
+// guardedConfigRound runs one config-sync round under the CHAOS-24 guard and
+// fails the apply-health surface closed when that round panicked.
+//
+// Marking the apply rejected is load-bearing, not bookkeeping. fetchAndApply
+// records an outcome at every payload-content rejection point in the
+// received→parsed→validated→fenced→synchronized→applied chain
+// (configsnapshot_apply_health.go), and a panic is the one way the "applied"
+// step can fail WITHOUT reaching any of them: the round dies before
+// markConfigSnapshotApplyOK, which leaves the surface reporting the PREVIOUS
+// success while the node enforces a half-applied snapshot — blocklist and IP
+// filter swapped, policy rules or URL categories not. Before CHAOS-71 that
+// state was unreachable (the process died), so containment creates it; the
+// surface must therefore learn about it in the same commit. Recovery is the
+// existing one: lastVersion is advanced only after a complete apply, so the
+// next poll re-fetches and re-applies the same version rather than
+// short-circuiting on it.
+func (c *DataPlaneClient) guardedConfigRound(ctx context.Context) {
+	if runGuarded(dpComponentConfigPoll, func() { c.fetchAndApply(ctx) }) {
+		markConfigSnapshotApplyRejected()
 	}
 }
 
@@ -512,21 +579,30 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			report := c.buildMetricsReport()
-			b, _ := json.Marshal(report)
-			raw, err := c.call(ctx, methodPushMetrics, b)
-			if err != nil {
-				logger.Printf("DataPlane: PushMetrics error: %v", err)
-				continue
-			}
-			// ADR-0005 S3: every heartbeat reply carries the CP's fencing
-			// epoch — ratchet it so leadership changes are learned between
-			// config polls (a stale reply just logs; nothing to reject here).
-			var reply dpHeartbeatReply
-			if json.Unmarshal(raw, &reply) == nil {
-				_ = dpObserveEpoch("heartbeat reply", reply.Epoch)
-			}
+			runGuarded(dpComponentMetricsPush, func() { c.metricsRound(ctx) })
 		}
+	}
+}
+
+// metricsRound pushes one heartbeat and ratchets the epoch its reply carries.
+// A panicking round is contained and counted: the CP's own heartbeat-timeout
+// path (enrollment.go) is the loud outcome of a heartbeat that does not arrive,
+// so skipping one interval degrades exactly as a failed PushMetrics RPC already
+// does, and the next tick retries.
+func (c *DataPlaneClient) metricsRound(ctx context.Context) {
+	report := c.buildMetricsReport()
+	b, _ := json.Marshal(report)
+	raw, err := c.call(ctx, methodPushMetrics, b)
+	if err != nil {
+		logger.Printf("DataPlane: PushMetrics error: %v", err)
+		return
+	}
+	// ADR-0005 S3: every heartbeat reply carries the CP's fencing
+	// epoch — ratchet it so leadership changes are learned between
+	// config polls (a stale reply just logs; nothing to reject here).
+	var reply dpHeartbeatReply
+	if json.Unmarshal(raw, &reply) == nil {
+		_ = dpObserveEpoch("heartbeat reply", reply.Epoch)
 	}
 }
 
@@ -547,41 +623,53 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 			limiter.SetClusterEnabled(false)
 			return
 		case <-ticker.C:
-			// CHAOS-61: evaluate broadcast freshness on EVERY tick, including the
-			// ones whose RPC fails — reporting only from the success branch
-			// would mean the state is never reported during the outage that
-			// causes it.
-			//
-			// This deliberately does NOT report on a node whose rate limiter is
-			// off: ClusterFreshness is un-armed there and returns a
-			// not-stale status, because AllowClusterAware short-circuits before
-			// consulting a remote count, so there is no enforcement for an
-			// expired broadcast to degrade. The first version of this call
-			// claimed the opposite in its own comment and pinned every freshness
-			// surface at "degraded" on the default posture (limit 0).
-			noteClusterRateLimitFreshness(limiter)
-			if !limiter.Enabled() {
-				continue
-			}
-			deltas := rateLimitWireDeltas(limiter)
-			gossip := RateLimitGossip{
-				NodeID: c.nodeID,
-				Deltas: deltas,
-			}
-			b, _ := json.Marshal(gossip)
-			raw, err := c.call(ctx, methodSyncRateLimits, b)
-			if err != nil {
-				logger.Printf("DataPlane: SyncRateLimits error: %v", err)
-				continue
-			}
-			var broadcast RateLimitBroadcast
-			if err := json.Unmarshal(raw, &broadcast); err != nil {
-				logger.Printf("DataPlane: SyncRateLimits parse error: %v", err)
-				continue
-			}
-			limiter.ApplyRemoteCounts(broadcast.RemoteCounts)
+			runGuarded(dpComponentRateLimitSync, func() { c.rateLimitGossipRound(ctx, limiter) })
 		}
 	}
+}
+
+// rateLimitGossipRound exchanges one batch of hot-IP deltas with the CP.
+//
+// Containment must keep the LOOP, never return from the goroutine: a goroutine
+// that returns here leaves the limiter cluster-enabled (SetClusterEnabled(false)
+// runs only on ctx.Done) with nothing ever refreshing the broadcast again —
+// which is the frozen-broadcast blackhole CHAOS-61 closed, manufactured by the
+// recovery instead of by an outage. Guarding the round keeps the per-tick
+// freshness evaluation below armed, so an operator still sees the state degrade.
+func (c *DataPlaneClient) rateLimitGossipRound(ctx context.Context, limiter *RateLimiter) {
+	// CHAOS-61: evaluate broadcast freshness on EVERY tick, including the
+	// ones whose RPC fails — reporting only from the success branch
+	// would mean the state is never reported during the outage that
+	// causes it.
+	//
+	// This deliberately does NOT report on a node whose rate limiter is
+	// off: ClusterFreshness is un-armed there and returns a
+	// not-stale status, because AllowClusterAware short-circuits before
+	// consulting a remote count, so there is no enforcement for an
+	// expired broadcast to degrade. The first version of this call
+	// claimed the opposite in its own comment and pinned every freshness
+	// surface at "degraded" on the default posture (limit 0).
+	noteClusterRateLimitFreshness(limiter)
+	if !limiter.Enabled() {
+		return
+	}
+	deltas := rateLimitWireDeltas(limiter)
+	gossip := RateLimitGossip{
+		NodeID: c.nodeID,
+		Deltas: deltas,
+	}
+	b, _ := json.Marshal(gossip)
+	raw, err := c.call(ctx, methodSyncRateLimits, b)
+	if err != nil {
+		logger.Printf("DataPlane: SyncRateLimits error: %v", err)
+		return
+	}
+	var broadcast RateLimitBroadcast
+	if err := json.Unmarshal(raw, &broadcast); err != nil {
+		logger.Printf("DataPlane: SyncRateLimits parse error: %v", err)
+		return
+	}
+	limiter.ApplyRemoteCounts(broadcast.RemoteCounts)
 }
 
 // revocationSyncLoop syncs session revocation entries with the CP every few
@@ -596,33 +684,46 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			local := sessionRevoked.ExportRevocations()
-			req := struct {
-				NodeID  string            `json:"node_id"`
-				Entries []RevocationEntry `json:"entries"`
-			}{
-				NodeID:  c.nodeID,
-				Entries: local,
-			}
-			b, _ := json.Marshal(req)
-			raw, err := c.call(ctx, methodSyncRevocations, b)
-			if err != nil {
-				logger.Printf("DataPlane: SyncRevocations error: %v", err)
-				continue
-			}
-			var resp struct {
-				Entries []RevocationEntry `json:"entries"`
-			}
-			if err := json.Unmarshal(raw, &resp); err != nil {
-				logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
-				continue
-			}
-			if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
-				logger.Printf("DataPlane: merged %d remote session revocations", added)
-				if err := sessionRevoked.SaveRevocations(); err != nil {
-					logger.Printf("DataPlane: failed to persist revocations: %v", err)
-				}
-			}
+			runGuarded(dpComponentRevocation, func() { c.revocationSyncRound(ctx) })
+		}
+	}
+}
+
+// revocationSyncRound exchanges one revocation set with the CP.
+//
+// Containment must keep the LOOP for a security reason: this loop is how a
+// logout on one node invalidates the session on every other node, so a
+// goroutine that stops syncing leaves revoked sessions live fleet-wide while
+// the node reports healthy — a silent fail-OPEN. A skipped round only delays
+// propagation by one interval, exactly as a failed SyncRevocations RPC already
+// does, and the next tick re-sends the full local set (ExportRevocations is a
+// full export, not a delta), so nothing is lost by the skip.
+func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
+	local := sessionRevoked.ExportRevocations()
+	req := struct {
+		NodeID  string            `json:"node_id"`
+		Entries []RevocationEntry `json:"entries"`
+	}{
+		NodeID:  c.nodeID,
+		Entries: local,
+	}
+	b, _ := json.Marshal(req)
+	raw, err := c.call(ctx, methodSyncRevocations, b)
+	if err != nil {
+		logger.Printf("DataPlane: SyncRevocations error: %v", err)
+		return
+	}
+	var resp struct {
+		Entries []RevocationEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
+		return
+	}
+	if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
+		logger.Printf("DataPlane: merged %d remote session revocations", added)
+		if err := sessionRevoked.SaveRevocations(); err != nil {
+			logger.Printf("DataPlane: failed to persist revocations: %v", err)
 		}
 	}
 }
@@ -638,25 +739,48 @@ func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Durat
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			events := drainPendingAuditEvents()
-			if len(events) == 0 {
-				continue
-			}
-			req := struct {
-				NodeID string       `json:"node_id"`
-				Events []AuditEntry `json:"events"`
-			}{
-				NodeID: c.nodeID,
-				Events: events,
-			}
-			b, _ := json.Marshal(req)
-			if _, err := c.call(ctx, methodPushAuditEvents, b); err != nil {
-				logger.Printf("DataPlane: PushAuditEvents error (%d events): %v", len(events), err)
-				// Re-queue events so they're retried on the next interval.
-				requeueAuditEvents(events)
-			}
+			runGuarded(dpComponentAuditPush, func() { c.auditPushRound(ctx) })
 		}
 	}
+}
+
+// auditPushRound forwards one drained batch of local audit events to the CP.
+//
+// The deferred requeue is the fail-closed half of the CHAOS-71 guard, and it is
+// why this round could not simply be wrapped. Drain REMOVES the batch from the
+// pending queue, so between the drain and a successful push the only copy of
+// those events is this local slice. Before the guard, a panic in here killed the
+// process and lost the batch once; with the guard and no requeue it would lose a
+// batch EVERY interval, forever, with the process alive and every surface
+// green — containment turning a one-off loss into silent, recurring destruction
+// of the audit trail the appliance exists to produce. Requeueing on the panic
+// path treats a panicked push exactly as a failed push: the batch goes back
+// (newest kept under audit.Requeue's cap) and the next tick retries it.
+func (c *DataPlaneClient) auditPushRound(ctx context.Context) {
+	events := drainPendingAuditEvents()
+	if len(events) == 0 {
+		return
+	}
+	delivered := false
+	defer func() {
+		if !delivered {
+			// Re-queue events so they're retried on the next interval.
+			requeueAuditEvents(events)
+		}
+	}()
+	req := struct {
+		NodeID string       `json:"node_id"`
+		Events []AuditEntry `json:"events"`
+	}{
+		NodeID: c.nodeID,
+		Events: events,
+	}
+	b, _ := json.Marshal(req)
+	if _, err := c.call(ctx, methodPushAuditEvents, b); err != nil {
+		logger.Printf("DataPlane: PushAuditEvents error (%d events): %v", len(events), err)
+		return
+	}
+	delivered = true
 }
 
 // call performs a unary gRPC call with a JSON payload.

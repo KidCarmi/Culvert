@@ -1131,6 +1131,49 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 	if snap.NodeGroups != nil && globalNodeGroups != nil {
 		globalNodeGroups.ReplaceAll(snap.NodeGroups)
 	}
+
+	reportDroppedStartupOrderSlices(snap)
+}
+
+// reportDroppedStartupOrderSlices logs any CP-authoritative snapshot slice that
+// applySnapshotExtendedState could not apply because its store does not exist
+// yet (CHAOS-72).
+//
+// The `!= nil` store guards in applySnapshotExtendedState carry TWO different
+// conditions, and only one of them is a no-op. A nil FIELD is the presence
+// contract: an older or rolled-back CP that omits the slice must leave the
+// node's durable state alone. A nil STORE is a startup-ORDER fact:
+// globalBandwidth and globalNodeGroups are built by initPersistentAdminState
+// (main.go), which runs AFTER initCluster — and initCluster is what calls
+// startDataPlane, whose applyDPLastGoodConfigSnapshot replays the
+// last-known-good snapshot SYNCHRONOUSLY. So on every Data Plane boot the
+// replay reaches the apply with both stores still nil and drops both slices,
+// while the surrounding apply goes on to record a complete, successful,
+// version-advancing apply. The version ratchet then suppresses the next poll
+// (`snap.Version <= lastVersion`), so nothing re-applies them until the CP
+// increments the config version.
+//
+// Enforcement normally still converges, because both stores reload the same
+// content from their own node-local JSON moments later (ReplaceAll persists on
+// every apply). That convergence is a property of the local files, not of this
+// apply: a restored, re-imaged or partially-populated volume breaks it, and the
+// node then enforces stale or absent bandwidth/QoS and node-group state with
+// every surface reporting a current config. Until the ordering itself is fixed,
+// a dropped slice is at least REPORTED rather than silent, naming the slice and
+// the version so an operator can correlate it instead of inferring it.
+func reportDroppedStartupOrderSlices(snap ConfigSnapshot) {
+	if snap.BandwidthPolicies != nil && globalBandwidth == nil {
+		logger.Printf("DataPlane: config v%d bandwidth policies NOT applied (%d policy/policies) — "+
+			"the bandwidth store is not constructed yet at this point in startup; the node keeps its "+
+			"node-local bandwidth state until the control plane publishes a new config version",
+			snap.Version, len(snap.BandwidthPolicies))
+	}
+	if snap.NodeGroups != nil && globalNodeGroups == nil {
+		logger.Printf("DataPlane: config v%d node groups NOT applied (%d group(s)) — "+
+			"the node-group store is not constructed yet at this point in startup; the node keeps its "+
+			"node-local group state until the control plane publishes a new config version",
+			snap.Version, len(snap.NodeGroups))
+	}
 }
 
 // applySnapshotSaaSFeed applies the CP-authoritative SaaS signed category-feed
