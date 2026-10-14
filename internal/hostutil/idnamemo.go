@@ -272,6 +272,31 @@ func normalizeHostStrictMemo(host string) (norm string, ok bool) {
 	}
 
 	norm, ok = normalizeHostStrictUncached(host)
+	// A FAILED normalization is retained only in the main tier. In the long
+	// tier it buys nothing and costs the whole key, so it is not stored.
+	//
+	// The asymmetry is in the dispatch gates, not in this table. An
+	// unnormalizable host whose bare form exceeds maxDestHostLen is refused
+	// IMMEDIATELY: on HTTP by rejectOversizeUnnormalizableHost, which runs right
+	// after canonicalDestHost and ahead of the connection limiter, the rate
+	// limiter, Stage-1 auth and every matcher; on SOCKS5 by the RISK-013 gate at
+	// the normalization point itself, ahead of every matcher. One normalization,
+	// no fan-out — so a hit could never pay back the ~1 KiB key clone and the
+	// entry allocation that storing it costs, and a client sending UNIQUE
+	// malformed long authorities would pay that on every request for nothing.
+	//
+	// A SHORT unnormalizable host is different, and that is why the main tier
+	// still memoizes failures: its bare form is inside maxDestHostLen, so the
+	// oversize gate does not fire and it proceeds through the limiters into
+	// Stage-1 authentication — which resolves category fusion through
+	// authRuleMatchesScratch — before the RISK-013 refusal is reached. That path
+	// does normalize repeatedly, and the MalformedACE benchmark row (311 ns ->
+	// 31 ns) is it. Found by Codex review on PR #1624; verified against both
+	// dispatch gates.
+	if !ok && len(host) > maxMemoHostLen {
+		return norm, ok
+	}
+
 	// The VALUE bound, enforced for both tiers. maxMemoHostLen is the DNS name
 	// maximum, so a canonical form longer than it is refused by the dispatch
 	// gates (canonicalHostOversize) and retaining it would buy nothing while

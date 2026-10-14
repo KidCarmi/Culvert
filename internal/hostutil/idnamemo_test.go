@@ -1017,3 +1017,69 @@ func BenchmarkIDNLongRawFanoutNoMemo(b *testing.B) {
 		}
 	}
 }
+
+// TestIDNMemo_LongTierDoesNotRetainFailures pins the one asymmetry between the
+// tiers: a FAILED normalization is memoized in the main tier and not in the
+// long tier.
+//
+// It is not a micro-optimization. Both dispatch gates refuse an unnormalizable
+// host whose bare form exceeds maxDestHostLen immediately — HTTP via
+// rejectOversizeUnnormalizableHost, ahead of the connection limiter, the rate
+// limiter, Stage-1 auth and every matcher; SOCKS5 at the normalization point —
+// so there is exactly one normalization and no fan-out for a hit to collapse.
+// Storing one would clone up to maxMemoLongKeyLen bytes of attacker-chosen key
+// and allocate an entry on every UNIQUE malformed long authority, for nothing.
+//
+// The short case is the control, and it must keep its entry: a short
+// unnormalizable host passes the oversize gate and reaches Stage-1
+// authentication's category fusion before the RISK-013 refusal, which does
+// normalize repeatedly.
+//
+// Found by Codex review on PR #1624. Verified failing against the pre-fix body,
+// which retained the long malformed key.
+func TestIDNMemo_LongTierDoesNotRetainFailures(t *testing.T) {
+	// Malformed ACE label, so normalization FAILS, on an authority inside the
+	// long tier's key bound and past the main tier's.
+	long := "xn--$$$." + strings.Repeat("a", 900) + ".com"
+	if len(long) <= maxMemoHostLen || len(long) > maxMemoLongKeyLen {
+		t.Fatalf("probe is %d bytes, not a long-tier key", len(long))
+	}
+
+	normMemoResetForTest()
+	wantNorm, wantOK := normalizeHostStrictUncached(long)
+	if wantOK {
+		t.Fatalf("probe host normalizes successfully; the case needs a FAILING host")
+	}
+	// The answer is unchanged — this is about retention only.
+	for round := 0; round < 3; round++ {
+		gotNorm, gotOK := NormalizeHostStrict(long)
+		if gotNorm != wantNorm || gotOK != wantOK {
+			t.Fatalf("round %d: got (%q, %v), uncached (%q, %v)", round, gotNorm, gotOK, wantNorm, wantOK)
+		}
+	}
+	if main, lng := normMemoOccupiedByTier(); main != 0 || lng != 0 {
+		t.Errorf("REGRESSION: a %d-byte unnormalizable authority filled main=%d long=%d slots. "+
+			"Both dispatch gates refuse it immediately, ahead of every matcher, so there is no "+
+			"fan-out for a hit to collapse — retaining it clones the whole attacker-chosen key "+
+			"for nothing on every unique such request", len(long), main, lng)
+	}
+
+	// ── Control: a SHORT failure is still memoized ─────────────────────────
+	// It reaches Stage-1 auth's matchers before the RISK-013 refusal, so the
+	// repeat is real and the negative entry pays for itself.
+	normMemoResetForTest()
+	// "xn--.com" is NOT a failing host — the zero-option profile accepts an
+	// empty ACE payload. hostutil_test.go's own fail-closed table supplies one.
+	const short = "xn--$$$.com"
+	if len(short) > maxMemoHostLen {
+		t.Fatalf("control host is %d bytes, not a main-tier key", len(short))
+	}
+	if _, ok := NormalizeHostStrict(short); ok {
+		t.Fatalf("control host normalizes successfully; it must FAIL to be the control")
+	}
+	if main, lng := normMemoOccupiedByTier(); main != 1 || lng != 0 {
+		t.Errorf("a short unnormalizable host filled main=%d long=%d, want main=1 long=0: "+
+			"the main tier must keep memoizing failures, or every request to a malformed "+
+			"short host re-pays idna.ToASCII across the auth-matcher fan-out", main, lng)
+	}
+}
