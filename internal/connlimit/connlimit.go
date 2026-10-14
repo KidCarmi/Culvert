@@ -68,9 +68,31 @@ const cacheLine = 64
 // at n=25 it is decisive: -22% on the distinct-IP parallel benchmark (p=0.005)
 // and -19% on the enabled one (p=0.000), -21% geomean. Removing it does not
 // break anything — it just gives back a fifth of the gain.
+//
+// ── Counter representation ───────────────────────────────────────────────────
+//
+// The counter is held BY VALUE, not behind a *int64. A pointer map made every
+// first Acquire for an IP heap-allocate an 8-byte counter, and because Release
+// deletes the entry when the count returns to zero, the common production shape
+// — a client with one request in flight at a time — allocated and discarded one
+// counter PER REQUEST, not per client:
+//
+//	BenchmarkAcquireRelease_SingleIP   132.5 ns/op   8 B/op   1 allocs/op
+//
+// It was the largest Culvert-owned allocation site in the end-to-end proxy
+// profile (2.4% of every allocation the whole proxy made, Acquire's own flat
+// cost). Holding the value inline removes that allocation, removes one heap
+// object per tracked IP from the GC's scan set, and — because the counter no
+// longer has to be mutable from outside the shard lock — lets every mutation
+// happen under the single lock the map operation already needs. That drops the
+// per-request lock acquisitions from three to two: see Release, which used to
+// take the lock twice (lookup, then the zero-count delete).
+//
+// Sizing note: a map header is still 8 bytes, so the 16-byte prefix the padding
+// below subtracts is unchanged.
 type shard struct {
 	mu    sync.Mutex
-	conns map[string]*int64
+	conns map[string]int64
 	_     [cacheLine - 16]byte
 }
 
@@ -95,7 +117,7 @@ type ConnLimiter struct {
 func New() *ConnLimiter {
 	cl := &ConnLimiter{seed: maphash.MakeSeed()}
 	for i := range cl.shards {
-		cl.shards[i].conns = make(map[string]*int64)
+		cl.shards[i].conns = make(map[string]int64)
 	}
 	cl.maxPerIP.Store(defaultMaxConnsPerIP)
 	return cl
@@ -193,37 +215,41 @@ func (cl *ConnLimiter) Rejected() int64 {
 // gating Release on enabled leaks the slot of a connection counted while
 // enabled and released after disable, wedging that IP over-limit forever
 // (the #503 fail-closed bug). Counting unconditionally closes both.
+//
+// The admit decision is made INSIDE the single lock hold, before the count is
+// written, rather than by incrementing first and undoing the increment after a
+// second lock acquisition. The two are equivalent on the state they leave
+// behind: a rejection requires n > limit, limit is never below 1 (New stores
+// the default and Enable clamps a non-positive argument to it), so a rejected
+// Acquire always found n >= 2 — an entry that already existed and that the undo
+// therefore restored to its prior value without deleting it. Not writing it is
+// that same outcome reached without the write, and the never-taken "drop the
+// entry if it was the last" branch goes with it. ActiveConns, ActiveIPs and
+// Rejected all read exactly what they read before (TestAcquireRelease_
+// LimitAndCleanup and TestRejected_OnlyCountsOverCapAcquires are the pins).
+//
+// enabled + the limit are still snapshotted under the lock, so an Enable racing
+// an Acquire lands on one side of this decision or the other, as it always has.
 func (cl *ConnLimiter) Acquire(ip string) bool {
 	sh := cl.shard(ip)
 	sh.mu.Lock()
-	ctr, ok := sh.conns[ip]
-	if !ok {
-		v := int64(0)
-		ctr = &v
-		sh.conns[ip] = ctr
-	}
-	// Hold the shard lock through the increment to prevent a TOCTOU race with
-	// Release(), which routes the same ip to this same shard.
-	n := atomic.AddInt64(ctr, 1)
+	// The count this connection would occupy. The lock is held through the
+	// decision and the write to prevent a TOCTOU race with Release(), which
+	// routes the same ip to this same shard.
+	n := sh.conns[ip] + 1
 	// Snapshot enabled + the limit for this decision — Enable()/Disable() may
 	// rewrite them at runtime.
 	enabled := cl.enabled.Load()
 	limit := cl.maxPerIP.Load()
-	sh.mu.Unlock()
-
 	if enabled && n > limit {
 		// Over the cap: this connection is NOT admitted, so it will never be
-		// Released — undo its count now (and drop the entry if it was the last).
-		sh.mu.Lock()
-		if cur, exists := sh.conns[ip]; exists && cur == ctr {
-			if atomic.AddInt64(ctr, -1) <= 0 {
-				delete(sh.conns, ip)
-			}
-		}
+		// Released — leave the count as it was.
 		sh.mu.Unlock()
 		cl.rejected.Add(1)
 		return false
 	}
+	sh.conns[ip] = n
+	sh.mu.Unlock()
 	return true
 }
 
@@ -232,30 +258,32 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 // Release must mirror that exactly. The decrement is guarded by map-entry
 // presence, and the ≤0 delete prevents underflow, so releasing an IP with no
 // live count is a safe no-op.
+//
+// With the count held by value the lookup, the decrement and the zero-count
+// delete are one lock hold instead of three (lookup; unlocked atomic; re-lock to
+// re-check and delete) — the re-check existed only because the decrement
+// happened outside the lock and the entry could have been re-created under it.
+// A present entry is always >= 1 (it is created at 1 and deleted rather than
+// stored at 0), so `n <= 1` is exactly the old "the decrement reached <= 0", and
+// an absent entry is still the same underflow-safe no-op.
 func (cl *ConnLimiter) Release(ip string) {
 	sh := cl.shard(ip)
 	sh.mu.Lock()
-	ctr, ok := sh.conns[ip]
-	sh.mu.Unlock()
-	if ok {
-		if atomic.AddInt64(ctr, -1) <= 0 {
-			sh.mu.Lock()
-			if atomic.LoadInt64(ctr) <= 0 {
-				delete(sh.conns, ip)
-			}
-			sh.mu.Unlock()
+	if n, ok := sh.conns[ip]; ok {
+		if n <= 1 {
+			delete(sh.conns, ip)
+		} else {
+			sh.conns[ip] = n - 1
 		}
 	}
+	sh.mu.Unlock()
 }
 
 // ActiveConns returns the current connection count for an IP (testing).
 func (cl *ConnLimiter) ActiveConns(ip string) int64 {
 	sh := cl.shard(ip)
 	sh.mu.Lock()
-	ctr, ok := sh.conns[ip]
+	n := sh.conns[ip] // absent ⇒ 0, as before
 	sh.mu.Unlock()
-	if !ok {
-		return 0
-	}
-	return atomic.LoadInt64(ctr)
+	return n
 }
