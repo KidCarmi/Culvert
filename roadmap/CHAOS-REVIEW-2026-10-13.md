@@ -66,7 +66,7 @@ failure survivable made it worse.
    exact hazard. The fix was never carried across. **Verified by direct source
    read** (no cleanup function for it exists anywhere in the tree).
 
-Beyond these, the round opened a backlog of 29 further findings across
+Beyond these, the round opened a backlog of 32 further findings across
 durability, retry shaping, resource exhaustion and lifecycle. They are recorded
 in §4 with explicit verification status, because several are consequential
 enough that an owner decision — not a drive-by patch — is the right next step.
@@ -248,11 +248,21 @@ change wider than a chaos round should make unreviewed.
 | L-4 | `logFatalf` bypasses the shutdown registry entirely, including from the live proxy serve loop, so a lost listening socket severs in-flight tunnels with no accounting and closes the stores uncleanly. The *exit posture* is a recorded owner decision; exiting via `os.Exit` rather than signalling `quit` is the defect. | **MED** | delegated |
 | L-5 | Two listeners die silently with no retry, alert, metric or health row: the **CP gRPC serve loop** (after which every surface still reports a healthy CP while no DP receives config) and the **scan sidecar**. Contrast the admin UI and SOCKS5, which have the full treatment. | **HIGH** | **source-verified** (CP gRPC half: the serve goroutine's only reaction to `Serve` returning is one `logger.Printf`; no role demotion, no rebind, and no CP-gRPC health surface exists anywhere in the tree). Scan sidecar half: delegated. |
 | L-6 | Five background workers lack the repo's own per-round panic guard (SSE broadcaster — every second, over the widest set of mutable globals in the binary; support retention janitor, whose boot sweep is synchronous; support upload worker; debug-level watchdog; decryption-trend sampler), so a panic in a round terminates the gateway. | **MED** | delegated |
+| L-7 | Lifecycle handles built to be awaited are discarded (hit-counter persistence `done`, SSE `Done()`, SIGHUP reloader `Done()`), and MCP telemetry loops are parented to `context.Background()` 25 lines after the same file argues they must not be. Loss mode is a missed checkpoint, not corruption. | **LOW** | delegated |
+
+### 4.5 Added after this report was first committed
+
+Three rows postdate the original commit: two were raised in review of this
+round's own diff and declined there as pre-existing or out of scope, and one is
+a CI-reliability observation from this round's own gate runs. They keep their
+`X-` identifiers, which are cited by number elsewhere, rather than being
+renumbered into sequence.
+
+| ID | Finding | Sev | Status |
+|----|---------|-----|--------|
+| X-8 | **`TestBenchGate_IPFilterBulkLoadIsLinear` is a marginal timing gate.** Observed at **8.65x against an 8.0x bound** on two heads of PR #1618, in a package that PR does not touch. The test's own comment records CI previously seeing **8.28x** on the same shuffled determinism run, which is why it already carries `runtime.GC()` settling and best-of-nine sampling. A ratio of two sub-millisecond samples on a shared runner is the underlying fragility; the bound is not the finding, the measurement's variance is. | **LOW** (CI reliability, not product) | **source-verified** (the prior overshoot is recorded in the test) |
 | X-9 | **`ConfigStore.Update` has no expected-version update, so two concurrent publishers can lose each other's content.** Every publisher in the tree is an unsynchronized build-then-update — `publishCurrentConfigSnapshot` is literally `globalConfigStore.Update(CurrentConfigSnapshot())`, and `configversion.go:385` and `enrollment.go:1256` do the same — so a publish landing between another's snapshot build and its `Update` is overwritten until something republishes. Repo-wide, not specific to any one caller. A real fix is a CAS or publish lock on `Update` plus converting every publisher; narrowing one call site in isolation would make that site look safe while the others carry the property. Raised by CodeRabbit against this round's republish; declined there as pre-existing and out of scope. | **LOW–MED** (needs an owner decision) | **source-verified** |
 | X-10 | **`updateDPAddresses` replaces the active connection with an unverified one.** `connect` uses lazy `grpc.NewClient`, so a redial to a de-listed address's replacement returns no error even when the replacement is unreachable. Self-healing (failed polls advance the streak until `failover()` tries the next listed address), and the alternative is better than the status quo either way: the old address has been *de-listed by the authority*, so keeping it is the defect CHAOS-72c fixes. The reviewer's suggested remedy — `grpc.DialContext` + `WithBlock` — is **not** available: both are deprecated in the pinned grpc v1.83.2 (`WithBlock`'s own comment links grpc's anti-patterns guide), and it would place a 5s blocking dial under `c.mu`, which `call`'s comment forbids ("would serialize all DP loops and block any failover"). A non-deprecated verification (health probe outside the mutex, or deferring the swap until the first successful poll) would be a genuine improvement. | **LOW** (needs an owner decision) | **source-verified** |
-| X-8 | **`TestBenchGate_IPFilterBulkLoadIsLinear` is a marginal timing gate.** Observed at **8.65x against an 8.0x bound** on two heads of PR #1618, in a package that PR does not touch. The test's own comment records CI previously seeing **8.28x** on the same shuffled determinism run, which is why it already carries `runtime.GC()` settling and best-of-nine sampling. A ratio of two sub-millisecond samples on a shared runner is the underlying fragility; the bound is not the finding, the measurement's variance is. | **LOW** (CI reliability, not product) | **source-verified** (the prior overshoot is recorded in the test) |
-
-| L-7 | Lifecycle handles built to be awaited are discarded (hit-counter persistence `done`, SSE `Done()`, SIGHUP reloader `Done()`), and MCP telemetry loops are parented to `context.Background()` 25 lines after the same file argues they must not be. Loss mode is a missed checkpoint, not corruption. | **LOW** | delegated |
 
 ---
 
@@ -470,7 +480,7 @@ across a sweep.
 | `go test -run 'TestCluster\|TestControlPlane\|TestDataPlane\|TestDP\|TestHA\|TestChaos0\|TestChaos5\|TestChaos6\|TestChaos7' .` | pass, 105s |
 | `python3 docs/agent-context/check.py` | pass (static integrity) |
 | Pre-fix regression check | each defect re-introduced individually; the matching tests fail, and the CHAOS-72 case wedges the test binary until its own timeout panic — the deadlock end to end |
-| `golangci-lint run` | **could not run locally.** The pre-installed binary is 2.5.0 built with go1.25 and aborts with `package requires newer Go version go1.26`, identically on packages this change does not touch. CI's pinned action is the authority. |
+| `golangci-lint run` | **superseded — this conclusion was wrong.** Recorded as it was first reported, because the PR description carried it; the row below and the note after the table give the real cause and the passing result. |
 | `go test -race -run 'TestChaos71\|TestChaos72\|TestChaos73' .` | pass, clean under `-race` |
 | `go test .` (serial, whole root package, 468s) | 10 failures, **all pre-existing and environmental** — see below |
 | `go test -race .` (whole root package, 2307s) | **0 data races, 0 panics, 0 CHAOS-7x failures.** The only failures are the same 9 environmental IdP tests described below. |
@@ -508,12 +518,21 @@ verdict's "Every producer must have succeeded" step). That manufactured most of
 the red checks this round then spent time investigating: on one head 2 of 21
 jobs "failed" and both were aggregates, with lint green and no shard failing. The
 genuinely real CI failures were two lint findings (both fixed) and the
-`internal/admission` determinism gate (row X-8 below).
+`internal/admission` determinism gate (row X-8, §4.5).
 
 One gap remains stated plainly: the full-module race-detector run across every
 package was not executed here. The Fast PR Gate, the hosted `golangci-lint` job
 and CodeQL for the PR's SHA are the authority. A passing local check is not a
 passing merge gate.
+
+**Hosted result for the final head.** On `88b9cfc` every one of the 83 check
+runs is `success` or `skipped`, with no failure, no cancellation and
+`mergeable_state: clean`: Fast PR Gate, Deep PR Gate, QA Gate and Security Gate
+all APPROVED, all four root race shards plus the non-root and privileged race
+jobs green, the race verdict and coverage floors green, and `golangci-lint`,
+`staticcheck`, `gosec`/`govulncheck`, CodeQL and the shuffled determinism job
+green. The `internal/admission` timing gate of row X-8 passed on this head,
+which is what makes it an intermittent rather than a standing failure.
 
 **Tests this round did NOT write:** nothing in §4. Several of those would need
 fault-injection harnesses that already exist in-tree (write-failure observers,
