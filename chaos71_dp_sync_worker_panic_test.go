@@ -84,6 +84,10 @@ func runLoopUntilRounds(t *testing.T, want int64, what string, loop func(context
 
 // ── 1. Config poll: contained, counted, and FAILED CLOSED on apply health ────
 
+// TestChaos71_ConfigRoundPanicIsContainedAndMarksApplyRejected pins both halves
+// of the config round: the panic is contained and counted under its own
+// component, and the apply-health surface fails CLOSED rather than keeping the
+// previous success while the node enforces a half-applied snapshot.
 func TestChaos71_ConfigRoundPanicIsContainedAndMarksApplyRejected(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
@@ -145,6 +149,9 @@ func TestChaos71_CleanConfigRoundRecordsNothingAndLeavesApplyHealthOK(t *testing
 	}
 }
 
+// TestChaos71_PollLoopSurvivesEveryPanickingRound requires the config loop to
+// keep ticking through a deterministic fault. Un-guarded this kills the test
+// BINARY on the first round, which is the defect itself.
 func TestChaos71_PollLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
@@ -161,6 +168,10 @@ func TestChaos71_PollLoopSurvivesEveryPanickingRound(t *testing.T) {
 
 // ── 2. Audit push: containment must not destroy the drained batch ────────────
 
+// TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue is the fail-closed
+// half of the audit round: Drain already removed the batch, so containment
+// without a requeue would destroy evidence once per interval, forever, with the
+// process alive and every surface green.
 func TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
@@ -236,6 +247,9 @@ func TestChaos71_FailedAuditPushStillRequeues(t *testing.T) {
 	}
 }
 
+// TestChaos71_AuditPushLoopSurvivesEveryPanickingRound is the loop-level form:
+// the requeue keeps a batch available, so every subsequent tick panics again and
+// the loop must survive all of them.
 func TestChaos71_AuditPushLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
@@ -253,6 +267,9 @@ func TestChaos71_AuditPushLoopSurvivesEveryPanickingRound(t *testing.T) {
 
 // ── 3. The remaining three loops ─────────────────────────────────────────────
 
+// TestChaos71_MetricsLoopSurvivesEveryPanickingRound requires the heartbeat loop
+// to keep ticking through a deterministic fault; a missing heartbeat is already
+// loud via the CP-side timeout, a dead process is not.
 func TestChaos71_MetricsLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
@@ -263,6 +280,9 @@ func TestChaos71_MetricsLoopSurvivesEveryPanickingRound(t *testing.T) {
 	})
 }
 
+// TestChaos71_RevocationLoopSurvivesEveryPanickingRound requires the revocation
+// loop to keep ticking: a loop that stops leaves revoked sessions live
+// fleet-wide while the node reports healthy, which is a silent fail-OPEN.
 func TestChaos71_RevocationLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
@@ -346,6 +366,10 @@ func TestChaos71_SyncPlaneComponentsAreDistinct(t *testing.T) {
 // version-advancing success. These gates pin the reporting; the ordering fix
 // itself is tracked separately (see the review).
 
+// TestChaos72_DroppedBandwidthSliceIsReported requires a CP-authoritative slice
+// dropped for a startup-order reason to be reported with its slice and config
+// version, rather than discarded silently behind a guard that reads like the
+// presence contract next to it.
 func TestChaos72_DroppedBandwidthSliceIsReported(t *testing.T) {
 	origBW, origNG := globalBandwidth, globalNodeGroups
 	globalBandwidth, globalNodeGroups = nil, nil

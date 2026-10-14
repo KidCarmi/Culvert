@@ -239,9 +239,38 @@ preserve each loop's existing skip semantics.
   the lossless signal (M1 anti-forensics-DoS trade-off, inherited unchanged).
 - **A panicked config round can leave partially applied state.** Containment
   does not roll back the slices that applied before the fault. This is now
-  *visible* (apply-health closed) and *converging* (the next poll re-applies the
-  same version), but it is not atomic, and making the snapshot apply
-  transactional is a far larger change than this sweep.
+  *converging* (the next poll re-applies the same version), but it is not
+  atomic, and making the snapshot apply transactional is a far larger change
+  than this sweep.
+
+  **It is also less visible than "apply-health closed" implies, and that
+  correction is owed here.** The CodeRabbit architecture review of this change
+  made the sharper observation: the apply-health bit has exactly two consumers,
+  `/api/diagnostics` (`diagnostics.go:282`) and the support telemetry registry
+  (`support_telemetry_registry.go:161`) — and **no `readyz*.go` file reads it**.
+  So the state this sweep newly makes reachable reports **ready** to a load
+  balancer and keeps taking traffic, where before the process died and the node
+  left the pool. The failure is visible on a role-gated surface, not on the one
+  that governs traffic.
+
+  The obvious repair is wrong twice over. `readyz_dp_health.go` already records
+  why its `cp_poll` and `node_cert` rows are report-only: *"gating the default
+  verdict on CP-poll failure would let a CP outage eject the entire DP fleet
+  from the load balancer at once"* — and a bad CP snapshot is fleet-wide by
+  construction. Worse, the bit is latched by every PRE-mutation rejection
+  (malformed JSON, over-cap, IdP sync), where the node serves its
+  last-known-good config perfectly coherently; gating on it as it stands would
+  eject healthy nodes. The in-pattern fix needs (1) a signal distinct from those
+  pre-mutation rejections, raised only when a round died AFTER live mutation
+  began, (2) a report-only `/ready` row on it gating under `?strict=1`, (3) a
+  fixed operator-directed detail string honouring that file's disclosure
+  contract (`/ready` is unauthenticated on the proxy port, so a row may name a
+  degraded subsystem but never the enforcement consequence), and (4) a fault
+  injected AFTER a live mutation — a fair criticism of the gates here, which
+  inject at `callForTest`, i.e. pre-mutation. That is a new unauthenticated
+  operator contract changing when a node leaves the load-balancer pool, so it
+  belongs in its own change with its own fail-closed analysis, not bundled into
+  a containment diff. Tracked alongside the CHAOS-72 ordering fix.
 
 ---
 
@@ -260,7 +289,7 @@ test binary*, which is the defect itself:
 | `TestChaos71_AuditPushLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
 | `TestChaos71_GossipLoopSurvivesPanicsAndStillDisarmsOnCancel` | FAIL — binary died on round 1 |
 | `TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue` | FAIL — `pending audit events after a panicking push = 0, want 3` (mutated by removing only the deferred requeue, with the loop guards intact) |
-| `TestChaos72_DroppedBandwidthSliceIsReported` | FAIL — `a dropped bandwidth slice must be reported, got: ` (empty) |
+| `TestChaos72_DroppedBandwidthSliceIsReported` | FAIL — `a dropped bandwidth slice must be reported, got:` then nothing (empty capture) |
 
 **CONTROLS** — a passing gate must not be able to mean the mechanism simply
 stopped firing, or that it fires unconditionally:
