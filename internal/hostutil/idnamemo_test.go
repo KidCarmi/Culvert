@@ -722,8 +722,14 @@ func TestIDNMemo_KeyBoundCoversTheRequestRawCap(t *testing.T) {
 // (mask too large).
 func TestIDNMemo_TierMasksMatchTheirTables(t *testing.T) {
 	cases := []struct {
-		tier  string
-		slots int
+		tier string
+		// slots is uint64, not int, so comparing it with the mask needs no
+		// conversion. The literals below are untyped constants, so they become
+		// uint64 at compile time; an int field would put a runtime
+		// int->uint64 conversion here and gosec reports that as G115 — which
+		// is what the production code this test guards was just fixed for, so
+		// reintroducing it in the guard itself would be an odd way to pass.
+		slots uint64
 		mask  uint64
 	}{
 		{"main", normMemoSlots, normMemoMask},
@@ -734,7 +740,7 @@ func TestIDNMemo_TierMasksMatchTheirTables(t *testing.T) {
 			t.Errorf("%s tier has %d slots, not a power of two — a mask cannot index it",
 				c.tier, c.slots)
 		}
-		if want := uint64(c.slots) - 1; c.mask != want {
+		if want := c.slots - 1; c.mask != want {
 			t.Errorf("%s tier mask is %d, want %d for %d slots", c.tier, c.mask, want, c.slots)
 		}
 	}
