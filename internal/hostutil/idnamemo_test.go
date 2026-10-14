@@ -83,17 +83,68 @@ func normMemoResetForTest() {
 	for i := range normMemo {
 		normMemo[i].Store(nil)
 	}
+	for i := range normMemoLong {
+		normMemoLong[i].Store(nil)
+	}
 }
 
-// normMemoOccupied counts filled slots — the table's live entry count.
+// normMemoOccupied counts filled slots across BOTH tiers — the memo's live
+// entry count. Tests that need to know WHICH tier answered use
+// normMemoOccupiedByTier.
 func normMemoOccupied() int {
-	n := 0
+	main, long := normMemoOccupiedByTier()
+	return main + long
+}
+
+// normMemoOccupiedByTier counts filled slots in the main and long tiers
+// separately, so a test can assert that a shape landed in the tier its key
+// length selects rather than merely landing somewhere.
+func normMemoOccupiedByTier() (main, long int) {
 	for i := range normMemo {
 		if normMemo[i].Load() != nil {
-			n++
+			main++
 		}
 	}
-	return n
+	for i := range normMemoLong {
+		if normMemoLong[i].Load() != nil {
+			long++
+		}
+	}
+	return main, long
+}
+
+// normMemoLiveEntries returns every live entry in both tiers, with the key
+// bound that tier enforces, so an invariant can be asserted over the table as
+// it actually stands rather than over the branch that maintains it.
+func normMemoLiveEntries() []struct {
+	entry     *normMemoEntry
+	tier      string
+	maxKeyLen int
+} {
+	var out []struct {
+		entry     *normMemoEntry
+		tier      string
+		maxKeyLen int
+	}
+	for i := range normMemo {
+		if e := normMemo[i].Load(); e != nil {
+			out = append(out, struct {
+				entry     *normMemoEntry
+				tier      string
+				maxKeyLen int
+			}{e, "main", maxMemoHostLen})
+		}
+	}
+	for i := range normMemoLong {
+		if e := normMemoLong[i].Load(); e != nil {
+			out = append(out, struct {
+				entry     *normMemoEntry
+				tier      string
+				maxKeyLen int
+			}{e, "long", maxMemoLongKeyLen})
+		}
+	}
+	return out
 }
 
 // normMemoRetainedBytes is the bytes the table itself keeps alive: the slot
@@ -102,13 +153,24 @@ func normMemoOccupied() int {
 func normMemoRetainedBytes() int {
 	const slotPtr = 8   // atomic.Pointer
 	const entryHdr = 40 // two string headers (16 each) + bool, padded
-	total := len(normMemo) * slotPtr
-	for i := range normMemo {
-		if e := normMemo[i].Load(); e != nil {
-			total += entryHdr + len(e.host) + len(e.norm)
-		}
+	total := (len(normMemo) + len(normMemoLong)) * slotPtr
+	for _, live := range normMemoLiveEntries() {
+		total += entryHdr + len(live.entry.host) + len(live.entry.norm)
 	}
 	return total
+}
+
+// normMemoCeilingBytes is the absolute footprint ceiling of both tiers: every
+// slot filled with the longest key its tier admits and a maximum-length
+// canonical value. It is a real ceiling only because every entry respects
+// those bounds — asserted over the live table by
+// TestIDNMemo_StoredEntriesRespectTheBound.
+func normMemoCeilingBytes() int {
+	const slotPtr = 8
+	const entryHdr = 40
+	return (len(normMemo)+len(normMemoLong))*slotPtr +
+		normMemoSlots*(entryHdr+maxMemoHostLen+maxMemoHostLen) +
+		normMemoLongSlots*(entryHdr+maxMemoLongKeyLen+maxMemoHostLen)
 }
 
 // ── Correctness ─────────────────────────────────────────────────────────────
@@ -229,6 +291,13 @@ func TestIDNMemo_AllocRegression(t *testing.T) {
 // 998-byte host stored as len(host)=998, len(norm)=998, i.e. ~2.1 MB across a
 // full table against the 554 KB this file claims). The verdict is unchanged
 // either way; only retention is.
+// TestIDNMemo_OversizeHostsAreNotRetained is unchanged by the long tier, and
+// deliberately so: every case below canonicalizes to MORE than maxMemoHostLen
+// (998, 995, 418 and 257 bytes respectively), so each is refused by the shared
+// VALUE bound even when its key is short enough for a tier to consider it. Two
+// of them — Unicode at 812 raw bytes and OneOverLimit at 257 — now reach the
+// long tier's slot lookup rather than being rejected on key length alone, which
+// is exactly why the value bound has to be the one doing this work.
 func TestIDNMemo_OversizeHostsAreNotRetained(t *testing.T) {
 	oversize := []struct {
 		name string
@@ -252,6 +321,10 @@ func TestIDNMemo_OversizeHostsAreNotRetained(t *testing.T) {
 				t.Fatalf("probe host is %d bytes, not oversize — the case proves nothing", len(lowered))
 			}
 			wantNorm, wantOK := normalizeHostStrictUncached(lowered)
+			if len(wantNorm) <= maxMemoHostLen {
+				t.Fatalf("probe host canonicalizes to %d bytes, inside the value bound — "+
+					"this case no longer proves non-retention", len(wantNorm))
+			}
 			// The answer must be identical: this is about retention only.
 			for round := 0; round < 3; round++ {
 				gotNorm, gotOK := NormalizeHostStrict(c.host)
@@ -301,14 +374,22 @@ func TestIDNMemo_StoredEntriesRespectTheBound(t *testing.T) {
 	for _, h := range corpus {
 		NormalizeHostStrict(h)
 	}
-	for i := range normMemo {
-		e := normMemo[i].Load()
-		if e == nil {
-			continue
+	corpus = append(corpus, longRawULabelHost(), beyondLongTierHost())
+	for _, h := range corpus {
+		NormalizeHostStrict(h)
+	}
+	for _, live := range normMemoLiveEntries() {
+		e := live.entry
+		if len(e.host) > live.maxKeyLen {
+			t.Fatalf("%s tier holds len(host)=%d, its key bound is %d",
+				live.tier, len(e.host), live.maxKeyLen)
 		}
-		if len(e.host) > maxMemoHostLen || len(e.norm) > maxMemoHostLen {
-			t.Fatalf("slot %d holds len(host)=%d len(norm)=%d, both must be <= %d",
-				i, len(e.host), len(e.norm), maxMemoHostLen)
+		// The VALUE bound is maxMemoHostLen in BOTH tiers: a canonical form
+		// longer than the DNS limit is refused by the dispatch gates, so
+		// retaining one would loosen the ceiling and buy nothing.
+		if len(e.norm) > maxMemoHostLen {
+			t.Fatalf("%s tier holds len(norm)=%d, the value bound is %d",
+				live.tier, len(e.norm), maxMemoHostLen)
 		}
 	}
 }
@@ -327,11 +408,13 @@ func TestIDNMemo_BoundedFootprint(t *testing.T) {
 	if occupied > normMemoSlots {
 		t.Fatalf("memo holds %d entries after %d distinct hosts, ceiling %d", occupied, distinct, normMemoSlots)
 	}
-	// Absolute ceiling: every slot filled with two maximum-length DNS names.
-	// It is a real ceiling only because no entry may exceed maxMemoHostLen —
-	// asserted over the live table by TestIDNMemo_StoredEntriesRespectTheBound
-	// and at the boundary by TestIDNMemo_OversizeHostsAreNotRetained.
-	ceiling := len(normMemo)*8 + normMemoSlots*(40+2*maxMemoHostLen)
+	// Absolute ceiling: every slot of both tiers filled with the longest key it
+	// admits and a maximum-length canonical value. It is a real ceiling only
+	// because every entry respects those bounds — asserted over the live table
+	// by TestIDNMemo_StoredEntriesRespectTheBound and at the boundaries by
+	// TestIDNMemo_OversizeHostsAreNotRetained and
+	// TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained.
+	ceiling := normMemoCeilingBytes()
 	retained := normMemoRetainedBytes()
 	if retained > ceiling {
 		t.Fatalf("memo retains %d B after %d distinct hosts, ceiling %d B", retained, distinct, ceiling)
@@ -560,6 +643,281 @@ func BenchmarkNormalizeHostStrict_IDNColdFanoutNoMemo(b *testing.B) {
 		h := hosts[i%len(hosts)]
 		for j := 0; j < perRequestNormalizations; j++ {
 			lowered := strings.ToLower(strings.TrimSuffix(h, "."))
+			benchIDNNorm, benchIDNOK = normalizeHostStrictUncached(lowered)
+		}
+	}
+}
+
+// ── The long tier: raw over the DNS limit, canonical inside it ──────────────
+//
+// This is the shape the first version of maxMemoHostLen's rationale said could
+// not exist. IDNA SHRINKS a U-label authority, so a host whose RAW spelling is
+// well past the 253-byte DNS limit can canonicalize comfortably inside it —
+// proxy_host_bounds.go records the worst legitimate case as 883 raw bytes
+// collapsing to a 251-byte A-label, which is why the raw pre-cap is 1 KiB. Such
+// a host is ACCEPTED by both proxy dispatch gates, so it walks the full ~10x
+// per-request normalization fan-out, and a key bound measured on the raw
+// spelling excluded every one of them from the memo.
+
+// longRawULabelHost builds that shape, and builds it RESOLVABLE rather than
+// merely accepted: eight U-labels of 20 CJK code points each, so every
+// canonical label lands at 26 bytes — inside the 63-byte A-label limit of
+// RFC 1035 §2.3.1 — for 499 raw bytes against 227 canonical.
+func longRawULabelHost() string {
+	label := strings.Repeat("日", 20)
+	return strings.TrimSuffix(strings.Repeat(label+".", 8), ".") + ".example.com"
+}
+
+// beyondLongTierHost is past the long tier's key bound, so no tier may retain
+// it. maxMemoLongKeyLen clears the empirical maximum IDN expansion, so nothing
+// this long can canonicalize inside the DNS limit anyway.
+func beyondLongTierHost() string {
+	return strings.Repeat("日", 400) + ".example.com"
+}
+
+// TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained is the regression gate for
+// the gap. It proves the premise before it asserts the fix: the probe host is a
+// DNS-valid name, both dispatch-gate predicates admit it, and its raw spelling
+// is over the main tier's key bound. Only then does it require that the memo
+// retain it — in the long tier, leaving the main tier untouched.
+//
+// Verified failing against the pre-fix body, where the final assertion reported
+// 0 occupied slots.
+func TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained(t *testing.T) {
+	// The two dispatch-gate bounds, mirrored from proxy_host_bounds.go. This
+	// package cannot import package main, so they are restated; the root
+	// TestHostutilLongRawULabelReachesTheMemo pins the agreement.
+	const maxRawDestAuthorityBytes = 1024 // rawAuthorityOversize
+	const maxDestHostLen = 253            // canonicalHostOversize
+
+	host := longRawULabelHost()
+	norm, ok := NormalizeHostStrict(host)
+	if !ok {
+		t.Fatalf("probe host does not canonicalize; the shape proves nothing")
+	}
+
+	// ── Premise 1: the raw spelling is past the main tier's key bound ───────
+	if len(host) <= maxMemoHostLen {
+		t.Fatalf("probe host is %d raw bytes, inside the main tier at %d — "+
+			"the case no longer exercises the long tier", len(host), maxMemoHostLen)
+	}
+	if len(host) > maxMemoLongKeyLen {
+		t.Fatalf("REGRESSION: a %d-byte raw authority that BOTH dispatch gates accept "+
+			"(canonical %d bytes, longest label 26) exceeds the memo's key bound of %d, so no tier "+
+			"may retain it and every request to it pays the full un-memoized IDNA fan-out "+
+			"(~53 µs and 180 allocations across the per-request fan-out)",
+			len(host), len(norm), maxMemoLongKeyLen)
+	}
+
+	// ── Premise 2: both dispatch gates ACCEPT it, so the fan-out is real ───
+	if len(host) > maxRawDestAuthorityBytes {
+		t.Fatalf("raw gate would refuse %d bytes; the fan-out is unreachable", len(host))
+	}
+	if len(norm) > maxDestHostLen {
+		t.Fatalf("canonical gate would refuse %d bytes; the fan-out is unreachable", len(norm))
+	}
+
+	// ── Premise 3: it is a resolvable name, not just an accepted string ─────
+	for _, label := range strings.Split(norm, ".") {
+		if len(label) > 63 {
+			t.Fatalf("canonical label %q is %d bytes, over the RFC 1035 limit of 63 — "+
+				"the shape is not a legitimate destination", label, len(label))
+		}
+	}
+
+	// ── The answer is unchanged: this is about retention only ──────────────
+	wantNorm, wantOK := normalizeHostStrictUncached(strings.ToLower(strings.TrimSuffix(host, ".")))
+	normMemoResetForTest()
+	for round := 0; round < 3; round++ {
+		gotNorm, gotOK := NormalizeHostStrict(host)
+		if gotNorm != wantNorm || gotOK != wantOK {
+			t.Fatalf("round %d: got (%q…, %v), uncached (%q…, %v)",
+				round, truncForLog(gotNorm), gotOK, truncForLog(wantNorm), wantOK)
+		}
+	}
+
+	// ── The fix: retained, in the long tier, and nowhere else ──────────────
+	main, long := normMemoOccupiedByTier()
+	if long != 1 {
+		t.Errorf("REGRESSION: %d long-tier slots filled for a %d-byte raw / %d-byte canonical "+
+			"host that both dispatch gates accept — it must be memoized, or every request to it "+
+			"pays the full un-memoized fan-out", long, len(host), len(norm))
+	}
+	if main != 0 {
+		t.Errorf("%d main-tier slots filled; a long key must not consume main-tier capacity", main)
+	}
+	t.Logf("raw=%d canonical=%d longest label=%d: main=%d long=%d",
+		len(host), len(norm), 26, main, long)
+}
+
+// TestIDNMemo_LongTierHitIsAllocationFree pins the point of the tier: a warm
+// long-tier lookup must cost no allocation, like a main-tier hit. The slice
+// header normMemoTableFor returns is stack-allocated; if that ever stops being
+// true, the long tier would add a heap allocation to the very path it exists to
+// make cheaper.
+func TestIDNMemo_LongTierHitIsAllocationFree(t *testing.T) {
+	host := longRawULabelHost()
+	normMemoResetForTest()
+	NormalizeHostStrict(host) // warm the slot
+
+	if allocs := testing.AllocsPerRun(200, func() {
+		benchIDNNorm, benchIDNOK = NormalizeHostStrict(host)
+	}); allocs != 0 {
+		t.Errorf("warm long-tier hit allocates %.2f times per call, want 0", allocs)
+	}
+}
+
+// TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained is the outer boundary:
+// past maxMemoLongKeyLen no tier may retain, the answer is still identical to
+// the uncached body, and the table stays empty. This is what keeps the ceiling
+// a bound rather than an expectation now that two tiers exist.
+func TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+	}{
+		{"Unicode", beyondLongTierHost()},
+		// One byte over the long tier's key bound — the boundary itself.
+		{"OneOverLongBound", "xn--bcher-kva." + strings.Repeat("c", maxMemoLongKeyLen-13) + ".de"},
+		// An ACE label, so it reaches the slow path rather than the
+		// already-canonical fast path, on an authority past the raw gate
+		// entirely — what a non-request caller (feed parsing, admin patterns)
+		// can still hand this function.
+		{"ValidACEPastRawCap", "xn--bcher-kva." + strings.Repeat("a", 1200) + ".com"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			normMemoResetForTest()
+			lowered := strings.ToLower(strings.TrimSuffix(c.host, "."))
+			if len(lowered) <= maxMemoLongKeyLen {
+				t.Fatalf("probe host is %d bytes, inside the long tier at %d — "+
+					"the case proves nothing", len(lowered), maxMemoLongKeyLen)
+			}
+			wantNorm, wantOK := normalizeHostStrictUncached(lowered)
+			for round := 0; round < 3; round++ {
+				gotNorm, gotOK := NormalizeHostStrict(c.host)
+				if gotNorm != wantNorm || gotOK != wantOK {
+					t.Fatalf("round %d: got (%q…, %v), uncached (%q…, %v)",
+						round, truncForLog(gotNorm), gotOK, truncForLog(wantNorm), wantOK)
+				}
+			}
+			if n := normMemoOccupied(); n != 0 {
+				t.Errorf("REGRESSION: %d slots filled by a %d-byte host — past the long tier's "+
+					"key bound nothing may be retained, or the footprint ceiling does not hold",
+					n, len(lowered))
+			}
+		})
+	}
+}
+
+// TestIDNMemo_LongTierBoundedFootprint is the long tier's own memory test. Its
+// key is a client-chosen authority just as the main tier's is, and its entries
+// are up to maxMemoLongKeyLen bytes, so it must not grow with the number of
+// distinct long hosts seen. Feeding it 64x more than it has slots must leave
+// both the slot count and the retained bytes inside the fixed ceiling.
+func TestIDNMemo_LongTierBoundedFootprint(t *testing.T) {
+	normMemoResetForTest()
+	label := strings.Repeat("日", 20)
+	prefix := strings.Repeat(label+".", 8)
+	const distinct = normMemoLongSlots * 64
+	for i := 0; i < distinct; i++ {
+		host := prefix + fmt.Sprintf("x%d.example.com", i)
+		if len(host) <= maxMemoHostLen || len(host) > maxMemoLongKeyLen {
+			t.Fatalf("generated host %d is %d bytes, not a long-tier key", i, len(host))
+		}
+		NormalizeHostStrict(host)
+	}
+	main, long := normMemoOccupiedByTier()
+	if long > normMemoLongSlots {
+		t.Fatalf("long tier holds %d entries after %d distinct hosts, ceiling %d",
+			long, distinct, normMemoLongSlots)
+	}
+	if retained, ceiling := normMemoRetainedBytes(), normMemoCeilingBytes(); retained > ceiling {
+		t.Fatalf("memo retains %d B after %d distinct long hosts, ceiling %d B",
+			retained, distinct, ceiling)
+	}
+	t.Logf("after %d distinct long-raw IDN hosts: main=%d long=%d/%d, %d B retained (ceiling %d B)",
+		distinct, main, long, normMemoLongSlots, normMemoRetainedBytes(), normMemoCeilingBytes())
+}
+
+// TestIDNMemo_LongTierConcurrentStress is the long tier's race gate: the same
+// immutable-entry / single-atomic-store contract as the main tier, exercised
+// over a host set far larger than the tier under continuous eviction. Run under
+// -race. Every answer must still equal the uncached body's.
+func TestIDNMemo_LongTierConcurrentStress(t *testing.T) {
+	normMemoResetForTest()
+	label := strings.Repeat("日", 20)
+	prefix := strings.Repeat(label+".", 8)
+	hosts := make([]string, normMemoLongSlots*4)
+	want := make([]string, len(hosts))
+	for i := range hosts {
+		hosts[i] = prefix + fmt.Sprintf("x%d.example.com", i)
+		want[i], _ = normalizeHostStrictUncached(hosts[i])
+	}
+
+	var wg sync.WaitGroup
+	var mismatches atomic.Int64
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for round := 0; round < 40; round++ {
+				for i := range hosts {
+					j := (i + g) % len(hosts)
+					got, ok := NormalizeHostStrict(hosts[j])
+					if !ok || got != want[j] {
+						mismatches.Add(1)
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	if n := mismatches.Load(); n != 0 {
+		t.Fatalf("%d crossed or wrong answers under concurrent long-tier eviction", n)
+	}
+	if _, long := normMemoOccupiedByTier(); long > normMemoLongSlots {
+		t.Fatalf("long tier grew to %d entries under stress, ceiling %d", long, normMemoLongSlots)
+	}
+}
+
+// BenchmarkIDNLongRawFanout and BenchmarkIDNLongRawFanoutNoMemo are the
+// measurement behind the tier: the ~10x per-request fan-out for ONE accepted
+// long-raw U-label destination, through the current body and through the
+// pre-fix body. Both include the strings.ToLower pass, so they are directly
+// comparable (Xeon @2.80GHz, go1.26.9, -count=2):
+//
+//	per 10x fan-out            pre-fix                  long tier
+//	long-raw U-label      85 000-94 000 ns  200     27 000-29 000 ns  0
+//
+// The ~28 µs that remain are strings.ToLower's per-rune Map walk, which runs
+// ahead of the memo and is not memoizable — see the residual note under
+// maxMemoHostLen. The in-limit U-label rows for the same fan-out are ~7 400 ns /
+// 70 allocs and ~424 ns / 0 allocs (BenchmarkNormalizeHostStrict_IDNRequestFanout).
+func BenchmarkIDNLongRawFanout(b *testing.B) {
+	host := longRawULabelHost()
+	normMemoResetForTest()
+	NormalizeHostStrict(host)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 10; j++ {
+			benchIDNNorm, benchIDNOK = NormalizeHostStrict(host)
+		}
+	}
+}
+
+// BenchmarkIDNLongRawFanoutNoMemo is the same fan-out through the pre-fix body:
+// NormalizeHostStrict's lowering pass and then the frozen uncached slow path,
+// which is exactly what every request to such a destination used to pay. The
+// lowering is INSIDE the loop deliberately — leaving it out measures a path the
+// request never takes and understates the pre-fix cost by ~28 µs.
+func BenchmarkIDNLongRawFanoutNoMemo(b *testing.B) {
+	host := longRawULabelHost()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 10; j++ {
+			lowered := strings.ToLower(strings.TrimSuffix(host, "."))
 			benchIDNNorm, benchIDNOK = normalizeHostStrictUncached(lowered)
 		}
 	}
