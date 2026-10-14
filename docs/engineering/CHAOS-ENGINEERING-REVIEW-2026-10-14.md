@@ -213,6 +213,65 @@ preserve each loop's existing skip semantics.
 
 ---
 
+## 6a. Two states the containment created, found in review (Codex P1/P2)
+
+Both are the §12.2 shape again — not defects in the base, but states that exist
+*because* the round now survives — and both were in the first version of this
+change. Recording them because the pattern is the lesson: **every time
+containment keeps a process alive past a fault, ask what the dead process used
+to clean up.**
+
+### P1 — the revocation persist could be owed forever (fail-open on restart)
+
+`revocationSyncRound` saved only when the merge reported new tokens:
+
+```go
+if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
+    ... SaveRevocations()
+}
+```
+
+`MergeRevocations` counts only tokens **not already present**
+(`internal/session/session.go`), so that save can fire at most once per token
+set. While a failed round killed the process this was safe: the in-memory merge
+died with it, so the next successful round after the restart saw `added > 0`
+and persisted. With the round contained, a fault between the merge and a
+completed `SaveRevocations` leaves the tokens in RAM only — and every later
+full-set response then returns `added == 0`, so the write is **never
+re-attempted**. The next restart loads a file that never received those
+revocations and **accepts the revoked session cookies** until gossip happens to
+re-deliver them, or indefinitely while the CP is unreachable.
+
+Fixed with a `revocationsUnsaved` flag on the client, set **before** the save is
+attempted (so a fault inside the save leaves the write owed) and cleared only
+once a save returns nil; every round discharges it independently of `added`.
+
+### P2 — a pre-mutation panic claimed a configuration-content rejection
+
+`guardedConfigRound` first marked the apply rejected on *any* panicking round.
+That is wrong in both directions. It **over-reports**: a fault in the RPC,
+parse, validation or fence leaves the node on its last-known-good config,
+whole, and calling that a CONTENT rejection is false — and the claim would
+**stick**, because the `config_unchanged` sentinel and the delta no-op both
+return without reaching `markConfigSnapshotApplyOK` (the only two callers are
+`controlplane_client.go:426` and `:544`), so on a steady-state cluster nothing
+would ever clear it. It also **under-reports** the outcome that matters: the one
+state an operator most needs to distinguish — this node is serving a
+half-applied config — became indistinguishable from the benign case.
+
+Fixed by bracketing the mutating region (`applySnapshotMutations`, extracted so
+there is exactly one begin and one end) with a marker that a panic cannot
+clear, because `end` is deliberately **not** deferred — a deferred clear runs
+during unwinding and would erase the fact being recorded. Keeping the single
+recover in `runGuarded` also preserves the original fault's stack in the crash
+record, which a recover-and-re-panic inside the apply would have replaced.
+
+That marker is also exactly the signal §7's readiness discussion needs: it is
+the one that means *this node cannot vouch for its policy coherence*, as
+distinct from the pre-mutation rejections that must never gate readiness.
+
+---
+
 ## 7. Residual Risk / deliberately left
 
 - **CHAOS-72 is reported, not repaired.** The real fix is to construct the

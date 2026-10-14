@@ -77,6 +77,13 @@ type DataPlaneClient struct {
 	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
 	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	// revocationsUnsaved records that a revocation merge has landed in memory
+	// but its persist has not completed. It exists because MergeRevocations
+	// counts only NEWLY added tokens, so a save that is skipped once can never
+	// be re-triggered by a later identical full-set response — see
+	// revocationSyncRound (CHAOS-71, Codex P1). Atomic because the gate and the
+	// revocation loop are different goroutines under -race.
+	revocationsUnsaved atomic.Bool
 }
 
 // backoff sleeps for an exponentially increasing duration after consecutive
@@ -275,7 +282,8 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 }
 
 // guardedConfigRound runs one config-sync round under the CHAOS-24 guard and
-// fails the apply-health surface closed when that round panicked.
+// fails the apply-health surface closed when that round died INSIDE the
+// mutating apply.
 //
 // Marking the apply rejected is load-bearing, not bookkeeping. fetchAndApply
 // records an outcome at every payload-content rejection point in the
@@ -290,8 +298,24 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 // existing one: lastVersion is advanced only after a complete apply, so the
 // next poll re-fetches and re-applies the same version rather than
 // short-circuiting on it.
+//
+// The marking is conditional on the apply having actually begun, and that
+// condition is the correction to this function's first shape (Codex P2). A
+// panic BEFORE any mutation — in the RPC, the parse, the validation or the
+// fence — leaves the node on its last-known-good config, whole; claiming the
+// configuration CONTENT was rejected there is false, and it would also STICK:
+// the "unchanged" sentinel and the delta no-op both return without reaching
+// markConfigSnapshotApplyOK, so on a steady-state cluster nothing would ever
+// clear the latch and the operator contract would report a content rejection
+// indefinitely. The crash record (dpComponentConfigPoll) is the correct and
+// sufficient signal for a pre-mutation fault; the apply-health surface speaks
+// only for the apply.
 func (c *DataPlaneClient) guardedConfigRound(ctx context.Context) {
-	if runGuarded(dpComponentConfigPoll, func() { c.fetchAndApply(ctx) }) {
+	panicked := runGuarded(dpComponentConfigPoll, func() { c.fetchAndApply(ctx) })
+	// Consume unconditionally: a round that completed normally must not leave a
+	// marker behind for the next one to read.
+	interrupted := consumeConfigSnapshotApplyInterrupted()
+	if panicked && interrupted {
 		markConfigSnapshotApplyRejected()
 	}
 }
@@ -722,9 +746,29 @@ func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
 	}
 	if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
 		logger.Printf("DataPlane: merged %d remote session revocations", added)
+		// Mark dirty BEFORE attempting the save, never after: a panic inside
+		// SaveRevocations must leave the node knowing the write is still owed.
+		c.revocationsUnsaved.Store(true)
+	}
+	// Retry the persist whenever it is still owed, independently of `added`
+	// (Codex P1). Tying the save to `added > 0` was safe only while a failed
+	// round killed the process: MergeRevocations counts only tokens that were
+	// NOT already present, so once a merge has landed in memory every later
+	// full-set response returns added == 0. A round contained between the merge
+	// and a completed save would therefore hold the revocations in RAM with the
+	// save never re-attempted — and on the next restart the node would load a
+	// file that never received them and ACCEPT those revoked cookies until
+	// gossip happened to re-deliver them, or indefinitely while the CP is
+	// unreachable. That is a fail-open the crash did not have (process death
+	// lost the in-memory merge too, so the next successful round saw added > 0
+	// and saved), so containment is what introduces it and the dirty flag is
+	// what removes it.
+	if c.revocationsUnsaved.Load() {
 		if err := sessionRevoked.SaveRevocations(); err != nil {
 			logger.Printf("DataPlane: failed to persist revocations: %v", err)
+			return // still owed; the next round retries
 		}
+		c.revocationsUnsaved.Store(false)
 	}
 }
 

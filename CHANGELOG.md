@@ -556,6 +556,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `lastVersion` advances only after a complete apply, so the next poll
   re-applies the same version. 13 gates, each verified failing against the
   pre-fix shape. See `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-14.md`.
+- Two states that the panic containment above newly created, both caught in
+  review of the same change. **The revocation persist could be owed forever:**
+  `revocationSyncRound` saved only when the merge reported new tokens, but
+  `MergeRevocations` counts only tokens not already present, so a round
+  contained between the merge and a completed `SaveRevocations` left them in
+  memory with every later full-set response returning zero added — the write
+  never retried, and the next restart loading a file that never received them
+  and accepting those revoked session cookies. Process death used to lose the
+  in-memory merge too, so the next round re-merged and saved; containment is
+  what removed that self-healing. A dirty flag, set before the save is attempted
+  and cleared only on success, now makes every round discharge an owed write.
+  **And a pre-mutation panic claimed a configuration-content rejection:** the
+  guard first latched the apply-health surface on any panicking round, which
+  mis-reported a transport fault as rejected content and would never clear,
+  since neither the unchanged sentinel nor the delta no-op reaches
+  `markConfigSnapshotApplyOK`. The mutating region is now bracketed by a marker
+  a panic cannot clear, so only a round interrupted after live mutation began
+  fails that surface closed — which is also the signal that distinguishes "this
+  node cannot vouch for its policy coherence" from a snapshot refused before any
+  mutation.
 - A Data Plane boot **silently discarded the bandwidth/QoS and node-group
   slices** of its last-known-good config snapshot and still recorded a complete,
   version-advancing apply (CHAOS-72). `initCluster` replays that snapshot

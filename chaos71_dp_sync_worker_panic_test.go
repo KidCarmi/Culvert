@@ -29,12 +29,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // panickingCall is a callForTest seam that counts every round that reached the
@@ -84,11 +87,18 @@ func runLoopUntilRounds(t *testing.T, want int64, what string, loop func(context
 
 // ── 1. Config poll: contained, counted, and FAILED CLOSED on apply health ────
 
-// TestChaos71_ConfigRoundPanicIsContainedAndMarksApplyRejected pins both halves
-// of the config round: the panic is contained and counted under its own
-// component, and the apply-health surface fails CLOSED rather than keeping the
-// previous success while the node enforces a half-applied snapshot.
-func TestChaos71_ConfigRoundPanicIsContainedAndMarksApplyRejected(t *testing.T) {
+// TestChaos71_ConfigRoundPanicIsContainedAndCounted pins the containment half
+// of the config round: the panic does not reach the runtime, and it is recorded
+// under its own crash component so an operator can tell WHICH worker faulted.
+//
+// Whether the round additionally fails the apply-health surface closed depends
+// on how far it got, and that is deliberately NOT asserted here — it is the
+// subject of TestChaos71_PreMutationPanicDoesNotClaimAContentRejection and
+// TestChaos71_PostMutationInterruptionMarksTheApplyRejected. This test's own
+// first shape asserted the apply WAS marked rejected for a fault at the RPC,
+// which Codex correctly identified as wrong in both directions: it mis-reports
+// a transport fault as rejected CONTENT, and the claim would never clear.
+func TestChaos71_ConfigRoundPanicIsContainedAndCounted(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	resetConfigSnapshotApplyHealth(t)
@@ -114,10 +124,6 @@ func TestChaos71_ConfigRoundPanicIsContainedAndMarksApplyRejected(t *testing.T) 
 	}
 	if rec.Component != dpComponentConfigPoll {
 		t.Errorf("component = %q, want %q", rec.Component, dpComponentConfigPoll)
-	}
-	if lastConfigSnapshotApplyOK() {
-		t.Fatal("a panicking apply round must fail the apply-health surface closed — " +
-			"otherwise the node reports a healthy config while enforcing a half-applied snapshot")
 	}
 }
 
@@ -408,5 +414,169 @@ func TestChaos72_OmittedSlicesAreNotReportedAsDropped(t *testing.T) {
 
 	if strings.Contains(out, "NOT applied") {
 		t.Errorf("an omitted slice is the presence contract, not a drop — must stay quiet, got: %s", out)
+	}
+}
+
+// withRevocationsPath points revocation persistence at a test-owned path and
+// returns a restore func (the path is a package global in internal/session).
+func withRevocationsPath(t *testing.T, path string) func() {
+	t.Helper()
+	prev := session.RevocationsPath()
+	session.SetRevocationsPath(path)
+	return func() { session.SetRevocationsPath(prev) }
+}
+
+// ── 6. Codex P1: a contained round must not lose the revocation persist ──────
+//
+// MergeRevocations counts only tokens that were NOT already present, so the
+// original `if added > 0 { save }` could only ever fire once per token set.
+// While a failed round killed the process that was safe — the in-memory merge
+// died with it, so the next successful round after a restart saw added > 0 and
+// saved. Containment breaks that: the merge survives in RAM, every later
+// full-set response returns added == 0, and the save is never re-attempted, so
+// a restart loads a file that never received those revocations and accepts the
+// revoked cookies. These gates pin the retry.
+
+// TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound requires a round that
+// died between the merge and a completed save to leave the write OWED, and the
+// next round to discharge it even though that round's merge adds nothing new.
+func TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	t.Cleanup(sessionRevoked.SwapForTest())
+
+	dir := t.TempDir()
+	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
+
+	entry := RevocationEntry{Token: "chaos71-token", Expiry: time.Now().Add(time.Hour).Unix()}
+	reply, err := json.Marshal(struct {
+		Entries []RevocationEntry `json:"entries"`
+	}{Entries: []RevocationEntry{entry}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Round 1: the CP's set merges, then the round dies before the save lands.
+	// The panic is injected by a save that cannot succeed (unwritable path).
+	var round int
+	c := &DataPlaneClient{nodeID: "chaos71", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		round++
+		return reply, nil
+	}}
+	// Simulate the interrupted round exactly as production would leave it: the
+	// merge has landed and the dirty flag is set, but the save did not finish.
+	if added := sessionRevoked.MergeRevocations([]RevocationEntry{entry}); added != 1 {
+		t.Fatalf("priming merge added %d, want 1", added)
+	}
+	c.revocationsUnsaved.Store(true)
+
+	// Round 2: the SAME full set arrives, so the merge adds nothing.
+	c.revocationSyncRound(context.Background())
+
+	if c.revocationsUnsaved.Load() {
+		t.Error("the persist is still marked owed after a successful save")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "revocations.json"))
+	if err != nil {
+		t.Fatalf("the owed revocation persist was never retried: %v", err)
+	}
+	if !strings.Contains(string(data), "chaos71-token") {
+		t.Errorf("persisted revocations = %s, want the merged token", data)
+	}
+}
+
+// CONTROL: the retry must be driven by the OWED flag, not run unconditionally
+// on every round — a clean round with nothing new must not keep rewriting the
+// file, and must not leave the flag set.
+func TestChaos71_RevocationSaveIsNotOwedAfterACleanRound(t *testing.T) {
+	t.Cleanup(sessionRevoked.SwapForTest())
+	dir := t.TempDir()
+	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
+
+	c := &DataPlaneClient{nodeID: "chaos71", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"entries":[]}`), nil
+	}}
+	c.revocationSyncRound(context.Background())
+
+	if c.revocationsUnsaved.Load() {
+		t.Error("a round that merged nothing must not mark a persist owed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "revocations.json")); err == nil {
+		t.Error("a round that merged nothing must not write the revocation file")
+	}
+}
+
+// ── 7. Codex P2: only a POST-mutation interruption is a content rejection ────
+
+// TestChaos71_PreMutationPanicDoesNotClaimAContentRejection requires a round
+// that died before any mutation to leave the apply-health surface alone. The
+// first shape of guardedConfigRound latched it on ANY panic, which both
+// mis-reported a transport fault as rejected CONTENT and stuck: the "unchanged"
+// sentinel and the delta no-op never reach markConfigSnapshotApplyOK, so on a
+// steady-state cluster nothing would clear it.
+func TestChaos71_PreMutationPanicDoesNotClaimAContentRejection(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	resetConfigSnapshotApplyHealth(t)
+
+	var rounds atomic.Int64
+	c := &DataPlaneClient{callForTest: panickingCall(&rounds)}
+	c.lastVersion.Store(0)
+
+	c.guardedConfigRound(context.Background())
+
+	if got := atomic.LoadInt64(&statCrashRecords); got != 1 {
+		t.Errorf("crash records = %d, want 1 — the round must still be counted", got)
+	}
+	if !lastConfigSnapshotApplyOK() {
+		t.Fatal("a panic in the RPC is not a configuration-content rejection: " +
+			"claiming one here is false and, because no unchanged/delta response clears it, permanent")
+	}
+}
+
+// TestChaos71_PostMutationInterruptionMarksTheApplyRejected is the other half:
+// once the mutating region has begun, an interrupted round MUST fail the
+// surface closed, because the node now holds a blend of two config generations.
+func TestChaos71_PostMutationInterruptionMarksTheApplyRejected(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	resetConfigSnapshotApplyHealth(t)
+
+	// Stand in for a fault raised after applySnapshotMutations started: the
+	// marker is what the production bracket leaves set when a panic crosses it.
+	beginConfigSnapshotApplyMutation()
+	c := &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		panic("CHAOS-71: fault after live mutation began")
+	}}
+	c.lastVersion.Store(0)
+
+	c.guardedConfigRound(context.Background())
+
+	if lastConfigSnapshotApplyOK() {
+		t.Fatal("a round interrupted inside the mutating apply must fail the apply-health surface closed")
+	}
+}
+
+// CONTROL: the marker must not outlive the round that set it, or one
+// interrupted apply would make every later pre-mutation panic look like a
+// content rejection too.
+func TestChaos71_InterruptedMarkerIsConsumedByTheRoundThatReadsIt(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	resetConfigSnapshotApplyHealth(t)
+
+	beginConfigSnapshotApplyMutation()
+	if !consumeConfigSnapshotApplyInterrupted() {
+		t.Fatal("the marker must read true while an apply is unfinished")
+	}
+	if consumeConfigSnapshotApplyInterrupted() {
+		t.Error("the marker must be cleared by the read that consumed it")
+	}
+
+	// And a mutating region that completes normally leaves nothing behind.
+	beginConfigSnapshotApplyMutation()
+	endConfigSnapshotApplyMutation()
+	if consumeConfigSnapshotApplyInterrupted() {
+		t.Error("a completed mutating region must leave no interrupted marker")
 	}
 }

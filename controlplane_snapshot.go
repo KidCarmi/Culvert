@@ -805,6 +805,25 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	refScanDeleteLock()
 	defer refScanDeleteUnlock()
 
+	// CHAOS-71: everything below this point MUTATES live enforcement state with
+	// no rollback, so a round that dies partway leaves two config generations
+	// blended. Bracket the region so an interrupted apply is distinguishable
+	// from one refused before any mutation. end… is NOT deferred on purpose: a
+	// deferred clear would run during panic unwinding and erase the fact being
+	// recorded. The region is one call, so there is exactly one begin and one
+	// end, and a future early return inside it cannot bypass the clear — only a
+	// panic crossing it can, which is the condition being detected.
+	// See configsnapshot_apply_health.go.
+	beginConfigSnapshotApplyMutation()
+	err := applySnapshotMutations(snap)
+	endConfigSnapshotApplyMutation()
+	return err
+}
+
+// applySnapshotMutations is applyConfigSnapshot's mutating region: every call
+// here replaces live enforcement state. Order is preserved verbatim from before
+// the CHAOS-71 extraction, and the caller holds the reference-integrity gate.
+func applySnapshotMutations(snap ConfigSnapshot) error {
 	applySnapshotPolicyAndTraffic(snap)
 	applySnapshotClusterRuntime(snap)
 
