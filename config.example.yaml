@@ -15,6 +15,7 @@ proxy:
   log_max_mb: 50      # Rotate log when it reaches this size in MB
   tls_cert: ""        # Custom TLS certificate for Web UI (PEM, optional)
   tls_key: ""         # Custom TLS key for Web UI (PEM, optional)
+  ui_sans: []         # Extra SANs (IPs or hostnames) for the auto-generated self-signed Web UI cert
   ca_path: "/data/ca.bundle"      # Persistent Root CA bundle (mount /data as Docker volume)
   metrics_token: ""   # Bearer token for /metrics endpoint (empty = open access)
   policy_file: ""     # JSON file for PBAC policy rules
@@ -107,6 +108,24 @@ security_scan:
   cache_ttl: "1h"        # SHA-256 scan result cache TTL
   cache_size: 10000      # Max entries in scan result cache
   max_scan_mb: 5         # Max response size to buffer for scanning (MiB)
+  scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. ":8484"
+  scan_svc_url: ""       # Delegate body scanning to a scan sidecar instead of in-process, e.g. "http://scan-svc:8484"
+
+# ── Content Disarm & Reconstruction (Sluice) ───────────────────────────────
+# Strips active content (macros, JS, OLE) from downloads via the Sluice sidecar.
+# Validated only when enabled: true. Fields below are optional unless noted.
+
+cdr:
+  enabled: false
+  endpoint: ""            # Sluice "host:port" (e.g. "sluice:8443"); required when enabled
+  fail_mode: "open"       # Sluice unreachable/ERROR: "open" (pass original + audit + alert) | "closed" (503 + block page)
+  default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
+  default_mode: "ENFORCE" # "ENFORCE" | "REPORT_ONLY" | "BYPASS_WITH_REPORT"
+  timeout_sec: 35         # Per-Sanitize deadline in seconds (must be >= 30)
+  max_file_size_mb: 0     # Reject larger files client-side; keep equal to Sluice's own cap
+  chunk_size_kb: 0        # gRPC stream chunk, 16-3072 (0 = default)
+  server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix)
+  certs_dir: ""           # Dir holding ca.pem, client.pem, client.key (written by enrollment)
 
 # ── Upstream Proxy Chaining ────────────────────────────────────────────────
 
@@ -143,9 +162,14 @@ file_block:
 # ── Logging & Observability ───────────────────────────────────────────────
 
 log_format: "text"      # "text" (default) | "json" (structured, fields: time, msg, req_id, identity, rule, action)
+log_level: ""           # Minimum level: DEBUG | INFO (default) | WARN | ERROR
 default_action: ""      # "allow" (passthrough) | "deny" (zero-trust); auto-detected if empty
 audit_log_file: ""      # Persistent JSONL audit log path (e.g. "/data/audit.jsonl")
 syslog_addr: ""         # Syslog forwarding: "udp://host:514" or "tcp://host:601"
+syslog_format: ""       # "rfc3164" (default) | "rfc5424" (preferred by Splunk HEC / Elastic / QRadar)
+otlp_endpoint: ""       # OTLP collector base URL, e.g. "http://otel-collector:4318" (metrics + traces)
+request_log_file: ""    # Persistent JSONL request log path; empty = in-memory only (lost on restart)
+request_log_max_mb: 100 # Request-log rotation size in MB
 
 # Saved request-log HISTORY (queryable, retention-managed; survives restart).
 # Normally enabled from the admin UI (Live Feed → "Save logs to disk") with no
@@ -261,3 +285,6 @@ ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)
   # - "10.0.0.0/8"
   # - "192.168.1.100"
 session_timeout_hours: 8  # Admin session lifetime (1–168 hours)
+session_secret: ""      # Hex (>=64 chars / 32 bytes) HMAC key for session cookies; set the SAME value on every node behind a
+                        # load balancer. Empty = random per-start key (single node). CULVERT_SESSION_SECRET takes priority —
+                        # prefer the env var so the secret stays out of the config file.
