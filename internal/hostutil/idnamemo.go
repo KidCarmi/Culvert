@@ -147,8 +147,18 @@ const normMemoSlots = 1024
 // is a change for the differential fuzz harness and review, not a perf patch.
 const maxMemoHostLen = 253
 
-// normMemoMask turns a hash into a slot index.
-const normMemoMask = normMemoSlots - 1
+// normMemoMask turns a hash into a main-tier slot index.
+//
+// Typed uint64 so the mask needs no conversion at the call site. An
+// `&uint64(len(table)-1)` computed from the slice instead is a runtime
+// int->uint64 conversion, which gosec reports as G115 (CWE-190) at HIGH — and
+// correctly, as a matter of form: on a zero-length table len-1 is -1, which
+// converts to an all-ones mask and indexes out of range. That cannot happen
+// here (a nil table returns before the lookup and both tiers are non-empty
+// constants), but the fix is to not perform the conversion rather than to
+// suppress the report, so the shape carries no latent out-of-range index for a
+// later reader to re-derive.
+const normMemoMask uint64 = normMemoSlots - 1
 
 // maxMemoLongKeyLen is the longest KEY the long tier retains. The long tier
 // exists for exactly one shape: the U-label authority whose RAW spelling is
@@ -196,6 +206,10 @@ const maxMemoLongKeyLen = 1024
 // maxMemoHostLen remains in both cases.
 const normMemoLongSlots = 128
 
+// normMemoLongMask turns a hash into a long-tier slot index. Typed for the same
+// reason as normMemoMask.
+const normMemoLongMask uint64 = normMemoLongSlots - 1
+
 // normMemoEntry is one memoized answer. Entries are immutable once published:
 // a writer builds a new one and stores the pointer, so a concurrent reader sees
 // either the previous entry or this one, never a half-written mix. host is the
@@ -220,18 +234,23 @@ var (
 	normMemoLong [normMemoLongSlots]atomic.Pointer[normMemoEntry]
 )
 
-// normMemoTableFor returns the tier that may retain host, or nil when no tier
-// may. Both tiers are returned as slices so one lookup body serves both; the
-// slice header is stack-allocated and the hit path stays 0-alloc (pinned by
-// TestIDNMemo_AllocRegression and TestIDNMemo_LongTierHitIsAllocationFree).
-func normMemoTableFor(host string) []atomic.Pointer[normMemoEntry] {
+// normMemoTableFor returns the tier that may retain host and that tier's slot
+// mask, or nil when no tier may. Both tiers are returned as slices so one
+// lookup body serves both; the slice header is stack-allocated and the hit path
+// stays 0-alloc (pinned by TestIDNMemo_AllocRegression and
+// TestIDNMemo_LongTierHitIsAllocationFree).
+//
+// The mask travels WITH the table rather than being derived from len(table) at
+// the call site, so it is a typed constant and never a conversion — see
+// normMemoMask. TestIDNMemo_TierMasksMatchTheirTables pins each pair.
+func normMemoTableFor(host string) ([]atomic.Pointer[normMemoEntry], uint64) {
 	switch {
 	case len(host) <= maxMemoHostLen:
-		return normMemo[:]
+		return normMemo[:], normMemoMask
 	case len(host) <= maxMemoLongKeyLen:
-		return normMemoLong[:]
+		return normMemoLong[:], normMemoLongMask
 	default:
-		return nil
+		return nil, 0
 	}
 }
 
@@ -242,12 +261,12 @@ func normalizeHostStrictMemo(host string) (norm string, ok bool) {
 	// Too long for either tier to retain (see maxMemoLongKeyLen): normalize and
 	// answer, store nothing. Decided before the slot lookup because nothing
 	// that long is ever stored, so the probe could only ever miss.
-	table := normMemoTableFor(host)
+	table, mask := normMemoTableFor(host)
 	if table == nil {
 		return normalizeHostStrictUncached(host)
 	}
 
-	slot := &table[maphash.String(normMemoSeed, host)&uint64(len(table)-1)]
+	slot := &table[maphash.String(normMemoSeed, host)&mask]
 	if e := slot.Load(); e != nil && e.host == host {
 		return e.norm, e.ok
 	}

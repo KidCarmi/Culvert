@@ -668,6 +668,89 @@ func longRawULabelHost() string {
 	return strings.TrimSuffix(strings.Repeat(label+".", 8), ".") + ".example.com"
 }
 
+// oneOverPrefix and oneOverSuffix are the literals the boundary case is built
+// from, named so the repetition can be computed from their real lengths.
+const (
+	oneOverPrefix = "xn--bcher-kva."
+	oneOverSuffix = ".de"
+)
+
+// TestIDNMemo_KeyBoundCoversTheRequestRawCap is this package's half of the
+// two-sided proof that the memo can key on every authority a dispatch gate
+// admits.
+//
+// The root TestHostutilLongRawULabelReachesTheMemo owns the other half, and on
+// its own it is not enough: it can only MIRROR maxMemoLongKeyLen, because that
+// constant is package-private here, and a mirrored literal does not move when
+// the real constant does. So if this bound were lowered to 900, that test would
+// still compare 1024 against the proxy cap and still pass, and its 499-byte
+// probe would still fit — the asymmetry would come back silently (CodeRabbit on
+// PR #1624, verified and correct; the claim that the mirror could only ever fail
+// in the safe direction was wrong).
+//
+// Each half therefore asserts the side whose real constant its own package
+// owns:
+//
+//	here:  maxMemoLongKeyLen        >= mirrored raw cap (1024)
+//	root:  mirrored memo bound      >= maxRawDestAuthorityBytes
+//
+// Together they give maxMemoLongKeyLen >= maxRawDestAuthorityBytes, and moving
+// either real constant fails one of them.
+func TestIDNMemo_KeyBoundCoversTheRequestRawCap(t *testing.T) {
+	// maxRawDestAuthorityBytes in proxy_host_bounds.go, which this package
+	// cannot import. The root half pins this number against the real one.
+	const mirroredRawDestAuthorityBytes = 1024
+
+	if maxMemoLongKeyLen < mirroredRawDestAuthorityBytes {
+		t.Errorf("REGRESSION: the request path admits raw authorities up to %d bytes but the "+
+			"memo keys on at most %d, leaving a %d-byte band of ACCEPTED destinations that can "+
+			"never be memoized — every request to one pays the full un-memoized IDNA fan-out",
+			mirroredRawDestAuthorityBytes, maxMemoLongKeyLen,
+			mirroredRawDestAuthorityBytes-maxMemoLongKeyLen)
+	}
+	// The value bound is the DNS limit by definition, not a tunable: a canonical
+	// form longer than it is refused by the canonical gate.
+	if maxMemoHostLen != 253 {
+		t.Errorf("maxMemoHostLen is %d; the value bound is the 253-byte DNS name maximum",
+			maxMemoHostLen)
+	}
+}
+
+// TestIDNMemo_TierMasksMatchTheirTables pins the pairing normMemoTableFor
+// returns: a mask that did not match its tier's length would silently fold the
+// tier into a fraction of its slots (mask too small) or index out of range
+// (mask too large).
+func TestIDNMemo_TierMasksMatchTheirTables(t *testing.T) {
+	cases := []struct {
+		tier  string
+		slots int
+		mask  uint64
+	}{
+		{"main", normMemoSlots, normMemoMask},
+		{"long", normMemoLongSlots, normMemoLongMask},
+	}
+	for _, c := range cases {
+		if c.slots&(c.slots-1) != 0 {
+			t.Errorf("%s tier has %d slots, not a power of two — a mask cannot index it",
+				c.tier, c.slots)
+		}
+		if want := uint64(c.slots) - 1; c.mask != want {
+			t.Errorf("%s tier mask is %d, want %d for %d slots", c.tier, c.mask, want, c.slots)
+		}
+	}
+	// And the masks the lookup actually receives are those, for a key of each
+	// tier's length class.
+	if _, mask := normMemoTableFor(strings.Repeat("a", maxMemoHostLen)); mask != normMemoMask {
+		t.Errorf("a main-tier key selected mask %d, want %d", mask, normMemoMask)
+	}
+	if _, mask := normMemoTableFor(strings.Repeat("a", maxMemoHostLen+1)); mask != normMemoLongMask {
+		t.Errorf("a long-tier key selected mask %d, want %d", mask, normMemoLongMask)
+	}
+	if table, mask := normMemoTableFor(strings.Repeat("a", maxMemoLongKeyLen+1)); table != nil || mask != 0 {
+		t.Errorf("a key past both bounds selected a tier (mask %d), want none", mask)
+	}
+}
+
 // beyondLongTierHost is past the long tier's key bound, so no tier may retain
 // it. maxMemoLongKeyLen clears the empirical maximum IDN expansion, so nothing
 // this long can canonicalize inside the DNS limit anyway.
@@ -777,8 +860,15 @@ func TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained(t *testing.T) {
 		host string
 	}{
 		{"Unicode", beyondLongTierHost()},
-		// One byte over the long tier's key bound — the boundary itself.
-		{"OneOverLongBound", "xn--bcher-kva." + strings.Repeat("c", maxMemoLongKeyLen-13) + ".de"},
+		// One byte over the long tier's key bound — the boundary itself. The
+		// repetition is computed from BOTH literals, so the host is exactly
+		// maxMemoLongKeyLen+1 bytes and stays that way if either literal
+		// changes; subtracting a hand-counted constant is how the first version
+		// of this case silently became 1028 bytes, proving non-retention but
+		// not the boundary it is named for (CodeRabbit on PR #1624).
+		{"OneOverLongBound", oneOverPrefix +
+			strings.Repeat("c", maxMemoLongKeyLen+1-len(oneOverPrefix)-len(oneOverSuffix)) +
+			oneOverSuffix},
 		// An ACE label, so it reaches the slow path rather than the
 		// already-canonical fast path, on an authority past the raw gate
 		// entirely — what a non-request caller (feed parsing, admin patterns)
@@ -792,6 +882,11 @@ func TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained(t *testing.T) {
 			if len(lowered) <= maxMemoLongKeyLen {
 				t.Fatalf("probe host is %d bytes, inside the long tier at %d — "+
 					"the case proves nothing", len(lowered), maxMemoLongKeyLen)
+			}
+			if c.name == "OneOverLongBound" && len(lowered) != maxMemoLongKeyLen+1 {
+				t.Fatalf("the boundary case is %d bytes, not exactly one over %d — "+
+					"it no longer tests the boundary it is named for",
+					len(lowered), maxMemoLongKeyLen)
 			}
 			wantNorm, wantOK := normalizeHostStrictUncached(lowered)
 			for round := 0; round < 3; round++ {

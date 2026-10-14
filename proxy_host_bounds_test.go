@@ -1853,7 +1853,15 @@ func TestHostutilLongRawULabelReachesTheMemo(t *testing.T) {
 }
 
 // hostutilMaxMemoKeyLenForTest mirrors internal/hostutil's maxMemoLongKeyLen,
-// which is package-private. The mirror is safe because it is only ever read in
-// the direction that FAILS this test if hostutil's bound shrinks below what the
-// gates accept; hostutil's own tests own the exact value.
+// which is package-private.
+//
+// A mirror does NOT move when the real constant does, so this test alone cannot
+// prove the relation it asserts: if maxMemoLongKeyLen were lowered to 900, the
+// comparison below would still weigh 1024 against the raw cap and still pass
+// (CodeRabbit on PR #1624, verified and correct — an earlier version of this
+// comment claimed the mirror could only ever fail in the safe direction, which
+// was wrong). hostutil's TestIDNMemo_KeyBoundCoversTheRequestRawCap owns the
+// other half, asserting its REAL maxMemoLongKeyLen against its own mirror of
+// maxRawDestAuthorityBytes. Each half asserts the side whose real constant its
+// package owns, so moving either one fails one of them.
 const hostutilMaxMemoKeyLenForTest = 1024
