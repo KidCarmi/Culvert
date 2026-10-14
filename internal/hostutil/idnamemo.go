@@ -243,7 +243,7 @@ var (
 // The mask travels WITH the table rather than being derived from len(table) at
 // the call site, so it is a typed constant and never a conversion — see
 // normMemoMask. TestIDNMemo_TierMasksMatchTheirTables pins each pair.
-func normMemoTableFor(host string) ([]atomic.Pointer[normMemoEntry], uint64) {
+func normMemoTableFor(host string) (table []atomic.Pointer[normMemoEntry], mask uint64) {
 	switch {
 	case len(host) <= maxMemoHostLen:
 		return normMemo[:], normMemoMask
