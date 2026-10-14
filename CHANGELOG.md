@@ -591,6 +591,53 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The per-IP connection limiter holds its counter by value instead of behind a
+  `*int64`, so admitting a request no longer allocates. `Acquire` and `Release`
+  run on **every proxied request** (`handleRequest`, SOCKS5) rather than once
+  per TCP connection, and because `Release` deletes the map entry when the
+  count returns to zero, the common shape — a client with one request in flight
+  at a time — allocated and discarded a fresh counter *per request*, not per
+  client. That made `Acquire` the largest Culvert-owned allocation site in the
+  end-to-end proxy allocation profile: **2.4%** of every allocation the whole
+  proxy made, as its own flat cost.
+
+  Holding the count inline also removes the reason it had to be mutable from
+  outside the shard lock, so every mutation moved under the single lock the map
+  operation already needed. `Release` previously took the shard lock **twice**
+  (lookup, then a re-check-and-delete after an unlocked atomic decrement), so
+  the per-request pair now takes two lock acquisitions instead of three, and
+  one fewer heap object per tracked IP is left for the GC to scan — on an
+  appliance holding 50k live client IPs, 50k objects out of the scan set.
+
+  Measured with benchstat, n=12, 2.8 GHz Xeon, Go 1.26.9: **−32.0%** on the
+  serial pair (125.3 ns → 85.3 ns), **−25.5%** on the single-NAT-egress
+  parallel shape (287.6 ns → 214.3 ns), **−14.7%** on the distinct-IP scaling
+  benchmark, **−11.0%** on the enabled path, **−21.2% geomean**, and the
+  allocation goes from 1 to **0 on every shape** (all p ≤ 0.002). The
+  single-IP parallel case is the honest control: every operation lands on one
+  shard, which is what sharding deliberately does not help, so moving a
+  decrement from an unlocked atomic to under the lock could have regressed it.
+  It improves second most instead, because the removed lock acquisition is
+  worth more than the atomic it replaces exactly when the shard is contended.
+
+  End to end, `BenchmarkPerfQual_ProxyHTTPForward/rules=100` drops from 177 to
+  176 allocations per request (p=0.000) with **latency unchanged** (p=0.279),
+  which is the expected reading and is not oversold: the limiter is ~100 ns of
+  a ~275 µs loopback request, so no serial end-to-end benchmark can show this.
+  The value is one allocation removed from every request and one lock
+  acquisition removed from a per-IP shard — the ceiling, not the constant,
+  which is the same reasoning recorded when this limiter was sharded.
+
+  Behaviour is unchanged, including the `#503` fail-closed contract that a
+  connection admitted while the limiter was disabled is still counted. The
+  admit decision now happens before the count is written rather than
+  incrementing and undoing: a rejection requires `n > limit` and the limit is
+  never below 1, so a rejected `Acquire` always found an entry that already
+  existed and that the undo restored without deleting, which made the old
+  "drop the entry if it was the last" branch unreachable. Three of the five new
+  allocation gates fail on the parent commit at exactly 1.00 allocs/op,
+  verified by reverting the implementation under the new tests.
+
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
   `hostutil.NormalizeHostStrict` already had an already-canonical fast path
