@@ -565,8 +565,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   already computed on both data-plane paths and was being discarded at both
   provider dispatch points; it now reaches them through additive optional
   interfaces, so a backend that keeps no result cache (SAML, which is
-  browser-mediated) is unaffected. Displacement is now counted per backend.
-  Gates: ten, every one verified failing against the pre-fix behaviour.
+  browser-mediated) is unaffected. Displacement is now counted per backend and
+  exposed as `culvert_identity_cache_evictions_total`, beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache. Gates: twelve, with
+  every gate that pins a defect verified failing against the pre-fix
+  behaviour.
 
 ### Changed
 

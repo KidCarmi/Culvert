@@ -8474,15 +8474,20 @@ client's oldest entry by INSERTION, which is not necessarily its first to
 expire, so a deeper expired entry waits until it reaches the front. That costs
 nothing the fairness property depends on.
 
-**Displacement is now visible.** `CacheEvictions()` per backend, matching the
-`AuthCacheEvictions` precedent from CHAOS-57. It is the operator's only signal
-that cached verdicts are being thrown away, and each one costs somebody a
-round trip — or a denial, during a cooldown.
+**Displacement is now visible.** `CacheEvictions()` per backend, reached
+through `Config.IdentityCacheEvictions` and exposed as
+`culvert_identity_cache_evictions_total`, beside the
+`culvert_auth_cache_evictions_total` that CHAOS-57 added for the local cache.
+The counter is the operator's only signal that cached verdicts are being thrown
+away, and each one costs somebody a round trip — or a denial, during a
+cooldown. It was wired in deliberately rather than left as an accessor: an
+eviction counter nobody can read is not observability, and this sweep's own
+write-up claimed the signal before it existed.
 
 ### 41.6 Gates
 
-`auth_identity_cache_chaos_test.go`. **All ten were verified to FAIL against
-the pre-fix behaviour**, by restoring it (arbitrary map-range victim, a lookup
+`auth_identity_cache_chaos_test.go`, twelve gates. **Every gate that pins a
+defect was verified to FAIL against the pre-fix behaviour**, by restoring it (arbitrary map-range victim, a lookup
 that leaves expired entries, and a dispatch that drops the key) and re-running:
 
 | Gate | Pins |
@@ -8496,12 +8501,18 @@ that leaves expired entries, and a dispatch that drops the key) and re-running:
 | `TestChaos76_BucketBackingSliceDoesNotGrowWithRequestCount` | The compaction trap: a window-based test never fires under a sustained flood |
 | `TestChaos76_ClientFairnessKeyReachesTheIdentityProviders` | Both `store.go` dispatch points pass the key and do not fall back to the bare form |
 | `TestChaos76_EveryCachingIdentityBackendIsClientAttributed` | Anti-drift wall: a backend added later that forgets the client-attributed form is caught, because the dispatcher's fallback is silent |
+| `TestChaos76_EvictionsAreCounted` | The store counts what it displaces |
+| `TestChaos76_IdentityCacheEvictionsReachTheActiveBackend` | The count reaches `/metrics` through the active provider, and reports 0 — not the local cache's count — when no external backend is configured |
 | `TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent` | The cap and the bucket index under 32-goroutine contention; `bucketDriftForTest` catches live-count drift, which corrupts the victim choice rather than merely leaking memory |
 
 Two of these started life as probabilistic oracles — a flood against one honest
 entry passes pre-fix about a third of the time — and were reformulated to be
 deterministic before being accepted. A gate that only usually fails against the
-defect is not a gate.
+defect is not a gate. The two observability gates pin surfaces that did not
+exist before this sweep rather than a pre-fix defect, and the concurrency gate
+was verified against a deliberately broken overwrite path (de-indexing removed:
+drift of 2,000 on one bucket) rather than against `main`, since the store it
+guards is new.
 
 ### 41.7 What is deliberately left
 
