@@ -1132,7 +1132,7 @@ func addRequestLogHealth(resp map[string]any) {
 	// effective role is NOT what the file says) and the remedy is to re-assign
 	// the role, not to fix storage.
 	if n := cfg.ActiveRosterRoleClamps(); n > 0 {
-		resp["uiRosterRoleClamped"] = n
+		resp["adminRosterRoleClamped"] = n
 	}
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.
