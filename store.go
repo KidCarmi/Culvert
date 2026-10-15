@@ -1075,9 +1075,15 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 // full bcrypt on its next request (CHAOS-57).
 func (c *Config) AuthCacheEvictions() uint64 { return c.cache.Evictions() }
 
-// IdentityCacheEvictions reports how many cached verdicts the ACTIVE external
+// IdentityCacheEvictions reports how many cached verdicts the LEGACY external
 // identity backend has displaced to stay under its cap, or 0 when no such
 // backend is configured (local bcrypt reports through AuthCacheEvictions).
+//
+// This covers only the single provider on Config. A registry deployment's
+// caches live in idpRegistry instead, and an LDAP registry cutover explicitly
+// unwires the legacy provider, so the operator-facing metric must sum both —
+// see identityCacheEvictionsTotal, which is what /metrics reads (Codex review,
+// PR #1633).
 //
 // Same meaning as AuthCacheEvictions one layer out, and the same reason to
 // expose it (CHAOS-76): every eviction costs the displaced client a full
@@ -1131,15 +1137,11 @@ func (c *Config) resolveAuthIdentityFromSnapshot(snapshot authBackendSnapshot, c
 		return nil, false
 	}
 	// Prefer the client-attributed form so the caller's fairness key reaches
-	// the provider's result cache (CHAOS-76). Providers that do not implement
-	// it keep the historical contract and share one fairness bucket.
-	if resolver, ok := snapshot.provider.(clientAttributedResolver); ok {
-		return resolver.ResolveIdentityFrom(client, user, pass)
-	}
-	if resolver, ok := snapshot.provider.(interface {
-		ResolveIdentity(username, credential string) (*Identity, bool)
-	}); ok {
-		return resolver.ResolveIdentity(user, pass)
+	// the provider's result cache (CHAOS-76), through the same helper the
+	// registry dispatch in proxy.go uses. Providers that implement neither
+	// identity form fall through to local verification below.
+	if resolver, ok := snapshot.provider.(identityResolver); ok {
+		return resolveIdentityAttributed(resolver, client, user, pass)
 	}
 	if !c.verifyAuthFrom(snapshot, client, user, pass) {
 		return nil, false

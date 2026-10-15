@@ -8460,11 +8460,15 @@ ordering so the tree has ONE definition of "better victim":
   for another.
 
 **The key now has a route.** Two additive optional interfaces in `identity.go`
-— `clientAttributedVerifier` and `clientAttributedResolver` — which the
-`store.go` dispatch prefers and falls back from. They are additive rather than
+— `clientAttributedVerifier` and `clientAttributedResolver` — reached through
+`resolveIdentityAttributed`, which both the `store.go` dispatch and the
+REGISTRY dispatch loop in `proxy.go` go through. They are additive rather than
 a widening of `IdentityProvider` because SAML is browser-mediated, keeps no
 result cache, and has nothing to do with a proxy-credential fairness key;
 forcing the parameter on it would be a contract change bought for nothing.
+The single helper is the point: the first version of this fix converted
+`store.go` and left the registry loop on the bare call, which is §41.9's first
+finding.
 
 **Per-entry expiry, not a store-wide TTL.** A positive introspection verdict is
 clamped to the token's own declared lifetime
@@ -8474,8 +8478,9 @@ client's oldest entry by INSERTION, which is not necessarily its first to
 expire, so a deeper expired entry waits until it reaches the front. That costs
 nothing the fairness property depends on.
 
-**Displacement is now visible.** `CacheEvictions()` per backend, reached
-through `Config.IdentityCacheEvictions` and exposed as
+**Displacement is now visible.** `CacheEvictions()` per backend, summed by
+`identityCacheEvictionsTotal` over BOTH the legacy provider on `Config` and the
+live registry credential providers, and exposed as
 `culvert_identity_cache_evictions_total`, beside the
 `culvert_auth_cache_evictions_total` that CHAOS-57 added for the local cache.
 The counter is the operator's only signal that cached verdicts are being thrown
@@ -8486,7 +8491,8 @@ write-up claimed the signal before it existed.
 
 ### 41.6 Gates
 
-`auth_identity_cache_chaos_test.go`, twelve gates. **Every gate that pins a
+`auth_identity_cache_chaos_test.go`, fifteen gates (the last three from
+§41.9). **Every gate that pins a
 defect was verified to FAIL against the pre-fix behaviour**, by restoring it (arbitrary map-range victim, a lookup
 that leaves expired entries, and a dispatch that drops the key) and re-running:
 
@@ -8555,3 +8561,58 @@ documents for IDs, in a different column: a sweep closes a defect, writes its
 own section, and does not walk back to the summary table the next sweep
 actually reads first. An open High row is not free — it is the most expensive
 kind of stale, because it is exactly what draws the next sweep in.
+
+### 41.9 Review follow-up — three defects in the fix itself
+
+Codex review on PR #1633 raised three findings against this sweep's own change.
+All three were traced to a real path and confirmed; all three are fixed, each
+with a gate verified failing against the state the finding described.
+
+**(1) P1 — the fix reached the wrong dispatch.** `proxy.go`'s credential path
+tries the IdP-REGISTRY providers first and only then the legacy fallback:
+
+```go
+for _, prov := range idpRegistry.EnabledCredentialProviders() {
+	id, resolved := prov.ResolveIdentity(u, p)   // the bare form
+```
+
+The conversion had covered `store.go`'s two dispatch points and left this loop
+untouched. In a registry deployment — the modern path, and the one whose caches
+this sweep is about — the fairness key therefore never arrived, every entry
+landed in the empty-client bucket, and the defect persisted unchanged. The
+sweep's own structural gate asserted the two converted points and did not
+assert the loop that matters most, which is the lesson worth keeping: a gate
+written from the fix rather than from the call graph confirms the fix.
+
+Fixed by routing every data-plane caller through one
+`resolveIdentityAttributed` helper, so the preference lives in a single place
+and a new caller inherits it instead of re-deciding.
+
+**(2) P1 — the compaction leak, by a second route.** `set` on a key the bucket
+already lists removes the old record and appends the key, so the slice holds it
+twice while `live` counts it once — and a presence test cannot tell the stale
+slot from the live one, because the NEW record answers "present" for every
+historical position of that key. The filter kept them all, so `b.keys` grew
+with request count behind a bounded map.
+
+This is the trap `compactLocked`'s own comment warns about, reached from the
+other side, in code written to avoid it. The shape is ordinary rather than
+adversarial: the fairness key is a client address, so one NAT'd office is ONE
+bucket holding many live credentials, each re-verified every TTL. Measured by
+the gate before the fix: **2,020 key slots for 20 live credentials** after
+2,000 refreshes. Compaction now keeps each key's LAST position — the one whose
+record `set` most recently wrote — so bucket order still tracks entry age and
+`frontLocked` still yields the client's oldest entry.
+
+**(3) P2 — the new metric was blind where it mattered.** The counter read only
+`Config.provider`, but a registry deployment's caches live in `idpRegistry`,
+and an LDAP registry cutover unwires the legacy provider — so
+`culvert_identity_cache_evictions_total` would have reported zero while the
+caches actually serving the credential path evicted. The same root as (1):
+`Config.provider` is not where the caches are. `identityCacheEvictionsTotal`
+now sums both sources.
+
+Findings (1) and (3) share one cause, and it is worth naming plainly: this
+sweep read the register and the cache implementations closely, and did not
+trace the production call graph that reaches them. Two of the three findings
+follow from that single omission.

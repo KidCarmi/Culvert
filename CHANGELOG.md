@@ -562,14 +562,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   insertion stays proportional to the number of active clients rather than to
   the cache size, which is what keeps the fix clear of the separate
   full-scan-under-the-mutex defect CHAOS-57 also closed. The fairness key was
-  already computed on both data-plane paths and was being discarded at both
-  provider dispatch points; it now reaches them through additive optional
-  interfaces, so a backend that keeps no result cache (SAML, which is
-  browser-mediated) is unaffected. Displacement is now counted per backend and
-  exposed as `culvert_identity_cache_evictions_total`, beside the existing
-  `culvert_auth_cache_evictions_total` for the local cache. Gates: twelve, with
-  every gate that pins a defect verified failing against the pre-fix
-  behaviour.
+  already computed on both data-plane paths and was being discarded at every
+  provider dispatch point — the two in `store.go` and the IdP-registry loop in
+  `proxy.go`, which is the one tried first in a registry deployment. All three
+  now go through a single helper that prefers the client-attributed form, so a
+  backend keeping no result cache (SAML, which is browser-mediated) is
+  unaffected and a new call site inherits the behaviour instead of re-deciding
+  it. Displacement is counted per backend and exposed as
+  `culvert_identity_cache_evictions_total`, summed over both the legacy
+  provider and the live registry providers, beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache. Gates: fifteen,
+  with every gate that pins a defect verified failing against the behaviour
+  that defect describes.
 
 ### Changed
 

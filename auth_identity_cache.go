@@ -240,8 +240,9 @@ func (c *identityResultCache[T]) removeLocked(k string) {
 	}
 }
 
-// compactLocked drops consumed positions once a bucket's backing slice has
-// grown past a small multiple of what the client actually holds.
+// compactLocked drops consumed and duplicated positions once a bucket's
+// backing slice has grown past a small multiple of what the client actually
+// holds.
 //
 // The condition is on len(b.keys), NOT on the un-consumed window
 // len(b.keys)-b.head: under a sustained flood the window stays pinned at the
@@ -249,15 +250,44 @@ func (c *identityResultCache[T]) removeLocked(k string) {
 // never fires and the backing array grows with total request count — a memory
 // leak reachable by the same flood the eviction policy exists to survive.
 // (The identical trap is documented in store.go and internal/authstate.)
+//
+// Duplicates are the SECOND route to that same leak, and the one this code
+// originally missed (Codex review, PR #1633). Re-verifying a credential after
+// its TTL calls set for a key the bucket already lists: set removes the old
+// record and appends the key, so the slice holds it twice while live counts it
+// once. A presence test cannot tell the stale slot from the live one, because
+// the NEW record answers "present" for every historical position of that key —
+// so a plain filter kept them all and the slice grew with request count.
+//
+// The realistic shape is ordinary rather than adversarial: the fairness key is
+// a client address, so one NAT'd office is ONE bucket holding many live
+// credentials, each re-verified every TTL.
+//
+// Deduplication keeps each key's LAST position, which is the one whose record
+// set most recently wrote, so the bucket's order still matches entry age and
+// frontLocked still yields the client's oldest entry.
 func (c *identityResultCache[T]) compactLocked(client string, b *identityCacheBucket) {
 	if len(b.keys) <= 8 || len(b.keys) < 4*b.live {
 		return
 	}
-	kept := b.keys[:0]
-	for _, k := range b.keys[b.head:] {
+	window := b.keys[b.head:]
+	// Walk back to front so the first sighting of a key is its last position,
+	// then reverse. A fresh slice rather than b.keys[:0]: writing forwards
+	// while reading backwards would overwrite positions still to be read.
+	kept := make([]string, 0, b.live)
+	seen := make(map[string]struct{}, b.live)
+	for i := len(window) - 1; i >= 0; i-- {
+		k := window[i]
+		if _, dup := seen[k]; dup {
+			continue
+		}
 		if e, present := c.entries[k]; present && e.client == client {
+			seen[k] = struct{}{}
 			kept = append(kept, k)
 		}
+	}
+	for lo, hi := 0, len(kept)-1; lo < hi; lo, hi = lo+1, hi-1 {
+		kept[lo], kept[hi] = kept[hi], kept[lo]
 	}
 	b.keys = kept
 	b.head = 0
@@ -291,6 +321,31 @@ func (c *identityResultCache[T]) entryForTest(key string) *identityCacheEntry[T]
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.entries[key]
+}
+
+// identityCacheEvictionsTotal sums the displacement counters of every
+// identity backend that keeps a result cache: the legacy single provider on
+// Config AND the live registry credential providers.
+//
+// Both halves are needed. In a registry deployment the registry providers ARE
+// the caches this sweep changed — proxy.go tries them before the legacy
+// fallback — and an LDAP registry cutover unwires Config.provider entirely, so
+// a counter reading only the legacy slot would report zero while the real
+// caches evicted (Codex review, PR #1633).
+//
+// A provider that keeps no cache contributes nothing, so a backend added later
+// is counted the moment it grows one.
+func identityCacheEvictionsTotal(cfg *Config) uint64 {
+	total := uint64(0)
+	if cfg != nil {
+		total += cfg.IdentityCacheEvictions()
+	}
+	for _, prov := range idpRegistry.EnabledCredentialProviders() {
+		if ev, ok := prov.(interface{ CacheEvictions() uint64 }); ok {
+			total += ev.CacheEvictions()
+		}
+	}
+	return total
 }
 
 // keysRetainedForTest reports how many key slots a client's bucket still holds,

@@ -72,6 +72,33 @@ type clientAttributedResolver interface {
 	ResolveIdentityFrom(client, username, credential string) (*Identity, bool)
 }
 
+// resolveIdentityAttributed resolves credentials through prov, preferring the
+// client-attributed form so the caller's fairness key reaches the provider's
+// result cache (CHAOS-76). A provider that does not implement it keeps the
+// historical contract exactly.
+//
+// Every data-plane caller must go through this rather than calling
+// ResolveIdentity directly. The registry dispatch loop in proxy.go called the
+// bare form while store.go's dispatch had been converted, which left the
+// PRIMARY production path for a registry deployment on the empty-client
+// bucket — the fix reaching only the legacy fallback. One helper means there
+// is a single place to get this right, and a new caller inherits it.
+// identityResolver is the minimal contract the helper needs: the bare
+// ResolveIdentity. IdentityProvider embeds it, and so does any provider the
+// legacy dispatch reaches by structural assertion, so the helper covers both
+// without forcing CaptiveLoginURL/DisplayName on a caller that has no use for
+// them.
+type identityResolver interface {
+	ResolveIdentity(username, credential string) (*Identity, bool)
+}
+
+func resolveIdentityAttributed(prov identityResolver, client, username, credential string) (*Identity, bool) {
+	if attributed, ok := prov.(clientAttributedResolver); ok {
+		return attributed.ResolveIdentityFrom(client, username, credential)
+	}
+	return prov.ResolveIdentity(username, credential)
+}
+
 func identityAuthSource(id *Identity, fallback string) string {
 	if id != nil && id.Provider != "" {
 		return id.Provider

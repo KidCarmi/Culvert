@@ -501,3 +501,147 @@ func TestChaos76_IdentityCacheEvictionsReachTheActiveBackend(t *testing.T) {
 		t.Errorf("IdentityCacheEvictions = %d with no external backend, want 0", got)
 	}
 }
+
+// Codex review finding on PR #1633, confirmed: re-verifying a credential after
+// its TTL calls set() again for the SAME key. set removes the old record and
+// appends the key, so the bucket's key slice holds that key TWICE while live
+// counts it once — and compactLocked kept BOTH slots, because it asks only
+// whether c.entries[k] is present and the newest record answers yes for every
+// historical slot. So nothing reclaimed the duplicates and b.keys grew with
+// total request count behind a bounded map.
+//
+// This is the same trap compactLocked's own comment warns about, reached by a
+// different route, and the realistic shape is ordinary: the fairness key is a
+// client address, so one NAT'd office is ONE bucket holding many live
+// credentials, each re-verified every TTL.
+func TestChaos76_RefreshingACredentialDoesNotGrowItsBucketForever(t *testing.T) {
+	var c identityResultCache[*Identity]
+	const (
+		client    = "198.51.100.7"
+		creds     = 20   // distinct credentials behind one NAT'd address
+		refreshes = 2000 // each re-verified after its TTL lapses
+	)
+
+	// Keep the bucket alive throughout: with more than one live entry the
+	// bucket is never dropped, which is the state the duplicates accumulate in.
+	for i := 0; i < creds; i++ {
+		c.set(fmt.Sprintf("cred-%d", i), client, &Identity{Sub: "alice"}, true, honestEntryTTL)
+	}
+	for r := 0; r < refreshes; r++ {
+		c.set(fmt.Sprintf("cred-%d", r%creds), client, &Identity{Sub: "alice"}, true, honestEntryTTL)
+	}
+
+	if got := c.len(); got != creds {
+		t.Fatalf("entry count = %d, want %d — refreshes must replace, not accumulate", got, creds)
+	}
+	// The bucket may carry some slack, but it must not scale with request count.
+	if got := c.keysRetainedForTest(client); got > 8*creds {
+		t.Fatalf("one client's bucket retains %d key slots for %d live credentials after "+
+			"%d refreshes — the backing array is growing with request count, behind a "+
+			"bounded map (CHAOS-76, Codex finding on #1633)", got, creds, refreshes)
+	}
+}
+
+// Codex review finding on PR #1633, confirmed: the registry dispatch loop in
+// proxy.go calls prov.ResolveIdentity directly and is tried BEFORE the legacy
+// fallback, so in a registry deployment — the modern path, and the one whose
+// caches this sweep changed — the fairness key never reached the cache at all.
+// The original gate checked store.go's two dispatch points and missed the loop
+// that matters most.
+//
+// This pins the helper every data-plane caller must go through.
+func TestChaos76_RegistryDispatchIsClientAttributed(t *testing.T) {
+	t.Run("attributed provider receives the key", func(t *testing.T) {
+		p := &recordingProvider{}
+		id, ok := resolveIdentityAttributed(p, "198.51.100.7", "alice", "secret")
+		if !ok || id == nil {
+			t.Fatalf("resolveIdentityAttributed = (%v, %v), want an identity", id, ok)
+		}
+		if p.sawBareResolve {
+			t.Error("the helper used the bare ResolveIdentity, discarding the fairness key (CHAOS-76)")
+		}
+		if p.resolveClient != "198.51.100.7" {
+			t.Errorf("provider saw client key %q, want %q (CHAOS-76)", p.resolveClient, "198.51.100.7")
+		}
+	})
+
+	t.Run("unattributed provider keeps the historical contract", func(t *testing.T) {
+		// A provider with no result cache (SAML) must still resolve, through
+		// the bare form, rather than being refused for lacking the interface.
+		p := &bareOnlyProvider{}
+		if id, ok := resolveIdentityAttributed(p, "198.51.100.7", "alice", "secret"); !ok || id == nil {
+			t.Fatalf("resolveIdentityAttributed on a bare provider = (%v, %v), want an identity", id, ok)
+		}
+		if !p.sawBareResolve {
+			t.Error("a provider implementing only ResolveIdentity was not called through it")
+		}
+	})
+
+	// Every shipped registry credential provider must implement the attributed
+	// form, or the helper silently falls back for it.
+	t.Run("shipped registry providers are attributed", func(t *testing.T) {
+		engine, err := NewLDAPAuth(LDAPConfig{URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com"})
+		if err != nil {
+			t.Fatalf("NewLDAPAuth: %v", err)
+		}
+		for name, prov := range map[string]identityResolver{
+			"LDAPIdPProvider":  &LDAPIdPProvider{engine: engine},
+			"OIDCFlowProvider": &OIDCFlowProvider{},
+		} {
+			if _, ok := prov.(clientAttributedResolver); !ok {
+				t.Errorf("%s is reached by the registry dispatch but does not implement "+
+					"clientAttributedResolver, so resolveIdentityAttributed falls back to the "+
+					"bare form and its cache reverts to one shared bucket (CHAOS-76)", name)
+			}
+		}
+	})
+}
+
+// bareOnlyProvider implements the historical contract and nothing more.
+type bareOnlyProvider struct{ sawBareResolve bool }
+
+func (p *bareOnlyProvider) Name() string               { return "bare-only" }
+func (p *bareOnlyProvider) Verify(string, string) bool { return true }
+func (p *bareOnlyProvider) ResolveIdentity(user, _ string) (*Identity, bool) {
+	p.sawBareResolve = true
+	return &Identity{Sub: user}, true
+}
+
+// Codex review finding on PR #1633, confirmed: the eviction counter read only
+// Config.provider, but a registry deployment's caches live in idpRegistry and
+// an LDAP registry cutover unwires the legacy provider — so the metric would
+// report zero while the real caches evicted.
+func TestChaos76_EvictionCounterIncludesRegistryProviders(t *testing.T) {
+	engine, err := NewLDAPAuth(LDAPConfig{
+		URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com", CacheTTL: honestEntryTTL,
+	})
+	if err != nil {
+		t.Fatalf("NewLDAPAuth: %v", err)
+	}
+
+	// A registry-only deployment: no legacy provider on Config at all. The
+	// global is restored on cleanup, per the shared-global rule in
+	// docs/agent-context/conventions.md.
+	cfg := &Config{}
+	profile := ldapTestProfile("corp-ad", "AD")
+	prevRegistry := idpRegistry
+	t.Cleanup(func() { idpRegistry = prevRegistry })
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{profile},
+		live: map[string]IdentityProvider{
+			profile.ID: &LDAPIdPProvider{profile: profile, engine: engine},
+		},
+	}
+
+	if got := identityCacheEvictionsTotal(cfg); got != 0 {
+		t.Fatalf("precondition: total = %d, want 0", got)
+	}
+	for i := 0; i < maxAuthCacheSize+48; i++ {
+		engine.cacheSet(cacheKey(fmt.Sprintf("mallory-%d", i), "nope"), "flooding-client", false, nil)
+	}
+	if got := identityCacheEvictionsTotal(cfg); got < 48 {
+		t.Fatalf("identityCacheEvictionsTotal = %d after %d insertions past the cap in a "+
+			"REGISTRY-only deployment, want >= 48 — the operator signal misses the caches that "+
+			"actually serve the credential path (CHAOS-76)", got, 48)
+	}
+}
