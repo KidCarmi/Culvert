@@ -178,7 +178,7 @@ func TestCACert_GetPEM(t *testing.T) {
 
 func TestOIDCCacheSetWithExp_PastExpiryFailsClosed(t *testing.T) {
 	a := &OIDCAuth{
-		ttl:   1 * time.Hour,
+		ttl: 1 * time.Hour,
 	}
 	pastExp := time.Now().Add(-1 * time.Minute).Unix()
 	a.oidcCacheSetIdentityWithExp("past-expiry-test", "", &Identity{Sub: "test"}, true, &pastExp)
