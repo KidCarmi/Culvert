@@ -293,15 +293,6 @@ func (c *identityResultCache[T]) entryForTest(key string) *identityCacheEntry[T]
 	return c.entries[key]
 }
 
-// clientsForTest reports how many distinct fairness buckets are live. The
-// fairness property under test is stated in terms of them, so a gate that
-// cannot see them can only assert the policy indirectly.
-func (c *identityResultCache[T]) clientsForTest() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.buckets)
-}
-
 // keysRetainedForTest reports how many key slots a client's bucket still holds,
 // consumed positions included. It is the only way to observe the compaction
 // trap documented on compactLocked — the entry COUNT stays at the cap under a
