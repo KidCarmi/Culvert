@@ -132,12 +132,21 @@ var proxyInnerHostMismatchBlocked atomic.Int64
 // That is the very bypass this gate closes, arriving through the one branch that
 // waved it through.
 //
-// Refusing costs nothing a client is entitled to. It demonstrably knows the host
-// — it named it in the CONNECT line and again in the TLS SNI — and no origin can
-// route a Host-less HTTP/1.1 request to a specific vhost anyway. The refusal is
-// taken BEFORE the IP-literal scope skip below, because the default-vhost
-// concern does not depend on whether the CONNECT target was a name or an
-// address.
+// Refusing costs nothing a client is entitled to. It named its destination in
+// the CONNECT line, so it is not being asked for anything it has not already
+// supplied, and no origin can route a Host-less HTTP/1.1 request to a specific
+// vhost anyway. The refusal is taken BEFORE the IP-literal scope skip below,
+// because the default-vhost concern does not depend on whether the CONNECT
+// target was a name or an address.
+//
+// The entitlement rests on the CONNECT line ALONE, deliberately — not on "and
+// again in the TLS SNI", which an earlier revision of this comment claimed
+// (CodeRabbit on PR #1632, correct). Because the refusal above covers an
+// IP-literal CONNECT target, and RFC 6066 §3 forbids a literal IPv4/IPv6
+// address in the SNI HostName, there is no SNI name to appeal to in exactly the
+// case this branch was extended to cover; SNI is optional besides. The CONNECT
+// authority is the authorizing value and the only one always present, which is
+// the same reason the pin anchors on it rather than on the SNI (see "Scope").
 //
 // Substituting the authorized authority instead of refusing was considered and
 // rejected: it would have the gateway synthesize a Host the client never sent,

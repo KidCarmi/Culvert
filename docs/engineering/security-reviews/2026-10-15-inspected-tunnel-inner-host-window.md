@@ -221,9 +221,20 @@ without any header at all.
 Empty inner hosts are now refused, and the refusal is taken **ahead of** the
 IP-literal scope skip, because the default-vhost concern does not depend on
 whether the CONNECT target was a name or an address. Refusing costs nothing a
-client is entitled to: it demonstrably knows the host (it named it in the
-CONNECT line and again in the TLS SNI), and no origin can route a Host-less
-HTTP/1.1 request to a specific vhost anyway.
+client is entitled to: it named its destination in the CONNECT line, so it is
+not being asked for anything it has not already supplied, and no origin can
+route a Host-less HTTP/1.1 request to a specific vhost anyway.
+
+The entitlement rests on the CONNECT line **alone**. An earlier revision of this
+section also appealed to the TLS SNI, which CodeRabbit correctly flagged: because
+the refusal covers an IP-literal CONNECT target, and RFC 6066 §3 forbids a
+literal IPv4/IPv6 address in the SNI `HostName`, there is no SNI name to appeal
+to in exactly the case this branch was extended to cover — and SNI is optional
+besides. The CONNECT authority is the authorizing value and the only one always
+present, which is the same reason the pin anchors on it rather than on the SNI
+(§2). The claim was a redundant flourish, not load-bearing, so removing it
+changes no decision; it is recorded here because a wrong justification in a
+security record is how a correct gate later gets "simplified" on bad grounds.
 
 **Substituting** the authorized authority instead of refusing was considered and
 rejected: it would have the gateway synthesize a `Host` the client never sent,
