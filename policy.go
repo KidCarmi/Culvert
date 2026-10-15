@@ -269,6 +269,12 @@ type PolicyStore struct {
 	path      string
 	version   int64  // incremented on every mutation
 	updatedAt string // RFC3339 timestamp of last mutation
+	// verified memoises the per-revision counters-publication check that the
+	// evaluation hot path used to re-derive on every request. Written only by
+	// evaluationSnapshot (never by a mutator) and keyed by revision identity, so
+	// it is a pure accelerator: see publishedRevision.
+	verified atomic.Pointer[publishedRevision]
+
 	// adoptUnsaved is set when Load adopted a path whose file did not exist
 	// and the immediate write of the current in-memory rules FAILED: the path
 	// is configured but nothing is on disk, so Persisted() must keep reporting
@@ -1349,18 +1355,73 @@ type PolicyMatch struct {
 	ruleSnapshot      PolicyRule
 }
 
+// publishedRevision memoises the counters-publication check for ONE published
+// rule revision, keyed by that revision's identity (backing array + length).
+//
+// The check it memoises — "does every definition in this slice already carry an
+// accounting cell?" — is a property of the revision, not of the request, yet it
+// was re-derived on EVERY policy evaluation: an O(rules) pointer-chasing walk
+// held under ps.mu.RLock before the scan even started. Measured on this machine
+// (4 vCPU Xeon, BenchmarkPolicySnapshot_Steady, n=2 medians):
+//
+//	rules │    10   │   100   │   500   │  1000
+//	walk  │ 17.3 ns │ 70.3 ns │ 387 ns  │ 876 ns
+//
+// At 500 rules that is ~385 ns added to every request, and — because a match on
+// rule 1 paid it in full — it made an EARLY match scale with rulebase size:
+// BenchmarkPerfQual_Evaluate/rules=500/first measured 1068 ns against
+// rules=10/first at 662 ns for identical matching work. The walk also held the
+// reader lock for O(rules), so a config-plane writer (Add/Save/List) queued
+// behind a lock whose hold time grew with the rulebase.
+//
+// Keying on identity is sound because a published revision is IMMUTABLE: every
+// mutator rebuilds ps.rules into a fresh slice rather than writing pointer slots
+// into the array a concurrent evaluator is scanning. That is not an assumption
+// here — it is the contract TestCascadeRename_NoRaceWithEvaluate was written to
+// enforce, and the same contract evalAccessRules already relies on when it scans
+// the captured header lock-free after releasing the lock. So two slices sharing
+// a backing-array pointer and a length are the same revision, with the same
+// answer. The memo RETAINS the slice (rather than storing a bare address) so the
+// array cannot be freed and a later allocation cannot reuse its address under
+// the key; in steady state that is the live revision, so it retains nothing a
+// reader did not already hold.
+//
+// It is a pure memo and self-healing: a miss (first evaluation of a revision, or
+// a lost store race) costs exactly the pre-change walk and then re-memoises, and
+// a stale entry fails the identity check rather than answering for the wrong
+// revision. Nothing depends on catching a write, so no mutator changes.
+type publishedRevision struct {
+	rules []*PolicyRule
+}
+
+// matchesRevision reports whether v memoises exactly the revision in rules.
+// An empty revision needs no memo — there is nothing to walk — so it is always
+// its own answer.
+func (v *publishedRevision) matchesRevision(rules []*PolicyRule) bool {
+	if len(rules) == 0 {
+		return true
+	}
+	return v != nil && len(v.rules) == len(rules) && &v.rules[0] == &rules[0]
+}
+
 func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 	ps.mu.RLock()
 	rules := ps.rules
-	needsPublication := false
-	for _, rule := range rules {
-		if rule.counters == nil {
-			needsPublication = true
-			break
-		}
-	}
 	ps.mu.RUnlock()
-	if !needsPublication {
+
+	// Steady state: one atomic pointer load and a header comparison, constant in
+	// the rulebase size. No read-modify-write on a shared word, so this does not
+	// reintroduce the per-request contention the RLock walk above it imposed.
+	if ps.verified.Load().matchesRevision(rules) {
+		return rules
+	}
+
+	// First evaluation of this revision. The walk is the pre-change one, now off
+	// the reader lock: the captured header addresses an immutable published
+	// revision (see publishedRevision), exactly as the lock-free evaluator scan
+	// does, and reading one field per rule is strictly weaker than that scan.
+	if !needsRulePublication(rules) {
+		ps.memoiseRevision(rules)
 		return rules
 	}
 
@@ -1377,7 +1438,37 @@ func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 	}
 	rules = ps.rules
 	ps.mu.Unlock()
+	// sortLocked publishes an accounting cell for every definition, so the
+	// revision this returns is verified by construction. Re-check it anyway
+	// rather than assert it: the memo must be structurally incapable of caching
+	// a wrong answer, and this is the once-per-direct-install path, not a
+	// per-request one. Memoising here is what keeps a direct install from making
+	// the NEXT evaluation walk the rulebase again.
+	if !needsRulePublication(rules) {
+		ps.memoiseRevision(rules)
+	}
 	return rules
+}
+
+// needsRulePublication reports whether any definition in a revision still lacks
+// its accounting cell.
+func needsRulePublication(rules []*PolicyRule) bool {
+	for _, rule := range rules {
+		if rule.counters == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// memoiseRevision records that rules passed the publication check. Racing
+// evaluators may both store; they are storing the same answer for the same
+// revision, and an empty revision is never stored because it never needs one.
+func (ps *PolicyStore) memoiseRevision(rules []*PolicyRule) {
+	if len(rules) == 0 {
+		return
+	}
+	ps.verified.Store(&publishedRevision{rules: rules})
 }
 
 // accessEvalInput carries the per-request Stage-2 evaluation inputs. It is
