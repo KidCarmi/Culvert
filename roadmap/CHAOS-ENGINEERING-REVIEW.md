@@ -95,6 +95,19 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-15 — `CHAOS-76` CLAIMED (placeholder, commit one). Domain: the
+identity-backend RESULT CACHES (`auth_oidc_flow.go` registry introspection,
+`auth_oidc.go` legacy introspection, `auth_ldap.go` directory bind) as a
+displacement surface — all three evict ONE ARBITRARY LIVE ENTRY at the cap on a
+key space derived entirely from caller-supplied credentials, which is register
+row **AU-3c** exactly, closed by CHAOS-57 in the LOCAL auth cache and never
+ported to its three siblings. Ids 71–75 are held by open or merged sweeps
+(71/72/73 across the DP↔CP and logout sweeps, 74 the category store, 75 the
+release dispatcher), so this sweep takes 76. Claimed in a committed line BEFORE
+any code is written — the remedy the header above reaches twice independently
+after ten collisions, and which §35, §39 and §40 applied before it. Findings and
+gates are written up in §41 below.**
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
