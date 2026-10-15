@@ -338,15 +338,15 @@ func (a *LDAPAuth) resolveIdentityFrom(client, username, password string) (*Iden
 	return cloneIdentity(id), true
 }
 
-// authenticate runs the shared cache → gate → directory round-trip pipeline.
-// The returned Identity is non-nil only for identity-resolving engines
-// (attrs.enabled()); the legacy boolean provider always yields (nil, ok).
-func (a *LDAPAuth) authenticate(username, password string) (*Identity, bool) {
-	return a.authenticateFrom("", username, password)
-}
-
-// authenticateFrom is authenticate attributing any cache entry it writes to
-// the caller's client-fairness key (CHAOS-76).
+// authenticateFrom runs the shared cache → gate → directory round-trip
+// pipeline. The returned Identity is non-nil only for identity-resolving
+// engines (attrs.enabled()); the legacy boolean provider always yields
+// (nil, ok).
+//
+// client is the caller's fairness key, which any cache entry this writes is
+// attributed to (CHAOS-76). The empty key is legitimate and means "attribute
+// this to the shared bucket"; VerifyFrom and resolveIdentityFrom document when
+// a caller may pass it.
 func (a *LDAPAuth) authenticateFrom(client, username, password string) (*Identity, bool) {
 	if password == "" {
 		return nil, false // never permit empty passwords
