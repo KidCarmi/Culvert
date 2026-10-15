@@ -2090,12 +2090,20 @@ maint_toml_string() {
   # leak into the extracted value. Mirrors extract_toml_string() in
   # packaging/culvert-maint/install.sh.
   sudo awk -v k="$key" '
+    BEGIN { q = sprintf("%c", 39) }
     /^[[:space:]]*#/ { next }
     $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
       line=$0
       sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
-      sub(/^"/, "", line)
-      sub(/".*$/, "", line)
+      if (substr(line, 1, 1) == q) {
+        # TOML literal string: value ends at the next single quote.
+        line = substr(line, 2)
+        idx = index(line, q)
+        if (idx > 0) line = substr(line, 1, idx - 1)
+      } else {
+        sub(/^"/, "", line)
+        sub(/".*$/, "", line)
+      }
       print line
       exit
     }
