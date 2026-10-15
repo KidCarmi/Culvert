@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net/http"
@@ -169,8 +170,10 @@ func TestInnerHostPinnedToTunnel_Equivalences(t *testing.T) {
 			"same, over IPv6"},
 		{"named inner host against a ported IPv4 CONNECT target", "inspect.test:8443", "127.0.0.1:8443", true,
 			"the port is stripped from both sides before the address test"},
-		{"empty inner host", "", "a.example.com", true,
-			"names no competing destination, so it cannot reach another vhost"},
+		{"empty inner host", "", "a.example.com", false,
+			"Request.Write serializes a literal \"Host: \"; a shared front end may answer from its default vhost"},
+		{"empty inner host against an address tunnel", "", "127.0.0.1", false,
+			"refused ahead of the IP-literal scope skip: the default-vhost risk does not depend on the tunnel being a name"},
 
 		// ── Different destination: must NOT be pinned ─────────────────────
 		{"different host", "blocked.example.com", "allowed.example.com", false, "the defect"},
@@ -189,8 +192,8 @@ func TestInnerHostPinnedToTunnel_Equivalences(t *testing.T) {
 			"fail-closed: no canonical form means no comparison, not a free pass"},
 		{"empty tunnel host", "anything.example.com", "", false,
 			"no recorded authorized destination means nothing to forward a client-chosen host against"},
-		{"both empty", "", "", true,
-			"the empty inner host short-circuits first; it names nothing either way"},
+		{"both empty", "", "", false,
+			"no authority on either side: nothing to authorize against and nothing routable"},
 	}
 
 	for _, tc := range cases {
@@ -368,5 +371,70 @@ func TestInnerHostPin_SNIAgreementDoesNotExcuseTheMismatch(t *testing.T) {
 		t.Errorf("a self-consistent SNI/Host pair naming an unauthorized destination was forwarded "+
 			"(kind=%v forwarded=%v) — the pin must anchor on the CONNECT authority policy evaluated",
 			out.kind, *forwarded)
+	}
+}
+
+// TestInnerHostPin_EmptyInnerHostIsRefused is the second DEFECT GATE (Codex P1
+// on PR #1632). The first revision of this gate treated an absent inner
+// authority as pinned, on the reasoning that it names no competing destination
+// and that the origin would reject it anyway. The second half was the real
+// error — it assumed the ORIGIN's behaviour instead of enforcing here.
+//
+// This test states the mechanism rather than trusting the claim, so the gate
+// cannot be "simplified" back by someone who repeats the original reasoning:
+// it first proves against the real stdlib that the request is BOTH accepted by
+// the reader this path uses AND serialized upstream with an empty Host, then
+// asserts the pin refuses it.
+func TestInnerHostPin_EmptyInnerHostIsRefused(t *testing.T) {
+	resetInnerHostMismatchStateForTest()
+	t.Cleanup(resetInnerHostMismatchStateForTest)
+	chaos66CaptureLog(t)
+
+	// PRECONDITION 1: runH1InspectLoop reads inner requests with
+	// http.ReadRequest, NOT through an http.Server — so the server's "missing
+	// required Host header" 400 never runs on this path.
+	parsed, err := http.ReadRequest(bufio.NewReader(strings.NewReader(
+		"GET /secret HTTP/1.1\r\nConnection: close\r\n\r\n")))
+	if err != nil {
+		t.Fatalf("precondition: http.ReadRequest must ACCEPT a Host-less HTTP/1.1 request "+
+			"(it is what this path uses); got %v", err)
+	}
+	if parsed.Host != "" {
+		t.Fatalf("precondition: expected req.Host == \"\", got %q", parsed.Host)
+	}
+
+	// PRECONDITION 2: Request.Write serializes that as a literal "Host: " and
+	// does NOT error — i.e. absent the pin, the Host-less request reaches the
+	// upstream, where a default/fallback vhost can answer it.
+	var wire strings.Builder
+	parsed.URL.Scheme = "https"
+	if werr := parsed.Write(&wire); werr != nil {
+		t.Fatalf("precondition: expected Write to serialize an empty Host, got error %v", werr)
+	}
+	if !strings.Contains(wire.String(), "Host: \r\n") {
+		t.Fatalf("precondition: expected a literal empty \"Host: \" line on the wire, got:\n%s", wire.String())
+	}
+
+	// THE GATE: the pin must refuse it, on a named tunnel and on an address
+	// tunnel alike.
+	for _, tunnel := range []string{"allowed.example.com", "127.0.0.1"} {
+		t.Run(tunnel, func(t *testing.T) {
+			ex, forwarded, _, spy := pinExchange(tunnel, "")
+			out := runInspectExchange(ex)
+			if *forwarded {
+				t.Errorf("a Host-less inner request was forwarded upstream on a tunnel for %q — "+
+					"a front end's default vhost can answer it, unevaluated by policy", tunnel)
+			}
+			if out.kind != exBlocked {
+				t.Errorf("kind = %v, want exBlocked", out.kind)
+			}
+			if spy.calls != 1 {
+				t.Errorf("responder calls = %d, want 1", spy.calls)
+			}
+		})
+	}
+
+	if got, want := proxyInnerHostMismatchBlocked.Load(), int64(2); got != want {
+		t.Errorf("counter = %d, want %d", got, want)
 	}
 }

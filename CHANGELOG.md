@@ -70,6 +70,29 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and decidable at this seam: a tunnel authorized for a **name**, reused for a
   different name.
 
+  **Correction round — an absent inner authority is not harmless (Codex P1, PR
+  #1632).** The first revision treated an empty inner host as pinned, reasoning
+  that it names no competing destination and that an origin requiring a `Host`
+  would reject it anyway. The second half was the real error: it assumed the
+  ORIGIN's behaviour instead of enforcing here, which is the same fail-open
+  asymmetry this gate exists to remove. Measured against the tree rather than
+  argued — `runH1InspectLoop` reads inner requests with `http.ReadRequest`, NOT
+  through an `http.Server`, so the server's "missing required Host header" 400
+  never runs; `ReadRequest` accepts `"GET / HTTP/1.1\r\n\r\n"` and yields
+  `req.Host == ""`, and `Request.Write` then serializes a literal `Host: ` and
+  returns no error. A shared front end with a default or fallback virtual host
+  (an nginx `server_name _`, a CDN catch-all) answers such a request from that
+  vhost — a destination policy never evaluated, with the scan verdicts and the
+  log row still attributed to the CONNECT host. Empty inner hosts are now
+  refused, ahead of the IP-literal scope skip, because the default-vhost concern
+  does not depend on the tunnel target being a name. Substituting the authorized
+  authority was considered and rejected: it would have the gateway synthesize a
+  `Host` the client never sent. `TestInnerHostPin_EmptyInnerHostIsRefused` gates
+  it and states the mechanism rather than trusting the claim — it proves against
+  the real stdlib that the request is both accepted by the reader this path uses
+  and serialized with an empty `Host`, then asserts the refusal, so the branch
+  cannot be reverted by repeating the original reasoning.
+
   New counter `culvert_proxy_inner_host_mismatch_blocked_total` (always emitted,
   so a flat zero means "no client has done this", never "the gate is off") and an
   `INNER_HOST_MISMATCH` log line naming **both** hosts, since either alone says

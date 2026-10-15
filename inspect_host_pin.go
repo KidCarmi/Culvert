@@ -113,11 +113,35 @@ var proxyInnerHostMismatchBlocked atomic.Int64
 // of the comparison: the TCP connection already fixes it, so a port claim in the
 // header cannot redirect anything.
 //
-// An EMPTY inner host is pinned. It names no competing destination, so it cannot
-// reach a different vhost — an origin that requires a Host (every HTTP/1.1
-// server, and HTTP/2, where :authority is absent only for CONNECT) rejects it on
-// its own. Refusing it here would break HTTP/1.0 inner requests for no security
-// gain.
+// An EMPTY inner host is REFUSED (Codex P1 on PR #1632, verified and correct).
+// The first revision of this gate treated it as pinned, reasoning that it names
+// no competing destination and that an origin requiring a Host would reject it
+// on its own. Both halves of that were wrong, and the second half was the real
+// error: it assumed the ORIGIN's behaviour instead of enforcing here, which is
+// the same fail-open asymmetry this gate exists to remove.
+//
+// Measured against the tree, not argued: runH1InspectLoop reads inner requests
+// with http.ReadRequest, NOT through an http.Server, so the server's "missing
+// required Host header" 400 never runs — ReadRequest accepts
+// "GET / HTTP/1.1\r\n\r\n" and yields req.Host == "" with req.URL.Host == "".
+// Request.Write then serializes that as a literal "Host: " and returns no error,
+// so the Host-less request reached the upstream. A shared front end with a
+// default or fallback virtual host (an nginx "server_name _", a CDN catch-all)
+// answers such a request from that vhost — a destination policy never evaluated,
+// with the scan verdicts and the log row still attributed to the CONNECT host.
+// That is the very bypass this gate closes, arriving through the one branch that
+// waved it through.
+//
+// Refusing costs nothing a client is entitled to. It demonstrably knows the host
+// — it named it in the CONNECT line and again in the TLS SNI — and no origin can
+// route a Host-less HTTP/1.1 request to a specific vhost anyway. The refusal is
+// taken BEFORE the IP-literal scope skip below, because the default-vhost
+// concern does not depend on whether the CONNECT target was a name or an
+// address.
+//
+// Substituting the authorized authority instead of refusing was considered and
+// rejected: it would have the gateway synthesize a Host the client never sent,
+// changing request semantics to make a malformed request succeed. Fail closed.
 //
 // An empty TUNNEL host is NOT pinned. It means this exchange has no recorded
 // authorized destination, and forwarding a client-chosen host in that state is
@@ -126,13 +150,16 @@ var proxyInnerHostMismatchBlocked atomic.Int64
 // so SplitHostPort always succeeds and hostOnly is non-empty for any CONNECT
 // that got far enough to dial an upstream.
 //
-// An IP-LITERAL tunnel host is pinned unconditionally — see "Scope" above. The
-// check is on the TUNNEL side only: an inner host that is an IP literal while
-// the tunnel names a host is still a mismatch, because no conforming client
-// sends an address in Host for a connection it opened to a name.
+// An IP-LITERAL tunnel host is pinned — see "Scope" above — but only once the
+// empty-inner-host refusal above has run. The check is on the TUNNEL side only:
+// an inner host that is an IP literal while the tunnel names a host is still a
+// mismatch, because no conforming client sends an address in Host for a
+// connection it opened to a name.
 func innerHostPinnedToTunnel(innerHost, tunnelHost string) bool {
 	if innerHost == "" {
-		return true
+		// No authority at all: Request.Write serializes a literal "Host: " and a
+		// shared front end may answer it from its default vhost. See above.
+		return false
 	}
 	if tunnelHost == "" {
 		return false

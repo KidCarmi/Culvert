@@ -187,9 +187,53 @@ are client-influenced and go through `sanitizeLog` + `%q` (CWE-117).
 | `TestInnerHostPin_ClientResolvedAddressTunnelStillFlows` | The scope shape (§5) on IPv4 and IPv6, at the pipeline level rather than only in the table, because this is what a future tightening would break. |
 | `TestInnerHostPin_SNIAgreementDoesNotExcuseTheMismatch` | A self-consistent SNI/`Host` pair naming an unauthorized destination. Fails if the pin is re-anchored on the SNI. |
 | `TestInnerHostPin_SuffixMatchWouldNotHaveCaught` | A subdomain of the authorized host, with a precondition asserting `MatchFQDNNorm` *would* have accepted it. |
-| `TestInnerHostPinnedToTunnel_Equivalences` | Boundary/malformed table: case, trailing dot, U-label↔A-label, default and non-default ports, IPv4/IPv6 literals, bracketed IPv6, parent/subdomain/suffix-extension/prefix-truncation, unnormalizable input, empty inner host, empty tunnel host. |
+| `TestInnerHostPinnedToTunnel_Equivalences` | Boundary/malformed table: case, trailing dot, U-label↔A-label, default and non-default ports, IPv4/IPv6 literals, bracketed IPv6, parent/subdomain/suffix-extension/prefix-truncation, unnormalizable input, empty inner host (on both a named and an address tunnel), empty tunnel host. |
+| `TestInnerHostPin_EmptyInnerHostIsRefused` | **Second defect gate** (see §2.1). An absent inner authority, which the first revision waved through. Proves the mechanism against the real stdlib before asserting the refusal. |
 | `TestInnerHostPin_RefusalIsEmittedOnBothProtocolWires` | The 403 wire bytes on each responder, including that H2 sends no `Connection` header. |
 | `TestInnerHostPin_ConcurrentMismatchesAreAllCharged` | 400 concurrent refusals under `-race`; the counter is a process global every inspected tunnel charges. |
+
+### 2.1 Correction round — an absent inner authority is not harmless (Codex P1)
+
+The first revision of this gate treated an empty inner host as **pinned**, on
+the reasoning that it names no competing destination and that an origin
+requiring a `Host` would reject it on its own. Codex flagged it P1 on PR #1632.
+It was right, and the second half of that reasoning was the real error: it
+assumed the **origin's** behaviour instead of enforcing at the gateway — the
+same fail-open asymmetry this whole finding is about, arriving through the one
+branch that waved it through.
+
+Verified against the tree rather than argued:
+
+1. `runH1InspectLoop` reads inner requests with `http.ReadRequest`, **not**
+   through an `http.Server`. The server's "missing required Host header" 400
+   therefore never runs on this path. `ReadRequest` accepts
+   `"GET /secret HTTP/1.1\r\nConnection: close\r\n\r\n"` and yields
+   `req.Host == ""` with `req.URL.Host == ""`.
+2. `Request.Write` serializes that as a literal `Host: ` line and returns **no
+   error**, so absent the pin the Host-less request reached the upstream.
+
+A shared front end with a default or fallback virtual host (an nginx
+`server_name _`, a CDN catch-all) answers such a request from that vhost — a
+destination policy never evaluated, with scan verdicts and the log row still
+attributed to the CONNECT host. That is this finding's own bypass, reached
+without any header at all.
+
+Empty inner hosts are now refused, and the refusal is taken **ahead of** the
+IP-literal scope skip, because the default-vhost concern does not depend on
+whether the CONNECT target was a name or an address. Refusing costs nothing a
+client is entitled to: it demonstrably knows the host (it named it in the
+CONNECT line and again in the TLS SNI), and no origin can route a Host-less
+HTTP/1.1 request to a specific vhost anyway.
+
+**Substituting** the authorized authority instead of refusing was considered and
+rejected: it would have the gateway synthesize a `Host` the client never sent,
+changing request semantics to make a malformed request succeed. Fail closed.
+
+`TestInnerHostPin_EmptyInnerHostIsRefused` gates it, and deliberately states the
+mechanism rather than trusting the claim — it proves both preconditions above
+against the real stdlib before asserting the refusal, so the branch cannot be
+reverted by someone repeating the original reasoning. Verified failing against
+the pre-correction body on both a named and an address tunnel.
 
 ## 3. Files
 
