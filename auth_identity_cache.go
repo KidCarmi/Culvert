@@ -306,3 +306,28 @@ func (c *identityResultCache[T]) keysRetainedForTest(client string) int {
 	}
 	return len(b.keys)
 }
+
+// bucketDriftForTest reports the first bucket whose live count disagrees with
+// the number of entries the map actually attributes to that client, and by how
+// much. The eviction policy orders victims BY those live counts, so drift does
+// not merely waste memory — it corrupts the choice of victim, which is the
+// security property. Returns (0, "") when every bucket agrees.
+func (c *identityResultCache[T]) bucketDriftForTest() (int, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	actual := map[string]int{}
+	for _, e := range c.entries {
+		actual[e.client]++
+	}
+	for client, b := range c.buckets {
+		if d := b.live - actual[client]; d != 0 {
+			return d, client
+		}
+	}
+	for client, n := range actual {
+		if _, ok := c.buckets[client]; !ok {
+			return -n, client
+		}
+	}
+	return 0, ""
+}

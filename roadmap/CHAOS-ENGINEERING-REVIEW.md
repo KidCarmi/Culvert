@@ -1137,11 +1137,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
-| AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP | H | `auth_oidc_flow.go:344-363,608-627` (no cache field); loop `proxy.go:209-220`; contrast `auth_oidc.go:210-238` |
+| AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP → **CLOSED** (CHAOS-49: `introspectCacheGet`/`introspectCacheSet`, 2-min TTL clamped to token expiry, plus `authProbeGate`). **Row was stale until CHAOS-76 §41.8 — it read as a live High gap for two months after the fix and is what drew that sweep into the domain.** Eviction fairness on this cache is a SEPARATE defect, AU-20 | ~~H~~ — | `auth_oidc_flow.go` `resolveByIntrospection`; gates `TestOIDCFlow_IntrospectionResultIsCached`, `..._UnreachableIdPIsGatedAndReported` |
 | AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. | GAP | H | `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245` |
 | AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. **Understated: the WRONG-username branch is worse (AU-3a) and needs no valid username at all.** | GAP → **CLOSED** (CHAOS-57, §25: `internal/authcost` bounds concurrency globally + per client, fail-closed) | M → **C** | `store.go` `verifyAuthFrom`, `internal/authcost`, `auth_cost_health.go` |
 | AU-3a | The wrong-username branch runs an unconditional bcrypt against the dummy hash (RISK-008 timing equaliser), is reached BEFORE the result cache, and never populates it — so a flood of DISTINCT usernames is a guaranteed miss every time. Measured **79.6 ms of exclusive CPU per ~200-byte request (51,631x a cached auth)**; **66 req/s (~13 KB/s) consumed 100% of a 4-core box** and degraded other CPU work **15.6x**. Unauthenticated, remotely triggerable, and in the DEFAULT posture nothing stands in front of it — the connection limiter, rate limiter and IP filter all ship disabled. | GAP → **CLOSED** (CHAOS-57) | **C** | `store.go:521` (pre-fix), gates `TestChaos57_WrongUsernamePathIsGoverned`, `..._ConcurrentVerificationsAreBounded` |
-| AU-3c | The auth result cache evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic) | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
+| AU-3c | **The LOCAL auth cache** evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED for this cache** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic). **The three SIBLING caches kept the defect for another seven weeks — see AU-20** | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
 | AU-3d | The at-capacity expired-entry scan is O(cache) whenever nothing has expired — precisely the state a flood keeps it in — and runs holding the process-wide auth mutex. Measured **64 µs per insertion** at the 5,000-entry cap. | GAP → **CLOSED** (CHAOS-57: bucket-indexed eviction, no full scan) | L/M | `store.go` `set` (pre-fix) |
 | AU-3e | **Username-enumeration timing oracle, PRE-EXISTING and deliberately NOT closed by CHAOS-57.** A negative result for the CORRECT username is cached; one for a wrong username is not (the branch returns before the cache). So repeating the SAME wrong (user, pass) pair twice is ~1.5 µs the second time for a valid username and ~80 ms for an invalid one — which is the oracle RISK-008's dummy-compare equalisation exists to prevent, reachable by repetition rather than by a single request. Closing it means caching wrong-username negatives, a behaviour change to a security control that deserves its own review. CHAOS-57 verifies only that it does not WIDEN it (`TestChaos57_AdmissionDecisionIsUsernameIndependent`). | GAP | M | `store.go` `verifyAuthFrom` — cache write is on the username-match branch only |
 | AU-4 | Lockout store is bounded + fail-closed, and TOTP failures now feed it. But it is **not persisted** (resets on restart) and **per-node** (attacker gets MaxAttempts per node in a cluster). | ✓ (+2 gaps) | M | `lockout.go:111-126,102-110`; per-node note `roadmap/edge-case-audit.md:138` |
@@ -1154,9 +1154,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-10 | TOTP: 30s step, ±1 window (~90s skew tolerance), replay closed via `counter <= lastCounter`, empty-secret fails closed. | ✓ | — | `totp.go:47-88` |
 | AU-11 | Multi-IdP registry: compile is isolated (all-or-nothing staging swap; bad profile dropped, not fatal). But the **request-time provider loop is sequential and unguarded** — one slow IdP adds latency to every request that reaches it. | ✓ compile / GAP request | M | `auth_idp.go:159-165,354-376` vs loop `proxy.go:209-220` |
 | AU-12 | All admin-configured IdP URLs dial through `ssrfSafeDialContext`; HTTPS+non-private pre-validated; response bodies `io.LimitReader`-capped. | ✓ | — | `auth_oidc_flow.go:64,300`, `auth_idp.go:556-565` |
-| AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP | M | `auth_oidc_flow.go:623-636`; breaker exists unused `internal/upstream/upstream.go:89-96` |
+| AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP → **CLOSED** (CHAOS-49: an AUTHORITATIVE `active:false` is cached; `authProbeGate` is the breaker. An infrastructure failure is still deliberately NOT cached — see AU-7). Row was stale until CHAOS-76 §41.8 | ~~M~~ — | `auth_oidc_flow.go` `resolveByIntrospection`; gate `TestOIDCFlow_InactiveTokenVerdictIsCached` |
 | AU-15 | **The public admin-login endpoint accepted an UNBOUNDED username and copied it verbatim into durable state.** `apiAuthLogin` is on `uiAuthMiddleware`'s public allowlist; nothing between the 1 MiB body cap and the handler limited `body.User`, and every failed attempt wrote it into the two lockout maps (retained ≥ `lockout.Window`), the 500-entry audit ring, and the **durable audit JSONL** — a 50 MB rotating file keeping exactly ONE archive. At the endpoint's own rate limit (60 mutating POSTs/min/IP) one unauthenticated client commits ~60 MiB/min of chosen bytes, rotating the entire 100 MB retained compliance record away in **under two minutes**, with no disk fault and every write SUCCEEDING (so `writeErrors`/`storage_write_failed` never fire). Measured by the gate: **4,195,672 bytes into the audit file from 8 requests.** | NEW → **CLOSED** (CHAOS-63: bounded at the handler; `lockout.MaxUsernameKeyLen` is the structural half; `culvert_login_oversize_rejected_total`) | **H** | was: `ui_auth.go` `apiAuthLogin`; `internal/audit/audit.go:213` (`NewRotatingFile(path, 50)`); see §32 |
 | AU-16 | **`internal/lockout` bounded its maps by ENTRY COUNT but not by KEY SIZE.** `Cleanup`'s own doc claims the maps are bounded "against an unbounded-memory DoS" — true on the count axis, and the janitor cannot sweep an entry before its `Window` elapses, so the SIZE axis was the whole exposure: one caller retained (rate × Window × username size) bytes in a leaf package whose stated contract is to be bounded. | NEW → **CLOSED** (CHAOS-63: `boundUsername` applied at every public entry point; consistency pinned so `Check` and `RecordFailure` cannot disagree on the key) | M/H | was: `internal/lockout/lockout.go`; see §32 |
+| AU-20 | **The three identity-backend result caches evicted one arbitrary LIVE entry at the cap** — `auth_oidc_flow.go` (registry introspection, token-keyed), `auth_oidc.go` (legacy introspection, token-keyed) and `auth_ldap.go` (directory bind, user+pass-keyed). AU-3c exactly, on a key space derived entirely from caller-supplied credentials, never ported from CHAOS-57. All three are populated by UNAUTHENTICATED requests and an authoritative denial is cacheable by design (RFC 7662 §2.2 answers an unknown token `200 {"active":false}`; a directory answering "no such user" is authoritative), so the flood needs no fault and no credential: a specific honest entry survives `k` insertions with probability `e^(-k/N)`, so one cap-worth removes ~63% and three remove ~95%. Compounding it, **nothing reclaimed an expired entry**, so the steady state under a flood was a map full of DEAD verdicts while eviction destroyed the few live ones. Sharp end: displacing a cached positive while the backend sits in its CHAOS-47/CHAOS-49 cooldown turns a cache HIT into a **DENIAL**, inverting the cache's stated purpose for the users it serves. Fail-closed throughout (no bypass), but authentication becomes remotely deniable by an anonymous client. | NEW → **CLOSED** (CHAOS-76: one shared `identityResultCache` carrying `internal/authstate`'s policy via the shared `betterAuthCacheVictim`; expired-preferred victims; lookup-time reclaim; O(active clients), never the AU-3d full scan) | **H** | was: `auth_oidc_flow.go` `introspectCacheSet`, `auth_oidc.go` `oidcCacheSetIdentityWithExp`, `auth_ldap.go` `cacheSet`; now `auth_identity_cache.go`; see §41 |
+| AU-21 | **The CHAOS-57 client fairness key was computed on both data-plane paths and DISCARDED at both provider dispatch points** — `proxy.go` (`authStateClientKey`) and `socks5.go` (`clientFairnessKey`) both derive it, then `store.go` called `provider.Verify(user, pass)` and `resolver.ResolveIdentity(user, pass)`. So no per-client eviction policy was expressible inside a provider's cache at all. `authProbeGate` governs REACHABILITY and is the right answer about COST (the dispatch comment says so); it says nothing about who may displace whose entry, so the displacement axis had **no owner**. The structural half of AU-20: the primitive that would have prevented the defect existed, ran on every request, and was dropped one call short of the code that needed it. | NEW → **CLOSED** (CHAOS-76: additive `clientAttributedVerifier` / `clientAttributedResolver` preferred by both dispatch points, with the historical signature as fallback — additive rather than widening `IdentityProvider`, because SAML is browser-mediated and keeps no result cache) | **H** | was: `store.go` `verifyAuthFrom`, `resolveAuthIdentityFromSnapshot`; now `identity.go`; gate `TestChaos76_ClientFairnessKeyReachesTheIdentityProviders`; see §41.3 |
 
 ### 2.6 Background Workers / Feeds / Scanning / Alerting
 
@@ -8294,3 +8296,251 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-76 — The identity-backend result caches as a displacement surface
+
+**Date:** 2026-10-15
+**Scope:** The three result caches on the proxy credential path — the LDAP
+directory bind (`auth_ldap.go`), the legacy RFC 7662 introspection backend
+(`auth_oidc.go`) and the IdP-registry introspection provider
+(`auth_oidc_flow.go`) — plus the two dispatch points in `store.go` that reach
+them.
+**Verdict:** One **High** finding with two halves, both closed. Nothing else in
+the domain was found wanting; the surrounding contracts (CHAOS-47's probe gate,
+CHAOS-49's result cache, the "an infrastructure failure is never cached as a
+verdict" rule) all hold and are cited below where they carry the weight.
+
+### 41.1 Why this domain
+
+CHAOS-57 closed register row **AU-3c** in the LOCAL auth cache: the cache
+`store.go` keeps for local bcrypt verification evicted *one arbitrary entry*
+at capacity, so a credential flood displaced other clients' cached positives
+and the attacker's amplification landed on legitimate traffic.
+
+That sweep fixed one cache. Culvert has four. The three others sit behind the
+same `Config` dispatch, are reached by the same unauthenticated proxy
+credential path, and were written before the policy existed. This sweep asked
+whether the AU-3c reasoning had been ported, and it had not.
+
+### 41.2 The defect: AU-3c, three more times
+
+All three caches ended `set` with the same six lines — a Go map range that
+stops at the first key:
+
+```go
+if len(a.cache) >= maxAuthCacheSize {
+	for k := range a.cache {
+		delete(a.cache, k)
+		break
+	}
+}
+```
+
+A map range is randomised, so the victim is a uniformly random entry — and
+nothing in that code asks whether the entry it takes is still LIVE.
+
+The key space is caller-controlled, and the flood is free:
+
+- The proxy credential path hands whatever username/password or bearer token
+  the client supplied to the configured backend
+  (`store.go` `verifyAuthFrom` → `provider.Verify`,
+  `resolveAuthIdentityFromSnapshot` → `resolver.ResolveIdentity`).
+- An **authoritative denial is cacheable by design**, and correctly so — not
+  caching it would make every wrong credential a fresh round trip. RFC 7662
+  §2.2 answers an unknown or expired token with `200 {"active":false}`, which
+  is authoritative, so a flood of distinct bogus tokens is the IdP's *normal*
+  behaviour, not an edge case. On the directory leg the equivalent is
+  `auth_ldap.go` `verify`'s own comment: *"The directory answered: no such
+  user … That is an authoritative deny and stays cacheable."*
+
+So each bogus credential writes an entry. At the 5,000 cap each further
+insertion evicts a uniformly random entry, and a specific honest entry
+survives `k` insertions with probability `(1 - 1/N)^k ≈ e^(-k/N)`: one
+cap-worth of flood removes **~63%** of the honest population and three remove
+**~95%**. Fifteen thousand requests carrying no credential at all is the whole
+cost.
+
+Two things made this worse than the local-cache case:
+
+1. **Nothing reclaimed an expired entry.** `introspectCacheGet`, the legacy
+   `oidcIdentityCacheGet` and `cacheGet` all reported a miss and left the dead
+   entry in the map. So the steady state under a flood is a map full of DEAD
+   verdicts while eviction destroys the few live ones — and an expired entry is
+   *free* to drop, because it would have been a miss anyway. Evicting a live
+   entry in preference to a dead one is pure loss, and it was the default.
+
+2. **The registry cache is per provider.** `maxAuthCacheSize` bounds
+   `p.cache`, so an estate with N enabled OIDC profiles has N independent
+   5,000-entry maps, each independently floodable, and the dispatch loop asks
+   every enabled provider about every credential.
+
+### 41.3 The structural half: the fairness key had nowhere to go
+
+CHAOS-57 did not only fix a policy — it introduced the **client fairness key**,
+and both data-plane paths already compute it:
+
+- `proxy.go` → `cfg.resolveAuthIdentityFrom(authStateClientKey(r), u, p)`
+- `socks5.go` → `cfg.VerifyAuthFrom(clientFairnessKey(clientIP), …)`
+
+Both dispatch points in `store.go` then **discarded it** before reaching the
+provider:
+
+```go
+return snapshot.provider.Verify(user, pass)        // verifyAuthFrom
+return resolver.ResolveIdentity(user, pass)        // resolveAuthIdentityFromSnapshot
+```
+
+`verifyAuthFrom`'s comment explains why external providers are not charged a
+verification slot — *"their cost and their failure modes are governed by
+CHAOS-47's authProbeGate instead"* — and that is right about COST. It is not
+an answer about displacement. `authProbeGate` governs **reachability**: it
+decides whether to attempt a round trip. It says nothing about who may evict
+whose entry. So the displacement axis had **no owner**, and no per-client
+policy was even expressible inside these caches.
+
+This is the more interesting half of the finding: the primitive that would have
+prevented the defect existed, was computed on every request, and was dropped
+one call short of the code that needed it.
+
+### 41.4 The sharp end: a cached positive becomes a denial
+
+Displacement alone costs the victim a full backend round trip. The real
+consequence is the interaction with the CHAOS-47 / CHAOS-49 cooldown.
+
+When the backend is unreachable the gate denies **without** a round trip:
+
+```go
+if !p.gate.allow() {
+	noteAuthBackendGatedDenial()
+	return nil, false
+}
+```
+
+That is the correct fail-closed posture, and the cache is what makes it
+survivable: a client whose verdict is already cached is served from the cache
+and never reaches the gate. The cache's stated purpose, in CHAOS-49's own
+words, is that *"a one-second IdP blip cannot keep denying valid tokens."*
+
+Evict that client's entry and the next request falls through to the gate and is
+**denied** — for the whole cooldown, while the IdP is down, for a credential
+that was valid a moment ago. A flood therefore inverts the cache's purpose for
+exactly the users it exists to serve.
+
+Failure stays **CLOSED** throughout: there is no bypass, no credential is
+accepted that should not be, and the denial is logged and counted. What an
+anonymous client gains is the ability to make the gateway's authentication
+fail for other people — which is precisely the failure shape
+`internal/authstate`'s package doc was written for: *"Failure was closed (no
+bypass), but the whole gateway's authentication was remotely deniable by an
+anonymous client."*
+
+### 41.5 What shipped
+
+**One policy, not a fourth variant.** `identityResultCache[T]`
+(`auth_identity_cache.go`) is `internal/authstate`'s policy — the same one
+CHAOS-57 put in `store.go` — reusing the shared `betterAuthCacheVictim`
+ordering so the tree has ONE definition of "better victim":
+
+- Entries are attributed to a client fairness key; eviction takes the **oldest
+  entry of the client holding the most**, ties broken by oldest entry then by
+  client key. The victim never depends on Go's map order. A flooding source
+  evicts **itself** until it is no longer the largest holder, and a client
+  holding one entry cannot be displaced until every other client is down to one
+  too — so displacing one honest verdict costs an attacker as many distinct
+  source addresses as the cap, not a for-loop.
+- An **expired entry is always the better victim** and is taken wherever a
+  bucket front holds one. A lookup now reclaims an expired entry in place, so
+  dead verdicts stop occupying capacity as soon as anybody looks at them.
+- Work per insertion stays **O(active clients)** — bucket fronts only, never a
+  scan of the whole map. That restraint is deliberate: the O(cache) scan under
+  a process-wide mutex is register row **AU-3d**, measured at 64 µs per
+  insertion, and re-introducing it here would have traded one measured defect
+  for another.
+
+**The key now has a route.** Two additive optional interfaces in `identity.go`
+— `clientAttributedVerifier` and `clientAttributedResolver` — which the
+`store.go` dispatch prefers and falls back from. They are additive rather than
+a widening of `IdentityProvider` because SAML is browser-mediated, keeps no
+result cache, and has nothing to do with a proxy-credential fairness key;
+forcing the parameter on it would be a contract change bought for nothing.
+
+**Per-entry expiry, not a store-wide TTL.** A positive introspection verdict is
+clamped to the token's own declared lifetime
+(`clampCacheTTLToTokenExpiry`), so it can be shorter-lived than the backend's
+configured TTL. The consequence is recorded on the type: a bucket front is the
+client's oldest entry by INSERTION, which is not necessarily its first to
+expire, so a deeper expired entry waits until it reaches the front. That costs
+nothing the fairness property depends on.
+
+**Displacement is now visible.** `CacheEvictions()` per backend, matching the
+`AuthCacheEvictions` precedent from CHAOS-57. It is the operator's only signal
+that cached verdicts are being thrown away, and each one costs somebody a
+round trip — or a denial, during a cooldown.
+
+### 41.6 Gates
+
+`auth_identity_cache_chaos_test.go`. **All ten were verified to FAIL against
+the pre-fix behaviour**, by restoring it (arbitrary map-range victim, a lookup
+that leaves expired entries, and a dispatch that drops the key) and re-running:
+
+| Gate | Pins |
+|---|---|
+| `TestChaos76_FloodCannotDisplaceAnHonestClientsCachedVerdict` | The headline property, once per backend (registry OIDC / legacy OIDC / LDAP): a 3×-cap flood from one source leaves an honest client's verdict cached |
+| `TestChaos76_FloodCannotTurnACachedPositiveIntoADenialDuringAnOutage` | §41.4 end to end: flood, then take the IdP down, and the honest client is still served from cache rather than gate-denied |
+| `TestChaos76_ExpiredEntriesAreEvictedBeforeLiveOnes` | One expired front in an otherwise-live cache, so an arbitrary victim is a live entry with probability (cap−1)/cap |
+| `TestChaos76_LookupReclaimsAnExpiredEntry` | A dead verdict stops occupying capacity when looked at |
+| `TestChaos76_EvictionVictimIsDeterministic` | The victim is the oldest entry of the largest holder, identical across nine runs — not read from map order |
+| `TestChaos76_ASingleEntryHolderOutlivesEveryLargerHolder` | The fairness property, against a 6×-cap flood (pre-fix survival e⁻⁶) |
+| `TestChaos76_BucketBackingSliceDoesNotGrowWithRequestCount` | The compaction trap: a window-based test never fires under a sustained flood |
+| `TestChaos76_ClientFairnessKeyReachesTheIdentityProviders` | Both `store.go` dispatch points pass the key and do not fall back to the bare form |
+| `TestChaos76_EveryCachingIdentityBackendIsClientAttributed` | Anti-drift wall: a backend added later that forgets the client-attributed form is caught, because the dispatcher's fallback is silent |
+| `TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent` | The cap and the bucket index under 32-goroutine contention; `bucketDriftForTest` catches live-count drift, which corrupts the victim choice rather than merely leaking memory |
+
+Two of these started life as probabilistic oracles — a flood against one honest
+entry passes pre-fix about a third of the time — and were reformulated to be
+deterministic before being accepted. A gate that only usually fails against the
+defect is not a gate.
+
+### 41.7 What is deliberately left
+
+- **The per-provider cap multiplies.** N enabled OIDC profiles still mean N
+  independent 5,000-entry caches. Fairness now bounds who can displace whom
+  WITHIN each, which is the security property; the aggregate memory ceiling
+  (N × 5,000 entries) is a sizing decision for an operator-configurable cap,
+  not a defect, and `maxAuthCacheSize` is shared with `store.go` so changing it
+  is a cross-cache decision.
+- **`AU-3e`, the username-enumeration timing oracle, is untouched** and stays
+  as CHAOS-57 recorded it: closing it means caching wrong-username negatives,
+  a behaviour change to a security control that deserves its own review. This
+  sweep does not widen it — the caches it changed are keyed by the same
+  `cacheKey` as before.
+- **`AU-11`, the sequential provider loop**, remains open: the gate collapses
+  an OUTAGE to a constant, but a merely SLOW IdP still adds its latency to
+  every request that reaches it. Different axis, different fix.
+
+### 41.8 Register hygiene: two rows were stale, and they misdirect
+
+While locating the domain, this sweep read `AU-1` and `AU-13` as live **High**
+and **Medium** gaps:
+
+> AU-1 — Registry OIDC introspection has **no result cache** → one IdP
+> round-trip per request, ×N providers, each 10 s timeout.
+> AU-13 — Registry introspection also lacks **negative caching / circuit
+> breaker**.
+
+Both were closed by **CHAOS-49** in August and neither row was updated. The
+revision-log entry for that sweep records the fixes explicitly (its items (5)
+and (6)), and the code has carried `introspectCacheGet`/`introspectCacheSet`,
+the 2-minute TTL and `authProbeGate` since. Verified at this revision in
+`auth_oidc_flow.go` and by the existing gates
+`TestOIDCFlow_IntrospectionResultIsCached`,
+`TestOIDCFlow_InactiveTokenVerdictIsCached` and
+`TestOIDCFlow_UnreachableIdPIsGatedAndReported`.
+
+Both rows are corrected below. This is the same governance failure the header
+documents for IDs, in a different column: a sweep closes a defect, writes its
+own section, and does not walk back to the summary table the next sweep
+actually reads first. An open High row is not free — it is the most expensive
+kind of stale, because it is exactly what draws the next sweep in.

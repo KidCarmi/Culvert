@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -424,5 +425,48 @@ func TestChaos76_EvictionsAreCounted(t *testing.T) {
 	if got := c.Evictions(); got < 64 {
 		t.Fatalf("Evictions() = %d after %d insertions past the cap, want >= 64 — "+
 			"displacement is invisible to the operator (CHAOS-76)", got, 64)
+	}
+}
+
+// The store is reached concurrently from every request goroutine on the
+// credential path, and it is new shared state. The bucket index, the entry map
+// and the compaction window all have to stay consistent with each other under
+// contention — a bucket whose live count drifts from the entry map would either
+// evict the wrong victim forever or leak capacity.
+func TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent(t *testing.T) {
+	var c identityResultCache[*Identity]
+
+	const (
+		workers   = 32
+		perWorker = 400
+	)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			client := fmt.Sprintf("client-%d", w%6)
+			for i := 0; i < perWorker; i++ {
+				k := fmt.Sprintf("w%d-k%d", w, i)
+				c.set(k, client, &Identity{Sub: "alice"}, true, honestEntryTTL)
+				c.get(k)
+				// Re-set the same key: the overwrite path has to remove the old
+				// entry from its bucket before re-attributing it, or the live
+				// count double-counts and the fairness ordering goes wrong.
+				c.set(k, client, &Identity{Sub: "alice"}, true, honestEntryTTL)
+				c.get(fmt.Sprintf("w%d-k%d", (w+1)%workers, i))
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	if got := c.len(); got > maxAuthCacheSize {
+		t.Fatalf("cache holds %d entries after concurrent use, cap is %d", got, maxAuthCacheSize)
+	}
+	// Every bucket's live count must equal what the entry map actually
+	// attributes to that client.
+	if drift, client := c.bucketDriftForTest(); drift != 0 {
+		t.Fatalf("bucket live count for %q drifts from the entry map by %d — the eviction "+
+			"policy reads live counts, so drift corrupts the victim choice (CHAOS-76)", client, drift)
 	}
 }
