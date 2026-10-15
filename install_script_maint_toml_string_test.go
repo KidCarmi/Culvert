@@ -127,3 +127,13 @@ func TestInstallScript_MaintTomlString_SingleQuotedLiteral(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallScript_MaintTomlString_TripleSingleQuoted guards against the
+// single-quote branch mistaking '''x''' for an empty string, which the caller
+// would silently replace with the default repository.
+func TestInstallScript_MaintTomlString_TripleSingleQuoted(t *testing.T) {
+	toml := "proxy_repo = '''ghcr.io/example/custom'''\n"
+	if got, want := runMaintTomlString(t, toml, "proxy_repo"), "ghcr.io/example/custom"; got != want {
+		t.Fatalf("maint_toml_string(proxy_repo) = %q, want %q", got, want)
+	}
+}
