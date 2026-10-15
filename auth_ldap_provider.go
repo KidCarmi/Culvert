@@ -466,6 +466,11 @@ func (p *LDAPIdPProvider) ResolveIdentity(username, password string) (*Identity,
 	return p.engine.resolveIdentity(username, password)
 }
 
+// CacheEvictions forwards the engine's displacement counter so the active
+// provider can be asked for it without knowing which engine backs it
+// (CHAOS-76).
+func (p *LDAPIdPProvider) CacheEvictions() uint64 { return p.engine.CacheEvictions() }
+
 // ResolveIdentityFrom is ResolveIdentity carrying the caller's client-fairness
 // key, so one flooding source cannot displace another client's cached
 // directory verdict (CHAOS-76).

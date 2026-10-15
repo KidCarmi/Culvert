@@ -1075,6 +1075,27 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 // full bcrypt on its next request (CHAOS-57).
 func (c *Config) AuthCacheEvictions() uint64 { return c.cache.Evictions() }
 
+// IdentityCacheEvictions reports how many cached verdicts the ACTIVE external
+// identity backend has displaced to stay under its cap, or 0 when no such
+// backend is configured (local bcrypt reports through AuthCacheEvictions).
+//
+// Same meaning as AuthCacheEvictions one layer out, and the same reason to
+// expose it (CHAOS-76): every eviction costs the displaced client a full
+// directory bind or introspection round trip on its next request, or a denial
+// outright while the backend sits in its unreachable cooldown. A climbing
+// counter means either the cap is undersized for real login volume or somebody
+// is flooding the credential path.
+func (c *Config) IdentityCacheEvictions() uint64 {
+	provider := c.snapshotAuthBackend().provider
+	if provider == nil {
+		return 0
+	}
+	if ev, ok := provider.(interface{ CacheEvictions() uint64 }); ok {
+		return ev.CacheEvictions()
+	}
+	return 0
+}
+
 // VerifyAuthFrom is VerifyAuth with the caller's client-fairness key, so the
 // CHAOS-57 verification governor can attribute the bcrypt work. Data-plane
 // callers that know their peer MUST use this: the plain VerifyAuth passes the

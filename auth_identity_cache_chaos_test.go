@@ -470,3 +470,34 @@ func TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent(t *testing.
 			"policy reads live counts, so drift corrupts the victim choice (CHAOS-76)", client, drift)
 	}
 }
+
+// An eviction counter nobody can read is not observability. culvert_auth_cache_
+// evictions_total has been on /metrics since CHAOS-57 for the local cache; the
+// identity backends' displacement needs the same surface, for the same reason.
+func TestChaos76_IdentityCacheEvictionsReachTheActiveBackend(t *testing.T) {
+	engine, err := NewLDAPAuth(LDAPConfig{
+		URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com", CacheTTL: honestEntryTTL,
+	})
+	if err != nil {
+		t.Fatalf("NewLDAPAuth: %v", err)
+	}
+	cfg := &Config{}
+	cfg.provider = &LDAPIdPProvider{profile: ldapTestProfile("corp-ad", "AD"), engine: engine}
+
+	if got := cfg.IdentityCacheEvictions(); got != 0 {
+		t.Fatalf("precondition: IdentityCacheEvictions = %d, want 0", got)
+	}
+	for i := 0; i < maxAuthCacheSize+32; i++ {
+		engine.cacheSet(cacheKey(fmt.Sprintf("mallory-%d", i), "nope"), "flooding-client", false, nil)
+	}
+	if got := cfg.IdentityCacheEvictions(); got < 32 {
+		t.Fatalf("IdentityCacheEvictions = %d after %d insertions past the cap, want >= 32 — "+
+			"displacement on the active identity backend is invisible to the operator (CHAOS-76)", got, 32)
+	}
+
+	// No external backend configured: the local cache reports through
+	// AuthCacheEvictions, and this accessor must not claim its count.
+	if got := (&Config{}).IdentityCacheEvictions(); got != 0 {
+		t.Errorf("IdentityCacheEvictions = %d with no external backend, want 0", got)
+	}
+}
