@@ -183,6 +183,19 @@ Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
 
+Less common flags (the full list is `culvert -h`; a flag overrides the matching `config.yaml` value unless noted):
+
+| Flag | Purpose |
+|---|---|
+| `-ip-filter-mode allow\|block` | IP filter mode; empty = off. Any other value aborts startup. YAML: `security.ip_filter_mode`. |
+| `-trust-forwarded-headers` | Trust `X-Forwarded-*` headers. OR-ed with `proxy.trust_forwarded_headers` (either enables it). Unscoped - read [OPERATIONS.md](docs/OPERATIONS.md) item 6 first. |
+| `-syslog-format rfc3164\|rfc5424` | Remote syslog message format (default `rfc3164`); used with `-syslog`. |
+| `-revocations-file`, `-fileprofiles-file`, `-cluster-db` | Persistence paths for session revocations, file-extension profiles and cluster state (e.g. `/data/revocations.json`). |
+| `-cat-sync-interval 24h` | Re-sync interval for the URL category community feed (with `-cat-feed-db`). |
+| `-scan-svc-listen :8484` | Run as the scan-microservice sidecar on this address (the client side is `-scan-svc-url`). |
+| `-list-backups -backup-dir /backup` | Print backup archives in `-backup-dir` (absolute path, default `/backup`) as a JSON array and exit. |
+| `-cdr-enabled`, `-cdr-endpoint`, `-cdr-certs-dir`, `-cdr-default-profile`, `-cdr-timeout-sec`, `-cdr-max-file-size-mb` | Sluice CDR client: enable, gRPC endpoint, mTLS bundle directory (`ca.pem`, `client.pem`, `client.key`), fallback profile (`default`), per-file deadline (>=30 s, default 35) and payload cap (default 50 MB). `-cdr-enabled` can only turn CDR on; it cannot disable a config that enables it. |
+
 > In the shipped Docker image, persistence paths such as `/data/ca.bundle` and `/data/ui_users.json` are supplied by the compose command line, not by binary flag defaults.
 
 ### Environment variables
