@@ -46,6 +46,32 @@ type IdentityProvider interface {
 	DisplayName() string
 }
 
+// clientAttributedVerifier and clientAttributedResolver are the OPTIONAL
+// client-attributed forms of AuthProvider.Verify and
+// IdentityProvider.ResolveIdentity (CHAOS-76).
+//
+// Why they are separate optional interfaces rather than a change to the two
+// contracts above: every identity backend that keeps a RESULT CACHE needs the
+// caller's fairness key, and the backends that keep none (SAML, which is
+// browser-mediated and never sees a proxy credential) have no use for it.
+// Widening IdentityProvider would force a parameter on providers that cannot
+// act on it, so the dispatcher in store.go prefers these when a provider
+// implements them and falls back to the historical signature otherwise.
+//
+// client is an opaque fairness key derived from the resolved peer address
+// (authStateClientKey for HTTP, clientFairnessKey for SOCKS5). It is never
+// compared against anything a caller supplies later and never reaches a
+// lookup, so a wrong or empty value can only make cache eviction less fair —
+// it can never admit a credential that should be rejected. The empty key is
+// legitimate and means "attribute this to the shared bucket".
+type clientAttributedVerifier interface {
+	VerifyFrom(client, username, credential string) bool
+}
+
+type clientAttributedResolver interface {
+	ResolveIdentityFrom(client, username, credential string) (*Identity, bool)
+}
+
 func identityAuthSource(id *Identity, fallback string) string {
 	if id != nil && id.Provider != "" {
 		return id.Provider

@@ -74,13 +74,13 @@ func TestLDAPAuth_Name(t *testing.T) {
 func TestLDAPAuth_Cache_HitTrue(t *testing.T) {
 	a, _ := NewLDAPAuth(LDAPConfig{URL: "ldap://localhost:389", BaseDN: "dc=x,dc=com"})
 	k := cacheKey("alice", "secret")
-	a.cacheSet(k, true, nil)
+	a.cacheSet(k, "", true, nil)
 
-	e, hit := a.cacheGet(k)
+	_, verdict, hit := a.cacheGet(k)
 	if !hit {
 		t.Error("expected cache hit")
 	}
-	if !e.ok {
+	if !verdict {
 		t.Error("expected ok=true from cache")
 	}
 }
@@ -88,20 +88,20 @@ func TestLDAPAuth_Cache_HitTrue(t *testing.T) {
 func TestLDAPAuth_Cache_HitFalse(t *testing.T) {
 	a, _ := NewLDAPAuth(LDAPConfig{URL: "ldap://localhost:389", BaseDN: "dc=x,dc=com"})
 	k := cacheKey("bob", "wrong")
-	a.cacheSet(k, false, nil)
+	a.cacheSet(k, "", false, nil)
 
-	e, hit := a.cacheGet(k)
+	_, verdict, hit := a.cacheGet(k)
 	if !hit {
 		t.Error("expected cache hit")
 	}
-	if e.ok {
+	if verdict {
 		t.Error("expected ok=false from cache")
 	}
 }
 
 func TestLDAPAuth_Cache_Miss(t *testing.T) {
 	a, _ := NewLDAPAuth(LDAPConfig{URL: "ldap://localhost:389", BaseDN: "dc=x,dc=com"})
-	_, hit := a.cacheGet("nonexistent")
+	_, _, hit := a.cacheGet("nonexistent")
 	if hit {
 		t.Error("expected cache miss for unknown key")
 	}
@@ -114,11 +114,11 @@ func TestLDAPAuth_Cache_Expiry(t *testing.T) {
 		CacheTTL: 1 * time.Millisecond,
 	})
 	k := cacheKey("alice", "secret")
-	a.cacheSet(k, true, nil)
+	a.cacheSet(k, "", true, nil)
 
 	time.Sleep(5 * time.Millisecond)
 
-	_, hit := a.cacheGet(k)
+	_, _, hit := a.cacheGet(k)
 	if hit {
 		t.Error("expected cache miss after TTL expiry")
 	}

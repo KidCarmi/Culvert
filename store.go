@@ -1014,6 +1014,15 @@ func (c *Config) verifyAuthFrom(snapshot authBackendSnapshot, client, user, pass
 		// their cost and their failure modes are governed by CHAOS-47's
 		// authProbeGate instead. Charging them a verification slot here would
 		// bound the wrong resource.
+		//
+		// The fairness key still has to reach them (CHAOS-76). authProbeGate
+		// governs REACHABILITY — it says nothing about who may displace whose
+		// entry in the provider's result cache, and that cache is populated by
+		// unauthenticated requests on a caller-controlled key space. Dropping
+		// the key here left the displacement axis with no owner at all.
+		if v, ok := snapshot.provider.(clientAttributedVerifier); ok {
+			return v.VerifyFrom(client, user, pass)
+		}
 		return snapshot.provider.Verify(user, pass)
 	}
 	if snapshot.user == "" {
@@ -1099,6 +1108,12 @@ func (c *Config) resolveAuthIdentityFromSnapshot(snapshot authBackendSnapshot, c
 	// never turn that sentinel success into a caller-controlled identity.
 	if snapshot.provider == nil && snapshot.user == "" {
 		return nil, false
+	}
+	// Prefer the client-attributed form so the caller's fairness key reaches
+	// the provider's result cache (CHAOS-76). Providers that do not implement
+	// it keep the historical contract and share one fairness bucket.
+	if resolver, ok := snapshot.provider.(clientAttributedResolver); ok {
+		return resolver.ResolveIdentityFrom(client, user, pass)
 	}
 	if resolver, ok := snapshot.provider.(interface {
 		ResolveIdentity(username, credential string) (*Identity, bool)
