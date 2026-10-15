@@ -312,21 +312,21 @@ func (c *identityResultCache[T]) keysRetainedForTest(client string) int {
 // much. The eviction policy orders victims BY those live counts, so drift does
 // not merely waste memory — it corrupts the choice of victim, which is the
 // security property. Returns (0, "") when every bucket agrees.
-func (c *identityResultCache[T]) bucketDriftForTest() (int, string) {
+func (c *identityResultCache[T]) bucketDriftForTest() (drift int, client string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	actual := map[string]int{}
 	for _, e := range c.entries {
 		actual[e.client]++
 	}
-	for client, b := range c.buckets {
-		if d := b.live - actual[client]; d != 0 {
-			return d, client
+	for name, b := range c.buckets {
+		if d := b.live - actual[name]; d != 0 {
+			return d, name
 		}
 	}
-	for client, n := range actual {
-		if _, ok := c.buckets[client]; !ok {
-			return -n, client
+	for name, n := range actual {
+		if _, ok := c.buckets[name]; !ok {
+			return -n, name
 		}
 	}
 	return 0, ""
