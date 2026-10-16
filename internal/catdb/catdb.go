@@ -69,8 +69,27 @@ type CommunityDB struct {
 // A non-zero memFaults count means the data volume damaged the store's mapped
 // tables while it was open and serving. Layer-2 categorisation is off from that
 // point on; Layer 1 remains authoritative.
+//
+// Ordering contract (invariant: degraded ⇒ memFaults ≥ 1). noteMemFault ADDS to
+// memFaults BEFORE it sets degraded, and this reader loads degraded BEFORE
+// memFaults. Go's atomics are sequentially consistent, so a reader that sees
+// degraded==true is guaranteed to see the Add that preceded it. Loading in the
+// other order could catch memFaults before the Add and degraded after the CAS,
+// so a scrape would report a degraded store with "0 memory fault(s)". The order
+// is pinned by TestLookupFaults_DegradedImpliesACountedFault; no mutex needed.
 func (c *CommunityDB) LookupFaults() (faults, memFaults uint64, degraded bool) {
-	return c.faults.Load(), c.memFaults.Load(), c.degraded.Load()
+	degraded = c.degraded.Load()
+	memFaults = c.memFaults.Load()
+	faults = c.faults.Load()
+	return faults, memFaults, degraded
+}
+
+// noteMemFault accounts one contained memory fault and latches degraded,
+// reporting whether this call was the one that latched it. The Add comes
+// BEFORE the CAS: that is the writer half of LookupFaults' ordering contract.
+func (c *CommunityDB) noteMemFault() (first bool) {
+	c.memFaults.Add(1)
+	return c.degraded.CompareAndSwap(false, true)
 }
 
 // Open opens (or creates) a BadgerDB at the given directory.
@@ -139,8 +158,7 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 		// The mapping is gone. Latch degraded and report ONCE: a per-request
 		// log line here would be a log flood driven by request volume, which is
 		// the shape of outage this package exists to prevent.
-		c.memFaults.Add(1)
-		if c.degraded.CompareAndSwap(false, true) {
+		if c.noteMemFault() {
 			// The error text is object-derived and can embed a filesystem
 			// path, so it goes through the recognized sanitizer and %q
 			// rather than %v (CWE-117).
