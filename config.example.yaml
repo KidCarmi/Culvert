@@ -109,9 +109,10 @@ security_scan:
   cache_size: 10000      # Max entries in scan result cache
   max_scan_mb: 5         # Max response size to buffer for scanning (MiB)
   scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. ":8484".
-                         # The sidecar scans only with an engine initialised on THIS process: also set
-                         # enabled: true or a backend above (clamav_addr / yara_rules_dir / threat_feed_db).
-                         # Without one, /health still reports ok and /scan answers clean for every body.
+                         # /scan inspects bodies only with clamav_addr or loaded yara_rules_dir rules on THIS
+                         # process (configured DPI patterns apply separately to text content). enabled: true
+                         # or threat_feed_db alone does not scan bodies (feeds check URLs/domains only):
+                         # /health still reports ok and /scan answers clean for every body.
   scan_svc_url: ""       # Delegate body scanning to a scan sidecar instead of in-process, e.g. "http://scan-svc:8484"
 
 # ── Content Disarm & Reconstruction (Sluice) ───────────────────────────────
