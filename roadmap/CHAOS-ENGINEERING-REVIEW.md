@@ -8773,6 +8773,40 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Twelfth review round.**
+
+  (a) **The boot resume is revalidated.** A delayed bind's resume ran
+  check-then-`ResumeAsLeader` from a config loaded earlier, so an admin HA
+  enable that landed during the seconds-long lease acquisition was
+  overwritten and re-persisted. A lock across the acquisition would block the
+  admin path for seconds, and it would order against `cpActivationGateMu` (the
+  resume runs inside it, while an admin promote can reach activation). The
+  resume therefore revalidates instead (`ResumeAsLeaderIfUnclaimed`): after
+  the acquisition it re-reads the persisted config, and then, under
+  `HAState.mu` — atomic with every HA transition, since `setTopologyLocked`
+  writes under it — it applies only if no HA role is held. Gates:
+  `TestChaos71_BootResumeLosesToAnAdminHAEnableDuringAcquisition` (each check
+  alone), `TestChaos71_BootResumeRevalidatesThePersistedConfig` and
+  `TestChaos71_BootResumeAppliesWhenNothingRaced`.
+
+  (b) **Terminal exits release CP address ownership.** The asynchronous
+  `role_conflict` exit (a Data Plane claimed first) kept `cpAddrSource`, so
+  the DP was reported as an active CP. The earlier "harmless" call was wrong,
+  because the diagnostic itself was false. Both terminal exits now go through
+  `exitTerminal`, which releases ownership and then records the terminal
+  state. The panic path republishes the list first, while still owning it.
+  The exit-edge table gains an address-ownership column that EVERY row must
+  state, and the wall `TestChaos71_Wall_TerminalExitsGoThroughExitTerminal`
+  pins the single terminal path.
+
+  (c) `culvert_cp_grpc_bind_backoff_seconds` reads 0 while serving,
+  stabilizing included. The internal value is kept for the flap policy
+  (`TestChaos71_BackoffGaugeReadsZeroWhileServing`).
+
+  Two existing walls were updated to the new structure at the same strength:
+  the panic guard may reach the terminal recorder through `exitTerminal`
+  only if `exitTerminal` calls it, and the boot resume must go through
+  `ResumeAsLeaderIfUnclaimed`. Five mutations each fail a gate.
 * **Eleventh review round.**
 
   (a) **Flap damping.** Every bind marked the episode recovered before `Serve`

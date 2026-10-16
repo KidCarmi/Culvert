@@ -721,6 +721,12 @@ func cpGRPCListenerState() cpGRPCListenerSnapshot {
 	}
 	snap.Failing = !snap.Serving && !snap.Stopped && snap.Configured
 	snap.Stabilizing = snap.Serving && !cpGRPCListener.firstFailure.IsZero()
+	if snap.Serving {
+		// The reported backoff is the CURRENT rebind wait: none while serving,
+		// stabilizing included (the metric's documented "0 while serving").
+		// The internal value is kept for the episode's flap policy.
+		snap.Backoff = 0
+	}
 	snap.Unavailable = snap.Failing && (snap.SupervisorDown || snap.FailingFor >= cpGRPCUnavailableAfter)
 	return snap
 }

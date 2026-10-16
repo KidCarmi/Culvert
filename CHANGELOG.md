@@ -122,7 +122,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   replicated from the new leader. A Control Plane listener whose socket dies
   right after every bind is now treated as one continuous outage, so it pages
   and (in lease mode) gives up the fencing lease instead of resetting each
-  cycle. An outage closes only after 60 s of stable serving. A refused admin/promote
+  cycle. An outage closes only after 60 s of stable serving. An admin HA
+  enable made while a restarted leader is still re-acquiring its fencing lease
+  is no longer overwritten by the restart's resume. A node whose Control Plane
+  listener ends terminally (a Data Plane role won, or the loop crashed) no
+  longer reports itself as an active Control Plane. The rebind-backoff gauge
+  reads 0 while the listener serves. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

@@ -1281,8 +1281,13 @@ func TestChaos71_WallThePanicGuardUsesTheTerminalRecorder(t *testing.T) {
 		guard = guard[:j]
 	}
 
-	if !strings.Contains(guard, "noteCPGRPCSupervisorDown(") {
-		t.Error("the panic guard does not call noteCPGRPCSupervisorDown: a dead supervisor reported as a " +
+	// The terminal recorder is reached directly or through exitTerminal, the
+	// supervisor's one terminal exit (which also releases CP address ownership
+	// and must itself call the recorder).
+	viaExit := strings.Contains(guard, "s.exitTerminal(") &&
+		strings.Contains(cpFuncBody(t, body, "func (s *cpListenerSupervisor) exitTerminal("), "noteCPGRPCSupervisorDown(")
+	if !strings.Contains(guard, "noteCPGRPCSupervisorDown(") && !viaExit {
+		t.Error("the panic guard does not reach noteCPGRPCSupervisorDown: a dead supervisor reported as a " +
 			"rebinding listener tells the operator to wait for a recovery that will never come")
 	}
 	if strings.Contains(guard, "noteCPGRPCServeEnded(") {
@@ -1316,9 +1321,11 @@ func TestChaos71_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 
 	// The resume is resumeLeadershipIfStillPersisted (which re-reads the HA
 	// config at bind time); it must still reach globalHA.ResumeAsLeader.
-	if !strings.Contains(body, "globalHA.ResumeAsLeader(") ||
+	// ...through the REVALIDATED resume (Codex review of #1556): an admin HA
+	// enable landing during the lease acquisition must win.
+	if !strings.Contains(body, "globalHA.ResumeAsLeaderIfUnclaimed(") ||
 		!strings.Contains(cpFuncBody(t, body, "func resumeLeadershipIfStillPersisted("), "haBootResumeAsLeader(haCfg)") {
-		t.Fatal("resumeLeadershipIfStillPersisted no longer resumes leadership through globalHA.ResumeAsLeader")
+		t.Fatal("resumeLeadershipIfStillPersisted no longer resumes leadership through globalHA.ResumeAsLeaderIfUnclaimed")
 	}
 	resume := strings.Index(fn, "resumeLeadershipIfStillPersisted(")
 	if resume < 0 {

@@ -328,7 +328,54 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 // WITHOUT bumping the term — it is the same leadership epoch continuing, not a
 // new promotion. Replaces the previous EnableAsLeader-then-patch-token dance in
 // main.go so the persisted term/token survive a restart intact (ADR-0004).
-func (h *HAState) ResumeAsLeader(cfg *haConfig) {
+func (h *HAState) ResumeAsLeader(cfg *haConfig) { h.resumeAsLeader(cfg, nil) }
+
+// ResumeAsLeaderIfUnclaimed is ResumeAsLeader for a resume that can race a
+// live HA transition — the boot path's delayed-bind callback, which may run
+// after the admin HA API became usable (Codex review of #1556). The lease
+// acquisition takes seconds and cannot hold a lock, so the resume is
+// REVALIDATED after it: persistedStill re-reads the persisted config (it must
+// still be the one being resumed), and then, atomically with every other HA
+// transition — under h.mu, the lock setTopologyLocked writes under — the
+// resume applies only if this process still holds NO HA role. An admin enable
+// that landed meanwhile has set the role and persisted its own peer/token;
+// the resume aborts instead of overwriting and re-persisting the older one.
+// Reports whether the resume was applied.
+func (h *HAState) ResumeAsLeaderIfUnclaimed(cfg *haConfig, persistedStill func() bool) bool {
+	return h.resumeAsLeader(cfg, persistedStill)
+}
+
+// haResumeAfterAcquire, when non-nil, runs right after a resume's lease
+// acquisition. Test seam only (nil in production): it lands a concurrent HA
+// transition inside the acquisition window deterministically.
+var haResumeAfterAcquire func()
+
+// resumePersistedStill is a guarded resume's first post-acquisition check: the
+// persisted config must still be the one being resumed (guard == nil: always).
+func resumePersistedStill(guard func() bool) bool {
+	if hook := haResumeAfterAcquire; hook != nil {
+		hook()
+	}
+	if guard != nil && !guard() {
+		logger.Printf("HA: the persisted HA config changed while the fencing lease was being acquired — not resuming leadership from the older copy")
+		return false
+	}
+	return true
+}
+
+// resumeClaimedLocked is a guarded resume's second check, under h.mu and so
+// atomic with every HA transition: an HA role set meanwhile wins. Caller holds
+// h.mu (write).
+func (h *HAState) resumeClaimedLocked(guard func() bool) bool {
+	if guard == nil || h.role == "" {
+		return false
+	}
+	logger.Printf("HA: an HA transition claimed this node (role %q) during the resume's lease acquisition — not resuming leadership from the older persisted config", h.role)
+	return true
+}
+
+// resumeAsLeader is the shared body; guard == nil is the unconditional resume.
+func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// ADR-0005 S2: a restarting leader's old lease expired during the
 	// restart, so it must re-acquire. Granted ⇒ normal leadership (epoch,
 	// keepalive). Denied BY A LIVE FOREIGN HOLDER ⇒ S4: the peer promoted
@@ -348,17 +395,28 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	// foreign holder (handleForeignFenceHolder) and otherwise completes the
 	// interrupted resume.
 	leaseGranted, foreignHolder := h.acquireLeaseForResume()
+	if !resumePersistedStill(guard) {
+		return false
+	}
 	if !leaseGranted && h.leaseConfigured() && foreignHolder {
 		h.mu.Lock()
+		if h.resumeClaimedLocked(guard) {
+			h.mu.Unlock()
+			return false
+		}
 		h.token = cfg.Token
 		h.standbyAddr = cfg.StandbyAddr
 		h.autoFailover = cfg.AutoFailover
 		h.mu.Unlock()
 		if h.enterStandbyResync("unfenced leader resume") {
-			return
+			return true
 		}
 	}
 	h.mu.Lock()
+	if h.resumeClaimedLocked(guard) {
+		h.mu.Unlock()
+		return false
+	}
 	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
 	h.token = cfg.Token
 	h.autoFailover = cfg.AutoFailover
@@ -394,6 +452,7 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	h.startLeaseKeepalive()
 	// Re-persist the SAME values (idempotent; keeps the file canonical).
 	_ = saveHAConfig(cfg)
+	return true
 }
 
 // ── Standby Mode ────────────────────────────────────────────────────────────

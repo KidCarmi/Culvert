@@ -35,6 +35,16 @@ const (
 	cpEdgeRejected // a refused synchronous activation: the plane is unconfigured again
 )
 
+// cpEdgeOwnership is the "CP address ownership after the exit" column. Its zero
+// value is INVALID: every row must state it (the harness fails otherwise).
+type cpEdgeOwnership int
+
+const (
+	cpOwnUnset cpEdgeOwnership = iota
+	cpOwnKept
+	cpOwnReleased
+)
+
 // cpEdgeObservation is what the probe captured when the loop went to sleep.
 type cpEdgeObservation struct {
 	snap   cpGRPCListenerSnapshot
@@ -68,9 +78,11 @@ type cpEdgeRow struct {
 	check func(t *testing.T, sup *cpListenerSupervisor, obs *cpEdgeObservation)
 	// activate, when set, enters through activateControlPlane instead of the
 	// bare supervisor: "sync" (admin activate / HA promote) or "resilient"
-	// (boot). wantAddrOwned is its released column for CP address ownership.
-	activate      string
-	wantAddrOwned bool
+	// (boot).
+	activate string
+	// addrOwnership: the released column for CP address-list ownership,
+	// asserted for EVERY row (terminal exits release it, others keep it).
+	addrOwnership cpEdgeOwnership
 }
 
 // TestChaos71_SupervisorExitEdgeTable drives every exit edge of the CP
@@ -113,7 +125,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				e.t.Cleanup(release)
 				e.cfg.addr = fmt.Sprintf("127.0.0.1:%d", port)
 			},
-			wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "port_in_use",
+			wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "port_in_use", addrOwnership: cpOwnKept,
 		},
 		{
 			name: "tls_reload_failure",
@@ -123,12 +135,12 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				_ = os.WriteFile(dir+"/cp.key", nil, 0o600)
 				e.cfg.certFile, e.cfg.keyFile = dir+"/cp.crt", dir+"/cp.key"
 			},
-			ownPort: true, wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "tls_certificate",
+			ownPort: true, wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "tls_certificate", addrOwnership: cpOwnKept,
 		},
 		{
 			name:    "shutdown_at_the_claim",
 			setup:   func(*cpEdgeEnv) { beginCPActivationShutdown() },
-			ownPort: true, wantRole: "standalone", signal: cpEdgeStopped,
+			ownPort: true, wantRole: "standalone", signal: cpEdgeStopped, addrOwnership: cpOwnKept,
 		},
 		{
 			name: "role_conflict",
@@ -137,7 +149,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				clusterRole.role = "data-plane"
 				clusterRoleMu.Unlock()
 			},
-			ownPort: true, wantRole: "data-plane", signal: cpEdgeTerminal, wantReason: "role_conflict",
+			ownPort: true, wantRole: "data-plane", signal: cpEdgeTerminal, wantReason: "role_conflict", addrOwnership: cpOwnReleased,
 		},
 		{
 			name: "shutdown_after_the_claim",
@@ -146,7 +158,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				cpActivationAfterClaim = beginCPActivationShutdown
 				e.t.Cleanup(func() { cpActivationAfterClaim = nil })
 			},
-			ownPort: true, wantRole: "standalone", signal: cpEdgeStopped,
+			ownPort: true, wantRole: "standalone", signal: cpEdgeStopped, addrOwnership: cpOwnKept,
 			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
 				if publishes.Load() != 0 {
 					t.Error("the address list was published after shutdown began")
@@ -156,7 +168,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 		{
 			name:    "address_publish_rejected",
 			setup:   func(e *cpEdgeEnv) { cpInjectPublish(e.t, countingPublish(false, boom)) },
-			ownPort: true, wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "address_publish_rejected",
+			ownPort: true, wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "address_publish_rejected", addrOwnership: cpOwnKept,
 		},
 		{
 			name: "panic_after_the_claim",
@@ -164,7 +176,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				cpActivationAfterClaim = func() { panic("injected: after claim") }
 				e.t.Cleanup(func() { cpActivationAfterClaim = nil })
 			},
-			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked",
+			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleased,
 		},
 		{
 			name: "panic_in_onActivated",
@@ -172,7 +184,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				cpInjectPublish(e.t, countingPublish(true, nil))
 				e.onActivated = func() { panic("injected: onActivated") }
 			},
-			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked",
+			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleased,
 			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
 				if publishes.Load() < 2 {
 					t.Errorf("the address list naming this node was published but never republished after the "+
@@ -188,7 +200,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 					_ = sup.Stop(e.t.Context())
 				}
 			},
-			ownPort: true, wantRole: "control-plane", signal: cpEdgeStopped,
+			ownPort: true, wantRole: "control-plane", signal: cpEdgeStopped, addrOwnership: cpOwnKept,
 		},
 		{
 			name: "serve_ends_on_its_own",
@@ -199,7 +211,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 					_ = firstListener().Close()
 				}
 			},
-			ownPort: true, wantRole: "control-plane", signal: cpEdgeRecoverable, wantReason: "listen_failed",
+			ownPort: true, wantRole: "control-plane", signal: cpEdgeRecoverable, wantReason: "listen_failed", addrOwnership: cpOwnKept,
 		},
 		{
 			name: "panic_after_a_serve_ended",
@@ -212,7 +224,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 					_ = firstListener().Close()
 				}
 			},
-			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked",
+			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleased,
 			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
 				if publishes.Load() < 2 {
 					t.Errorf("no republish after the terminal exit (%d publish call(s))", publishes.Load())
@@ -228,7 +240,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				e.t.Cleanup(release)
 				e.cfg.addr = fmt.Sprintf("127.0.0.1:%d", port)
 			},
-			activate: "sync", wantAddrOwned: false,
+			activate: "sync", addrOwnership: cpOwnReleased,
 			wantRole: "standalone", signal: cpEdgeRejected,
 		},
 		{
@@ -239,7 +251,7 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				e.t.Cleanup(release)
 				e.cfg.addr = fmt.Sprintf("127.0.0.1:%d", port)
 			},
-			activate: "resilient", wantAddrOwned: true,
+			activate: "resilient", addrOwnership: cpOwnKept,
 			wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "port_in_use",
 		},
 	}
@@ -250,6 +262,9 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 			lnMu.Lock()
 			lns = nil
 			lnMu.Unlock()
+			if row.addrOwnership == cpOwnUnset {
+				t.Fatal("the row does not state its address-ownership column")
+			}
 			if row.activate != "" {
 				cpRunActivationEdgeRow(t, row)
 				return
@@ -272,6 +287,7 @@ func cpRunEdgeRow(t *testing.T, row cpEdgeRow) {
 
 	e := &cpEdgeEnv{t: t, cfg: cpListenerConfig{addr: fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))}}
 	row.setup(e)
+	globalConfigStore.setCPAddressSource(buildCPAddressList) // as activateControlPlane does
 
 	var obs *cpEdgeObservation
 	var sup *cpListenerSupervisor
@@ -319,6 +335,7 @@ func cpRunEdgeRow(t *testing.T, row cpEdgeRow) {
 	if started.currentServer() != nil {
 		t.Error("a server handle is still published after the edge")
 	}
+	cpAssertAddrOwnership(t, row)
 	if row.ownPort {
 		cpRequirePortReleased(t, e.cfg.addr)
 	}
@@ -512,17 +529,7 @@ func cpRunActivationEdgeRow(t *testing.T, row cpEdgeRow) {
 	}
 
 	// ---- released column
-	globalConfigStore.mu.RLock()
-	owned := globalConfigStore.cpAddrSource != nil
-	globalConfigStore.mu.RUnlock()
-	if owned != row.wantAddrOwned {
-		t.Errorf("CP address ownership after the %s edge = %v, want %v", row.activate, owned, row.wantAddrOwned)
-	}
-	if !row.wantAddrOwned {
-		if c := checkCPAddressList(); c.Status != diagOK || !strings.Contains(c.Message, "Not an active Control Plane") {
-			t.Errorf("cp_address_list after a refused activation = %+v — the node is not a Control Plane", c)
-		}
-	}
+	cpAssertAddrOwnership(t, row)
 	if got := cpRoleNow(); got != row.wantRole {
 		t.Errorf("role after the edge = %q, want %q", got, row.wantRole)
 	}
@@ -541,5 +548,23 @@ func cpRunActivationEdgeRow(t *testing.T, row cpEdgeRow) {
 		}
 	default:
 		t.Fatalf("activation rows support rejected/recoverable signals, not %d", row.signal)
+	}
+}
+
+// cpAssertAddrOwnership checks the address-ownership column: a released row
+// must also read "Not an active Control Plane" on cp_address_list.
+func cpAssertAddrOwnership(t *testing.T, row cpEdgeRow) {
+	t.Helper()
+	globalConfigStore.mu.RLock()
+	owned := globalConfigStore.cpAddrSource != nil
+	globalConfigStore.mu.RUnlock()
+	want := row.addrOwnership == cpOwnKept
+	if owned != want {
+		t.Errorf("CP address ownership after the edge = %v, want %v", owned, want)
+	}
+	if !want {
+		if c := checkCPAddressList(); c.Status != diagOK || !strings.Contains(c.Message, "Not an active Control Plane") {
+			t.Errorf("cp_address_list after the edge = %+v — this node is no longer a Control Plane", c)
+		}
 	}
 }

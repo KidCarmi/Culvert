@@ -133,8 +133,26 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 // haBootResumeAsLeader is the boot path's leadership-resume action. A seam so
 // the gate for resumeLeadershipIfStillPersisted can observe the decision
 // without mutating the process-global HA state.
-var haBootResumeAsLeader = func(cfg *haConfig) {
-	globalHA.ResumeAsLeader(cfg) // restores role+token+term+auto_failover (no term bump)
+//
+// It resumes through ResumeAsLeaderIfUnclaimed: the lease acquisition can take
+// seconds, during which an admin HA enable may claim the node, so the resume
+// revalidates the persisted config and applies only while no HA role is held
+// (atomic with every HA transition under HAState.mu). Reports whether it was
+// applied.
+var haBootResumeAsLeader = func(cfg *haConfig) bool {
+	// restores role+token+term+auto_failover (no term bump)
+	return globalHA.ResumeAsLeaderIfUnclaimed(cfg, func() bool { return haConfigStillResumable(cfg) })
+}
+
+// haConfigStillResumable reports whether the persisted HA config still says
+// this node leads with the same peer and token as cfg — the config a resume
+// started from.
+func haConfigStillResumable(cfg *haConfig) bool {
+	now, err := loadHAConfig()
+	if haRestartAction(now, err) != "leader" {
+		return false
+	}
+	return now.PeerAddr == cfg.PeerAddr && now.Token == cfg.Token && now.Term == cfg.Term
 }
 
 // resumeLeadershipIfStillPersisted is the boot path's onActivated callback: it
@@ -162,7 +180,9 @@ func resumeLeadershipIfStillPersisted() {
 			"Control Plane listener's first bind", role, haConfigFile)
 		return
 	}
-	haBootResumeAsLeader(haCfg)
+	if !haBootResumeAsLeader(haCfg) {
+		return // revalidation lost to a live HA transition; it logged why
+	}
 	if haCfg.AutoFailover {
 		logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
 			"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+

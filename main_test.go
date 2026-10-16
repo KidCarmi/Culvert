@@ -24,6 +24,17 @@ func TestMain(m *testing.M) {
 	// dataDir still override it via withTempDataDir (which saves/restores this value).
 	if td, err := os.MkdirTemp("", "culvert-test-datadir-"); err == nil {
 		dataDir = td
+		// Bind the /data-rooted package defaults that are NOT derived from dataDir
+		// at their own startup (config-version store, registry settings, CDR certs
+		// root and runtime marker, alert retry queue) to the same root, exactly as
+		// production applyDataDirFromEnv does. Setting dataDir alone left them at
+		// the literal "/data/...": a dev host with a writable /data got test state
+		// written into it, and on a CI runner (no /data) every such write failed.
+		// A failed webhook delivery leaked by an earlier test then saved its retry
+		// queue inside an unrelated rollback's storage-write scope (time-based, see
+		// storage_health.go) and turned that rollback into rolled_back_not_durable.
+		// Pinned by TestTestMain_BindsPersistedStateDefaultsToTestDataDir.
+		rebindDataDirPaths()
 		code := m.Run()
 		os.RemoveAll(td)
 		os.Exit(code)

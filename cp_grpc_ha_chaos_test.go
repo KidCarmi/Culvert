@@ -572,7 +572,7 @@ func cpRecordBootResumes(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var n atomic.Int32
 	prev := haBootResumeAsLeader
-	haBootResumeAsLeader = func(*haConfig) { n.Add(1) }
+	haBootResumeAsLeader = func(*haConfig) bool { n.Add(1); return true }
 	t.Cleanup(func() { haBootResumeAsLeader = prev })
 	return &n
 }

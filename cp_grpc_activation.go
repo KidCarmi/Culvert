@@ -251,7 +251,7 @@ func (s *cpListenerSupervisor) commitAfterAdopt(mode string, backoff time.Durati
 		logErrorf("ControlPlane gRPC listener bound on %s, but this node already holds the %q cluster role — "+
 			"refusing to replace it; the Control Plane listener is STOPPED and will not rebind (fix the "+
 			"Control Plane / Data Plane configuration and restart this node)", s.cfg.addr, conflictRole)
-		noteCPGRPCSupervisorDown("role_conflict")
+		s.exitTerminal("role_conflict")
 		return false, true
 	default: // cpCommitPublishFailed: a failure in this episode, retried with backoff
 		if !s.handleBindFailure(err, backoff) {

@@ -410,6 +410,19 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 	}
 }
 
+// exitTerminal is the ONE way the supervisor ends terminally
+// (TestChaos71_Wall_TerminalExitsGoThroughExitTerminal). A terminal exit
+// leaves no Control Plane behind, so it releases CP address-list ownership —
+// a Data Plane that won a role conflict, or a node whose loop panicked, must
+// not keep reporting and reconciling a CP list (Codex review of #1556) — and
+// then records the terminal state (fail row, alert). The panic path's own
+// republish (abandonAfterPanic) runs BEFORE this, while the list is still
+// owned, so the fleet's list drops this node first.
+func (s *cpListenerSupervisor) exitTerminal(reason string) {
+	globalConfigStore.releaseCPAddressSource()
+	noteCPGRPCSupervisorDown(reason)
+}
+
 // run is the bind/serve/rebind loop.
 //
 // THE STATE MACHINE. Stages: bind → adopt → claim → publish → onActivated →
@@ -423,14 +436,17 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 //	Stop during a backoff sleep  | nothing held                               | stopped
 //	Stop wins the adopt race     | server + listener                          | stopped
 //	Stop / shutdown at the claim | server + listener + handle                 | stopped
-//	role_conflict                | server + listener + handle (role is not ours) | TERMINAL + alert (bypasses latch)
+//	role_conflict                | server + listener + handle (role is not ours) + address ownership | TERMINAL + alert (bypasses latch)
 //	shutdown after the claim     | server + listener + handle + role rollback, no publish | stopped
 //	address publish rejected     | server + listener + handle + role rollback | recoverable failure, backoff
-//	panic after the claim        | server + listener + handle + role restored | TERMINAL + alert (bypasses latch)
-//	panic in onActivated         | as above + address list republished        | TERMINAL + alert (bypasses latch)
+//	panic after the claim        | server + listener + handle + role restored + address ownership | TERMINAL + alert (bypasses latch)
+//	panic in onActivated         | as above + address list republished first  | TERMINAL + alert (bypasses latch)
 //	Stop while serving           | handle (Stop owns the graceful drain)      | stopped
 //	serve ends on its own        | server RETIRED (DP transports) + handle    | recoverable failure, backoff
-//	panic after a serve ended    | role restored + address list republished   | TERMINAL + alert (bypasses latch)
+//	panic after a serve ended    | role restored + list republished + address ownership | TERMINAL + alert (bypasses latch)
+//
+// Address ownership: every TERMINAL exit releases it (exitTerminal); every
+// recoverable and stopped exit keeps it (a retry, or shutdown, follows).
 //
 // Two more rows are the ENTRY's (activateControlPlane), not the loop's, and
 // the same table test drives them:
@@ -458,8 +474,8 @@ func (s *cpListenerSupervisor) run() {
 			// the terminal state: a panic between adopt and Serve otherwise
 			// left the server, the bound socket and the CP role claimed with
 			// nothing serving (Codex review of #1556).
-			s.abandonAfterPanic()
-			noteCPGRPCSupervisorDown("bind loop panicked")
+			s.abandonAfterPanic() // republishes the list without this node FIRST
+			s.exitTerminal("bind loop panicked")
 		}
 	}()
 
