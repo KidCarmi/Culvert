@@ -396,6 +396,16 @@ complete — not a weakening of the wall.
 - `admission_owner_reassign_wall_test.go` — new, test-only (round 3): the
   package handle itself is walled against production reassignment. Kept in its
   own file so it merges cleanly alongside concurrent edits to the other walls.
+  **Merge disposition:** PR #1635 carries
+  `TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles`, a strict
+  superset — it scans package `main` for assignments to `ipf` *and* `rl`, where
+  this one covers `rl` only. The wall is kept here rather than deferred to
+  #1635 because an already-reproduced gap should not depend on another open PR
+  merging; if #1635 is reworked or dropped, the hole stays named. **Whichever
+  of #1584 / #1635 merges second should delete this file**, since #1635's wall
+  covers everything it does. One redundant test is the cheaper failure mode
+  than a security property with an external dependency, but it is not meant to
+  be permanent.
 - `internal/admission/zero_value_doc_test.go` — new, test-only (round 4): binds
   §4's zero-value table to the engine, so this document cannot drift from the
   behaviour it reports.
