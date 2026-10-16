@@ -255,7 +255,12 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_audit_cluster_push_drops_total Audit entries discarded from the Data Plane→Control Plane push queue at its cap (Control Plane unreachable). Non-zero means the CENTRALIZED audit trail is incomplete; the local JSONL file on this node is unaffected\n")
 	fmt.Fprintf(w, "# TYPE culvert_audit_cluster_push_drops_total counter\nculvert_audit_cluster_push_drops_total %d\n", auditPendingDrops())
 	fmt.Fprintf(w, "\n# HELP culvert_admin_roster_role_clamped_total Admin roster records whose persisted role this build does not enroll, clamped to viewer at load (SEC-RBAC-ROLE-1). Non-zero means ui_users.json names a role this binary cannot grant — a restore from a newer build, or a hand-edited/corrupt roster\n")
-	fmt.Fprintf(w, "# TYPE culvert_admin_roster_role_clamped_total counter\nculvert_admin_roster_role_clamped_total %d\n", RosterRoleClampCount())
+	rosterRoleClamps := RosterRoleClampCount()
+	fmt.Fprintf(w, "# TYPE culvert_admin_roster_role_clamped_total counter\nculvert_admin_roster_role_clamped_total %d\n", rosterRoleClamps)
+	// Pre-T-64 name, shipped since v1.0.252: kept as a deprecated alias for one
+	// release window so existing dashboards and alert rules keep the series.
+	fmt.Fprintf(w, "\n# HELP culvert_ui_roster_role_clamped_total Deprecated alias of culvert_admin_roster_role_clamped_total (T-64); same value, removed after one release window\n")
+	fmt.Fprintf(w, "# TYPE culvert_ui_roster_role_clamped_total counter\nculvert_ui_roster_role_clamped_total %d\n", rosterRoleClamps)
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_dropped_total History-store entries dropped because the async write queue was full\n")
 	fmt.Fprintf(w, "# TYPE culvert_logstore_dropped_total counter\nculvert_logstore_dropped_total %d\n", logstore.Dropped())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_pruned_total History-store entries deleted by the size-retention janitor\n")

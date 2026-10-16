@@ -1131,8 +1131,11 @@ func addRequestLogHealth(resp map[string]any) {
 	// like the two above: it is an authorization-surface fact (someone's
 	// effective role is NOT what the file says) and the remedy is to re-assign
 	// the role, not to fix storage.
+	// uiRosterRoleClamped is the pre-T-64 name (shipped since v1.0.252),
+	// kept as a deprecated alias for one release window.
 	if n := cfg.ActiveRosterRoleClamps(); n > 0 {
 		resp["adminRosterRoleClamped"] = n
+		resp["uiRosterRoleClamped"] = n
 	}
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.

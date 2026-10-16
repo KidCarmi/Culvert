@@ -126,6 +126,7 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 	// can raise a persistent banner instead of the operator having to run the
 	// diagnose verb (the failure this feature exists to make un-silent).
 	publishRejected, publishRejectedAt := globalConfigStore.LastPublishError()
+	rosterRoleClamps := cfg.ActiveRosterRoleClamps()
 	jsonOK(w, map[string]any{
 		"total":       total,
 		"allowed":     allowed,
@@ -149,7 +150,11 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// SEC-RBAC-ROLE-1. Non-zero means ui_users.json carries a role this
 		// build does not enroll; the account was clamped to viewer at load, so
 		// its effective authority is deliberately lower than the file states.
-		"adminRosterRoleClamped": cfg.ActiveRosterRoleClamps(),
+		// uiRosterRoleClamped is the pre-T-64 name, shipped since v1.0.252;
+		// it stays as a deprecated alias for one release window so existing
+		// dashboards and parsers keep the signal.
+		"adminRosterRoleClamped": rosterRoleClamps,
+		"uiRosterRoleClamped":    rosterRoleClamps,
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),
