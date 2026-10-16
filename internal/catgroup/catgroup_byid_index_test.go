@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // Gates for the byID index (stable ID → current lowercase name key) that makes
@@ -401,70 +400,15 @@ func TestByIDIndex_WallNoLinearIDScanSurvives(t *testing.T) {
 }
 
 // ── Cost-shape gates ─────────────────────────────────────────────────────────
-
-// measureBest runs fn iters times and returns the best of three samples: a
-// scheduler hiccup inflates a sample, never deflates it, so best-of-three is
-// the noise-robust statistic for a ratio gate on a shared runner.
-func measureBest(iters int, fn func()) time.Duration {
-	one := func() time.Duration {
-		for i := 0; i < iters/10; i++ { // warm up; neither arm pays first-touch alone
-			fn()
-		}
-		start := time.Now()
-		for i := 0; i < iters; i++ {
-			fn()
-		}
-		return time.Since(start)
-	}
-	d := one()
-	for i := 0; i < 2; i++ {
-		if e := one(); e < d {
-			d = e
-		}
-	}
-	return d
-}
-
-// TestBenchGate_MatchesCategoryByIDIsFlatInGroupCount is a RATIO gate, so it is
-// machine-independent: it compares the resolve against ITSELF at two store
-// sizes rather than against an absolute nanosecond budget (the standing rule —
-// an absolute bound gets re-baselined per machine and then muted).
 //
-// The pre-index walk cost ~4.6 ns per group, so 1000 groups cost ~45x what 4
-// cost (measured 117.6 ns → 5298 ns on a 4-core Xeon @2.10GHz). The index makes
-// the cost independent of store size; measured ratio after the change is ~1.0.
-// The bound is 4x, which keeps a wide margin under -race on a loaded runner
-// while still failing hard if the walk returns.
-func TestBenchGate_MatchesCategoryByIDIsFlatInGroupCount(t *testing.T) {
-	if testing.Short() {
-		t.Skip("cost-shape gate skipped in -short")
-	}
-	const (
-		small = 4
-		large = 1000
-		bound = 4.0
-	)
-	measure := func(n int) time.Duration {
-		s, ids := seedGroups(t, n)
-		id := ids[0] // first-seeded: the walk's position is map-order random anyway
-		return measureBest(20000, func() {
-			if m, ok := s.MatchesCategoryByID(id, "Social Media"); !ok || !m {
-				t.Fatal("expected a resolved match")
-			}
-		})
-	}
-	dSmall, dLarge := measure(small), measure(large)
-	ratio := float64(dLarge) / float64(dSmall)
-	t.Logf("groups=%d: %v, groups=%d: %v, ratio=%.2fx (flat ~1x, linear ~45x, bound %.1fx)",
-		small, dSmall, large, dLarge, ratio, bound)
-	if ratio > bound {
-		t.Errorf("MatchesCategoryByID cost scales with the group count (%.2fx for %dx the "+
-			"groups, bound %.1fx): the linear g.ID walk has returned",
-			ratio, large/small, bound)
-	}
-}
+// The WALL-CLOCK ratio gate for the resolve lives in
+// catgroup_byid_benchgate_test.go, behind the `benchgate` build tag, because a
+// timing comparison is not a property an ordinary, race or determinism run can
+// decide: measured under load it failed 2 of 8 runs against an unchanged
+// implementation. What stays here is deterministic.
 
-// TestBenchGate_BulkInstallIsLinearInGroupCount guards what the fix COSTS.
+// TestByIDIndex_BulkInstallReindexesOnce guards what the fix COSTS, by counting
+// mutations instead of timing them.
 //
 // Every content mutation rebuilds the index wholesale, so a caller that loops a
 // single-group mutator pays O(N^2) to install N groups — the trap recorded
@@ -475,53 +419,70 @@ func TestBenchGate_MatchesCategoryByIDIsFlatInGroupCount(t *testing.T) {
 // Culvert does not reach it today: the only Add caller creates ONE group per
 // admin HTTP request (ui_policy.go), and every bulk path — config import in
 // both modes, config-version rollback, and the CP→DP snapshot apply — goes
-// through ReplaceAll, which reindexes exactly once. This gate pins that
-// property on the bulk path so a future bulk caller cannot quietly reintroduce
-// the quadratic by looping Add instead.
+// through ReplaceAll, which reindexes exactly once.
 //
-// Linear is ~4x for 4x the groups; quadratic is ~16x. Bound 8x.
-func TestBenchGate_BulkInstallIsLinearInGroupCount(t *testing.T) {
-	if testing.Short() {
-		t.Skip("cost-shape gate skipped in -short")
-	}
-	const (
-		small = 250
-		large = 1000
-		bound = 8.0
-	)
-	build := func(n int) []Group {
-		out := make([]Group, 0, n)
+// THE REVISION COUNTER IS THE EXACT INVARIANT, not a proxy for it. reindexing
+// happens only in bumpRevLocked, which also advances rev, so "ReplaceAll
+// reindexed once" and "ReplaceAll advanced rev by one" are the same statement —
+// and it holds for ANY group count, on any hardware, under any load. This
+// replaced a wall-clock ratio (ReplaceAll at 250 vs 1000 groups, bound 8x) that
+// was measuring the same property through a noisy instrument: it read 3.5x–4.0x
+// idle but 11.22x and 15.75x under CPU contention, i.e. it failed a correct
+// tree a quarter of the time.
+func TestByIDIndex_BulkInstallReindexesOnce(t *testing.T) {
+	for _, n := range []int{0, 1, 250, 1000} {
+		s := New()
+		groups := make([]Group, 0, n)
 		for i := 0; i < n; i++ {
-			out = append(out, Group{
+			groups = append(groups, Group{
 				ID:         fmt.Sprintf("bulk%08d", i),
 				Name:       fmt.Sprintf("group-%d", i),
 				Categories: []string{fmt.Sprintf("Category %d", i), "Social Media"},
 			})
 		}
-		return out
-	}
-	measure := func(n int) time.Duration {
-		s := New()
-		groups := build(n)
-		return measureBest(20, func() { s.ReplaceAll(groups) })
-	}
-	dSmall, dLarge := measure(small), measure(large)
-	ratio := float64(dLarge) / float64(dSmall)
-	t.Logf("ReplaceAll groups=%d: %v, groups=%d: %v, ratio=%.2fx (linear ~4x, quadratic ~16x, bound %.1fx)",
-		small, dSmall, large, dLarge, ratio, bound)
-	if ratio > bound {
-		t.Errorf("ReplaceAll cost grows faster than linearly (%.2fx for %dx the groups, "+
-			"bound %.1fx): the bulk path is reindexing per group instead of once",
-			ratio, large/small, bound)
+		before := s.Revision()
+		s.ReplaceAll(groups)
+		if got := s.Revision() - before; got != 1 {
+			t.Errorf("ReplaceAll(%d groups) advanced rev by %d, want exactly 1: the bulk "+
+				"path is reindexing per group instead of once (O(N^2) install)", n, got)
+		}
+		assertIndexInLockstep(t, s, fmt.Sprintf("ReplaceAll(%d)", n))
 	}
 }
 
-// CONTROL for both gates above: the cheapest way to make a resolve flat and a
-// bulk install linear is to stop doing the work. A store installed in bulk must
-// still resolve every ID it was handed and still answer membership correctly —
-// a silently unresolved rule falls back to the mutable denormalized name, or
+// TestByIDIndex_LoopedAddIsTheShapeTheBulkGateRejects is the NEGATIVE half of
+// the gate above: it pins that per-call mutators really do reindex per call, so
+// "ReplaceAll advances rev once" is a meaningful distinction rather than a
+// statement that would hold however the store were written.
+//
+// This is not a defect — Add is correctly per-request — it is the measurement
+// that gives the bulk assertion its teeth.
+func TestByIDIndex_LoopedAddIsTheShapeTheBulkGateRejects(t *testing.T) {
+	s := New()
+	const n = 25
+	before := s.Revision()
+	for i := 0; i < n; i++ {
+		if _, err := s.Add(fmt.Sprintf("looped-%d", i), []string{"Social Media"}); err != nil {
+			t.Fatalf("Add %d: %v", i, err)
+		}
+	}
+	if got := s.Revision() - before; got != n {
+		t.Fatalf("looped Add advanced rev by %d, want %d — the bulk gate's contrast is "+
+			"vacuous if a per-call mutator does not reindex per call", got, n)
+	}
+}
+
+// CONTROL for the bulk-install gates above: the cheapest way to make a bulk
+// install cheap is to stop doing the work. A store installed in bulk must still
+// resolve every ID it was handed and still answer membership correctly — a
+// silently unresolved rule falls back to the mutable denormalized name, or
 // matches nothing, which is fail-open for a Deny rule.
-func TestBenchGate_ControlBulkInstalledGroupsStillResolve(t *testing.T) {
+//
+// Deliberately NOT named TestBenchGate_*: it carries no timing and belongs in
+// the ordinary suite. Claiming the benchgate prefix without the build tag is
+// the exact mislabeling that let the wall-clock gates run in every race and
+// determinism suite (see catgroup_byid_benchgate_test.go).
+func TestByIDIndex_ControlBulkInstalledGroupsStillResolve(t *testing.T) {
 	s := New()
 	const n = 250
 	groups := make([]Group, 0, n)
