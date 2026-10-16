@@ -246,16 +246,36 @@ const (
 	FaultMarkerTempSuffix = ".faultedtmp."
 )
 
+// markerFS is the filesystem surface the fault marker's durability depends on,
+// injected so that a failed unlink or a failed directory fsync can be tested.
+type markerFS struct {
+	remove  func(string) error
+	syncDir func(string) error
+}
+
+// osMarkerFS is the real filesystem. It is an immutable default, not a test
+// hook: tests pass their own markerFS to the internal entry points.
+var osMarkerFS = markerFS{remove: os.Remove, syncDir: syncDir}
+
 // RecordFault durably records that the store at dir took a contained memory
 // fault, so the next Open quarantines it instead of handing badger the same
 // damaged tables. The write is atomic (temp file, fsync, rename, directory
 // fsync), so a crash mid-write leaves either no marker or a complete one.
 //
+// The directory fsync is part of the result. Without it the rename may not
+// survive a power loss, and the next start would reopen the damaged store
+// instead of quarantining it, so a failed fsync is reported, not swallowed.
+//
 // Only a store whose contents are rebuildable should call this: Open treats the
 // marker as sufficient grounds to move the directory aside (still gated by the
-// store lock, and never a deletion). Best-effort by contract — the error is for
-// the caller's log line; a volume damaged enough to fault may refuse the write.
+// store lock, and never a deletion). The error is for the caller's log line: a
+// volume damaged enough to fault may refuse the write, and nothing more can be
+// done about it from inside the faulting process.
 func RecordFault(dir, cause string) error {
+	return recordFault(dir, cause, osMarkerFS)
+}
+
+func recordFault(dir, cause string, fsys markerFS) error {
 	base := trimSep(dir)
 	if base == "" {
 		return errors.New("storeguard: empty store path")
@@ -277,10 +297,15 @@ func RecordFault(dir, cause string) error {
 		werr = os.Rename(tmpName, base+FaultMarkerSuffix)
 	}
 	if werr != nil {
-		_ = os.Remove(tmpName)
+		_ = fsys.remove(tmpName)
 		return fmt.Errorf("write fault marker: %w", werr)
 	}
-	syncDir(parent)
+	// The marker is in place but may not be durable. It stays: a marker that
+	// survives is still the right signal, and one that does not is no worse
+	// than not writing it.
+	if err := fsys.syncDir(parent); err != nil {
+		return fmt.Errorf("fault marker written but its directory could not be synced, so it may not survive a power loss: %w", err)
+	}
 	return nil
 }
 
@@ -301,24 +326,27 @@ func faultRecorded(dir string) bool {
 // not a signal). Called only after the damaged directory is gone, so no live
 // writer can still be producing either file.
 //
-// A failure to remove the MARKER is returned, not swallowed. If it were
-// swallowed, a healthy replacement store would open with the marker still
-// present, the next start would quarantine that healthy replacement, and the
-// one-copy prune would then delete the original evidence. remove is injected so
-// that failure can be tested.
-func clearFault(dir string, remove func(string) error) error {
+// A failure to remove the MARKER is returned, not swallowed, and so is a
+// failure to sync the directory afterwards. Without the sync the unlink may not
+// survive a power loss, which is the same outcome as an unlink that failed. If
+// either were swallowed, a healthy replacement store would open with the marker
+// still (or again) present. The next start would quarantine that healthy
+// replacement, and the one-copy prune would then delete the original evidence.
+func clearFault(dir string, fsys markerFS) error {
 	base := trimSep(dir)
 	if base == "" {
 		return nil
 	}
-	if err := remove(base + FaultMarkerSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := fsys.remove(base + FaultMarkerSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("clear fault marker: %w", err)
 	}
 	for _, tmp := range siblings(base, FaultMarkerTempSuffix) {
 		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().IsRegular() {
-			_ = remove(tmp)
+			_ = fsys.remove(tmp)
 		}
 	}
-	syncDir(filepath.Dir(base))
+	if err := fsys.syncDir(filepath.Dir(base)); err != nil {
+		return fmt.Errorf("clear fault marker: sync directory: %w", err)
+	}
 	return nil
 }

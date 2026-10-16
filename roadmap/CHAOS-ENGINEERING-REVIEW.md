@@ -8717,6 +8717,32 @@ a serving store reports `runtime fault containment: unavailable on <GOOS>`
 tag) pin the re-panic and the reported status. Everything else in §41 that
 describes containment applies to Linux builds.
 
+### Codex round 4 — a failed rebuild behind an alias, and undurable markers
+
+**Dangling alias after a failed rebuild.** If a recovery quarantined the
+target and then could not create its replacement (ENOSPC), the alias was left
+dangling. `EvalSymlinks` then failed on every later start, so badger was handed
+the alias itself, and `MkdirAll` refused the existing symlink (`file exists`).
+Layer 2 never came back, even after space was freed. That exact error was
+reproduced. `resolveStoreDir` now follows a dangling alias with `os.Readlink`
+(relative links made absolute against the link's directory, at most 8 hops) to
+a missing target whose parent exists, and badger recreates the target there.
+The alias is never replaced. A target whose parent is also missing, such as an
+unmounted volume, is refused, so the store cannot be rebuilt on the wrong
+filesystem. Gated by
+`TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart` (injected
+ENOSPC opener) and `TestDanglingAliasTarget`.
+
+**Directory fsync.** `syncDir` discarded its error, so a failed parent fsync
+after the marker rename let `RecordFault` return nil while the marker could
+still be lost on power loss. The same applied to the unlink in `clearFault`.
+Both now return the fsync failure. For the clear, that error flows into the
+round-2 stop-recovery path, so no replacement is created behind an unlink that
+may not be durable. The attempt-marker fsync in `BeginAttempt` stays
+best-effort by design. Gated by `TestRecordFault_DirectorySyncFailureIsReported`
+and `TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery` (injected
+`markerFS`).
+
 ---
 
 ## 42. Adjacent domains swept for §41, recorded and not fixed

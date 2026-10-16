@@ -209,16 +209,16 @@ type Recovery struct {
 // the answer has been the same: run without it, because refusing to run an
 // in-line gateway over a damaged local store is a self-inflicted outage.
 func Open[T any](dir string, policy Policy, open func(string) (T, error)) (T, Recovery, error) {
-	return openWith(dir, policy, open, os.Remove)
+	return openWith(dir, policy, open, osMarkerFS)
 }
 
-// openWith is Open with the marker remover injected, so a recovery whose
-// fault marker cannot be cleared can be exercised.
-func openWith[T any](dir string, policy Policy, open func(string) (T, error), remove func(string) error) (T, Recovery, error) {
+// openWith is Open with the marker filesystem injected, so a recovery whose
+// fault marker cannot be durably cleared can be exercised.
+func openWith[T any](dir string, policy Policy, open func(string) (T, error), fsys markerFS) (T, Recovery, error) {
 	var zero T
 	var rec Recovery
 
-	if err := recoverBeforeOpen(dir, &rec, remove); err != nil {
+	if err := recoverBeforeOpen(dir, &rec, fsys); err != nil {
 		// The recovery could not be completed safely. Opening a replacement
 		// now would leave a marker that quarantines it on the next start, so
 		// the store stays unopened and the caller degrades (Layer 1 only for
@@ -269,7 +269,7 @@ func openWith[T any](dir string, policy Policy, open func(string) (T, error), re
 // A non-nil error means the fault marker could not be cleared after the
 // condition was resolved; the caller must NOT open a replacement (see
 // clearFault).
-func recoverBeforeOpen(dir string, rec *Recovery, remove func(string) error) error {
+func recoverBeforeOpen(dir string, rec *Recovery, fsys markerFS) error {
 	poison := AbandonedMarkers(dir)
 	faulted := faultRecorded(dir)
 	switch {
@@ -282,7 +282,7 @@ func recoverBeforeOpen(dir string, rec *Recovery, remove func(string) error) err
 			// previous start quarantined it and then failed to clear the
 			// marker), so the condition the marker records is resolved.
 			// Keeping the marker would report a phantom recovery on every start.
-			if cerr := clearFault(dir, remove); cerr != nil {
+			if cerr := clearFault(dir, fsys); cerr != nil {
 				rec.Trigger = TriggerRuntimeFault
 				rec.Cause = "a previous run recorded a memory fault on this store"
 				return fmt.Errorf("the faulted store is gone but its fault marker could not be cleared, refusing to create a replacement that the next start would quarantine: %w", cerr)
@@ -306,7 +306,7 @@ func recoverBeforeOpen(dir string, rec *Recovery, remove func(string) error) err
 		_ = os.Remove(m)
 	}
 	if faulted {
-		if err := clearFault(dir, remove); err != nil {
+		if err := clearFault(dir, fsys); err != nil {
 			return fmt.Errorf("quarantined the faulted store to %s but could not clear its fault marker, refusing to create a replacement that the next start would quarantine: %w", rec.QuarantinePath, err)
 		}
 	}
@@ -471,7 +471,7 @@ func BeginAttempt(dir string) *OpenAttempt {
 		_ = os.Remove(tmp)
 		return &OpenAttempt{}
 	}
-	syncDir(parent)
+	_ = syncDir(parent) // best-effort: the attempt marker is a safety net, see above
 	return &OpenAttempt{Path: final, Lock: &HeldLock{f: f}}
 }
 
@@ -578,13 +578,17 @@ func siblings(base, suffix string) []string {
 
 func trimSep(p string) string { return strings.TrimSuffix(p, string(os.PathSeparator)) }
 
-func syncDir(dir string) {
+// syncDir fsyncs a directory so a rename or unlink inside it is durable.
+func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		return
+		return err
 	}
-	_ = d.Sync()
-	_ = d.Close()
+	serr := d.Sync()
+	if cerr := d.Close(); serr == nil {
+		serr = cerr
+	}
+	return serr
 }
 
 // ── quarantine ───────────────────────────────────────────────────────────────

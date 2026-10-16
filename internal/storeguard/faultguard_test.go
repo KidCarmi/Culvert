@@ -368,7 +368,7 @@ func TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery(t *testing.T) {
 		t.Fatalf("RecordFault: %v", err)
 	}
 	o := &opener{}
-	st, rec, err := openWith(dir, Policy{}, o.open, failMarkerRemoval)
+	st, rec, err := openWith(dir, Policy{}, o.open, markerFS{remove: failMarkerRemoval, syncDir: syncDir})
 	if err == nil || st != nil {
 		t.Fatalf("openWith = (%v, %+v, %v), want an error and no store", st, rec, err)
 	}
@@ -409,8 +409,52 @@ func TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery(t *tes
 		t.Fatalf("RecordFault: %v", err)
 	}
 	o := &opener{}
-	st, _, err := openWith(dir, Policy{}, o.open, failMarkerRemoval)
+	st, _, err := openWith(dir, Policy{}, o.open, markerFS{remove: failMarkerRemoval, syncDir: syncDir})
 	if err == nil || st != nil || o.calls != 0 {
 		t.Fatalf("openWith = (%v, %v) after %d open(s), want an error and no open", st, err, o.calls)
+	}
+}
+
+// failingSync is a markerFS whose directory fsync fails, as on a volume
+// returning EIO, while unlink still works.
+var failingSync = markerFS{
+	remove:  os.Remove,
+	syncDir: func(string) error { return syscall.EIO },
+}
+
+// A marker whose directory cannot be synced may not survive a power loss, so
+// RecordFault must not report it as recorded.
+func TestRecordFault_DirectorySyncFailureIsReported(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	err := recordFault(dir, "test fault", failingSync)
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("recordFault = %v, want the directory sync failure", err)
+	}
+	// The marker itself stays: if it does survive it is still the right signal.
+	if !faultRecorded(dir) {
+		t.Error("a written marker was removed because its directory sync failed")
+	}
+}
+
+// An unlink that cannot be made durable is the same as one that failed: the
+// marker may reappear after a power loss and quarantine the healthy
+// replacement. The open must stop before creating one.
+func TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	if err := RecordFault(dir, "test fault"); err != nil {
+		t.Fatalf("RecordFault: %v", err)
+	}
+	o := &opener{}
+	st, rec, err := openWith(dir, Policy{}, o.open, failingSync)
+	if !errors.Is(err, syscall.EIO) || st != nil {
+		t.Fatalf("openWith = (%v, %+v, %v), want the sync failure and no store", st, rec, err)
+	}
+	if o.calls != 0 {
+		t.Errorf("opener ran %d time(s) after an undurable marker clear", o.calls)
+	}
+	if !rec.Quarantined {
+		t.Errorf("recovery = %+v, want the quarantine reported", rec)
 	}
 }

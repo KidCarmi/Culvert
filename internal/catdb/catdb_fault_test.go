@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/storeguard"
@@ -310,5 +311,113 @@ func TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget(t *testing.T
 	}
 	if got := QuarantinedCopies(alias); len(got) != 1 || got[0] != rec.QuarantinePath {
 		t.Fatalf("QuarantinedCopies(alias) = %v, want [%s]", got, rec.QuarantinePath)
+	}
+}
+
+// TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart pins the
+// retry after a recovery that quarantined the target and then could not create
+// its replacement (ENOSPC). That leaves the alias dangling. Before dangling
+// aliases were followed, every later start handed badger the alias itself,
+// MkdirAll refused the existing symlink, and Layer 2 never came back even once
+// space was freed.
+func TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart(t *testing.T) {
+	volume := t.TempDir()
+	target := filepath.Join(volume, "catfeeddb")
+	alias := filepath.Join(t.TempDir(), "catfeeddb")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	seed, err := Open(alias)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := seed.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
+		t.Fatalf("bulkwrite: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// The previous run contained a fault on this store and recorded it.
+	if err := storeguard.RecordFault(resolveStoreDir(alias), "test fault"); err != nil {
+		t.Fatalf("RecordFault: %v", err)
+	}
+
+	enospc := func(string) (*CommunityDB, error) {
+		return nil, &os.PathError{Op: "mkdir", Path: target, Err: syscall.ENOSPC}
+	}
+	if _, rec, err := openResilientWith(alias, enospc); err == nil || !rec.Quarantined {
+		t.Fatalf("injected rebuild failure: rec=%+v err=%v, want a quarantine then an error", rec, err)
+	}
+	if _, err := os.Stat(alias); err == nil {
+		t.Fatal("test precondition: the alias should now be dangling")
+	}
+
+	// Space is back. The next start must rebuild under the ORIGINAL target.
+	next, rec, err := OpenResilient(alias)
+	if err != nil {
+		t.Fatalf("restart after the failed rebuild: rec=%+v err=%v", rec, err)
+	}
+	t.Cleanup(func() { _ = next.Close() })
+	if rec.Quarantined {
+		t.Fatalf("the restart quarantined again: %+v", rec)
+	}
+	fi, err := os.Lstat(alias)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the alias was replaced: fi=%v err=%v", fi, err)
+	}
+	if got, err := os.Readlink(alias); err != nil || got != target {
+		t.Fatalf("alias now points at %q (err %v), want %q", got, err, target)
+	}
+	if fi, err := os.Lstat(target); err != nil || !fi.IsDir() {
+		t.Fatalf("store not rebuilt at the original target: fi=%v err=%v", fi, err)
+	}
+	if err := next.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
+		t.Fatalf("rebuilt store not writable: %v", err)
+	}
+	if cat, ok := next.Lookup("evil.example"); !ok || cat != "Malware" {
+		t.Fatalf("rebuilt store not serving: cat=%q ok=%v", cat, ok)
+	}
+}
+
+// danglingAliasTarget must refuse anything that is not a dangling alias onto
+// an existing parent: following a link into an unmounted volume would put the
+// store on the wrong filesystem.
+func TestDanglingAliasTarget(t *testing.T) {
+	root := t.TempDir()
+	plain := filepath.Join(root, "plain")
+	if err := os.Mkdir(plain, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	relLink := filepath.Join(root, "rel")
+	if err := os.Symlink("gone", relLink); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(root, "orphan")
+	if err := os.Symlink(filepath.Join(root, "unmounted", "catfeeddb"), orphan); err != nil {
+		t.Fatal(err)
+	}
+	loopA, loopB := filepath.Join(root, "a"), filepath.Join(root, "b")
+	if err := os.Symlink(loopB, loopA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(loopA, loopB); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, ok := danglingAliasTarget(relLink); !ok || got != filepath.Join(root, "gone") {
+		t.Errorf("relative dangling link = (%q, %v), want (%q, true)", got, ok, filepath.Join(root, "gone"))
+	}
+	for name, p := range map[string]string{
+		"plain directory": plain,
+		"missing path":    filepath.Join(root, "missing"),
+		"orphan parent":   orphan,
+		"symlink loop":    loopA,
+	} {
+		if got, ok := danglingAliasTarget(p); ok {
+			t.Errorf("%s: danglingAliasTarget(%q) = %q, want refusal", name, p, got)
+		}
 	}
 }
