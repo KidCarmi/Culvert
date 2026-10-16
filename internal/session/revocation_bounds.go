@@ -69,6 +69,7 @@ import (
 	"crypto/hmac"
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -243,6 +244,7 @@ func (r *RevocationList) RevokeVerified(cookieValue string) (changed bool, reaso
 		return false, RevokeAlreadyKnown
 	}
 	r.tokens[b64] = exp
+	r.verified[b64] = struct{}{}
 	r.sweepIfDueLocked(time.Now())
 	return true, RevokeAccepted
 }
@@ -263,6 +265,7 @@ func (r *RevocationList) sweepLocked(now time.Time) {
 	for tok, exp := range r.tokens {
 		if now.After(exp) {
 			delete(r.tokens, tok)
+			delete(r.verified, tok)
 		}
 	}
 	for user, exp := range r.users {
@@ -273,16 +276,11 @@ func (r *RevocationList) sweepLocked(now time.Time) {
 }
 
 // admitUntrustedLocked decides whether an entry from an untrusted origin
-// (cluster gossip, the persistence file) may be recorded. Caller holds r.mu
-// and must have swept first, so the cap is measured against LIVE entries.
-//
-// persisted marks the on-disk revocations file. There the key-size bound is
-// waived for an entry that is session-shaped (see persistedSessionShaped):
-// RevokeVerified admits a MAC-verified session of ANY size and SaveRevocations
-// writes it, so bounding it on reload silently resurrected a revoked large
-// cookie after a restart (Codex P1, PR #1591). Gossip keeps the bound.
-func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time, persisted bool) bool {
-	if len(e.Token) > MaxRevocationTokenLen && !(persisted && persistedSessionShaped(e)) {
+// (cluster gossip, or a persisted entry without a valid provenance MAC) may be
+// recorded. Caller holds r.mu and must have swept first, so the cap is
+// measured against LIVE entries.
+func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time) bool {
+	if len(e.Token) > MaxRevocationTokenLen {
 		noteRefusal(RevokeOversize)
 		return false
 	}
@@ -307,25 +305,29 @@ func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time, 
 	return true
 }
 
-// persistedSessionShaped reports whether a persisted entry's key decodes as a
-// Session payload whose own expiry is the one recorded beside it — the shape
-// RevokeVerified writes for a MAC-verified session. It is the waiver for the
-// key-size bound on reload only. It is not proof of provenance (the file
-// carries no MAC), but no NEW unverified entry can reach the file any more:
-// the local path verifies the MAC and the gossip path keeps the size bound.
-// What it can still admit is an oversized, session-shaped residue written by a
-// pre-CHAOS-73 build, and the MaxSessionLifetime expiry bound above sweeps
-// that within one session lifetime.
-func persistedSessionShaped(e RevocationEntry) bool {
-	payload, err := base64.RawURLEncoding.DecodeString(e.Token)
-	if err != nil {
+// provenanceDomain separates the provenance MAC from the cookie MAC. A cookie
+// is b64 + "." + mac(b64); the provenance input always starts with this
+// prefix, so a provenance value is never a usable cookie signature and the
+// revocations file never holds a working cookie.
+const provenanceDomain = "culvert-revocation-provenance-v1\x00"
+
+// provenanceMAC authenticates a persisted revocation as one THIS appliance
+// MAC-verified (RevokeVerified), under the current session signing key. With
+// a configured shared key (CULVERT_SESSION_SECRET / session_secret) it
+// verifies across restarts; with a random per-start key it does not — and
+// then the old cookies cannot verify either, so treating those entries as
+// untrusted on reload loses nothing.
+func provenanceMAC(token string, expiry int64) string {
+	return mac(provenanceDomain + strconv.FormatInt(expiry, 10) + "\x00" + token)
+}
+
+// validProvenance reports whether a persisted entry carries a valid
+// provenance MAC for exactly its token and expiry. Constant-time compare.
+func validProvenance(e RevocationEntry) bool {
+	if e.Prov == "" {
 		return false
 	}
-	var s Session
-	if err := json.Unmarshal(payload, &s); err != nil {
-		return false
-	}
-	return s.Exp == e.Expiry
+	return hmac.Equal([]byte(e.Prov), []byte(provenanceMAC(e.Token, e.Expiry)))
 }
 
 // Tracked returns the number of revocation entries currently held.

@@ -119,14 +119,22 @@ type RevocationList struct {
 	// that just logged out — so an un-clustered node had no evictor at all.
 	// See revocation_bounds.go.
 	sinceSweep int
+
+	// verified holds the tokens this process admitted through RevokeVerified
+	// (or reloaded from the file with a valid provenance MAC). Only these are
+	// written to the revocations file with a provenance MAC, and only entries
+	// carrying a valid one are reloaded past the untrusted-origin bounds. See
+	// provenanceMAC in revocation_bounds.go.
+	verified map[string]struct{}
 }
 
 // NewRevocationList returns an empty list (used by tests to swap the
 // package singleton, mirroring the bl pointer-swap idiom).
 func NewRevocationList() *RevocationList {
 	return &RevocationList{
-		tokens: map[string]time.Time{},
-		users:  map[string]time.Time{},
+		tokens:   map[string]time.Time{},
+		users:    map[string]time.Time{},
+		verified: map[string]struct{}{},
 	}
 }
 
@@ -165,6 +173,7 @@ func (r *RevocationList) IsRevoked(token string) bool {
 	}
 	if time.Now().After(exp) {
 		delete(r.tokens, token) // lazy eviction
+		delete(r.verified, token)
 		return false
 	}
 	return true
@@ -194,10 +203,16 @@ func (r *RevocationList) IsUserRevoked(username string) bool {
 	return true
 }
 
-// RevocationEntry is a single revoked session token for gRPC gossip.
+// RevocationEntry is a single revoked session token for gRPC gossip and the
+// persistence file.
 type RevocationEntry struct {
 	Token  string `json:"token"`
 	Expiry int64  `json:"expiry"` // Unix timestamp
+	// Prov is the provenance MAC of a locally MAC-verified revocation. It is
+	// written to the PERSISTENCE FILE only (never by ExportRevocations, so the
+	// gossip wire is unchanged) and lets LoadRevocations tell this appliance's
+	// own verified entries from untrusted ones. See provenanceMAC.
+	Prov string `json:"prov,omitempty"`
 }
 
 // ExportRevocations returns all non-expired revocation entries for syncing.
@@ -211,6 +226,23 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	entries := make([]RevocationEntry, 0, len(r.tokens))
 	for tok, exp := range r.tokens {
 		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
+	}
+	return entries
+}
+
+// exportPersisted is ExportRevocations plus the provenance MAC on every
+// locally verified entry; it is what SaveRevocations writes.
+func (r *RevocationList) exportPersisted() []RevocationEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweepLocked(time.Now())
+	entries := make([]RevocationEntry, 0, len(r.tokens))
+	for tok, exp := range r.tokens {
+		e := RevocationEntry{Token: tok, Expiry: exp.Unix()}
+		if _, ok := r.verified[tok]; ok {
+			e.Prov = provenanceMAC(tok, e.Expiry)
+		}
+		entries = append(entries, e)
 	}
 	return entries
 }
@@ -235,7 +267,23 @@ func (r *RevocationList) mergeUntrusted(entries []RevocationEntry, persisted boo
 	r.sweepLocked(now)
 	added := 0
 	for _, e := range entries {
-		if !r.admitUntrustedLocked(e, now, persisted) {
+		// A persisted entry carrying a valid provenance MAC is one this
+		// appliance verified itself (RevokeVerified) under the current signing
+		// key, so it reloads past the untrusted bounds: refusing it on size or
+		// capacity would resurrect a session an operator revoked (Codex P1/P2,
+		// CodeRabbit, PR #1591). Gossip never takes this branch.
+		if persisted && validProvenance(e) {
+			if !now.Before(time.Unix(e.Expiry, 0)) {
+				continue
+			}
+			if _, exists := r.tokens[e.Token]; !exists {
+				added++
+			}
+			r.tokens[e.Token] = time.Unix(e.Expiry, 0)
+			r.verified[e.Token] = struct{}{}
+			continue
+		}
+		if !r.admitUntrustedLocked(e, now) {
 			continue
 		}
 		r.tokens[e.Token] = time.Unix(e.Expiry, 0)
@@ -256,15 +304,17 @@ func (r *RevocationList) Count() int {
 // tests that touch shared revocation state.
 func (r *RevocationList) SwapForTest() (restore func()) {
 	r.mu.Lock()
-	prevTokens, prevUsers, prevSweep := r.tokens, r.users, r.sinceSweep
+	prevTokens, prevUsers, prevSweep, prevVerified := r.tokens, r.users, r.sinceSweep, r.verified
 	r.tokens = map[string]time.Time{}
 	r.users = map[string]time.Time{}
+	r.verified = map[string]struct{}{}
 	r.sinceSweep = 0
 	r.mu.Unlock()
 	return func() {
 		r.mu.Lock()
 		r.tokens = prevTokens
 		r.users = prevUsers
+		r.verified = prevVerified
 		r.sinceSweep = prevSweep
 		r.mu.Unlock()
 	}
@@ -297,7 +347,7 @@ func (r *RevocationList) SaveRevocations() error {
 	if path == "" {
 		return nil
 	}
-	entries := r.ExportRevocations()
+	entries := r.exportPersisted()
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return fmt.Errorf("marshal revocations: %w", err)
