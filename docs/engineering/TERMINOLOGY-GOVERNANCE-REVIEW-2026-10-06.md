@@ -26,7 +26,12 @@ One small production-worthy defect found and fixed; no rename of any stable iden
    `/api/auth/change-password` agree; `Backup Now` / `backup.trigger` / `backup.create` agree in
    meaning (`backup.create` is the maintenance-agent operation kind, `backup.trigger` the admin audit action —
    distinct namespaces, not drift). The new GUI text uses the existing legacy Title Case button convention
-   (carried legacy style, not new drift).
+   (carried legacy style, not new drift). **Exception, missed in the first draft:** the same #1468 surface
+   names its operation handle two ways. At `3fcc07e`, `POST /api/backups` returns `opId`
+   (`backups_api.go:345`), and `GET /api/backups/operations/{id}` passes the agent's record through
+   verbatim with `op_id` (`backups_api.go:447`). That is real drift in this window. It is recorded as
+   **T-64** by the 2026-10-11 review (#1602), which owns the finding and its migration plan. This report
+   cross-references it and does not open a duplicate ID or charge it again.
 3. **Carried backlog unchanged.** T-9, T-11, T-12, T-13, T-18, T-21+T-32, T-25, T-29, T-30, T-33, T-34, T-39,
    T-54, T-55, T-56, T-59b/c, T-60, T-61, T-62, T-63 and the T-51 residual remain as recorded by their owning
    reports; not re-verified in full and not re-charged.
@@ -38,7 +43,9 @@ One small production-worthy defect found and fixed; no rename of any stable iden
    inside a diagnostics-copy fix.
 
 **Terminology Health Score:** 7.9 → **7.9** (lineage of the 2026-09-24 report's comparison row). T-66 was opened
-and closed in the same change, so net 0.0.
+and closed in the same change, so net 0.0. The backup operation-ID drift (T-64) is open at this snapshot. It
+is not deducted here because the 2026-10-11 report charges it (−0.1) in the same lineage, and charging it
+in both reports would count it twice. Read with that report, the lineage figure after both is 7.7.
 
 ## Findings
 
@@ -48,4 +55,6 @@ and closed in the same change, so net 0.0.
 
 ## Stop-condition assessment
 
-Beyond T-66, no production-worthy terminology improvement was identified in the window.
+Beyond T-66, one other production-worthy terminology improvement exists in the window: the
+`opId` / `op_id` split on the backup create and poll responses. It is owned by T-64 in the 2026-10-11
+review (#1602) and not duplicated here. No further item was identified.
