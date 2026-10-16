@@ -108,7 +108,10 @@ security_scan:
   cache_ttl: "1h"        # SHA-256 scan result cache TTL
   cache_size: 10000      # Max entries in scan result cache
   max_scan_mb: 5         # Max response size to buffer for scanning (MiB)
-  scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. ":8484"
+  scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. ":8484".
+                         # The sidecar scans only with an engine initialised on THIS process: also set
+                         # enabled: true or a backend above (clamav_addr / yara_rules_dir / threat_feed_db).
+                         # Without one, /health still reports ok and /scan answers clean for every body.
   scan_svc_url: ""       # Delegate body scanning to a scan sidecar instead of in-process, e.g. "http://scan-svc:8484"
 
 # ── Content Disarm & Reconstruction (Sluice) ───────────────────────────────
@@ -122,10 +125,14 @@ cdr:
   default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
   default_mode: "ENFORCE" # "ENFORCE" | "REPORT_ONLY" | "BYPASS_WITH_REPORT"
   timeout_sec: 35         # Per-Sanitize deadline in seconds (must be >= 30)
-  max_file_size_mb: 0     # Reject larger files client-side; keep equal to Sluice's own cap
+  max_file_size_mb: 0     # Per-file CDR cap (0 = default 50 MiB). Larger files are NOT rejected: they skip
+                          # sanitization and pass through unmodified (SKIPPED_OVERSIZE), whatever fail_mode
+                          # says. Keep equal to Sluice's own cap.
   chunk_size_kb: 0        # gRPC stream chunk, 16-3072 (0 = default)
   server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix)
-  certs_dir: ""           # Dir holding ca.pem, client.pem, client.key (written by enrollment)
+  certs_dir: ""           # Pre-provisioned bootstrap bundle (ca.pem, client.pem, client.key), read only while no
+                          # instance is enrolled (needs endpoint + server_fingerprint). UI enrollment ignores
+                          # it and writes certificates under <data-dir>/integrations/sluice/<name>.
 
 # ── Upstream Proxy Chaining ────────────────────────────────────────────────
 
@@ -286,5 +293,6 @@ ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)
   # - "192.168.1.100"
 session_timeout_hours: 8  # Admin session lifetime (1–168 hours)
 session_secret: ""      # Hex (>=64 chars / 32 bytes) HMAC key for session cookies; set the SAME value on every node behind a
-                        # load balancer. Empty = random per-start key (single node). CULVERT_SESSION_SECRET takes priority —
-                        # prefer the env var so the secret stays out of the config file.
+                        # load balancer. CULVERT_SESSION_SECRET takes priority when set — prefer the env var so the secret
+                        # stays out of the config file. A random per-start key (single node only) is used when neither is
+                        # set, or when this value is not valid hex of >=32 bytes (a warning is logged; startup continues).
