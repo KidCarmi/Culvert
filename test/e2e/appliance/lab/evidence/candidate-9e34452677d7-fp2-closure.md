@@ -26,3 +26,5 @@ artifacts: appliance-lab-fp2-isolated-control-1.4.6-bad788e5 and
 appliance-lab-fp2-isolated-candidate-1.5.4-9e344526 (per-conversation sent-byte
 sha256, verbatim reply, timing, temp free, clamd log, signature set, image
 binding).
+
+_Cache-bypass regression re-run on the 1.5.4 engine against the candidate OVA; the 60s clean-verdict quarantine logic is Culvert code, unchanged by the engine bump._
