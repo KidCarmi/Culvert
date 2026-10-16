@@ -238,8 +238,20 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 	// — dishonest, and the unsafe direction. A refused session is reported as
 	// logged out; it is not cleared here, because this is a status read and
 	// clearing stays the middleware's and logout's business.
-	if sess, role, verdict := resolveUISession(r); verdict == uiSessionValid {
+	//
+	// The REFUSED verdict returns before the Basic fallback below, because the
+	// middleware does the same: it answers 401 and never reaches its own Basic
+	// branch. Falling through here would report `loggedIn: true` for a request
+	// carrying a refused cookie AND valid Basic credentials — promising access
+	// that every gated route then denies, which is this endpoint's whole
+	// contract inverted one branch over from where it was first fixed.
+	// Only ABSENT (no cookie, or one that did not verify) leaves Basic a turn.
+	switch sess, role, verdict := resolveUISession(r); verdict {
+	case uiSessionValid:
 		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
+		return
+	case uiSessionRefused:
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": false})
 		return
 	}
 	// Accept Basic Auth header for CLI/API callers.

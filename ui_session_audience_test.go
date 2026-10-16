@@ -347,6 +347,97 @@ func TestSECUISESS1_StatusReportsLocalSessions(t *testing.T) {
 	}
 }
 
+// TestSECUISESS1_StatusRefusedCookieDoesNotFallBackToBasic is the second
+// Codex P2, and a distinct case from the one above: MIXED auth.
+//
+// uiAuthMiddleware answers 401 on uiSessionRefused and returns — it never
+// reaches its own Basic fallback. The first version of this fix only
+// short-circuited the VALID verdict here, so a refused cookie fell through to
+// Basic, and a request carrying both a refused ps_ui_session and valid Basic
+// credentials was reported `loggedIn: true` while every gated route refused it
+// with 401. Same contract break as the cookie-only case, one branch over.
+//
+// Reachable without an attacker: an operator whose account was deleted, or
+// whose browser still holds a proxy-issued cookie, driving the API with Basic
+// credentials. No escalation — Basic still has to verify — but the endpoint
+// promises access the middleware will not grant, which is the direction that
+// matters.
+func TestSECUISESS1_StatusRefusedCookieDoesNotFallBackToBasic(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	// Premise: these Basic credentials really do verify, so a loggedIn=false
+	// below is the refused COOKIE talking and not a bad password.
+	probe := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	probe.SetBasicAuth("bob", "Sup3rSecret!x")
+	if _, valid := verifyUIBasicAuth(probe, "bob", "Sup3rSecret!x"); !valid {
+		t.Fatal("premise broken: the Basic credentials used by this gate no longer verify")
+	}
+
+	for _, tc := range []struct {
+		name string
+		sess *Session
+	}{
+		{"proxy-issued provider", &Session{
+			Sub: "browsing-user@corp.example", Provider: "oidc-corp", Role: "",
+			Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+		}},
+		{"deleted local user", &Session{
+			Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+			Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value, err := encodeSession(tc.sess)
+			if err != nil {
+				t.Fatalf("encodeSession: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+			req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+			req.SetBasicAuth("bob", "Sup3rSecret!x")
+			rec := httptest.NewRecorder()
+			apiAuthStatus(rec, req)
+
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+			}
+			if body["loggedIn"] != false {
+				t.Errorf("loggedIn = %v with a REFUSED cookie plus valid Basic credentials, want false — "+
+					"uiAuthMiddleware answers 401 for this request and never tries Basic, so reporting it "+
+					"as logged in promises access no gated route will grant", body["loggedIn"])
+			}
+		})
+	}
+}
+
+// TestSECUISESS1_StatusBasicFallbackSurvives is the CONTROL that keeps the fix
+// from over-refusing: with NO cookie at all, the Basic fallback is the
+// documented CLI/API path and must still report the credential's real role.
+// uiSessionAbsent is the verdict that leaves Basic its turn, in the middleware
+// and here alike.
+func TestSECUISESS1_StatusBasicFallbackSurvives(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	req.SetBasicAuth("bob", "Sup3rSecret!x")
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, req)
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if body["loggedIn"] != true {
+		t.Fatalf("loggedIn = %v for Basic credentials with no cookie, want true — the CLI/API path "+
+			"must survive the refused-cookie fix", body["loggedIn"])
+	}
+	if body["user"] != "bob" || body["role"] != string(RoleViewer) {
+		t.Errorf("Basic fallback reported user=%v role=%v, want bob/%s", body["user"], body["role"], RoleViewer)
+	}
+}
+
 // TestSECUISESS1_StatusPreSetupStillBootstraps is the CONTROL for the
 // bootstrap window: before setup completes the endpoint reports admin with no
 // cookie at all, and sharing resolveUISession must not have disturbed that
