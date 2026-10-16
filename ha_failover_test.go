@@ -197,8 +197,17 @@ func TestAcquireLeaseForResume_WaitsOutOwnGhost(t *testing.T) {
 	if granted, foreign := h.acquireLeaseForResume(); !granted || foreign {
 		t.Fatalf("resume must succeed once our own ghost lease expires (granted=%v foreign=%v)", granted, foreign)
 	}
-	if !h.WriteAllowed() {
-		t.Fatal("a successful resume acquire must confer write authority")
+	// The acquire STAGES the grant; write authority comes with its install,
+	// which commits a snapshot stamped with the epoch first (CHAOS-71,
+	// ha_epoch_commit.go).
+	if h.WriteAllowed() {
+		t.Fatal("a staged grant conferred write authority before it was installed")
+	}
+	h.mu.Lock()
+	err := h.installGrantLocked("test")
+	h.mu.Unlock()
+	if err != nil || !h.WriteAllowed() {
+		t.Fatalf("installing the resume's grant must confer write authority (err=%v)", err)
 	}
 }
 

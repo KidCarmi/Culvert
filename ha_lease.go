@@ -124,8 +124,13 @@ func (h *HAState) acquireLeaseAttempt(reason string) (granted bool, st halease.S
 			sanitizeLog(st.Holder), st.Epoch, sanitizeLog(reason))
 		return false, st, nil
 	}
+	// The grant is STAGED, not installed: nothing advertises its epoch (the
+	// heartbeat, issuance, /healthz) and it confers no write authority until
+	// the caller's installGrantLocked has committed a snapshot stamped with it
+	// (Codex review of #1556: a fencing token is exposed only once state
+	// stamped with it is distributable).
 	h.mu.Lock()
-	h.setLeaseEpochLocked(st.Epoch)
+	h.grantEpoch = st.Epoch
 	h.leaseConfirmedAt = time.Now()
 	h.leaseValidFor = st.ValidFor
 	h.mu.Unlock()
