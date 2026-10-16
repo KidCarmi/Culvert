@@ -51,10 +51,17 @@ filter's view, in which case `Allowed` reads `emptyIPFilterView`, resolves mode
 both the HTTP and SOCKS5 data paths, recurring at every Control-Plane config
 sync on every Data-Plane node. Culvert ships and qualifies arm64 images.
 
-It is **not** fixed in this change, deliberately — see §4. The reviewed commits
-only changed the spelling of that line (`&IPFilter{single: …}` → `newIPFilter()`);
-the swap itself long predates them, and the fix belongs in its own measured
-change with its own gate.
+**Correction (2026-10-16, review round):** the race is **confirmed on amd64 by
+the race detector**. It does not need an arm64 store reordering to observe. A
+root test that runs `applySnapshotAdmission` while goroutines call
+`ipf.Allowed` reports `WARNING: DATA RACE`: a read of `ipf` against the write at
+`controlplane_snapshot.go:873` (§4, *Verification*). The first draft said the
+defect could not be verified on amd64 and deferred the fix for that reason. That
+was wrong, and the fix is **required, not deferred for verifiability**. It is
+still not made in this docs-only change. The reviewed commits only changed the
+spelling of that line (`&IPFilter{single: …}` → `newIPFilter()`), the swap
+itself long predates them, and the fix belongs in its own change with its own
+gate.
 
 ---
 
@@ -199,7 +206,8 @@ what is embedded — so runtime exposure is nil and this is build hygiene.
 
 **Severity:** LOW (timing-bound, architecture-dependent) — but see *Impact*,
 which escalates with deployment posture.
-**Status:** OPEN. Reported, not fixed (§4).
+**Status:** OPEN — **confirmed** by `-race` on amd64 (§4, *Verification*); fix
+required, to land in its own change.
 **CWE:** CWE-362 (race condition) → CWE-636 (failure to handle exceptional
 conditions / fail-open). **OWASP:** A01:2021 Broken Access Control.
 **Not a regression from this window.**
@@ -257,8 +265,11 @@ snapshots; a request arriving within the store-reordering window.
 window, only retry against it. The window is the reordering distance between two
 adjacent stores — nanoseconds — but it recurs on every config sync on every DP
 node, so over a fleet's lifetime the aggregate probability is not negligible. On
-amd64 (TSO) store order is preserved and the defect is effectively unreachable,
-which is also why CI cannot observe it (§4).
+amd64 (TSO) store order is preserved, so the *fail-open verdict* is effectively
+unreachable there. The underlying **data race is not**: it is a race under the
+Go memory model on every architecture, and the race detector reports it on
+amd64 (§4, *Verification*). The first draft said CI could not observe it, which
+was wrong.
 
 ### Impact and affected assets
 
@@ -333,7 +344,10 @@ This is strictly preferable:
 
 ### Required tests
 
-Deterministic, no race detector needed — which is the point:
+The first and sixth gates below can both be shown RED against the current
+tree on amd64. The structural wall fails by construction on the existing
+`ipf = newIPF`. The concurrency gate's pre-fix form was run and reports the race
+(*Verification* below). The others are deterministic:
 
 1. **Structural wall** — AST-walk `controlplane_snapshot.go` and fail on any
    assignment to `ipf`. This is the repo's established pattern where behavioural
@@ -356,22 +370,46 @@ Deterministic, no race detector needed — which is the point:
 7. **Snapshot integration** — a CP→DP apply (full *and* delta) leaves the
    filter enforcing the snapshot's mode and list.
 
-### Why this run reports rather than patches
+### Verification (added 2026-10-16, review round)
 
-Three reasons, in order of weight:
+The first draft's main reason for deferring was that "this defect is
+unobservable on amd64, so no gate I could write would demonstrate the bug". That
+was **wrong**. A scratch root test, not committed with this docs-only review,
+was run on amd64 with the pinned `go1.26.9` against `main` at `dec66e1` (the
+`ipf = newIPF` line is unchanged at `controlplane_snapshot.go:873`):
 
-1. **I cannot meet this repository's own evidentiary bar for the fix here.**
-   The standing convention is that every defect gate is *verified failing
-   against the pre-fix shape*. This defect is unobservable on amd64, which is
-   what the CI runners and this container are, so no gate I could write would
-   demonstrate the bug it claims to prevent. Shipping an unprovable change to
-   the per-request admission gate is a worse trade than recording it precisely.
-2. **It is pre-existing and outside the stated scope** of a regression sweep
-   (`1f7f42c..3fcc07e` only re-spelled the line). The precedent for this is
-   RISK-021 and RISK-022, both HIGH and recorded OPEN rather than patched.
-3. **One concern per change.** The fix adds an engine method, re-points two
-   snapshot paths and adds a structural wall; it deserves its own PR and its
-   own review, not an unattended drive-by inside a review commit.
+```
+TestRISK030_SnapshotIPFilterSwapRacesRequestPath
+  - applySnapshotAdmission({IPFilterMode: "allow", IPList: ["10.0.0.1"]}) x2000
+  - concurrently, 4 goroutines: ipf.Allowed("192.0.2.77") in a loop
+  - restores ipf in t.Cleanup
+
+$ go test -race -count=1 -run 'TestRISK030_SnapshotIPFilterSwapRacesRequestPath' -v .
+WARNING: DATA RACE
+Read at 0x00000583bef8 by goroutine 16:
+  ...TestRISK030_SnapshotIPFilterSwapRacesRequestPath.func2()   (the ipf.Allowed read)
+Previous write at 0x00000583bef8 by goroutine 13:
+  github.com/KidCarmi/Culvert.applySnapshotAdmission()
+      controlplane_snapshot.go:873
+    zz_risk030_race_scratch_test.go:45: fail-open admissions observed: 0
+    testing.go:1712: race detected during execution of test
+--- FAIL: TestRISK030_SnapshotIPFilterSwapRacesRequestPath (0.06s)
+```
+
+The race is confirmed. No fail-open verdict was observed, as expected on amd64,
+where TSO hides the reordering. The data race the verdict depends on is
+reported deterministically. With the structural wall also RED by construction,
+the repository's "verified failing against the pre-fix shape" bar can be met on
+the CI architecture.
+
+**Disposition:** the fix is **required**. Eliminate the unsynchronised handle
+swap, preferably with the in-place `ReplaceAll` above (no pointer write left),
+or else by publishing the filter handle atomically. That test, turned into a
+committed gate with the fail-open counter as an assertion, is gate 6. The fix is
+not made in this commit for one reason only: **one concern per change**. This is
+a docs-only review record, and the fix adds an engine method, re-points two
+snapshot paths and adds two gates, so it needs its own PR and review. The fix is
+not deferred for verifiability.
 
 ---
 
@@ -379,7 +417,7 @@ Three reasons, in order of weight:
 
 | Item | State |
 |---|---|
-| **RISK-030** — unsynchronised `ipf` publication can transiently disable the IP filter (§3) | OPEN, reported this run, fix + gates specified in §4 |
+| **RISK-030** — unsynchronised `ipf` publication can transiently disable the IP filter (§3) | OPEN, **confirmed by `-race` on amd64** (§4 *Verification*); fix required, gates specified in §4 |
 | `applySnapshotAdmission` discards DP-local admin-settings IP entries on every CP sync | **By design** — `semAlwaysReplace`, CP is authoritative. Verified consistent with `config_surfaces.go` and its parity tests. Not a finding. |
 | RISK-021 — fresh/unconfigured proxy runs default-allow + no-auth | Unchanged by this window; it is the posture that escalates RISK-030's impact |
 | Timing-ratio gates relocated into `internal/admission` (`6a83a2b`, `dac3dde`) | Re-stabilised by pairing samples under load. Timing gates remain flake-prone by nature; the repo's own preference for *structural* gates applies |
@@ -397,6 +435,6 @@ view" contract structural rather than conventional. **No regression.**
 The one real finding is older than the window and was surfaced by reading the
 snapshot path that the refactor happened to touch: publishing a security gate by
 reassigning a shared pointer is unsound, and the failure direction is open, not
-closed. It is registered as RISK-030 with a fix that removes the race rather
-than guarding it, and with gates that do not depend on reproducing a memory
-reordering.
+closed. It is registered as RISK-030, confirmed by the race detector on amd64,
+with a required fix that removes the race rather than guarding it, and with
+gates that do not depend on reproducing a memory reordering.
