@@ -12581,6 +12581,13 @@ function setPosture(id, state, text) {
   const el = document.getElementById('po-' + id);
   if (!el) return;
   el.textContent = text;
+  // .posture-state clips with white-space:nowrap + ellipsis to keep the tile
+  // compact, which silently hides anything past the visible width — the
+  // Logging tile can now join several concurrent warnings with " · " and the
+  // combined string regularly overflows. The native title tooltip is the
+  // cheapest accessible way to read the full text without widening every
+  // tile or adding a detail view (CodeRabbit review, PR #1414).
+  el.title = text;
   el.classList.remove('skeleton');
   const item = el.closest('.posture-item');
   if (item) item.dataset.state = state;
