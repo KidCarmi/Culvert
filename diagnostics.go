@@ -604,6 +604,14 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 const diagnosticsRedactedUsernameMessage = "one or more admin accounts have a username above the " +
 	"supported account limit; sign in as an admin for the affected count and the remediation steps"
 
+// diagnosticsRedactedAction is the operator_action of every redacted warn/fail
+// row. The contract requires an action on any non-ok row so the GUI can
+// render a hint, but the real remediation is admin-only, so the redacted row
+// carries this FIXED text: it names no account, role, count or second-factor
+// posture and only routes the reader to an administrator.
+const diagnosticsRedactedAction = "Ask an administrator to review this row in Diagnostics; " +
+	"the details and the remediation steps are shown to administrators only."
+
 // redactContractForRole strips admin-roster-derived detail from the operator
 // contract for any caller that is not a proven admin.
 //
@@ -651,7 +659,7 @@ func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
 			continue
 		}
 		checks[i].Message = diagnosticsRedactedUsernameMessage
-		checks[i].OperatorAction = ""
+		checks[i].OperatorAction = diagnosticsRedactedAction
 	}
 	c.Checks = checks
 	return c

@@ -42,8 +42,9 @@ verify the affected behavior in the linked implementation/tests at the task SHA.
 - The operator contract (`/api/diagnostics`, `/api/health/explain`) is
   viewer-readable, but rows derived from the admin roster or its durability
   counters are admin-only detail (SEC-DIAG-ROSTER-1). Classify every such row
-  in `redactContractForRole`: below admin it gets a fixed message with no
-  action, no counts and no TOTP/backup posture. It keeps code and status unless
+  in `redactContractForRole`: below admin it gets a fixed message, no counts
+  and no TOTP/backup posture. A non-ok row keeps the required action as the
+  fixed `diagnosticsRedactedAction`. It keeps code and status unless
   the status itself is admin-only; then status and verdict are recomputed from
   viewer-safe facts. Un-redact only for a proven admin. Serialize the contract
   only through `writeOperatorContract`. The AST walls in
