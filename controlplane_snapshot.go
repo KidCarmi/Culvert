@@ -575,6 +575,23 @@ var dpControlPlanePollFailing atomic.Bool
 // clear signal (fail-open on new threats). The CP's own local proxying is
 // unaffected (its stores already hold the data); only distribution is gated.
 func (s *ConfigStore) Update(snap ConfigSnapshot) error {
+	if err := validateSnapshotForPublish(snap); err != nil {
+		return s.rejectPublish(err)
+	}
+
+	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
+
+	s.mu.Lock()
+	c := s.commitLocked(snap)
+	s.mu.Unlock()
+	s.afterCommit(c)
+	return nil
+}
+
+// validateSnapshotForPublish runs the commit-time gates every publish passes
+// (Update and UpdateCPAddresses alike). Returns the RAW error; the caller
+// routes it through rejectPublish.
+func validateSnapshotForPublish(snap ConfigSnapshot) error {
 	// Gate 0 — rewrite management-identity degradation: while the latch is
 	// set, CurrentConfigSnapshot has captured KNOWN-ephemeral rewrite
 	// StableIDs that must not be distributed to the fleet as authoritative
@@ -583,57 +600,128 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	// alerted, LastPublishError; the fleet stays on the last valid snapshot —
 	// rather than silently omitting or re-minting the rewrite slice.
 	if d := rewriteIdentityDegraded(); d != nil {
-		return s.rejectPublish(fmt.Errorf("rewrite management identity degraded (%s): refusing to publish ephemeral rewrite StableIDs as authoritative fleet identity", d.reason))
+		return fmt.Errorf("rewrite management identity degraded (%s): refusing to publish ephemeral rewrite StableIDs as authoritative fleet identity", d.reason)
 	}
 	// Gate 1 — entry counts (fast pre-check).
 	if err := validateConfigSnapshot(snap); err != nil {
-		return s.rejectPublish(err)
+		return err
 	}
 	// Gate 2 — marshaled BYTE budget. Counts can pass while long strings push
 	// the snapshot past the frame; measuring the real wire size here stops a
 	// byte-oversized config from committing and then failing every DP fetch.
 	b, err := json.Marshal(snap)
 	if err != nil {
-		return s.rejectPublish(fmt.Errorf("config snapshot marshal failed: %w", err))
+		return fmt.Errorf("config snapshot marshal failed: %w", err)
 	}
 	if len(b) > maxSnapshotWireBytes {
-		return s.rejectPublish(fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), maxSnapshotWireBytes))
+		return fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), maxSnapshotWireBytes)
 	}
+	return nil
+}
 
-	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
+// configCommit carries what afterCommit needs from a commit made under s.mu.
+type configCommit struct {
+	base, target       int64
+	epoch              int64
+	oldHosts, newHosts []string
+	subs               []chan struct{}
+}
 
-	s.mu.Lock()
+// commitLocked stamps and installs snap as the published snapshot. Caller
+// holds s.mu (write) and has already validated snap.
+func (s *ConfigStore) commitLocked(snap ConfigSnapshot) configCommit {
 	// Capture the pre-publish blocklist + version for the delta ring. oldHosts
 	// still references the outgoing snapshot's slice (safe — s.snap is replaced,
 	// not mutated in place).
-	oldHosts := s.snap.BlockedHosts
-	base := s.version
+	c := configCommit{oldHosts: s.snap.BlockedHosts, base: s.version}
 	s.version++
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	newHosts := snap.BlockedHosts
-	target, epoch := s.version, snap.Epoch
+	c.newHosts = snap.BlockedHosts
+	c.target, c.epoch = s.version, snap.Epoch
 	s.snap = snap
 	s.published = true
 	s.lastPublishErr = ""
 	s.lastPublishTS = ""
 	s.persistVersionLocked()
-	subs := append([]chan struct{}{}, s.subs...)
-	s.mu.Unlock()
+	c.subs = append([]chan struct{}{}, s.subs...)
+	return c
+}
 
-	// Record the blocklist delta OUTSIDE the store lock: the O(N) diff +
-	// fingerprint over up to 2 M hosts must not stall config readers/pollers.
-	// Config publishes are admin-action-rate, so the cost is not hot-path.
-	s.deltaRing.record(base, target, oldHosts, newHosts, blocklistSyncedFingerprint(newHosts), epoch)
-
-	for _, ch := range subs {
+// afterCommit records the blocklist delta and notifies subscribers OUTSIDE the
+// store lock: the O(N) diff + fingerprint over up to 2 M hosts must not stall
+// config readers/pollers. Config publishes are admin-action-rate, so the cost
+// is not hot-path.
+func (s *ConfigStore) afterCommit(c configCommit) {
+	s.deltaRing.record(c.base, c.target, c.oldHosts, c.newHosts, blocklistSyncedFingerprint(c.newHosts), c.epoch)
+	for _, ch := range c.subs {
 		select {
 		case ch <- struct{}{}:
 		default:
 		}
 	}
-	logger.Printf("ControlPlane: config v%d published", snap.Version)
-	return nil
+	logger.Printf("ControlPlane: config v%d published", c.target)
+}
+
+// cpAddrMergeAttempts bounds UpdateCPAddresses' optimistic retries. Publishes
+// are admin-action-rate, so losing the race this many times in a row means
+// something is publishing in a tight loop — reported, not spun on.
+const cpAddrMergeAttempts = 8
+
+// cpAddrMergeBeforeCommit, when non-nil, runs between UpdateCPAddresses'
+// validation and its compare-and-swap commit. Test seam only (nil in
+// production): it lets a gate commit a competing publish inside that window
+// deterministically.
+var cpAddrMergeBeforeCommit func()
+
+// UpdateCPAddresses publishes addrs as the fleet's CP address list by MERGING
+// onto the latest COMMITTED snapshot — never onto a snapshot captured earlier
+// (CHAOS-71, Codex review of #1556).
+//
+// It exists for the Control Plane's post-bind activation. A full
+// Update(CurrentConfigSnapshot()) whose snapshot was built just before an admin
+// publish committed would republish the OLDER state at a higher version merely
+// to add the address list, rolling the admin change back on every Data Plane.
+// Instead this reads (snapshot, version) under the store lock, validates the
+// merged copy with the SAME commit-time gates as Update, and commits only if
+// the version is still the one it read — a compare-and-swap on s.version under
+// the same s.mu every publish commits under, not a second lock. A lost race
+// re-reads and re-merges onto the newer commit.
+//
+// Returns changed=false with no publish when nothing has been published yet
+// (there is no committed snapshot to correct, and the first full publish will
+// carry the address list) or when the committed list already equals addrs. A
+// gate rejection goes through rejectPublish (logged, alerted,
+// LastPublishError) and is RETURNED so activation can refuse to succeed.
+func (s *ConfigStore) UpdateCPAddresses(addrs []string) (changed bool, err error) {
+	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
+		s.mu.RLock()
+		base, ver, published := s.snap, s.version, s.published
+		s.mu.RUnlock()
+		if !published || slicesEqual(base.CPAddresses, addrs) {
+			return false, nil
+		}
+		merged := base // shallow copy: published snapshots are never mutated in place
+		merged.CPAddresses = append([]string(nil), addrs...)
+		if verr := validateSnapshotForPublish(merged); verr != nil {
+			return false, s.rejectPublish(verr)
+		}
+		if hook := cpAddrMergeBeforeCommit; hook != nil {
+			hook()
+		}
+
+		s.mu.Lock()
+		if s.version != ver {
+			s.mu.Unlock()
+			continue // another publish committed in between: merge onto it instead
+		}
+		c := s.commitLocked(merged)
+		s.mu.Unlock()
+		recordPublishedSnapshotSizes(merged)
+		s.afterCommit(c)
+		return true, nil
+	}
+	return false, fmt.Errorf("CP address list publish lost the commit race %d times in a row", cpAddrMergeAttempts)
 }
 
 // rejectPublish records a commit-time rejection (count OR byte gate): it does

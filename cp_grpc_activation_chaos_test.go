@@ -1,0 +1,310 @@
+package main
+
+// cp_grpc_activation_chaos_test.go — CHAOS-71 gates for commitActivation, the
+// ONE post-bind activation step (cp_grpc_activation.go). One gate per face of
+// the Codex review of #1556 (activation became ASYNCHRONOUS, so it raced
+// everything that changed since boot). Each is deterministic: the race is
+// opened by an injected hook or a pre-set flag, never by a sleep, and each was
+// verified failing with its guard removed.
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// cpInjectPublish swaps the CP-address publish for fn.
+func cpInjectPublish(t *testing.T, fn func(addrs []string) (bool, error)) {
+	t.Helper()
+	prev := cpPublishCPAddresses
+	cpPublishCPAddresses = fn
+	t.Cleanup(func() { cpPublishCPAddresses = prev })
+}
+
+// cpRoleNow reads clusterRole.role under its lock.
+func cpRoleNow() string {
+	clusterRoleMu.RLock()
+	defer clusterRoleMu.RUnlock()
+	return clusterRole.role
+}
+
+// cpRequirePortReleased asserts the listener the supervisor built was closed.
+// No wait is needed: on every non-serve path Serve never ran, and ln.Close is
+// synchronous.
+func cpRequirePortReleased(t *testing.T, addr string) {
+	t.Helper()
+	probe, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", addr)
+	if err != nil {
+		t.Fatalf("the refused activation left %s bound: %v", addr, err)
+	}
+	_ = probe.Close()
+}
+
+// TestChaos71_ActivationPublishFailureIsNotASuccess — Codex P1 (4292927421).
+// When the CP-address publish is rejected at commit (e.g. a near-cap snapshot
+// pushed over the wire budget by the added address), activation must NOT
+// report success: the runtime/promote path returns the error, no role stays
+// claimed, onActivated does not run, and the boot path records a RETRYING
+// failure (not success, not terminal) so the supervisor tries again.
+func TestChaos71_ActivationPublishFailureIsNotASuccess(t *testing.T) {
+	rejected := errors.New("config snapshot wire size=99 bytes exceeds budget 98")
+
+	t.Run("runtime_path_refuses", func(t *testing.T) {
+		cpChaosSetup(t)
+		cpInsecure(t)
+		cpInjectPublish(t, func([]string) (bool, error) { return false, rejected })
+		var resumed atomic.Int32
+		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+
+		sup, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, false, func() { resumed.Add(1) })
+		if err == nil || sup != nil {
+			t.Fatalf("activation reported success although the address publish was rejected (sup=%v err=%v) — "+
+				"a promotion would leave Data Planes with only the dead leader's address", sup, err)
+		}
+		if !strings.Contains(err.Error(), "address_publish_rejected") {
+			t.Errorf("the refusal does not name the publish rejection: %v", err)
+		}
+		if r := cpRoleNow(); r == "control-plane" {
+			t.Error("the CP role stayed claimed after its address publish was rejected")
+		}
+		if resumed.Load() != 0 {
+			t.Error("onActivated ran although activation failed")
+		}
+		cpRequirePortReleased(t, addr)
+	})
+
+	t.Run("boot_path_retries", func(t *testing.T) {
+		cpChaosSetup(t)
+		cpInsecure(t)
+		cpInjectPublish(t, func([]string) (bool, error) { return false, rejected })
+		var resumed atomic.Int32
+		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+
+		if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, func() { resumed.Add(1) }); err != nil {
+			t.Fatalf("boot path: %v", err)
+		}
+		snap := cpGRPCListenerState()
+		if snap.Serving || !snap.Failing || snap.SupervisorDown || snap.LastReason != "address_publish_rejected" {
+			t.Errorf("a rejected publish must be a RETRYING failure: serving=%v failing=%v supervisorDown=%v reason=%q",
+				snap.Serving, snap.Failing, snap.SupervisorDown, snap.LastReason)
+		}
+		if r := cpRoleNow(); r == "control-plane" || resumed.Load() != 0 {
+			t.Errorf("role=%q resumed=%d after a rejected publish, want no role and no resume", r, resumed.Load())
+		}
+	})
+}
+
+// TestChaos71_AddressPublishMergesOntoTheLatestCommit — Codex P1 (4292927411).
+// The pre-fix republish built a FULL CurrentConfigSnapshot() and Update()d it,
+// so an admin publish committing in between was rolled back at a higher
+// version. UpdateCPAddresses merges onto the latest COMMITTED snapshot under
+// the store's own commit lock: a competing commit inside its window forces a
+// re-merge onto it. The race is opened deterministically by the seam.
+func TestChaos71_AddressPublishMergesOntoTheLatestCommit(t *testing.T) {
+	s := &ConfigStore{}
+	if err := s.Update(ConfigSnapshot{BlockedHosts: []string{"old.example"}}); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+	stale := s.Get() // what the pre-fix republish would have captured
+
+	admin := ConfigSnapshot{BlockedHosts: []string{"old.example", "admin-added.example"}}
+	fired := false
+	cpAddrMergeBeforeCommit = func() {
+		if !fired {
+			fired = true
+			if err := s.Update(admin); err != nil {
+				t.Errorf("admin publish: %v", err)
+			}
+		}
+	}
+	t.Cleanup(func() { cpAddrMergeBeforeCommit = nil })
+
+	changed, err := s.UpdateCPAddresses([]string{"10.0.0.2:50051"})
+	if err != nil || !changed {
+		t.Fatalf("UpdateCPAddresses: changed=%v err=%v", changed, err)
+	}
+	got := s.Get()
+	if !cpListNames(got.BlockedHosts, "admin-added.example") {
+		t.Errorf("the address publish rolled back the admin publish that committed in its window: hosts=%v", got.BlockedHosts)
+	}
+	if !cpListNames(got.CPAddresses, "10.0.0.2:50051") {
+		t.Errorf("the address list was lost: %v", got.CPAddresses)
+	}
+	if got.Version != 3 {
+		t.Errorf("version = %d, want 3 (seed, admin, merged address list)", got.Version)
+	}
+
+	// Negative control — the pre-fix SHAPE (a full publish of a snapshot
+	// captured before the admin commit) really does roll the admin change back,
+	// so the assertion above is not vacuous.
+	stale.CPAddresses = []string{"10.0.0.2:50051"}
+	if err := s.Update(stale); err != nil {
+		t.Fatalf("stale publish: %v", err)
+	}
+	if cpListNames(s.Get().BlockedHosts, "admin-added.example") {
+		t.Fatal("negative control: a full publish of a stale snapshot did not roll back — the merge gate proves nothing")
+	}
+}
+
+// TestChaos71_AddressPublishIsANoOpWhenUnchangedOrUnpublished pins the two
+// no-publish branches: nothing committed yet (nothing to correct — and merging
+// onto a zero snapshot would publish an EMPTY config), and an unchanged list
+// (an ordinary rebind must not spend a config version).
+func TestChaos71_AddressPublishIsANoOpWhenUnchangedOrUnpublished(t *testing.T) {
+	s := &ConfigStore{}
+	if changed, err := s.UpdateCPAddresses([]string{"a:1"}); changed || err != nil {
+		t.Fatalf("unpublished store: changed=%v err=%v, want a no-op", changed, err)
+	}
+	if err := s.Update(ConfigSnapshot{CPAddresses: []string{"a:1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.UpdateCPAddresses([]string{"a:1"}); changed || err != nil || s.Version() != 1 {
+		t.Fatalf("unchanged list: changed=%v err=%v version=%d, want a no-op at v1", changed, err, s.Version())
+	}
+}
+
+// TestChaos71_ShutdownBeforeActivationAbortsTheClaim — Codex P1 (4292927436).
+// Shutdown closes the activation gate in the ha-stop hook (order 10) BEFORE the
+// supervisor is stopped (order 20). A bind adopted after that must neither
+// claim the role nor run onActivated (the HA resume would re-acquire the lease
+// after globalHA.Stop was joined), and must release its socket.
+func TestChaos71_ShutdownBeforeActivationAbortsTheClaim(t *testing.T) {
+	t.Run("gate_closed_before_the_claim", func(t *testing.T) {
+		cpChaosSetup(t)
+		cpInsecure(t)
+		var resumed atomic.Int32
+		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+
+		beginCPActivationShutdown()
+		if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, func() { resumed.Add(1) }); err != nil {
+			t.Fatalf("boot path: %v", err)
+		}
+		if resumed.Load() != 0 || cpRoleNow() == "control-plane" {
+			t.Fatalf("a bind adopted after shutdown began claimed the role (%q) or ran onActivated (%d)", cpRoleNow(), resumed.Load())
+		}
+		cpRequirePortReleased(t, addr)
+	})
+
+	t.Run("gate_closed_between_claim_and_onActivated", func(t *testing.T) {
+		cpChaosSetup(t)
+		cpInsecure(t)
+		var resumed atomic.Int32
+		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+		// Shutdown begins after the role is claimed, inside the publish step:
+		// the re-check right before onActivated must catch it.
+		cpInjectPublish(t, func([]string) (bool, error) {
+			beginCPActivationShutdown()
+			return false, nil
+		})
+
+		if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, func() { resumed.Add(1) }); err != nil {
+			t.Fatalf("boot path: %v", err)
+		}
+		if resumed.Load() != 0 {
+			t.Fatal("onActivated ran after shutdown had begun — the HA resume could re-acquire the fencing lease during teardown")
+		}
+		if r := cpRoleNow(); r == "control-plane" {
+			t.Error("the role claimed before shutdown began was not rolled back")
+		}
+		cpRequirePortReleased(t, addr)
+	})
+
+	t.Run("in_flight_onActivated_holds_the_gate", func(t *testing.T) {
+		cpChaosSetup(t)
+		cpInsecure(t)
+		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+		var gateHeld atomic.Bool
+		// While onActivated runs, shutdown cannot close the gate past it: the
+		// gate mutex is held, so beginCPActivationShutdown waits and the
+		// subsequent globalHA.Stop joins whatever the resume started.
+		onActivated := func() {
+			if cpActivationGateMu.TryLock() {
+				cpActivationGateMu.Unlock()
+				return
+			}
+			gateHeld.Store(true)
+		}
+		if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, onActivated); err != nil {
+			t.Fatalf("boot path: %v", err)
+		}
+		if !gateHeld.Load() {
+			t.Error("onActivated ran without holding the activation gate — a shutdown could close it mid-resume")
+		}
+	})
+}
+
+// TestChaos71_DelayedBindNeverReplacesAnEstablishedRole — Codex P2 (4292927446).
+// A CP whose first bind failed lets boot continue into Data-Plane wiring; a
+// later successful retry must not overwrite `data-plane` (the DP client keeps
+// running, and isManagedDataPlane would flip false). It is refused, raised as
+// the listener-down alert, and the supervisor stops.
+func TestChaos71_DelayedBindNeverReplacesAnEstablishedRole(t *testing.T) {
+	alerts := cpChaosSetup(t)
+	cpInsecure(t)
+	clusterRoleMu.Lock()
+	clusterRole.role = "data-plane"
+	clusterRoleMu.Unlock()
+	var resumed atomic.Int32
+	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+
+	sup, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, func() { resumed.Add(1) })
+	if err != nil {
+		t.Fatalf("boot path: %v", err)
+	}
+	if r := cpRoleNow(); r != "data-plane" {
+		t.Fatalf("a delayed CP bind replaced the established data-plane role with %q", r)
+	}
+	if !isManagedDataPlane() {
+		t.Error("isManagedDataPlane flipped false — the node would accept CP-authoritative local mutations while still consuming remote config")
+	}
+	if resumed.Load() != 0 {
+		t.Error("onActivated ran for a refused activation")
+	}
+	snap := cpGRPCListenerState()
+	if !snap.SupervisorDown || snap.LastReason != "role_conflict" || !snap.Unavailable {
+		t.Errorf("the refusal is not reported as a terminal listener-down state: %+v", snap)
+	}
+	if len(alerts()) == 0 {
+		t.Error("the refused activation raised no cp_grpc_listener_down alert")
+	}
+	// The supervisor exits on its own. The starter is released by the loop's
+	// deferred markFirstAttempt, which runs just BEFORE the deferred close(done),
+	// so wait for done (bounded) rather than assume it is already closed.
+	select {
+	case <-sup.done:
+	case <-time.After(5 * time.Second):
+		t.Error("the supervisor is still running after refusing to replace the role")
+	}
+	cpRequirePortReleased(t, addr)
+}
+
+// TestChaos71_RejectedRuntimeActivationLeavesThePlaneUnconfigured — Codex P2
+// (4292927456). The 409 says no Control Plane exists; the health plane must
+// agree, as it read before the attempt — not `stopped` (shutting down), not a
+// dropped readiness row, not `up 0`. Lifetime counters survive (a Prometheus
+// counter must never go backwards).
+func TestChaos71_RejectedRuntimeActivationLeavesThePlaneUnconfigured(t *testing.T) {
+	cpChaosSetup(t)
+	cpInsecure(t)
+	port, release := occupyPort(t)
+	defer release()
+
+	if _, err := cpStartSupervised(t, cpListenerConfig{addr: fmt.Sprintf("127.0.0.1:%d", port)}, false, nil); err == nil {
+		t.Fatal("runtime activation against an occupied port succeeded")
+	}
+	snap := cpGRPCListenerState()
+	if snap.Configured || snap.Stopped {
+		t.Errorf("a refused runtime activation left configured=%v stopped=%v — /health would report %q for a node that is not a Control Plane",
+			snap.Configured, snap.Stopped, cpGRPCHealthPosture())
+	}
+	if got := cpGRPCHealthPosture(); got != "not_configured" {
+		t.Errorf("/health cp_grpc = %q, want not_configured", got)
+	}
+	if snap.Total == 0 {
+		t.Error("the failed attempt was erased from the lifetime counter")
+	}
+}

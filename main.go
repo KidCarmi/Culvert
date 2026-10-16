@@ -1500,7 +1500,7 @@ func enableControlPlaneResilient(grpcAddr, certFile, keyFile, caFile, clusterDBP
 // jointly not, so un-serialised two concurrent activations could each bind and
 // the later role claim could point at a socket the other one is serving (the
 // `caMutationMu` pattern, §18). clusterRoleMu is taken INSIDE it, briefly, by
-// the readers and by activateControlPlaneAfterBind — never held across the
+// the readers and by commitActivation (claimRole) — never held across the
 // bind, which is what lets the supervisor goroutine claim the role on a later
 // successful attempt without deadlocking against a starter waiting on it.
 func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, tolerateFirstFailure bool, onActivated func()) error {
@@ -1547,7 +1547,7 @@ func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath str
 	// A first-attempt failure therefore leaves the node `standalone` and the
 	// supervisor claims the role itself when a later attempt succeeds, so
 	// there is exactly ONE writer of that transition
-	// (activateControlPlaneAfterBind). All this does is say which happened.
+	// (commitActivation). All this does is say which happened.
 	if sup.currentServer() == nil {
 		logger.Printf("ControlPlane: gRPC listener on %s is not up yet — this node stays standalone and keeps "+
 			"serving proxy traffic while the listener retries in the background",

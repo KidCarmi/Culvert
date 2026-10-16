@@ -75,11 +75,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `enableControlPlane` no longer risks main's `clusterRoleMu` self-deadlock
   (the pre-bind snapshot is taken with the role lock released), a promote whose
   listener cannot bind leaves the node a retryable standby, and once the role
-  is committed the config is republished so the Data Planes' CP address list
-  names the promoted node instead of only the dead leader (CHAOS-72b, ported
-  from #1618). The rebind backoff now resets to its 1 s floor after a serve
-  that stayed up for 60 s, so a one-off socket loss after a long healthy run is
-  not charged the 30 s ceiling.
+  is committed the Data Planes' CP address list is updated to name the
+  promoted node instead of only the dead leader (the CHAOS-71
+  address-republish rider, ported from #1618). That update MERGES onto the
+  latest committed config snapshot (it can no longer roll back an admin
+  publish that committed in between), and a rejected update fails the
+  activation — the role is rolled back and the listener retries — instead of
+  reporting success. Because a retried bind can land long after boot, the
+  activation also aborts once shutdown has begun (no HA resume after
+  `globalHA.Stop`), never replaces an established Data Plane role (refused,
+  alerted as `cp_grpc_listener_down`, reason `role_conflict`), and re-reads the
+  persisted HA config before resuming leadership. A refused admin/promote
+  activation (409) now leaves the listener health plane unconfigured instead
+  of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
+  a serve that stayed up for 60 s, so a one-off socket loss after a long
+  healthy run is not charged the 30 s ceiling.
 
 ### Security
 

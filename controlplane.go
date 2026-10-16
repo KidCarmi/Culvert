@@ -46,8 +46,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc"
 )
 
 // ─── gRPC service definition (no protoc needed) ───────────────────────────────
@@ -330,7 +328,6 @@ var (
 		role     string // "standalone", "control-plane", "data-plane"
 		grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
 		nodeID   string // this node's identifier
-		grpcSrv  *grpc.Server
 		certFile string // TLS cert path (for HA deploy command)
 		keyFile  string // TLS key path (for HA deploy command)
 		caFile   string // CA cert path (for HA deploy command)

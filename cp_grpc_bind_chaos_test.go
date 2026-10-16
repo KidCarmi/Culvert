@@ -68,6 +68,8 @@ func cpChaosSetup(t *testing.T) func() []string {
 	t.Helper()
 	resetCPGRPCListenerHealthForTest()
 	t.Cleanup(resetCPGRPCListenerHealthForTest)
+	resetCPActivationShutdownForTest()
+	t.Cleanup(resetCPActivationShutdownForTest)
 
 	frozen := time.Now()
 	prevNow := cpGRPCHealthNow
@@ -1151,21 +1153,22 @@ func TestChaos71_ControlReadinessIsReportOnly(t *testing.T) {
 }
 
 // TestChaos71_ControlRebindDoesNotRestartTheHeartbeatMonitor pins the
-// idempotence activateControlPlaneAfterBind depends on. It runs again on every
-// rebind, and the heartbeat monitor is a goroutine: starting a second one per
-// rebind would leak one per listener fault for the life of the process.
+// idempotence commitActivation depends on. It runs again on every rebind, and
+// the heartbeat monitor is a goroutine: starting a second one per rebind would
+// leak one per listener fault for the life of the process.
 func TestChaos71_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
 	cpChaosSetup(t)
-
-	cfg := cpListenerConfig{addr: "127.0.0.1:50051"}
 
 	clusterRoleMu.Lock()
 	clusterRole.role = "standalone"
 	clusterRoleMu.Unlock()
 
-	// First activation claims the role. A nil server handle is deliberate: the
-	// gate is about the role transition and the monitor guard, not the handle.
-	activateControlPlaneAfterBind(cfg, nil)
+	s := &cpListenerSupervisor{cfg: cpListenerConfig{addr: "127.0.0.1:50051"}, stopping: make(chan struct{})}
+
+	// First activation claims the role.
+	if outcome, _, err := s.commitActivation(); outcome != cpCommitted || err != nil {
+		t.Fatalf("first activation: outcome=%d err=%v", outcome, err)
+	}
 	clusterRoleMu.RLock()
 	role := clusterRole.role
 	clusterRoleMu.RUnlock()
@@ -1173,20 +1176,14 @@ func TestChaos71_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
 		t.Fatalf("role = %q after activation, want control-plane", role)
 	}
 
-	// A rebind re-runs it; the role stays, and the gate below pins that the
-	// monitor-start is guarded rather than unconditional.
-	activateControlPlaneAfterBind(cfg, nil)
+	// A rebind re-runs it and re-asserts its OWN claim; the gate below pins
+	// that the monitor start is guarded rather than unconditional.
+	if outcome, _, err := s.commitActivation(); outcome != cpCommitted || err != nil {
+		t.Fatalf("rebind activation: outcome=%d err=%v", outcome, err)
+	}
 
-	body := cpReadSource(t, "cp_grpc_bind.go")
-	i := strings.Index(body, "func activateControlPlaneAfterBind(")
-	if i < 0 {
-		t.Fatal("could not locate activateControlPlaneAfterBind")
-	}
-	fnBody := body[i:]
-	if j := strings.Index(fnBody, "\n}\n"); j > 0 {
-		fnBody = fnBody[:j]
-	}
-	if !strings.Contains(fnBody, "if !alreadyCP {") || !strings.Contains(fnBody, "StartHeartbeatMonitor") {
+	fnBody := cpFuncBody(t, cpReadSource(t, "cp_grpc_activation.go"), "func (s *cpListenerSupervisor) commitActivation(")
+	if !strings.Contains(fnBody, `if prev.role != "control-plane" {`) || !strings.Contains(fnBody, "StartHeartbeatMonitor") {
 		t.Error("the heartbeat monitor start is not guarded on a first activation — a rebind would start a " +
 			"second monitor goroutine, one per listener fault, for the life of the process")
 	}
@@ -1265,7 +1262,13 @@ func TestChaos71_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 		fn = fn[:j]
 	}
 
-	resume := strings.Index(fn, "globalHA.ResumeAsLeader(")
+	// The resume is resumeLeadershipIfStillPersisted (which re-reads the HA
+	// config at bind time); it must still reach globalHA.ResumeAsLeader.
+	if !strings.Contains(body, "globalHA.ResumeAsLeader(") ||
+		!strings.Contains(cpFuncBody(t, body, "func resumeLeadershipIfStillPersisted("), "haBootResumeAsLeader(haCfg)") {
+		t.Fatal("resumeLeadershipIfStillPersisted no longer resumes leadership through globalHA.ResumeAsLeader")
+	}
+	resume := strings.Index(fn, "resumeLeadershipIfStillPersisted(")
 	if resume < 0 {
 		t.Fatal("the boot path no longer resumes leadership at all — a persisted leader would silently stop " +
 			"leading after a restart")
@@ -1310,6 +1313,20 @@ func TestChaos71_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 				"or not the listener ever came up")
 		}
 	}
+}
+
+// cpFuncBody returns the source of the top-level function starting at sig.
+func cpFuncBody(t *testing.T, body, sig string) string {
+	t.Helper()
+	i := strings.Index(body, sig)
+	if i < 0 {
+		t.Fatalf("could not locate %s", sig)
+	}
+	fn := body[i:]
+	if j := strings.Index(fn, "\n}\n"); j > 0 {
+		fn = fn[:j]
+	}
+	return fn
 }
 
 // TestChaos71_DefectStarterIsReleasedOnlyAfterActivation pins the ordering

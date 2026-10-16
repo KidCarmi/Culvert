@@ -321,6 +321,9 @@ func classifyCPGRPCBindError(err error) string {
 	if errors.Is(err, errCPGRPCTLSMaterial) {
 		return "tls_certificate"
 	}
+	if errors.Is(err, errCPGRPCAddressPublish) {
+		return "address_publish_rejected"
+	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return "network_error"
@@ -353,6 +356,8 @@ func cpGRPCBindRemedy(reason string) string {
 		return "This node is out of file descriptors, which affects far more than the Control Plane. Raise the process/container descriptor limit and look for a descriptor leak." + tail
 	case "tls_certificate":
 		return "The Control Plane mTLS material could not be loaded. Check that -cp-grpc-cert/-cp-grpc-key/-cp-grpc-ca are readable and valid — a cert-manager or certbot rotation that briefly truncates the pair lands here and clears on its own." + tail
+	case "address_publish_rejected":
+		return "The listener bound, but publishing the Control Plane address list to the fleet was rejected at commit (see LastPublishError / the config_snapshot_rejected alert — usually a config at its sync size cap). Activation is refused rather than leaving Data Planes on a stale address list; reduce the oversized collection." + tail
 	default:
 		return "See the rate-limited CONTROL-PLANE gRPC log line on this node for the underlying error." + tail
 	}
@@ -563,6 +568,34 @@ func noteCPGRPCSupervisorDown(reason string) {
 				"Enrolled Data Planes continue serving their last-good config. "+
 				"This node's own proxy data plane and admin UI are unaffected.", reason))
 	}
+}
+
+// noteCPGRPCActivationRejected restores the UNCONFIGURED state after a
+// runtime (admin/promote) activation was refused with an error.
+//
+// The request answered 409 and the node is still a live standalone gateway, so
+// every surface must read as it did before the attempt: leaving `configured`
+// set made /health say `stopped`, dropped the readiness row, emitted `up 0`
+// with no unavailability, and had diagnostics claim the node was shutting down
+// (Codex review of #1556). The lifetime COUNTERS are kept — a Prometheus
+// counter must never go backwards — and are simply not emitted while the
+// plane is unconfigured.
+func noteCPGRPCActivationRejected() {
+	cpGRPCListener.mu.Lock()
+	cpGRPCListener.configured = false
+	cpGRPCListener.addr = ""
+	cpGRPCListener.serving = false
+	cpGRPCListener.stopped = false
+	cpGRPCListener.supervisorDown = false
+	cpGRPCListener.firstFailure = time.Time{}
+	cpGRPCListener.lastFailure = time.Time{}
+	cpGRPCListener.lastReason = ""
+	cpGRPCListener.backoff = 0
+	cpGRPCListener.consecutive = 0
+	cpGRPCListener.suppressed = 0
+	cpGRPCListener.logAt = time.Time{}
+	cpGRPCListener.alerted = false
+	cpGRPCListener.mu.Unlock()
 }
 
 // noteCPGRPCListenerStopped records a clean shutdown exit.

@@ -134,7 +134,11 @@ rollout) keeps the lease. In legacy mode (no etcd lease) nothing changes.
 On the **promote** path the listener is started synchronously: if it cannot
 bind, the promotion fails and the node stays a retryable standby rather than
 becoming a leader nobody can reach. Once the role is committed the config is
-republished so Data Planes receive a CP address list naming the new leader.
+merged into the latest published config so Data Planes receive a CP address
+list naming the new leader; if that publish is rejected the promotion fails
+instead of reporting success. Because the first bind can land long after boot,
+the leadership resume re-reads the persisted HA config at that moment, and no
+resume runs once shutdown has begun.
 
 ### Rebind backoff
 
@@ -217,6 +221,7 @@ port nobody holds.
 | `network_error` | a genuine timeout | Network-level investigation. |
 | `listen_failed` | nothing above matched | See the rate-limited `ControlPlane gRPC listener` log line for the underlying error. |
 | `serve_ended` | the listener was serving and stopped | The listener rebinds. If it recurs, check `culvert_cp_grpc_binds_total` for flapping. |
+| `address_publish_rejected` | the socket bound, but publishing the CP address list to the fleet was rejected at commit | See `config_snapshot_rejected` / LastPublishError — usually a config at its sync size cap. Activation is refused (role rolled back) rather than leaving Data Planes on a stale address list; it retries. |
 
 In **every** class two things are true and the operator action says so: the
 listener rebinds by itself (so a restart costs an outage to achieve what is
@@ -225,8 +230,11 @@ unaffected.
 
 ## The one state that does *not* recover on its own
 
-If the supervisor goroutine itself panics, nothing rebinds. That is reported
-distinctly:
+If the supervisor goroutine itself panics, nothing rebinds. The same terminal
+state is used — reason `role_conflict` — when a delayed bind finds that this node
+has meanwhile become a **Data Plane**: the Control Plane listener refuses to
+replace an established role and stops (fix the CP/DP configuration, then
+restart). Either way it is reported distinctly:
 
 * diagnostics row: *"supervisor stopped … and will **NOT** rebind"*, and its
   operator action is the only one in this family that tells you to **restart

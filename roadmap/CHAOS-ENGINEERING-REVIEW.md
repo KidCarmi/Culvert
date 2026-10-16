@@ -8670,11 +8670,12 @@ required before merge; each is now in the tree.
   listener cannot bind leaves a retryable standby, no role, no supervisor; the
   retry after the port frees promotes and publishes a list naming the node) and
   `TestChaos71_HABootOnActivatedRunsOnceAcrossRebinds`.
-* **Ported from #1618 (CHAOS-72 / 72b, ids kept for provenance).**
+* **Ported from #1618, filed as CHAOS-71 riders** (CHAOS-72 is a different
+  finding, #1611): the promote-deadlock rider and the address-republish rider.
   `cluster_promote_deadlock_chaos_test.go`, adapted to this supervisor, and the
-  72b REPUBLISH: once `activateControlPlaneAfterBind` has committed the role,
-  `republishCPAddressesAfterCommit` rebuilds the snapshot with the role lock
-  released and republishes only if the CP address list changed — the pre-bind
+  address REPUBLISH: once the role is committed, the CP address list is
+  published with the role lock released, only if it changed (now a merge onto
+  the latest committed snapshot — see the commitActivation item below) — the pre-bind
   publish cannot name this node, and on a promotion it names only the dead
   leader, which `updateDPAddresses` would then install by REPLACING a DP's list.
   #1618's DP-side cadence/backoff ladder and janitor deliberately stay in #1618.
@@ -8685,6 +8686,41 @@ required before merge; each is now in the tree.
   1 s floor after a serve that stayed up for `cpGRPCServeStableAfter` (2× the
   30 s ceiling), so a socket that dies within one ceiling period of every bind
   still never earns a reset. Gate: `TestChaos71_BackoffResetsOnlyAfterAStableServe`.
+
+* **Activation is asynchronous, so it is ONE re-deciding step
+  (`commitActivation`, `cp_grpc_activation.go`).** Codex's review of the
+  merged head found five faces of one root cause — a retried bind can land
+  long after boot and raced everything that changed since:
+  (a) shutdown began after `adopt` and the HA resume still ran after
+  `globalHA.Stop` was joined; (b) a delayed bind overwrote an established
+  `data-plane` role; (c) the address republish was a full
+  `CurrentConfigSnapshot()` that could roll back an admin publish committed in
+  between; (d) its error was discarded, so a promotion reported success while
+  DPs kept only the dead leader's address; (e) a refused runtime activation
+  left the health plane `configured`. The ordering now: under `clusterRoleMu`
+  abort on stop/shutdown or any role other than none/standalone/our own claim
+  (a refused role is terminal, reason `role_conflict`, alerted); commit; merge
+  the address list onto the latest COMMITTED snapshot with a version
+  compare-and-swap under the store's own commit lock
+  (`ConfigStore.UpdateCPAddresses` — the same `s.mu` and the same commit-time
+  gates every publish uses, no second lock); a rejected publish rolls the role
+  back and is a retried failure (`address_publish_rejected`); `onActivated` runs
+  last behind `cpActivationGateMu`, which the `ha-stop` hook closes before
+  `globalHA.Stop`. A refused runtime activation calls
+  `noteCPGRPCActivationRejected` (unconfigured again, counters kept). Gates in
+  `cp_grpc_activation_chaos_test.go`, one per face, each verified failing with
+  its guard removed. Residual, recorded: every publisher in the tree builds its
+  snapshot OUTSIDE the store lock and commits last-writer-wins, so an admin
+  snapshot built before the role commit and committed after the address merge
+  can still drop the address until the next publish — pre-existing for all
+  publishers and narrowed here (any build after the role commit carries it);
+  serialising build+commit for every publisher is a broader refactor.
+* **CodeRabbit (HA config at bind time).** The boot resume closed over the HA
+  config read at boot; with the retrying supervisor it can run minutes later
+  and restore a leader the operator had since disabled or flipped to standby.
+  `resumeLeadershipIfStillPersisted` re-reads it and also skips when the
+  process already holds an HA role. `clusterRole.grpcSrv` (no readers left,
+  stale after a serve ended) was removed.
 
 Remaining risk, recorded rather than fixed: a self-fenced ex-leader whose
 listener is still dark can be re-promoted by `leaseAutoPromote` (its resync

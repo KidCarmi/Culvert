@@ -117,25 +117,60 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 	// (the listener binds on its first attempt, i.e. every healthy boot) the
 	// callback runs synchronously inside this call and the ordering is
 	// byte-identical to the code above.
-	resumeLeadership := func() {
-		if haErr != nil || !haCfg.Enabled {
-			return
-		}
-		globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
-		if haCfg.AutoFailover {
-			logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
-				"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
-				"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
-		} else {
-			logger.Printf("HA: resumed as leader from %s after restart (peer=%s)", haConfigFile, haCfg.PeerAddr)
-		}
-	}
+	//
+	// The callback deliberately does NOT close over the boot-time haCfg: with
+	// the retrying supervisor it can run minutes after boot, and resuming from
+	// a config the operator has since disabled or flipped to standby would
+	// restore and re-persist a stale leader (CodeRabbit review of #1556).
+	resumeLeadership := func() { resumeLeadershipIfStillPersisted() }
 	if err := enableControlPlaneResilient(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath, resumeLeadership); err != nil {
 		// Reached only for a refusal that no retry can fix (an empty address, or
 		// a listener already starting) — never for a bind or TLS fault, which
 		// the supervisor owns. Still not fatal: a misconfigured cluster plane
 		// must not cost this node's traffic.
 		logErrorf("ControlPlane: not enabled: %v — this node continues as a standalone gateway", err)
+	}
+}
+
+// haBootResumeAsLeader is the boot path's leadership-resume action. A seam so
+// the gate for resumeLeadershipIfStillPersisted can observe the decision
+// without mutating the process-global HA state.
+var haBootResumeAsLeader = func(cfg *haConfig) {
+	globalHA.ResumeAsLeader(cfg) // restores role+token+term+auto_failover (no term bump)
+}
+
+// resumeLeadershipIfStillPersisted is the boot path's onActivated callback: it
+// resumes HA leadership on the first OBSERVED bind, from the HA config as it is
+// persisted NOW.
+//
+// It re-reads the config rather than using the one loaded at boot because the
+// callback runs on the first successful bind, which with the retrying
+// supervisor can be long after boot. It resumes only if the CURRENT config
+// still says this node leads (haRestartAction == "leader": readable, enabled,
+// not standby), and never when this process already holds an HA role — an
+// operator acting through the live HA API in the meantime has already decided
+// it, and ResumeAsLeader would overwrite that and persist the stale leader.
+func resumeLeadershipIfStillPersisted() {
+	haCfg, haErr := loadHAConfig()
+	if action := haRestartAction(haCfg, haErr); action != "leader" {
+		if action == "standby" {
+			logger.Printf("HA: %s now records this node as standby — not resuming leadership on the "+
+				"Control Plane listener's first bind", haConfigFile)
+		}
+		return
+	}
+	if role := globalHA.Status().Role; role != "" {
+		logger.Printf("HA: this node already holds HA role %q — not resuming leadership from %s on the "+
+			"Control Plane listener's first bind", role, haConfigFile)
+		return
+	}
+	haBootResumeAsLeader(haCfg)
+	if haCfg.AutoFailover {
+		logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
+			"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
+			"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
+	} else {
+		logger.Printf("HA: resumed as leader from %s after restart (peer=%q)", haConfigFile, sanitizeLog(haCfg.PeerAddr))
 	}
 }
 

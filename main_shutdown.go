@@ -228,6 +228,11 @@ const (
 func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	// Stop HA leader election and release lock before gRPC shutdown.
 	reg.Register("ha-stop", shutdownOrderHAStop, func(context.Context) error {
+		// CHAOS-71: close the CP activation gate FIRST. The CP supervisor is
+		// stopped later (order 20), so a bind adopted in between must not run
+		// its HA leadership resume after globalHA.Stop has been joined. This
+		// waits for an onActivated already in flight, which Stop then joins.
+		beginCPActivationShutdown()
 		globalHA.Stop()
 		return nil
 	})

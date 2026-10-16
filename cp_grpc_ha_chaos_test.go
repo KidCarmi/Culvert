@@ -133,9 +133,8 @@ func TestChaos71_Wall_NoCurrentConfigSnapshotUnderTheRoleLock(t *testing.T) {
 // CurrentConfigSnapshot), so a function holding clusterRoleMu must never call
 // them.
 var cpRoleLockReentrantCalls = map[string]bool{
-	"CurrentConfigSnapshot":           true,
-	"buildCPAddressList":              true,
-	"republishCPAddressesAfterCommit": true,
+	"CurrentConfigSnapshot": true,
+	"buildCPAddressList":    true,
 }
 
 // cpScanRoleLockReentrancy walks body in source order, modelling whether
@@ -211,10 +210,6 @@ func TestChaos71_ListenFailureDoesNotLeakTheGRPCServer(t *testing.T) {
 	port, release := occupyPort(t)
 	defer release()
 
-	clusterRoleMu.Lock()
-	clusterRole.grpcSrv = nil
-	clusterRoleMu.Unlock()
-
 	srv, ln, _, err := buildControlPlaneServer(cpListenerConfig{addr: fmt.Sprintf("127.0.0.1:%d", port)})
 	if err == nil {
 		srv.Stop()
@@ -229,10 +224,12 @@ func TestChaos71_ListenFailureDoesNotLeakTheGRPCServer(t *testing.T) {
 	if srv != nil || ln != nil {
 		t.Error("a failed bind returned a server/listener handle alongside its error — nobody owns stopping it")
 	}
-	clusterRoleMu.RLock()
-	published := clusterRole.grpcSrv
-	clusterRoleMu.RUnlock()
-	if published != nil {
+	// The supervisor is the only owner of a server handle (clusterRole.grpcSrv
+	// was removed); a bare build attempt must not have armed one.
+	cpActivationMu.Lock()
+	sup := cpSupervisor
+	cpActivationMu.Unlock()
+	if sup.currentServer() != nil {
 		t.Error("a failed bind published a grpc.Server handle that nothing serves and nothing stops")
 	}
 
@@ -253,7 +250,7 @@ func TestChaos71_ListenFailureDoesNotLeakTheGRPCServer(t *testing.T) {
 // so a listener that cannot bind must fail the promotion — the node stays a
 // retryable STANDBY, claims no CP role and leaves no supervisor — instead of
 // becoming a "leader" no Data Plane can reach. Once the port frees, the same
-// standby promotes and the published CP list names it (CHAOS-72b).
+// standby promotes and the published CP list names it (the address-republish rider).
 func TestChaos71_HAPromoteBindFailureLeavesTheNodeStandby(t *testing.T) {
 	tempHADir(t)
 	clusterDB := cpIsolateActivation(t)
@@ -261,7 +258,7 @@ func TestChaos71_HAPromoteBindFailureLeavesTheNodeStandby(t *testing.T) {
 	cpInsecure(t)
 	const peer = "10.0.0.9:50051"
 	// globalHA carries the standby role so buildCPAddressList takes the role
-	// lock on the promotion path (the CHAOS-72 condition).
+	// lock on the promotion path (the promote-deadlock condition).
 	cpWithGlobalHARole(t, "standby", peer)
 
 	port, release := occupyPort(t)
@@ -316,8 +313,12 @@ func TestChaos71_HAPromoteBindFailureLeavesTheNodeStandby(t *testing.T) {
 		t.Error("a failed promote-path bind left a supervisor retrying in the background — it would later claim " +
 			"the CP role on a node HA still records as standby")
 	}
-	if got := cpGRPCListenerState().LastReason; got != "port_in_use" {
-		t.Errorf("reason = %q, want port_in_use — the gate must have reached the bind", got)
+	// The refused activation must leave the health plane as it found it
+	// (unconfigured) while keeping the lifetime counter that proves the bind
+	// was really attempted.
+	if snap := cpGRPCListenerState(); snap.Configured || snap.Total == 0 {
+		t.Errorf("after a refused promote-path activation: configured=%v total=%d, want configured=false and "+
+			"the failed attempt counted", snap.Configured, snap.Total)
 	}
 
 	// The standby is retryable: free the port and promote again.
@@ -335,7 +336,7 @@ func TestChaos71_HAPromoteBindFailureLeavesTheNodeStandby(t *testing.T) {
 		t.Errorf("role = %q after a successful promotion, want control-plane", role)
 	}
 	if pub := globalConfigStore.Get().CPAddresses; !cpListNames(pub, addr) {
-		t.Errorf("published CP list %v does not name the promoted node %q (CHAOS-72b)", pub, addr)
+		t.Errorf("published CP list %v does not name the promoted node %q (address-republish rider)", pub, addr)
 	}
 }
 
@@ -563,5 +564,103 @@ func TestChaos71_BackoffResetsOnlyAfterAStableServe(t *testing.T) {
 	}
 	if !strings.Contains(body[i:j], "cpGRPCBackoffAfterServe(") {
 		t.Error("cpListenerSupervisor.run does not reset the backoff after a successful serve")
+	}
+}
+
+// cpRecordBootResumes swaps the boot-path resume action for a counter.
+func cpRecordBootResumes(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var n atomic.Int32
+	prev := haBootResumeAsLeader
+	haBootResumeAsLeader = func(*haConfig) { n.Add(1) }
+	t.Cleanup(func() { haBootResumeAsLeader = prev })
+	return &n
+}
+
+// TestChaos71_HABootResumeReReadsTheHAConfigAtBindTime is the CodeRabbit
+// finding on #1556: the boot-path leadership resume runs on the FIRST OBSERVED
+// bind, which with the retrying supervisor can be minutes after boot, so it
+// must decide from the HA config as persisted at BIND time. The pre-fix closure
+// captured the boot-time config and would resume — and re-persist — a leader
+// the operator had since flipped to standby or disabled.
+//
+// The bind is delayed deterministically by holding the port; the persisted
+// config is changed while the supervisor retries; then the port is released.
+func TestChaos71_HABootResumeReReadsTheHAConfigAtBindTime(t *testing.T) {
+	leader := &haConfig{Enabled: true, Role: "leader", PeerAddr: "10.0.0.9:50051", Token: "tok"}
+	cases := []struct {
+		name       string
+		changeTo   *haConfig // persisted while the bind is failing; nil = unchanged
+		wantResume int32
+	}{
+		{"control_unchanged_leader_resumes", nil, 1},
+		{"flipped_to_standby", &haConfig{Enabled: true, Role: "standby", PeerAddr: "10.0.0.9:50051", Token: "tok"}, 0},
+		{"ha_disabled", &haConfig{Enabled: false}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tempHADir(t)
+			clusterDB := cpIsolateActivation(t)
+			cpChaosSetup(t)
+			cpInsecure(t)
+			cpWithGlobalHARole(t, "", "")
+			resumes := cpRecordBootResumes(t)
+			if err := saveHAConfig(leader); err != nil {
+				t.Fatalf("seed HA config: %v", err)
+			}
+
+			port, release := occupyPort(t)
+			defer release()
+			addr := fmt.Sprintf("127.0.0.1:%d", port)
+			if err := enableControlPlaneResilient(addr, "", "", "", clusterDB, resumeLeadershipIfStillPersisted); err != nil {
+				t.Fatalf("boot path: %v", err)
+			}
+			if resumes.Load() != 0 {
+				t.Fatal("leadership resumed before any bind")
+			}
+			if tc.changeTo != nil {
+				if err := saveHAConfig(tc.changeTo); err != nil {
+					t.Fatalf("change HA config: %v", err)
+				}
+			}
+
+			release()
+			cpWaitFor(t, 15*time.Second, "the delayed bind", func() bool { return cpGRPCListenerState().Serving })
+			if got := resumes.Load(); got != tc.wantResume {
+				t.Errorf("leadership resumed %d time(s) on the delayed bind, want %d — the resume must follow the "+
+					"HA config persisted at bind time, not the one read at boot", got, tc.wantResume)
+			}
+		})
+	}
+}
+
+// TestChaos71_HABootResumeSkipsWhenTheNodeAlreadyHoldsAnHARole covers the other
+// half of the finding: an operator acting through the live HA API while the
+// listener retried has already given this process a role, and the delayed
+// resume must not overwrite it. Also: an unreadable config never resumes.
+func TestChaos71_HABootResumeSkipsWhenTheNodeAlreadyHoldsAnHARole(t *testing.T) {
+	tempHADir(t)
+	resumes := cpRecordBootResumes(t)
+
+	// Unreadable (absent) config: no resume.
+	cpWithGlobalHARole(t, "", "")
+	resumeLeadershipIfStillPersisted()
+	if resumes.Load() != 0 {
+		t.Fatal("resumed leadership with no persisted HA config")
+	}
+
+	if err := saveHAConfig(&haConfig{Enabled: true, Role: "leader", PeerAddr: "10.0.0.9:50051"}); err != nil {
+		t.Fatalf("seed HA config: %v", err)
+	}
+	// Control: no live role, persisted leader → resumes.
+	resumeLeadershipIfStillPersisted()
+	if resumes.Load() != 1 {
+		t.Fatalf("control: a persisted leader with no live role resumed %d time(s), want 1", resumes.Load())
+	}
+	// A live role is already set → no further resume.
+	cpWithGlobalHARole(t, "standby", "10.0.0.9:50051")
+	resumeLeadershipIfStillPersisted()
+	if resumes.Load() != 1 {
+		t.Error("the delayed resume overwrote an HA role this process already holds")
 	}
 }

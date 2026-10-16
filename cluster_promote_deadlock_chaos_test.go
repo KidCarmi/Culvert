@@ -1,11 +1,12 @@
 package main
 
-// cluster_promote_deadlock_chaos_test.go — CHAOS-72 / CHAOS-72b gates, ported
-// from open PR #1618 onto the CHAOS-71 listener supervisor (#1556). The ids are
-// #1618's and are kept so the provenance survives; when #1618 is reworked onto
-// this branch it drops its own copies of these gates.
+// cluster_promote_deadlock_chaos_test.go — CHAOS-71 riders ported from open PR
+// #1618 onto the CHAOS-71 listener supervisor (#1556): the PROMOTE-DEADLOCK
+// rider and the CP ADDRESS-REPUBLISH rider. They are filed under this PR's own
+// id (CHAOS-72 belongs to a different finding, #1611); when #1618 is reworked
+// onto this branch it drops its own copies of these gates.
 //
-// CHAOS-72 — HA standby→leader promotion must not deadlock on clusterRoleMu.
+// Promote deadlock — HA standby→leader promotion must not deadlock on clusterRoleMu.
 // main's enableControlPlane held the clusterRoleMu WRITE lock across
 // CurrentConfigSnapshot, and that snapshot reads the same mutex through
 // buildCPAddressList. sync.RWMutex is not reentrant, so the RLock blocked on
@@ -17,7 +18,7 @@ package main
 // lock and clusterRoleMu is taken only briefly), so these gates pin that it
 // stays that way through the real promotion entry point.
 //
-// CHAOS-72b — once the role is committed (activateControlPlaneAfterBind) the
+// Address republish — once the role is committed (commitActivation) the
 // CP address list must be REPUBLISHED, outside the role lock, because the
 // pre-bind snapshot names only the HA peer — for a promoting standby, the
 // leader that just died — and updateDPAddresses REPLACES a DP's list.
@@ -29,6 +30,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,7 +79,7 @@ func cpIsolateActivation(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "cluster.json")
 }
 
-// TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock pins the PREMISE the
+// TestChaos71_PromoteDeadlock_BuildCPAddressListNeedsTheClusterRoleLock pins the PREMISE the
 // gates below rest on: with HA enabled, buildCPAddressList really does acquire
 // clusterRoleMu. If a refactor removes that acquisition this fails loudly
 // instead of letting the deadlock gates pass vacuously forever.
@@ -86,7 +88,7 @@ func cpIsolateActivation(t *testing.T) string {
 // released. Reproducing the deadlock itself on one goroutine is deliberately
 // not done: that goroutine could never be recovered and would wedge every later
 // test that reads the lock.
-func TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
+func TestChaos71_PromoteDeadlock_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
 	cpWithGlobalHARole(t, "standby", "10.0.0.1:50051")
 	if !globalHA.Status().Enabled {
 		t.Fatal("precondition: a node with an HA role must report Enabled, or this test proves nothing")
@@ -111,7 +113,7 @@ func TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
 	case <-blocked:
 		close(release)
 		t.Fatal("buildCPAddressList returned while clusterRoleMu was write-held — it no longer reads that lock, " +
-			"so the reentrancy CHAOS-72 fixed can no longer occur and the gates below are vacuous; re-derive them")
+			"so the promote-deadlock reentrancy can no longer occur and the gates below are vacuous; re-derive them")
 	case <-time.After(500 * time.Millisecond):
 		// Expected: it is waiting on the lock.
 	}
@@ -123,13 +125,13 @@ func TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
 	}
 }
 
-// TestChaos72_EnableControlPlaneDoesNotDeadlockOnPromotion is the regression
+// TestChaos71_PromoteDeadlock_EnableControlPlaneDoesNotDeadlockOnPromotion is the regression
 // gate: with HA reporting Enabled — the standby condition every promotion path
 // runs under — enableControlPlane (the HA onPromote callback) must reach a
 // DECISION rather than hang. Driven against an occupied port so the call gets
 // all the way through the pre-bind snapshot publish (where the deadlock lived)
 // to a refused bind, binding nothing.
-func TestChaos72_EnableControlPlaneDoesNotDeadlockOnPromotion(t *testing.T) {
+func TestChaos71_PromoteDeadlock_EnableControlPlaneDoesNotDeadlockOnPromotion(t *testing.T) {
 	clusterDB := cpIsolateActivation(t)
 	cpChaosSetup(t)
 	cpInsecure(t)
@@ -149,8 +151,8 @@ func TestChaos72_EnableControlPlaneDoesNotDeadlockOnPromotion(t *testing.T) {
 		}
 		// Not vacuous: the refusal must be the BIND, i.e. the call really did
 		// pass the snapshot publish that used to deadlock.
-		if got := cpGRPCListenerState().LastReason; got != "port_in_use" {
-			t.Fatalf("the promotion did not reach the bind: reason = %q, want port_in_use (err: %v)", got, err)
+		if !strings.Contains(err.Error(), "port_in_use") {
+			t.Fatalf("the promotion did not reach the bind: want a port_in_use refusal, got %v", err)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("enableControlPlane did not return within 30s while HA reported Enabled — the promotion path is " +
@@ -158,11 +160,11 @@ func TestChaos72_EnableControlPlaneDoesNotDeadlockOnPromotion(t *testing.T) {
 	}
 }
 
-// TestChaos72_ClusterRoleReadersStayLiveAfterPromotion is the blast-radius
+// TestChaos71_PromoteDeadlock_ClusterRoleReadersStayLiveAfterPromotion is the blast-radius
 // assertion: after a promotion attempt, clusterRoleMu must still be acquirable
 // by its readers (diagnostics, /healthz, the PAC mutation gate, the support
 // bundle all read it).
-func TestChaos72_ClusterRoleReadersStayLiveAfterPromotion(t *testing.T) {
+func TestChaos71_PromoteDeadlock_ClusterRoleReadersStayLiveAfterPromotion(t *testing.T) {
 	clusterDB := cpIsolateActivation(t)
 	cpChaosSetup(t)
 	cpInsecure(t)
@@ -194,11 +196,11 @@ func TestChaos72_ClusterRoleReadersStayLiveAfterPromotion(t *testing.T) {
 	}
 }
 
-// TestChaos72b_PromotingLeaderPublishesAListNamingItself pins 72b at the level
+// TestChaos71_CPAddrRepublish_PromotingLeaderPublishesAListNamingItself pins the address-republish rider at the level
 // the defect lives: the list buildCPAddressList produces BEFORE
 // clusterRole.grpcAddr is committed names only the peer, and the list AFTER
 // names this node too — so there is something the republish must publish.
-func TestChaos72b_PromotingLeaderPublishesAListNamingItself(t *testing.T) {
+func TestChaos71_CPAddrRepublish_PromotingLeaderPublishesAListNamingItself(t *testing.T) {
 	const (
 		deadLeader = "10.0.0.1:50051"
 		promoted   = "10.0.0.2:50051"
@@ -234,13 +236,13 @@ func TestChaos72b_PromotingLeaderPublishesAListNamingItself(t *testing.T) {
 	}
 }
 
-// TestChaos72b_PromotionRepublishesTheCommittedAddressList is the WIRING gate
-// for 72b on the CHAOS-71 supervisor: a real promotion through enableControlPlane
+// TestChaos71_CPAddrRepublish_PromotionRepublishesTheCommittedAddressList is the WIRING gate
+// for the address-republish rider on the CHAOS-71 supervisor: a real promotion through enableControlPlane
 // must leave the PUBLISHED snapshot naming this node, which only the post-commit
 // republish in the supervisor's activation flow can produce (the pre-bind
-// publish cannot know grpcAddr). Verified failing with
-// republishCPAddressesAfterCommit removed from cpListenerSupervisor.run.
-func TestChaos72b_PromotionRepublishesTheCommittedAddressList(t *testing.T) {
+// publish cannot know grpcAddr). Verified failing with the address publish
+// removed from commitActivation.
+func TestChaos71_CPAddrRepublish_PromotionRepublishesTheCommittedAddressList(t *testing.T) {
 	const deadLeader = "10.0.0.1:50051"
 	clusterDB := cpIsolateActivation(t)
 	cpChaosSetup(t)
