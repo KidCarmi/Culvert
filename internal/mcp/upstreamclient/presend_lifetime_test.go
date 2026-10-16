@@ -26,12 +26,13 @@ import (
 // internal/mcp/execution writes NOTHING from the hook: it returns the verdict inside the error
 // (preSendGuardErr) and reads it back off Call's own error with errors.As.
 //
-// That design is correct only while THIS property holds, and nothing else asserts it: the
-// executor's own gates run against a fixture that joins the hook's goroutine, which is exactly
-// the happens-before edge production lacks. This test pins the property against the REAL
-// transport, so the premise the carrier rests on cannot quietly stop being true — if a future
-// net/http or client change made the hook complete before Call returns, the carrier's
-// justification would silently become false and no other test would notice.
+// That design is REQUIRED because THIS property holds (were it to stop holding, the carrier
+// would stay correct, merely unnecessary), and nothing else asserts it: the executor's own
+// gates run against a fixture that joins the hook's goroutine, which is exactly the
+// happens-before edge production lacks. This test pins the property against the REAL
+// transport, so a change to it cannot go unnoticed — if a future net/http or client change
+// made Call wait for the hook, this test reports it as a named skip (below) rather than
+// leaving the carrier's justification to change silently.
 //
 // It is DETERMINISTIC rather than timing-based: the hook is parked on a channel at the exact
 // moment the test needs it parked, so "the hook has not finished" is observed, never sampled.

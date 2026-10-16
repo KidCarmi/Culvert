@@ -2164,8 +2164,9 @@ is ordered before `Call` returns -- and an abandoned dial's error is discarded r
 This correction shipped alongside the read-first identity-band change (#1375), together with a
 deterministic gate that fails against the captured-variable shape.
 
-**What this round adds is the premise, which nothing else asserts.** The carrier is correct only
-while the hook can genuinely outlive the call, and the executor's own gates cannot show that:
+**What this round adds is the premise, which nothing else asserts.** The carrier is REQUIRED
+because the hook can genuinely outlive the call (under a narrower lifetime it stays correct, merely
+unnecessary), and the executor's own gates cannot show that premise:
 their fixture JOINS the hook's goroutine, which is exactly the happens-before edge production
 lacks -- as that file's own header says, the captured shape passes them even under `-race`.
 `TestPreSend_MayStillBeRunningAfterCallReturns` pins the property itself, against the real
