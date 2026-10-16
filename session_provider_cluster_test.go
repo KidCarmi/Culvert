@@ -31,6 +31,7 @@ package main
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -192,6 +193,16 @@ func TestChaos72_DocumentedResidual_SameIDRestoration(t *testing.T) {
 	c72Setup(t, "live")
 	c72AssertAuthenticates(t, "the live provider")
 
+	// Captured before the incident so the restoration check below can compare
+	// the actual groups rather than how many there are.
+	preIncident, _, _ := c72Resolve(t, "corp")
+	preIncidentGroups := slices.Clone(preIncident.groups)
+	if len(preIncidentGroups) == 0 {
+		t.Fatal("precondition: the fixture session must carry groups, or the " +
+			"restoration assertion below proves nothing about authorization")
+	}
+	resetSessionProviderBoundsForTest()
+
 	p := idpRegistry.Get("corp")
 	if p == nil {
 		t.Fatal("precondition: the fixture must store a profile")
@@ -207,12 +218,18 @@ func TestChaos72_DocumentedResidual_SameIDRestoration(t *testing.T) {
 	idpRegistry.profiles = []*IdPProfile{p}
 
 	out, proceed, code := c72Resolve(t, "corp")
-	if !proceed || out.identity != "alice@corp.example" || len(out.groups) != 2 {
+	// Compare the group VALUES, not their count. The whole claim of AU-22 is
+	// that the groups the provider asserted BEFORE the incident come back, and
+	// those groups go straight to policyStore.Evaluate — a length check would
+	// pass on two entirely different groups, i.e. on a changed authorization
+	// outcome.
+	if !proceed || out.identity != "alice@corp.example" || !slices.Equal(out.groups, preIncidentGroups) {
 		t.Fatalf("documented residual no longer holds — a pre-incident cookie is no longer "+
-			"revived by re-enabling the same profile id: proceed=%v identity=%q groups=%v status=%d.\n"+
+			"revived by re-enabling the same profile id: proceed=%v identity=%q groups=%v "+
+			"(want %v) status=%d.\n"+
 			"If you stamped a provider generation into the cookie, that is the AU-22 fix: invert "+
 			"this gate and correct §4 of docs/operator/identity-provider-revocation.md in the "+
 			"same change, so the runbook stops describing behaviour the code no longer has.",
-			proceed, out.identity, out.groups, code)
+			proceed, out.identity, out.groups, preIncidentGroups, code)
 	}
 }
