@@ -179,6 +179,27 @@ anywhere in the function counts, even on a branch the call cannot reach —
 because for a security wall the safe direction is refusing a shape it cannot
 prove.
 
+A third round found the gap the first two left by construction: both reason
+INSIDE `Run` and the handlers, so the package HANDLE itself was unguarded.
+`Run` captures the pointer when it starts the gossip loop while the request
+path reads the global per request, so `rl = newRateLimiter()` in any other
+production function splits the owner after the fact — requests enforce with the
+new limiter, gossip keeps feeding the old one, and the live budget is
+discarded. Reproduced: adding such a function left every `TestAdmissionOwner_`
+test passing. ADR-0038's boundary map already said "No production reassignment
+of `rl`", so this was a recorded invariant with nothing enforcing it —
+`admission_owner_reassign_wall_test.go` now scans every non-test file in the
+package for an assignment to the handle (the declaration is the one permitted
+write; a local of the same name is not the handle), with controls in both
+directions and two mutations verified failing.
+
+**The shape of these three rounds is the lesson, not any one of them.** Each
+fix was correct and each left the next hop unguarded: resolve the caller's
+binding, then the callee's, then the handle both of them name. A wall over a
+composition invariant has to state WHICH hops it covers — this one now does,
+and the third round is what turned "the wall checks the owner" into a claim
+with a boundary.
+
 Known and deliberately NOT closed here: the request-path wall is scoped per
 FILE, so it requires one `AllowAuto` somewhere in `proxy.go`/`socks5.go` rather
 than inside each named handler, and a future handler could lose its call while
