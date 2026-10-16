@@ -79,6 +79,7 @@ type Feed struct {
 	domains         map[string]entry // lowercase hostname → entry
 	domainAllowlist map[string]bool  // domains exempt from domain-level blocking
 	dbPath          string
+	allowlistPath   string // admin-managed domain allowlist, persisted independently of dbPath and backed up
 	syncInterval    time.Duration
 	lastSync        time.Time // time of the most recent sync attempt, success or failure
 	lastSuccess     time.Time // time of the most recent sync where every feed fetched cleanly
@@ -217,8 +218,20 @@ const (
 // Init configures the feed manager and loads any persisted DB from disk.
 // dbPath may be "" to disable persistence (feed data lives in-memory only).
 func (tf *Feed) Init(dbPath string, syncInterval time.Duration) {
+	tf.InitWithAllowlist(dbPath, "", syncInterval)
+}
+
+// InitWithAllowlist is Init plus the path of the admin-managed domain-allowlist
+// file, persisted and loaded INDEPENDENTLY of the disposable feed DB (dbPath)
+// so a supported backup restored onto a fresh appliance preserves the
+// administrator's threat-domain exemptions — including an explicit full clear.
+// The feed DB is a re-downloadable cache and is NOT backed up; the standalone
+// allowlist file IS (backup.go defaultBackupArtifacts). allowlistPath == ""
+// keeps the allowlist in the feed DB only (the pre-fix / in-memory behaviour).
+func (tf *Feed) InitWithAllowlist(dbPath, allowlistPath string, syncInterval time.Duration) {
 	tf.mu.Lock()
 	tf.dbPath = dbPath
+	tf.allowlistPath = allowlistPath
 	if syncInterval > 0 {
 		tf.syncInterval = syncInterval
 	}
@@ -236,6 +249,26 @@ func (tf *Feed) Init(dbPath string, syncInterval time.Duration) {
 	if dbPath != "" {
 		if err := tf.loadFromDisk(dbPath); err != nil {
 			obs.Printf("ThreatFeed: could not load persisted DB (%v) — will sync fresh", err)
+		}
+	}
+
+	// Reconcile the admin allowlist with its standalone, backed-up file. The
+	// file is AUTHORITATIVE when present (absent-vs-empty: a present file with
+	// an explicit domain_allowlist, even [], is honoured and a cleared list is
+	// NOT reverted to defaults). When the file is absent — a fresh install, or
+	// the first boot of this binary while the feed DB already carries an admin
+	// allowlist — the current allowlist is MIGRATED into the file so the next
+	// backup captures it.
+	if allowlistPath != "" {
+		switch authoritative, err := tf.loadAllowlistFromDisk(); {
+		case err != nil:
+			obs.Printf("ThreatFeed: domain allowlist load failed (%v) — keeping current", err)
+		case authoritative:
+			// standalone file is the source of truth (incl. an explicit clear)
+		default:
+			if err := tf.saveAllowlist(); err != nil {
+				obs.Printf("ThreatFeed: domain allowlist migrate-write failed: %v", err)
+			}
 		}
 	}
 }
@@ -861,11 +894,9 @@ func (tf *Feed) SetDomainAllowlist(domains []string) error {
 	}
 	tf.publishLocked()
 	tf.mu.Unlock()
-	if tf.dbPath != "" {
-		if err := tf.saveToDisk(); err != nil {
-			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
-			return err
-		}
+	if err := tf.persistAllowlistStores(); err != nil {
+		obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+		return err
 	}
 	return nil
 }
@@ -886,11 +917,9 @@ func (tf *Feed) AddDomainAllowlist(domain string) error {
 	tf.domainAllowlist = next
 	tf.publishLocked()
 	tf.mu.Unlock()
-	if tf.dbPath != "" {
-		if err := tf.saveToDisk(); err != nil {
-			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
-			return err
-		}
+	if err := tf.persistAllowlistStores(); err != nil {
+		obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+		return err
 	}
 	return nil
 }
@@ -905,11 +934,9 @@ func (tf *Feed) RemoveDomainAllowlist(domain string) error {
 	tf.domainAllowlist = next
 	tf.publishLocked()
 	tf.mu.Unlock()
-	if tf.dbPath != "" {
-		if err := tf.saveToDisk(); err != nil {
-			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
-			return err
-		}
+	if err := tf.persistAllowlistStores(); err != nil {
+		obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+		return err
 	}
 	return nil
 }
@@ -1158,6 +1185,91 @@ func (tf *Feed) saveToDisk() error {
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced (P6.2 SC-4).
 	return fileutil.AtomicWrite(tf.dbPath, data, 0o600)
+}
+
+// domainAllowlistFile is the admin-managed threat-domain allowlist persisted
+// INDEPENDENTLY of the disposable feed cache (feedDB/dbPath). The feed DB is a
+// re-downloadable cache that backup.go deliberately omits; co-locating the
+// admin allowlist there lost it on every fresh recovery (owner P1 review,
+// PR #1528). DomainAllowlist is a POINTER so the loader distinguishes three
+// states: nil (field absent → not authoritative, keep defaults/feed-DB),
+// &[]{} (explicit admin clear → honour empty, never re-seed defaults) and
+// &[...] (those entries). No omitempty, for the same reason feedDB's field has
+// none: a cleared list must serialize as [], not vanish.
+type domainAllowlistFile struct {
+	Version         int       `json:"version"`
+	DomainAllowlist *[]string `json:"domain_allowlist"`
+}
+
+// loadAllowlistFromDisk loads the standalone allowlist file. It returns
+// authoritative=true only when the file exists AND carries a domain_allowlist
+// field; tf.domainAllowlist is then replaced (an explicit [] clears it) and the
+// readView republished. A missing file (first run / pre-fix) or a file without
+// the field returns false and leaves the current allowlist untouched.
+func (tf *Feed) loadAllowlistFromDisk() (bool, error) {
+	if tf.allowlistPath == "" {
+		return false, nil
+	}
+	data, err := os.ReadFile(tf.allowlistPath) // #nosec G304 -- admin-configured data dir
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", tf.allowlistPath, err)
+	}
+	var f domainAllowlistFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return false, fmt.Errorf("parse %s: %w", tf.allowlistPath, err)
+	}
+	if f.DomainAllowlist == nil {
+		return false, nil // present but no field: not authoritative
+	}
+	next := make(map[string]bool, len(*f.DomainAllowlist))
+	for _, d := range *f.DomainAllowlist {
+		if d = normaliseDomain(d); d != "" {
+			next[d] = true
+		}
+	}
+	tf.mu.Lock()
+	tf.domainAllowlist = next
+	tf.publishLocked()
+	tf.mu.Unlock()
+	return true, nil
+}
+
+// saveAllowlist writes the standalone, backed-up allowlist file atomically; a
+// no-op when no path is configured. The list is written with NO omitempty
+// semantics — a cleared allowlist writes "domain_allowlist": [].
+func (tf *Feed) saveAllowlist() error {
+	if tf.allowlistPath == "" {
+		return nil
+	}
+	tf.mu.RLock()
+	list := make([]string, 0, len(tf.domainAllowlist))
+	for d := range tf.domainAllowlist {
+		list = append(list, d)
+	}
+	tf.mu.RUnlock()
+	sort.Strings(list)
+	data, err := json.MarshalIndent(domainAllowlistFile{Version: 1, DomainAllowlist: &list}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal domain allowlist: %w", err)
+	}
+	return fileutil.AtomicWrite(tf.allowlistPath, data, 0o600)
+}
+
+// persistAllowlistStores writes an allowlist change to BOTH stores: the feed DB
+// (the running cache, and the only copy an OLDER binary reads after a rollback)
+// and the standalone backed-up file (the source of truth for this binary and
+// the only copy a backup captures). Writing one but not the other would drift
+// them on the next boot or restore.
+func (tf *Feed) persistAllowlistStores() error {
+	if tf.dbPath != "" {
+		if err := tf.saveToDisk(); err != nil {
+			return err
+		}
+	}
+	return tf.saveAllowlist()
 }
 
 // Save is the caller-facing wrapper around saveToDisk. Used by paths

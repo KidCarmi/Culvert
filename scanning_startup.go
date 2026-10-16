@@ -61,7 +61,7 @@ func startThreatFeedIfEnabled(cfg scanningStartupConfig, ctx context.Context) {
 	if !cfg.ThreatFeedEnabled {
 		return
 	}
-	globalThreatFeed.Init(cfg.FeedDB, cfg.SyncInterval)
+	globalThreatFeed.InitWithAllowlist(cfg.FeedDB, cfg.DomainAllowlistPath, cfg.SyncInterval)
 	// Arm the staleness plane BEFORE Start: Start may run an immediate sync
 	// (empty on-disk DB), and that round's outcome — the cold-start case where
 	// a failure leaves the node enforcing with no threat intelligence at all —

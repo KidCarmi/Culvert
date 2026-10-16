@@ -61,6 +61,12 @@ type scanningStartupConfig struct {
 	// dir) skips the load.
 	ScanExclusionsPath string
 
+	// DomainAllowlistPath is the admin-managed threat-domain allowlist,
+	// persisted independently of the disposable feed DB so a backup restored
+	// onto a fresh appliance preserves it (owner P1, PR #1528). "" (no data
+	// dir) keeps the allowlist in the feed DB only.
+	DomainAllowlistPath string
+
 	// SvcListenAddr != "" runs the scan microservice sidecar.
 	SvcListenAddr string
 
@@ -103,20 +109,25 @@ func resolveScanningStartupConfig(fc *FileConfig, flags scanningCLIFlags, dataDi
 	if dataDirVal != "" {
 		exclusionsPath = filepath.Join(dataDirVal, "scan_exclusions.json")
 	}
+	allowlistPath := ""
+	if dataDirVal != "" {
+		allowlistPath = filepath.Join(dataDirVal, "threat_domain_allowlist.json")
+	}
 
 	return scanningStartupConfig{
-		RemoteScanURL:      firstStr(flags.ScanSvcURL, secCfg.ScanSvcURL),
-		ClamAddr:           clamAddr,
-		YaraDir:            yaraDir,
-		FeedDB:             feedDB,
-		LocalEnabled:       secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "",
-		ThreatFeedEnabled:  feedDB != "" || secCfg.Enabled,
-		CacheTTL:           cacheTTL,
-		SyncInterval:       syncInterval,
-		CacheSize:          cacheSize,
-		MaxScanBytes:       maxScanBytes,
-		ScanExclusionsPath: exclusionsPath,
-		SvcListenAddr:      firstStr(flags.ScanSvcListen, secCfg.ScanSvcListen),
-		AVUnavailableEnv:   flags.AVUnavailableEnv,
+		RemoteScanURL:       firstStr(flags.ScanSvcURL, secCfg.ScanSvcURL),
+		ClamAddr:            clamAddr,
+		YaraDir:             yaraDir,
+		FeedDB:              feedDB,
+		LocalEnabled:        secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "",
+		ThreatFeedEnabled:   feedDB != "" || secCfg.Enabled,
+		CacheTTL:            cacheTTL,
+		SyncInterval:        syncInterval,
+		CacheSize:           cacheSize,
+		MaxScanBytes:        maxScanBytes,
+		ScanExclusionsPath:  exclusionsPath,
+		DomainAllowlistPath: allowlistPath,
+		SvcListenAddr:       firstStr(flags.ScanSvcListen, secCfg.ScanSvcListen),
+		AVUnavailableEnv:    flags.AVUnavailableEnv,
 	}
 }
