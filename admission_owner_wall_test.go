@@ -66,10 +66,76 @@ func findMethodDecl(file *ast.File, recv, name string) *ast.FuncDecl {
 	return nil
 }
 
+// fieldListBinds reports whether fl declares a parameter/result named name.
+func fieldListBinds(fl *ast.FieldList, name string) bool {
+	if fl == nil {
+		return false
+	}
+	for _, f := range fl.List {
+		for _, n := range f.Names {
+			if n.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rebindsName reports whether fn can make the identifier name refer to
+// anything other than its package-level declaration, or rewrites that
+// declaration: a receiver, parameter or result of that name, a `:=` / `var`
+// declaration, a range variable, a function-literal parameter, or ANY
+// assignment to it (`rl = …` replaces the composition handle itself, which is
+// written once by its declaration). Matching the identifier's SPELLING alone
+// is not enough: `rl := newRateLimiter()` followed by an unchanged call passes
+// a name check while the call consults an independent limiter (Codex review,
+// PR #1584). Conservative by design: a rebinding anywhere in fn, even in an
+// unrelated closure, is reported.
+func rebindsName(fn *ast.FuncDecl, name string) bool {
+	if fieldListBinds(fn.Recv, name) || fieldListBinds(fn.Type.Params, name) || fieldListBinds(fn.Type.Results, name) {
+		return true
+	}
+	if fn.Body == nil {
+		return false
+	}
+	isName := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == name
+	}
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for _, l := range x.Lhs {
+				if isName(l) {
+					found = true
+				}
+			}
+		case *ast.ValueSpec:
+			for _, id := range x.Names {
+				if id.Name == name {
+					found = true
+				}
+			}
+		case *ast.RangeStmt:
+			if isName(x.Key) || isName(x.Value) {
+				found = true
+			}
+		case *ast.FuncLit:
+			if fieldListBinds(x.Type.Params, name) || fieldListBinds(x.Type.Results, name) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
 // gossipLoopLimiterArgs reports, for every rateLimitGossipLoop call inside fn,
 // the identifier passed as its limiter argument. A non-identifier (a fresh
-// constructor call, a field, an index) is reported as "<not an identifier>" —
-// the shape cannot be proven to name the application's enforcing owner.
+// constructor call, a field, an index) is reported as "<not an identifier>",
+// and an identifier fn rebinds as "<rebound NAME>" — neither shape can be
+// proven to name the application's enforcing owner.
 func gossipLoopLimiterArgs(fn *ast.FuncDecl) []string {
 	var out []string
 	ast.Inspect(fn, func(n ast.Node) bool {
@@ -86,7 +152,11 @@ func gossipLoopLimiterArgs(fn *ast.FuncDecl) []string {
 			out = append(out, "<too few arguments>")
 		default:
 			if id, ok := call.Args[2].(*ast.Ident); ok {
-				out = append(out, id.Name)
+				if rebindsName(fn, id.Name) {
+					out = append(out, "<rebound "+id.Name+">")
+				} else {
+					out = append(out, id.Name)
+				}
 			} else {
 				out = append(out, "<not an identifier>")
 			}
@@ -117,8 +187,33 @@ func TestAdmissionOwner_Wall_GossipLoopIsFedTheEnforcingLimiter(t *testing.T) {
 			"limiting silently degrades to per-node with no metric, episode or alert (SEC-ADMISSION-OWNER-1)", args)
 	}
 
+	// The name the call passes must be the PACKAGE-LEVEL composition handle the
+	// request path reads — not merely an identifier spelled rl.
+	if !packageVarDeclared(t, "admission.go", "rl") {
+		t.Error("admission.go no longer declares the package-level composition handle rl; " +
+			"this gate's anchor has gone stale")
+	}
+
 	// CONTROLS: the shapes this gate exists to reject must be rejected.
 	for name, src := range map[string]string{
+		"shadowed fresh limiter": `package main
+func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
+	rl := newRateLimiter()
+	go c.rateLimitGossipLoop(ctx, 5*time.Second, rl)
+}`,
+		"reassigned owner": `package main
+func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
+	rl = newRateLimiter()
+	go c.rateLimitGossipLoop(ctx, 5*time.Second, rl)
+}`,
+		"parameter shadow": `package main
+func (c *DataPlaneClient) Run(ctx context.Context, rl *RateLimiter) {
+	go c.rateLimitGossipLoop(ctx, 5*time.Second, rl)
+}`,
+		"closure shadow": `package main
+func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
+	go func(rl *RateLimiter) { c.rateLimitGossipLoop(ctx, 5*time.Second, rl) }(newRateLimiter())
+}`,
 		"fresh limiter": `package main
 func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 	go c.rateLimitGossipLoop(ctx, 5*time.Second, newRateLimiter())
@@ -163,21 +258,57 @@ func rlAdmissionEntryPoints(t *testing.T, filename, src string) []string {
 		t.Fatalf("parse %s: %v", filename, err)
 	}
 	var out []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
+	for _, d := range file.Decls {
+		fn, ok := d.(*ast.FuncDecl)
 		if !ok {
+			continue
+		}
+		rebound := rebindsName(fn, "rl")
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !strings.HasPrefix(sel.Sel.Name, "Allow") {
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "rl" {
+				if rebound {
+					// The call reads a local rl, not the composition handle.
+					out = append(out, sel.Sel.Name+" (on a locally rebound rl)")
+				} else {
+					out = append(out, sel.Sel.Name)
+				}
+			}
 			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !strings.HasPrefix(sel.Sel.Name, "Allow") {
-			return true
-		}
-		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "rl" {
-			out = append(out, sel.Sel.Name)
-		}
-		return true
-	})
+		})
+	}
 	return out
+}
+
+// packageVarDeclared reports whether filename declares a package-level var
+// named name.
+func packageVarDeclared(t *testing.T, filename, name string) bool {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), filename, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", filename, err)
+	}
+	for _, d := range file.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			for _, id := range spec.(*ast.ValueSpec).Names {
+				if id.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Every protocol's front door must consult the CLUSTER-AWARE entry point.
@@ -204,8 +335,10 @@ func TestAdmissionOwner_Wall_RequestPathUsesClusterAwareEntryPoint(t *testing.T)
 
 	// CONTROLS: the local-only and enable-bypassing shapes must be rejected.
 	for name, src := range map[string]string{
-		"local only":    "package main\nfunc h(ip string) { if !rl.Allow(ip) { return } }",
-		"enable bypass": "package main\nfunc h(ip string) { if !rl.AllowClusterAware(ip) { return } }",
+		"local only":      "package main\nfunc h(ip string) { if !rl.Allow(ip) { return } }",
+		"enable bypass":   "package main\nfunc h(ip string) { if !rl.AllowClusterAware(ip) { return } }",
+		"shadowed owner":  "package main\nfunc h(ip string) { rl := newRateLimiter(); if !rl.AllowAuto(ip) { return } }",
+		"parameter owner": "package main\nfunc h(rl *RateLimiter, ip string) { if !rl.AllowAuto(ip) { return } }",
 	} {
 		calls := rlAdmissionEntryPoints(t, "control.go", src)
 		if len(calls) != 1 {
