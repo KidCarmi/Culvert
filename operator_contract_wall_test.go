@@ -396,7 +396,7 @@ func TestWall_OperatorContractRenderer_NegativeControls(t *testing.T) {
 // a restart) and non-durable mutations are admin-only under the PR #1545
 // policy table.
 var (
-	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser", "hasLocalAdministrator"}
+	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser", "hasLocalAdministrator", "rosterPersistTarget"}
 	rosterCounterVars     = []string{"rosterPersistRefused", "rosterPersistBestEffort", "rosterNotDurable"}
 )
 
@@ -408,7 +408,7 @@ var rosterRowExceptions = map[string]string{
 	"collectAdminUsernames":            "feeds admin_username_length; redacted in redactContractForRole",
 	"hasCredentialCapableProvider": "reads cfg.GetUser() only as a BOOLEAN existence probe; renders no " +
 		"name, role, count or second-factor posture",
-	"readRosterDurabilityFacts": "the CHAOS-70 counters and local-admin probe behind admin_roster_durability; " +
+	"readRosterDurabilityFacts": "the CHAOS-70 counters, local-admin probe and roster-target load outcome behind admin_roster_durability; " +
 		"redactContractForRole replaces that row with rosterDurabilityFacts.viewerRow below admin " +
 		"(gated by diagnostics_roster_durability_test.go)",
 }

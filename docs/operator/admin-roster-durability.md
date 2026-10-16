@@ -177,7 +177,9 @@ administrative decision was affected, and therefore what the operator must redo.
    `ok` while initial setup is incomplete (there is no credential to persist
    yet). Once setup is complete it is `warn` when no `-ui-users-file` is
    configured (changes revert at restart; on a node with no local
-   administrator it also names the missing break-glass account) or when
+   administrator it also names the missing break-glass account), when the
+   configured file failed to load at startup or its path is not a usable
+   regular file (a directory, or a missing parent directory), or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. The counts, the remedy and the degraded login-write

@@ -170,6 +170,116 @@ func TestCheckAdminRosterDurability_OKWhenPersistedOrNotSetUp(t *testing.T) {
 	}
 }
 
+// TestCheckAdminRosterDurability_UnusableRosterTarget answers Codex's P2 on
+// #1601: a CONFIGURED but unusable -ui-users-file must not read as persisted.
+// Startup continues after LoadUIUsersFile fails, and the failure counters stay
+// zero until a mutation is attempted, so the recorded load outcome and a
+// read-only stat of the target are what make the gap visible.
+func TestCheckAdminRosterDurability_UnusableRosterTarget(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, c *Config) // configures and loads the roster path
+		warn  bool
+	}{
+		{"directory-as-path", func(t *testing.T, c *Config) {
+			c.SetUIUsersFile(t.TempDir())
+			if err := c.LoadUIUsersFile(); err == nil {
+				t.Fatal("precondition: loading a directory must fail")
+			}
+		}, true},
+		{"missing-parent", func(t *testing.T, c *Config) {
+			c.SetUIUsersFile(filepath.Join(t.TempDir(), "missing", "ui_users.json"))
+			if err := c.LoadUIUsersFile(); err != nil {
+				t.Fatalf("precondition: a missing file loads as first run, got %v", err)
+			}
+		}, true},
+		{"unreadable-file", func(t *testing.T, c *Config) {
+			p := filepath.Join(t.TempDir(), "ui_users.json")
+			if err := os.WriteFile(p, []byte(`{"users":[]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+			c.SetUIUsersFile(p)
+			if err := c.LoadUIUsersFile(); err == nil {
+				t.Skip("running with privileges that read a mode-000 file; unreadable case not reproducible here")
+			}
+		}, true},
+		// Deterministic twin of unreadable-file for privileged runners: the
+		// read error a mode-000 file produces, recorded as the load outcome.
+		{"unreadable-file-recorded", func(t *testing.T, c *Config) {
+			p := filepath.Join(t.TempDir(), "ui_users.json")
+			if err := os.WriteFile(p, []byte(`{"users":[]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.SetUIUsersFile(p)
+			c.mu.Lock()
+			c.uiUsersLoadErr = &os.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+			c.mu.Unlock()
+		}, true},
+		{"missing-file-first-run", func(t *testing.T, c *Config) {
+			c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
+			if err := c.LoadUIUsersFile(); err != nil {
+				t.Fatalf("first-run load: %v", err)
+			}
+		}, false},
+		{"healthy-file", func(t *testing.T, c *Config) {
+			c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
+			if err := c.SaveUIUsersFile(); err != nil {
+				t.Fatalf("SaveUIUsersFile: %v", err)
+			}
+			if err := c.LoadUIUsersFile(); err != nil {
+				t.Fatalf("LoadUIUsersFile: %v", err)
+			}
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := configuredRosterCfg(t, false)
+			swapCfgForRosterDurability(t, c)
+			tc.setup(t, c)
+			path, _ := c.rosterPersistTarget()
+
+			got := checkAdminRosterDurability()
+			if (got.Status == diagWarn) != tc.warn {
+				t.Fatalf("admin: %+v, want warn=%v", got, tc.warn)
+			}
+			if strings.Contains(got.Message+got.OperatorAction, path) {
+				t.Errorf("admin row names the roster path: %+v", got)
+			}
+			_, viewer := durabilityRowAt(t, RoleViewer)
+			assertRedactedRowIsFixed(t, "viewer "+tc.name, viewer)
+			if !tc.warn {
+				if viewer.Status != diagOK {
+					t.Errorf("viewer: %+v, want ok", viewer)
+				}
+				return
+			}
+			if !strings.Contains(got.OperatorAction, "-ui-users-file") || !strings.Contains(got.OperatorAction, "restart") {
+				t.Errorf("admin operator_action = %q, want the fix-path-and-restart remedy", got.OperatorAction)
+			}
+			if viewer.Status != diagWarn || viewer.Message != rosterDurabilityViewerNotDurable {
+				t.Errorf("viewer: %+v, want warn with the fixed not-durable message", viewer)
+			}
+		})
+	}
+}
+
+// TestRosterTargetProblem_IsReadOnly pins that the diagnostics probe never
+// creates the roster file or its directory.
+func TestRosterTargetProblem_IsReadOnly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	p := filepath.Join(dir, "ui_users.json")
+	if rosterTargetProblem(p, nil) == "" {
+		t.Fatal("missing parent reported as usable")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("rosterTargetProblem created %s (stat err %v)", dir, err)
+	}
+}
+
 // TestCheckAdminRosterDurability_ReportsWriteFailuresToAdmin ports #1553's
 // refused/degraded counters: an admin sees both counts and the remedy.
 func TestCheckAdminRosterDurability_ReportsWriteFailuresToAdmin(t *testing.T) {

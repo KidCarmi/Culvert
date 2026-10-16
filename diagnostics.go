@@ -840,8 +840,8 @@ const adminRosterDurabilityCode = "admin_roster_durability"
 // (SEC-DIAG-ROSTER-1 policy, PR #1545). They are CONSTANTS carrying no count
 // and no second-factor or single-use-credential posture.
 const (
-	rosterDurabilityViewerNotDurable = "no admin roster file is configured, so admin account changes are kept in " +
-		"memory only and are lost on restart; sign in as an admin for the remediation steps"
+	rosterDurabilityViewerNotDurable = "the admin roster is not being persisted to disk, so admin account changes " +
+		"can be lost on restart; sign in as an admin for the remediation steps"
 	rosterDurabilityViewerRefused = "one or more admin account changes were refused because the admin roster " +
 		"could not be written to disk; sign in as an admin for the details"
 	// rosterDurabilityViewerConfigured is the viewer rendering of EVERY state
@@ -860,23 +860,57 @@ const (
 type rosterDurabilityFacts struct {
 	configured bool
 	persisted  bool // a roster file (-ui-users-file) is configured
-	localAdmin bool // a local account can sign in as admin without the IdP
-	notDurable int64
-	refused    int64
-	degraded   int64
+	// targetProblem is the admin-only reason a CONFIGURED roster file is
+	// unusable (failed startup load, not a regular file, missing parent);
+	// "" when the target looks usable.
+	targetProblem string
+	localAdmin    bool // a local account can sign in as admin without the IdP
+	notDurable    int64
+	refused       int64
+	degraded      int64
+}
+
+// rosterTargetProblem reports why a configured roster path cannot hold the
+// roster, or "" when it looks usable. READ-ONLY: it stats the target and its
+// parent directory and never creates, opens for writing or modifies anything.
+// A missing file under an existing directory is the supported first-run
+// state (the first save creates it), not a problem. The returned reason never
+// names the path.
+func rosterTargetProblem(path string, loadErr error) string {
+	if path == "" {
+		return ""
+	}
+	if loadErr != nil {
+		return "the configured roster file could not be loaded at startup"
+	}
+	fi, err := os.Stat(path)
+	switch {
+	case err == nil && !fi.Mode().IsRegular():
+		return "the configured roster path is not a regular file"
+	case err == nil:
+		return ""
+	case !os.IsNotExist(err):
+		return "the configured roster path cannot be inspected"
+	}
+	if di, err := os.Stat(filepath.Dir(path)); err != nil || !di.IsDir() {
+		return "the configured roster file's parent directory does not exist"
+	}
+	return ""
 }
 
 func readRosterDurabilityFacts() rosterDurabilityFacts {
 	if cfg == nil || !cfg.IsConfigured() {
 		return rosterDurabilityFacts{}
 	}
+	path, loadErr := cfg.rosterPersistTarget()
 	return rosterDurabilityFacts{
-		configured: true,
-		persisted:  cfg.rosterPathConfigured(),
-		localAdmin: cfg.hasLocalAdministrator(),
-		notDurable: rosterNotDurable.Load(),
-		refused:    rosterPersistRefused.Load(),
-		degraded:   rosterPersistBestEffort.Load(),
+		configured:    true,
+		persisted:     path != "",
+		targetProblem: rosterTargetProblem(path, loadErr),
+		localAdmin:    cfg.hasLocalAdministrator(),
+		notDurable:    rosterNotDurable.Load(),
+		refused:       rosterPersistRefused.Load(),
+		degraded:      rosterPersistBestEffort.Load(),
 	}
 }
 
@@ -885,8 +919,9 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 // evidence lived only in a boot log line (warnRosterNotDurable), a rate-limited
 // per-change line, and the culvert_admin_roster_persist_{failures,degraded}_total
 // counters — none visible to an operator working from the GUI. Report-only: it
-// reads atomics and one config field, writes nothing and changes no roster
-// behaviour. This is the ADMIN rendering; redactContractForRole replaces it
+// reads atomics, config fields (including the recorded startup load outcome)
+// and two read-only stats of the roster target; it writes nothing and changes
+// no roster behaviour. This is the ADMIN rendering; redactContractForRole replaces it
 // with adminRow's viewer twin below admin. Counts are since process start.
 func checkAdminRosterDurability() OperatorContractCheck {
 	return readRosterDurabilityFacts().adminRow()
@@ -899,6 +934,12 @@ func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
 		row.Message = "initial setup is not complete; there are no admin credentials to persist yet"
 	case !f.persisted:
 		row = f.notDurableAdminRow()
+	case f.targetProblem != "":
+		row.Status = diagWarn
+		row.Message = f.targetProblem + " — admin account deletes, role changes and password rotations " +
+			"may not be saved and can be LOST on restart"
+		row.OperatorAction = "Fix the admin users file (-ui-users-file) path or its permissions so it names a " +
+			"writable regular file on a persistent volume, then restart and re-apply any account changes made since boot."
 	case f.refused == 0 && f.degraded == 0:
 		row.Message = "admin roster is persisting to disk"
 	default:
@@ -952,7 +993,7 @@ func (f rosterDurabilityFacts) viewerRow() OperatorContractCheck {
 	switch {
 	case !f.configured:
 		// The not-configured message names no roster fact; keep it.
-	case !f.persisted:
+	case !f.persisted, f.targetProblem != "":
 		row.Status, row.Message = diagWarn, rosterDurabilityViewerNotDurable
 	case f.refused > 0:
 		row.Status, row.Message = diagWarn, rosterDurabilityViewerRefused

@@ -704,7 +704,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - The operator contract (`GET /api/diagnostics`, `GET /api/health/explain`)
   now carries an `admin_roster_durability` row (CHAOS-70 evidence): `warn`
   when no `-ui-users-file` is configured, so admin account deletes, role
-  changes and password rotations revert on restart, and when admin-roster
+  changes and password rotations revert on restart; when the configured file
+  failed to load at startup or is not a usable regular-file target (a
+  read-only check); and when admin-roster
   changes were refused or login-time roster writes failed since process
   start. Counts, the remedy and the degraded login-write state are shown to
   admins only. Viewers and operators get a fixed message for "not durable" and
