@@ -127,7 +127,7 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_users` | gauge | Deleted-account revocations in force on this node |
 | `culvert_session_revocation_persist_failures_total` | counter | **Failed save attempts**, not affected revocations — the boot probe attempts a save on an empty list and the sync loop retries every 3–5 s, so one fault reaches hundreds. The scope is `..._tokens` + `..._users` |
 | `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
-| `culvert_session_revocation_persist_refused_total` | counter | Revocations not written because overwriting the file was refused — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b) |
+| `culvert_session_revocation_persist_refused_total` | counter | Cumulative count of saves refused because overwriting the file was refused — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b). Magnitude only; the live memory-only scope is the diagnostics row's token/account counts |
 | `culvert_ha_bundle_revocations_subset` | gauge | Entries left out of the **most recent** HA state bundle the leader prepared — `> 0` means the standby can hold at most a subset (§6d, the page signal). `0` means the last bundle sent was complete, not that the standby acknowledged applying it |
 | `culvert_ha_bundle_revocations_dropped_total` | counter | Cumulative entries left out of HA state bundles — magnitude and rate only; it never decreases, so do not alert on `> 0` (§6d) |
 
@@ -310,8 +310,12 @@ file.
 
 The cost is that revocations applied in the meantime are **memory-only**: they
 are enforced by this node now and gone at the next restart.
-`culvert_session_revocation_persist_refused_total` counts them, and the row
-reports the same number — it is the size of the re-apply job. Refusals are
+`culvert_session_revocation_persist_refused_total` is a CUMULATIVE count of
+refused saves: it never decreases, a refused entry that later expires stays in
+it, and extending one account revocation can count twice, so it is the incident's
+magnitude, not the re-apply job. The size of the re-apply job is the LIVE count
+the `session_revocation` row reports (tokens and accounts in force now, also on
+`culvert_session_revocation_tokens` / `_users`). Refusals are
 deliberately **not** counted as persistence failures
 (`..._persist_failures_total`, `..._persist_degraded`): no write was attempted
 and the volume may be perfectly healthy, so the remedy is the permission repair
@@ -373,8 +377,9 @@ as the only record of what this node was enforcing.
 
 **Writes are refused while this holds.** Saving would replace those bytes, so
 `SaveRevocations` returns a refusal instead and every revocation applied in the
-meantime is memory-only (counted by
-`culvert_session_revocation_persist_refused_total`).
+meantime is memory-only (the refusals are counted, cumulatively, by
+`culvert_session_revocation_persist_refused_total`; the live scope is the
+`session_revocation` row's token and account counts).
 
 1. Copy the revocations file somewhere safe **first**.
 2. **Record every revocation applied since this boot** — each logout and each
