@@ -188,7 +188,7 @@ Less common flags (the full list is `culvert -h`). Unless noted, a non-empty / n
 | Flag | Purpose |
 |---|---|
 | `-ip-filter-mode allow\|block` | IP filter mode. Any other value aborts startup. YAML: `security.ip_filter_mode`. Filtering is off only when both are empty: `-ip-filter-mode=` does not disable a mode set in YAML; clear the YAML key instead. |
-| `-trust-forwarded-headers` | Trust `X-Forwarded-*` headers. OR-ed with `proxy.trust_forwarded_headers` (either enables it). Unscoped - read [OPERATIONS.md](docs/OPERATIONS.md) item 6 first. |
+| `-trust-forwarded-headers` | Trust `X-Forwarded-Host` and `X-Forwarded-Proto` only (OIDC redirect URL when `proxy.base_url` is unset, CP/DP bootstrap URLs). It does **not** trust `X-Forwarded-For`: client-IP resolution for admin allowlists, rate limits, lockout and audit uses `-trusted-proxy-cidrs` / `proxy.trusted_proxy_cidrs`. OR-ed with `proxy.trust_forwarded_headers` (either enables it). Unscoped (any direct peer) - read [OPERATIONS.md](docs/OPERATIONS.md) item 6 first. |
 | `-syslog-format rfc3164\|rfc5424` | Remote syslog message format (default `rfc3164`); used with `-syslog`. |
 | `-revocations-file`, `-fileprofiles-file`, `-cluster-db` | Persistence paths for session revocations, file-extension profiles and cluster state (e.g. `/data/revocations.json`). |
 | `-cat-sync-interval 24h` | Re-sync interval for the URL category community feed (with `-cat-feed-db`). |
