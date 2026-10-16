@@ -455,7 +455,13 @@ func (s *Writer) send(pri int, msg string) {
 		// to a writer that had not refused it, and if that writer was the
 		// live one the caller lost a line it would have accepted (Codex P2,
 		// PR #1494). `w` is now always the last writer that actually refused.
-		if hop+1 >= maxHandoffHops {
+		//
+		// `hop` counts successor links already FOLLOWED, so this permits
+		// exactly maxHandoffHops of them — the same budget handOffQueued
+		// spends. Comparing hop+1 here stopped one short: with eight links
+		// the eighth (often the live writer) was never offered the line
+		// (Codex P2, PR #1494).
+		if hop >= maxHandoffHops {
 			break
 		}
 		w = nx
@@ -548,11 +554,11 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 	// branch above (events were lost across a re-point and are not replayed),
 	// and the reason vocabulary is a closed set on a published API enum that
 	// should not grow to name an internal walk limit.
-	// s is this drain's OWN Writer, so it is displaced but cannot yet be
-	// sealed (sealing is the last thing this goroutine does), and the charge
-	// therefore lands on counters the health plane still folds. The branch is
-	// kept rather than asserted away so the accounting reads the same at every
-	// terminal; it simply never takes the late path from here.
+	// From the drain loop, s is that drain's OWN Writer, so it is displaced
+	// but cannot yet be sealed (sealing is the last thing that goroutine
+	// does) and the charge lands on counters the health plane still folds.
+	// WriteProbe also calls this for a writer that may already be sealed;
+	// chargeTerminalDrop routes that case to the late-drop count.
 	if s.chargeTerminalDrop(&reasonClosed) {
 		noteLateDrop()
 	}
@@ -643,10 +649,26 @@ func (s *Writer) WriteProbe(msg string) (<-chan ProbeOutcome, bool) {
 	}
 	item := s.formatLine(14, msg, time.Now())
 	item.ack = ack
-	if !s.enqueue(item) {
-		return nil, false
+	switch s.tryEnqueue(item) {
+	case enqAccepted:
+		return ack, true
+	case enqDropped:
+		return nil, false // queue full: already counted on s by tryEnqueue
 	}
-	return ack, true
+	// enqClosed: s was displaced by a re-point after the caller captured it.
+	// Follow the successor chain exactly as an ordinary line does, so the
+	// REPLACEMENT collector is the one probed and a loss is charged where the
+	// health plane can read it. Dropping directly on s instead reported a
+	// healthy replacement as "dropped" and, once s was sealed, left the loss
+	// out of the exported totals (Codex P2, PR #1494). The ack then arrives
+	// from whichever writer dealt with the line.
+	if s.handOffQueued(item) {
+		return ack, true
+	}
+	if s.chargeTerminalDrop(&reasonClosed) {
+		noteLateDrop()
+	}
+	return nil, false
 }
 
 func (s *Writer) connect() error {

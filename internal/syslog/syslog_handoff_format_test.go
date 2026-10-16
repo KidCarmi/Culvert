@@ -315,6 +315,14 @@ func TestSendExhaustedWalkIsCountableAndTriesItsLastWriter(t *testing.T) {
 	if edge.Stats().LastFailureReason != "" {
 		t.Errorf("an unasked writer's failure reason was set to %q", edge.Stats().LastFailureReason)
 	}
+	// With exactly maxHandoffHops successor links the walk must reach the
+	// LAST one: the bound is maxHandoffHops links followed, the same budget
+	// handOffQueued spends. Stopping one short dropped a line the live
+	// writer at the end of the chain would have accepted.
+	if len(edge.queue) != 1 {
+		t.Errorf("the writer %d links down the chain received %d lines; want 1 — the walk stopped one link short of its bound",
+			maxHandoffHops, len(edge.queue))
+	}
 
 	// CONTROL: a walk that reaches a live writer within the bound delivers and
 	// counts nothing. The cheapest way to pass the assertions above is to
@@ -403,5 +411,38 @@ func TestAckReasonIsEmptyOnDelivery(t *testing.T) {
 	}
 	if out.Reason != "" {
 		t.Fatalf("a delivered probe carries reason %q, want empty: a success has no failure class", out.Reason)
+	}
+}
+
+// TestWriteProbeFollowsTheSuccessorOfAClosedWriter: POST /api/syslog/test
+// captures a writer and a concurrent re-point can close it before the probe
+// is enqueued. The probe must then reach the REPLACEMENT collector, like any
+// other line, instead of being dropped against the displaced writer (which
+// reported a healthy replacement as "dropped").
+func TestWriteProbeFollowsTheSuccessorOfAClosedWriter(t *testing.T) {
+	old := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	old.closed.Store(true)
+	live := &Writer{network: "udp", format: "rfc5424", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	old.HandOffTo(live)
+
+	ack, ok := old.WriteProbe("probe")
+	if !ok || ack == nil {
+		t.Fatal("a probe on a displaced writer with a live successor was refused instead of handed off")
+	}
+	if len(live.queue) != 1 {
+		t.Fatalf("the replacement writer received %d probe lines; want 1", len(live.queue))
+	}
+	if d := old.Stats().Drops; d != 0 {
+		t.Errorf("the displaced writer was charged %d drops for a probe its successor accepted", d)
+	}
+
+	// CONTROL: with no successor the probe is still refused and counted.
+	lone := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	lone.closed.Store(true)
+	if _, ok := lone.WriteProbe("probe"); ok {
+		t.Error("control: a probe on a closed writer with no successor was reported as queued")
+	}
+	if lone.Stats().Drops != 1 {
+		t.Errorf("control: the closed writer counted %d drops; want 1", lone.Stats().Drops)
 	}
 }
