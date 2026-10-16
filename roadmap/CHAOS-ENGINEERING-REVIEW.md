@@ -7845,10 +7845,14 @@ That is correct and it is also a throughput ceiling in exactly the wrong place.
 Every refusal in the process serialised on one lock — **including the suppressed
 ones, which during a flood is every refusal** — and this gate is reached on the
 proxy path **ahead of `internal/connlimit`, the IP filter and the per-IP rate
-limiter**. All three of those are sharded, and the reason is written down in this
-same file: an unsharded process-wide lock on the request path is a throughput
-ceiling. So the mitigation reintroduced that ceiling in front of the very
-limiters meant to bound the flood.
+limiter**. None of those three takes a process-wide lock to decide, for the
+reason written down in this same file: an unsharded lock on the request path is
+a throughput ceiling. They reach that by two different primitives, and the
+distinction is the whole point of this round — `internal/connlimit` and the
+per-IP rate limiter shard their locks 64 ways, while `IPFilter.Allowed` is
+lock-free, loading an immutable view through an `atomic.Pointer`
+(`internal/admission/engine.go`). So the mitigation reintroduced, in front of
+all three, exactly the ceiling each of them had been rebuilt to avoid.
 
 `noteOversizeHostLog` is now an `atomic.Int64` stamp claimed with
 `CompareAndSwap`: exactly one racing caller wins each window and the losers

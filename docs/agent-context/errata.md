@@ -99,7 +99,11 @@ absent from that text; both live in the
 with an atomic compare-and-swap (`noteOversizeHostLog`), never a mutex: this gate
 is reached ahead of connection limiting, the IP filter and the per-IP limiter, so
 a process-wide lock there would serialize every refusal during the flood it
-bounds, including the suppressed ones. A negative age re-arms instead of
+bounds, including the suppressed ones. Those three avoid such a lock by two
+different primitives, which a copying reader must not merge:
+[connection counting](../../internal/connlimit) and the per-IP rate limiter shard
+their locks, while `IPFilter.Allowed` is lock-free over an `atomic.Pointer` view
+([admission engine](../../internal/admission/engine.go)). A negative age re-arms instead of
 suppressing, so a clock rollback still reports. The client address is resolved
 only after the window is won (`noteOversizeHostRejectionReq` takes the request;
 both admin entry points in [the admin handlers](../../ui_policy.go) use it):
