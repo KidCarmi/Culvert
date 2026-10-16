@@ -164,9 +164,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   that parser. So `ESC`, `NUL` and `BEL` never reached a log line by any path,
   and the claim that they did (in the code comment, this changelog and the
   operator runbook) came from measuring the function rather than the wire; all
-  three are corrected. The same claim survives in the archived agent note
-  (`docs/agent-context/history/`, hash-frozen by design); the corrected
-  contract lives beside its owner in `request_tracing_bounds.go`. The bound is **not** redundant for it: it is
+  three are corrected. The archived agent note still carries it
+  (`docs/agent-context/history/observability-and-alerts.md`), and that copy is
+  hash-frozen by design — all 108 preserved blocks must reconstruct the
+  original `CLAUDE.md` byte for byte — so the correction is recorded in
+  `docs/agent-context/errata.md`, the mechanism that tree provides for a
+  verified conflict in the preserved guide, rather than by editing the
+  archive. The bound is **not** redundant for it: it is
   load-bearing on 130 delivered byte values — `TAB`, `SPACE` and every byte
   `0x80`–`0xFF` — and the length half is reachable in full. Seven new gates
   drive the real `setupRequestTracing` behind a real listener and pin the

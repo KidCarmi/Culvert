@@ -59,7 +59,7 @@ exclude some mutations, including [password changes](../../auth_password_change_
 but contains historical inventories; use current source/tests for capture decisions.
 A credential mutation must not introduce a restore path to old credentials.
 
-## Tracing-header control bytes
+## Tracing-header control bytes and suite size
 
 [Original L212](history/observability-and-alerts.md#claude-main-l212-l212)
 says `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` in `X-Request-Id` reached the
@@ -72,6 +72,12 @@ stopped only by it, and the length half is reachable in full.
 [The socket gates](../../request_tracing_wire_bounds_test.go) pin the
 delivered/refused partition in both directions. Keep the charset and length
 bound; do not treat the control-byte gate as evidence of a reachable exposure.
+
+That reachability argument rests on `setupRequestTracing` having exactly one
+caller, `handleRequest`, whose request always comes from that parser: the
+inspected-H2 server dispatches to `h2InspectStream` instead, and the
+SSL-inspect inner loop's `http.ReadRequest` applies the same validation.
+The same block also counts the suite at 25 gates; it has 23.
 
 ## General advice versus domain exceptions
 
