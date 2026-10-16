@@ -165,8 +165,9 @@ func (p *cdrClientPool) Pick() *cdrPooledClient {
 
 // PickReserved is Pick for the sanitize RPC path: the winning breaker hands
 // out a half-open reservation that the caller OWNS and must either report on
-// (OnSuccess/OnFailure) or hand back (Release). Only safeCDRSanitize may call
-// it (TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath).
+// (OnSuccess/OnFailure) or hand back (Release). Only the Sanitize RPC callers
+// may reserve (TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath), and every
+// one of them must (TestCDRRPC_EverySanitizeCallOwnsAReservation).
 func (p *cdrClientPool) PickReserved() (*cdrPooledClient, cdrProbeReservation) {
 	return p.pick((*cdrCircuitBreaker).Reserve)
 }

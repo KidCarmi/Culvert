@@ -48,14 +48,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   indefinitely. And the status/UI/diagnostic selectors (`cdrActiveClient()`
   behind `GET /api/cdr/config` and five other admin handlers, plus the
   revoke/recovery client pickers) reserved through `Pick()`/`Allow()` for a
-  read. The API is now split: `Pick()`, `cdrActiveClient()` and every
-  non-sanitize caller select through the non-consuming `Available()`; only
-  `safeCDRSanitize` reserves (`cdrPickPooledReserved`), receives an owned
-  reservation, and hands it back through a deferred, outcome-neutral,
-  generation-scoped `Release` on every return that records no outcome
-  (oversize, cache hit, client-side `file_too_large`, panic). An AST wall
-  (`TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath`) pins that no other
-  production code reserves.
+  read. The API is now split by whether the caller issues the data-path
+  RPC. Every `Sanitize` caller — `safeCDRSanitize` and the admin
+  `POST /api/cdr/test` — reserves (`cdrPickPooledReserved`), owns the
+  reservation, records the outcome on its RPC paths, and hands it back
+  through a deferred, outcome-neutral, generation-scoped `Release` on every
+  return that records none (oversize, cache hit, client-side
+  `file_too_large`, panic). An admin test that finds no free probe slot gets
+  `503 CDR is recovering; retry shortly` instead of running uncounted beside
+  the recovery probe. `Pick()`, `cdrActiveClient()` and every other caller
+  select through the non-consuming `Available()`; the control-plane RPCs
+  (Health, RenewCert, RevokeClient, EnrollStatus) are deliberately outside
+  the data-path breaker and never feed it. Two AST walls pin both
+  directions: no production code reserves except the Sanitize callers
+  (`TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath`), and every
+  Sanitize call reserves and defers its Release, while every control-plane
+  call site is individually classified
+  (`TestCDRRPC_EverySanitizeCallOwnsAReservation`).
 
   The breaker's coupled state — state, reset timer, half-open generation,
   newest-reservation stamp, probe budget — is now changed under ONE

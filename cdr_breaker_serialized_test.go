@@ -235,7 +235,7 @@ func TestCDRConfigGet_DoesNotConsumeTheProbe(t *testing.T) {
 	clk.advance(b.cfg.ResetTimeout + time.Second)
 
 	rec := httptest.NewRecorder()
-	apiCDRConfigGet(rec, httptest.NewRequest(http.MethodGet, "/api/cdr/config", http.NoBody))
+	apiCDRConfigGet(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/cdr/config", http.NoBody))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"clientActive":true`) {
 		t.Fatalf("GET /api/cdr/config = %d %s, want 200 with clientActive=true",
 			rec.Code, rec.Body.String())
@@ -268,6 +268,99 @@ func assertProbeUntouched(t *testing.T, b *cdrCircuitBreaker, what string) {
 	}
 }
 
+// stressLedger counts, per half-open generation, the holders a stress worker
+// has been admitted and not yet retired, and records any generation that ever
+// held more than the budget.
+type stressLedger struct {
+	budget     int
+	mu         sync.Mutex
+	live       map[int64]int
+	overBudget atomic.Int64
+}
+
+func (l *stressLedger) admit(gen int64) {
+	if gen == 0 {
+		return // closed-state admission: no budget involved
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.live[gen]++
+	if l.live[gen] > l.budget {
+		l.overBudget.Add(1)
+	}
+}
+
+// retire runs BEFORE the breaker frees the slot, so the ledger can never
+// count a holder the breaker has already replaced.
+func (l *stressLedger) retire(gen int64) {
+	if gen == 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.live[gen]--
+}
+
+// invariantChecker re-checks the coupled invariants under the breaker lock
+// until stop is closed, keeping the first violation.
+type invariantChecker struct {
+	checks    atomic.Int64
+	violation atomic.Value
+	done      chan struct{}
+}
+
+func startInvariantChecker(b *cdrCircuitBreaker, stop <-chan struct{}) *invariantChecker {
+	c := &invariantChecker{done: make(chan struct{})}
+	go func() {
+		defer close(c.done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if v := breakerInvariantViolation(b); v != "" {
+				c.violation.CompareAndSwap(nil, v)
+			}
+			c.checks.Add(1)
+		}
+	}()
+	return c
+}
+
+// stressSteps are the clock advances a worker cycles through; mixed so the
+// reset timer, the stale-probe timeout and fresh reservations all interleave.
+var stressSteps = []time.Duration{0, time.Millisecond, 3 * time.Millisecond, 7 * time.Millisecond}
+
+// runStressWorker is one worker: reserve, then release, succeed, fail or
+// abandon (never report — only the stale reclaim recovers that slot).
+func runStressWorker(b *cdrCircuitBreaker, clock *atomic.Int64, ledger *stressLedger, g, iters int) {
+	for i := 0; i < iters; i++ {
+		clock.Add(int64(stressSteps[(g+i)%len(stressSteps)]))
+		ok, r := b.Reserve()
+		if !ok {
+			_ = b.Available()
+			continue
+		}
+		ledger.admit(r.gen)
+		switch (g*31 + i*17) % 5 {
+		case 0:
+			ledger.retire(r.gen)
+			b.Release(r)
+		case 1:
+			ledger.retire(r.gen)
+			b.OnSuccess()
+			b.Release(r) // the deferred-release shape: must be a no-op now
+		case 2, 3:
+			ledger.retire(r.gen)
+			b.OnFailure()
+			b.Release(r)
+		case 4:
+			// Abandoned.
+		}
+	}
+}
+
 // TestCDRBreaker_ConcurrentTransitionsKeepInvariants is the -race stress gate:
 // concurrent Reserve, Release, OnSuccess, OnFailure, abandonment (which drives
 // the stale reclaim) and Available over a shared advancing clock. A checker
@@ -285,43 +378,10 @@ func TestCDRBreaker_ConcurrentTransitionsKeepInvariants(t *testing.T) {
 	var clock atomic.Int64
 	clock.Store(time.Now().UnixNano())
 	b.setNowFn(func() time.Time { return time.Unix(0, clock.Load()) })
-	steps := []time.Duration{0, time.Millisecond, 3 * time.Millisecond, 7 * time.Millisecond}
-
-	var liveMu sync.Mutex
-	live := map[int64]int{}
-	var overBudget atomic.Int64
-	admit := func(gen int64) {
-		liveMu.Lock()
-		live[gen]++
-		if live[gen] > budget {
-			overBudget.Add(1)
-		}
-		liveMu.Unlock()
-	}
-	retire := func(gen int64) { // BEFORE the breaker frees the slot
-		liveMu.Lock()
-		live[gen]--
-		liveMu.Unlock()
-	}
+	ledger := &stressLedger{budget: budget, live: map[int64]int{}}
 
 	stop := make(chan struct{})
-	var checks atomic.Int64
-	var violation atomic.Value // first invariant violation seen by the checker
-	checkerDone := make(chan struct{})
-	go func() {
-		defer close(checkerDone)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if v := breakerInvariantViolation(b); v != "" {
-				violation.CompareAndSwap(nil, v)
-			}
-			checks.Add(1)
-		}
-	}()
+	checker := startInvariantChecker(b, stop)
 
 	const workers, iters = 8, 3000
 	var wg sync.WaitGroup
@@ -329,42 +389,9 @@ func TestCDRBreaker_ConcurrentTransitionsKeepInvariants(t *testing.T) {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < iters; i++ {
-				clock.Add(int64(steps[(g+i)%len(steps)]))
-				ok, r := b.Reserve()
-				if !ok {
-					_ = b.Available()
-					continue
-				}
-				if r.gen != 0 {
-					admit(r.gen)
-				}
-				switch (g*31 + i*17) % 5 {
-				case 0:
-					if r.gen != 0 {
-						retire(r.gen)
-					}
-					b.Release(r)
-				case 1:
-					if r.gen != 0 {
-						retire(r.gen)
-					}
-					b.OnSuccess()
-					b.Release(r) // the deferred-release shape: must be a no-op now
-				case 2, 3:
-					if r.gen != 0 {
-						retire(r.gen)
-					}
-					b.OnFailure()
-					b.Release(r)
-				case 4:
-					// Abandoned: never reported, never released. Only the
-					// stale reclaim can recover its slot.
-				}
-			}
+			runStressWorker(b, &clock, ledger, g, iters)
 		}(g)
 	}
-
 	finished := make(chan struct{})
 	go func() { wg.Wait(); close(finished) }()
 	select {
@@ -373,15 +400,15 @@ func TestCDRBreaker_ConcurrentTransitionsKeepInvariants(t *testing.T) {
 		t.Fatal("REGRESSION: workers did not finish — a reserver is spinning")
 	}
 	close(stop)
-	<-checkerDone
+	<-checker.done
 
-	if v := violation.Load(); v != nil {
+	if v := checker.violation.Load(); v != nil {
 		t.Fatalf("REGRESSION: invariant broken under concurrent transitions: %v", v)
 	}
-	if n := overBudget.Load(); n != 0 {
+	if n := ledger.overBudget.Load(); n != 0 {
 		t.Fatalf("REGRESSION: %d admissions exceeded the %d-probe budget of their generation", n, budget)
 	}
-	if checks.Load() == 0 {
+	if checker.checks.Load() == 0 {
 		t.Fatal("the invariant checker never ran; the test proves nothing")
 	}
 	if b.staleProbes.Load() == 0 {
@@ -402,7 +429,9 @@ func TestCDRBreaker_ConcurrentTransitionsKeepInvariants(t *testing.T) {
 //   - the reserving method expression `(*cdrCircuitBreaker).Reserve` only in
 //     cdrClientPool.PickReserved;
 //   - `.PickReserved` only in cdrPickPooledReserved;
-//   - `cdrPickPooledReserved` only in safeCDRSanitize;
+//   - `cdrPickPooledReserved` only in the two Sanitize RPC callers
+//     (safeCDRSanitize, apiCDRTest) — TestCDRRPC_EverySanitizeCallOwnsAReservation
+//     pins the converse, that every Sanitize call reserves;
 //   - any other `.Reserve` in a cdr*.go file only in Allow (the breaker's
 //     own test-only wrapper) — so a pool selector cannot quietly reserve
 //     through a closure.
@@ -410,7 +439,7 @@ func TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath(t *testing.T) {
 	allowed := map[string]map[string]bool{ // selector/ident -> enclosing funcs
 		"Reserve(method-expr)":  {"PickReserved": true},
 		"PickReserved":          {"cdrPickPooledReserved": true},
-		"cdrPickPooledReserved": {"safeCDRSanitize": true},
+		"cdrPickPooledReserved": {"safeCDRSanitize": true, "apiCDRTest": true},
 		"Reserve(cdr)":          {"Allow": true},
 	}
 	entries, err := os.ReadDir(pkgSourceDir())

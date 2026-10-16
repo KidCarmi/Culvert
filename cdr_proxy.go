@@ -372,6 +372,19 @@ func cdrClassifyResult(res *cdrRunSanitizeResult, instance, profile, mode string
 	return cdrErrorOutcome(fmt.Sprintf("unknown_status_%d", res.Status), profile, mode, ms, cfg)
 }
 
+// cdrStatusIsInstanceFailure reports whether a Sluice status counts against
+// the instance's breaker — the classification cdrClassifyResult applies: an
+// engine ERROR or a status this build does not know is a failure; every
+// verdict (CLEAN, SANITIZED, BLOCKED, UNSUPPORTED) is a success.
+func cdrStatusIsInstanceFailure(st pb.Status) bool {
+	switch st {
+	case pb.Status_CLEAN, pb.Status_SANITIZED, pb.Status_BLOCKED, pb.Status_UNSUPPORTED:
+		return false
+	default:
+		return true
+	}
+}
+
 // cdrRunSanitizeResult is a type alias so cdrClassifyResult can take the
 // Sluice result without importing the generated proto directly at every
 // call site.  The underlying type is CDRResult from cdr.go.
