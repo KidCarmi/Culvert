@@ -374,18 +374,51 @@ func TestCHAOS75_AuditPanicAfterApply_StillRecordsTheOp(t *testing.T) {
 	rec := httptest.NewRecorder()
 	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
 		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
-	if !fired.Load() {
-		t.Fatal("control: the audit fault never fired; this test proves nothing")
-	}
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("dispatch = %d; want 202 — the agent accepted the apply (%s)", rec.Code, rec.Body.String())
 	}
 	got := waitTerminal(t, rm, "A")
+	// Checked after waitTerminal, which waits for the recovered worker: no
+	// assumption about whether the audit ran before or after the 202 shipped.
+	if !fired.Load() {
+		t.Fatal("control: the audit fault never fired; this test proves nothing")
+	}
 	if got.OpID != "op-live" {
 		t.Fatalf("op_id = %q; want op-live — the live op must stay recorded", got.OpID)
 	}
 	if got.Terminal != TerminalFailedNeedsAttn || got.Detail != detailDispatchWorkerPanicAfterApply {
 		t.Fatalf("terminal = %q detail = %q; want FAILED_NEEDS_ATTN with the resume detail", got.Terminal, got.Detail)
+	}
+}
+
+// On the normal path the durable release.dispatch audit (op_id + key) must be
+// written BEFORE the observer that releases the API's 202 records the op: a CP
+// stop right after the 202 must still leave the resume handle on disk. Checked
+// deterministically from inside the audit sink — at that moment the observer
+// must not yet have written the status slot.
+func TestCHAOS75_DispatchAuditPrecedesThe202(t *testing.T) {
+	agent := &panicAgent{opID: "op-live", runningSeq: freshDispatchSeq()}
+	rm := newPanicReleaseFixture(t, agent)
+	var sawDispatch, recordedFirst atomic.Bool
+	rm.svc.auditSink = func(e AuditEntry) {
+		if e.Action == "release.dispatch" && sawDispatch.CompareAndSwap(false, true) {
+			_, recorded := rm.store.get("A")
+			recordedFirst.Store(recorded)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d; want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	waitTerminal(t, rm, "A")
+	if !sawDispatch.Load() {
+		t.Fatal("control: no release.dispatch audit was written; this test proves nothing")
+	}
+	if recordedFirst.Load() {
+		t.Fatal("the status slot (which releases the 202) was written before the durable release.dispatch audit")
 	}
 }
 

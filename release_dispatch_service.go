@@ -265,21 +265,29 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 	applied := false
 	res, eerr := reg.exec.Execute(ctx, plan, func(opID string) error {
 		applied = true
-		// Observers FIRST: they carry the durable op_id/resume record (the API's
-		// status slot and its 202). Running them after the audit meant a fault in
-		// the audit sink left a LIVE agent op with no record and an API reply that
-		// claimed no op had started (CHAOS-75 review). Nothing in the audit write
-		// is needed by an observer, so the order costs nothing.
+		early := reportFromPlan(plan)
+		early.OpID = opID
 		rc := resumeContextFor(ep.Key, plan, opID)
+		// Order is load-bearing (CHAOS-75 review, two findings that pull in
+		// opposite directions):
+		//   1. The audit is ATTEMPTED FIRST, so on the normal path the durable
+		//      release.dispatch record (op_id + key) exists before any observer
+		//      can release the API's 202 — a CP stop right after the 202 still
+		//      leaves the resume handle on disk.
+		//   2. The observers ALWAYS run, even when the audit write panics, so a
+		//      fault in the audit sink cannot leave a live agent op with no status
+		//      record and a reply that claims no op started. The audit panic is
+		//      then re-raised, so the caller's containment still records it.
+		// auditAdd is in-memory + best-effort file persistence, so it does not
+		// fail today; the error return honors the executor's durable-record
+		// contract for a future persistent recorder.
+		auditPanic := s.auditDispatchContained(actor, ep, target, early)
 		for _, ob := range onApplied {
 			ob(opID, rc)
 		}
-		early := reportFromPlan(plan)
-		early.OpID = opID
-		// auditAdd is in-memory + best-effort file persistence, so this does not
-		// fail today; the error return honors the executor's durable-record
-		// contract for a future persistent recorder.
-		s.auditDispatch(actor, ep, target, early)
+		if auditPanic != nil {
+			panic(auditPanic)
+		}
 		return nil
 	})
 	rep := reportFromResult(plan, res)
@@ -300,6 +308,15 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		s.maybeAlert(actor, ep, rep)
 	}
 	return rep, eerr
+}
+
+// auditDispatchContained writes the release.dispatch audit and returns the
+// value of a panic raised while writing it (nil when none), so the caller can
+// record the applied op before re-raising it. See Dispatch's onApplied hook.
+func (s *DispatchService) auditDispatchContained(actor string, ep AgentEndpoint, target DispatchTarget, rep *DispatchReport) (recovered any) {
+	defer func() { recovered = recover() }()
+	s.auditDispatch(actor, ep, target, rep)
+	return nil
 }
 
 // resumeContextFor builds the persistable resume record at apply time.
