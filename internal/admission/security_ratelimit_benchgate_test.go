@@ -1,10 +1,10 @@
 //go:build benchgate
 
-package main
+package admission
 
 // Scaling-regression gate for the per-IP rate-limiter's sliding window.
 //
-//	go test -tags benchgate -run 'TestBenchGate_RateLimit' -v .
+//	go test -tags benchgate -run 'TestBenchGate_RateLimit' -v ./internal/admission
 
 import (
 	"testing"
@@ -75,7 +75,7 @@ func TestBenchGate_RateLimitWindowIsFlatInConfiguredLimit(t *testing.T) {
 // request path.
 func TestBenchGate_RateLimitWindowIsAllocationFree(t *testing.T) {
 	const limit = 6000
-	r := newRateLimiter()
+	r := NewRateLimiter()
 	r.Configure(limit, time.Minute)
 	const ip = "203.0.113.42"
 

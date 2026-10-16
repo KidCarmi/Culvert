@@ -25,6 +25,8 @@ GLOBAL_FLOOR=55
 FLOORS="
 totp.go                85
 security.go            70
+internal/admission/engine.go 70
+internal/admission/freshness.go 70
 session.go             75
 lockout.go             80
 policy.go              60

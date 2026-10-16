@@ -88,13 +88,15 @@ func TestUIContract_ChangePasswordButtonSharesLogoutVisibility(t *testing.T) {
 	if i < 0 {
 		t.Fatal("applySession() not found in static/index.html")
 	}
-	// applySession is a short, self-contained function; a generous window
-	// comfortably covers its body without needing a brace-matching parser.
-	end := i + 1600
-	if end > len(s) {
-		end = len(s)
+	// Bound the body by applySession's own closing brace (the first
+	// column-0 "}" after the marker) rather than a fixed character window:
+	// a fixed window silently shrinks below the function as unrelated
+	// statements are added to it, turning the check into a false failure.
+	end := strings.Index(s[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("applySession() closing brace not found in static/index.html")
 	}
-	body := s[i:end]
+	body := s[i : i+end]
 
 	if !strings.Contains(body, `document.getElementById('logout-btn').style.display = (user || role) ? '' : 'none';`) {
 		t.Fatal("applySession no longer toggles logout-btn the expected way — update this test's expectation alongside it")
