@@ -516,6 +516,123 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+### Fixed
+
+- **HA standby→leader promotion self-deadlocked, and took the node's own
+  diagnostics with it (CHAOS-72).** `enableControlPlane` held the
+  `clusterRoleMu` *write* lock while evaluating `CurrentConfigSnapshot`, and
+  that snapshot reads the same non-reentrant `RWMutex` through
+  `buildCPAddressList` (it needs `clusterRole.grpcAddr` for the Data Plane
+  failover address list). The guard meant to make this unreachable — that
+  function's HA-disabled early return — is open on exactly the promotion path,
+  because `HAStatus.Enabled` is `role != ""` and so a standby reports enabled
+  for its entire stint. Every promotion path reached it: manual, legacy
+  auto-failover, planned handoff and lease-arbitrated.
+
+  The node therefore never promoted, and because the wedged goroutine kept
+  holding the write lock, every reader behind it wedged too — diagnostics,
+  `/healthz`, the PAC mutation gate and the **support bundle**, i.e. the
+  break-glass evidence path an operator would reach for was precisely what
+  became unavailable. A fleet that lost its leader was left with no control
+  plane and no way to diagnose why; Data Planes kept enforcing their
+  last-known-good snapshot, so traffic flowed while policy, blocklist and
+  session-revocation changes silently stopped propagating.
+
+  Fixed by building the snapshot *before* taking the lock. The hoist is
+  behaviour-preserving: the snapshot is pure reads, and `clusterRole.grpcAddr`
+  is assigned only after the publish, so it never observed the new address
+  under the old ordering either. The idempotency guard and the role transition
+  stay atomic inside the write lock, and CHAOS-01's arm-before-publish ordering
+  is untouched. The only pre-existing test that called `enableControlPlane` ran
+  with HA *disabled*, so `buildCPAddressList` took its `nil` early return and
+  the reentrancy never fired — the guard being conditional is what made that
+  test vacuous, so the new gates pin the premise (that the function really does
+  take the lock) as well as the behaviour.
+
+- **A promoted leader published a CP address list naming the node that had just
+  died, and a shrinking list crashed the Data Plane (CHAOS-72b / CHAOS-72c).**
+  Both of these sit *downstream* of the publish in `enableControlPlane`, so
+  neither had ever executed on the promotion path: the deadlock above reached
+  the publish and stopped there. Fixing the hang made both live at once.
+
+  `buildCPAddressList` composes the Data Plane failover list from the HA peer
+  address and `clusterRole.grpcAddr`, and `grpcAddr` is deliberately assigned
+  only *after* the listener binds ("only set role after gRPC is successfully
+  started"). For a promoting standby the peer is **the leader that just died**,
+  so the published list named the dead node and omitted the one taking over —
+  and `updateDPAddresses` *replaces* a Data Plane's list rather than merging into
+  it, so a node that had just reached the new leader would overwrite its working
+  address with the dead one and have nothing live left to redial. Fixed by
+  republishing once the role fields are committed, outside the write lock
+  (inside it would be the deadlock again), and only when the list actually
+  changed — so an ordinary non-HA startup does not spend a config version on a
+  no-op.
+
+  `activeIdx` is an index *into* `c.addrs` naming the address the live
+  connection holds, and `updateDPAddresses` replaced that slice without
+  re-resolving it. `reconnectActive` indexes it directly and its `len == 0`
+  guard does not cover an index past a *non-empty* slice, so a shrinking list
+  panicked with `index out of range [1] with length 1` — and
+  `reconnectActive` is the certificate-renewal redial, which runs unattended on
+  a healthy node. The one-element list the first defect published is exactly
+  the shrink that triggers it. Fixed by re-resolving the active entry by
+  **address** rather than clamping the index: clamping also stops the panic but
+  silently re-points the client at a different Control Plane than the one its
+  connection actually holds.
+
+- **The Data Plane's backoff against its Control Plane was defeated three ways
+  (CHAOS-71).** Measured, not inferred:
+
+  The consecutive-failure streak was incremented twice per failed poll — once
+  by `pollConfig`, once again inside `backoff` — so the ladder documented as
+  `2s, 4s, 8s, …, 60s` was really **`4s, 16s, 60s`**: the ceiling on the third
+  failed poll instead of the sixth, and the documented "3 consecutive failures"
+  failover gate tripping on the **second**. The log line was wrong in the same
+  way, reporting "backing off 4s (failure #2)" for a node's *first* failed
+  poll, so an operator could not reconstruct the real cadence from it.
+  `backoff` no longer increments; the streak has exactly one writer.
+
+  Worse, `failover()` cleared the streak on a successful *dial*. A Control
+  Plane pair that answered TCP while failing `GetConfig` — overloaded, fenced
+  out, or timing out an oversized snapshot — therefore held every Data Plane on
+  the ladder's low rungs **indefinitely**: the streak never passed the failover
+  threshold, so no delay ever grew beyond the 30s poll ticker and the ladder
+  never engaged at all. `pollLoop` is ticker-driven and `backoff` sleeps inside
+  a tick, so the effect was not a faster poll rate — it was a Control Plane that
+  was already failing being polled at the full 30s cadence by every node
+  forever, with a fresh gRPC connection every other poll. Connectivity is not evidence that a Control
+  Plane is serving config; only a successful poll is. The failover gate is now
+  re-crossed every `dpFailoverAfterFailures` rather than tested once, so a
+  sustained outage still probes each configured address periodically without
+  redialling on every poll.
+
+  Neither the ladder nor any of the five Control-Plane-facing tickers was
+  jittered or phase-offset, so a fleet whose Control Plane went away — one
+  shared event — retried in lockstep and reconnected in a single instant. The
+  ladder is now jittered per attempt (±10%, matching `internal/feedsched`), and
+  a one-time per-loop phase offset, bounded by both the loop's own interval and
+  5s, staggers all five tickers. The cold-start poll is deliberately **not**
+  staggered: a node with no last-known-good snapshot enforces nothing until it
+  lands, so delaying it to smooth a one-time boot burst would trade a security
+  property for load. This closes the registered WK-13/HA-11 herd rows for the
+  cluster plane; they remain open for `internal/blocklistfeed` and
+  `internal/otlp`.
+
+- **An unbounded per-peer-IP map on the Control Plane (CHAOS-73).**
+  `unenrolledConfigPull.attempts`, which throttles pre-enrollment config pulls,
+  prunes a peer's timestamps only on that same peer's *next* pull, so an
+  address that pulled once and never returned left a permanent entry — one
+  request per source address was enough to grow it for the process lifetime, on
+  a port reachable by any routable peer. The structurally identical
+  `enrollRateLimit` has had a periodic sweep for exactly this, wired into the
+  shared security-limiter janitor, and its own comment names the hazard; the
+  fix had never been carried across. It is now, alongside its sibling. The
+  throttle's *decision* is unchanged — a sweep reclaims aged-out state and does
+  not re-admit an exhausted peer.
+
+  Round report, risk matrix and the backlog it opened are in
+  `roadmap/CHAOS-REVIEW-2026-10-13.md`.
+
 ### Changed
 
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
