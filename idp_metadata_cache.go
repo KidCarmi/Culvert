@@ -140,7 +140,7 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 
 	if fetchErr == nil && len(doc) > 0 && validate != nil {
 		if vErr := validate(doc); vErr != nil {
-			fetchErr = fmt.Errorf("IdP returned an invalid document: %w", vErr)
+			fetchErr = idpFetchDefinitive(fmt.Errorf("IdP returned an invalid document: %w", vErr))
 		}
 	}
 	if fetchErr == nil && len(doc) > 0 {
@@ -156,7 +156,7 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 		return doc, time.Time{}, nil
 	}
 	if fetchErr == nil {
-		fetchErr = fmt.Errorf("IdP returned an empty document")
+		fetchErr = idpFetchDefinitive(fmt.Errorf("IdP returned an empty document"))
 	}
 	if !idpFetchStaleEligible(fetchErr) {
 		// The IdP ANSWERED (4xx, non-200, empty or invalid document), or the
@@ -258,7 +258,45 @@ func idpFetchStatusError(status int, err error) error {
 	if status >= 500 && status <= 599 {
 		return idpFetchUnavailable(err)
 	}
-	return err
+	return idpFetchDefinitive(err)
+}
+
+// idpDefinitiveError marks a fetch the IdP ANSWERED in a way that says the
+// document this profile depends on is not the one this node holds: a non-5xx
+// status (404 withdrawn, 410 gone, 401/403 refused, 429 throttled), or a 200
+// whose body is empty or is not a usable document.
+//
+// IT IS A POSITIVE MARK FOR THE SAME REASON idpUnavailableError IS, and the
+// reason matters more here. "Not stale-eligible" is also true of an error
+// nobody classified — a parse bug, an SP key-pair failure, a validator
+// tightened across an upgrade — so acting on the ABSENCE of the availability
+// mark would let an internal compile fault retire a provider that is serving
+// browser SSO perfectly. Retiring requires POSITIVE evidence that the IdP
+// spoke, and anything unclassified leaves the provider alone.
+//
+// An SSRF policy refusal is NEVER marked, mirroring idpFetchUnavailable: a host
+// that now resolves into a private range is a verdict about the DESTINATION,
+// not the IdP stating that its document is gone, and marking it would let a DNS
+// change take SSO dark.
+type idpDefinitiveError struct{ err error }
+
+func (e *idpDefinitiveError) Error() string { return e.err.Error() }
+func (e *idpDefinitiveError) Unwrap() error { return e.err }
+
+// idpFetchDefinitive marks err as an answer from the IdP. See
+// idpDefinitiveError.
+func idpFetchDefinitive(err error) error {
+	if err == nil || errors.Is(err, errSSRFBlocked) {
+		return err
+	}
+	return &idpDefinitiveError{err: err}
+}
+
+// idpFetchIsDefinitive reports whether a failed fetch was the IdP ANSWERING
+// that the document is not what this node holds. See idpDefinitiveError.
+func idpFetchIsDefinitive(err error) bool {
+	var d *idpDefinitiveError
+	return errors.As(err, &d) && !errors.Is(err, errSSRFBlocked)
 }
 
 // idpFetchStaleEligible reports whether a failed fetch may be answered from the

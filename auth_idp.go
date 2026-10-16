@@ -427,7 +427,11 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// and its episode is a live outage signal — those paths take
 	// discardCandidateEpisode instead, which touches only the candidate's own
 	// key. See retireEpisodeAfterCommit for the rule itself.
-	retireEpisodeAfterCommit(p.ID, liveRef, effectiveRemoteDocRef(p))
+	committedRef := effectiveRemoteDocRef(p)
+	retireEpisodeAfterCommit(p.ID, liveRef, committedRef)
+	// The cache half of the same rule, at the same commit site — see
+	// retireSupersededDocuments for why it may not run on the compile path.
+	retireSupersededDocuments(p.ID, committedRef)
 	return nil
 }
 
@@ -493,6 +497,41 @@ func retireEpisodeAfterCommit(profileID string, prev, next idpDocRef) {
 	// rather than inherit it (Codex review round 19).
 	if prev.Source != "" && prev != next {
 		forgetIdPMetadataEpisodeForSource(profileID, prev)
+	}
+}
+
+// retireSupersededDocuments drops the cached documents a committed profile can
+// no longer reach, keeping the one for the source it now fetches.
+//
+// It is the CACHE half of the same question retireEpisodeAfterCommit asks of
+// the episode store — "what is this profile's source now that the write has
+// landed?" — so it is called from the SAME two commit sites, immediately after
+// persistence, and never from the compile path.
+//
+// That placement is the whole finding. Round 19 retired superseded documents
+// inside idpmeta.Store.Put, which is reached from compileIdPProfile, i.e.
+// before either registry writer has decided to publish: a repoint from S1 to
+// S2 whose persist then failed, or whose snapshot a later profile aborted,
+// left S1 authoritative with its last-known-good already deleted, so the next
+// S1 outage took a healthy profile dark — the pre-CHAOS-71 failure the cache
+// exists to prevent, reintroduced by the round that bounded the cache
+// (CodeRabbit + Codex, independently). COMPILING IS NOT COMMITTING: this
+// section's own rule from rounds 4 and 6, which had been applied to episode
+// state and not to durable cache state.
+//
+// A profile with no remote source left is skipped rather than swept, because
+// sweeping it is the Forget(profileID) case of register row IDP-11.
+func retireSupersededDocuments(profileID string, next idpDocRef) {
+	if next.Source == "" {
+		return
+	}
+	if err := idpMetadataStore().RetireSuperseded(profileID, next.Kind, next.Source); err != nil {
+		// Advisory: the authoritative document is already stored and the
+		// profile is published. A failure here leaves an unreachable entry
+		// that evictLocked still bounds, so it must not fail the write that
+		// has already landed.
+		logger.Printf("IdP[%s]: could not retire superseded cached metadata: %v",
+			sanitizeLog(profileID), sanitizeLog(fmt.Sprint(err)))
 	}
 }
 
@@ -798,6 +837,14 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	}
 	for id, prev := range prevSources {
 		retireEpisodeAfterCommit(id, prev, kept[id])
+	}
+	// The cache half, over the COMMITTED set rather than over prevSources: a
+	// profile whose id is new to this snapshot (including an id reused after a
+	// delete) can still carry cached documents for a source it no longer
+	// fetches, and it has no prevSources entry to be found under. Retiring
+	// nothing rewrites nothing, so the extra ids are free.
+	for id, ref := range kept {
+		retireSupersededDocuments(id, ref)
 	}
 	return nil
 }

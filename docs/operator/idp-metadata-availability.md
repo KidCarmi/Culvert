@@ -96,7 +96,7 @@ outage is adopted within minutes of recovery, not when the 7-day ceiling
 expires. It logs `IDP_METADATA_REVALIDATED` when it does. While the IdP is
 still unreachable the cached provider keeps serving.
 
-**The degradation alert does not depend on another fetch.** A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence — and it does not run at all on a node with no enabled remote-metadata profile.
+**The degradation alert does not depend on another fetch.** A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence. It runs on EVERY node, including one with no remote-metadata profile at boot: a profile added later by an admin save or a CP->DP snapshot is covered, which is why the start is deliberately unconditional. With no open episode its check is a no-op.
 
 **A dark provider recovers on its own.** If a profile still cannot be compiled
 — unreachable at boot with nothing cached — the appliance retries at a bounded
@@ -264,8 +264,10 @@ safe at any time; it costs only the fallback.
   authorization host — even though the user's browser can — and would let a
   resolver outage reject a cached document, which is the whole failure this
   page exists to prevent. So the trade is deliberate and it is visible:
-  `culvert_idp_authz_endpoint_unverified_total` rising, plus one
-  `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line per minute naming the profile.
+  `culvert_idp_authz_endpoint_unverified_total` rising, plus at most one
+  `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line per 5 minutes — ONE process-global
+  rate gate shared by every profile, naming whichever profile triggered it, so
+  the counter is what tells you how many are affected.
   **If you see it: fix this node's DNS.** A provider compiled while the
   resolver was healthy carries a verified endpoint.
 

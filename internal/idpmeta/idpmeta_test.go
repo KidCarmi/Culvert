@@ -575,16 +575,54 @@ func TestServable_AgreesWithGet(t *testing.T) {
 	}
 }
 
-// --- Codex review round 19: superseded entries are retired, not merely aged ---
+// --- round 19 + the owner-decision round: superseded entries are retired at
+// --- the COMMIT, never on the speculative compile path ---
 
-// TestPut_RetiresSupersededSourceForSameProfileKind pins that repointing a
-// profile does not leave its old document behind forever.
+// TestPut_DoesNotRetireTheInServiceSourcesFallback is the owner-decision
+// round's DEFECT gate, and it is the reason supersession no longer lives in
+// Put.
 //
-// The DEFECT this fails against: Put only ever added keys, and nothing in the
-// tree could remove one (the Store has no delete API at all), so every repoint
+// Put is reached from compileIdPProfile, i.e. from the SPECULATIVE half of a
+// registry write, and both writers can abandon that candidate afterwards —
+// Upsert when r.persist fails, ReplaceAll when any later profile fails to
+// validate, compile or persist. Round 19 retired the other sources inside Put,
+// so a repoint from S1 to S2 that was then REFUSED left S1 authoritative with
+// its last-known-good already deleted, and the next S1 outage took a healthy
+// profile dark: the pre-CHAOS-71 failure this package exists to prevent,
+// reintroduced by the round that bounded the cache (CodeRabbit + Codex,
+// independently).
+func TestPut_DoesNotRetireTheInServiceSourcesFallback(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	const s1 = "https://idp.example/md-v1"
+	const s2 = "https://idp.example/md-v2"
+
+	if err := s.Put("A", KindSAMLMetadata, s1, []byte("V1")); err != nil {
+		t.Fatalf("seed S1: %v", err)
+	}
+	// A repoint is being COMPILED. Nothing is persisted or published yet.
+	if err := s.Put("A", KindSAMLMetadata, s2, []byte("V2")); err != nil {
+		t.Fatalf("speculative put S2: %v", err)
+	}
+	// The repoint is refused, so A stays in service on S1.
+	doc, _, err := s.Get("A", KindSAMLMetadata, s1)
+	if err != nil {
+		t.Fatalf("a speculative compile destroyed the in-service source's fallback: %v", err)
+	}
+	if string(doc) != "V1" {
+		t.Fatalf("wrong document served for the in-service source: %q", doc)
+	}
+}
+
+// TestRetireSuperseded_RetiresSupersededSourceForSameProfileKind pins round
+// 19's property at its new home: a COMMITTED repoint does not leave its old
+// document behind forever.
+//
+// The DEFECT round 19 fixed: Put only ever added keys and nothing in the tree
+// could remove one (the Store had no delete API at all), so every repoint
 // leaked a key that Get can never read again — Get is keyed by the profile's
 // CURRENT source. Those dead keys then drove the global oldest-first eviction.
-func TestPut_RetiresSupersededSourceForSameProfileKind(t *testing.T) {
+func TestRetireSuperseded_RetiresSupersededSourceForSameProfileKind(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
 
@@ -599,9 +637,17 @@ func TestPut_RetiresSupersededSourceForSameProfileKind(t *testing.T) {
 	if err := s.Put("p", KindSAMLMetadata, "https://b.example/md", []byte("B")); err != nil {
 		t.Fatalf("put B: %v", err)
 	}
+	// Still TWO entries: the publication has not happened yet.
+	if got := len(s.entries); got != 2 {
+		t.Fatalf("before the commit there should be %d entries, got %d — Put must not retire", 2, got)
+	}
+	// Now the write lands and B becomes authoritative.
+	if err := s.RetireSuperseded("p", KindSAMLMetadata, "https://b.example/md"); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
 
 	if got := len(s.entries); got != 1 {
-		t.Fatalf("repointing a profile left %d entries, want 1 — the superseded key was not retired", got)
+		t.Fatalf("a committed repoint left %d entries, want 1 — the superseded key was not retired", got)
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
 		t.Fatalf("superseded document file still on disk (err=%v)", err)
@@ -613,11 +659,30 @@ func TestPut_RetiresSupersededSourceForSameProfileKind(t *testing.T) {
 	}
 }
 
-// TestPut_SupersessionIsScopedToProfileAndKind is the CONTROL. The cheapest way
-// to pass the gate above is to clear more than you should — another profile's
-// entry, or the same profile's OTHER document kind — which would destroy
-// exactly the fallbacks the cache exists to hold.
-func TestPut_SupersessionIsScopedToProfileAndKind(t *testing.T) {
+// TestRetireSuperseded_KeepSourceEmptyRetiresNothing pins the IDP-11 boundary:
+// a profile with no remote source left (disabled, or switched to inline SAML
+// metadata) is NOT swept here. Sweeping it is Forget(profileID), which needs
+// the cross-layer delete path IDP-11 records, and doing it by accident would
+// delete a fallback a re-enable would have used.
+func TestRetireSuperseded_KeepSourceEmptyRetiresNothing(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	if err := s.Put("p", KindSAMLMetadata, "https://a.example/md", []byte("A")); err != nil {
+		t.Fatalf("put A: %v", err)
+	}
+	if err := s.RetireSuperseded("p", KindSAMLMetadata, ""); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	if doc, _, err := s.Get("p", KindSAMLMetadata, "https://a.example/md"); err != nil || string(doc) != "A" {
+		t.Fatalf("an empty keepSource must retire nothing, got %q err=%v", doc, err)
+	}
+}
+
+// TestRetireSuperseded_IsScopedToProfileAndKind is the CONTROL. The cheapest
+// way to pass the gate above is to clear more than you should — another
+// profile's entry, or the same profile's OTHER document kind — which would
+// destroy exactly the fallbacks the cache exists to hold.
+func TestRetireSuperseded_IsScopedToProfileAndKind(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
 
@@ -633,6 +698,9 @@ func TestPut_SupersessionIsScopedToProfileAndKind(t *testing.T) {
 	if err := s.Put("p", KindSAMLMetadata, "https://b.example/md", []byte("B")); err != nil {
 		t.Fatalf("put B: %v", err)
 	}
+	if err := s.RetireSuperseded("p", KindSAMLMetadata, "https://b.example/md"); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
 
 	if doc, _, err := s.Get("other", KindSAMLMetadata, "https://other.example/md"); err != nil || string(doc) != "OTHER" {
 		t.Fatalf("another profile's entry was retired: %q err=%v", doc, err)
@@ -642,14 +710,15 @@ func TestPut_SupersessionIsScopedToProfileAndKind(t *testing.T) {
 	}
 }
 
-// TestPut_SupersessionKeepsLiveProfilesOutOfEvictionRange is the finding's own
+// TestRetireSuperseded_KeepsLiveProfilesOutOfEvictionRange is round 19's own
 // scenario: a live profile that is NOT recompiling must not lose its only
 // fallback because another profile was repointed many times.
 //
 // Pre-fix, each repoint added a key, so MaxEntries+1 repoints of "busy" evicted
 // the oldest entry in the store — "steady", whose document was still the live
-// fallback for a profile serving traffic.
-func TestPut_SupersessionKeepsLiveProfilesOutOfEvictionRange(t *testing.T) {
+// fallback for a profile serving traffic. Each repoint here is a COMMITTED one
+// (fetch, then publish), which is what the registry does on a successful write.
+func TestRetireSuperseded_KeepsLiveProfilesOutOfEvictionRange(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
 	now := time.Unix(1_700_000_000, 0)
@@ -666,6 +735,9 @@ func TestPut_SupersessionKeepsLiveProfilesOutOfEvictionRange(t *testing.T) {
 		src := fmt.Sprintf("https://busy.example/md/%d", i)
 		if err := s.Put("busy", KindSAMLMetadata, src, []byte("BUSY")); err != nil {
 			t.Fatalf("put busy %d: %v", i, err)
+		}
+		if err := s.RetireSuperseded("busy", KindSAMLMetadata, src); err != nil {
+			t.Fatalf("retire busy %d: %v", i, err)
 		}
 	}
 

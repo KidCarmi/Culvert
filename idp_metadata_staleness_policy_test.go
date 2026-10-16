@@ -396,3 +396,173 @@ func TestChaos71_StaleExpiryRetirementLeavesTheProfileEnabled(t *testing.T) {
 		t.Fatal("a stale-expiry retirement must leave the profile stored and enabled — it is not a revocation")
 	}
 }
+
+// ── Codex P1 on the owner-decision round: a DEFINITIVE answer retires a
+// ── cache-serving provider; an OUTAGE does not ──
+
+// TestChaos71_DefinitiveAnswerRetiresACacheServingProvider is the DEFECT gate.
+//
+// The owner decision separates an OUTAGE from an ANSWER: a transport failure or
+// a 5xx may be served from the last-known-good copy, a 404/410/401/403 or an
+// unusable 200 may not. That rule was applied where a document is ACQUIRED and
+// not where a provider is REVALIDATED, so revalidateCacheServingProviders took
+// the compile-error branch for EVERY error class and left the provider live —
+// keeping withdrawn SAML signing material trusted until the seven-day ceiling
+// even though the IdP was answering and saying it was gone. That is the exact
+// exposure the decision's first item describes.
+//
+// A rule enforced at one layer and not carried to the next is this review's
+// most repeated defect shape.
+func TestChaos71_DefinitiveAnswerRetiresACacheServingProvider(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	idp.down.Store(true) // 503: an outage, so the republish serves from cache
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("upsert during the outage must publish from cache: %v", err)
+	}
+	if !idpRegistry.hasCacheServingProfile() {
+		t.Fatal("setup: the live provider must be serving from cache")
+	}
+
+	// The IdP comes back and ANSWERS that the metadata is gone.
+	idp.down.Store(false)
+	idp.status.Store(http.StatusNotFound)
+	revalidateCacheServingProviders()
+
+	if idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("a provider whose IdP answered 404 must be retired, not left serving " +
+			"a withdrawn document until the seven-day ceiling")
+	}
+	// The profile is WITHDRAWN, not revoked: it stays enabled and stored so the
+	// recovery loop republishes it the moment a usable document is served.
+	if !chaos71ProfileIsEnabledAndStored(t, "corp") {
+		t.Fatal("retirement must leave the profile ENABLED and STORED — it is a " +
+			"withdrawal of a stale document, not a revocation")
+	}
+}
+
+// TestChaos71_OutageDoesNotRetireACacheServingProvider is the CONTROL, and it
+// is the whole availability posture of this round: the cheapest way to pass the
+// gate above is to retire on any compile failure, which would take SSO down for
+// every profile whose IdP is merely unreachable — the behaviour the owner
+// decision exists to prevent.
+func TestChaos71_OutageDoesNotRetireACacheServingProvider(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	idp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("upsert during the outage must publish from cache: %v", err)
+	}
+	if !idpRegistry.hasCacheServingProfile() {
+		t.Fatal("setup: the live provider must be serving from cache")
+	}
+
+	// Still down — a 5xx and a transport failure are OUTAGES.
+	revalidateCacheServingProviders()
+	if !idpRegistry.HasEnabledInteractiveProvider() {
+		t.Fatal("an OUTAGE must leave the cache-serving provider live: an unreachable " +
+			"IdP is degraded availability, not revocation")
+	}
+}
+
+// TestChaos71_UnclassifiedCompileFailureDoesNotRetire is the second CONTROL and
+// the reason the definitive mark is POSITIVE rather than "not stale-eligible".
+//
+// "Not stale-eligible" is also true of an error nobody classified — a parse
+// bug, an SP key-pair failure, an SSRF policy refusal — so retiring on the
+// ABSENCE of the availability mark would let an internal fault take down a
+// provider that is serving browser SSO perfectly.
+func TestChaos71_UnclassifiedCompileFailureDoesNotRetire(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	idp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("upsert during the outage must publish from cache: %v", err)
+	}
+	cands := idpRegistry.cacheServingProfiles()
+	if len(cands) != 1 {
+		t.Fatalf("setup: want one cache-serving candidate, got %d", len(cands))
+	}
+
+	for _, err := range []error{
+		errors.New("saml[corp] sp key: entropy source failed"),
+		fmt.Errorf("oidc[corp] discovery: %w", errSSRFBlocked),
+	} {
+		retireOnDefinitiveAnswer(cands[0], err)
+		if !idpRegistry.HasEnabledInteractiveProvider() {
+			t.Fatalf("an unclassified compile failure must NOT retire a live provider: %v", err)
+		}
+	}
+}
+
+// TestChaos71_DefinitiveClassifierIsDisjointFromStaleEligible pins the two
+// marks against each other. They decide opposite actions on the same error
+// value — serve the cache, or retire the provider — so an error that satisfied
+// both, or neither where one is required, is a silent policy failure.
+func TestChaos71_DefinitiveClassifierIsDisjointFromStaleEligible(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		err            error
+		wantStale      bool
+		wantDefinitive bool
+	}{
+		{"transport failure", idpFetchUnavailable(errors.New("dial tcp: no such host")), true, false},
+		{"http 500", idpFetchStatusError(500, errors.New("HTTP 500")), true, false},
+		{"http 503", idpFetchStatusError(503, errors.New("HTTP 503")), true, false},
+		{"http 404 withdrawn", idpFetchStatusError(404, errors.New("HTTP 404")), false, true},
+		{"http 410 gone", idpFetchStatusError(410, errors.New("HTTP 410")), false, true},
+		{"http 403 refused", idpFetchStatusError(403, errors.New("HTTP 403")), false, true},
+		{"http 429 throttled", idpFetchStatusError(429, errors.New("HTTP 429")), false, true},
+		{"invalid document", idpFetchDefinitive(errors.New("IdP returned an invalid document")), false, true},
+		// An SSRF refusal is a verdict about the DESTINATION, not the IdP
+		// speaking about its document: neither mark may claim it, or a DNS
+		// change would either poison the cache or take SSO dark.
+		{"ssrf refusal", idpFetchUnavailable(fmt.Errorf("host refused: %w", errSSRFBlocked)), false, false},
+		{"ssrf refusal marked definitive", idpFetchDefinitive(fmt.Errorf("host refused: %w", errSSRFBlocked)), false, false},
+		// BOTH layers refuse an SSRF refusal, and this case pins the PREDICATE
+		// rather than the constructor. Constructing through idpFetchDefinitive
+		// leaves the error unmarked, so errors.As fails and the predicate's own
+		// guard is never reached — a mutation that deleted that guard passed
+		// the case above, which is a gate proving less than it claims. The
+		// struct is therefore built directly, the way a future caller might.
+		{"ssrf refusal marked directly", &idpDefinitiveError{err: fmt.Errorf("host refused: %w", errSSRFBlocked)}, false, false},
+		{"ssrf refusal marked directly as unavailable", &idpUnavailableError{err: fmt.Errorf("host refused: %w", errSSRFBlocked)}, false, false},
+		{"unclassified", errors.New("some internal failure"), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := idpFetchStaleEligible(tc.err); got != tc.wantStale {
+				t.Errorf("idpFetchStaleEligible = %v, want %v", got, tc.wantStale)
+			}
+			if got := idpFetchIsDefinitive(tc.err); got != tc.wantDefinitive {
+				t.Errorf("idpFetchIsDefinitive = %v, want %v", got, tc.wantDefinitive)
+			}
+			if idpFetchStaleEligible(tc.err) && idpFetchIsDefinitive(tc.err) {
+				t.Error("an error may never be BOTH an outage and an answer")
+			}
+		})
+	}
+}
+
+// chaos71ProfileIsEnabledAndStored reports whether the registry still holds the
+// profile as enabled — the half of a retirement that must NOT change.
+func chaos71ProfileIsEnabledAndStored(t *testing.T, id string) bool {
+	t.Helper()
+	for _, p := range idpRegistry.All() {
+		if p != nil && p.ID == id && p.Enabled {
+			return true
+		}
+	}
+	return false
+}

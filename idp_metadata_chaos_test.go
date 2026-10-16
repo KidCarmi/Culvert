@@ -50,6 +50,12 @@ type chaos71IdP struct {
 	// land in the middle of it (round 16). An atomic.Value because the handler
 	// goroutine reads it while the gate installs it.
 	hold atomic.Value // chan struct{}
+	// status, when non-zero, makes the handler answer that HTTP status instead
+	// of the document. `down` already covers the 5xx/outage case (it answers
+	// 503, which IS stale-eligible); this is for the DEFINITIVE answers — 404
+	// withdrawn, 410 gone, 401/403 refused — which the owner-decision round
+	// deliberately excluded from the cache fallback.
+	status atomic.Int64
 }
 
 // chaos71NoHold is the typed nil stored to clear a hold. atomic.Value panics on
@@ -93,6 +99,10 @@ func newChaos71IdP(t *testing.T) *chaos71IdP {
 		}
 		if m.down.Load() {
 			http.Error(w, "maintenance", http.StatusServiceUnavailable)
+			return
+		}
+		if code := m.status.Load(); code != 0 {
+			http.Error(w, http.StatusText(int(code)), int(code))
 			return
 		}
 		w.Header().Set("Content-Type", "application/samlmetadata+xml")
@@ -3732,4 +3742,127 @@ func TestChaos71_EpisodeProfilePrefixStillMatchesEveryKey(t *testing.T) {
 			}
 		}
 	}
+}
+
+// ── Owner-decision round: a speculative compile may not retire a cached document ──
+
+// TestChaos71_RefusedRepointKeepsTheInServiceFallback is the DEFECT gate for
+// the finding CodeRabbit and Codex raised independently on round 19's
+// supersession.
+//
+// Round 19 retired superseded documents inside idpmeta.Store.Put. Put is
+// reached from compileIdPProfile, i.e. from the SPECULATIVE half of a registry
+// write, and both writers can abandon that candidate afterwards — Upsert when
+// r.persist fails, ReplaceAll when any later profile fails. So a repoint from A
+// to B that was then REFUSED left A authoritative with its last-known-good
+// already deleted, and the next A outage took a healthy profile dark: the
+// pre-CHAOS-71 failure this package exists to prevent, reintroduced by the
+// round that bounded the cache.
+//
+// COMPILING IS NOT COMMITTING — this section's rule from rounds 4 and 6,
+// applied to durable cache state rather than to episode state.
+func TestChaos71_RefusedRepointKeepsTheInServiceFallback(t *testing.T) {
+	sourceA, healthyB := chaos71RepointSetup(t)
+	kind := chaos71Ref(sourceA).Kind
+
+	if _, _, err := idpMetadataStore().Get("corp", kind, sourceA); err != nil {
+		t.Fatalf("setup: source A must have a cached document: %v", err)
+	}
+
+	// The write cannot be persisted, so the repoint is refused and A stays in
+	// service — but B has already been fetched and cached by the compile.
+	idpRegistry.path = filepath.Join(t.TempDir(), "no-such-dir", "idp.json")
+	chaos71WantErr(t, idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())),
+		"a repoint that cannot be persisted must be refused")
+
+	if _, _, err := idpMetadataStore().Get("corp", kind, sourceA); err != nil {
+		t.Fatalf("a REFUSED repoint retired the in-service source's fallback: %v — "+
+			"source A is still what this profile fetches, so its last-known-good "+
+			"document is the only thing standing between an A outage and a dark profile", err)
+	}
+}
+
+// TestChaos71_CommittedRepointRetiresTheSupersededDocument is the CONTROL, and
+// it is what stops the fix above from being "never retire anything".
+//
+// Round 19's property must survive the move: a repoint that COMMITS makes A
+// unreachable (Get is keyed by the profile's current source), so leaving A
+// behind accumulates one dead key per repoint and the global, oldest-first,
+// liveness-blind eviction can then drop a live profile's only fallback.
+func TestChaos71_CommittedRepointRetiresTheSupersededDocument(t *testing.T) {
+	sourceA, healthyB := chaos71RepointSetup(t)
+	kind := chaos71Ref(sourceA).Kind
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", healthyB.URL())); err != nil {
+		t.Fatalf("a healthy repoint must commit: %v", err)
+	}
+
+	if _, _, err := idpMetadataStore().Get("corp", kind, sourceA); err == nil {
+		t.Fatal("a COMMITTED repoint must retire the superseded document: it is " +
+			"unreachable through Get and drives the liveness-blind eviction")
+	}
+	if _, _, err := idpMetadataStore().Get("corp", chaos71Ref(healthyB.URL()).Kind, healthyB.URL()); err != nil {
+		t.Fatalf("the newly authoritative source must still be cached: %v", err)
+	}
+}
+
+// TestChaos71_SupersessionRunsOnlyFromTheCommitSites is the STRUCTURAL wall.
+//
+// Behavioural coverage cannot reach every future caller of the retirement, and
+// the defect was a CALL SITE rather than a computation: the same function, one
+// phase too early. So the wall pins the phase — Put must not retire, the
+// retirement must be reachable only from the exported commit-time operation,
+// and both registry commit sites must carry it.
+func TestChaos71_SupersessionRunsOnlyFromTheCommitSites(t *testing.T) {
+	store, err := os.ReadFile(filepath.Join(pkgSourceDir(), "internal", "idpmeta", "idpmeta.go"))
+	if err != nil {
+		t.Fatalf("read store source: %v", err)
+	}
+	src := string(store)
+
+	put := chaos71SliceFunc(t, src, "func (s *Store) Put(")
+	if strings.Contains(put, "supersedeLocked(") {
+		t.Fatal("Put must NOT retire superseded documents: it runs on the speculative " +
+			"compile path, before either registry writer has decided to publish")
+	}
+	retire := chaos71SliceFunc(t, src, "func (s *Store) RetireSuperseded(")
+	if !strings.Contains(retire, "supersedeLocked(") {
+		t.Fatal("RetireSuperseded must be the one caller of supersedeLocked")
+	}
+	if got := strings.Count(src, "s.supersedeLocked("); got != 1 {
+		t.Fatalf("supersedeLocked has %d call sites, want exactly 1 (RetireSuperseded)", got)
+	}
+
+	root, err := os.ReadFile(filepath.Join(pkgSourceDir(), "auth_idp.go"))
+	if err != nil {
+		t.Fatalf("read auth_idp.go: %v", err)
+	}
+	body := string(root)
+	for _, fn := range []string{"func (r *IdPRegistry) Upsert(", "func (r *IdPRegistry) ReplaceAll("} {
+		w := chaos71SliceFunc(t, body, fn)
+		if !strings.Contains(w, "retireSupersededDocuments(") {
+			t.Fatalf("%s must retire superseded cached documents after its persist lands", fn)
+		}
+		// Both halves of one rule, at one seam, so they cannot drift apart.
+		if !strings.Contains(w, "retireEpisodeAfterCommit(") {
+			t.Fatalf("%s must still retire the failure episode at the same commit site", fn)
+		}
+	}
+}
+
+// chaos71SliceFunc slices a function out of already-read source, failing rather
+// than slicing from the end of the file when the anchor is absent — the
+// offBy1 trap the other walls in this file document.
+func chaos71SliceFunc(t *testing.T, body, anchor string) string {
+	t.Helper()
+	start := strings.Index(body, anchor)
+	if start < 0 {
+		t.Fatalf("%q not found — this wall is pinning nothing", anchor)
+	}
+	out := body[start:]
+	end := strings.Index(out, "\n}\n")
+	if end < 0 {
+		t.Fatalf("could not find the end of %q", anchor)
+	}
+	return out[:end]
 }

@@ -163,7 +163,7 @@ The third: an `idpMetaInline` early return left an episode nothing could ever
 clear, so a profile switched to inline `metadataXml` warned forever about a
 remote fetch that no longer existed — the observed-evidence rule forbids clearing
 on elapsed TIME, not on evidence the dependency is GONE. See §41, rows
-IDP-1…IDP-11, and `docs/operator/idp-metadata-availability.md`.
+IDP-1…IDP-12, and `docs/operator/idp-metadata-availability.md`.
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -8701,6 +8701,105 @@ finding is fixed on one of two symmetric paths, fix BOTH in the same change and
 wall the PAIR on the property that was actually broken — not on the one that
 was convenient to assert.*
 
+### Review round on the owner decision — a speculative write is not a commit, and a rule stopped one layer short
+
+Two reviewers, independently, found the same defect in **round 19's own
+supersession**, and they were right.
+
+**P1/major — supersession ran on the SPECULATIVE path and deleted the
+in-service profile's fallback.** Round 19 retired a profile's other cached
+documents inside `idpmeta.Store.Put`. `Put` is reached from
+`compileIdPProfile`, i.e. from the half of a registry write that has decided
+nothing yet, and **both** writers can abandon that candidate afterwards —
+`Upsert` when `r.persist` fails, `ReplaceAll` when any later profile fails to
+validate, compile or persist. So a repoint from S1 to S2 that was then REFUSED
+left S1 authoritative with its last-known-good already deleted, and the next S1
+outage took a healthy profile dark: the pre-CHAOS-71 failure this package
+exists to prevent, reintroduced by the round that bounded the cache. Reproduced
+against the real store before anything was changed — seed S1, speculatively
+`Put` S2, and S1 answers *"no usable cached document"* — and then end to end
+through the real `Upsert` with its persist forced to fail.
+
+**COMPILING IS NOT COMMITTING.** That is this section's own rule, written in
+rounds 4 and 6 and applied there to EPISODE state; round 19 broke it for
+DURABLE CACHE state. The registry states the same contract in three places a
+few lines from the call — *"the published slice/map must not be touched until
+persistence succeeds"*, *"old profiles + old live providers stay
+authoritative"*, *"the generation is PUBLISHED only here, after the save
+landed"* — and a durable store write is a publication like any other. The fix
+moves the retirement to `Store.RetireSuperseded`, called from the SAME two
+commit sites as `retireEpisodeAfterCommit`, immediately after persistence: one
+seam, both stores, so the two halves of one rule cannot drift apart. Round 19's
+property survives the move for every repoint that actually commits — the case
+that accumulates in practice — and only a refused candidate's own entry is left
+behind, which `evictLocked` bounds. `keepSource == ""` retires NOTHING, because
+sweeping a profile with no remote source left is IDP-11's `Forget`.
+
+*The transferable form: when a change bounds a resource by DELETING something,
+ask which phase the deletion runs in, not merely whether the arithmetic is
+right. Round 19's reasoning — "a superseded entry is UNREACHABLE" — was true of
+a COMMITTED repoint and false of a speculative one, and nothing in the
+arithmetic distinguished them.*
+
+**P1 — the stale-if-error rule stopped one layer short of the live provider.**
+The owner decision separates an OUTAGE from an ANSWER: a transport failure or a
+5xx may be served from the last-known-good copy, a 404/410/401/403 or an
+unusable 200 may not. That was enforced where a document is ACQUIRED and not
+where a provider is REVALIDATED — `revalidateCacheServingProviders` took its
+compile-error branch for EVERY error class and left the provider live, so a
+provider already serving from cache kept trusting **withdrawn SAML signing
+material** until the seven-day ceiling while the IdP was answering and saying
+it was gone. That is precisely the seven-day exposure the decision's first item
+describes, surviving in the one place the decision did not reach. **A rule
+enforced at one layer and not carried to the next is this review's most
+repeated defect shape** — the OCSP sweep hit it three times in a single round.
+
+The fix needed a POSITIVE classifier, and the reason is the sharp part:
+`idpUnavailableError` is a positive mark for availability, so *"not
+stale-eligible"* is **also** true of an error nobody classified — a parse bug,
+an SP key-pair failure, an SSRF refusal. Retiring on the ABSENCE of the
+availability mark would let an internal fault take down a provider serving
+browser SSO perfectly. So `idpDefinitiveError` mirrors it: retirement requires
+positive evidence that **the IdP spoke**, and anything unclassified leaves the
+provider alone. An SSRF refusal is marked by NEITHER — it is a verdict about
+the DESTINATION, not the IdP speaking about its document, and marking it either
+way would let a DNS change poison the cache or take SSO dark. Retirement reuses
+`retireStaleProvider`, so there is ONE retirement path with one identity rule
+(the under-lock re-check and the atomic stale-serve CLAIM that rounds 9 and 10
+arrived at after two comparison-based attempts raced an admin write); the
+profile stays ENABLED and STORED, so this is a withdrawal of a stale document,
+not a revocation, and the recovery loop republishes as soon as a usable
+document is served.
+
+**One of this round's own gates was VACUOUS, and mutation testing is the only
+reason it is known.** `TestChaos71_DefinitiveClassifierIsDisjointFromStaleEligible`
+claimed to pin that an SSRF refusal is refused by both marks, and it PASSED
+against a mutation deleting the predicate's SSRF guard — because constructing
+through `idpFetchDefinitive` leaves the error unmarked, so `errors.As` fails
+first and the guard is never reached. The case now builds the marked struct
+DIRECTLY, the way a future caller might, and each predicate's guard fails its
+own mutation. *A two-layer defence needs a gate per layer; a gate that enters
+through the outer layer proves nothing about the inner one.*
+
+**Two runbook statements asserted the opposite of what the code does**, both
+the same drift class as the register rows above. The degradation watchdog's
+start was made UNCONDITIONAL in round 5, for the recorded reason that a DP
+receives profiles by snapshot and a node that gains a profile later must still
+be watched — and the runbook said it *"does not run at all on a node with no
+enabled remote-metadata profile"*. And `IDP_AUTHZ_ENDPOINT_UNVERIFIED` is rate
+limited by ONE process-global atomic at `idpMetadataLogInterval` (5 minutes),
+not once per minute per profile as documented, so an operator would have
+misread both the lifecycle and the volume. Both corrected.
+
+**One finding was verified and SKIPPED, with the reason recorded**: a review
+comment asked that `internal/threatfeed`'s `pkgSourceDir` tolerate
+`runtime.Caller` under `-trimpath`. `-trimpath` is used in this repo only for
+release `go build`, never for `go test`, and `qa-race-shards.yml` carries an
+explicit comment that the test build omits it *because* compiled-in source
+paths must resolve. A working-directory fallback would make a wall that is
+reading the WRONG directory pass quietly rather than fail loudly, which is the
+opposite of what every structural wall here is for.
+
 ### Codex review round (2026-09-25) — three findings, one of them the sweep's own headline defect left half-closed
 
 **P1 — a RESOLUTION failure was still reported as a CONFIGURATION error on the
@@ -9784,7 +9883,8 @@ five were the only ones anybody had ever checked.
 | **IDP-7** | A fetch does not honour the metadata document's own `cacheDuration` | **NARROWED by the owner-decision round — `validUntil` is CLOSED.** `samlValidUntilOf` reads `validUntil` from the `EntityDescriptor` AND from the enclosing `EntitiesDescriptor` that `samlsp.ParseMetadata` discards, takes the earlier of the two, and the stale ceiling is now `min(StaleMaxAge, validUntil)` on the compile path and in the live ceiling sweep alike — carried on `idpServedDoc.validUntil` through the same `idpServedDocumentAger` interface the fetch time rides, so the compile-time assertions bind it the same way. `cacheDuration` remains, and it is a DELIBERATE decision rather than an oversight: it is a refresh HINT — how often a relying party should re-fetch — not a statement that the document has expired, so enforcing it as a stale-if-error ceiling would retire a document the IdP never said was invalid, taking SSO down mid-outage on the strength of the IdP's own advice about polling. Its correct home is the periodic refresh in IDP-4. **This row was left asserting a bound that had just been built, which is the lesson worth carrying**: the round that implemented `min(7d, validUntil)` recorded it in the §41 narrative and in the operator runbook and did not narrow the row, so the register — the one artifact a reader consults to learn what is still open — went on claiming the cap did not exist, and the next reader would either rebuild it or trust "the 7-day ceiling bounds the exposure" as the only bound. It is the same shape as the runbook naming an endpoint that was never registered (CHAOS-70 round 2) and as a note whose claim was broader than its wall (round 7), one artifact over: **a register row is a contract about what is open, so a change that closes half a row narrows the row in the SAME change.** |
 | **IDP-9** | An OIDC `authorization_endpoint` whose address CANNOT BE DETERMINED (resolver outage, or the check's own budget spent) is admitted UNVERIFIED. That endpoint is handed to the user's BROWSER, so no dialer of ours ever re-checks it and `isSafeCaptiveRedirect` validates only shape; nothing re-compiles a LIVE provider, so a host unresolvable at compile time that later resolves private is a browser redirect into the internal network | **OPEN, REPORTED NOT FIXED — POSTURE.** Refusing on an unknown verdict is not free: it takes SSO down whenever THIS node's resolver cannot resolve the authorization host, even though the user's browser could, and it hands a resolver outage the power to reject a cached document — this sweep's own headline defect. So the trade is an owner's, not a sweep's. It is no longer SILENT: `culvert_idp_authz_endpoint_unverified_total` plus a rate-limited log line naming the profile. Two closing designs were considered and are recorded rather than half-built: (a) resolve the verdict when the document is ADMITTED to the cache — the network path, where DNS is by definition working — and carry it with the document, which needs a cache-schema change; (b) memoise the verdict on the provider and resolve it OFF the request path, failing closed until it answers. A synchronous re-check at redirect issuance was REJECTED: `CaptiveLoginURL` is on the proxy request path (`proxy_portal.go`), and a blocking resolve there is exactly the CHAOS-60/64 defect this review documents at length |
 | **IDP-10** | **`Upsert` holds `r.mu.Lock()` ACROSS `compileIdPProfile`, which reaches the network** — so an admin saving an IdP profile whose metadata endpoint is slow or blackholed stalls the PROXY DATA PLANE. `proxy.go:350` calls `idpRegistry.HasEnabledInteractiveProvider()` on the request path and that takes `r.mu.RLock()`, so every proxied request blocks for the whole fetch: up to `samlMetadataFetchBudget` (15 s) or `oidcDiscoveryFetchBudget` (10 s), from ONE click on Save. **Measured against the real registry**, not reasoned about: with the metadata response held, the request-path probe was still blocked after 3 s and returned only when the fetch completed. **The rule is already written down TWICE in this tree and applied to two of its three writers** — `idp_recovery.go`'s `publishRecompiled` compiles outside the lock with the reason in its comment, and `ReplaceAll` does the same (round 16 restates it) — so this is the SIXTH instance in this sweep of a rule held on one of two (here, two of three) symmetric paths, and the one it was not applied to is the one reachable from the LIVE admin API. It is CHAOS-57's theme (*the admin plane may never take down the data plane*) in the STALL form rather than the exit form. | **OPEN, REPORTED NOT FIXED — one concern per change.** Pre-existing: the network fetch inside the compile is defect (1) of this sweep and the lock scope predates it, so nothing here introduced it and CHAOS-71 does not widen it. Closing it means giving `Upsert` the `publishRecompiled` shape — compile outside `r.mu`, then re-check still-present / still-enabled / same-generation under the lock before publishing — which is a structural change to the one registry writer whose current correctness argument is *"it never releases the lock"*: rounds 6, 7, 9, 10 and 16 all lean on that, so it needs its own gates for each, not a round appended to this PR |
-| **IDP-11** | **A DELETED profile's last cached document is never removed.** Round 19 bounded cache occupancy to one entry per live `(profile, kind)` by retiring superseded sources on a successful `Put`, which closes the repoint accumulation that let dead keys evict a live profile's only fallback. What remains is the DELETE case: the Store has no `Forget(profileID)`, so a profile removed from the registry leaves its final entry behind, and `evictLocked` is still liveness-blind — so with more than `MaxEntries` (64) profiles having ever existed, a live profile's fallback can still be the oldest entry and be evicted | **OPEN, REPORTED NOT FIXED.** Far narrower than what round 19 closed: the bound moved from "one key per REPOINT, forever" to "one key per profile that has ever existed", so reaching it now needs 64 distinct profiles rather than 64 edits to one. Closing it means a `Forget(profileID)` the registry calls on delete — a NEW cross-layer mutation path into the commit code rounds 6, 7, 9, 10 and 16 each got wrong in turn, so it needs its own gates rather than a round appended here. **The eviction-side alternative is UNSAFE and must not be tried**: `Upsert` holds `r.mu.Lock()` across `compileIdPProfile` (row IDP-10), which reaches `store.Put`, so asking the registry which keys are live from inside eviction takes `r.mu.RLock()` under the write lock and self-deadlocks — the CHAOS-50 cluster-CA defect. Any fix here must pass liveness IN rather than call back OUT, or land after IDP-10 |
+| **IDP-11** | **A DELETED profile's last cached document is never removed.** Round 19 bounded cache occupancy to one entry per live `(profile, kind)` by retiring superseded sources, which closes the repoint accumulation that let dead keys evict a live profile's only fallback — and the review round after it MOVED that retirement out of `Put` and onto the two registry commit sites (`Store.RetireSuperseded`), because on the speculative compile path it was deleting the fallback of the source still in service. What remains is the DELETE case: the Store has no `Forget(profileID)`, so a profile removed from the registry leaves its final entry behind, and `evictLocked` is still liveness-blind — so with more than `MaxEntries` (64) profiles having ever existed, a live profile's fallback can still be the oldest entry and be evicted | **OPEN, REPORTED NOT FIXED.** Far narrower than what round 19 closed: the bound moved from "one key per REPOINT, forever" to "one key per profile that has ever existed", so reaching it now needs 64 distinct profiles rather than 64 edits to one. Closing it means a `Forget(profileID)` the registry calls on delete — a NEW cross-layer mutation path into the commit code rounds 6, 7, 9, 10 and 16 each got wrong in turn, so it needs its own gates rather than a round appended here. **The eviction-side alternative is UNSAFE and must not be tried**: `Upsert` holds `r.mu.Lock()` across `compileIdPProfile` (row IDP-10), which reaches `store.Put`, so asking the registry which keys are live from inside eviction takes `r.mu.RLock()` under the write lock and self-deadlocks — the CHAOS-50 cluster-CA defect. Any fix here must pass liveness IN rather than call back OUT, or land after IDP-10 |
+| **IDP-12** | **The cached document's fetch time is RECONSTRUCTED from a delta, not read from the store, and the reconstruction is only correct while a parse and a log write stay under half a second.** `Store.Get` holds the stamp (`time.Unix(e.FetchedAt, 0)`, a whole second written by `s.now().Unix()`) and returns an AGE against its own clock read; `serveCachedIdPDocument` then rebuilds the stamp as `time.Now().Add(-age).Round(time.Second)`. That reproduces the store's second exactly only while the gap between the two clock reads is under 500 ms — and the owner-decision round's own comment states the purpose as making two compiles of ONE document agree. Between those two reads the function runs **two full XML parses of a remote-supplied document up to 1 MiB** (`validateSAMLMetadataDocument` → `samlsp.ParseMetadata`, then `samlValidUntilOf` → a second `xml.Unmarshal`), a mutex-taking `noteIdPMetadataOutcome`, and a `logger.Printf` that `internal/logsink` documents as **BLOCKING the caller on a full queue**. Past 500 ms the rebuilt stamp is `F+1`: one second AHEAD of the store's own. Two consequences, and the first is the one that bites. (1) `idpRevalidationAdopts` adopts on `cachedAt.After(servedAt)`, and BOTH values are independent reconstructions of the same `F` — so a revalidation that fell back to the IDENTICAL cached document reads "a newer document", `publishRevalidated` swaps the live provider and re-stamps `idpServed`, and because the replacement is still cache-serving it stays a revalidation candidate and `runIdPRecoveryLoop` never settles: pointless provider swaps on a live browser-SSO path, each moving the recovery counters, for a document that never changed. (2) `Round` moves the stamp FORWARD, so the stale window's start moves later and the ceiling is extended — by at most a second, immaterial in itself, but it is the UNSAFE direction in a file that adopts CHAOS-61's *a negative age is STALE, not fresh* explicitly | **OPEN, REPORTED NOT FIXED — LOW severity, and the fix is to stop reconstructing rather than to re-tune the rounding.** Reaching it needs a large document or a saturated log sink, and the cost is churn plus a ≤1 s window, never a trust failure — which is why it is reported rather than folded into the round that found it. `Store.Get` already has the stamp in hand at the line that computes the age, so returning it removes the delta, the 500 ms dependency and the two-clock problem together; **truncating instead of rounding is the lesser fix** (it matches the store's own `Unix()` truncation and fails toward the safe side) but still leaves the stamp derived twice. This is this sweep's own standing rule arriving once more: *when one layer decides what a value MEANS, every other layer asks that layer rather than re-deriving it* (SEC-TOTP-1; rounds 6 and 7 of this section, where a value derived in two places drifted and a writer was reconciled against a key that never existed). Closing it changes `internal/idpmeta`'s read signature and every caller of `resolveIdPDocument`, so it needs its own gates — including one that holds the two clock reads apart deliberately, since the defect is invisible at microsecond δ and no existing gate can observe it **The class was enumerated from the PRIMITIVE rather than from the file, and it came back a single instance**: `idpmeta.Store.Get` is the ONLY accessor in the tree that returns an age for a caller to invert into a timestamp, and every other `time.Now().Add(-...)` site is a self-contained constant (certificate `NotBefore` backdating, a pruning cutoff derived from a window). So the blast radius of the proper fix is exactly one signature, and there is no second copy to keep in step |
 | **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
 | **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so an order that configures a credential first refuses the request and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by the refusal line, so it reports health while testing nothing. 44 root tests mutate the global auth credentials with no restore, so the poisoning order is common, not a rare draw | **CLOSED on main by CHAOS-69 (#1446)**, with the same one-line fix this row proposed — `setupProxyTest(t)`, the repo's own helper for this flake class — reached independently. **It also corrects this row**: CHAOS-69 applied the fix to the SIBLING gate `TestSecReqID1_EndToEndLogAmplificationIsBounded` as well, which this row had assessed as unaffected on the reasoning that it asserts on byte VOLUME rather than on tokens. That reasoning was wrong — leaked credentials change which PATH the request takes, so the byte bound was being measured against a challenge rather than a proxied request. *A gate that drives the real `handleRequest` depends on every global that path reads, not only on the ones its assertion names.* |
 | **SUITE-2** | `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy` is a bare `fast >= legacy` timing ratio with no margin; under `-race` both arms ran ~6-14x slower and INVERTED (5881 vs 5141 ns/op against a documented 376 vs 887), failing with no regression present | **OPEN, REPORTED NOT FIXED** — the package already replaced its other ratio gate with a structural one for this exact reason; widening the bound enough to tolerate a 1.14x inversion would also admit a real 1.4x regression |
