@@ -204,10 +204,21 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	if !cfg.Enabled {
 		return cdrPassSkipped("SKIPPED")
 	}
-	pooled := cdrPickPooled()
+	pooled, resv := cdrPickPooledReserved()
 	if pooled == nil {
 		return cdrPassSkipped("SKIPPED")
 	}
+	// Hand back the half-open probe slot on EVERY return below that does not
+	// record an outcome: the oversize gate (it needs this instance's profile
+	// cap, so it cannot run before the pick), a cache hit, a client-side
+	// file_too_large refusal, a panic, and an outcome lost because the
+	// instance left the pool. Each of those used to abandon the reservation,
+	// so a non-RPC request arriving first after every re-arm kept the breaker
+	// in half-open indefinitely while normal documents skipped CDR (fail-open
+	// by default: forwarded unsanitized). One unconditional defer rather than
+	// a flag: after OnSuccess/OnFailure the breaker has left half-open, which
+	// makes Release a no-op, so it cannot undo a recorded outcome.
+	defer pooled.Breaker.Release(resv)
 	client := pooled.Client
 	instanceName := pooled.Name
 
@@ -361,6 +372,19 @@ func cdrClassifyResult(res *cdrRunSanitizeResult, instance, profile, mode string
 	return cdrErrorOutcome(fmt.Sprintf("unknown_status_%d", res.Status), profile, mode, ms, cfg)
 }
 
+// cdrStatusIsInstanceFailure reports whether a Sluice status counts against
+// the instance's breaker — the classification cdrClassifyResult applies: an
+// engine ERROR or a status this build does not know is a failure; every
+// verdict (CLEAN, SANITIZED, BLOCKED, UNSUPPORTED) is a success.
+func cdrStatusIsInstanceFailure(st pb.Status) bool {
+	switch st {
+	case pb.Status_CLEAN, pb.Status_SANITIZED, pb.Status_BLOCKED, pb.Status_UNSUPPORTED:
+		return false
+	default:
+		return true
+	}
+}
+
 // cdrRunSanitizeResult is a type alias so cdrClassifyResult can take the
 // Sluice result without importing the generated proto directly at every
 // call site.  The underlying type is CDRResult from cdr.go.
@@ -392,7 +416,14 @@ type cdrStageDecision struct {
 //nolint:gocognit // orchestration splits poorly; already extracted from handleTunnelInspect
 func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, ce string,
 	br blockResponder, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
-	if cdrActiveClient() == nil {
+	// Non-consuming liveness gate. It MUST NOT reserve: the original gate
+	// (cdrActiveClient() -> a reserving Pick()) spent the single half-open
+	// probe on a check that issues no RPC and therefore can never record an
+	// outcome. safeCDRSanitize's own pick was then denied and skipped CDR,
+	// leaving the breaker wedged in half-open for the rest of the process
+	// lifetime — under the default fail-OPEN FailMode, every later document
+	// forwarded unsanitized. The probe belongs to the call below.
+	if !cdrAnyInstanceAvailable() {
 		return cdrStageDecision{body: body, scanBody: scanBody}
 	}
 	res := safeCDRSanitize(r.Context(), cdrRequestContext{
