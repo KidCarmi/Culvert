@@ -6,12 +6,15 @@
 > diagnostics, audit actions, OpenAPI). Method: added-line glossary sweep against
 > `docs/design/PRODUCT-TERMINOLOGY.md` plus spot-checks of the new admin surfaces
 > (#1425 self-service password change, #1468 on-demand backup, #1490 admin-username diagnostics, #1408 state-file quarantine).
+>
+> **Finding ID.** This report was drafted as T-64. The 2026-10-11 report (#1602) is assigned T-64 and T-65,
+> and main's last assigned ID before both was T-63, so this report's finding is renumbered **T-66**.
 
 ## Executive Summary
 
 One small production-worthy defect found and fixed; no rename of any stable identifier recommended.
 
-1. **T-64 (fixed here).** The `admin_username_length` operator-contract row used two names for two
+1. **T-66 (fixed here).** The `admin_username_length` operator-contract row used two names for two
    different bounds. Its warning names the 64-byte **account limit** (`adminUsernameAccountLimit`), but its
    healthy message said "within the **login** length limit". "Login length limit" is the 256-byte login-API
    bound (`maxUsernameLen`, CHAOS-63) — a different number. An operator reading the OK row would believe 256
@@ -27,21 +30,22 @@ One small production-worthy defect found and fixed; no rename of any stable iden
 3. **Carried backlog unchanged.** T-9, T-11, T-12, T-13, T-18, T-21+T-32, T-25, T-29, T-30, T-33, T-34, T-39,
    T-54, T-55, T-56, T-59b/c, T-60, T-61, T-62, T-63 and the T-51 residual remain as recorded by their owning
    reports; not re-verified in full and not re-charged.
-4. **Observation (not opened as an ID; owner decision).** Diagnostics copy says "admin account/username"
-   (ten Go sites) while the glossary canonical is **Administrator** (console account) and the legacy panel is
+4. **Observation (not opened as an ID; owner decision).** Operator-facing copy says "admin account/username"
+   (the three `admin_username_length` / no-accounts diagnostics messages at `diagnostics.go:553,574,585`, plus
+   startup and restore output in `auth_startup.go` and `restore.go`) while the glossary canonical is **Administrator** (console account) and the legacy panel is
    titled "Admin Users". Both the shipped nav label ("Administrators") and the panel title ("Admin Users")
    exist today; aligning them is a GUI-wide decision the glossary already scopes, so no change is proposed
    inside a diagnostics-copy fix.
 
-**Terminology Health Score:** 7.9 → **7.9** (lineage of the 2026-09-24 report's comparison row). T-64 was opened
+**Terminology Health Score:** 7.9 → **7.9** (lineage of the 2026-09-24 report's comparison row). T-66 was opened
 and closed in the same change, so net 0.0.
 
 ## Findings
 
 | ID | Business concept | Current names | Canonical | Priority | Migration | Compat risk | PR size |
 |---|---|---|---|---|---|---|---|
-| T-64 (fixed) | Maximum supported admin username length | "login length limit" (OK) vs "account limit" (warn) | "account limit" (64 bytes); "login bound" reserved for the 256-byte login-API bound | Low | None | None (copy only) | XS |
+| T-66 (fixed) | Maximum supported admin username length | "login length limit" (OK) vs "account limit" (warn) | "account limit" (64 bytes); "login bound" reserved for the 256-byte login-API bound | Low | None | None (copy only) | XS |
 
 ## Stop-condition assessment
 
-Beyond T-64, no production-worthy terminology improvement was identified in the window.
+Beyond T-66, no production-worthy terminology improvement was identified in the window.
