@@ -117,10 +117,12 @@ func cpSnapshotRoleAndSupervisor(t *testing.T) {
 	cpSupervisor = nil
 	cpActivationMu.Unlock()
 
+	resetClusterRoleConflictForTest()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = stopControlPlaneListener(ctx)
+		resetClusterRoleConflictForTest()
 
 		cpActivationMu.Lock()
 		cpSupervisor = prevSup

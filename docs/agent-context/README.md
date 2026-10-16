@@ -132,7 +132,11 @@ to this checkout, not to an unmerged branch.
   ONE post-bind step: abort on stop/shutdown or an established non-CP role,
   claim the role, merge the CP address list onto the latest committed snapshot
   (`ConfigStore.UpdateCPAddresses`), roll back on a rejected publish, and only
-  then run `onActivated` behind the shutdown gate. `cpActivationMu` is taken
+  then run `onActivated` behind the shutdown gate. Every write of the cluster
+  role / advertised gRPC address goes through
+  [cluster_role_arbiter.go](../../cluster_role_arbiter.go): an already-claimed
+  role wins, the second claimant is refused and latched (`cluster_posture` FAIL).
+  `cpActivationMu` is taken
   before `clusterRoleMu`, and nothing may call `CurrentConfigSnapshot` while
   holding `clusterRoleMu`. A lease-mode leader whose listener is dark past 30 s
   withholds lease renewal (`leaseRenewOnce`).

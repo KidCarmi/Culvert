@@ -10,7 +10,12 @@ package main
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -307,4 +312,133 @@ func TestChaos71_RejectedRuntimeActivationLeavesThePlaneUnconfigured(t *testing.
 	if snap.Total == 0 {
 		t.Error("the failed attempt was erased from the lifetime counter")
 	}
+}
+
+// TestChaos71_ClusterRoleArbiter_CPClaimFirstRefusesTheDataPlane — Codex P2
+// (4293559910), ordering 1: the CP supervisor's retried bind claims the role
+// BEFORE boot reaches Data-Plane wiring. startDataPlane must then be refused —
+// pre-fix it did UNLOCKED writes that replaced role and gRPC address with DP
+// values while the CP listener, heartbeat monitor and HA leadership stayed
+// live. Deterministic: the claim is driven to completion first, then the real
+// startDataPlane entry point runs.
+func TestChaos71_ClusterRoleArbiter_CPClaimFirstRefusesTheDataPlane(t *testing.T) {
+	cpChaosSetup(t)
+	cpInsecure(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+	if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, nil); err != nil {
+		t.Fatalf("boot path: %v", err)
+	}
+	if r := cpRoleNow(); r != "control-plane" {
+		t.Fatalf("precondition: the CP claim did not land (role %q)", r)
+	}
+
+	startDataPlane(t.Context(), "10.9.9.9:50051", "dp-node", "", "", "")
+
+	clusterRoleMu.RLock()
+	role, gotAddr := clusterRole.role, clusterRole.grpcAddr
+	clusterRoleMu.RUnlock()
+	if role != "control-plane" || gotAddr != addr {
+		t.Fatalf("startDataPlane replaced a live Control Plane's role/address with (%q, %q) — the node would "+
+			"consume DP config while still serving as a CP", role, gotAddr)
+	}
+	if !cpGRPCListenerState().Serving {
+		t.Error("the CP listener stopped serving after the refused Data Plane claim")
+	}
+	if c := checkClusterPosture(); c.Status != diagFail || !strings.Contains(c.Message, "data-plane role was refused") {
+		t.Errorf("the refused Data Plane claim is not operator-visible: cluster_posture = %s %q", c.Status, c.Message)
+	}
+}
+
+// TestChaos71_ClusterRoleArbiter_DPClaimFirstRefusesTheDelayedCP — ordering 2:
+// the Data Plane claimed first (the CP's first bind failed), then the delayed
+// CP bind succeeds. The arbiter refuses the CP (supervisor stops,
+// role_conflict, alert) and the conflict is latched for diagnostics.
+func TestChaos71_ClusterRoleArbiter_DPClaimFirstRefusesTheDelayedCP(t *testing.T) {
+	alerts := cpChaosSetup(t)
+	cpInsecure(t)
+	if _, err := claimDataPlaneRole("10.9.9.9:50051", "dp-node"); err != nil {
+		t.Fatalf("precondition: DP claim: %v", err)
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+	if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, nil); err != nil {
+		t.Fatalf("boot path: %v", err)
+	}
+	clusterRoleMu.RLock()
+	role, gotAddr := clusterRole.role, clusterRole.grpcAddr
+	clusterRoleMu.RUnlock()
+	if role != "data-plane" || gotAddr != "10.9.9.9:50051" {
+		t.Fatalf("the delayed CP claim replaced the Data Plane's role/address with (%q, %q)", role, gotAddr)
+	}
+	if snap := cpGRPCListenerState(); snap.LastReason != "role_conflict" || !snap.SupervisorDown {
+		t.Errorf("the refused CP claim is not reported terminal: %+v", snap)
+	}
+	if len(alerts()) == 0 {
+		t.Error("no cp_grpc_listener_down alert for the refused CP claim")
+	}
+	if c := checkClusterPosture(); c.Status != diagFail || !strings.Contains(c.Message, "control-plane role was refused") {
+		t.Errorf("cluster_posture = %s %q, want a FAIL naming the refused control-plane claim", c.Status, c.Message)
+	}
+	cpRequirePortReleased(t, addr)
+}
+
+// TestChaos71_Wall_ClusterRoleIsWrittenOnlyByTheArbiter: no production file
+// other than cluster_role_arbiter.go may assign clusterRole.role, its
+// advertised grpcAddr, or the identity fields that travel with them — and no
+// file may replace the whole struct. A direct write elsewhere is how
+// startDataPlane overwrote a live Control Plane. Test files are exempt (they
+// stage state deliberately and restore it).
+func TestChaos71_Wall_ClusterRoleIsWrittenOnlyByTheArbiter(t *testing.T) {
+	guarded := map[string]bool{"role": true, "grpcAddr": true, "nodeID": true, "certFile": true, "keyFile": true, "caFile": true}
+	dir := pkgSourceDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	arbiterWrites := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", name, perr)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range as.Lhs {
+				if !cpIsClusterRoleWrite(lhs, guarded) {
+					continue
+				}
+				if name == "cluster_role_arbiter.go" {
+					arbiterWrites++
+					continue
+				}
+				t.Errorf("%s: writes the cluster role outside the arbiter — claim it through "+
+					"cluster_role_arbiter.go so an already-claimed role is never silently replaced", fset.Position(lhs.Pos()))
+			}
+			return true
+		})
+	}
+	if arbiterWrites < 6 {
+		t.Fatalf("the wall found only %d role writes in the arbiter — its selector has gone stale", arbiterWrites)
+	}
+}
+
+// cpIsClusterRoleWrite reports whether an assignment target is clusterRole
+// itself or one of its guarded fields.
+func cpIsClusterRoleWrite(lhs ast.Expr, guarded map[string]bool) bool {
+	if id, ok := lhs.(*ast.Ident); ok {
+		return id.Name == "clusterRole"
+	}
+	sel, ok := lhs.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == "clusterRole" && guarded[sel.Sel.Name]
 }

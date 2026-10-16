@@ -8715,6 +8715,23 @@ required before merge; each is now in the tree.
   can still drop the address until the next publish — pre-existing for all
   publishers and narrowed here (any build after the role commit carries it);
   serialising build+commit for every publisher is a broader refactor.
+* **One role arbiter (Codex review of `ac965a0`).** The mirror of (b): with CP
+  and DP wiring both present and the first CP bind failing, the async retry
+  could claim the role BEFORE boot reached `startDataPlane`, whose UNLOCKED
+  writes then replaced role and gRPC address with DP values while the CP
+  listener, heartbeat monitor and HA leadership stayed live. Every write of
+  `clusterRole.role` / `.grpcAddr` (and the identity fields that travel with
+  them) now lives in `cluster_role_arbiter.go`, under `clusterRoleMu`, with one
+  rule in both orders: **an already-claimed role wins and the second claimant
+  is refused loudly** (latched conflict, `cluster_posture` FAIL; a refused CP
+  claim also stops its supervisor with `role_conflict` and alerts). Silently
+  switching an established role is the dangerous outcome, so refusal is the
+  conservative default; WHICH role should win when both are configured is an
+  owner decision, recorded as an open question. Gates: both interleavings
+  (`TestChaos71_ClusterRoleArbiter_*`) and a structural wall that no production
+  file writes the role outside the arbiter
+  (`TestChaos71_Wall_ClusterRoleIsWrittenOnlyByTheArbiter`), each verified
+  failing with its guard removed.
 * **CodeRabbit (HA config at bind time).** The boot resume closed over the HA
   config read at boot; with the retrying supervisor it can run minutes later
   and restore a leader the operator had since disabled or flipped to standby.

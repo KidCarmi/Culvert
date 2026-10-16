@@ -85,7 +85,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   activation also aborts once shutdown has begun (no HA resume after
   `globalHA.Stop`), never replaces an established Data Plane role (refused,
   alerted as `cp_grpc_listener_down`, reason `role_conflict`), and re-reads the
-  persisted HA config before resuming leadership. A refused admin/promote
+  persisted HA config before resuming leadership. The other way round,
+  Data-Plane startup no longer overwrites a Control Plane role the listener
+  already claimed: every role write goes through one arbiter, the role claimed
+  first wins, and the refused claim is reported FAIL by the `cluster_posture`
+  diagnostics row. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

@@ -234,7 +234,11 @@ If the supervisor goroutine itself panics, nothing rebinds. The same terminal
 state is used — reason `role_conflict` — when a delayed bind finds that this node
 has meanwhile become a **Data Plane**: the Control Plane listener refuses to
 replace an established role and stops (fix the CP/DP configuration, then
-restart). Either way it is reported distinctly:
+restart). The reverse also holds: if the Control Plane claimed the role first,
+Data-Plane startup is refused and the DP client does not start. In both orders
+the role claimed FIRST wins, and the `cluster_posture` diagnostics row reports
+*"cluster role conflict"* as FAIL until the node is reconfigured and
+restarted. Either way it is reported distinctly:
 
 * diagnostics row: *"supervisor stopped … and will **NOT** rebind"*, and its
   operator action is the only one in this family that tells you to **restart

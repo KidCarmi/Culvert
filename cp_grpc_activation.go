@@ -161,45 +161,31 @@ func (s *cpListenerSupervisor) commitActivation() (outcome cpCommitOutcome, conf
 // treats as a Control Plane. The only role it re-asserts is its OWN, on a
 // rebind after a serve-death (s.committed).
 //
-// Locking: clusterRoleMu only, never cpActivationMu (the starter may hold it
-// while waiting on this goroutine). The shutdown flag is read lock-free so the
-// gate mutex is never nested inside the role lock.
+// The decision and the write are the cluster-role ARBITER's
+// (cluster_role_arbiter.go): an already-claimed role wins and the second
+// claimant is refused and latched as a conflict — the same rule the Data
+// Plane's claim obeys in the other order.
+//
+// Locking: clusterRoleMu only (inside the arbiter), never cpActivationMu (the
+// starter may hold it while waiting on this goroutine). The shutdown flag is
+// read lock-free so the gate mutex is never nested inside the role lock.
+// s.committed is touched only by the supervisor's own goroutine.
 func (s *cpListenerSupervisor) claimRole() (prev cpRoleFields, outcome cpCommitOutcome, conflictRole string) {
-	clusterRoleMu.Lock()
-	defer clusterRoleMu.Unlock()
-	if s.stopRequested() || cpActivationShutdown.Load() {
-		return prev, cpCommitStopped, ""
+	prev, outcome, conflictRole = claimControlPlaneRole(s.cfg,
+		func(cur string) bool { return cur == "control-plane" && s.committed },
+		func() bool { return s.stopRequested() || cpActivationShutdown.Load() })
+	if outcome == cpCommitted {
+		s.committed = true
 	}
-	cur := clusterRole.role
-	ours := cur == "control-plane" && s.committed
-	if cur != "" && cur != "standalone" && !ours {
-		return prev, cpCommitRoleConflict, cur
-	}
-	prev = cpRoleFields{role: cur, grpcAddr: clusterRole.grpcAddr, certFile: clusterRole.certFile,
-		keyFile: clusterRole.keyFile, caFile: clusterRole.caFile}
-	clusterRole.role = "control-plane"
-	clusterRole.grpcAddr = s.cfg.addr
-	clusterRole.certFile = s.cfg.certFile
-	clusterRole.keyFile = s.cfg.keyFile
-	clusterRole.caFile = s.cfg.caFile
-	s.committed = true
-	return prev, cpCommitted, ""
+	return prev, outcome, conflictRole
 }
 
 // rollbackRole restores the role fields claimRole replaced, unless something
 // else has changed the role since (it then owns it).
 func (s *cpListenerSupervisor) rollbackRole(prev cpRoleFields) {
-	clusterRoleMu.Lock()
-	defer clusterRoleMu.Unlock()
-	if clusterRole.role != "control-plane" || clusterRole.grpcAddr != s.cfg.addr {
-		return
+	if restoreControlPlaneRole(prev, s.cfg.addr) {
+		s.committed = prev.role == "control-plane"
 	}
-	clusterRole.role = prev.role
-	clusterRole.grpcAddr = prev.grpcAddr
-	clusterRole.certFile = prev.certFile
-	clusterRole.keyFile = prev.keyFile
-	clusterRole.caFile = prev.caFile
-	s.committed = prev.role == "control-plane"
 }
 
 // runOnActivatedUnlessStopping runs the one-time onActivated callback behind

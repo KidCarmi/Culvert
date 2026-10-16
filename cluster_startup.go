@@ -22,10 +22,8 @@ import (
 // a runtime input, deliberately not part of the resolved config.
 func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnrollmentConfig) {
 	// Node identity: standalone until a CP/DP/HA path below claims a role.
-	clusterRole.role = "standalone"
-	if h, err := os.Hostname(); err == nil {
-		clusterRole.nodeID = h
-	}
+	host, _ := os.Hostname()
+	initStandaloneClusterRole(host)
 
 	// Cluster state persistence.
 	clusterDBPathGlobal = cfg.ClusterDBPath
