@@ -52,8 +52,8 @@ func TestAuthExemptKillSwitchRowsNoBackend(t *testing.T) {
 		if strings.Contains(rows[0].Message, "407") || strings.Contains(rows[0].Message, "403") {
 			t.Fatalf("no-backend row must not enumerate per-rule status codes, got %q", rows[0].Message)
 		}
-		if !strings.Contains(rows[0].OperatorAction, "Policy Tester") {
-			t.Fatalf("no-backend row must point to the Policy Tester, got %q", rows[0].OperatorAction)
+		if strings.Contains(rows[0].OperatorAction, "Policy Tester") {
+			t.Fatalf("no-backend row must not point to the Policy Tester, which assumes a backend for Default: %q", rows[0].OperatorAction)
 		}
 	}
 	withBackend := authExemptKillSwitchRows(false, true, true)

@@ -42,10 +42,11 @@ func authExemptKillSwitchRows(envDisabled, runtimeDisabled, authBackend bool) []
 		// backend the result depends on the global default, the rule order
 		// and whether the client presented Proxy-Authorization (which turns
 		// the Stage-1 outcome into Default), so a list here is either
-		// incomplete or wrong. The row states only what holds in every case
-		// and points at the Policy Tester for a specific client.
+		// incomplete or wrong. The row states only what holds in every case.
+		// It does not point at the Policy Tester: its stage2Reached flag
+		// assumes a backend for the Default outcome, so on this node it would
+		// contradict the runtime fall-through to Stage 2.
 		effect = "but no credential or SSO backend is configured, so this does not make formerly exempt clients authenticate: their requests are decided by the remaining authentication rules and Stage 2 policy"
-		action = "Use Policies → Policy Tester to see how a specific formerly exempt client is now decided. " + action
 	}
 	return []OperatorContractCheck{{
 		Code:           "auth_exempt_kill_switch",
