@@ -72,7 +72,9 @@ The inventory is split by kind, because the two kinds carry different risk:
 **(a) Wire-identifier inventory.** This is the inventory produced by the commands below at `fbf6a37`.
 The implementing PR must re-run them against its base and reconcile. The first version of this table
 used a case-sensitive pattern keyed on "id" and missed the untagged `OpID` field and the `op=` alert
-key (Codex, PR #1602).
+key. A later version matched only ID-shaped names and missed the `operation=` audit key (Codex,
+PR #1602). Search (c) therefore matches ANY key whose name is `op` or `operation`, with or without an
+`id` suffix, in every key syntax the code uses.
 
 ```sh
 # (a) every spelling, case-insensitive, all non-test Go INCLUDING cmd/
@@ -81,12 +83,22 @@ git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' fbf6a37 -- '*.go' ':
 git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' fbf6a37 -- api/openapi/openapi.yaml frontend/src static/
 # (b) exported, UNTAGGED operation-ID-like struct fields (Go serializes them under the Go name)
 git grep -n -E '^\s+(Op|OpID|OpId|OperationID|OperationId|Operation)\s+[][*A-Za-z0-9_.]+\s*(//.*)?$' fbf6a37 -- '*.go' ':!*_test.go'
+# (c) any op/operation key, in every key syntax: key=value details and Go/TS/YAML keys,
+#     JSON struct tags, quoted map-literal keys, query parameters (URL, Query().Get, OpenAPI name:)
+P='\b(op|operation)(_?id)?\s*[=:]|json:"(op|operation)(_?id|Id)?[,"]|["'"'"'](op|operation)(_?id|Id)?["'"'"']\s*:'
+P="$P"'|[?&](op|operation)(_?id|Id)?=|\.Get\(["'"'"'](op|operation)(_?id|Id)?["'"'"']|name: (op|operation)(_?id|Id)?\b'
+git grep -n -i -E "$P" fbf6a37 -- '*.go' ':!*_test.go' api/openapi/openapi.yaml frontend/src static/ ':!frontend/src/test'
 ```
 
 Each hit was classified by surface, and each untagged struct from (b) was traced to see whether it
 reaches a JSON response, a request body or a webhook payload. Not this concept, and omitted: OpenAPI
 route `operationId:` keys and `internal/apicontract`; MCP `Operation` fields (an operation *class*);
-`mcperr` `Op` (a kernel step name); and `op=` JavaScript variables in `static/index.html` MCP panels.
+`mcperr` `Op` (a kernel step name); `op=` JavaScript variables in `static/index.html` MCP panels; Go
+locals and struct-literal fields (`opID :=`, `OpID: x`), which (c) also matches; the comparison-
+*operator* keys `op` on auth-rule subject predicates (`authpolicy.go:77`, read at
+`frontend/src/api/policyAuth.ts:72,114`) and MCP policy conditions (`internal/mcp/policy/condition.go:50`,
+`internal/mcpacceptance/authoritative.go:94`); and the plural full-word `operations` keys
+(`internal/pac/publish.go:76`; MCP rollout risk classes, `internal/mcp/rollout/scope.go:109`).
 Wire identifiers found:
 
 | # | Site (`fbf6a37`) | Surface | Current key |
@@ -102,6 +114,7 @@ Wire identifiers found:
 | 8 | `release_dispatch_service.go:423` — `release.dispatch` | Audit detail | `op_id=` |
 | 9 | `release_dispatch_service.go:438` — `release.dispatch.outcome` | Audit detail | `op_id=` |
 | 9a | `release_dispatch_service.go:450-453` — `release_dispatch_attention` alert (`AlertPayload.Detail`, delivered to alert/webhook subscribers) | Alert/webhook detail | `op=` |
+| 9b | `cdr_ui.go:529-531` — `cdr.instance.enroll` | Audit detail | `operation=` |
 | 10 | `pac_lifecycle_api.go:650,1092,1256` — `pac.*` audit details | Audit detail — recorded exception (see constraints) | `operationId=` |
 | 11 | `static/index.html:16091-16166` — Backup Now polling | GUI (JS only) | `opId` |
 | 12 | `static/index.html:17679,17689,17741,17783` — release dispatch panel reads the response key | GUI (client code) | `op_id` |
@@ -109,6 +122,8 @@ Wire identifiers found:
 | 14 | `decryption_redaction.go:135,379,418` — key rotation request/receipts (`openapi.yaml:1014,1896`) | API request/response — already canonical | `operation_id` |
 | 15 | `cdr_ui.go:537`, `cdr_enroll_receipts.go:87,128,558,595`, `cdr_lineage.go:75` — CDR enrollment/receipts (`openapi.yaml:2186-2257`) | API request/response — already canonical | `operationId` |
 | 16 | `pac_lifecycle_api.go` responses (`:185,293,535,570,612,651,847,870,910,920,927,1169,1248`; `openapi.yaml:552-561`) | API request/response — already canonical | `operationId` |
+| 16a | Query parameters: `GET …/lifecycle?operationId=` (`pac_lifecycle_api.go:367`, `openapi.yaml:9109`) and the CDR receipt repair `?operationId=` (`cdr_enroll_receipts.go:726`, `openapi.yaml:12765`; sent at `frontend/src/api/cdr.ts:673`, `frontend/src/api/pac.ts:1302`) | Query parameter — already canonical | `operationId` |
+| 16b | `internal/pac/intent.go:105` — `AmbiguousOp.Op` in the PAC lifecycle response (`ambiguous.op`, decoded at `frontend/src/api/pac.ts:501`). It names the pending operation *record*, not its ID | API response (camelCase) | `op` |
 | 17 | Maintenance agent (`cmd/culvert-maint`): its operation record `op_id` (`internal/ops/ops.go:52`), error and start bodies (`internal/server/handlers_d16b.go:363,420`), its own audit events (`internal/audit/audit.go:39`), its on-disk journal (`internal/journal/journal.go:72`) and its op-log note `op_id=` (`internal/ops/orchestrator.go:223`) | Agent API, agent audit, agent storage — recorded exception (see constraints) | `op_id` |
 
 Internal, not visible: `backups_api.go:328` and `release_dispatch_exec.go:575,581` read the maintenance
@@ -139,7 +154,9 @@ mentions in logs and audit prose ("operation <id>") already follow the rule.
 
 **Constraints the implementing PR must satisfy.** The migration design belongs to that PR.
 
-- Additive only: every existing key, field and alias stays, both emitted and accepted.
+- Additive only: every existing key, field and alias stays, both emitted and accepted. That includes
+  audit detail keys: `key=value` details gain `operation_id=` beside the existing `op_id=`, `op=` and
+  `operation=` (rows 7-9b), which stay.
 - Accepted-input sites (row 5a) accept both keys, reject a request that carries conflicting values, and
   keep strict decoding (unknown fields rejected).
 - snake_case surfaces use `operation_id`; camelCase surfaces use `operationId` (only row 1 is camelCase).
