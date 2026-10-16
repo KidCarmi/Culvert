@@ -311,72 +311,119 @@ const minContendedWindow = 50 * time.Millisecond
 // used the fixture-retention harness that has since been corrected, and the
 // corrected A/Bs show no significant change (p=0.083 with short keys, p=0.328
 // with 64-hex keys; roadmap/SCAN-CACHE-EVICTION-COST.md).
+// evictingWriter is the contention benchmarks' writer goroutine. It Sets unique
+// 64-hex keys into a full cache as fast as it can, so it keeps tripping
+// evictLocked under the exclusive lock.
+//
+// Two guarantees the timed window depends on (Codex, PR #1604):
+//
+//   - An eviction lands INSIDE the window, not only before it. The handshake
+//     Set evicts, which leaves maxSize/4 free slots. Without help, a short run
+//     or a high GOMAXPROCS could time only ordinary Set locking. So, before
+//     announcing ready, the writer tops the cache back up to exactly maxSize.
+//     Its next Set, the first one that can land in the window, evicts.
+//   - Evictions are COUNTED without touching the read path or hashcache.go.
+//     The writer is the only mutator, its keys are unique and nothing expires
+//     (TTL 1 h), so it tracks the map size itself. A Set at size >= maxSize
+//     evicts exactly maxSize/4 entries. halt cross-checks that model against
+//     the real size and fails the benchmark if they ever disagree.
+type evictingWriter struct {
+	stop      chan struct{}
+	done      sync.WaitGroup
+	writes    atomic.Int64
+	evictions atomic.Int64
+	size      int // owned by the writer goroutine; read only after halt's Wait
+}
+
+func startEvictingWriter(c *HashCache, maxSize int, res ScanCacheResult) *evictingWriter {
+	w := &evictingWriter{stop: make(chan struct{})}
+	_, _, w.size = c.Stats()
+	ready := make(chan struct{})
+	w.done.Add(1)
+	go func() {
+		defer w.done.Done()
+		set := func(key string) {
+			evicts := w.size >= maxSize
+			c.Set(key, res)
+			if evicts {
+				w.size -= maxSize / 4
+				w.evictions.Add(1) // counted once the evicting Set has returned
+			}
+			w.size++
+			w.writes.Add(1)
+		}
+		// Land a write before the readers are timed. Without the handshake
+		// the calibration call (b.N=1) can return and stop the writer before
+		// it is ever scheduled.
+		set(seqKey("w", 0))
+		for j := 0; w.size < maxSize; j++ {
+			set(seqKey("f", j)) // top up: the next Set evicts
+		}
+		close(ready)
+		for i := 1; ; i++ {
+			select {
+			case <-w.stop:
+				return
+			default:
+			}
+			set(seqKey("w", i))
+		}
+	}()
+	<-ready
+	return w
+}
+
+// halt stops the writer and waits for it, so it never outlives the benchmark
+// function, then checks the eviction model. Call it with the timer stopped.
+func (w *evictingWriter) halt(b *testing.B, c *HashCache) {
+	b.Helper()
+	close(w.stop)
+	w.done.Wait()
+	if _, _, n := c.Stats(); n != w.size {
+		b.Fatalf("writer's eviction model drifted: model size %d, cache size %d", w.size, n)
+	}
+}
+
+// assertContended reports the in-window writes and evictions and fails a run
+// whose timed window was long enough to be meaningful but saw no eviction.
+// Calibration passes time windows of microseconds to a few milliseconds, in
+// which the writer legitimately may not be scheduled at all. With every P
+// running a reader, a runnable writer can wait for the scheduler's ~10 ms
+// preemption tick (observed: b.N=9512, 1.87 ms timed, 0 writes). So the
+// assertion is gated on the timed duration, not on b.N.
+func assertContended(b *testing.B, writes, evictions int64) {
+	b.Helper()
+	b.ReportMetric(float64(writes), "writes")
+	b.ReportMetric(float64(evictions), "evictions")
+	if b.Elapsed() >= minContendedWindow && evictions == 0 {
+		b.Fatalf("no eviction inside the %v timed window (%d writes landed); the contention this benchmark measures did not happen", b.Elapsed(), writes)
+	}
+}
+
 func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	const maxSize = 10_000
 	c := fillCache(maxSize, 0)
 	keys := keyTable("k", maxSize) // built before the timer starts
 	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
+	w := startEvictingWriter(c, maxSize, res)
 
-	stop := make(chan struct{})
-	ready := make(chan struct{})
-	var writes atomic.Int64
-	go func() {
-		// Land the first write BEFORE the readers are timed, and announce it.
-		// Without the handshake the calibration call (b.N=1) returns and closes
-		// stop before this goroutine is ever scheduled, so the benchmark would
-		// measure uncontended reads and then fail on the assertion below.
-		c.Set(seqKey("w", 0), res)
-		writes.Add(1)
-		close(ready)
-		for i := 1; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			c.Set(seqKey("w", i), res)
-			writes.Add(1)
-		}
-	}()
-	<-ready
-
-	// Count writes that land INSIDE the timed window, not writes that ever
-	// happened. The handshake above already guarantees one Set before timing
-	// starts, which made an earlier `writes.Load() == 0` guard vacuous: it
-	// could not fail, so a run whose writer never got scheduled during
-	// RunParallel would report UNCONTENDED reads under a name promising
-	// contention and still pass (Codex P2, PR #1604).
-	//
-	// The counter is sampled immediately either side of RunParallel, so the
-	// only writes it can misattribute are those landing in the statement
-	// between the sample and the first/last read. That is not airtight by
-	// construction — proving overlap would need the readers themselves to
-	// observe writer progress, and a shared atomic in the measured read path
-	// would distort the ns/op this benchmark exists to report (CodeRabbit
-	// minor, PR #1604). With ~200 000 writes landing in a half-second timed
-	// window, a false pass needs zero of them inside it and one in a
-	// two-statement gap, so the count is evidence rather than proof.
+	// Count writes and evictions that land INSIDE the timed window. The
+	// counters are sampled immediately either side of RunParallel, so the
+	// only ones they can misattribute are those landing in the statement
+	// between the sample and the first/last read. Proving overlap exactly
+	// would need the readers to observe writer progress, and a shared atomic
+	// in the measured read path would distort the ns/op this benchmark exists
+	// to report (CodeRabbit minor, PR #1604). The count is evidence, not proof.
 	b.ReportAllocs()
 	b.ResetTimer()
-	writesBefore := writes.Load()
+	writesBefore, evictionsBefore := w.writes.Load(), w.evictions.Load()
 	hits, total := readParallel(b, c, keys)
-	landed := writes.Load() - writesBefore
+	landed, evicted := w.writes.Load()-writesBefore, w.evictions.Load()-evictionsBefore
 	b.StopTimer()
-	close(stop)
+	w.halt(b, c)
 
 	reportHitRate(b, hits, total)
-	b.ReportMetric(float64(landed), "writes")
-
-	// Calibration passes time windows of microseconds to a few milliseconds,
-	// in which the writer legitimately may not be scheduled at all: with every
-	// P running a reader, a runnable writer can wait for the scheduler's ~10 ms
-	// preemption tick (observed: b.N=9512, 1.87 ms timed, 0 writes). Gating on
-	// b.N let that pass fail spuriously, so gate on the timed duration instead:
-	// assert only once the window spans several preemption ticks, where no
-	// overlapping write means something is actually wrong.
-	if b.Elapsed() >= minContendedWindow && landed == 0 {
-		b.Fatal("no write landed inside the timed window; the contention this benchmark measures did not happen")
-	}
+	assertContended(b, landed, evicted)
 }
 
 // ── Like-for-like contention control ────────────────────────────────────────
@@ -406,44 +453,33 @@ func benchMissOnlyParallel(b *testing.B, withWriter bool) {
 	keys := keyTable("m", maxSize) // never inserted; built before the timer starts
 	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
 
-	stop := make(chan struct{})
-	var writes atomic.Int64
+	var w *evictingWriter
 	if withWriter {
-		ready := make(chan struct{})
-		go func() {
-			c.Set(seqKey("w", 0), res)
-			writes.Add(1)
-			close(ready)
-			for i := 1; ; i++ {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				c.Set(seqKey("w", i), res)
-				writes.Add(1)
-			}
-		}()
-		<-ready
+		w = startEvictingWriter(c, maxSize, res)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	writesBefore := writes.Load()
+	var writesBefore, evictionsBefore int64
+	if w != nil {
+		writesBefore, evictionsBefore = w.writes.Load(), w.evictions.Load()
+	}
 	hits, total := readParallel(b, c, keys) // namespace "m" is never inserted
-	landed := writes.Load() - writesBefore
+	var landed, evicted int64
+	if w != nil {
+		landed, evicted = w.writes.Load()-writesBefore, w.evictions.Load()-evictionsBefore
+	}
 	b.StopTimer()
-	close(stop)
+	if w != nil {
+		w.halt(b, c)
+	}
 
 	reportHitRate(b, hits, total)
 	if hits != 0 {
 		b.Fatalf("control benchmark must read only misses, got %d hits", hits)
 	}
-	if withWriter {
-		b.ReportMetric(float64(landed), "writes")
-		if b.Elapsed() >= minContendedWindow && landed == 0 { // see BenchmarkGet_ParallelDuringEviction
-			b.Fatal("no write landed inside the timed window; nothing was contended")
-		}
+	if w != nil {
+		assertContended(b, landed, evicted)
 	}
 }
 
