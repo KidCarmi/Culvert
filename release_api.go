@@ -249,6 +249,21 @@ const (
 // planner refusal, which are client-correctable.
 var errDispatchWorkerFailed = errors.New("dispatch worker failed; no op was recorded for this dispatch")
 
+// dispatchWorkerFailure is errDispatchWorkerFailed carrying the apply
+// idempotency key the failed attempt used. A panic WITHOUT appliedFlag does not
+// prove that no apply reached the agent: the agent can accept the apply and the
+// worker die before the onApplied observer runs (inside the agent client, or in
+// the executor between Apply returning and the record hook). The key is the one
+// thing that makes a retry safe in every one of those cases, because the agent
+// dedupes a repeated key to the same op — so the service reports it through
+// DispatchOptions.OnIdempotencyKey before any apply is attempted, and the
+// handler hands it back to the caller (Codex/CodeRabbit review).
+type dispatchWorkerFailure struct{ idempotencyKey string }
+
+func (e *dispatchWorkerFailure) Error() string { return errDispatchWorkerFailed.Error() }
+
+func (e *dispatchWorkerFailure) Is(target error) bool { return target == errDispatchWorkerFailed }
+
 // ─── bounded per-agent status store ──────────────────────────────────────────
 
 type dispatchPhase string
@@ -691,11 +706,17 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := auditActor(r)
+	// attemptKey is written by the worker goroutine (OnIdempotencyKey, before any
+	// apply) and read only by that same goroutine's panic conversion below.
+	var attemptKey string
 	opts := DispatchOptions{
 		PreBackup:      body.PreBackup,
 		NoRollback:     body.NoRollback,
 		PassphraseRef:  body.PassphraseRef,
 		IdempotencyKey: body.IdempotencyKey, // honored when set; else the service mints a stable key
+		// Learn the key BEFORE any apply, so a worker panic can still hand it back
+		// for a safe retry (dispatchWorkerFailure).
+		OnIdempotencyKey: func(k string) { attemptKey = k },
 	}
 	dispatchID := rm.newID()
 
@@ -729,7 +750,7 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 		// status slot only if THIS dispatch owned the agent (P2: status-clobber).
 		if panicked {
 			rm.recordDispatchPanic(ep.Key, dispatchID, appliedFlag.Load())
-			rep, derr = nil, errDispatchWorkerFailed
+			rep, derr = nil, &dispatchWorkerFailure{idempotencyKey: attemptKey}
 		} else if ownedAgent(rep, derr) {
 			rm.store.markTerminal(ep.Key, dispatchID, rep)
 		}
@@ -777,25 +798,10 @@ func (rm *releaseManager) write202(w http.ResponseWriter, agentKey, dispatchID s
 // guard below is deliberately independent of that fix: it holds for ANY future
 // writer that forgets, which the panic-containment change alone would not.
 func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchReport, err error) {
-	if rep == nil && err == nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
-			"status": "internal_error",
-			"detail": "dispatch produced no outcome; no op was recorded for this dispatch",
-		})
+	if respondWorkerFailure(w, rep, err) {
 		return
 	}
 	switch {
-	case errors.Is(err, errDispatchWorkerFailed):
-		// A recovered panic in the detached executor goroutine. This branch is
-		// reached only with appliedFlag false, so no op was recorded: a definite,
-		// retryable server-side failure — never a success. (The one case where an
-		// op could nonetheless be live on the agent is a panic in the onApplied
-		// callback itself, between the agent's accept and markDispatched; the
-		// reused idempotency key keeps the retry from applying twice. §41.)
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
-			"status": "internal_error",
-			"detail": errDispatchWorkerFailed.Error(),
-		})
 	case errors.Is(err, errDispatchInFlight):
 		writeJSONStatus(w, http.StatusConflict, map[string]any{"status": "in_flight", "detail": "a dispatch is already in flight on this agent"})
 	case errors.Is(err, errStaleAlreadyCurrent):
@@ -825,6 +831,52 @@ func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchRe
 	default:
 		writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 	}
+}
+
+// respondWorkerFailure answers the two outcomes that mean the detached worker
+// died before producing a normal report, and reports whether it wrote a reply.
+//
+//   - (nil, nil): unreachable by the DispatchService contract, so never "ok"
+//     (see respondPreApply).
+//   - errDispatchWorkerFailed: a recovered panic with appliedFlag false. That is
+//     NOT proof that no apply reached the agent — the agent can accept it and
+//     the worker die before the onApplied observer records it — so the reply
+//     says the outcome is uncertain and returns the idempotency key the attempt
+//     used: a retry with that key is safe whether or not the apply landed,
+//     because the agent dedupes a repeated key to the same op. Still a 500,
+//     never a success.
+func respondWorkerFailure(w http.ResponseWriter, rep *DispatchReport, err error) bool {
+	if rep == nil && err == nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+			"status": "internal_error",
+			"detail": "dispatch produced no outcome; no op was recorded for this dispatch",
+		})
+		return true
+	}
+	if !errors.Is(err, errDispatchWorkerFailed) {
+		return false
+	}
+	var wf *dispatchWorkerFailure
+	if !errors.As(err, &wf) || wf.idempotencyKey == "" {
+		// No key was ever reported, so the worker died before any apply was
+		// attempted (OnIdempotencyKey runs ahead of the executor): a definite,
+		// retryable failure with no op started.
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+			"status":  "internal_error",
+			"outcome": "not_started",
+			"detail":  errDispatchWorkerFailed.Error() + "; no apply was attempted, safe to retry",
+		})
+		return true
+	}
+	writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+		"status":          "internal_error",
+		"outcome":         "uncertain",
+		"idempotency_key": wf.idempotencyKey,
+		"detail": "dispatch worker failed before an op was recorded; the apply may or may not have " +
+			"reached the agent. Retry ONLY with this idempotency_key (the agent deduplicates it to " +
+			"the same op), or check the agent's status first",
+	})
+	return true
 }
 
 // runResumeWorker re-polls an existing agent op to terminal. It runs detached

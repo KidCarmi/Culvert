@@ -49,7 +49,12 @@ import (
 // exists, the HTTP reply is still open) and "wait" faults the watch (the op is
 // LIVE on the agent and the 202 has shipped).
 type panicAgent struct {
-	panicAt string // "running" | "wait"
+	panicAt string // "running" | "apply" | "wait"
+
+	// appliedKey records the idempotency key of the apply the agent ACCEPTED
+	// before an "apply" fault fired (the agent-side op exists; the CP never
+	// learns its op_id).
+	appliedKey string
 
 	mu          sync.Mutex
 	runningSeq  [][]string
@@ -73,7 +78,16 @@ func (p *panicAgent) RunningDigests(context.Context) ([]string, error) {
 	return nil, nil
 }
 
-func (p *panicAgent) Apply(context.Context, UpgradeApplyRequest) (string, error) {
+func (p *panicAgent) Apply(_ context.Context, req UpgradeApplyRequest) (string, error) {
+	if p.panicAt == "apply" {
+		// The agent accepted the apply (the op exists on its side) and the CP
+		// worker died before the onApplied observer could record it.
+		p.mu.Lock()
+		p.appliedKey = req.IdempotencyKey
+		p.mu.Unlock()
+		p.panics.Add(1)
+		panic("CHAOS-75 injected fault: after the agent accepted the apply")
+	}
 	return p.opID, nil
 }
 
@@ -287,6 +301,91 @@ func TestCHAOS75_DispatchWorkerPanicAfterApply_MarksTerminal(t *testing.T) {
 	}
 	if got := crashCount(crashComponentReleaseDispatch); got <= before {
 		t.Fatalf("crash counter for %q = %d; want > %d", crashComponentReleaseDispatch, got, before)
+	}
+}
+
+// A panic with appliedFlag false is NOT proof that no apply reached the agent:
+// here the agent accepts it and the worker dies before the onApplied observer
+// runs. The reply must not call that a no-op ("safe to retry") — a retry that
+// minted a NEW key would apply twice. It must say the outcome is uncertain and
+// hand back the key the accepted apply used, which the agent dedupes.
+func TestCHAOS75_DispatchWorkerPanicAfterAgentAccept_ReturnsRetryKey(t *testing.T) {
+	resetCrashPlaneForGate(t)
+	agent := &panicAgent{panicAt: "apply", opID: "op-accepted", runningSeq: freshDispatchSeq()}
+	rm := newPanicReleaseFixture(t, agent)
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("dispatch = %d; want 500 (%s)", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if body["outcome"] != "uncertain" {
+		t.Fatalf("outcome = %v; want uncertain — an accepted apply may be live (%s)", body["outcome"], rec.Body.String())
+	}
+	agent.mu.Lock()
+	accepted := agent.appliedKey
+	agent.mu.Unlock()
+	if accepted == "" {
+		t.Fatal("control: the injected agent never accepted an apply; this test proves nothing")
+	}
+	if body["idempotency_key"] != accepted {
+		t.Fatalf("idempotency_key = %v; want %q, the key of the apply the agent accepted", body["idempotency_key"], accepted)
+	}
+	if _, ok := rm.store.get("A"); ok {
+		t.Fatal("an unrecorded apply wrote the per-agent status slot; ownership is unproven")
+	}
+}
+
+// A pre-apply panic (before any key exists) is the certain case: the reply says
+// no apply was attempted rather than "uncertain".
+func TestCHAOS75_DispatchWorkerPanicBeforeKey_IsNotStarted(t *testing.T) {
+	resetCrashPlaneForGate(t)
+	agent := &panicAgent{panicAt: "running", opID: "op-unreached"}
+	newPanicReleaseFixture(t, agent)
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	body := decodeBody(t, rec)
+	if rec.Code != http.StatusInternalServerError || body["outcome"] != "not_started" {
+		t.Fatalf("pre-key panic = %d outcome=%v; want 500 not_started (%s)", rec.Code, body["outcome"], rec.Body.String())
+	}
+	if _, has := body["idempotency_key"]; has {
+		t.Fatalf("pre-key panic returned an idempotency_key: %s", rec.Body.String())
+	}
+}
+
+// A fault in the release.dispatch AUDIT write, after the agent accepted the
+// apply, must not erase the op: the observers run before the audit, so the
+// status slot carries the live op_id and the request still gets its 202.
+func TestCHAOS75_AuditPanicAfterApply_StillRecordsTheOp(t *testing.T) {
+	resetCrashPlaneForGate(t)
+	agent := &panicAgent{opID: "op-live", runningSeq: freshDispatchSeq()}
+	rm := newPanicReleaseFixture(t, agent)
+	var fired atomic.Bool
+	rm.svc.auditSink = func(e AuditEntry) {
+		if e.Action == "release.dispatch" && fired.CompareAndSwap(false, true) {
+			panic("CHAOS-75 injected fault: release.dispatch audit sink")
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if !fired.Load() {
+		t.Fatal("control: the audit fault never fired; this test proves nothing")
+	}
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d; want 202 — the agent accepted the apply (%s)", rec.Code, rec.Body.String())
+	}
+	got := waitTerminal(t, rm, "A")
+	if got.OpID != "op-live" {
+		t.Fatalf("op_id = %q; want op-live — the live op must stay recorded", got.OpID)
+	}
+	if got.Terminal != TerminalFailedNeedsAttn || got.Detail != detailDispatchWorkerPanicAfterApply {
+		t.Fatalf("terminal = %q detail = %q; want FAILED_NEEDS_ATTN with the resume detail", got.Terminal, got.Detail)
 	}
 }
 

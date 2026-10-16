@@ -255,6 +255,9 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		s.auditDispatch(actor, ep, target, rep)
 		return rep, plan.Reason
 	}
+	if opts.OnIdempotencyKey != nil && plan.Outcome == OutcomePlan {
+		opts.OnIdempotencyKey(plan.Apply.IdempotencyKey)
+	}
 
 	// The release.dispatch audit is written from the onApplied hook — as soon as
 	// the agent returns an op_id and BEFORE the blocking watch — so a CP crash
@@ -262,16 +265,21 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 	applied := false
 	res, eerr := reg.exec.Execute(ctx, plan, func(opID string) error {
 		applied = true
+		// Observers FIRST: they carry the durable op_id/resume record (the API's
+		// status slot and its 202). Running them after the audit meant a fault in
+		// the audit sink left a LIVE agent op with no record and an API reply that
+		// claimed no op had started (CHAOS-75 review). Nothing in the audit write
+		// is needed by an observer, so the order costs nothing.
+		rc := resumeContextFor(ep.Key, plan, opID)
+		for _, ob := range onApplied {
+			ob(opID, rc)
+		}
 		early := reportFromPlan(plan)
 		early.OpID = opID
 		// auditAdd is in-memory + best-effort file persistence, so this does not
 		// fail today; the error return honors the executor's durable-record
 		// contract for a future persistent recorder.
 		s.auditDispatch(actor, ep, target, early)
-		rc := resumeContextFor(ep.Key, plan, opID)
-		for _, ob := range onApplied {
-			ob(opID, rc)
-		}
 		return nil
 	})
 	rep := reportFromResult(plan, res)
