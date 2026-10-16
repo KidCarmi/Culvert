@@ -115,12 +115,17 @@ func TestSaaSFeedDiagnostics(t *testing.T) {
 // config failures persist after the origin recovers.
 func TestSaaSFeedDiagAction_ByErrorClass(t *testing.T) {
 	network := "once the origin or network path is reachable"
-	for _, class := range []string{saasFeedErrNone, saasFeedErrFetch, saasFeedErrHTTP} {
-		if a := saasFeedDiagAction(saasFeedStatusSnapshot{LastErrorClass: class}); !strings.Contains(a, network) {
-			t.Errorf("class %q: want network guidance, got %q", class, a)
-		}
+	if a := saasFeedDiagAction(saasFeedStatusSnapshot{LastErrorClass: saasFeedErrFetch}); !strings.Contains(a, network) {
+		t.Errorf("fetch: want network guidance, got %q", a)
+	}
+	// An http failure proves the origin answered: point at the URL/publisher
+	// and name the bounded status code.
+	if a := saasFeedDiagAction(saasFeedStatusSnapshot{LastErrorClass: saasFeedErrHTTP, LastHTTPStatus: 404}); strings.Contains(a, network) ||
+		!strings.Contains(a, "origin was reached but answered HTTP 404") {
+		t.Errorf("http: want reached-origin guidance naming the status, got %q", a)
 	}
 	want := map[string]string{
+		saasFeedErrNone:      "use Refresh to fetch a current generation",
 		saasFeedErrPersist:   "write access",
 		saasFeedErrVerify:    "feed is rejected",
 		saasFeedErrParse:     "feed is rejected",

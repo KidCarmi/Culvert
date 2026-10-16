@@ -94,12 +94,22 @@ func saasFeedServing(snap saasFeedStatusSnapshot) string {
 }
 
 // saasFeedDiagAction keys the remedy on the bounded last_error_class: only a
-// fetch/http failure is fixed by the origin or network path becoming
-// reachable; the other classes persist after the network recovers.
+// transport (fetch) failure is fixed by the origin or network path becoming
+// reachable. An http failure proves the origin answered, and no class at all
+// (for example a stale generation recovered at startup) implies no network
+// fault; the other classes persist after the network recovers.
 func saasFeedDiagAction(snap saasFeedStatusSnapshot) string {
 	switch snap.LastErrorClass {
-	case saasFeedErrNone, saasFeedErrFetch, saasFeedErrHTTP:
+	case saasFeedErrNone:
+		return saasFeedDiagTab + ", then use Refresh to fetch a current generation."
+	case saasFeedErrFetch:
 		return saasFeedDiagTab + ", then use Refresh once the origin or network path is reachable."
+	case saasFeedErrHTTP:
+		status := "an error status"
+		if snap.LastHTTPStatus > 0 {
+			status = fmt.Sprintf("HTTP %d", snap.LastHTTPStatus)
+		}
+		return saasFeedDiagTab + ", then check the feed URL and that the publisher is serving the feed: the origin was reached but answered " + status + ". Use Refresh after it is corrected."
 	case saasFeedErrPersist:
 		return saasFeedDiagTab + ", then restore free space and write access on this node's data directory before using Refresh: the feed cannot record a new generation."
 	case saasFeedErrVerify, saasFeedErrParse, saasFeedErrFreshness, saasFeedErrFloor:
