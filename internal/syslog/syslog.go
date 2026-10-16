@@ -493,8 +493,8 @@ func (s *Writer) send(pri int, msg string) {
 }
 
 // tryEnqueue hands one formatted line to the drain goroutine without
-// blocking. A full queue is counted here; a closed writer is NOT, so the
-// caller can hand the line off instead.
+// blocking. A full queue on the writer in SERVICE is counted here; a closed or
+// REPLACED writer is not, so the caller can hand the line off instead.
 //
 // A full queue is terminal backpressure only on a writer that is still the one
 // in SERVICE. A writer that has been REPLACED answers enqDisplaced instead:
