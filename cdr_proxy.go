@@ -403,13 +403,13 @@ type cdrStageDecision struct {
 //nolint:gocognit // orchestration splits poorly; already extracted from handleTunnelInspect
 func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, ce string,
 	br blockResponder, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
-	// Non-consuming liveness gate. This MUST NOT be cdrActiveClient(): that
-	// goes through Pick() -> Breaker.Allow(), which reserves the single
-	// half-open probe for a check that issues no RPC and therefore can never
-	// record an outcome. safeCDRSanitize's own Pick() was then denied and
-	// skipped CDR, leaving the breaker wedged in half-open for the rest of the
-	// process lifetime — under the default fail-OPEN FailMode, every later
-	// document forwarded unsanitized. The probe belongs to the call below.
+	// Non-consuming liveness gate. It MUST NOT reserve: the original gate
+	// (cdrActiveClient() -> a reserving Pick()) spent the single half-open
+	// probe on a check that issues no RPC and therefore can never record an
+	// outcome. safeCDRSanitize's own pick was then denied and skipped CDR,
+	// leaving the breaker wedged in half-open for the rest of the process
+	// lifetime — under the default fail-OPEN FailMode, every later document
+	// forwarded unsanitized. The probe belongs to the call below.
 	if !cdrAnyInstanceAvailable() {
 		return cdrStageDecision{body: body, scanBody: scanBody}
 	}

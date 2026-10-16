@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -49,8 +50,9 @@ func nonRPCProbeHarness(t *testing.T) (b *cdrCircuitBreaker, advance func(time.D
 // oversizeBody is over the harness's 1 MiB cap, so it never reaches Sluice.
 func oversizeBody() []byte { return make([]byte, 2<<20) }
 
-// normalBody is a document the fake Sluice answers CLEAN.
-func normalBody(i int) []byte { return []byte{'d', 'o', 'c', byte(i), byte(i >> 8)} }
+// normalBody is a document the fake Sluice answers CLEAN. Distinct per i so
+// no cache entry can answer it instead of the RPC.
+func normalBody(i int) []byte { return []byte(fmt.Sprintf("doc-%d", i)) }
 
 func sanitizeForProbeTest(body []byte) *cdrRunResult {
 	return safeCDRSanitize(context.Background(), sampleReq("example.com"),
@@ -59,17 +61,17 @@ func sanitizeForProbeTest(body []byte) *cdrRunResult {
 
 // assertNormalDocClosesBreaker sends a normal document and requires that it
 // takes the probe, is sanitized (not skipped), and closes the breaker.
-func assertNormalDocClosesBreaker(t *testing.T, b *cdrCircuitBreaker, i int, context string) {
+func assertNormalDocClosesBreaker(t *testing.T, b *cdrCircuitBreaker, i int, label string) {
 	t.Helper()
 	out := sanitizeForProbeTest(normalBody(i))
 	if out.Status != "CLEAN" {
 		t.Fatalf("%s: normal document got status %q, want CLEAN — the breaker denied it "+
 			"because an earlier request that never called Sluice kept the half-open probe, "+
-			"so CDR was skipped (forwarded unsanitized under fail-open)", context, out.Status)
+			"so CDR was skipped (forwarded unsanitized under fail-open)", label, out.Status)
 	}
 	if b.State() != cbStateClosed {
 		t.Fatalf("%s: breaker %s after a successful probe, want closed",
-			context, breakerStateName(b.State()))
+			label, breakerStateName(b.State()))
 	}
 }
 

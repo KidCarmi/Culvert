@@ -1149,7 +1149,7 @@ func cdrPickOtherClient(exclude string) *CDRClient {
 		if pc.Name == exclude {
 			continue
 		}
-		if pc.Breaker.Allow() {
+		if pc.Breaker.Available() { // non-consuming: no sanitize outcome is recorded here
 			return pc.Client
 		}
 	}

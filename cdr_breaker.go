@@ -9,8 +9,9 @@ package main
 //   half-open ─(probe success)────────> closed
 //   half-open ─(probe failure)────────> open  (reset timer starts fresh)
 //
-// Thread-safe.  The hot path (Allow + OnSuccess/OnFailure) is atomic
-// where possible so picking under load doesn't serialise on a mutex.
+// Thread-safe.  Every state transition runs under one per-breaker mutex
+// (see the concurrency contract on cdrCircuitBreaker); the critical sections
+// are a few loads and stores and never span the RPC.
 //
 // What counts as a failure is the POLICY of the caller (cdr_pool.go /
 // cdr_proxy.go), not the breaker.  Breaker only tracks Allow()/Result
@@ -44,11 +45,11 @@ type cdrBreakerConfig struct {
 	PerFileDeadline time.Duration
 	// HalfOpenProbeTimeout bounds how long a reserved half-open probe may go
 	// without reporting an outcome before the budget is re-armed. It is a
-	// WEDGE ESCAPE, not a concurrency control: Allow() hands out a reservation
-	// that only OnSuccess/OnFailure/Reset release, and half-open has no other
+	// WEDGE ESCAPE, not a concurrency control: Reserve() hands out a reservation
+	// that only OnSuccess/OnFailure/Release/Reset return, and half-open has no other
 	// timer, so a single caller that takes a reservation and never records an
 	// outcome used to strand the breaker in half-open for the whole process
-	// lifetime — every later Allow() denied, CDR silently skipped on every
+	// lifetime — every later Reserve() denied, CDR silently skipped on every
 	// file, and (under the default fail-OPEN FailMode) every document
 	// forwarded unsanitized.
 	//
@@ -136,18 +137,48 @@ func cdrEffectivePerFileDeadline() time.Duration {
 
 // cdrCircuitBreaker tracks one instance's health.  The pool owns one
 // breaker per enrolled Sluice.
+//
+// ── Concurrency contract: ONE mutex owns every state transition ─────────────
+//
+// state, openedAt, the half-open generation, the newest-reservation stamp and
+// the probe budget are COUPLED: a transition must publish them together, and a
+// reader deciding on one must see the others as of the same instant. An
+// earlier revision published them as independent atomics and every fix opened
+// another interleaving (PR #1611 review): a failed probe's cleanup zeroing the
+// generation of a half-open episode a concurrent caller had just armed (state
+// half-open with no generation, so every later reserver spun), two re-armers
+// both admitted because the generation was published before the stamp and the
+// budget, and a denied caller's decrement clobbering a re-arm.
+//
+// So mu guards ALL of it, and every method that reads or writes more than one
+// of those fields holds it for its whole decision. The critical sections are a
+// handful of loads and stores and never span I/O — in particular, mu is never
+// held across the Sanitize RPC: Reserve returns before the call, and the
+// outcome is recorded after it. The cost is irrelevant at this call rate (one
+// Reserve and one outcome per inspected document, against a sanitize RPC
+// measured in milliseconds), and in exchange each transition is one atomic
+// step that can be reasoned about sequentially.
+//
+// The fields stay atomic types so Stats, State and the tests can read a single
+// value without the lock; they are only ever WRITTEN under mu.
 type cdrCircuitBreaker struct {
 	cfg cdrBreakerConfig
+
+	mu sync.Mutex
 
 	state         atomic.Int32
 	openedAt      atomic.Int64 // UnixNano when state transitioned to open
 	consecFails   atomic.Int64
 	halfOpenTried atomic.Int32 // probes currently being served in half-open
-	halfOpenAt    atomic.Int64 // UnixNano when the current half-open budget was armed; doubles as its generation
-	// halfOpenLastAt is UnixNano of the most recent reservation taken from the
+	// halfOpenGen identifies the current half-open budget. It is bumped on
+	// every arm (open -> half-open), every stale re-arm, and every exit from
+	// half-open, so a reservation from an earlier budget can never be released
+	// into a later one. It is never 0 while state is half-open.
+	halfOpenGen atomic.Int64
+	// halfOpenLastAt is UnixNano of the newest reservation taken from the
 	// current budget (or of the arm, before any). The wedge escape measures
-	// staleness from HERE, not from halfOpenAt: once Release can hand a slot
-	// back, one budget can host several sequential reservations, and measuring
+	// staleness from HERE, not from the arm: once Release can hand a slot
+	// back, one budget hosts several sequential reservations, and measuring
 	// from the arm time would reclaim a probe taken moments ago.
 	halfOpenLastAt atomic.Int64
 	// staleProbes counts half-open budgets re-armed because a reserved probe
@@ -157,7 +188,7 @@ type cdrCircuitBreaker struct {
 
 	// totalOpens counts state transitions into open for observability.
 	totalOpens atomic.Int64
-	totalTrips atomic.Int64 // Allow() denials while open
+	totalTrips atomic.Int64 // Reserve denials while open / budget exhausted
 
 	// nowFn is injectable for tests — defaults to time.Now().
 	nowMu sync.RWMutex
@@ -187,220 +218,201 @@ func (b *cdrCircuitBreaker) setNowFn(fn func() time.Time) {
 	b.nowMu.Unlock()
 }
 
-// State reports the current state.  Lock-free.
+// State reports the current state.  Lock-free single read.
 func (b *cdrCircuitBreaker) State() int32 {
 	return b.state.Load()
 }
 
 // cdrProbeReservation identifies a half-open probe slot handed out by
-// Reserve, so Release can return exactly that slot. gen is the halfOpenAt
-// value of the budget the slot came from; zero means "no half-open slot was
-// taken" (closed state), and Release of it is a no-op.
+// Reserve, so Release can return exactly that slot. gen is the half-open
+// budget the slot came from; zero means "no half-open slot was taken" (closed
+// state), and Release of it is a no-op.
 type cdrProbeReservation struct {
 	gen int64
 }
 
-// Allow reports whether the caller should proceed with a request.  Also
-// advances the state machine when the open→half-open timer has elapsed,
-// and enforces the half-open probe budget.
+// Allow is Reserve without the reservation handle.
 //
-// A caller that may return WITHOUT recording an outcome must use Reserve and
-// Release instead, or it strands the half-open slot it was given.
+// It CONSUMES a half-open probe and drops the means to return it, so it is for
+// the breaker's own unit tests only. Production code reserves through
+// cdrPickPooledReserved (the sanitize RPC path, which releases or records every
+// reservation) and asks "is it up?" through Available. Pinned by
+// TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath.
 func (b *cdrCircuitBreaker) Allow() bool {
 	ok, _ := b.Reserve()
 	return ok
 }
 
-// Reserve is Allow plus the identity of the half-open slot it handed out, so
-// a caller that ends up NOT issuing the RPC (an oversize file, a cache hit, a
-// client-side refusal, a panic) can give the slot back with Release instead of
-// abandoning it. Only a slot that is released or reported on lets the breaker
-// leave half-open on the next real call.
+// Reserve reports whether the caller may issue an RPC to this instance and,
+// in half-open, hands out one slot of the probe budget. The caller OWNS the
+// returned reservation: it must either record an outcome (OnSuccess /
+// OnFailure) or hand it back with Release. Only the sanitize RPC path may call
+// it (see Allow).
 func (b *cdrCircuitBreaker) Reserve() (bool, cdrProbeReservation) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now().UnixNano()
 	switch b.state.Load() {
 	case cbStateClosed:
 		return true, cdrProbeReservation{}
 	case cbStateOpen:
-		// Check if the reset timeout has elapsed.
-		elapsed := b.now().UnixNano() - b.openedAt.Load()
-		if elapsed < int64(b.cfg.ResetTimeout) {
+		if now-b.openedAt.Load() < int64(b.cfg.ResetTimeout) {
 			b.totalTrips.Add(1)
 			return false, cdrProbeReservation{}
 		}
-		// Try to transition to half-open (racy with other goroutines; CAS
-		// makes exactly one succeed).
-		if b.state.CompareAndSwap(cbStateOpen, cbStateHalfOpen) {
-			now := b.now().UnixNano()
-			b.halfOpenTried.Store(0)
-			b.halfOpenLastAt.Store(now)
-			b.halfOpenAt.Store(now)
-		}
-		// Fall through to half-open handling below.
-		fallthrough
+		b.armHalfOpenLocked(now)
+		return b.reserveHalfOpenLocked(now)
 	case cbStateHalfOpen:
-		return b.reserveHalfOpen()
+		return b.reserveHalfOpenLocked(now)
 	default:
 		return true, cdrProbeReservation{}
 	}
 }
 
-// reserveHalfOpen takes one slot of the half-open budget, or re-arms an
-// abandoned budget (the wedge escape). Split from Reserve to keep both under
-// the cyclomatic threshold.
-func (b *cdrCircuitBreaker) reserveHalfOpen() (bool, cdrProbeReservation) {
-	// Budget: only N concurrent probes. Acquired with a CAS loop, NOT by
-	// optimistically incrementing and undoing on denial: a denied caller's
-	// Add(-1) could land after the wedge-escape re-arm below reset the
-	// counter, driving it to 0 (or, under a burst, negative) while a
-	// replacement probe was in flight. That silently defeated the budget
-	// and let a recovering Sluice be flooded. A denied caller must leave
-	// the counter untouched.
-	for {
-		gen := b.halfOpenAt.Load()
-		if gen == 0 {
-			// Not half-open any more (an outcome or Reset landed), or the
-			// open->half-open arm is mid-publish. Never hand out a slot
-			// under generation 0: Release could not return it.
-			if b.state.Load() != cbStateHalfOpen {
-				return b.Reserve()
-			}
-			continue
-		}
-		tried := b.halfOpenTried.Load()
-		if tried < b.cfg.HalfOpenProbes {
-			if b.halfOpenTried.CompareAndSwap(tried, tried+1) {
-				b.halfOpenLastAt.Store(b.now().UnixNano())
-				return true, cdrProbeReservation{gen: gen}
-			}
-			continue // lost the race; re-read the budget
-		}
-		// Wedge escape. A reservation is released only by
-		// OnSuccess/OnFailure/Reset, and half-open has no other timer, so a
-		// caller that takes one and never records an outcome would otherwise
-		// deny every later Allow() for the rest of the process lifetime. If
-		// the budget has gone that long without an outcome, treat the
-		// reservation as abandoned, re-arm, and admit one fresh probe so the
-		// breaker can still find its way back to closed. Staleness is
-		// measured from the NEWEST reservation (halfOpenLastAt), so every
-		// outstanding one is at least HalfOpenProbeTimeout old. The CAS on
-		// halfOpenAt elects exactly one re-armer and starts a new
-		// generation, so a late Release from the reclaimed budget is a
-		// no-op; HalfOpenProbeTimeout is derived to exceed any legitimate
-		// probe, so this cannot preempt one that is merely slow.
-		armed := b.halfOpenAt.Load()
-		now := b.now().UnixNano()
-		if armed != 0 && now-b.halfOpenLastAt.Load() >= int64(b.cfg.HalfOpenProbeTimeout) &&
-			b.halfOpenAt.CompareAndSwap(armed, now) {
-			b.staleProbes.Add(1)
-			b.halfOpenLastAt.Store(now)
-			// Reclaim the abandoned reservation(s): exactly this probe is
-			// outstanding. Safe as a Store only because denied callers never
-			// touch the counter.
-			b.halfOpenTried.Store(1)
-			return true, cdrProbeReservation{gen: now}
-		}
-		b.totalTrips.Add(1)
-		return false, cdrProbeReservation{}
+// armHalfOpenLocked starts a fresh half-open budget. Caller holds mu.
+func (b *cdrCircuitBreaker) armHalfOpenLocked(now int64) {
+	b.halfOpenTried.Store(0)
+	b.halfOpenGen.Add(1)
+	b.halfOpenLastAt.Store(now)
+	b.state.Store(cbStateHalfOpen)
+}
+
+// reserveHalfOpenLocked takes one slot of the current budget, or re-arms an
+// abandoned one (the wedge escape). Caller holds mu.
+//
+// Wedge escape: a reservation is released only by an outcome or Release, and
+// half-open has no other timer, so a caller that takes one and never reports
+// would otherwise deny every later Reserve for the rest of the process
+// lifetime. If the NEWEST reservation is older than HalfOpenProbeTimeout,
+// every outstanding one is, and HalfOpenProbeTimeout is derived to exceed any
+// legitimate probe — so they are abandoned: start a new generation (a late
+// Release from the old one is then a no-op) and admit exactly one probe.
+func (b *cdrCircuitBreaker) reserveHalfOpenLocked(now int64) (bool, cdrProbeReservation) {
+	if b.halfOpenTried.Load() < b.cfg.HalfOpenProbes {
+		b.halfOpenTried.Add(1)
+		b.halfOpenLastAt.Store(now)
+		return true, cdrProbeReservation{gen: b.halfOpenGen.Load()}
 	}
+	if now-b.halfOpenLastAt.Load() >= int64(b.cfg.HalfOpenProbeTimeout) {
+		b.staleProbes.Add(1)
+		b.halfOpenGen.Add(1)
+		b.halfOpenTried.Store(1)
+		b.halfOpenLastAt.Store(now)
+		return true, cdrProbeReservation{gen: b.halfOpenGen.Load()}
+	}
+	b.totalTrips.Add(1)
+	return false, cdrProbeReservation{}
 }
 
 // Release returns a half-open slot taken by Reserve WITHOUT counting a
 // success or a failure. Call it on every path that took a reservation and
-// then did not issue the RPC; a deferred call is safe on the RPC paths too,
-// because OnSuccess/OnFailure leave half-open (halfOpenAt reset to 0), which
-// makes a later Release of that reservation a no-op.
+// then did not issue the RPC. A deferred Release is also safe on the paths
+// that did record an outcome: an outcome leaves half-open and bumps the
+// generation, so the later Release no longer matches and does nothing.
 //
 // It is a no-op for a closed-state reservation (gen 0), after the breaker has
-// left half-open, and after the budget was re-armed by the wedge escape (new
-// generation) — in each case the slot is already gone. The one window it does
-// not close is a re-arm landing between the generation check and the
-// decrement; that requires the releasing holder to be older than
-// HalfOpenProbeTimeout, i.e. already reclaimable, and the worst case is one
-// extra concurrent probe.
+// left half-open, and after the budget was re-armed by the wedge escape — in
+// each case the slot is already gone. Because the generation check and the
+// decrement happen under mu, a release can never free a slot of a budget
+// other than the one it was taken from.
 func (b *cdrCircuitBreaker) Release(r cdrProbeReservation) {
-	if r.gen == 0 || b.state.Load() != cbStateHalfOpen || b.halfOpenAt.Load() != r.gen {
+	if r.gen == 0 {
 		return
 	}
-	for {
-		tried := b.halfOpenTried.Load()
-		if tried <= 0 {
-			return
-		}
-		if b.halfOpenTried.CompareAndSwap(tried, tried-1) {
-			return
-		}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state.Load() != cbStateHalfOpen || b.halfOpenGen.Load() != r.gen {
+		return
+	}
+	if b.halfOpenTried.Load() > 0 {
+		b.halfOpenTried.Add(-1)
 	}
 }
 
 // OnSuccess records a successful call.  In closed state, resets the
 // failure counter.  In half-open state, transitions back to closed.
 func (b *cdrCircuitBreaker) OnSuccess() {
-	// Reset fail counter regardless of state.
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.consecFails.Store(0)
 	if b.state.Load() == cbStateHalfOpen {
-		// Transition half-open → closed.  CAS to avoid racing with a
-		// concurrent OnFailure.
-		if b.state.CompareAndSwap(cbStateHalfOpen, cbStateClosed) {
-			b.halfOpenTried.Store(0)
-			b.halfOpenAt.Store(0)
-		}
+		b.leaveHalfOpenLocked()
+		b.state.Store(cbStateClosed)
 	}
 }
 
 // OnFailure records a failure.  In closed state, may trip the breaker.
 // In half-open state, returns straight to open with a fresh timer.
 func (b *cdrCircuitBreaker) OnFailure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	switch b.state.Load() {
 	case cbStateClosed:
-		fails := b.consecFails.Add(1)
-		if fails >= int64(b.cfg.FailureThreshold) {
-			if b.state.CompareAndSwap(cbStateClosed, cbStateOpen) {
-				b.openedAt.Store(b.now().UnixNano())
-				b.totalOpens.Add(1)
-			}
+		if b.consecFails.Add(1) >= int64(b.cfg.FailureThreshold) {
+			b.openLocked()
 		}
 	case cbStateHalfOpen:
 		// Single failure in half-open → back to open.
-		if b.state.CompareAndSwap(cbStateHalfOpen, cbStateOpen) {
-			b.openedAt.Store(b.now().UnixNano())
-			b.totalOpens.Add(1)
-			b.halfOpenTried.Store(0)
-			b.halfOpenAt.Store(0)
-		}
+		b.leaveHalfOpenLocked()
+		b.openLocked()
 	case cbStateOpen:
 		// Already open — nothing to do.
 	}
 }
 
+// leaveHalfOpenLocked retires the current half-open budget. The generation
+// bump is what turns every still-outstanding reservation's Release into a
+// no-op. Caller holds mu and then publishes the new state.
+func (b *cdrCircuitBreaker) leaveHalfOpenLocked() {
+	b.halfOpenTried.Store(0)
+	b.halfOpenGen.Add(1)
+	b.halfOpenLastAt.Store(0)
+}
+
+// openLocked publishes the open state with a fresh reset timer. openedAt is
+// written before the state so a lock-free State() reader that sees open also
+// has its timer (Reserve itself reads both under mu). Caller holds mu.
+func (b *cdrCircuitBreaker) openLocked() {
+	b.openedAt.Store(b.now().UnixNano())
+	b.totalOpens.Add(1)
+	b.state.Store(cbStateOpen)
+}
+
 // Reset forces the breaker back to closed (admin override).
 func (b *cdrCircuitBreaker) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state.Load() == cbStateHalfOpen {
+		b.leaveHalfOpenLocked()
+	}
 	b.state.Store(cbStateClosed)
 	b.consecFails.Store(0)
 	b.halfOpenTried.Store(0)
-	b.halfOpenAt.Store(0)
 	b.openedAt.Store(0)
 }
 
-// Available reports whether Allow() would plausibly admit a request, WITHOUT
-// consuming a half-open probe reservation.
+// Available reports whether Reserve would currently admit a request, WITHOUT
+// consuming a half-open probe reservation or advancing the state machine.
 //
-// A liveness nil-check must use this, never Allow(): the hot path asked
-// "is any instance up?" through Allow(), which spent the single half-open
-// probe on a check that issues no RPC and so can never report an outcome. The
-// real sanitize call that followed was then denied, and the breaker wedged.
-// The reservation belongs to the caller that can actually record the result.
+// Every liveness, status, UI and diagnostic caller must use this, never
+// Reserve/Allow: a reservation taken by a caller that issues no sanitize RPC
+// can never be reported on, and the probe it held is exactly the one the next
+// real document needed — under the default fail-OPEN FailMode, that document
+// is then forwarded unsanitized.
 func (b *cdrCircuitBreaker) Available() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now().UnixNano()
 	switch b.state.Load() {
 	case cbStateClosed:
 		return true
 	case cbStateOpen:
-		return b.now().UnixNano()-b.openedAt.Load() >= int64(b.cfg.ResetTimeout)
+		return now-b.openedAt.Load() >= int64(b.cfg.ResetTimeout)
 	case cbStateHalfOpen:
 		if b.halfOpenTried.Load() < b.cfg.HalfOpenProbes {
 			return true
 		}
-		armed := b.halfOpenAt.Load()
-		return armed != 0 && b.now().UnixNano()-b.halfOpenLastAt.Load() >= int64(b.cfg.HalfOpenProbeTimeout)
+		return now-b.halfOpenLastAt.Load() >= int64(b.cfg.HalfOpenProbeTimeout)
 	default:
 		return true
 	}
@@ -411,7 +423,7 @@ type cdrBreakerStats struct {
 	State       string `json:"state"` // "closed" | "open" | "half_open"
 	ConsecFails int64  `json:"consecFails"`
 	TotalOpens  int64  `json:"totalOpens"` // total transitions into open
-	TotalTrips  int64  `json:"totalTrips"` // Allow() denials while open
+	TotalTrips  int64  `json:"totalTrips"` // Reserve denials (open, or half-open budget exhausted)
 	OpenedAt    int64  `json:"openedAt"`   // UnixNano; 0 if never opened
 	// StaleProbes counts half-open budgets re-armed after a reserved probe
 	// never reported an outcome. Any non-zero value is a bug signal: some
@@ -419,7 +431,8 @@ type cdrBreakerStats struct {
 	StaleProbes int64 `json:"staleProbes"`
 }
 
-// Stats returns a lock-free snapshot of current breaker state.
+// Stats returns a snapshot of current breaker state. Each field is a single
+// lock-free read, so the snapshot as a whole is advisory (observability only).
 func (b *cdrCircuitBreaker) Stats() cdrBreakerStats {
 	return cdrBreakerStats{
 		State:       breakerStateName(b.state.Load()),

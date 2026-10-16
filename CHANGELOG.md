@@ -40,18 +40,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   leaving the probe for the call that can record the outcome. No persisted
   state, wire format or configuration default changes.
 
-  A third leak of the same reservation sat inside `safeCDRSanitize` itself:
-  it picks an instance (reserving the probe) and only then reaches the
-  oversize gate, which needs that instance's profile cap, and the cache
-  lookup — both return without calling Sluice and so without an outcome. An
-  oversize file arriving first after each re-arm therefore kept the breaker
-  half-open indefinitely while normal documents skipped CDR. The pick now
-  returns the reservation and a deferred, outcome-neutral `Release` hands it
-  back on every non-recording return (oversize, cache hit, client-side
-  `file_too_large`, panic). Releases are scoped to the budget's generation,
-  and the wedge escape now measures staleness from the newest reservation
-  rather than the arm time, so a slot handed back and re-taken is never
-  mistaken for an abandoned one.
+  The same reservation leaked on two more paths. Inside `safeCDRSanitize`
+  the instance is picked (reserving the probe) before the oversize gate,
+  which needs that instance's profile cap, and before the cache lookup —
+  both return without calling Sluice and so without an outcome, so an
+  oversize file arriving first after each re-arm kept the breaker half-open
+  indefinitely. And the status/UI/diagnostic selectors (`cdrActiveClient()`
+  behind `GET /api/cdr/config` and five other admin handlers, plus the
+  revoke/recovery client pickers) reserved through `Pick()`/`Allow()` for a
+  read. The API is now split: `Pick()`, `cdrActiveClient()` and every
+  non-sanitize caller select through the non-consuming `Available()`; only
+  `safeCDRSanitize` reserves (`cdrPickPooledReserved`), receives an owned
+  reservation, and hands it back through a deferred, outcome-neutral,
+  generation-scoped `Release` on every return that records no outcome
+  (oversize, cache hit, client-side `file_too_large`, panic). An AST wall
+  (`TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath`) pins that no other
+  production code reserves.
+
+  The breaker's coupled state — state, reset timer, half-open generation,
+  newest-reservation stamp, probe budget — is now changed under ONE
+  per-breaker mutex per transition instead of as independent atomics, which
+  had admitted a failed probe's cleanup erasing a concurrently re-armed
+  half-open episode (half-open with no generation: every reserver spun) and
+  two stale re-armers both admitted past a one-probe budget. The critical
+  sections are a few loads and stores, never span the RPC, and run once per
+  inspected document against a sanitize RPC measured in milliseconds. The
+  wedge escape measures staleness from the newest reservation rather than
+  the arm time, so a slot handed back and re-taken is never reclaimed while
+  live.
 
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode

@@ -320,7 +320,7 @@ func TestCDRHotPath_LivenessGateLeavesProbeForTheRealCall(t *testing.T) {
 	b := pc.Breaker
 	now := time.Now()
 	b.setNowFn(func() time.Time { return now })
-	b.OnSuccess() // release the reservation Pick() just took
+	b.OnSuccess() // no-op on a closed breaker; Pick() reserves nothing
 
 	tripOpen(t, b)
 	now = now.Add(b.cfg.ResetTimeout + time.Second)
@@ -335,8 +335,8 @@ func TestCDRHotPath_LivenessGateLeavesProbeForTheRealCall(t *testing.T) {
 			"the probe must be left for the call that can record an outcome", n)
 	}
 	// The real selector now gets it, and can report the outcome.
-	if got := cdrPickPooled(); got == nil {
-		t.Fatal("cdrPickPooled() == nil right after the gate said CDR was usable: " +
+	if got, _ := cdrPickPooledReserved(); got == nil {
+		t.Fatal("cdrPickPooledReserved() == nil right after the gate said CDR was usable: " +
 			"the recovery probe was consumed by the gate, so every file would " +
 			"silently skip sanitization")
 	}

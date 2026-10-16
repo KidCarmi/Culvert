@@ -9,13 +9,14 @@ package main
 //   - A per-instance circuit breaker
 //   - Last-known health response + timestamp
 //
-// safeCDRSanitize (cdr_proxy.go) calls cdrPickPooled() to get the best
-// available instance.  The picker ignores clients whose breaker is open
-// and round-robins across the rest.  All-open → nil → safeCDRSanitize
-// applies fail-mode.
+// safeCDRSanitize (cdr_proxy.go) calls cdrPickPooledReserved() to get the
+// best available instance AND own its half-open probe reservation.  The
+// picker ignores clients whose breaker is open and round-robins across the
+// rest.  All-open → nil → safeCDRSanitize applies fail-mode.
 //
-// Backwards compatibility: cdrActiveClient() still returns a *CDRClient
-// (or nil), so code paths that only need "is CDR live?" keep working.
+// Every other caller — liveness, status, UI, admin diagnostics — selects
+// through Pick() / cdrActiveClient(), which never reserve: a reservation is
+// only safe in a caller that records the sanitize outcome or releases it.
 
 import (
 	"errors"
@@ -148,21 +149,30 @@ func (p *cdrClientPool) Get(name string) *cdrPooledClient {
 }
 
 // Pick returns the next available client using round-robin with
-// circuit-breaker filtering.  Returns nil when every instance has an
-// open breaker (caller applies fail-mode).
+// circuit-breaker filtering, WITHOUT reserving a half-open probe.  Returns
+// nil when no instance is available.  For liveness, status, UI and admin
+// diagnostic callers; the sanitize RPC path uses PickReserved.
 //
-// Strategy: start from the rr cursor; the first client whose breaker
-// Allow() returns true wins.  Advances the cursor before returning so
-// subsequent calls on a stable pool spread load.
+// Strategy: start from the rr cursor; the first client whose breaker is
+// Available() wins.  Advances the cursor before returning so subsequent
+// calls on a stable pool spread load.
 func (p *cdrClientPool) Pick() *cdrPooledClient {
-	pc, _ := p.PickReserved()
+	pc, _ := p.pick(func(b *cdrCircuitBreaker) (bool, cdrProbeReservation) {
+		return b.Available(), cdrProbeReservation{}
+	})
 	return pc
 }
 
-// PickReserved is Pick plus the half-open reservation the winning breaker
-// handed out. A caller that may return without recording an outcome must
-// hand it back with pc.Breaker.Release (see safeCDRSanitize).
+// PickReserved is Pick for the sanitize RPC path: the winning breaker hands
+// out a half-open reservation that the caller OWNS and must either report on
+// (OnSuccess/OnFailure) or hand back (Release). Only safeCDRSanitize may call
+// it (TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath).
 func (p *cdrClientPool) PickReserved() (*cdrPooledClient, cdrProbeReservation) {
+	return p.pick((*cdrCircuitBreaker).Reserve)
+}
+
+// pick is the shared round-robin walk; sel decides each candidate.
+func (p *cdrClientPool) pick(sel func(*cdrCircuitBreaker) (bool, cdrProbeReservation)) (*cdrPooledClient, cdrProbeReservation) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	n := len(p.clients)
@@ -177,7 +187,7 @@ func (p *cdrClientPool) PickReserved() (*cdrPooledClient, cdrProbeReservation) {
 	}
 	for i := 0; i < n; i++ {
 		candidate := p.clients[(start+i)%n]
-		if ok, resv := candidate.Breaker.Reserve(); ok {
+		if ok, resv := sel(candidate.Breaker); ok {
 			return candidate, resv
 		}
 	}
@@ -239,25 +249,18 @@ func (p *cdrClientPool) anyAvailable() bool {
 }
 
 // cdrAnyInstanceAvailable is the hot path's non-consuming liveness gate. Use
-// it for "is CDR usable at all?"; use cdrPickPooled when actually calling,
-// because only the caller that issues the RPC can report the outcome that
-// releases a half-open reservation.
+// it for "is CDR usable at all?"; only the sanitize RPC path reserves
+// (cdrPickPooledReserved), because only the caller that issues the RPC can
+// report the outcome that releases a half-open reservation.
 func cdrAnyInstanceAvailable() bool {
 	return cdrPool.anyAvailable()
 }
 
-// cdrPickPooled returns the pool-aware selected client with full
-// per-instance state (profileCap, breaker, health).  Returns nil when
-// no instance is available — callers treat nil as "skip CDR" and apply
-// fail_mode.  This is the proxy hot path's selector.
-func cdrPickPooled() *cdrPooledClient {
-	return cdrPool.Pick()
-}
-
-// cdrPickPooledReserved is cdrPickPooled for a caller that may finish
-// without issuing the RPC: it also returns the half-open reservation, which
-// that caller must Release so the breaker is not left holding a slot nobody
-// will report on.
+// cdrPickPooledReserved is the proxy hot path's selector: the pool-aware
+// client with full per-instance state (profileCap, breaker, health) plus the
+// half-open reservation it holds.  Returns nil when no instance is available
+// — callers treat nil as "skip CDR" and apply fail_mode.  The caller must
+// record an outcome or Release the reservation on every return path.
 func cdrPickPooledReserved() (*cdrPooledClient, cdrProbeReservation) {
 	return cdrPool.PickReserved()
 }
