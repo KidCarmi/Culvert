@@ -38,12 +38,23 @@ func TestCheckFileProfileResolution_ClearsAfterRepair(t *testing.T) {
 	if c := checkFileProfileResolution(); c.Status != diagOK {
 		t.Fatalf("a disabled rule never matches, so its dangling reference must not warn: %+v", c)
 	}
+	// Drop/Block_Page/Redirect terminate before any file-profile evaluation,
+	// and auth rules never reach Stage 2: none of them can fail closed.
+	for _, a := range []PolicyAction{ActionDrop, ActionBlockPage, ActionRedirect} {
+		policyStore.Add(PolicyRule{Name: "fp-dangling-" + string(a), Action: a,
+			FileFiltering: true, FileProfile: "gone", FileProfileID: "fp-missing-id"})
+	}
+	policyStore.Add(PolicyRule{Name: "fp-dangling-auth", RuleType: ruleTypeAuth, Action: ActionAllow,
+		FileFiltering: true, FileProfile: "gone", FileProfileID: "fp-missing-id"})
+	if c := checkFileProfileResolution(); c.Status != diagOK {
+		t.Fatalf("rules that never evaluate a file profile must not warn: %+v", c)
+	}
 	policyStore.Add(PolicyRule{Name: "fp-dangling-rule", Action: ActionAllow,
 		FileFiltering: true, FileProfile: "gone", FileProfileID: "fp-missing-id"})
 	atomic.StoreInt64(&statFileProfileUnresolvedBlocked, 2)
 
 	c := checkFileProfileResolution()
-	if c.Status != diagWarn || !strings.Contains(c.Message, "fp-dangling-rule") || strings.Contains(c.Message, "fp-dangling-disabled") {
+	if c.Status != diagWarn || !strings.Contains(c.Message, "1 enabled Allow rule(s)") || !strings.Contains(c.Message, "fp-dangling-rule") {
 		t.Fatalf("dangling reference: got %+v, want warn naming fp-dangling-rule", c)
 	}
 
@@ -53,6 +64,9 @@ func TestCheckFileProfileResolution_ClearsAfterRepair(t *testing.T) {
 	c = checkFileProfileResolution()
 	if c.Status != diagOK {
 		t.Fatalf("repaired reference must clear the warning while the counter stays at 2, got %+v", c)
+	}
+	if strings.Contains(c.Message, "repaired") || strings.Contains(c.Message, "every policy rule") || !strings.Contains(c.Message, "2 fail-closed") {
+		t.Fatalf("OK row must describe only enforced rules and not assume how it cleared: %q", c.Message)
 	}
 }
 

@@ -30,13 +30,15 @@ func checkFileProfileResolution() OperatorContractCheck {
 
 // danglingFileProfileRules names the rules whose authoritative FileProfileID
 // does not resolve — exactly the rules fileProfileBlockedByID fails closed on.
-// Legacy rules without an ID resolve by name and never fail closed; a disabled
-// rule never matches, so it blocks nothing.
+// Only rules that can reach that path count: an enabled access rule whose
+// action is Allow (Drop/Block_Page/Redirect terminate in applyPolicyDecision
+// before any file-profile evaluation, and auth rules never reach Stage 2).
+// Legacy rules without an ID resolve by name and never fail closed.
 func danglingFileProfileRules(rules []PolicyRule) []string {
 	var names []string
 	for i := range rules {
 		r := &rules[i]
-		if !ruleIsEnabled(r) || !r.FileFiltering || r.FileProfile == FileProfileNone || r.FileProfileID == "" {
+		if !fileProfileEnforced(r) || r.FileProfileID == "" {
 			continue
 		}
 		if globalProfileStore.GetByID(r.FileProfileID) != nil {
@@ -51,11 +53,18 @@ func danglingFileProfileRules(rules []PolicyRule) []string {
 	return names
 }
 
+// fileProfileEnforced reports whether a rule's file profile is ever evaluated
+// by FileProfileBlocked on the request path.
+func fileProfileEnforced(r *PolicyRule) bool {
+	return ruleIsEnabled(r) && ruleTypeOf(r) == ruleTypeAccess && r.Action == ActionAllow &&
+		r.FileFiltering && r.FileProfile != FileProfileNone
+}
+
 func fileProfileResolutionRow(dangling []string, evaluations int64) OperatorContractCheck {
 	if len(dangling) == 0 {
-		msg := "every policy rule's file profile resolves"
+		msg := "no enabled Allow rule references a missing file profile"
 		if evaluations > 0 {
-			msg += fmt.Sprintf(" (%d fail-closed file-profile evaluation(s) since boot, before the reference was repaired)", evaluations)
+			msg += fmt.Sprintf(" (%d fail-closed file-profile evaluation(s) since boot)", evaluations)
 		}
 		return OperatorContractCheck{
 			Code:    "file_profile_resolution",
@@ -66,7 +75,7 @@ func fileProfileResolutionRow(dangling []string, evaluations int64) OperatorCont
 	return OperatorContractCheck{
 		Code:   "file_profile_resolution",
 		Status: diagWarn,
-		Message: fmt.Sprintf("%d policy rule(s) reference a file profile that no longer exists, so file downloads/uploads they match are blocked (fail-closed; %d fail-closed evaluation(s) since boot): %s",
+		Message: fmt.Sprintf("%d enabled Allow rule(s) reference a file profile that no longer exists, so file downloads/uploads they match are blocked (fail-closed; %d fail-closed evaluation(s) since boot): %s",
 			len(dangling), evaluations, strings.Join(dangling, ", ")),
 		OperatorAction: "Open Policies > Access Rules, edit each rule named here and select an existing file profile (Objects > File Profiles). Rules reference a profile by ID, so creating a new profile with the old name does not repair them.",
 	}
