@@ -21,7 +21,7 @@ type healthReport struct {
 	ClusterCA     string `json:"cluster_ca" redact:"internal"`
 	SOCKS5        string `json:"socks5" redact:"internal"`
 	AdminUI       string `json:"admin_ui" redact:"internal"`
-	// CPGRPC is the Control Plane gRPC listener's posture (CHAOS-73), omitted
+	// CPGRPC is the Control Plane gRPC listener's posture (CHAOS-71), omitted
 	// entirely on a node that is not a Control Plane: an always-present field
 	// would make every standalone proxy and every Data Plane in the fleet look
 	// like a CP whose listener is down, which is the emission rule the socks5
@@ -105,7 +105,7 @@ func computeHealth() healthReport {
 		// posture is public, the resolution (attempt count, reason class) is
 		// not.
 		AdminUI: adminUIListenerStatus(),
-		// CHAOS-73. Like the admin_ui field above this rides the PROXY port,
+		// CHAOS-71. Like the admin_ui field above this rides the PROXY port,
 		// and here the reason is structural rather than incidental: the
 		// Control Plane's own gRPC port is the thing being measured, so a
 		// probe against it reports nothing when it is down. Fixed 5-value
@@ -473,7 +473,7 @@ func computeReadiness() (report readinessReport, code int) {
 	// this row exists to make visible. Strict callers opt in via ?strict=1.
 	appendAdminUIReadinessCheck(checks)
 
-	// 9b''. Control Plane gRPC listener (CHAOS-73) — REPORT-ONLY, absent
+	// 9b''. Control Plane gRPC listener (CHAOS-71) — REPORT-ONLY, absent
 	// entirely on a node that is not a Control Plane. The strongest case in the
 	// set for report-only: a CP whose gRPC listener cannot bind is proxying its
 	// OWN traffic perfectly, so gating the default verdict would eject a

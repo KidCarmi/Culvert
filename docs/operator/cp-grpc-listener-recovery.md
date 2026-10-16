@@ -1,6 +1,6 @@
 # Control Plane gRPC listener — degradation and recovery
 
-**Applies to:** CHAOS-73 (`cp_grpc_bind.go`, `cp_grpc_health.go`,
+**Applies to:** CHAOS-71 (`cp_grpc_bind.go`, `cp_grpc_health.go`,
 `cluster_startup.go`).
 
 ## The rule this implements
@@ -14,7 +14,7 @@ listener) and CHAOS-66 (the SOCKS5 bind):
 |---|---|
 | CHAOS-57 (§33) | the **management** plane killed the **data** plane |
 | CHAOS-66 (§36) | a **secondary, opt-in** data plane killed the **primary** one |
-| **CHAOS-73 (§41)** | the **cluster** plane — whose job is serving config to *other* nodes — killed this node's data plane, management plane and health endpoints, before any of them existed |
+| **CHAOS-71 (§41)** | the **cluster** plane — whose job is serving config to *other* nodes — killed this node's data plane, management plane and health endpoints, before any of them existed |
 
 Before this change the Control Plane boot path was:
 
@@ -113,7 +113,35 @@ listener reporting a healthy Control Plane with its address, forever).
 The HA leadership resume rides the same rule: a persisted leader asserts its
 term only once the listener has actually bound, because a "leader" no Data
 Plane can reach cannot serve `HASync`. On a healthy boot (the bind succeeds on
-the first attempt) the ordering is unchanged.
+the first attempt) the ordering is unchanged, and a later rebind never re-runs
+the resume.
+
+### HA: a dark leader stops renewing its fencing lease
+
+With the etcd fencing lease armed (ADR-0005), a leader whose CP gRPC listener
+has been **unavailable for more than 30 s** — the same threshold that fires
+`cp_grpc_listener_down` — or whose listener supervisor has stopped, **withholds
+its lease renewal**. It logs `HA: WITHHOLDING fencing-lease renewal …` once,
+keeps its write authority only for the remainder of the window etcd last
+confirmed, then self-fences (`ha_self_fenced`) before the backend lease lapses.
+The standby then acquires the free lease through its normal fence-gated
+promotion. If the listener serves again before the window ends, the next
+keepalive renews and logs `resuming fencing-lease renewal`.
+
+A listener that is merely rebinding inside the 30 s threshold (an ordinary
+rollout) keeps the lease. In legacy mode (no etcd lease) nothing changes.
+
+On the **promote** path the listener is started synchronously: if it cannot
+bind, the promotion fails and the node stays a retryable standby rather than
+becoming a leader nobody can reach. Once the role is committed the config is
+republished so Data Planes receive a CP address list naming the new leader.
+
+### Rebind backoff
+
+1 s doubling to 30 s (±20% jitter). It is **not** reset by a bind alone — a
+socket that dies right after every bind stays at one attempt per 30 s — but it
+**is** reset to 1 s after a serve that stayed up for 60 s, so a one-off socket
+loss after a long healthy run rebinds promptly.
 
 ## Visibility
 
@@ -131,7 +159,7 @@ probe against it reports nothing when it is down.
 | | `culvert_cp_grpc_binds_total` | successful binds (flap counter) |
 | | `culvert_cp_grpc_bind_backoff_seconds` | current rebind backoff |
 | `GET /api/diagnostics` | `cp_grpc_listener` row | ok / warn / **fail**, with a per-reason operator action |
-| Alerts | `cp_grpc_unavailable` | fire-once per episode |
+| Alerts | `cp_grpc_listener_down` | fire-once per episode |
 
 **Every metric in this family is emitted only on a node that asked to be a
 Control Plane.** A flat `culvert_cp_grpc_up 0` from every standalone proxy and
@@ -161,14 +189,16 @@ If you *do* want such nodes ejected, call `/ready?strict=1`.
 
 ### You will need to subscribe to the new alert event
 
-`cp_grpc_unavailable` is a **new** event name. Existing alert webhooks will not
+`cp_grpc_listener_down` is a **new** event name. Existing alert webhooks will not
 receive it until you add it to their subscriptions — the house rule is that a
 new name is silently unsubscribed everywhere. There was no existing event for
 this plane to reuse (`admin_ui_unavailable` and `socks5_listener_down` are
 specific to their own listeners, and folding the Control Plane into either
-would page under the wrong name with the wrong operator action). Until you
-subscribe, the diagnostics row and `culvert_cp_grpc_unavailable` carry the
-state.
+would page under the wrong name with the wrong operator action). The name
+follows the `<contract-row>_down` convention used by `socks5_listener_down` and
+`mcp_gateway_down`. Subscribe in the admin UI (**Alert Webhooks** panel → **+ Add Webhook** or edit → **Control Plane
+gRPC listener down**) or via the webhook API. Until you subscribe, the
+diagnostics row and `culvert_cp_grpc_unavailable` carry the state.
 
 ## Reason classes and what to do about each
 
@@ -208,7 +238,7 @@ actions. Do not restart a node whose row says the listener is rebinding.
 
 ## Runbook
 
-**You are paged with `cp_grpc_unavailable`.**
+**You are paged with `cp_grpc_listener_down`.**
 
 1. Confirm the blast radius first — it is almost certainly *not* a traffic
    incident:

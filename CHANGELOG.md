@@ -10,7 +10,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Fixed
 
 - **A Control Plane gRPC listener fault terminated the whole appliance, and a
-  listener that died after binding was silent and terminal (CHAOS-73).** The CP
+  listener that died after binding was silent and terminal (CHAOS-71).** The CP
   boot path had exactly one error branch — `logFatalf("ControlPlane gRPC: %v",
   err)` — reached from `initCluster`, which `main.go` runs **before**
   `initSOCKS5`, `startAdminUI` and `buildAndStartProxyServer`. So an occupied
@@ -55,14 +55,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `culvert_cp_grpc_unavailable == 1`, not on `up == 0`, which drops for the few
   seconds of rebinding after an ordinary rollout.
 
-  **Action required for alerting:** `cp_grpc_unavailable` is a new alert event
-  and will not reach existing webhooks until you add it to their
-  subscriptions. See `docs/operator/cp-grpc-listener-recovery.md`.
+  **Action required for alerting:** `cp_grpc_listener_down` is a new alert event
+  (named per the `<contract-row>_down` convention) and will not reach existing
+  webhooks until you add it to their subscriptions — the admin UI's webhook
+  editor now lists it. See `docs/operator/cp-grpc-listener-recovery.md`.
 
   Also fixed in the same change: `StopControlPlaneGRPC` read
   `clusterRole.grpcSrv` with no lock — latent while that field was written once
   per process, a real data race once anything rebinds. The handle now lives on
   the supervisor under its own mutex.
+
+  **HA interaction.** A lease-mode HA leader whose CP gRPC listener has been
+  unavailable past the 30 s threshold (or whose listener supervisor stopped)
+  now **stops renewing its fencing lease**: the fence no longer vouches for a
+  leader no Data Plane or standby can reach, the node self-fences when its
+  last confirmed window ends, and the standby acquires the lapsed lease
+  through its ordinary fence-gated promotion. Renewal resumes if the listener
+  serves again before the window ends. HA promotion through the synchronous
+  `enableControlPlane` no longer risks main's `clusterRoleMu` self-deadlock
+  (the pre-bind snapshot is taken with the role lock released), a promote whose
+  listener cannot bind leaves the node a retryable standby, and once the role
+  is committed the config is republished so the Data Planes' CP address list
+  names the promoted node instead of only the dead leader (CHAOS-72b, ported
+  from #1618). The rebind backoff now resets to its 1 s floor after a serve
+  that stayed up for 60 s, so a one-off socket loss after a long healthy run is
+  not charged the 30 s ceiling.
 
 ### Security
 

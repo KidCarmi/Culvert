@@ -95,16 +95,17 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
-**2026-10-04 — `CHAOS-73` CLAIMED (placeholder, commit one). Domain: the
+**2026-10-04 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: the
 Control Plane's gRPC listener, and the third instance of "which plane may kill
 which". `CLAUDE.md`'s CHAOS-66 note names this path explicitly — *"the CP gRPC
 bind (`cluster_startup.go`) is the closest unexamined analogue"* — after §33
 (CHAOS-57, the admin UI listener) and §36 (CHAOS-66, the SOCKS5 bind) closed
-the same shape on two other planes. Claimed as `CHAOS-73` rather than the next
-free number: ids 67–72 were allocated in one pass across open sweeps (see the
-CHAOS-70 row below) and only 70 has merged, so 67/68/71/72 may still be held by
-branches this tree cannot see. Taking 73 costs nothing and cannot collide with
-that block. Findings and gates are written up in §41 below.**
+the same shape on two other planes. First claimed on its branch as `CHAOS-73`
+(ids 67–72 were then allocated across open sweeps and only 70 had merged);
+**renumbered to `CHAOS-71` in merge order** when main was brought in — 71 was
+the id this domain's earlier sweep (#1534, closed in favour of this one) held,
+and it is the next free id on main. Findings and gates are written up in §41
+below.**
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -1113,9 +1114,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | HA-13 | HA-aware CP update handoff uses a **fixed 15s sleep**, never confirms the standby actually promoted before taking the leader down → possible leaderless window; reports success regardless. | GAP | M | `update_cluster.go:593-598,706-746` |
 | HA-14 | Session HMAC / secrets sync: fenced in-band (good), but `persistDPLastGoodConfigSnapshot` writes the whole snapshot **including `SessionHMAC`** as plaintext JSON (0600) — no envelope encryption like the CA key gets. | GAP (at-rest) | M | `controlplane.go:1979-1997,2058-2061` vs DP node-key encrypt `main.go:1757-1760` |
 | HA-15 | Puller "no live holder" reject couples standby replication to a healthy leader lease — a witness outage stalls replication until a holder reappears (intended safety-over-availability; needs a runbook entry). | ✓ (documented) | L | `ha_fencing.go:94-97,83-85` |
-| CL-22 | **CP gRPC listener bind/TLS failure was FATAL on the boot path** — `logFatalf` from `initCluster`, which runs BEFORE the proxy, SOCKS5 and admin UI start, so an occupied gRPC address or an unreadable mTLS pair killed the whole appliance; and a `Serve` that returned after a successful bind was SILENT and TERMINAL while `clusterRole.role`/`grpcAddr` kept reporting a healthy Control Plane. The only listener in the appliance with no health plane at all. | GAP → **CLOSED** (CHAOS-73 §41, `cp_grpc_bind.go` + `cp_grpc_health.go`) | H | `cluster_startup.go:96` (pre-fix); `main.go:228` vs `269`/`271`; `controlplane_server.go` `srv.Serve` goroutine |
-| CL-23 | **The Data Plane's two boot fatals are the same class one plane over**: `dp_enrollment.go` still `logFatalf`s on a DP node-key at-rest failure and on DP client construction, from `startDataPlane`, on the same pre-proxy boot path. NOT closed by CHAOS-73 — one concern per change, and the DP posture question (*may a node that cannot reach its CP serve traffic at all?*) is a genuinely different decision, with a real argument on both sides (a DP serves last-good config, so degrading is defensible; a DP that never enrolled has no config to serve). | GAP (open, recorded) | M | `dp_enrollment.go:277,300` |
-| CL-24 | **A crash-looping CP boot minted and persisted a fresh CLUSTER CA before dying** — `initClusterCA` runs before the bind, so on a node with an EPHEMERAL data volume each iteration would mint a different trust root (§18's *"a retry MUST NEVER MINT"* hazard, for the root that authenticates every DP to the CP). Idempotent on a persistent volume, and the crash loop that reached it is gone (CL-22), so the reachable path is closed; the minting POLICY is unchanged. Observed in CHAOS-73's reproduction. | GAP (open, recorded — latent) | L/M | `main.go` `enableControlPlane` → `initClusterCA` ordering |
+| CL-22 | **CP gRPC listener bind/TLS failure was FATAL on the boot path** — `logFatalf` from `initCluster`, which runs BEFORE the proxy, SOCKS5 and admin UI start, so an occupied gRPC address or an unreadable mTLS pair killed the whole appliance; and a `Serve` that returned after a successful bind was SILENT and TERMINAL while `clusterRole.role`/`grpcAddr` kept reporting a healthy Control Plane. The only listener in the appliance with no health plane at all. | GAP → **CLOSED** (CHAOS-71 §41, `cp_grpc_bind.go` + `cp_grpc_health.go`) | H | `cluster_startup.go:96` (pre-fix); `main.go:228` vs `269`/`271`; `controlplane_server.go` `srv.Serve` goroutine |
+| CL-23 | **The Data Plane's two boot fatals are the same class one plane over**: `dp_enrollment.go` still `logFatalf`s on a DP node-key at-rest failure and on DP client construction, from `startDataPlane`, on the same pre-proxy boot path. NOT closed by CHAOS-71 — one concern per change, and the DP posture question (*may a node that cannot reach its CP serve traffic at all?*) is a genuinely different decision, with a real argument on both sides (a DP serves last-good config, so degrading is defensible; a DP that never enrolled has no config to serve). | GAP (open, recorded) | M | `dp_enrollment.go:277,300` |
+| CL-24 | **A crash-looping CP boot minted and persisted a fresh CLUSTER CA before dying** — `initClusterCA` runs before the bind, so on a node with an EPHEMERAL data volume each iteration would mint a different trust root (§18's *"a retry MUST NEVER MINT"* hazard, for the root that authenticates every DP to the CP). Idempotent on a persistent volume, and the crash loop that reached it is gone (CL-22), so the reachable path is closed; the minting POLICY is unchanged. Observed in CHAOS-71's reproduction. | GAP (open, recorded — latent) | L/M | `main.go` `enableControlPlane` → `initClusterCA` ordering |
 
 ### 2.4 Storage / Filesystem / Persistence / Configuration
 
@@ -8298,14 +8299,16 @@ the sweep happens to be editing.
 
 ---
 
-## 41. CHAOS-73 — The Control Plane's gRPC listener, and which plane may kill which
+## 41. CHAOS-71 — The Control Plane's gRPC listener, and which plane may kill which
 
 **Id allocated at the START of the sweep**, per the governance note in §0 — in a
-committed placeholder row, before any code was written. It took `CHAOS-73`
-rather than the next free number because ids 67–72 were allocated across open
-sweeps in one pass (see the CHAOS-70 revision-log row) and only 70 has merged,
-so the rest of that block may still be held by branches this tree cannot see.
-Taking 73 costs nothing and cannot collide with it.
+committed placeholder row, before any code was written. The branch first took
+`CHAOS-73` because ids 67–72 were allocated across open sweeps in one pass (see
+the CHAOS-70 revision-log row) and only 70 had merged. On the owner's
+open-PR cleanup (#1556 made canonical; #1534/#1546/#1571/#1578 closed in its
+favour) it was **renumbered to `CHAOS-71` in merge order**: the next free id on
+main, and the id the closed #1534 sweep of this same domain held. Its gates
+that were ported from #1534 keep their `TestChaos71_` names.
 
 ### 41.1 Why this path, and why now
 
@@ -8464,12 +8467,16 @@ from the load balancer because the plane that serves config to *other* nodes is
 down, converting a fleet-management outage into the traffic outage the change
 exists to prevent.
 
-`cp_grpc_unavailable` is a **new** alert event, and the cost is recorded rather
+`cp_grpc_listener_down` is a **new** alert event, and the cost is recorded rather
 than waved away: a new name is silently unsubscribed on every configured
 webhook. §36 avoided one by reusing `socks5_listener_down`; there is no existing
 event for this plane, and folding it into `admin_ui_unavailable` would page for
 one subsystem under another's name with the wrong operator action attached. §33
-minted `admin_ui_unavailable` for the same reason.
+minted `admin_ui_unavailable` for the same reason. The name was first drafted
+as `cp_grpc_unavailable` and renamed to `cp_grpc_listener_down` on owner review
+to match the `<contract-row>_down` convention (`socks5_listener_down`,
+`mcp_gateway_down`, `upstream_pool_down`); the legacy webhook editor
+(`static/index.html`) lists it as a checkbox, which closes the GUI-parity gap.
 
 One thing the retry forced, and it is the kind of detail a rebind loop always
 exposes: **`cpServerOption` had to become silent.** It emitted
@@ -8547,7 +8554,7 @@ the transferable part. Re-running the mutation afterwards it passed **3/3 under
 scheduling, so the control gate caught the defect once by luck. A gate that
 passes against the defect is worse than no gate, and a gate that can flake gets
 muted. The ordering is therefore pinned by CONSTRUCTION in
-`TestChaos73_DefectStarterIsReleasedOnlyAfterActivation` — `onActivated` blocks
+`TestChaos71_DefectStarterIsReleasedOnlyAfterActivation` — `onActivated` blocks
 and the starter must not have returned while it is blocked, which fails every
 time against the defect, with and without `-race`, and cannot flake against the
 fix because the gate controls the schedule instead of racing it. It carries the
@@ -8620,3 +8627,67 @@ because they touch every sweep's habits:
   itself is now gone, which removes the reachable path. Recorded as **CL-24**,
   not fixed inside this sweep: the fix belongs with the cluster-CA minting
   policy, not with the listener.
+
+### 41.8 Owner review (open-PR cleanup): what the canonical variant had to absorb
+
+#1556 was made the canonical fix for this domain and #1534/#1546/#1571/#1578
+were closed in its favour. The owner decision named the changes below as
+required before merge; each is now in the tree.
+
+* **Id in merge order.** `CHAOS-73` → `CHAOS-71` (see the §41 header).
+* **Alert name.** `cp_grpc_unavailable` → `cp_grpc_listener_down`, matching the
+  `<contract-row>_down` convention (`socks5_listener_down`,
+  `mcp_gateway_down`, `upstream_pool_down`). The `culvert_cp_grpc_unavailable`
+  GAUGE keeps its name: it is the metric half of the alertable pair, not the
+  event.
+* **GUI parity.** The legacy webhook editor (`static/index.html`) lists
+  `cp_grpc_listener_down` beside the other `_down` events. The React frontend
+  has no webhook-event list, so there is nothing to mirror there.
+* **The fence must not vouch for a dark leader.** After an HA promote, a dead
+  listener used to leave `leaseRenewOnce` renewing — so the fence kept the
+  standby out indefinitely on behalf of a leader that could serve neither
+  `HASync` nor config. `leaseRenewOnce` now consults
+  `cpGRPCLeaseRenewWithheld`, which reuses the plane's ONE unavailability
+  predicate (configured, not serving, not stopped, failing ≥ 30 s or the
+  supervisor gone), and WITHHOLDS the renewal. The confirmed window is then
+  charged exactly as a transport failure is (`fenceIfLeaseWindowElapsed`, same
+  write margin), so the node self-fences before the backend lease can lapse and
+  the standby acquires through its ordinary fence-gated promotion. A listener
+  serving again inside the window resumes renewal. Withholding can only END
+  authority sooner, never extend it. Gate:
+  `TestChaos71_HADarkLeaderStopsRenewingTheFence` (deterministic: injected
+  listener clock, `halease.Fake` clock, keepalive loop stopped, window collapsed
+  by assignment), plus the negative control
+  `TestChaos71_HANonCPLeaderKeepsRenewing`.
+* **Ported from #1534.** `TestChaos71_EnableControlPlaneDoesNotDeadlockWithHAEnabled`,
+  `TestChaos71_Wall_NoCurrentConfigSnapshotUnderTheRoleLock` (re-modelled to
+  track RELEASE as well as acquire, because `activateControlPlane` takes the
+  role lock for its `alreadyCP` check and releases it before publishing — the
+  position-only scanner would have flagged a correct function), and
+  `TestChaos71_ListenFailureDoesNotLeakTheGRPCServer` (adapted to
+  `buildControlPlaneServer`). Two HA-transition gates are new:
+  `TestChaos71_HAPromoteBindFailureLeavesTheNodeStandby` (a promote whose
+  listener cannot bind leaves a retryable standby, no role, no supervisor; the
+  retry after the port frees promotes and publishes a list naming the node) and
+  `TestChaos71_HABootOnActivatedRunsOnceAcrossRebinds`.
+* **Ported from #1618 (CHAOS-72 / 72b, ids kept for provenance).**
+  `cluster_promote_deadlock_chaos_test.go`, adapted to this supervisor, and the
+  72b REPUBLISH: once `activateControlPlaneAfterBind` has committed the role,
+  `republishCPAddressesAfterCommit` rebuilds the snapshot with the role lock
+  released and republishes only if the CP address list changed — the pre-bind
+  publish cannot name this node, and on a promotion it names only the dead
+  leader, which `updateDPAddresses` would then install by REPLACING a DP's list.
+  #1618's DP-side cadence/backoff ladder and janitor deliberately stay in #1618.
+* **Backoff reset after a successful serve.** The first draft never reset the
+  rebind backoff. That bounded the flapping socket correctly but charged a
+  listener that served for days and then lost its socket once with whatever
+  ceiling an earlier outage had reached. `cpGRPCBackoffAfterServe` resets to the
+  1 s floor after a serve that stayed up for `cpGRPCServeStableAfter` (2× the
+  30 s ceiling), so a socket that dies within one ceiling period of every bind
+  still never earns a reset. Gate: `TestChaos71_BackoffResetsOnlyAfterAStableServe`.
+
+Remaining risk, recorded rather than fixed: a self-fenced ex-leader whose
+listener is still dark can be re-promoted by `leaseAutoPromote` (its resync
+`onPromote` is a no-op because the CP is "already running") and will withhold
+and fence again — bounded by the self-fence hysteresis, but promotion does not
+yet consult the listener predicate.

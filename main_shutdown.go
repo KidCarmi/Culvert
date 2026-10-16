@@ -233,7 +233,7 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	})
 	// Gracefully stop gRPC server (drains in-flight RPCs).
 	//
-	// CHAOS-73: stops the SUPERVISOR, not just the server. Stopping the server
+	// CHAOS-71: stops the SUPERVISOR, not just the server. Stopping the server
 	// alone would leave the listener's bind/serve/rebind loop to observe the
 	// serve ending and bind a fresh socket on the way out — a listener coming
 	// up during shutdown, which is worse than the terminal silence it replaced.

@@ -1471,7 +1471,7 @@ func initClusterCA(clusterDBPath string) {
 // This is the SYNCHRONOUS entry point, used by the live admin API
 // (`apiClusterMode`) and by the HA promote callback. A listener that cannot
 // come up is reported as an error — which is what it always did here, and the
-// asymmetry CHAOS-73 found was that the BOOT path took the same error and
+// asymmetry CHAOS-71 found was that the BOOT path took the same error and
 // called `logFatalf` on it. The boot path is now
 // `enableControlPlaneResilient`; see cp_grpc_bind.go for the finding.
 //
@@ -1524,7 +1524,7 @@ func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath str
 	// publish so a restarted (or HA-promoted) CP never re-issues version
 	// numbers at or below what running DPs have already seen.
 	//
-	// CHAOS-73: this preparation runs ONCE, outside the retry loop, and that
+	// CHAOS-71: this preparation runs ONCE, outside the retry loop, and that
 	// placement is deliberate. Folding it into the retried unit would
 	// re-publish a config version and rewrite the durable floor file on EVERY
 	// rebind attempt — a write every 30 s for the length of an outage, to

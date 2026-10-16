@@ -1,6 +1,6 @@
 package main
 
-// cp_grpc_bind_chaos_test.go — CHAOS-73 gates for the Control Plane gRPC
+// cp_grpc_bind_chaos_test.go — CHAOS-71 gates for the Control Plane gRPC
 // listener's BIND, SERVE and REBIND.
 //
 // The finding: the boot path called `logFatalf("ControlPlane gRPC: %v", err)`
@@ -205,7 +205,7 @@ func cpFreePort(t *testing.T) int {
 
 // ── Defect gates ────────────────────────────────────────────────────────────
 
-// TestChaos73_DefectBindFailureIsNotFatal is the primary gate.
+// TestChaos71_DefectBindFailureIsNotFatal is the primary gate.
 //
 // Pre-fix shape (cluster_startup.go):
 //
@@ -215,7 +215,7 @@ func cpFreePort(t *testing.T) int {
 //
 // Reintroducing that kills the test binary rather than failing this assertion,
 // which is what makes the defect unreintroducible-and-green.
-func TestChaos73_DefectBindFailureIsNotFatal(t *testing.T) {
+func TestChaos71_DefectBindFailureIsNotFatal(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -248,7 +248,7 @@ func TestChaos73_DefectBindFailureIsNotFatal(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectRoleIsNotClaimedWithoutASocket pins the invariant
+// TestChaos71_DefectRoleIsNotClaimedWithoutASocket pins the invariant
 // `enableControlPlane` stated in a comment — "Only set role after gRPC is
 // successfully started" — across the new retry path.
 //
@@ -256,7 +256,7 @@ func TestChaos73_DefectBindFailureIsNotFatal(t *testing.T) {
 // loop by replacing it with an operational lie: `GET /api/cluster/status`
 // reporting a Control Plane with an address nothing is listening on, which is
 // exactly the pre-existing silent-serve-death defect arriving by a new road.
-func TestChaos73_DefectRoleIsNotClaimedWithoutASocket(t *testing.T) {
+func TestChaos71_DefectRoleIsNotClaimedWithoutASocket(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -284,11 +284,11 @@ func TestChaos73_DefectRoleIsNotClaimedWithoutASocket(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectUnbindableListenerSelfHealsWithoutARestart is the recovery
+// TestChaos71_DefectUnbindableListenerSelfHealsWithoutARestart is the recovery
 // gate: before this change there was no rebind loop at all, so the ONLY way
 // back from a transient bind fault was a process restart (and on the boot path
 // the process had already exited).
-func TestChaos73_DefectUnbindableListenerSelfHealsWithoutARestart(t *testing.T) {
+func TestChaos71_DefectUnbindableListenerSelfHealsWithoutARestart(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -345,14 +345,14 @@ func TestChaos73_DefectUnbindableListenerSelfHealsWithoutARestart(t *testing.T) 
 	}
 }
 
-// TestChaos73_DefectTLSMaterialFaultIsNotFatal covers the second production
+// TestChaos71_DefectTLSMaterialFaultIsNotFatal covers the second production
 // trigger, reproduced against the real binary: `cpServerOption` reads the mTLS
 // pair at call time, so a cert-manager/certbot rotation that briefly truncates
 // the key is a boot that ended in exit 1.
 //
 // It also pins that the material is RE-READ on every attempt, which is what
 // makes the rotation self-heal with no restart (§33 rule 4).
-func TestChaos73_DefectTLSMaterialFaultIsNotFatal(t *testing.T) {
+func TestChaos71_DefectTLSMaterialFaultIsNotFatal(t *testing.T) {
 	cpChaosSetup(t)
 
 	dir := t.TempDir()
@@ -381,7 +381,7 @@ func TestChaos73_DefectTLSMaterialFaultIsNotFatal(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectBuildLeaksNoListenerOnAFailedBind pins §33 rule 5 in this
+// TestChaos71_DefectBuildLeaksNoListenerOnAFailedBind pins §33 rule 5 in this
 // plane's shape.
 //
 // There the defect was `ServeTLS` returning a certificate error WITHOUT closing
@@ -391,7 +391,7 @@ func TestChaos73_DefectTLSMaterialFaultIsNotFatal(t *testing.T) {
 // occur — but a gRPC server built before a FAILED Listen is still a resource,
 // and an unbounded retry loop is precisely where leaking one per attempt
 // matters.
-func TestChaos73_DefectBuildLeaksNoListenerOnAFailedBind(t *testing.T) {
+func TestChaos71_DefectBuildLeaksNoListenerOnAFailedBind(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -433,7 +433,7 @@ func cpOpenFDs(t *testing.T) int {
 	return len(ents)
 }
 
-// TestChaos73_DefectServeDeathIsObservableAndRebinds is the gate for the third
+// TestChaos71_DefectServeDeathIsObservableAndRebinds is the gate for the third
 // defect, the one with no fatal to blame.
 //
 // Pre-fix:
@@ -447,7 +447,7 @@ func cpOpenFDs(t *testing.T) int {
 // One log line, no rebind, and `clusterRole.role` left at "control-plane" with
 // `grpcAddr` still set — so `GET /api/cluster/status` reported a healthy
 // Control Plane on a node with no listener, forever. PX-18 in miniature.
-func TestChaos73_DefectServeDeathIsObservableAndRebinds(t *testing.T) {
+func TestChaos71_DefectServeDeathIsObservableAndRebinds(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -482,7 +482,7 @@ func TestChaos73_DefectServeDeathIsObservableAndRebinds(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectRuntimeAdminPathStillReportsTheFault pins the ASYMMETRY
+// TestChaos71_DefectRuntimeAdminPathStillReportsTheFault pins the ASYMMETRY
 // that is this sweep's governance point, from the other side.
 //
 // `apiClusterMode` must keep answering 409 for an address it cannot bind: an
@@ -490,7 +490,7 @@ func TestChaos73_DefectServeDeathIsObservableAndRebinds(t *testing.T) {
 // answer 200 for a Control Plane that may never exist — the same operational
 // lie, in the one place the operator can be told the truth immediately. The
 // gate also requires no loop is left behind.
-func TestChaos73_DefectRuntimeAdminPathStillReportsTheFault(t *testing.T) {
+func TestChaos71_DefectRuntimeAdminPathStillReportsTheFault(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -512,11 +512,11 @@ func TestChaos73_DefectRuntimeAdminPathStillReportsTheFault(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectUnavailabilityIsADurationNotACount pins the CHAOS-54/57
+// TestChaos71_DefectUnavailabilityIsADurationNotACount pins the CHAOS-54/57
 // rule. The backoff ceiling is reached in under a minute, so paging on the
 // ATTEMPT COUNT would page on every ordinary rollout of the Control Plane —
 // the one node in a cluster that gets rolled most carefully.
-func TestChaos73_DefectUnavailabilityIsADurationNotACount(t *testing.T) {
+func TestChaos71_DefectUnavailabilityIsADurationNotACount(t *testing.T) {
 	alerts := cpChaosSetup(t)
 	noteCPGRPCConfigured("127.0.0.1:50051")
 
@@ -551,7 +551,7 @@ func TestChaos73_DefectUnavailabilityIsADurationNotACount(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectUnavailabilityIsObservedWhileWaitingBetweenRetries carries
+// TestChaos71_DefectUnavailabilityIsObservedWhileWaitingBetweenRetries carries
 // CHAOS-66 round 3's finding forward.
 //
 // A duration derived from two STORED stamps freezes the instant an attempt
@@ -559,7 +559,7 @@ func TestChaos73_DefectUnavailabilityIsADurationNotACount(t *testing.T) {
 // threshold would stay reported as "merely retrying" for up to 36 s. Nothing
 // here records a second failure: the point is that the passage of time ALONE
 // must move the verdict.
-func TestChaos73_DefectUnavailabilityIsObservedWhileWaitingBetweenRetries(t *testing.T) {
+func TestChaos71_DefectUnavailabilityIsObservedWhileWaitingBetweenRetries(t *testing.T) {
 	cpChaosSetup(t)
 	noteCPGRPCConfigured("127.0.0.1:50051")
 
@@ -583,11 +583,11 @@ func TestChaos73_DefectUnavailabilityIsObservedWhileWaitingBetweenRetries(t *tes
 	}
 }
 
-// TestChaos73_DefectSleepIsClampedToTheThreshold is the other half of round 3's
+// TestChaos71_DefectSleepIsClampedToTheThreshold is the other half of round 3's
 // fix. The alert is produced by an ATTEMPT — noteCPGRPCBindFailure holds the
 // fire-once latch and nothing else wakes the supervisor — so a sleep that
 // straddles the threshold delays the page by up to the ceiling plus jitter.
-func TestChaos73_DefectSleepIsClampedToTheThreshold(t *testing.T) {
+func TestChaos71_DefectSleepIsClampedToTheThreshold(t *testing.T) {
 	cases := []struct {
 		name       string
 		sleep      time.Duration
@@ -608,12 +608,12 @@ func TestChaos73_DefectSleepIsClampedToTheThreshold(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectAlertDetailIsBounded pins the WK-12/RS-5 rule. `Dispatch`
+// TestChaos71_DefectAlertDetailIsBounded pins the WK-12/RS-5 rule. `Dispatch`
 // dedups on event + ":" + Detail, so a raw error — which embeds the bind
 // address — mints one key per failure and defeats the dedup window BY
 // CONSTRUCTION, fanning out into the 500-entry retry queue where it can evict
 // real threat alerts.
-func TestChaos73_DefectAlertDetailIsBounded(t *testing.T) {
+func TestChaos71_DefectAlertDetailIsBounded(t *testing.T) {
 	alerts := cpChaosSetup(t)
 	noteCPGRPCConfigured("10.42.7.9:50051")
 
@@ -637,7 +637,7 @@ func TestChaos73_DefectAlertDetailIsBounded(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectBindFailureLogIsRateLimited pins that the mitigation for a
+// TestChaos71_DefectBindFailureLogIsRateLimited pins that the mitigation for a
 // crash loop is not itself a log flood.
 //
 // The pre-fix crash loop was measurable: each iteration re-published a config
@@ -646,7 +646,7 @@ func TestChaos73_DefectAlertDetailIsBounded(t *testing.T) {
 // process log is a RotatingFile keeping one archive, so it is also how the
 // evidence gets destroyed (CHAOS-54's 7.6M-attempt finding, CHAOS-63's
 // write-amplification rule).
-func TestChaos73_DefectBindFailureLogIsRateLimited(t *testing.T) {
+func TestChaos71_DefectBindFailureLogIsRateLimited(t *testing.T) {
 	cpChaosSetup(t)
 	noteCPGRPCConfigured("127.0.0.1:50051")
 
@@ -679,10 +679,10 @@ func TestChaos73_DefectBindFailureLogIsRateLimited(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectShutdownIsNotDelayedByABackoff pins rule 4: the
+// TestChaos71_DefectShutdownIsNotDelayedByABackoff pins rule 4: the
 // control-plane-grpc-stop hook (order 20, inside the 12 s early phase) must
 // never wait out a 30 s backoff.
-func TestChaos73_DefectShutdownIsNotDelayedByABackoff(t *testing.T) {
+func TestChaos71_DefectShutdownIsNotDelayedByABackoff(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -725,7 +725,7 @@ func TestChaos73_DefectShutdownIsNotDelayedByABackoff(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectSupervisorPanicIsTerminalAndSaysSo pins CHAOS-66's round-2
+// TestChaos71_DefectSupervisorPanicIsTerminalAndSaysSo pins CHAOS-66's round-2
 // conclusion: a dead supervisor and an unbindable listener point at OPPOSITE
 // operator actions, so they must be separate states with separate remedies.
 //
@@ -733,7 +733,7 @@ func TestChaos73_DefectShutdownIsNotDelayedByABackoff(t *testing.T) {
 // production outage to achieve what is already in progress. A panicked
 // supervisor is terminal and the restart is the ONLY remedy. One field for both
 // sends the operator the wrong way half the time.
-func TestChaos73_DefectSupervisorPanicIsTerminalAndSaysSo(t *testing.T) {
+func TestChaos71_DefectSupervisorPanicIsTerminalAndSaysSo(t *testing.T) {
 	alerts := cpChaosSetup(t)
 	noteCPGRPCConfigured("127.0.0.1:50051")
 
@@ -779,11 +779,11 @@ func TestChaos73_DefectSupervisorPanicIsTerminalAndSaysSo(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectReasonClassesAreBoundedAndMatchedStructurally pins rule 5.
+// TestChaos71_DefectReasonClassesAreBoundedAndMatchedStructurally pins rule 5.
 // Matched via errors.As on syscall.Errno, never by string: net wraps as
 // *net.OpError{*os.SyscallError{syscall.Errno}} and the text is
 // platform-specific.
-func TestChaos73_DefectReasonClassesAreBoundedAndMatchedStructurally(t *testing.T) {
+func TestChaos71_DefectReasonClassesAreBoundedAndMatchedStructurally(t *testing.T) {
 	wrap := func(e syscall.Errno) error {
 		return &net.OpError{Op: "listen", Net: "tcp", Err: &os.SyscallError{Syscall: "bind", Err: e}}
 	}
@@ -819,11 +819,11 @@ func TestChaos73_DefectReasonClassesAreBoundedAndMatchedStructurally(t *testing.
 	}
 }
 
-// TestChaos73_DefectEveryDiagnosableReasonHasItsOwnRemedy is CHAOS-66's round-3
+// TestChaos71_DefectEveryDiagnosableReasonHasItsOwnRemedy is CHAOS-66's round-3
 // control, applied here: a bounded classifier is worth nothing if one remedy is
 // printed for every class. A node out of descriptors must not be sent to hunt
 // the owner of a port nobody holds.
-func TestChaos73_DefectEveryDiagnosableReasonHasItsOwnRemedy(t *testing.T) {
+func TestChaos71_DefectEveryDiagnosableReasonHasItsOwnRemedy(t *testing.T) {
 	diagnosable := []string{"port_in_use", "permission_denied", "address_unavailable", "descriptors_exhausted", "tls_certificate"}
 	seen := map[string]string{}
 	for _, r := range diagnosable {
@@ -844,10 +844,10 @@ func TestChaos73_DefectEveryDiagnosableReasonHasItsOwnRemedy(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectThePlaneHasEveryOperatorSurface is the gate for the
+// TestChaos71_DefectThePlaneHasEveryOperatorSurface is the gate for the
 // observability half of the finding: before this change the Control Plane gRPC
 // listener was the ONLY listener in the appliance with no health plane at all.
-func TestChaos73_DefectThePlaneHasEveryOperatorSurface(t *testing.T) {
+func TestChaos71_DefectThePlaneHasEveryOperatorSurface(t *testing.T) {
 	cpChaosSetup(t)
 	noteCPGRPCConfigured("127.0.0.1:50051")
 
@@ -909,7 +909,7 @@ func TestChaos73_DefectThePlaneHasEveryOperatorSurface(t *testing.T) {
 	})
 }
 
-// TestChaos73_DefectCPServerOptionIsSilent is a STRUCTURAL gate, and the
+// TestChaos71_DefectCPServerOptionIsSilent is a STRUCTURAL gate, and the
 // structure is the point.
 //
 // `cpServerOption` used to emit "ControlPlane: gRPC %s (mTLS)" (or the insecure
@@ -919,7 +919,7 @@ func TestChaos73_DefectThePlaneHasEveryOperatorSurface(t *testing.T) {
 // limited. Behavioural coverage cannot see this: the lines go to the process
 // logger, every assertion still passes, and the only symptom is a destroyed
 // process log on a node already in trouble.
-func TestChaos73_DefectCPServerOptionIsSilent(t *testing.T) {
+func TestChaos71_DefectCPServerOptionIsSilent(t *testing.T) {
 	lines := strings.Split(cpReadSource(t, "controlplane_server.go"), "\n")
 
 	start, end := -1, -1
@@ -951,7 +951,7 @@ func TestChaos73_DefectCPServerOptionIsSilent(t *testing.T) {
 	}
 }
 
-// TestChaos73_TheControlPlaneListenerPathHasNoFatal is the structural wall, and
+// TestChaos71_TheControlPlaneListenerPathHasNoFatal is the structural wall, and
 // it is what makes the fix durable.
 //
 // Behavioural coverage cannot catch a reintroduction directly: a restored
@@ -965,7 +965,7 @@ func TestChaos73_DefectCPServerOptionIsSilent(t *testing.T) {
 // product, and a gateway that cannot serve must exit loudly rather than linger
 // as a black hole. The asymmetry between the cluster plane and the primary data
 // plane is the whole finding.
-func TestChaos73_TheControlPlaneListenerPathHasNoFatal(t *testing.T) {
+func TestChaos71_TheControlPlaneListenerPathHasNoFatal(t *testing.T) {
 	files := []string{"cluster_startup.go", "cp_grpc_bind.go", "cp_grpc_health.go", "controlplane_server.go"}
 	checked := 0
 	haLeaseAllowance := 0
@@ -1006,12 +1006,12 @@ func TestChaos73_TheControlPlaneListenerPathHasNoFatal(t *testing.T) {
 
 // ── Controls ────────────────────────────────────────────────────────────────
 
-// TestChaos73_ControlHealthyBindIsSilent is the control for the "make it loud"
+// TestChaos71_ControlHealthyBindIsSilent is the control for the "make it loud"
 // direction. A Control Plane whose listener binds on its first attempt must
 // produce NO failure count, NO alert, NO warn row and NO backoff — the
 // overwhelmingly common case must be indistinguishable from the pre-change
 // behaviour.
-func TestChaos73_ControlHealthyBindIsSilent(t *testing.T) {
+func TestChaos71_ControlHealthyBindIsSilent(t *testing.T) {
 	alerts := cpChaosSetup(t)
 	cpInsecure(t)
 
@@ -1063,13 +1063,13 @@ func TestChaos73_ControlHealthyBindIsSilent(t *testing.T) {
 	}
 }
 
-// TestChaos73_ControlUnboundListenerIsNeverReportedReady is the control for the
+// TestChaos71_ControlUnboundListenerIsNeverReportedReady is the control for the
 // cheapest wrong fix: delete the fatal and report the listener healthy. That
 // would be strictly WORSE than the defect — a Control Plane silently absent
 // forever on a node whose every probe reads green, and a fleet that quietly
 // stops receiving config, which is the §19/§33 "found nothing wrong and never
 // consulted are the same scrape" failure.
-func TestChaos73_ControlUnboundListenerIsNeverReportedReady(t *testing.T) {
+func TestChaos71_ControlUnboundListenerIsNeverReportedReady(t *testing.T) {
 	cpChaosSetup(t)
 	noteCPGRPCConfigured("127.0.0.1:50051")
 
@@ -1093,14 +1093,14 @@ func TestChaos73_ControlUnboundListenerIsNeverReportedReady(t *testing.T) {
 	}
 }
 
-// TestChaos73_ControlNotAControlPlaneEmitsNothing pins the CHAOS-54 emission
+// TestChaos71_ControlNotAControlPlaneEmitsNothing pins the CHAOS-54 emission
 // rule in both directions.
 //
 // A flat `culvert_cp_grpc_up 0` from every standalone proxy and every Data
 // Plane in the fleet is indistinguishable from a broken Control Plane, and the
 // documented paging rule is `== 0`. Equally, a permanently-green row on a node
 // that is not a CP is noise that trains operators to ignore the row.
-func TestChaos73_ControlNotAControlPlaneEmitsNothing(t *testing.T) {
+func TestChaos71_ControlNotAControlPlaneEmitsNothing(t *testing.T) {
 	cpChaosSetup(t)
 
 	if cpGRPCConfigured() {
@@ -1126,7 +1126,7 @@ func TestChaos73_ControlNotAControlPlaneEmitsNothing(t *testing.T) {
 	}
 }
 
-// TestChaos73_ControlReadinessIsReportOnly pins the load-bearing half of the
+// TestChaos71_ControlReadinessIsReportOnly pins the load-bearing half of the
 // readiness row, exactly as §33 does for admin_ui.
 //
 // A Control Plane whose gRPC listener cannot bind is proxying its OWN traffic
@@ -1134,7 +1134,7 @@ func TestChaos73_ControlNotAControlPlaneEmitsNothing(t *testing.T) {
 // fully-functional gateway out of the load balancer because the plane that
 // serves config to OTHER nodes is down — converting a fleet-management outage
 // into the traffic outage this whole change exists to prevent.
-func TestChaos73_ControlReadinessIsReportOnly(t *testing.T) {
+func TestChaos71_ControlReadinessIsReportOnly(t *testing.T) {
 	s := cpReadSource(t, "healthcheck.go")
 	if !strings.Contains(s, "appendCPGRPCReadinessCheck(checks)") {
 		t.Fatal("the readiness row is not wired into /ready")
@@ -1150,11 +1150,11 @@ func TestChaos73_ControlReadinessIsReportOnly(t *testing.T) {
 	}
 }
 
-// TestChaos73_ControlRebindDoesNotRestartTheHeartbeatMonitor pins the
+// TestChaos71_ControlRebindDoesNotRestartTheHeartbeatMonitor pins the
 // idempotence activateControlPlaneAfterBind depends on. It runs again on every
 // rebind, and the heartbeat monitor is a goroutine: starting a second one per
 // rebind would leak one per listener fault for the life of the process.
-func TestChaos73_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
+func TestChaos71_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
 	cpChaosSetup(t)
 
 	cfg := cpListenerConfig{addr: "127.0.0.1:50051"}
@@ -1192,11 +1192,11 @@ func TestChaos73_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
 	}
 }
 
-// TestChaos73_WallThePanicGuardUsesTheTerminalRecorder is a STRUCTURAL wall,
+// TestChaos71_WallThePanicGuardUsesTheTerminalRecorder is a STRUCTURAL wall,
 // and it exists because mutation testing proved the behavioural gate above is
 // not enough.
 //
-// `TestChaos73_DefectSupervisorPanicIsTerminalAndSaysSo` drives the two
+// `TestChaos71_DefectSupervisorPanicIsTerminalAndSaysSo` drives the two
 // recorders directly and asserts each produces the right state and remedy. It
 // says nothing about which one the panic guard CALLS. Swapping them —
 //
@@ -1213,7 +1213,7 @@ func TestChaos73_ControlRebindDoesNotRestartTheHeartbeatMonitor(t *testing.T) {
 // observable afterwards is a state both recorders can produce. So the WIRING is
 // pinned instead — the same conclusion, for the same reason, as
 // §36's TestChaos66 recorder wall and the sanitizeLog scan-count gate.
-func TestChaos73_WallThePanicGuardUsesTheTerminalRecorder(t *testing.T) {
+func TestChaos71_WallThePanicGuardUsesTheTerminalRecorder(t *testing.T) {
 	body := cpReadSource(t, "cp_grpc_bind.go")
 	i := strings.Index(body, "func (s *cpListenerSupervisor) run() {")
 	if i < 0 {
@@ -1245,7 +1245,7 @@ func TestChaos73_WallThePanicGuardUsesTheTerminalRecorder(t *testing.T) {
 	}
 }
 
-// TestChaos73_WallTheBootPathDefersLeadershipToAnObservedBind is the structural
+// TestChaos71_WallTheBootPathDefersLeadershipToAnObservedBind is the structural
 // half of the HA-ordering decision, and it is pinned structurally for the same
 // reason as the wall above: the behavioural gates observe that onActivated RAN,
 // not that the boot path routed the leadership resume through it.
@@ -1254,7 +1254,7 @@ func TestChaos73_WallThePanicGuardUsesTheTerminalRecorder(t *testing.T) {
 // call would leave every gate in this file green while restoring the thing the
 // deferral exists to prevent: a node asserting a leadership term it cannot
 // exercise, because a "leader" no Data Plane can reach cannot serve HASync.
-func TestChaos73_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
+func TestChaos71_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 	body := cpReadSource(t, "cluster_startup.go")
 	i := strings.Index(body, "func startControlPlaneWithHAResume(")
 	if i < 0 {
@@ -1312,11 +1312,11 @@ func TestChaos73_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 	}
 }
 
-// TestChaos73_DefectStarterIsReleasedOnlyAfterActivation pins the ordering
+// TestChaos71_DefectStarterIsReleasedOnlyAfterActivation pins the ordering
 // inside the supervisor's success path, DETERMINISTICALLY.
 //
 // It exists because the behavioural control gate could not be trusted with
-// this property. `TestChaos73_ControlHealthyBindIsSilent` checks, with a
+// this property. `TestChaos71_ControlHealthyBindIsSilent` checks, with a
 // non-blocking receive, that onActivated has run by the time the starter
 // returned — and it *did* catch the window once, under `-race`, which is how
 // the defect was found. But re-running the mutation afterwards
@@ -1338,7 +1338,7 @@ func TestChaos73_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 // proxy. Releasing it before the role is claimed means those steps run against
 // a node still reporting `standalone`, with the HA leadership resume not yet
 // done — the same class of lie this whole change exists to remove.
-func TestChaos73_DefectStarterIsReleasedOnlyAfterActivation(t *testing.T) {
+func TestChaos71_DefectStarterIsReleasedOnlyAfterActivation(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
 

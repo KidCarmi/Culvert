@@ -90,6 +90,11 @@ type HAState struct {
 	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
 	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
 	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running
+	// leaseRenewWithheld is true while the keepalive is deliberately NOT
+	// renewing because this leader's Control Plane gRPC listener is dark
+	// (CHAOS-71 self-fence, see leaseRenewOnce). Only drives the transition
+	// log lines; the decision itself is re-evaluated every round.
+	leaseRenewWithheld atomic.Bool
 	// leaseRecoveryCh stops the CHAOS-55 re-acquire loop; nil = not running.
 	// Armed only for role=leader with leaseEpoch==0 — a node that holds the
 	// leader role but not the fence. See ha_lease_recovery.go.

@@ -99,7 +99,7 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 	// still coming up is better off having it than not.
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
 
-	// CHAOS-73 — this used to be:
+	// CHAOS-71 — this used to be:
 	//
 	//	if err := enableControlPlane(...); err != nil {
 	//	        logFatalf("ControlPlane gRPC: %v", err)   // ← os.Exit(1)

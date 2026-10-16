@@ -1364,7 +1364,7 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
-	// CHAOS-73: Control Plane gRPC listener health. Emitted only on a node that
+	// CHAOS-71: Control Plane gRPC listener health. Emitted only on a node that
 	// asked to be a Control Plane, for the same reason as the block above: a
 	// flat `up 0` from every standalone proxy and every Data Plane in the fleet
 	// is indistinguishable from a broken CP, and the documented paging rule is

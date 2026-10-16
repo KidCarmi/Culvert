@@ -1,6 +1,6 @@
 package main
 
-// cp_grpc_health.go — CHAOS-73: the Control Plane gRPC listener's health plane.
+// cp_grpc_health.go — CHAOS-71: the Control Plane gRPC listener's health plane.
 //
 // This file is the observability half of the finding written up in
 // cp_grpc_bind.go. It deliberately reuses the vocabulary the two earlier
@@ -41,7 +41,7 @@ package main
 //     be a Control Plane (the CHAOS-54 emission rule: a flat `up 0` from every
 //     standalone proxy and every Data Plane in the fleet is indistinguishable
 //     from a broken CP, and the documented paging rule is `== 0`).
-//   - alerts — `cp_grpc_unavailable`.
+//   - alerts — `cp_grpc_listener_down`.
 //
 // On the new alert NAME. The house rule is that a new event name is silently
 // unsubscribed on every webhook an operator has already configured, so an
@@ -50,10 +50,13 @@ package main
 // `admin_ui_unavailable` and `socks5_listener_down` are both specific to their
 // own listener, and folding the CP into either would page for one subsystem
 // under another subsystem's name with the wrong operator action attached. §33
-// minted `admin_ui_unavailable` for exactly this reason. The cost is recorded
-// in docs/operator/cp-grpc-listener-recovery.md: an existing deployment must
-// add the event to its webhook subscriptions, and until it does the contract
-// row and the gauge are the surfaces that carry the state.
+// minted `admin_ui_unavailable` for exactly this reason. The name follows the
+// `<contract-row>_down` convention (`socks5_listener_down`, `mcp_gateway_down`,
+// `upstream_pool_down`): row `cp_grpc_listener` → event `cp_grpc_listener_down`.
+// The admin UI's webhook editor offers it as a checkbox (GUI parity). The cost
+// is recorded in docs/operator/cp-grpc-listener-recovery.md: an existing
+// deployment must add the event to its webhook subscriptions, and until it
+// does the contract row and the gauge are the surfaces that carry the state.
 
 import (
 	"errors"
@@ -85,6 +88,13 @@ const (
 	// booting — all measured in seconds, none machine-speed.
 	cpGRPCBindBackoffInitial = 1 * time.Second
 	cpGRPCBindBackoffMax     = 30 * time.Second
+
+	// cpGRPCServeStableAfter is how long a serve must stay up before it counts
+	// as SUCCESSFUL and resets the rebind backoff to its floor. Twice the
+	// backoff ceiling, so a socket that dies within one ceiling period of every
+	// bind — the pathological flap — can never earn a reset and stays bounded
+	// at one attempt per 30 s.
+	cpGRPCServeStableAfter = 2 * cpGRPCBindBackoffMax
 
 	// cpGRPCBindJitter spreads the backoff by ±20%. A fleet restarts together —
 	// a compose `up`, a rolling reboot, a host bringing every container back at
@@ -129,6 +139,9 @@ const (
 // records failures with synthetic stamps is not also, invisibly, asserting
 // something about how much WALL time passed between two of its own statements
 // (the determinism failure CHAOS-66 §36 diagnosed the expensive way).
+//
+// The supervisor also measures how long a serve stayed up against it
+// (cpGRPCBackoffAfterServe), so the backoff-reset policy shares the one seam.
 var cpGRPCHealthNow = time.Now
 
 // cpGRPCListenerHealth is the process-wide record of the CP gRPC listener's
@@ -228,7 +241,7 @@ type cpGRPCListenerSnapshot struct {
 	FailingFor     time.Duration
 }
 
-// fireCPGRPCListenerAlert delivers the `cp_grpc_unavailable` alert.
+// fireCPGRPCListenerAlert delivers the `cp_grpc_listener_down` alert.
 //
 // Package-level seam so tests observe transitions SYNCHRONOUSLY instead of
 // racing the process-global alerts sink (the -count/-shuffle determinism class
@@ -237,10 +250,10 @@ type cpGRPCListenerSnapshot struct {
 // posture, and the state of every test binary — this must not spawn a goroutine
 // at all.
 var fireCPGRPCListenerAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("cp_grpc_unavailable") {
+	if !globalAlertStore.HasSubscriber("cp_grpc_listener_down") {
 		return
 	}
-	go fireAlert("cp_grpc_unavailable", AlertPayload{
+	go fireAlert("cp_grpc_listener_down", AlertPayload{
 		Detail: detail,
 		Source: "control_plane",
 	})
@@ -585,6 +598,29 @@ func cpGRPCListenerState() cpGRPCListenerSnapshot {
 	snap.Failing = !snap.Serving && !snap.Stopped && snap.Configured
 	snap.Unavailable = snap.Failing && (snap.SupervisorDown || snap.FailingFor >= cpGRPCUnavailableAfter)
 	return snap
+}
+
+// cpGRPCLeaseRenewWithheld reports whether an HA leader holding the fencing
+// lease must stop renewing it because this node's Control Plane gRPC listener
+// is dark, plus a BOUNDED reason for the log/self-fence line.
+//
+// "Dark" is exactly the state every other surface already calls unavailable —
+// configured, not serving, not stopped for shutdown, and either failing for at
+// least cpGRPCUnavailableAfter or with the supervisor itself gone. Reusing that
+// one predicate keeps the fence, the alert, the contract row and the gauge from
+// ever disagreeing about whether the listener is down. A node that never asked
+// to be a Control Plane, or whose listener is merely rebinding inside the
+// threshold (an ordinary rollout), keeps renewing.
+func cpGRPCLeaseRenewWithheld() (reason string, withhold bool) {
+	snap := cpGRPCListenerState()
+	if !snap.Unavailable {
+		return "", false
+	}
+	if snap.SupervisorDown {
+		return fmt.Sprintf("Control Plane gRPC listener supervisor stopped (reason: %s)", snap.LastReason), true
+	}
+	return fmt.Sprintf("Control Plane gRPC listener unavailable for %s (%d consecutive attempts, reason: %s)",
+		snap.FailingFor.Round(time.Second), snap.Consecutive, snap.LastReason), true
 }
 
 // cpGRPCHealthPosture is the FIXED enum on the proxy port's /health.

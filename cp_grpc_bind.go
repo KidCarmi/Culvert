@@ -1,6 +1,6 @@
 package main
 
-// cp_grpc_bind.go — CHAOS-73: the Control Plane's gRPC listener, and the third
+// cp_grpc_bind.go — CHAOS-71: the Control Plane's gRPC listener, and the third
 // instance of "which plane is allowed to kill which".
 //
 // Why this file exists.
@@ -406,12 +406,15 @@ func (s *cpListenerSupervisor) run() {
 		}
 	}()
 
-	// The backoff is deliberately NEVER reset inside the loop, exactly as
-	// serveAdminUIWithRetry and the SOCKS5 supervisor do it. Resetting it on
-	// every successful bind would let a socket that dies immediately after each
-	// bind settle into a steady one-bind-per-floor cadence forever; letting it
-	// escalate monotonically to the ceiling bounds that pathological case at
-	// one attempt per 30 s.
+	// The backoff is NOT reset on a bind — only after a SUCCESSFUL SERVE, one
+	// that stayed up for at least cpGRPCServeStableAfter (cpGRPCBackoffAfterServe).
+	// Resetting on every bind would let a socket that dies immediately after
+	// each bind settle into a steady one-bind-per-floor cadence forever, so that
+	// pathological case still escalates to the 30 s ceiling. But NEVER resetting
+	// (the first draft) charged a listener that served for days and then lost
+	// its socket once with the ceiling it reached during an outage last month:
+	// an ordinary one-off fault after a long healthy run must rebind on the 1 s
+	// floor, not wait out 30 s with the fleet's config plane dark.
 	backoff := cpGRPCBindBackoffInitial
 
 	for {
@@ -464,8 +467,7 @@ func (s *cpListenerSupervisor) run() {
 		// startControlPlaneListener claimed no role at all, because the half
 		// that would have done so lived in a caller the gate was not going
 		// through. Two writers for one state is the trap; there is now one.
-		activateControlPlaneAfterBind(s.cfg, srv)
-		s.runOnActivated()
+		s.claimAfterBind(srv)
 
 		// Released only NOW, with the role claimed and onActivated done, and
 		// that ORDER is a correctness argument rather than tidiness.
@@ -482,7 +484,7 @@ func (s *cpListenerSupervisor) run() {
 		// reason).
 		//
 		// Found by this sweep's own control gate
-		// (TestChaos73_ControlHealthyBindIsSilent) under `-race`, which slows
+		// (TestChaos71_ControlHealthyBindIsSilent) under `-race`, which slows
 		// the scheduler enough to make the window observable — it passed
 		// without `-race`, which is why the gate runs under it.
 		//
@@ -493,8 +495,10 @@ func (s *cpListenerSupervisor) run() {
 		// still releases the starter on every abnormal exit.
 		s.markFirstAttempt()
 
+		servedFrom := cpGRPCHealthNow()
 		serveErr := srv.Serve(ln)
 		s.release(srv)
+		backoff = cpGRPCBackoffAfterServe(backoff, cpGRPCHealthNow().Sub(servedFrom))
 
 		if s.stopRequested() {
 			noteCPGRPCListenerStopped()
@@ -554,6 +558,20 @@ func (s *cpListenerSupervisor) handleBindFailure(err error, backoff time.Duratio
 	return haSleepInterruptible(s.stopping, wait)
 }
 
+// claimAfterBind is the ONE post-bind activation sequence: claim the CP role,
+// run the one-time onActivated work, then republish the CP address list.
+//
+// The ORDER is the contract. The role must be committed before the republish
+// (CHAOS-72b, ported from #1618: only then can the address list name this
+// node), the republish must run with clusterRoleMu released (the snapshot
+// reads it), and it runs after onActivated so a resumed HA leader's list is the
+// one published. Extracted from run() to keep it inside funlen's budget.
+func (s *cpListenerSupervisor) claimAfterBind(srv *grpc.Server) {
+	activateControlPlaneAfterBind(s.cfg, srv)
+	s.runOnActivated()
+	republishCPAddressesAfterCommit()
+}
+
 // firstResolved reports whether the first bind attempt has already been
 // released to the starter.
 func (s *cpListenerSupervisor) firstResolved() bool {
@@ -568,6 +586,17 @@ func (s *cpListenerSupervisor) runOnActivated() {
 		return
 	}
 	s.onActivatedOnce.Do(s.onActivated)
+}
+
+// cpGRPCBackoffAfterServe resets the rebind backoff to its floor once a serve
+// has proven stable — it ran for at least cpGRPCServeStableAfter — and leaves
+// it untouched otherwise, so a listener that dies right after every bind still
+// escalates to the ceiling. Pure, so the policy is pinned without a clock.
+func cpGRPCBackoffAfterServe(cur, served time.Duration) time.Duration {
+	if served >= cpGRPCServeStableAfter {
+		return cpGRPCBindBackoffInitial
+	}
+	return cur
 }
 
 // nextCPGRPCBindBackoff advances the rebind backoff: 1 s on the first failure,
@@ -633,12 +662,44 @@ func stopControlPlaneListener(ctx context.Context) error {
 	return sup.Stop(ctx)
 }
 
+// republishCPAddressesAfterCommit republishes the config snapshot when the CP
+// address list changed because the role fields were just committed (CHAOS-72b,
+// ported from #1618's Codex review).
+//
+// buildCPAddressList composes the Data Planes' failover list from the HA peer
+// address and clusterRole.grpcAddr, and grpcAddr is assigned only on an
+// OBSERVED bind (activateControlPlaneAfterBind). The snapshot activateControlPlane
+// published before the bind therefore cannot name this node — on an HA
+// promotion it names only the PEER, which for a promoting standby is the leader
+// that just died. updateDPAddresses REPLACES a DP's list, so a DP applying that
+// snapshot would overwrite a working address with the dead one.
+//
+// Republishing (rather than predicting the address before the bind) keeps "the
+// published list describes committed state" true by construction and can never
+// publish an address that then fails to bind. It must run with clusterRoleMu
+// RELEASED: CurrentConfigSnapshot reads it through buildCPAddressList, and
+// sync.RWMutex is not reentrant (the CHAOS-72 deadlock). Published only when the
+// list actually changed, so a non-HA boot — nil both times — and an ordinary
+// rebind on the same address spend no config version.
+func republishCPAddressesAfterCommit() {
+	published := globalConfigStore.Get()
+	republished := CurrentConfigSnapshot()
+	if slicesEqual(published.CPAddresses, republished.CPAddresses) {
+		return
+	}
+	// The list carries operator- and peer-supplied addresses: format, then
+	// sanitize (CWE-117), then print with %q.
+	logger.Printf("ControlPlane: republishing config with the committed CP address list %q (was %q)",
+		sanitizeLog(fmt.Sprint(republished.CPAddresses)), sanitizeLog(fmt.Sprint(published.CPAddresses)))
+	_ = globalConfigStore.Update(republished)
+}
+
 // activateControlPlaneAfterBind claims the Control Plane role now that a socket
 // is real.
 //
 // This is the second half of what `enableControlPlane` used to do inline, and
 // the invariant it carries is the one that function stated in a comment —
-// "Only set role after gRPC is successfully started". CHAOS-73 preserves it
+// "Only set role after gRPC is successfully started". CHAOS-71 preserves it
 // rather than trading it for availability: while the bind is failing the node
 // reports `standalone`, so every `clusterRole.role == "control-plane"` gate,
 // `GET /api/cluster/status` and `/api/diagnostics` say what is true.

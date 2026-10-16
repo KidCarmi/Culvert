@@ -872,7 +872,7 @@ var clusterInsecure bool
 // cpServerOption returns the gRPC server option for the Control Plane based on
 // available TLS certs or the --cluster-insecure flag.
 //
-// CHAOS-73 made this function SILENT and it must stay that way. It used to
+// CHAOS-71 made this function SILENT and it must stay that way. It used to
 // emit "ControlPlane: gRPC %s (mTLS)" (or the insecure WARN) itself, which was
 // correct while it was called exactly once per process and became a log flood
 // the moment the listener acquired a rebind loop — one line per attempt,
@@ -895,7 +895,7 @@ func cpServerOption(certFile, keyFile, caFile string) (grpc.ServerOption, error)
 // ("mtls" or "insecure") for the once-per-bind log line.
 //
 // It deliberately does NOT take the listen address. It used to, only to log it,
-// and once CHAOS-73 moved that line out to logControlPlaneTransport (so the
+// and once CHAOS-71 moved that line out to logControlPlaneTransport (so the
 // rebind loop does not emit one per attempt) the parameter had no reader —
 // caught by `unparam`. The address belongs to the supervisor, which owns the
 // once-per-observed-bind log line.
@@ -926,7 +926,7 @@ func logControlPlaneTransport(addr, mode string) {
 
 // newControlPlaneGRPCServer constructs the Control Plane gRPC server with the
 // cluster frame budgets. Split out of the old StartControlPlaneGRPC by
-// CHAOS-73 so the bind can be retried without re-deriving the options, and so
+// CHAOS-71 so the bind can be retried without re-deriving the options, and so
 // the construction carries no globals and no goroutine (cp_grpc_bind.go owns
 // the lifecycle; the caller registers the service and serves).
 //
@@ -1002,7 +1002,7 @@ const cpGRPCGracefulStopBudget = 8 * time.Second
 //
 // Two callers, both via the supervisor (cp_grpc_bind.go): the SIGTERM/SIGINT
 // shutdown hook, and the supervisor tearing down a server it lost the adopt
-// race for. CHAOS-73 removed the previous entry point, `StopControlPlaneGRPC`,
+// race for. CHAOS-71 removed the previous entry point, `StopControlPlaneGRPC`,
 // which read `clusterRole.grpcSrv` with NO lock — latent while that field was
 // written exactly once per process, a REAL data race the moment the listener
 // acquired a rebind loop. Do not reintroduce a global-handle variant: the
