@@ -30,9 +30,13 @@ Confirmed consistent in the window (no action): `Rollback` for config versions
 documented); `backup` / `backup operation` across `/api/backups*`, GUI and audit `backup.trigger`;
 `ip_filter_mode` values `allow` / `block` match the IP filter vocabulary.
 
-**Terminology Health Score: 7.7 / 10** — baseline 7.9 (the 2026-09-24 report's comparison figure: its 7.5
-plus T-57, T-58, T-17, T-59 fixed), minus 0.1 per newly recorded item (T-64, T-65). Same rule as prior
-reports. Carried open backlog: 23 IDs / 22 entries per that comparison row (not re-verified), plus the 2
+**Terminology Health Score: 7.7 / 10 (lineage figure)** — baseline 7.9 (the 2026-09-24 report's
+comparison figure: its 7.5 plus T-57, T-58, T-17, T-59 fixed), minus 0.1 per newly recorded item (T-64,
+T-65). Same rule as prior reports. Like its predecessors, this lineage figure UNDER-charges by 0.1,
+because open T-54's charge was never carried into the 2026-09-13 report's score
+(`TERMINOLOGY-GOVERNANCE-REVIEW-2026-09-24.md`, "Disclosed, not amended"). The **fully charged
+equivalent is 7.6** (7.8 − 0.2), carried for transparency as that report requires; it is not this
+report's score. Carried open backlog: 23 IDs / 22 entries per that comparison row (not re-verified), plus the 2
 new IDs → 25 / 24.
 
 ---
@@ -77,17 +81,18 @@ PR #1602). Search (c) therefore matches ANY key whose name is `op` or `operation
 `id` suffix, in every key syntax the code uses.
 
 ```sh
+REV=fbf6a37   # the audited snapshot; the implementing PR sets its own base
 # (a) every spelling, case-insensitive, all non-test Go INCLUDING cmd/
-git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' fbf6a37 -- '*.go' ':!*_test.go'
+git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' "$REV" -- '*.go' ':!*_test.go'
 # (a) the same over the contract and both GUIs
-git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' fbf6a37 -- api/openapi/openapi.yaml frontend/src static/
+git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' "$REV" -- api/openapi/openapi.yaml frontend/src static/
 # (b) exported, UNTAGGED operation-ID-like struct fields (Go serializes them under the Go name)
-git grep -n -E '^\s+(Op|OpID|OpId|OperationID|OperationId|Operation)\s+[][*A-Za-z0-9_.]+\s*(//.*)?$' fbf6a37 -- '*.go' ':!*_test.go'
+git grep -n -E '^\s+(Op|OpID|OpId|OperationID|OperationId|Operation)\s+[][*A-Za-z0-9_.]+\s*(//.*)?$' "$REV" -- '*.go' ':!*_test.go'
 # (c) any op/operation key, in every key syntax: key=value details and Go/TS/YAML keys,
 #     JSON struct tags, quoted map-literal keys, query parameters (URL, Query().Get, OpenAPI name:)
 P='\b(op|operation)(_?id)?\s*[=:]|json:"(op|operation)(_?id|Id)?[,"]|["'"'"'](op|operation)(_?id|Id)?["'"'"']\s*:'
 P="$P"'|[?&](op|operation)(_?id|Id)?=|\.Get\(["'"'"'](op|operation)(_?id|Id)?["'"'"']|name: (op|operation)(_?id|Id)?\b'
-git grep -n -i -E "$P" fbf6a37 -- '*.go' ':!*_test.go' api/openapi/openapi.yaml frontend/src static/ ':!frontend/src/test'
+git grep -n -i -E "$P" "$REV" -- '*.go' ':!*_test.go' api/openapi/openapi.yaml frontend/src static/ ':!frontend/src/test'
 ```
 
 Each hit was classified by surface, and each untagged struct from (b) was traced to see whether it
@@ -98,18 +103,18 @@ locals and struct-literal fields (`opID :=`, `OpID: x`), which (c) also matches;
 *operator* keys `op` on auth-rule subject predicates (`authpolicy.go:77`, read at
 `frontend/src/api/policyAuth.ts:72,114`) and MCP policy conditions (`internal/mcp/policy/condition.go:50`,
 `internal/mcpacceptance/authoritative.go:94`); and the plural full-word `operations` keys
-(`internal/pac/publish.go:76`; MCP rollout risk classes, `internal/mcp/rollout/scope.go:109`).
+(PAC `DecidedOp` lists in `internal/pac/publish.go`; MCP rollout risk classes in `internal/mcp/rollout/scope.go`).
 Wire identifiers found:
 
 | # | Site (`fbf6a37`) | Surface | Current key |
 |---|---|---|---|
 | 1 | `backups_api.go:345` — `POST /api/backups` (`BackupCreateResult`, `openapi.yaml:1203`) | API response | `opId` |
 | 2 | `backups_api.go:447` — `GET /api/backups/operations/{id}` (`BackupOperationStatus`, `openapi.yaml:1212-1215`) | API response (agent record, verbatim; snake_case surface: `op_id`, `kind`, `state`, `progress`) | `op_id` |
-| 3 | `release_api.go:224` (`dispatchRecord`, served by `GET /api/releases/dispatch/status` at `release_api.go:588`; spec `DispatchStatus`, an open object) | API response | `op_id` |
-| 3a | `release_api.go:229` `dispatchRecord.ResumeContext` (`json:"resume_context"`) of type `DispatchResumeContext` (`release_dispatch_service.go:49-58`), whose fields have **no json tags**. The response is `GET /api/releases/dispatch/status` (`release_api.go:588`) | API response | `resume_context.OpID` (the Go field name) |
+| 3 | `release_api.go:224` (`dispatchRecord`, served by `GET /api/releases/dispatch/status` (`apiReleaseDispatchStatus`); spec `DispatchStatus`, an open object) | API response | `op_id` |
+| 3a | `release_dispatch_service.go:49-58` — `DispatchResumeContext`, whose fields have **no json tags**, embedded as `dispatchRecord.ResumeContext` (`json:"resume_context"`) in the `GET /api/releases/dispatch/status` response (`apiReleaseDispatchStatus`) | API response | `resume_context.OpID` (the Go field name) |
 | 4 | `release_api.go:711` — `POST /api/releases/dispatch` 202 body | API response | `op_id` |
 | 5 | `release_api.go:845` — `POST /api/releases/dispatch/resume` 202 body | API response | `op_id` |
-| 5a | `release_api.go:784-787` — `POST /api/releases/dispatch/resume` request `resumeRequest.ResumeContext` (`*DispatchResumeContext`), used verbatim at `release_api.go:851-853` | Accepted request field | `resume_context.OpID` |
+| 5a | `release_dispatch_service.go:49-58` — the same untagged `DispatchResumeContext`, accepted as `resumeRequest.ResumeContext` by `POST /api/releases/dispatch/resume` and used verbatim by `resolveResumeContext` | Accepted request field | `resume_context.OpID` |
 | 7 | `backups_api.go:335` — `backup.trigger` | Audit detail | `op_id=` |
 | 8 | `release_dispatch_service.go:423` — `release.dispatch` | Audit detail | `op_id=` |
 | 9 | `release_dispatch_service.go:438` — `release.dispatch.outcome` | Audit detail | `op_id=` |
@@ -124,7 +129,7 @@ Wire identifiers found:
 | 16 | `pac_lifecycle_api.go` responses (`:185,293,535,570,612,651,847,870,910,920,927,1169,1248`; `openapi.yaml:552-561`) | API request/response — already canonical | `operationId` |
 | 16a | Query parameters: `GET …/lifecycle?operationId=` (`pac_lifecycle_api.go:367`, `openapi.yaml:9109`) and the CDR receipt repair `?operationId=` (`cdr_enroll_receipts.go:726`, `openapi.yaml:12765`; sent at `frontend/src/api/cdr.ts:673`, `frontend/src/api/pac.ts:1302`) | Query parameter — already canonical | `operationId` |
 | 16b | `internal/pac/intent.go:105` — `AmbiguousOp.Op` in the PAC lifecycle response (`ambiguous.op`, decoded at `frontend/src/api/pac.ts:501`). It names the pending operation *record*, not its ID | API response (camelCase) | `op` |
-| 17 | Maintenance agent (`cmd/culvert-maint`): its operation record `op_id` (`internal/ops/ops.go:52`), error and start bodies (`internal/server/handlers_d16b.go:363,420`), its own audit events (`internal/audit/audit.go:39`), its on-disk journal (`internal/journal/journal.go:72`) and its op-log note `op_id=` (`internal/ops/orchestrator.go:223`) | Agent API, agent audit, agent storage — recorded exception (see constraints) | `op_id` |
+| 17 | Maintenance agent (`cmd/culvert-maint`): its operation record `op_id` (`cmd/culvert-maint/internal/ops/ops.go:52`), error and start bodies (`cmd/culvert-maint/internal/server/handlers_d16b.go:363,420`), its own audit events (`cmd/culvert-maint/internal/audit/audit.go:39`), its on-disk journal (`cmd/culvert-maint/internal/journal/journal.go:72`) and its op-log note `op_id=` (`cmd/culvert-maint/internal/ops/orchestrator.go:223`) | Agent API, agent audit, agent storage — recorded exception (see constraints) | `op_id` |
 
 Internal, not visible: `backups_api.go:328` and `release_dispatch_exec.go:575,581` read the maintenance
 agent's own `op_id` wire field. The untagged `OpID` fields of `DispatchReport`
@@ -135,13 +140,34 @@ agent's own `op_id` wire field. The untagged `OpID` fields of `DispatchReport`
 Also internal: the Go error strings at `release_dispatch_exec.go:338` and
 `release_dispatch_service.go:317` and the route note at `ui_routes_meta.go:810`.
 
-**(b) Prose.** Copy rule: user-facing prose says "operation ID", never a bare "op", "op id",
-"op_id" or "op record". This is not enumerated. The implementing PR must run this search against its
-base and resolve every user-facing hit:
+**(b) Prose.** Copy rule: user-facing prose says "operation ID". It never uses a bare "op" or an
+identifier spelling as a word ("op id", "op_id", "opId", "opID", "op record", "operation_id",
+"operationId", "OperationID"). This is not enumerated.
+
+**Scope of the rule, and of the search that enforces it** (the two must name the same paths):
+- error strings and comments in non-test Go (`*.go`, including `cmd/`);
+- OpenAPI descriptions (`api/openapi/openapi.yaml`);
+- React UI copy (`frontend/src`, excluding `frontend/src/test`);
+- legacy GUI copy (`static/`);
+- operator runbooks (`docs/operator/`).
+
+The implementing PR must run this search against its base and resolve every user-facing hit. It
+uses explicit non-alphanumeric delimiters instead of `\b`, because `_` is a word character and `\b`
+fails around `op_id`:
 
 ```sh
-git grep -n -i -E 'operation id|\bop\b|op id|op record' -- '*.go' ':!*_test.go' api/openapi/openapi.yaml frontend/src
+REV=fbf6a37   # the implementing PR sets its own base
+D='(^|[^A-Za-z0-9])'; E='([^A-Za-z0-9]|$)'
+git grep -n -i -E "${D}(op([ _]?(id|record))?|operation[ _]?id)${E}" "$REV" -- \
+  '*.go' ':!*_test.go' api/openapi/openapi.yaml frontend/src ':!frontend/src/test' static/ docs/operator/
 ```
+
+**Self-check (run at `fbf6a37`).** Every `file:line` cited anywhere in this T-64 section was checked
+against the combined output of the (a)/(b)/(c) identifier commands and the prose command above, all at
+`fbf6a37`. All 101 citations appear in that output: 86 `path:line` or `path:range` citations, plus 15
+bare `:N` continuation lines for `pac_lifecycle_api.go`. Context references that are not hits (the
+route or handler that serves or decodes a struct) are named by function, not by line. The implementing
+PR should repeat the check at its own base.
 
 Examples found at `fbf6a37`, **not exhaustive**: the resume 400 text "resume needs an op_id"
 (`release_api.go:823`); "no valid op_id or kind" (`backups_api.go:330-332`); "agent apply returned no
