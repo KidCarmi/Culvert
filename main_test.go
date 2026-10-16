@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -24,6 +25,19 @@ func TestMain(m *testing.M) {
 	// dataDir still override it via withTempDataDir (which saves/restores this value).
 	if td, err := os.MkdirTemp("", "culvert-test-datadir-"); err == nil {
 		dataDir = td
+		// The config-version store is a package default bound to
+		// "/data/config_versions" at init, not derived from dataDir, so every
+		// admin-handler test that reaches saveConfigVersion without
+		// snapshotConfigVersionsDir wrote into the HOST's /data whenever that
+		// directory existed (a developer box or agent container accumulated
+		// v50.json…v106.json across runs), while on the CI runner, where /data
+		// does not exist, the same writes failed. Point the store under the
+		// temp root but leave the directory UNCREATED: unisolated writes keep
+		// failing with ENOENT exactly as they do in CI, and nothing reaches
+		// the host. Tests that need a working store still isolate one with
+		// snapshotConfigVersionsDir / SetDirForTest, which save and restore
+		// this value.
+		configVersions.SetDirForTest(filepath.Join(td, "config_versions"))
 		code := m.Run()
 		os.RemoveAll(td)
 		os.Exit(code)
