@@ -7,19 +7,34 @@
 
 ## Executive Summary
 
-One small drift found and fixed; one T-51 recurrence and one button-case drift recorded as open; everything else in the window is consistent.
+One small drift found and fixed (R-1, runbook half); its metric half, one T-51 recurrence, one
+sentence-case drift and one console-account wording drift are recorded as open. This is a sampled
+review of the window's operator-facing additions, not an exhaustive sweep: items it did not sample
+are neither cleared nor charged.
 
 - **Operator-facing additions checked:** on-demand backup (`Backup Now` / `Start Backup`), self-service
   `Change Password`, `/api/backups/operations/`, `auth.basic.fail` / `auth.basic.refused`,
   state-file quarantine diagnostics, `culvert_ui_roster_role_clamped_total`. Verb/noun usage matches
   existing vocabulary (`backup`, `auth.<mechanism>.<outcome>`, `quarantine`). Capitalisation does
-  not: the three new buttons are Title Case, against the glossary's sentence-case rule (see Other
-  sections).
-- **Findings:** 1 (Low) — below — plus one recurrence of an open item: "appliance" in two new
-  `CHANGELOG.md` release-note entries (T-51; see Other sections).
+  not: several new labels are Title Case or all caps, against the glossary's sentence-case rule (see
+  Other sections).
+- **Findings:** R-1 (Low) below, plus two new Low items (sentence case; console-account "user"
+  wording) and one recurrence of an open item ("appliance" in two new `CHANGELOG.md` entries, T-51),
+  all in Other sections.
 
-**Terminology Health Score:** carried baseline from the 2026-09-24 report plus 1 new item, fixed in
-this PR for the runbook; its metric-HELP half stays open until #1630 (T-64) merges.
+**Terminology Health Score — audited window `45eaf07..fbf6a37`: 7.6 / 10** (lineage figure; fully
+charged equivalent **7.5**).
+
+- **Rule** (the 2026-09-08 precedent, as applied by the 2026-09-24 report): each open backlog item a
+  report newly records costs 0.1, and each item it fixes gives 0.1 back. An item already charged by an
+  earlier report is never charged again.
+- **Baseline: 7.9**, the 2026-09-24 report's comparison figure for `6ec745d` plus T-57, T-58, T-17 and
+  T-59. All four fixes merged before `45eaf07` (that report's own merge), so they are in this window's
+  base tree and 7.9 is the inherited value (fully charged 7.8, carrying the disclosed T-54 0.1).
+- **This report:** R-1 is newly recorded and only half fixed, so it stays open (−0.1); the sentence-case
+  drift (−0.1) and the console-account "user" wording (−0.1) are new open items; the T-51 recurrence
+  is not charged again. 7.9 − 0.3 = **7.6** (fully charged 7.5). R-1 gives its 0.1 back when #1630
+  (T-64) fixes the metric HELP.
 
 ## Canonical Concepts
 
@@ -50,11 +65,17 @@ this PR for the runbook; its metric-HELP half stays open until #1630 (T-64) merg
   entry), although [product terminology](../design/PRODUCT-TERMINOLOGY.md) says **Appliance** is not
   used (say **node** or **instance**). Left for the T-51 owner because the on-prem appliance work in
   flight may change that glossary row.
-- **Button case drift (Low, open, not fixed here):** the window adds `Backup Now`, `Start Backup`
-  and `Change Password` in `static/index.html`; [product terminology](../design/PRODUCT-TERMINOLOGY.md)
-  requires sentence case (`Backup now`, `Start backup`, `Change password`). Recorded rather than
-  fixed so this docs-only review does not edit the console.
+- **Sentence-case drift (Low, open, not fixed here):** [product terminology](../design/PRODUCT-TERMINOLOGY.md)
+  requires sentence case for labels, headings and buttons. The window adds, in `static/index.html`,
+  the buttons `Backup Now`, `Start Backup`, `Change Password` and `Back Up Unencrypted` and the heading
+  `Unencrypted Backup`, and, in `docs/operator/admin-basic-auth.md`, the all-caps heading
+  `BREAKING: accounts with TOTP enrolled cannot use Basic`. Recorded rather than fixed so this
+  docs-only review does not edit the console.
+- **Console-account "user" wording (Low, open, not fixed here):** `docs/operator/admin-basic-auth.md`
+  says "Admin RBAC roles are per user", where "user" means a console account; the glossary requires
+  **Administrator** (or "account") there and forbids bare "user" when it could mean a console account.
 - **Legacy / conflicting / ambiguous names:** none new. The legacy console's "Admin Users" panel title
   is a known divergence from "Administrators", tracked separately (#1531). **Migration risk:** none.
-- **Recommended plan:** none beyond R-1. If a future change surfaces "roster" in the GUI, use
+- **Recommended plan:** R-1's metric half via #1630; the sentence-case and "user" items in a small
+  follow-up that touches the console and the Basic-auth runbook. If a future change surfaces "roster" in the GUI, use
   "Administrators" instead.
