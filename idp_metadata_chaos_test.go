@@ -3838,8 +3838,19 @@ func TestChaos71_SupersessionRunsOnlyFromTheCommitSites(t *testing.T) {
 		t.Fatalf("read auth_idp.go: %v", err)
 	}
 	body := string(root)
+	// Delete is the third commit site, and it sweeps the whole profile.
+	del := chaos71SliceFunc(t, body, "func (r *IdPRegistry) Delete(")
+	if !strings.Contains(del, "Forget(") {
+		t.Fatal("Delete must retire the deleted profile's cached documents after its persist lands (IDP-11)")
+	}
 	for _, fn := range []string{"func (r *IdPRegistry) Upsert(", "func (r *IdPRegistry) ReplaceAll("} {
 		w := chaos71SliceFunc(t, body, fn)
+		// ReplaceAll delegates both halves to retireAfterSnapshotCommit, which
+		// the complexity gate forced out of its body. The DELEGATION IS
+		// SELF-CHECKING: the helper is re-read below and must itself carry both
+		// retirements, so the allowance cannot become a hole — the
+		// draftTestSetup precedent for exactly this shape.
+		w += chaos71DelegatedCommitBody(t, body, w)
 		if !strings.Contains(w, "retireSupersededDocuments(") {
 			t.Fatalf("%s must retire superseded cached documents after its persist lands", fn)
 		}
@@ -3848,6 +3859,19 @@ func TestChaos71_SupersessionRunsOnlyFromTheCommitSites(t *testing.T) {
 			t.Fatalf("%s must still retire the failure episode at the same commit site", fn)
 		}
 	}
+}
+
+// chaos71DelegatedCommitBody returns the body of the post-commit retirement
+// helper when the caller delegates to it, and "" when it does not — so a
+// commit site may satisfy the wall either directly or through the one helper,
+// and never by delegating to something that does not retire.
+func chaos71DelegatedCommitBody(t *testing.T, file, caller string) string {
+	t.Helper()
+	const helper = "retireAfterSnapshotCommit("
+	if !strings.Contains(caller, helper) {
+		return ""
+	}
+	return chaos71SliceFunc(t, file, "func "+helper)
 }
 
 // chaos71SliceFunc slices a function out of already-read source, failing rather
@@ -3865,4 +3889,65 @@ func chaos71SliceFunc(t *testing.T, body, anchor string) string {
 		t.Fatalf("could not find the end of %q", anchor)
 	}
 	return out[:end]
+}
+
+// TestChaos71_DeleteRetiresTheProfilesCachedDocuments closes IDP-11's reachable
+// half, raised again by CodeRabbit on the owner-decision round.
+//
+// Get is keyed by (profile, kind, source), so a profile RECREATED under the
+// same id pointed at the same source was served the PRE-DELETION document
+// during an outage — metadata the operator had deliberately deleted, including
+// whatever signing material it carried, for up to StaleMaxAge. The retirement
+// is post-commit, like every other one here: a delete whose persist fails
+// leaves the profile stored AND live, so its fallback must survive.
+func TestChaos71_DeleteRetiresTheProfilesCachedDocuments(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+	kind := chaos71Ref(idp.URL()).Kind
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	if _, _, err := idpMetadataStore().Get("corp", kind, idp.URL()); err != nil {
+		t.Fatalf("setup: the profile must have a cached document: %v", err)
+	}
+
+	if err := idpRegistry.Delete("corp"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := idpMetadataStore().Get("corp", kind, idp.URL()); err == nil {
+		t.Fatal("a committed delete must retire the profile's cached documents: left behind " +
+			"they feed the liveness-blind eviction for a profile that no longer exists, and a " +
+			"recreate under the same id and source would be served the pre-deletion document")
+	}
+
+	// And the recreate cannot resurrect it: with the IdP down there is no
+	// fallback left, so the profile is dark rather than silently serving
+	// metadata from before the delete.
+	idp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err == nil {
+		t.Fatal("a profile recreated during an outage must NOT compile from the " +
+			"deleted profile's document")
+	}
+}
+
+// TestChaos71_RefusedDeleteKeepsTheCachedDocuments is the CONTROL: a delete that
+// cannot be persisted leaves the profile stored and live, so retiring its
+// fallback would take a profile that is still serving dark at the next outage.
+func TestChaos71_RefusedDeleteKeepsTheCachedDocuments(t *testing.T) {
+	chaos71Env(t)
+	idp := newChaos71IdP(t)
+	kind := chaos71Ref(idp.URL()).Kind
+
+	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	idpRegistry.path = filepath.Join(t.TempDir(), "no-such-dir", "idp.json")
+	if err := idpRegistry.Delete("corp"); err == nil {
+		t.Fatal("precondition: the delete must fail to persist for this gate to mean anything")
+	}
+	if _, _, err := idpMetadataStore().Get("corp", kind, idp.URL()); err != nil {
+		t.Fatalf("a REFUSED delete must keep the cached document — the profile is still "+
+			"stored and live: %v", err)
+	}
 }

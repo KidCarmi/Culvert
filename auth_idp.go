@@ -679,6 +679,19 @@ func (r *IdPRegistry) Delete(id string) error {
 		// The profile is gone, so nothing will ever fetch for it again and no
 		// evidence can clear an episode it left behind.
 		forgetIdPMetadataEpisode(id)
+		// Nor can anything serve its cached documents to it again — and left
+		// behind they would feed the liveness-blind eviction on behalf of a
+		// profile that no longer exists, and would be served to a profile
+		// RECREATED under the same id and source during an outage, since Get
+		// keys on exactly that triple. Post-commit only, like every other
+		// retirement here (IDP-11).
+		if err := idpMetadataStore().Forget(id); err != nil {
+			// Advisory: the deletion itself has landed. A failure here leaves
+			// unreachable entries that evictLocked still bounds, so it must not
+			// fail a write that is already durable.
+			logger.Printf("IdP[%s]: could not retire cached metadata after delete: %v",
+				sanitizeLog(id), sanitizeLog(fmt.Sprint(err)))
+		}
 		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
@@ -820,15 +833,31 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// Published: only now may the served-generation evidence change (round 14).
 	idpReplacePublishedGenerations(nextProfiles, nextLive)
 
-	// Whatever this snapshot dropped, disabled, or switched to inline metadata
-	// has no remote fetch left, so its episode can never be cleared by
-	// evidence again. The inline arm mirrors Upsert's: a profile keeps its
-	// episode only while it still names a remote source to fetch from.
-	// Reached only after persist, so a rejected snapshot never gets here. A
-	// profile absent from `kept` has no remote source left in the published
-	// set, which retireEpisodeAfterCommit reads as the sweep-everything case —
-	// an absent key yields the zero idpDocRef, whose Source is "", so the two
-	// cases need no branch here.
+	retireAfterSnapshotCommit(nextProfiles, prevSources)
+	return nil
+}
+
+// retireAfterSnapshotCommit is ReplaceAll's post-persist retirement, both
+// halves of it, extracted so the two stores are swept from one place and so
+// ReplaceAll stays under the complexity gate.
+//
+// EPISODES: whatever this snapshot dropped, disabled, or switched to inline
+// metadata has no remote fetch left, so its episode can never be cleared by
+// evidence again. The inline arm mirrors Upsert's — a profile keeps its episode
+// only while it still names a remote source to fetch from. A profile absent
+// from `kept` has no remote source in the published set, which
+// retireEpisodeAfterCommit reads as the sweep-everything case: an absent key
+// yields the zero idpDocRef, whose Source is "", so the two cases need no
+// branch here.
+//
+// CACHED DOCUMENTS: swept over the COMMITTED set rather than over prevSources,
+// because a profile whose id is new to this snapshot — including an id reused
+// after a delete — can still carry cached documents for a source it no longer
+// fetches, and it has no prevSources entry to be found under. Retiring nothing
+// rewrites nothing, so the extra ids are free.
+//
+// CALLED ONLY AFTER persist, so a rejected snapshot never reaches it.
+func retireAfterSnapshotCommit(nextProfiles []*IdPProfile, prevSources map[string]idpDocRef) {
 	kept := make(map[string]idpDocRef, len(nextProfiles))
 	for _, p := range nextProfiles {
 		if ref := effectiveRemoteDocRef(p); ref.Source != "" {
@@ -838,15 +867,9 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	for id, prev := range prevSources {
 		retireEpisodeAfterCommit(id, prev, kept[id])
 	}
-	// The cache half, over the COMMITTED set rather than over prevSources: a
-	// profile whose id is new to this snapshot (including an id reused after a
-	// delete) can still carry cached documents for a source it no longer
-	// fetches, and it has no prevSources entry to be found under. Retiring
-	// nothing rewrites nothing, so the extra ids are free.
 	for id, ref := range kept {
 		retireSupersededDocuments(id, ref)
 	}
-	return nil
 }
 
 // liveRemoteSourceLocked returns the remote document source of the profile

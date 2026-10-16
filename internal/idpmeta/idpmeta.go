@@ -430,6 +430,55 @@ func (s *Store) RetireSuperseded(profileID string, kind Kind, keepSource string)
 	return s.saveIndexLocked()
 }
 
+// Forget removes every cached document for profileID, whatever its kind or
+// source.
+//
+// IT MUST BE CALLED ONLY AFTER A PROFILE DELETION HAS BEEN PERSISTED — the same
+// ordering rule as RetireSuperseded, for the same reason: the registry's
+// deletion is not committed until r.persist returns, and sweeping a profile's
+// documents before that would destroy the fallback of a profile that is still
+// in service if the write then fails.
+//
+// Two things this closes (register row IDP-11, raised again by CodeRabbit on
+// the owner-decision round). A deleted profile's final entry used to linger
+// forever: it fed the global, oldest-first, liveness-blind evictLocked, so with
+// more than MaxEntries profiles having ever existed a LIVE profile's only
+// fallback could be evicted on behalf of a profile that no longer exists. And
+// because Get is keyed by (profile, kind, source), recreating a profile under
+// the SAME id pointed at the SAME source would be served the PRE-DELETION
+// document during an outage — metadata the operator had deliberately deleted,
+// including whatever signing material it carried, coming back for up to
+// StaleMaxAge.
+//
+// Deleting rather than moving aside matches evictLocked and RetireSuperseded:
+// the CHAOS-50/62 "quarantine, never delete" rule governs a store whose content
+// is EVIDENCE of a fault, and this content is a cache of a remote document that
+// the next successful fetch reproduces.
+func (s *Store) Forget(profileID string) error {
+	if s == nil || profileID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dir == "" {
+		return nil // inert store
+	}
+	s.loadLocked()
+	removed := false
+	for k, e := range s.entries {
+		if e == nil || e.ProfileID != profileID {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.dir, docFileName(k)))
+		delete(s.entries, k)
+		removed = true
+	}
+	if !removed {
+		return nil // nothing retired, so nothing to rewrite
+	}
+	return s.saveIndexLocked()
+}
+
 // supersedeLocked retires every OTHER cached document for this (profile, kind),
 // keeping the entry named by keep. It reports whether it removed anything, so
 // the caller can skip rewriting an unchanged index.

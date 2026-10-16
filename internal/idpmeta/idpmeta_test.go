@@ -749,3 +749,64 @@ func TestRetireSuperseded_KeepsLiveProfilesOutOfEvictionRange(t *testing.T) {
 		t.Fatalf("wrong document served: %q", doc)
 	}
 }
+
+// TestForget_RemovesEveryDocumentForTheProfile closes register row IDP-11.
+//
+// A deleted profile's entries used to linger forever, feeding the global,
+// oldest-first, liveness-blind evictLocked on behalf of a profile that no
+// longer exists — so with more than MaxEntries profiles having ever existed a
+// LIVE profile's only fallback could be evicted for a dead one.
+func TestForget_RemovesEveryDocumentForTheProfile(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+
+	if err := s.Put("gone", KindSAMLMetadata, "https://gone.example/md", []byte("SAML")); err != nil {
+		t.Fatalf("put saml: %v", err)
+	}
+	if err := s.Put("gone", KindOIDCDiscovery, "https://gone.example/.well-known/openid-configuration", []byte("OIDC")); err != nil {
+		t.Fatalf("put oidc: %v", err)
+	}
+	if err := s.Forget("gone"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if n := len(s.entries); n != 0 {
+		t.Fatalf("Forget left %d entries, want 0 — every kind must go", n)
+	}
+	// The documents must be off the disk too, not merely out of the index.
+	for _, p := range []string{
+		docPathFor(s, "gone", KindSAMLMetadata, "https://gone.example/md"),
+		docPathFor(s, "gone", KindOIDCDiscovery, "https://gone.example/.well-known/openid-configuration"),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("document file still on disk (err=%v)", err)
+		}
+	}
+}
+
+// TestForget_IsScopedToTheProfile is the CONTROL. The cheapest way to pass the
+// gate above is to clear more than asked, which would destroy the fallbacks the
+// cache exists to hold for profiles that are still in service.
+func TestForget_IsScopedToTheProfile(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+
+	if err := s.Put("gone", KindSAMLMetadata, "https://gone.example/md", []byte("GONE")); err != nil {
+		t.Fatalf("put gone: %v", err)
+	}
+	if err := s.Put("live", KindSAMLMetadata, "https://live.example/md", []byte("LIVE")); err != nil {
+		t.Fatalf("put live: %v", err)
+	}
+	if err := s.Forget("gone"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if doc, _, err := s.Get("live", KindSAMLMetadata, "https://live.example/md"); err != nil || string(doc) != "LIVE" {
+		t.Fatalf("a live profile's document was retired: %q err=%v", doc, err)
+	}
+	// An empty profile id must sweep NOTHING — it is not a wildcard.
+	if err := s.Forget(""); err != nil {
+		t.Fatalf("forget(\"\"): %v", err)
+	}
+	if doc, _, err := s.Get("live", KindSAMLMetadata, "https://live.example/md"); err != nil || string(doc) != "LIVE" {
+		t.Fatalf("an empty profile id must retire nothing: %q err=%v", doc, err)
+	}
+}
