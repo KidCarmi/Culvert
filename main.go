@@ -163,10 +163,25 @@ type startupState struct {
 	rlCleanupCancel context.CancelFunc
 	feedSyncer      *FeedSyncer
 	scanSvc         *ScanService
-	adminUISrv      *http.Server  // P1.1 / S4.AdminUI: graceful shutdown handle
-	socks5Srv       *socks5Server // P1.5 / S4.SOCKS5: listener-close shutdown handle
+	adminUISrv      *http.Server      // P1.1 / S4.AdminUI: graceful shutdown handle
+	socks5Srv       *socks5Supervisor // P1.5 / S4.SOCKS5: listener-close shutdown handle (CHAOS-66: the supervisor owns bind→serve→rebind)
 }
 
+// main is the composition root: a flat, ordered sequence of startup slices.
+//
+// The funlen finding here (56 statements > 50) PREDATES this change and is
+// untouched by it — main's body is byte-identical to the base branch. CI's
+// diff-scoped lint surfaced it only because an unrelated two-line edit to
+// startupState above sits inside the same diff hunk as this declaration.
+//
+// It is suppressed rather than split because the startup ORDER is load-bearing
+// throughout this file — dataDir before the flag set, the one-shots before the
+// restore check, reconcileObjectRefNames after every store it reads,
+// startAdminUI after the init block — so extracting the sequence would hide the
+// one thing this file exists to make readable. Splitting main deserves its own
+// change (DEBT-003 already split this file once), not a SOCKS5 fix.
+//
+//nolint:funlen // single-pass boot orchestration; splitting hides the startup order
 func main() {
 	// Positional subcommand: `culvert bootstrap-resolve ...` fetches + verifies the
 	// signed release catalog and emits the fresh-install decision, then exits. It
@@ -494,10 +509,27 @@ func runResetPasswordCommand(s *startupState) error {
 	if err := cfg.SetUIUser(parts[0], parts[1], RoleAdmin); err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
+	// SEC-TOTP-1: --reset-password is the documented break-glass for a lost
+	// admin credential (GAP-IAM-01: host/container shell is the ONLY admin
+	// recovery path), and it has always dropped the account's TOTP enrolment as
+	// a side effect of SetUIUser replacing the roster record. An operator who
+	// has lost the authenticator as well as the password needs that, so the
+	// behaviour is kept EXACTLY — but SetUIUser no longer removes a second
+	// factor on any path, so the removal is now explicit here and, unlike
+	// before, ANNOUNCED. This is the one place a second factor may be dropped
+	// without proving possession of it; it requires host access and it says so.
+	clearedTOTP := cfg.UserHasTOTP(parts[0])
+	if clearedTOTP {
+		cfg.ClearTOTP(parts[0])
+	}
 	if err := cfg.SaveUIUsersFile(); err != nil {
 		return fmt.Errorf("error saving: %w", err)
 	}
 	fmt.Printf("Password reset for %q (role=admin). You can now start the proxy.\n", parts[0])
+	if clearedTOTP {
+		fmt.Printf("WARNING: TOTP two-factor enrolment for %q was removed by this break-glass reset. "+
+			"The account is now single-factor — re-enrol it before returning the appliance to service.\n", parts[0])
+	}
 	return nil
 }
 
@@ -1214,10 +1246,10 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	stopEscalation := armShutdownEscalation(quit, os.Exit)
 	defer stopEscalation()
 
-	var early, late shutdownRegistry
-	registerEarlyShutdownHooks(&early, s)
-	registerLateShutdownHooks(&late, s, proxySrv)
-	runShutdownSequence(&early, &late, defaultShutdownBudget)
+	early, late := newShutdownRegistry(), newShutdownRegistry()
+	registerEarlyShutdownHooks(early, s)
+	registerLateShutdownHooks(late, s, proxySrv)
+	runShutdownSequence(early, late, defaultShutdownBudget)
 
 	// Disarm as soon as the sequence is done, not at function exit: a stray
 	// signal arriving in the gap would otherwise turn a shutdown that

@@ -130,6 +130,28 @@ func socks5ChaosSetup(t *testing.T) *[]string {
 	resetSOCKS5HealthForTest()
 	t.Cleanup(resetSOCKS5HealthForTest)
 
+	// FREEZE the health read clock at test start.
+	//
+	// These gates drive the WRITE path with synthetic stamps anchored at
+	// time.Now(), and since CHAOS-66 round 3 the READ path ages an in-progress
+	// episode against a clock. Leaving that clock real mixes the two: a gate
+	// that records failures 19 s apart synthetically and then asserts the
+	// listener is NOT yet degraded also, silently, asserts that fewer than 30 s
+	// of WALL time passed between the two statements. That holds in
+	// milliseconds locally and does not hold on a shared runner under
+	// `-count=2`, which is exactly how it was found (CI determinism gate, green
+	// locally under the same shuffle seed).
+	//
+	// Frozen at the same instant the gates use as their base, so `now - first`
+	// is ~0 and the stored span decides — the pre-round-3 semantics, now
+	// deterministic. A gate that wants an episode to AGE advances the clock
+	// explicitly via swapSOCKS5HealthClock, which is the condition under test
+	// there rather than an accident of scheduling.
+	frozen := time.Now()
+	prevNow := socks5HealthNow
+	socks5HealthNow = func() time.Time { return frozen }
+	t.Cleanup(func() { socks5HealthNow = prevNow })
+
 	var mu sync.Mutex
 	var fired []string
 	prev := fireSOCKS5ListenerAlert

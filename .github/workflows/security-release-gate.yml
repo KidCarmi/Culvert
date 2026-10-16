@@ -569,6 +569,23 @@ jobs:
     # so a job that silently fails to start refuses the gate instead of
     # passing through the skipped-as-pass door. The predicate is the same one
     # on the job's `if:`; see the note there before editing either.
+    #
+    # THE EIGHT BLOCKING SCANS ARE REQUIRED ON EVERY NON-PR EVENT, the push
+    # included. This workflow is a `mandatory` row in
+    # .github/release-evidence.txt, and require-gate.sh reads the WORKFLOW's
+    # conclusion: with no requirement, a main push in which every scan skipped
+    # left this job — `if: always()` — the only one that ran, so it reported
+    # APPROVED and the workflow concluded `success`, not `skipped`. There was
+    # then nothing for require-gate.sh to refuse, and a commit no scan had run
+    # against could be promoted. `tests-race` stays OUT of the push arm: QA
+    # owns the race suite on a main push and this job legitimately skips there
+    # (TestSecurityRace_OwnershipMatrix). `sbom` is absent for a different
+    # reason: it is informational and deliberately NOT in this job's `needs:`,
+    # so requiring it would demand a job needs-verdict never sees and would
+    # refuse EVERY run. Everything named here must be a member of `needs:` —
+    # pinned by TestSecurityRace_RequiredJobsAreAllNeeded. The arms are
+    # ordered, and a tag push matches the first, so it is judged on the suite
+    # AND the scans.
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -576,7 +593,7 @@ jobs:
         with:
           needs-json: ${{ toJSON(needs) }}
           title: "✅ Security Gate — APPROVED"
-          require-success: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && 'tests-race' || '' }}
+          require-success: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && 'tests-race,sast-gosec,vuln-govulncheck,vuln-trivy-fs,vuln-trivy-image,secrets-gitleaks,license-check,sast-staticcheck,lint-dockerfile' || github.event_name == 'push' && 'sast-gosec,vuln-govulncheck,vuln-trivy-fs,vuln-trivy-image,secrets-gitleaks,license-check,sast-staticcheck,lint-dockerfile' || '' }}
           extra-summary: ${{ github.event_name == 'pull_request' && 'PASS-THROUGH on PRs — scanning is enforced by the Fast PR Gate (govulncheck/gosec/gitleaks) and Deep PR Gate (trivy/hadolint/go-licenses) — roadmap/CI-REDESIGN.md, step 6; this gate runs fully on main pushes, tags, and weekly.' || '' }}
 
       - name: Security-checks-passed banner

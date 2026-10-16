@@ -95,7 +95,14 @@ type configSurfaceRow struct {
 	// non-empty replacement); SnapshotWireWipe pins both postures.
 	WireWipeCapable bool
 	Note            string // constraint the flags can't express (ordering, validation, known gaps)
-	Bindings        []surfaceBinding
+	// RollbackExclusion is the operator-facing reason a kindConfig row is
+	// deliberately NOT on the version-rollback surface, surfaced verbatim by
+	// GET /api/config/rollback-scope. It is DEDICATED to that answer: Note is
+	// a general-purpose engineering remark and is never reused as a rollback
+	// reason. Only meaningful when Rollback is false; rows without one are
+	// reported with rollbackExclusionGenericReason (or the Sensitive variant).
+	RollbackExclusion string
+	Bindings          []surfaceBinding
 }
 
 // configSurfaces is the registry. Ordering: meta rows, then the
@@ -255,17 +262,17 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "PACPools", Apply: semNilSkipEmptyWipe},
 			{Struct: "ConfigSnapshot", Field: "PACPools", Apply: semNilSkipEmptyWipe}}},
-	{ID: "alert_webhooks", Kind: kindConfig, Owner: "globalAlertStore",
+	{ID: "alert_webhooks", Kind: kindConfig, RollbackExclusion: "a faithful snapshot would have to store the webhook HMAC signing secrets in plaintext config-version files, and restoring would drop those secrets and renumber webhooks (Finding 10.3)", Owner: "globalAlertStore",
 		Export: true, Import: true, Sensitive: true,
 		Note:     "export via List() which strips HMAC secrets; off the rollback surface by design (Finding 10.3)",
 		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "AlertWebhooks", Redacted: true}}},
-	{ID: "block_page_html", Kind: kindConfig, Owner: "blockPage",
+	{ID: "block_page_html", Kind: kindConfig, RollbackExclusion: "operational setting, not versioned policy — its handler never snapshots it (Finding 10.3)", Owner: "blockPage",
 		Export: true, Import: true, AdminDurable: true,
 		Note: "operational setting, not versioned policy — off the rollback surface by design",
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "BlockPageHTML"},
 			{Struct: "AdminSettings", Field: "BlockPageHTML"}}},
-	{ID: "upstream_proxies", Kind: kindConfig, Owner: "upstreamPool",
+	{ID: "upstream_proxies", Kind: kindConfig, RollbackExclusion: "upstream proxy URLs may carry credentials, which must never be persisted across config-version files or silently swapped by a rollback (Finding 10.3)", Owner: "upstreamPool",
 		Import: true, Sensitive: true, AdminDurable: true,
 		Note: "2F-D: the legacy credential-free list is IMPORT-ONLY compatibility (authority-keyed, versioned xxxxx rule) — no export writes it since schema version 2; admin_settings persists it CREDENTIAL-FREE beside upstream_proxies_v2 (UpstreamProxiesSaved sentinel; a sentinel-less legacy file with userinfo URLs is migrated once at boot; prepare-downgrade rewrites it WITH credentials for the frozen predecessor) — off the rollback surface by design",
 		Bindings: []surfaceBinding{
@@ -279,20 +286,20 @@ var configSurfaces = []configSurfaceRow{
 		AdminDurable: true,
 		Note:         "2F-D: counts-only marker prepare-downgrade leaves beside the credential-bearing legacy list; consumed by the next boot's re-migration (re-migrated_after_prepare); node-local, off every other surface",
 		Bindings:     []surfaceBinding{{Struct: "AdminSettings", Field: "UpstreamPreparedDowngrade"}}},
-	{ID: "upstream_proxies_v2", Kind: kindConfig, Owner: "upstreamPool",
+	{ID: "upstream_proxies_v2", Kind: kindConfig, RollbackExclusion: "the managed upstream pool holds node-local sealed credentials, which are never written into a config-version snapshot or silently swapped by a rollback (Finding 10.3)", Owner: "upstreamPool",
 		Export: true, Import: true, Sensitive: true, AdminDurable: true,
 		Note: "2F-C/2F-D: the managed Upstream v2 document (ULID identities, canonical authorities, SEALED credentials under the node-local .upstream_cred_key). Exported ONLY as the credential-free C5 representation {id, scheme, host, port, username, credentialState} + upstream_credentials:\"omitted\" (upstream_portability.go); imported via the identity-keyed whole-file plan (C9); the SEALED document itself is node-local — never exported, rolled back or CP→DP synced; backups archive it credential-STRIPPED (requiresReplacement markers)",
 		Bindings: []surfaceBinding{
 			{Struct: "AdminSettings", Field: "UpstreamProxiesV2"},
 			{Struct: "configBackup", Field: "UpstreamProxiesV2", Redacted: true},
 			{Struct: "configBackup", Field: "UpstreamCredentials", Redacted: true}}},
-	{ID: "conn_limit_enabled", Kind: kindConfig, Owner: "connLimiter",
+	{ID: "conn_limit_enabled", Kind: kindConfig, RollbackExclusion: "operational setting, not versioned policy — its handler never snapshots it (Finding 10.3)", Owner: "connLimiter",
 		Export: true, Import: true, AdminDurable: true,
 		Note: "operational setting — off the rollback surface by design",
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "ConnLimitEnabled"},
 			{Struct: "AdminSettings", Field: "ConnLimitEnabled"}}},
-	{ID: "conn_limit_max_per_ip", Kind: kindConfig, Owner: "connLimiter",
+	{ID: "conn_limit_max_per_ip", Kind: kindConfig, RollbackExclusion: "operational setting, not versioned policy — its handler never snapshots it (Finding 10.3)", Owner: "connLimiter",
 		Export: true, Import: true, AdminDurable: true, ClusterSynced: true,
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "ConnLimitMaxPerIP"},
@@ -325,7 +332,7 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "ContentScanBypassHosts", Apply: semNilSkipEmptyWipe}}},
 
 	// ── AdminSettings-only settings ──────────────────────────────────────
-	{ID: "require_commit", Kind: kindConfig, Owner: "policyDraft", AdminDurable: true,
+	{ID: "require_commit", Kind: kindConfig, RollbackExclusion: "policy-draft governance posture, not rulebase content — a rules rollback must not silently flip the commit mode", Owner: "policyDraft", AdminDurable: true,
 		Note:     "policy-draft opt-in governance mode; admin-durable only (governance posture, NOT rulebase content), NOT cluster-synced, NOT on the rollback surface — a rules rollback must not silently flip the commit mode",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "RequireCommit"}}},
 	{ID: "syslog_addr", Kind: kindConfig, Owner: "syslog", AdminDurable: true,
@@ -361,13 +368,13 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "trusted_proxy_cidrs", Kind: kindConfig, Owner: "trustedProxyNets", AdminDurable: true,
 		Note:     "RISK-019 reverse-proxy trust set for admin-UI client-IP; admin-durable only (per-node topology), NOT cluster-synced; empty len-guarded apply",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRs"}}},
-	{ID: "base_url", Kind: kindConfig, Owner: "proxyBaseURL", AdminDurable: true, ClusterSynced: true,
+	{ID: "base_url", Kind: kindConfig, RollbackExclusion: "rolling back the external base URL would break OIDC redirect URIs registered on the IdP; re-set it directly instead", Owner: "proxyBaseURL", AdminDurable: true, ClusterSynced: true,
 		Bindings: []surfaceBinding{
 			{Struct: "AdminSettings", Field: "BaseURL"},
 			{Struct: "ConfigSnapshot", Field: "ProxyBaseURL", Apply: semAlwaysReplace}}},
-	{ID: "ui_sans", Kind: kindConfig, Owner: "uitls", AdminDurable: true,
+	{ID: "ui_sans", Kind: kindConfig, RollbackExclusion: "rolling back UI certificate SANs forces certificate regeneration and breaks browser certificate pins; re-set it directly instead", Owner: "uitls", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UISANs"}}},
-	{ID: "trust_forwarded_headers", Kind: kindConfig, Owner: "identity", AdminDurable: true, ClusterSynced: true,
+	{ID: "trust_forwarded_headers", Kind: kindConfig, RollbackExclusion: "rolling back could silently re-enable forwarded-header trust the admin turned off (header-spoofing risk); re-set it directly instead", Owner: "identity", AdminDurable: true, ClusterSynced: true,
 		Bindings: []surfaceBinding{
 			{Struct: "AdminSettings", Field: "TrustForwardedHeaders"},
 			{Struct: "ConfigSnapshot", Field: "TrustForwardedHeaders", Apply: semAlwaysReplace}}},
@@ -435,18 +442,18 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "saas_store_schema_version", Kind: kindMeta, Owner: "saasFeed", AdminDurable: true,
 		Note:     "F3a-1 durable migration marker; absence triggers one-time schema init, a newer value is refused (fail-closed downgrade guard)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSStoreSchemaVersion"}}},
-	{ID: "yara_enabled", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+	{ID: "yara_enabled", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Note:     "gated by yara_settings_saved sentinel (as are all yara_* rows)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAEnabled"}}},
-	{ID: "yara_timeout_secs", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+	{ID: "yara_timeout_secs", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARATimeoutSecs"}}},
-	{ID: "yara_max_inflight", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+	{ID: "yara_max_inflight", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAMaxInflight"}}},
-	{ID: "yara_on_timeout", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+	{ID: "yara_on_timeout", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAOnTimeout"}}},
-	{ID: "yara_on_saturation", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+	{ID: "yara_on_saturation", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAOnSaturation"}}},
-	{ID: "yara_alert_degraded", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+	{ID: "yara_alert_degraded", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAAlertDegraded"}}},
 
 	// Adaptive decryption-exclusion tunables (F10). AdminDurable-only — mirroring
@@ -454,16 +461,16 @@ var configSurfaces = []configSurfaceRow{
 	// OFF CP→DP (ClusterSynced), not Sensitive. These are node-local OPERATIONAL
 	// tuning, not policy; the learned cache they govern is itself volatile and off
 	// every surface. Gated by the autoexclude_tunables_saved sentinel on load.
-	{ID: "autoexclude_confirm_n", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+	{ID: "autoexclude_confirm_n", Kind: kindConfig, RollbackExclusion: "node-local engine tunable for the adaptive decryption-exclusion cache, not versioned policy", Owner: "autoExclude", AdminDurable: true,
 		Note:     "gated by autoexclude_tunables_saved sentinel (as are all autoexclude_* tunable rows)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeConfirmN"}}},
-	{ID: "autoexclude_ttl_secs", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+	{ID: "autoexclude_ttl_secs", Kind: kindConfig, RollbackExclusion: "node-local engine tunable for the adaptive decryption-exclusion cache, not versioned policy", Owner: "autoExclude", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTTLSecs"}}},
-	{ID: "autoexclude_pinned_ttl_secs", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+	{ID: "autoexclude_pinned_ttl_secs", Kind: kindConfig, RollbackExclusion: "node-local engine tunable for the adaptive decryption-exclusion cache, not versioned policy", Owner: "autoExclude", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludePinnedTTLSecs"}}},
-	{ID: "autoexclude_window_secs", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+	{ID: "autoexclude_window_secs", Kind: kindConfig, RollbackExclusion: "node-local engine tunable for the adaptive decryption-exclusion cache, not versioned policy", Owner: "autoExclude", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeWindowSecs"}}},
-	{ID: "autoexclude_max_entries", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+	{ID: "autoexclude_max_entries", Kind: kindConfig, RollbackExclusion: "node-local engine tunable for the adaptive decryption-exclusion cache, not versioned policy", Owner: "autoExclude", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeMaxEntries"}}},
 
 	// Policy Learning Mode governance (ADR-0025 M5A) — deliberately AdminDurable-ONLY:
@@ -564,7 +571,7 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "threat_feed_domains", Kind: kindConfig, Owner: "globalThreatFeed",
 		ClusterSynced: true, SnapshotCap: maxSnapThreatFeedDomains,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ThreatFeedDomains", Apply: semSkipIfZero}}},
-	{ID: "threat_domain_allowlist", Kind: kindConfig, Owner: "globalThreatFeed",
+	{ID: "threat_domain_allowlist", Kind: kindConfig, RollbackExclusion: "distributed to data-plane nodes via the cluster snapshot; putting it on rollback would create a control-plane/data-plane dual-authority hazard", Owner: "globalThreatFeed",
 		ClusterSynced: true, SnapshotCap: maxSnapDomainAllowlist, WireWipeCapable: true,
 		Note:     "no omitempty: the allowlist gates lookup verdicts, so an admin's full clear must reach DPs (stale allowlist = fail-open mask)",
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ThreatDomainAllowlist", Apply: semNilSkipEmptyWipe}}},
@@ -581,4 +588,127 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "node_groups", Kind: kindConfig, Owner: "globalNodeGroups",
 		ClusterSynced: true, SnapshotCap: maxSnapNodeGroups,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "NodeGroups", Apply: semNilSkipEmptyWipe}}},
+}
+
+// rollbackExcludedSetting names one operator-facing setting that the config
+// version rollback surface deliberately never captures, applies or diffs,
+// plus WHY (its registry RollbackExclusion, or a generic explanation).
+type rollbackExcludedSetting struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+	// sources names the "file:func" sites whose "not on the rollback
+	// surface" source comments this entry answers for. Never serialized;
+	// TestRollbackScope_EveryOffSurfaceMarkerIsClaimed pins it.
+	sources []string
+}
+
+// rollbackExclusionGenericReason is reported for a non-rollback row that
+// records no dedicated RollbackExclusion. It states only what is known: the
+// setting is not captured, so a rollback leaves its live value unchanged.
+const rollbackExclusionGenericReason = "not captured in config-version snapshots, so a rollback leaves its current value unchanged; change it directly in its own settings panel"
+
+// rollbackExclusionSensitiveReason is reported for a Sensitive row without a
+// dedicated reason: the registry invariant (config_surfaces_test.go) forbids
+// secret-bearing rows from the rollback surface.
+const rollbackExclusionSensitiveReason = "may carry secret material, which is never written into config-version snapshots; change it directly in its own settings panel"
+
+// rollbackExclusionReason is the ONLY place the rollback-scope answer for a
+// registry row is derived. It never falls back to row.Note.
+func rollbackExclusionReason(row *configSurfaceRow) string {
+	switch {
+	case row.RollbackExclusion != "":
+		return row.RollbackExclusion
+	case row.Sensitive:
+		return rollbackExclusionSensitiveReason
+	default:
+		return rollbackExclusionGenericReason
+	}
+}
+
+// rollbackExcludedConfigSurfaces derives, from the registry above, EVERY
+// operator-facing setting (any kindConfig row) that is NOT on the
+// version-rollback surface — not just the Finding-10.3 export/import rows,
+// but also the AdminSettings-only operational settings (log level, syslog,
+// OTLP, session timeout, IP allowlists, etc.) that configBackup never even
+// binds. Both groups are equally invisible to a rollback: an operator about
+// to click "Rollback" has no way to tell them apart from the ones that DO
+// move, so both belong in one accurate answer to "what will this not
+// change?" Deriving rather than hand-listing means a future registry row
+// can never drift out of sync with what the UI tells the operator. It then
+// appends the known off-registry state (offRegistryRollbackExclusions). The
+// result is the KNOWN exclusion set, not a proof of completeness, and callers
+// must present it that way.
+func rollbackExcludedConfigSurfaces() []rollbackExcludedSetting {
+	out := make([]rollbackExcludedSetting, 0, len(configSurfaces)+len(offRegistryRollbackExclusions))
+	for i := range configSurfaces {
+		row := &configSurfaces[i]
+		if row.Kind != kindConfig || row.Rollback {
+			continue
+		}
+		out = append(out, rollbackExcludedSetting{ID: row.ID, Reason: rollbackExclusionReason(row)})
+	}
+	return append(out, offRegistryRollbackExclusions...)
+}
+
+// offRegistryRollbackExclusions lists operator-managed state that lives
+// OUTSIDE the configSurfaces registry and is therefore invisible to the
+// derivation above, yet is equally untouched by a version rollback
+// (captureConfigBackup neither reads nor restores it). It is best-effort, not
+// a proof of completeness — the UI therefore presents the list as "including",
+// never as the whole set — but it is WALLED: every handler whose source says it
+// is off the rollback surface must be claimed here, by a registry row, or as
+// runtime-only (TestRollbackScope_EveryOffSurfaceMarkerIsClaimed).
+var offRegistryRollbackExclusions = []rollbackExcludedSetting{
+	{ID: "cdr_enabled", Reason: "CDR enablement is per-CP local state outside the config registry; rollback never captures or restores it",
+		sources: []string{"cdr_ui.go:<file>"}},
+	{ID: "cdr_instances", Reason: "CDR instances (cdr_instances.json) are per-CP local state; rollback never captures or restores them, and must never silently un-revoke a credential",
+		sources: []string{"cdr_ui.go:apiCDRRevokeRPC"}},
+	{ID: "cdr_policies", Reason: "CDR policies (cdr_policies.json) are per-CP local state; rollback never captures or restores them"},
+	{ID: "admin_users", Reason: "admin accounts, roles, password hashes and 2FA (ui_users.json); restoring an old password hash would be a security regression",
+		sources: []string{"ui_auth.go:apiAuthChangePassword"}},
+	{ID: "scan_exclusions", Reason: "scan-exclusion hashes/hosts are trust-elevation lists; a rollback could re-trust a binary or host the operator chose to scan",
+		sources: []string{"ui_security.go:apiSecScanExclusions"}},
+	{ID: "yara_rules", Reason: "YARA rule files are filesystem artifacts compiled at engine load, typically managed in external version control",
+		sources: []string{"ui_security.go:apiSecYARARules"}},
+	{ID: "inspection_root_ca", Reason: "the SSL-inspection root CA and its rotation are forward-only trust decisions; rollback would restore a superseded CA",
+		sources: []string{"ui_security.go:apiCARotate"}},
+	{ID: "custom_tls_certificates", Reason: "uploaded admin-UI and MITM certificates are forward-only trust mutations; rollback would restore superseded certificates",
+		sources: []string{"ui_security.go:apiCertsUpload"}},
+	{ID: "ocsp_revocation_checking", Reason: "relaxing revocation checking via rollback would silently re-permit certificates the admin tightened against",
+		sources: []string{"ui_security.go:apiOCSPConfig"}},
+	{ID: "cluster_mode", Reason: "control-plane / data-plane role (cluster.json); rolling back a role flip is meaningless once the control plane is active",
+		sources: []string{"ui_cluster.go:apiClusterMode"}},
+	{ID: "cluster_enrollment_tokens", Reason: "enrollment tokens are membership artifacts; rollback could resurrect a consumed token",
+		sources: []string{"ui_cluster.go:apiClusterTokenCreate"}},
+	{ID: "cluster_node_revocations", Reason: "un-revoking a banned node via rollback is a security regression",
+		sources: []string{"ui_cluster.go:apiClusterRevoke"}},
+	{ID: "cluster_ca", Reason: "cluster CA material is a forward-only trust artifact; its private key must never enter a version snapshot",
+		sources: []string{"ui_cluster.go:apiClusterCA"}},
+	{ID: "cluster_node_labels", Reason: "node labels are operational topology, not versioned policy",
+		sources: []string{"ui_cluster.go:apiClusterLabels"}},
+	{ID: "cluster_node_drain", Reason: "drain/maintenance state is operational topology; reverting it after traffic has shifted is wrong",
+		sources: []string{"ui_cluster.go:apiClusterDrain"}},
+	{ID: "pac_exceptions", Reason: "PAC exception governance metadata (pac_exceptions.json) is node-local and not on the capture/apply surface",
+		sources: []string{"pac_exceptions_api.go:pacExceptionPut"}},
+	{ID: "bootstrap_registry_settings", Reason: "the custom container-registry settings for node bootstrap (registry_settings.json) are not captured by a version snapshot"},
+	{ID: "mcp_gateway_state", Reason: "MCP Agent Security Gateway policies, approvals, tool trust and rollout mode have their own durable stores and are not captured by a version snapshot"},
+	{ID: "policy_learning_state", Reason: "Policy Learning sessions and recommendations (policy_learning.json) are node-local advisory state, not versioned policy"},
+}
+
+// rollbackMarkersCoveredByRegistry maps off-rollback source markers whose
+// state IS a configSurfaces row (so it is already reported by the derivation)
+// to that row's ID.
+var rollbackMarkersCoveredByRegistry = map[string]string{
+	"ui_config.go:apiNetworkSettings":             "base_url",
+	"ui_policy.go:apiDecryptionExclusionTunables": "autoexclude_confirm_n",
+	"ui_policy.go:<file>":                         "alert_webhooks",
+	"ui_security.go:apiSecYARASettings":           "yara_enabled",
+	"ui_security.go:apiDomainAllowlist":           "threat_domain_allowlist",
+}
+
+// rollbackMarkersRuntimeOnly are off-rollback markers on handlers that change
+// no durable setting at all, so there is nothing a rollback could restore.
+var rollbackMarkersRuntimeOnly = map[string]string{
+	"ui_security.go:apiCACacheClear": "flushes the in-memory leaf-certificate cache",
+	"ha.go:apiClusterHAEnable":       "HA leader-election state is ephemeral",
 }

@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
 )
 
 // ---------------------------------------------------------------------------
@@ -855,4 +857,112 @@ func TestPermitE2E_EveryBoundFieldCarriesTheExactTarget(t *testing.T) {
 			t.Fatalf("the exact tuple must carry the catalog record's own fingerprint digest, got %q", reason)
 		}
 	})
+}
+
+// ── §14 the certified verdict must not have a scheduled end ───────────────────
+
+// expiringWinnerDoc renders the canonical First-Canary rule with an expiry, plus a SHADOWED
+// lower-priority rule that the winner hides. The shadowed rule is a MONITOR carrying a
+// rate_limit_profile obligation: an action FirstCanaryRequiresPlainAllow refuses (it still
+// reaches EffectExecute and performs the real upstream call) and an obligation
+// permitObligationsSatisfiable refuses (no runtime consumer enforces it). Neither refusal can
+// fire while the winner matches, because the engine stops at the FIRST match — which is exactly
+// why the winner's expiry has to be checked.
+func expiringWinnerDoc(expiryUnix int64) string {
+	return `{"schema_version":1,"capability":"gateway","policy_revision":2,"default_action":"DENY","rules":[` +
+		`{"id":"ALLOW_READ_T","priority":1,"action":"ALLOW",` +
+		`"reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none",` +
+		`"expiry_unix":` + strconv.FormatInt(expiryUnix, 10) + `,` +
+		`"conditions":[{"field":"tool.name","op":"exact","value":"t"},` +
+		`{"field":"principal.tenant","op":"exact","value":"` + ttTenant + `"}],` +
+		`"obligations":{"logging":"standard"}},` +
+		`{"id":"MONITOR_FALLBACK","priority":2,"action":"MONITOR",` +
+		`"reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none",` +
+		`"conditions":[{"field":"tool.name","op":"exact","value":"t"}],` +
+		`"obligations":{"logging":"standard","rate_limit_profile":"rl-unenforced"}}]}`
+}
+
+// TestPermitE2E_ExpiringWinnerIsNotAPermit drives the real engine, the real snapshot store and
+// the real resolver. The winner matches at activation on bound fields only, with a satisfiable
+// obligation — every other permit check passes — and expires 60s later.
+//
+// Before the fix this returned PermitOK, certifying "the exact request resolves to a plain,
+// executable, invariant ALLOW" for a rulebase that stops saying so one minute later with no
+// operator action and nothing to audit.
+func TestPermitE2E_ExpiringWinnerIsNotAPermit(t *testing.T) {
+	r := newPermitRig(t, plainAllowDoc())
+	// Control: the SAME rule without an expiry is a permit, so the refusal below is caused by
+	// the expiry and by nothing else about this fixture.
+	if ok, reason := canaryExactPolicyPermit(r.scope(), r.reviewedReadOnly(t), r.now); !ok {
+		t.Fatalf("control: the expiry-free rule must be a permit, got %q", reason)
+	}
+	publishPermitPolicy(t, expiringWinnerDoc(r.now.Add(60*time.Second).Unix()))
+	ok, reason := canaryExactPolicyPermit(r.scope(), r.reviewedReadOnly(t), r.now)
+	if ok || reason != canary.PermitVerdictNotInvariant {
+		t.Fatalf("a winner that expires mid-window must not be certified, got ok=%v reason=%q", ok, reason)
+	}
+}
+
+// TestPermitE2E_ExpiringWinnerShadowsARefusedAction is the IMPACT proof, and it is what makes
+// the previous test a security gate rather than a pedantic one. It shows what the expired
+// winner hands the exact First-Canary request to: a rule the permit vocabulary refuses on two
+// independent grounds, which the invariance check never saw because it was never traced.
+func TestPermitE2E_ExpiringWinnerShadowsARefusedAction(t *testing.T) {
+	r := newPermitRig(t, plainAllowDoc())
+	expiry := r.now.Add(60 * time.Second).Unix()
+	publishPermitPolicy(t, expiringWinnerDoc(expiry))
+	// While the winner still matches, the shadowed rule leaves no trace entry at all.
+	_, trace, err := evaluateExpiringRig(t, r, r.now)
+	if err != nil {
+		t.Fatalf("evaluate at activation: %v", err)
+	}
+	for i := range trace.Entries {
+		if trace.Entries[i].RuleID == "MONITOR_FALLBACK" {
+			t.Fatalf("premise: the shadowed rule must be invisible at activation, trace=%+v", trace.Entries)
+		}
+	}
+	// One second after the winner expires the shadowed rule decides the same request.
+	dec, _, err := evaluateExpiringRig(t, r, time.Unix(expiry+1, 0))
+	if err != nil {
+		t.Fatalf("evaluate after expiry: %v", err)
+	}
+	if dec.MatchedRule != "MONITOR_FALLBACK" || dec.Action == policy.ActionAllow {
+		t.Fatalf("after expiry the shadowed rule must take over, got rule=%q action=%v",
+			dec.MatchedRule, dec.Action)
+	}
+	if dec.Obligations.RateLimitProfile == "" {
+		t.Fatalf("premise: the shadowed rule must carry the unenforced obligation, got %+v", dec.Obligations)
+	}
+}
+
+// evaluateExpiringRig evaluates the rig's exact tuple at an explicit instant through the same
+// tuple builder and engine the resolver uses, so the impact proof observes the real decision
+// rather than a re-implementation of it.
+func evaluateExpiringRig(t *testing.T, r permitRig, at time.Time) (policy.Decision, policy.ExplainTrace, error) {
+	t.Helper()
+	snap := mcpGatewayPolicySnapshot()
+	if snap == nil {
+		t.Fatal("no published gateway policy snapshot")
+	}
+	cat, servers, ok := mcpToolTrustReconcileSnapshotFor()
+	if !ok {
+		t.Fatal("no coherent inventory capture")
+	}
+	rec, recOK := cat.Get(catalog.ToolKey{Server: registry.ServerID(r.serverID), Name: r.toolName})
+	srv, srvOK := servers.Get(registry.ServerID(r.serverID))
+	if !recOK || !srvOK {
+		t.Fatal("missing catalog or registry record")
+	}
+	in, built := mcpruntime.ExactPermitTuple(mcpruntime.ExactPermitTupleInput{
+		PolicyRevision:  uint64(snap.Revision()),
+		CatalogRevision: rec.Revision, RegistryRevision: srv.Revision,
+		EvalTime: at, Tenant: ttTenant, SubjectID: r.scope().Principals[0],
+		ServerRec: srv, ToolRec: rec, ToolName: r.toolName,
+		ReviewedReadFirst: candidateReviewedReadFirst(r.reviewedReadOnly(t),
+			exactPermitCurrentTarget(srv, rec, r.toolName)),
+	})
+	if !built {
+		t.Fatal("exact tuple could not be built")
+	}
+	return mcpruntime.EvaluateExactPermitTuple(snap, in)
 }

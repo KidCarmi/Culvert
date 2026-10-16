@@ -294,7 +294,7 @@ func (p *pipeline) attachGatewayRefs(in *policy.DecisionInput, serverID string, 
 			// the fields this path populated inline, and the Canary permit builds its Tool with
 			// the same call.
 			in.Tool = GatewayToolRef(serverID, name, rec)
-			classifyReadFirstToolCall(op, p.capability, p.deps.canaryReviewedReadFirst, serverID, name)
+			p.classifyReadFirstForPrincipal(op, serverID, name, in.Principal.Assurance)
 			return
 		}
 	}
@@ -348,6 +348,45 @@ func classifyReadFirstToolCall(op *policy.Operation, capability protocol.Capabil
 	if reviewed(capability.String(), serverID, toolName) {
 		op.Class = policy.OpRead
 	}
+}
+
+// classifyReadFirstForPrincipal is the REQUEST-PATH entry to the one classification site. It
+// adds exactly one precondition the preflight does not have, and it never writes op.Class itself
+// — every promotion still goes through classifyReadFirstToolCall.
+//
+// # THE PROMOTION MAY MOVE A REQUEST BETWEEN RULES; IT MUST NOT MOVE IT OUT OF A HARD OVERRIDE
+//
+// The operation class is read by more than the read-first gate, and one of its readers is a
+// FAIL-CLOSED hard override no rule can undo: MCP-ID-005, which denies a write/high-risk
+// operation whose principal carries no assurance at all (policy/engine.go, subjectOverride).
+// Because every tools/call was OpWrite before this seam existed, that override denied EVERY
+// tool invocation from an unidentified principal, unconditionally. A promotion to OpRead takes
+// the request out of writeOrHigher's band, so the override stops firing — and the promotion
+// would then be the reason an identity control no longer applies.
+//
+// That is a different proposition from the one the review answered. A reviewer determined the
+// TOOL does not mutate state; nobody determined that invoking it without knowing who is asking
+// is acceptable, and a non-mutating tool still returns upstream data to its caller. So the
+// promotion is DECLINED when the principal's assurance is unknown: the request keeps OpWrite,
+// MCP-ID-005 denies it exactly as it did before this file gained a classifier, and nothing
+// about a properly identified principal changes.
+//
+// It is the same shape as every other branch here — an uncertainty leaves OpWrite in place —
+// and it is one-directional: declining to promote can only ever make a request MORE restricted.
+// Rule matching is deliberately NOT protected this way: moving a reviewed read-only tool
+// between ordinary rules is what the reviewed class is FOR. The line is the hard override.
+//
+// WHY THE PREFLIGHT DOES NOT CARRY THIS GUARD. The activation preflight (ExactPermitTuple) has
+// no principal assurance — `principal.assurance` is deliberately unbound there, and
+// EvaluateExactPermit's invariance argument depends on the read-first class making the
+// assurance branch unreachable. The permit therefore certifies the call for an IDENTIFIED
+// principal; at runtime an unidentified one keeps OpWrite and is denied by MCP-ID-005. The
+// runtime can only ever be stricter than the permit here, never looser.
+func (p *pipeline) classifyReadFirstForPrincipal(op *policy.Operation, serverID, toolName string, assurance policy.Assurance) {
+	if assurance == policy.AssuranceUnknown {
+		return // see the hard-override note above: never promote out of the MCP-ID-005 band
+	}
+	classifyReadFirstToolCall(op, p.capability, p.deps.canaryReviewedReadFirst, serverID, toolName)
 }
 
 // ReviewedReadFirstFn answers whether an exact named tool is bound to a four-eyes reviewed

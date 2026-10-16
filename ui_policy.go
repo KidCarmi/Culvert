@@ -1407,9 +1407,50 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host query param required", http.StatusBadRequest)
 		return
 	}
-	category, tier, matchedBy := lookupHostCategory(host)
+	// CHAOS-69: lookupHostCategory below is the SAME quadratic two-tier fusion
+	// the proxy data path reaches — urlcat's suffix walk plus one BadgerDB
+	// transaction per label. This endpoint takes the host from a query string
+	// inside the 1 MiB header block, so an authenticated VIEWER could park an
+	// admin-plane goroutine for minutes with one GET. Bounded through the same
+	// predicate the data path uses. See proxy_host_bounds.go.
+	if rawAuthorityOversize(host) {
+		noteOversizeHostRejectionReq("api/url-lookup", r, len(host), "raw")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
+		return
+	}
+	// And the CANONICAL tier, which this endpoint was missing: the raw pre-cap is
+	// deliberately generous (1 KiB) so IDN expansion is not refused, which on its
+	// own still admits the 1 000-byte dot-dense ASCII shape costing ~1.3 ms of
+	// fusion — exactly what the canonical tier exists to reject. Enforcing one
+	// tier of a two-tier contract is not enforcing the contract (Codex P2,
+	// PR #1446). Normalization failure is NOT refused here: validity is this
+	// endpoint's existing business, and this gate decides length only.
+	if normHost, ok := canonicalDestHost(host); ok {
+		if canonicalHostOversize(normHost) {
+			noteOversizeHostRejectionReq("api/url-lookup", r, len(normHost), "canonical")
+			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+			return
+		}
+	} else if unnormalizableHostOversize(host) {
+		// No canonical form ⇒ bound the raw bare host, or this band reaches
+		// the category fusion at full length (Codex P2, PR #1446).
+		noteOversizeHostRejectionReq("api/url-lookup", r, len(bareDestHost(host)), "unnormalizable")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+		return
+	}
+	// Hand the matchers the SAME value the tiers above measured. net.SplitHostPort
+	// does NOT require a numeric port, so `a:` + a 1 000-byte dot-dense string is
+	// a 1 002-byte authority whose bare host is one byte: every tier passed on "a"
+	// while the fusion below received the full value, restoring the suffix walk
+	// this tier exists to prevent (Codex P2, PR #1446). Bounding the ORIGINAL at
+	// 253 is not the fix — that is round 1's IDN regression, since a legitimate
+	// internationalized host can be 883 raw bytes and 251 canonical. Measure and
+	// match the same string. This also makes the tool agree with the proxy, which
+	// strips the port identically before its own matchers.
+	lookupHost := bareDestHost(host)
+	category, tier, matchedBy := lookupHostCategory(lookupHost)
 	// Also check the blocklist so the lookup tool gives a complete picture.
-	blocked := bl.IsBlocked(host)
+	blocked := bl.IsBlocked(lookupHost)
 	blockSource := ""
 	if blocked {
 		blockSource = "blocklist"
@@ -1926,14 +1967,17 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		// holding generation-P rules with a generation-P+1 token would pass the
 		// optimistic fence with a stale edit. The draft flag comes from the same
 		// selected state so the SPA banner never claims draft editing while the
-		// rules shown (and written) are the live ones.
-		snap, draft := effectiveManagementSnapshot()
+		// rules shown (and written) are the live ones. persisted is likewise
+		// the SELECTED domain's own durability, not always the running
+		// store's — the draft candidate has its own, separately-wired path.
+		snap, draft, persisted := effectiveManagementSnapshot()
 		jsonOK(w, map[string]any{
 			"rules":     snap.Rules,
 			"count":     len(snap.Rules),
 			"version":   snap.Version,
 			"updatedAt": snap.UpdatedAt,
 			"draft":     draft,
+			"persisted": persisted,
 		})
 	case http.MethodPost:
 		apiPolicyCreate(w, r)
@@ -2773,6 +2817,34 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "host is required", http.StatusBadRequest)
 		return
 	}
+	// CHAOS-69: this handler reaches walkPolicyTestRules and lookupHostCategory
+	// with a caller-supplied host — the same quadratic fusion the proxy data
+	// path bounds. Same predicate, same reason (see proxy_host_bounds.go).
+	if rawAuthorityOversize(body.Host) {
+		noteOversizeHostRejectionReq("api/policy-test", r, len(body.Host), "raw")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
+		return
+	}
+	// And the CANONICAL tier, which this endpoint was missing: the raw pre-cap is
+	// deliberately generous (1 KiB) so IDN expansion is not refused, which on its
+	// own still admits the 1 000-byte dot-dense ASCII shape costing ~1.3 ms of
+	// fusion — exactly what the canonical tier exists to reject. Enforcing one
+	// tier of a two-tier contract is not enforcing the contract (Codex P2,
+	// PR #1446). Normalization failure is NOT refused here: validity is this
+	// endpoint's existing business, and this gate decides length only.
+	if normHost, ok := canonicalDestHost(body.Host); ok {
+		if canonicalHostOversize(normHost) {
+			noteOversizeHostRejectionReq("api/policy-test", r, len(normHost), "canonical")
+			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+			return
+		}
+	} else if unnormalizableHostOversize(body.Host) {
+		// No canonical form ⇒ bound the raw bare host, or this band reaches
+		// the category fusion at full length (Codex P2, PR #1446).
+		noteOversizeHostRejectionReq("api/policy-test", r, len(bareDestHost(body.Host)), "unnormalizable")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+		return
+	}
 
 	// Evaluate the EFFECTIVE rulebase: the draft candidate when Draft Mode is
 	// engaged, else the running store (GAP-POL-03, ADR-0026). rulebase tells the
@@ -2782,18 +2854,42 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	// commit/revert and evaluate an empty candidate or mislabel the set.
 	rules, rulebase := effectivePolicySnapshot()
 
+	// ONE bounded host for every matcher on this endpoint, derived once.
+	//
+	// net.SplitHostPort does NOT require a numeric port, so `a:` + a 1 000-byte
+	// dot-dense string is a 1 002-byte authority whose bare host is one byte:
+	// every tier above passed on "a" while the matchers below received the full
+	// value, restoring the quadratic suffix walk those tiers exist to prevent
+	// (Codex P2, PR #1446). Bounding the ORIGINAL at 253 is not the fix — that is
+	// round 1's IDN regression, since a legitimate internationalized host can be
+	// 883 raw bytes and 251 canonical. Measure and match the SAME string.
+	//
+	// It is also a FIDELITY fix, which is why it is derived here rather than at
+	// each call: this endpoint dry-runs the live decision, and BOTH runtime
+	// stages strip the port with this exact operation before matching —
+	// authRequestContext (Stage-1, authpolicy.go) and handleRequest's own strip
+	// (Stage-2, proxy.go). Passing the raw authority made the simulator disagree
+	// with production on any host:port input.
+	testHost := bareDestHost(body.Host)
+
 	// Stage-1 simulation (Slice 8): resolve the auth outcome for this request
 	// and mirror Slice 7's runtime wiring — a no-credentials Exempt match makes
 	// Stage-2 see authSource="exempt". Dry-run: no counters, no hit counts.
+	//
+	// Stage-1 RUNS A MATCHER (resolveAuthOutcomeFrom → authRuleMatchesScratch →
+	// matchDestNorm → the category fusion), so it needs the bounded host for the
+	// same two reasons Stage-2 does. Enumerating the Stage-2 matchers and missing
+	// this one is the round-2 mistake of this same finding, repeated inside the
+	// function that fixed it.
 	stage2AuthSource, authBlock := simulateAuthOutcome(rules,
-		body.SourceIP, body.Host, body.Protocol, body.Method, body.Identity, body.AuthSource)
+		body.SourceIP, testHost, body.Protocol, body.Method, body.Identity, body.AuthSource)
 	body.AuthSource = stage2AuthSource
 
 	// Walk rules manually without incrementing hit counts.
-	trace, matched := walkPolicyTestRules(rules, body.SourceIP, body.Identity, body.AuthSource, body.Host, body.Groups)
+	trace, matched := walkPolicyTestRules(rules, body.SourceIP, body.Identity, body.AuthSource, testHost, body.Groups)
 
 	// Enrich with category lookup so the admin can see how the host was categorised.
-	catName, catTier, catMatchedBy := lookupHostCategory(body.Host)
+	catName, catTier, catMatchedBy := lookupHostCategory(testHost)
 	hostCategory := map[string]string{
 		"category":  catName,
 		"tier":      catTier,
@@ -3010,7 +3106,8 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/category-groups", apiCategoryGroups)                             // GET/POST/PUT/DELETE category groups
 	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles)                     // GET/POST/PUT/DELETE decryption profiles
 	mux.HandleFunc("/api/decryption/health", apiDecryptionHealth)                         // GET ADR-0011 coverage + failure aggregate (viewer, read-only)
-	mux.HandleFunc("/api/decryption/redaction", apiDecryptionRedaction)                   // GET viewer / PUT admin — ADR-0011 §4 traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)
+	mux.HandleFunc("/api/decryption/redaction", apiDecryptionRedaction)                   // legacy alias; canonical path is /api/traffic/redaction (terminology governance T-17)
+	mux.HandleFunc("/api/traffic/redaction", apiDecryptionRedaction)                      // GET viewer / PUT admin — ADR-0011 §4 traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)
 	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions)                 // GET list learned exclusions / DELETE evict one (?host=) or clear all
 	mux.HandleFunc("/api/decryption-exclusions/tunables", apiDecryptionExclusionTunables) // GET defaults+bounds / PUT admin runtime tunables (F10)
 	mux.HandleFunc("/api/urlcat", apiURLCat)                                              // GET/POST/PUT/DELETE categories

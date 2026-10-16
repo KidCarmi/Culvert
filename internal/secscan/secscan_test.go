@@ -6,6 +6,7 @@ package secscan
 
 import (
 	"errors"
+	"net/url"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/clamav"
@@ -49,6 +50,8 @@ type fakeFeed struct {
 func (f fakeFeed) Enabled() bool                                { return f.enabled }
 func (f fakeFeed) CheckURL(string) (hit bool, source string)    { return f.hit, f.source }
 func (f fakeFeed) CheckDomain(string) (hit bool, source string) { return f.hit, f.source }
+
+func (f fakeFeed) CheckRequestURL(*url.URL) (hit bool, source string) { return f.hit, f.source }
 
 type fakeExcl struct{ excluded bool }
 

@@ -207,12 +207,28 @@ func parseSigstoreIdentity(raw string) (sigstoreIdentity, bool, error) {
 	return id, true, nil
 }
 
+// Sigstore trust-material sources, surfaced read-only on /api/releases (as
+// sigstore_identity_source / sigstore_root_source) so an operator who set
+// CULVERT_RELEASE_SIGSTORE_IDENTITY/_TRUSTED_ROOT can positively confirm their
+// override is the one actually enforcing — not just discover a BROKEN one via
+// sigstore_warn. Same two-value vocabulary as catalogURLSource
+// (default/override) for consistency across the release-trust surface.
+const (
+	sigstoreSourceDefault  = "default"  // the baked embed / baked official identity
+	sigstoreSourceOverride = "override" // operator-supplied via the env var
+)
+
 // sigstoreWiring is the resolved Sigstore trust configuration for startup.
 type sigstoreWiring struct {
 	verifier *sigstoreVerifier // nil ⇒ scheme not active
 	active   bool              // true ⇒ a trusted root is present and a verifier was built
 	warn     string            // loud one-line startup note ("" ⇒ none)
 	err      error             // fatal config error ⇒ Release Management disabled
+	// identitySource / rootSource are "default" or "override", meaningful only
+	// when active is true (kept empty otherwise so callers never report a
+	// source for a scheme that isn't running).
+	identitySource string
+	rootSource     string
 }
 
 // resolveSigstoreWiring builds the Sigstore verifier from the trusted root (baked
@@ -222,7 +238,7 @@ type sigstoreWiring struct {
 // (verifier nil) — and if an identity override was set without a root, it warns so
 // the misconfiguration is visible rather than silently dormant.
 func resolveSigstoreWiring(getenv func(string) string) sigstoreWiring {
-	rootJSON, err := loadSigstoreTrustedRoot(getenv)
+	rootJSON, rootSource, err := loadSigstoreTrustedRoot(getenv)
 	if err != nil {
 		return sigstoreWiring{err: err}
 	}
@@ -230,7 +246,10 @@ func resolveSigstoreWiring(getenv func(string) string) sigstoreWiring {
 	if err != nil {
 		return sigstoreWiring{err: err}
 	}
-	if !overridden {
+	identitySource := sigstoreSourceDefault
+	if overridden {
+		identitySource = sigstoreSourceOverride
+	} else {
 		id = officialSigstoreIdentity()
 	}
 
@@ -249,20 +268,21 @@ func resolveSigstoreWiring(getenv func(string) string) sigstoreWiring {
 	if err != nil {
 		return sigstoreWiring{err: err}
 	}
-	return sigstoreWiring{verifier: sv, active: true}
+	return sigstoreWiring{verifier: sv, active: true, identitySource: identitySource, rootSource: rootSource}
 }
 
-// loadSigstoreTrustedRoot returns the trusted-root JSON: the operator override file
-// (if CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT is set) else the baked embed.
-func loadSigstoreTrustedRoot(getenv func(string) string) ([]byte, error) {
+// loadSigstoreTrustedRoot returns the trusted-root JSON and its source: the
+// operator override file (if CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT is set) else
+// the baked embed.
+func loadSigstoreTrustedRoot(getenv func(string) string) (rootJSON []byte, source string, err error) {
 	path := strings.TrimSpace(getenv(envReleaseSigstoreTrustedRoot))
 	if path == "" {
-		return bakedSigstoreTrustedRootJSON, nil
+		return bakedSigstoreTrustedRootJSON, sigstoreSourceDefault, nil
 	}
 	// #nosec G304 -- operator-provided trusted-root path (break-glass, host-trusted env var)
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("%s: read trusted root: %w", envReleaseSigstoreTrustedRoot, err)
+		return nil, "", fmt.Errorf("%s: read trusted root: %w", envReleaseSigstoreTrustedRoot, err)
 	}
-	return b, nil
+	return b, sigstoreSourceOverride, nil
 }

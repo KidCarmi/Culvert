@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -1008,14 +1009,121 @@ func (s *Store) GetByName(name string) *Entry {
 	return nil
 }
 
+// ─── Category index keys ──────────────────────────────────────────────────────
+
+// maxInlineCategoryKey sizes the stack scratch the callers hand categoryKey to
+// case-fold a category name into. The longest shipped name is 24 bytes
+// ("Automation & Integration"); 64 covers every realistic admin-created name
+// and anything longer simply takes the allocating fallback.
+const maxInlineCategoryKey = 64
+
+// categoryKey folds cat into the form rebuildIndex keys the host-set indexes by
+// — strings.ToLower(name) — WITHOUT allocating, on either path.
+//
+// This is the per-RULE half of destination-category resolution: package main's
+// hostCatScratch.matchesCategory calls MatchesHost/MatchesHostAdmin once per
+// category-scoped access rule per proxied request, and deliberately does not
+// memoize the result because — in its own words — they "are index lookups
+// (O(labels)), not scans", so memoizing would trade a cheap map probe for a map
+// allocation. That reasoning is right and the probe was not actually cheap:
+// both entry points spelled the key strings.ToLower(string(cat)), which
+// allocates whenever the name carries an uppercase letter — and ALL 21 shipped
+// SaaS category names do. So a rulebase with N category rules charged N heap
+// allocations to every proxied request in order to re-derive a value that is
+// pure CONFIGURATION: the rule's category name is fixed when the admin writes
+// the rule and is identical on every request that consults it.
+//
+// The fix keeps the key derivation where it is (the alternative — precomputing
+// a folded key onto PolicyRule — would put a urlcat implementation detail into
+// the policy struct and leave every other caller of these two methods paying
+// the allocation) and makes it free instead: for a short ASCII name the folded
+// bytes go into the CALLER's stack array and the probe is spelled
+// idx[string(b)] on it, which the compiler resolves against the bytes directly
+// — no copy, no allocation, and therefore no escape, so the array stays on the
+// stack.
+//
+// TWO RETURN FORMS, BECAUSE ONE WOULD COST ONE OF THE TWO PATHS.
+// The obvious shape is a single []byte, which forces the fallback to spell
+// itself []byte(strings.ToLower(cat)). Strings are immutable, so that
+// conversion COPIES, and measured against the pre-optimization code it is a
+// REGRESSION rather than a smaller win: an already-lowercase name past the
+// buffer goes 0 allocations → 1, and an uppercase or non-ASCII one goes 1 → 2.
+// The admin API accepts category names up to 256 bytes (ui_policy.go), so a
+// name past maxInlineCategoryKey is ordinary configuration, not a corner case,
+// and a rule carrying one pays that on every proxied request (Codex review,
+// PR #1410). So the fallback keeps the STRING strings.ToLower already produced
+// and is probed as a string; only the inline path uses bytes.
+//
+// THE FOLD STAYS OUTSIDE s.mu, AND THAT IS MEASURED, NOT ASSUMED.
+// Folding inside the read lock reads more simply — one helper taking (idx, cat),
+// one call per entry point — and the hold it adds looks negligible: a bounded
+// loop over at most maxInlineCategoryKey bytes, on a lock where readers do not
+// block readers and the only writers are admin-rate category CRUD. It is not
+// negligible. Interleaved same-run comparisons of the two shapes (n=11 each,
+// identical except for where the fold runs) put the hoisted form ahead on the
+// 4-way parallel path in both rounds with NON-OVERLAPPING distributions:
+// 83.8 vs 91.4 ns/op on a quiet box and 125.8 vs 155.0 ns/op on a busier one.
+// The serial path is unchanged either way.
+//
+// Quote the RATIO, never those absolutes: between the two rounds the box drifted
+// by half again, which is precisely why both arms must be timed in ONE run. An
+// earlier cross-run reading of this same question said "53%" and was wrong by an
+// order of magnitude — the arms had simply been measured minutes apart.
+//
+// The returned inline slice ALIASES buf, so it is valid only inside the
+// caller's frame — all a map probe needs. useInline discriminates explicitly
+// rather than leaving the caller to test inline == nil. A nil test would in fact
+// be correct — the fallback is the only path that returns nil, and an empty
+// category name folds to buf[:0], which is non-nil — but it is correct only
+// BECAUSE of that second clause, which a reader has to know to trust it. The
+// bool says what is meant without resting on it.
+//
+// Semantics are unchanged, exactly: for a pure-ASCII name strings.ToLower is
+// byte-wise 'A'-'Z' + 32, which is what lowerASCIIInto writes; anything
+// non-ASCII falls back to strings.ToLower itself, so Unicode folding is still
+// done by the standard library and never reimplemented here.
+func categoryKey(buf []byte, cat string) (inline []byte, str string, useInline bool) {
+	if n := len(cat); n <= len(buf) {
+		if lowerASCIIInto(buf[:n], cat) {
+			return buf[:n], "", true
+		}
+	}
+	return nil, strings.ToLower(cat), false
+}
+
+// lowerASCIIInto writes the ASCII-lowercased form of s into dst (which the
+// caller sizes to len(s)) and reports whether s was pure ASCII. It returns
+// false at the FIRST non-ASCII byte, leaving dst partially written — the caller
+// discards it and falls back to strings.ToLower, so a partial write is never
+// observable.
+func lowerASCIIInto(dst []byte, s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			return false
+		}
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		dst[i] = c
+	}
+	return true
+}
+
 // MatchesHost checks whether host belongs to the named URL category.
 // Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
 func (s *Store) MatchesHost(cat Category, host string) bool {
 	host = hostutil.NormalizeHost(host)
-	catKey := strings.ToLower(string(cat))
+	var keyBuf [maxInlineCategoryKey]byte
+	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
 	s.mu.RLock()
-	hostSet := s.index[catKey]
+	var hostSet map[string]bool
+	if inlineOK {
+		hostSet = s.index[string(inlineKey)]
+	} else {
+		hostSet = s.index[strKey]
+	}
 	s.mu.RUnlock()
 
 	if hostSet == nil {
@@ -1042,10 +1150,16 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 // MatchesHost.
 func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
 	host = hostutil.NormalizeHost(host)
-	catKey := strings.ToLower(string(cat))
+	var keyBuf [maxInlineCategoryKey]byte
+	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
 	s.mu.RLock()
-	hostSet := s.adminIndex[catKey]
+	var hostSet map[string]bool
+	if inlineOK {
+		hostSet = s.adminIndex[string(inlineKey)]
+	} else {
+		hostSet = s.adminIndex[strKey]
+	}
 	s.mu.RUnlock()
 
 	if hostSet == nil {

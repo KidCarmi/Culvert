@@ -163,6 +163,9 @@ func buildExactPermitInput(scope rollout.ScopeSpec, reviewed []canary.ReviewedTa
 	if dec.MatchedRule != "" {
 		if rule := snap.Rule(dec.MatchedRule); rule != nil {
 			pi.WinnerResolved, pi.WinnerConditionFields = true, rule.ConditionFields()
+			// The winner's own expiry, from that same snapshot. A winner that expires mid-window
+			// makes the verdict time-dependent, and the rules it shadows were never traced.
+			pi.WinnerHasExpiry = rule.HasExpiry()
 		}
 	}
 	// Blocker #9. The three authoritative credential statements, taken from the SAME decision and

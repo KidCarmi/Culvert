@@ -74,19 +74,46 @@ func withAlertRecorder(t *testing.T) *alertRecorder {
 	t.Helper()
 	rec := &alertRecorder{}
 	alerts.SetSink(rec.sink)
-	t.Cleanup(func() { alerts.SetSink(func(string, alerts.Payload) {}) })
+	// clamScanError is HasSubscriber-gated (the default posture is no webhooks),
+	// so a test that asserts on the alert must state the subscribed posture
+	// rather than inherit whatever probe another test left installed.
+	alerts.SetSubscriberProbe(func(string) bool { return true })
+	t.Cleanup(func() {
+		alerts.SetSink(func(string, alerts.Payload) {})
+		alerts.SetSubscriberProbe(func(string) bool { return true })
+	})
 	return rec
 }
 
-// waitForMatching polls until the recorder has at least n events whose
-// detail contains marker, or the deadline passes (the clam alert fires on
-// its own goroutine, mirroring remoteScanFail — Dispatch must never run
-// inside ScanBody's timeout).
-func (rec *alertRecorder) waitForMatching(t *testing.T, n int, marker string) []recordedAlert {
+// boundedClamClasses is the complete set a scan_clam_error Detail may carry.
+var boundedClamClasses = func() map[string]bool {
+	m := map[string]bool{"engine_error": true}
+	for _, c := range clamFailureClasses {
+		m[c.class] = true
+	}
+	return m
+}()
+
+// matchingEvent returns the recorded events for one alert name.
+func (rec *alertRecorder) matchingEvent(event string) []recordedAlert {
+	var out []recordedAlert
+	for _, ev := range rec.get() {
+		if ev.event == event {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// waitForEvent polls until the recorder has at least n events of that name, or
+// the deadline passes. Polling rather than reading once is required: the clam
+// alert fires on its OWN goroutine, mirroring remoteScanFail, because Dispatch
+// must never run inside ScanBody's timeout.
+func (rec *alertRecorder) waitForEvent(t *testing.T, n int, event string) []recordedAlert {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		events := rec.matching(marker)
+		events := rec.matchingEvent(event)
 		if len(events) >= n || time.Now().After(deadline) {
 			return events
 		}
@@ -113,9 +140,19 @@ func TestClamError_CountedAlertedAndCleanNotCached(t *testing.T) {
 	if got := atomic.LoadInt64(&statClamScanError) - before; got != 1 {
 		t.Fatalf("ClamScanError counter delta = %d, want 1", got)
 	}
-	events := rec.waitForMatching(t, 1, clamErr.Error())
-	if len(events) != 1 || events[0].event != "scan_clam_error" {
-		t.Fatalf("want one scan_clam_error alert for this invocation's error, got %v", events)
+	// The alert Detail is a BOUNDED class now (see clamFailureClass), not the
+	// error text, so this invocation's alert can no longer be told apart by a
+	// unique marker. The counter delta above is the exact, synchronous proof
+	// that THIS invocation fired; the alert assertions are therefore stated
+	// over the class, which holds for a straggler from another invocation too.
+	events := rec.waitForEvent(t, 1, "scan_clam_error")
+	if len(events) == 0 {
+		t.Fatal("want a scan_clam_error alert, got none")
+	}
+	for _, ev := range events {
+		if !boundedClamClasses[ev.detail] {
+			t.Fatalf("scan_clam_error Detail %q is not a bounded reason class", ev.detail)
+		}
 	}
 	if _, ok := ss.cache.Get(hashcache.SHA256Hex(data)); ok {
 		t.Fatal("verdict computed while ClamAV errored must NOT be cached (cache poisoning)")

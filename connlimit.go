@@ -45,6 +45,12 @@ import (
 const (
 	headerRequestID   = "X-Request-Id"
 	headerTraceparent = "Traceparent"
+	// headerTracestate is never READ by Culvert — it is deleted, and only when
+	// setupRequestTracing mints a replacement traceparent. W3C Trace Context
+	// makes tracestate meaningful only relative to its traceparent, so a
+	// tracestate that outlives the traceparent it was issued under is orphaned
+	// vendor data, not propagation.
+	headerTracestate = "Tracestate"
 )
 
 // requestIDHexLen is the width of a generated request ID (8 random bytes, hex).

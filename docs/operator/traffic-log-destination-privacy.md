@@ -16,12 +16,14 @@ model and the sink-by-sink inventory behind it.
 > - **Opt-in, off by default.** Plaintext host/URI logging is unchanged until
 >   an operator turns it on.
 > - Toggle it in the admin UI (**Privacy** panel) or via
->   `PUT /api/decryption/redaction`. Takes effect immediately — **no restart**.
+>   `PUT /api/traffic/redaction`. Takes effect immediately — **no restart**.
+>   (`/api/decryption/redaction` is a retained legacy alias of the same
+>   endpoint — see the note below.)
 > - It is a **per-node** setting: it is **not** synced CP→DP, exported, or
 >   restored by config-version rollback. Enable it on every node where you
 >   want the posture.
 > - **Key rotation has no UI button yet.** It is only reachable via
->   `PUT /api/decryption/redaction` with `{"rotate_key": true}` — see [§4](#4-rotating-the-pseudonym-key).
+>   `PUT /api/traffic/redaction` with `{"rotate_key": true}` — see [§4](#4-rotating-the-pseudonym-key).
 > - Rotating (or losing) the key **permanently breaks correlation** with
 >   records pseudonymized under the old key. There is no way to recover the
 >   old mapping.
@@ -34,7 +36,7 @@ model and the sink-by-sink inventory behind it.
 2. [Concepts: pseudonym key, chokepoint, fail-closed](#2-concepts-pseudonym-key-chokepoint-fail-closed)
 3. [Enabling the posture](#3-enabling-the-posture)
 4. [Rotating the pseudonym key](#4-rotating-the-pseudonym-key)
-5. [Verifying via `GET /api/decryption/redaction`](#5-verifying-via-get-apidecryptionredaction)
+5. [Verifying via `GET /api/traffic/redaction`](#5-verifying-via-get-apitrafficredaction)
 6. [Cluster behavior (CP/DP)](#6-cluster-behavior-cpdp)
 7. [Limitations](#7-limitations)
 8. [Audit events](#8-audit-events)
@@ -97,7 +99,7 @@ effect immediately.
 
 ```bash
 # Enable (admin session required)
-curl -sS -X PUT https://<host>:<ui-port>/api/decryption/redaction \
+curl -sS -X PUT https://<host>:<ui-port>/api/traffic/redaction \
   -H 'Content-Type: application/json' \
   --cookie "$SESSION_COOKIE" \
   -d '{"redact_hosts": true}'
@@ -123,7 +125,7 @@ Rotation mints a **brand-new** random key, so every future token changes.
 reachable via the API:
 
 ```bash
-curl -sS -X PUT https://<host>:<ui-port>/api/decryption/redaction \
+curl -sS -X PUT https://<host>:<ui-port>/api/traffic/redaction \
   -H 'Content-Type: application/json' \
   --cookie "$SESSION_COOKIE" \
   -d '{"rotate_key": true}'
@@ -146,13 +148,23 @@ Notes:
 
 ---
 
-## 5. Verifying via `GET /api/decryption/redaction`
+## 5. Verifying via `GET /api/traffic/redaction`
 
 Available to `viewer` role and above:
 
 ```bash
-curl -sS https://<host>:<ui-port>/api/decryption/redaction --cookie "$SESSION_COOKIE"
+curl -sS https://<host>:<ui-port>/api/traffic/redaction --cookie "$SESSION_COOKIE"
 ```
+
+> `/api/decryption/redaction` (both `GET` and `PUT`) remains a fully
+> supported, non-deprecated legacy alias of the same endpoint — same
+> handler, same RBAC, same audit events. `/api/traffic/redaction` is the
+> canonical name because the posture governs **every** traffic-log sink
+> (plain HTTP and `TUNNEL_CLOSED` entries included), not just decrypted
+> sessions — see the terminology-governance note in
+> [`docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-07-19.md`](../engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-07-19.md)
+> (finding T-17). Existing scripts/integrations using the old path need no
+> changes.
 
 ```json
 {
@@ -246,23 +258,26 @@ by filtering on the `decryption.redaction*` action prefix.
 **Enable / disable** (admin, hot-applies, no restart)
 
 ```
-PUT /api/decryption/redaction   {"redact_hosts": true|false}
+PUT /api/traffic/redaction   {"redact_hosts": true|false}
 ```
 
 **Rotate key** (admin, API-only — no UI button)
 
 ```
-PUT /api/decryption/redaction   {"rotate_key": true}
+PUT /api/traffic/redaction   {"rotate_key": true}
 ```
 
 **Check status** (viewer)
 
 ```
-GET /api/decryption/redaction
+GET /api/traffic/redaction
   redact_hosts     — on/off
   key_provisioned  — false ⇒ fail-closed sentinel is being emitted
   scope_fields     — exactly which fields are pseudonymized
 ```
+
+`/api/decryption/redaction` is a retained, fully supported legacy alias for
+all of the above (§5).
 
 **Scope:** host, uri, `dec.host`, `dec.sni`, `top_hosts` — **not** synced
 CP→DP, exported, or rollback-restored (per-node only).

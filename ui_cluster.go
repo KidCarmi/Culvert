@@ -204,6 +204,17 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 		ttl = time.Duration(req.TTLHours) * time.Hour
 	}
 
+	// SEC-BOOTSTRAP-HOST-1 — bootstrap_cmd below is a `curl … | sudo bash`
+	// one-liner the admin copies into a root shell, and its base URL is derived
+	// from this request's Host / X-Forwarded-Host. Validate BEFORE minting the
+	// token: a refusal after GenerateToken would burn a persisted enrollment
+	// token the caller never gets to see.
+	cpBase, baseOK := bootstrap.BaseURL(r, trustForwardedHeaders)
+	if !baseOK {
+		http.Error(w, "invalid host", http.StatusBadRequest)
+		return
+	}
+
 	admin := sessionAdmin(r)
 	plaintext, err := globalClusterStore.GenerateToken(req.NodePrefix, req.AllowCIDR, admin, ttl)
 	if err != nil {
@@ -216,8 +227,7 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	caFP := globalClusterCA.CACertFingerprint()
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
 
-	// Build bootstrap command (curl | bash).
-	cpBase := bootstrap.BaseURL(r, trustForwardedHeaders)
+	// Build bootstrap command (curl | bash) — cpBase was validated above.
 	bootstrapCmd := fmt.Sprintf("curl -fsSL -k %s/api/cluster/bootstrap/%s | sudo bash", cpBase, plaintext)
 	enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
 
@@ -371,13 +381,14 @@ func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
 	// node stopped consulting because the Control Plane went away" — the second
 	// is the state in which a 429 on this node has nothing to do with the
 	// client's current request rate.
-	crl := clusterRateLimitFreshness()
+	limiter := rl
+	crl := limiter.ClusterFreshness()
 	body := map[string]any{
-		"enabled":                      clusterRateLimitEnabled.Load(),
+		"enabled":                      limiter.ClusterEnabled(),
 		"syncing_nodes":                nodes,
 		"hot_ips":                      hotIPs,
-		"remote_ips":                   clusterCounts.Count(),
-		"rate_limit_rpm":               rl.Limit(),
+		"remote_ips":                   limiter.RemoteIPCount(),
+		"rate_limit_rpm":               limiter.Limit(),
 		"threshold_pct":                hotThresholdPct,
 		"remote_counts_stale":          crl.Stale,
 		"remote_counts_max_age_secs":   crl.MaxAge.Seconds(),

@@ -24,6 +24,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"github.com/KidCarmi/Culvert/internal/totp"
 )
 
 // ─── Uptime ───────────────────────────────────────────────────────────────────
@@ -748,16 +749,47 @@ const (
 	RoleViewer   UIRole = "viewer"   // read-only dashboard access
 )
 
-// rolePriority maps roles to numeric levels for comparison.
+// rolePriority maps roles to numeric levels for comparison. Membership of this
+// map is the definition of an ENROLLED role: a UIRole absent from it is one no
+// part of this binary grants, and both directions of HasRole treat it as such.
 var rolePriority = map[UIRole]int{
 	RoleViewer:   1,
 	RoleOperator: 2,
 	RoleAdmin:    3,
 }
 
-// HasRole returns true when r's level is at least the level of min.
-func (r UIRole) HasRole(min UIRole) bool {
-	return rolePriority[r] >= rolePriority[min]
+// roleEnrolled reports whether r is one of the three roles this binary grants.
+// RolePublic is deliberately NOT enrolled (it is metadata documentation, not an
+// enforcement primitive), and neither is any other string.
+func roleEnrolled(r UIRole) bool {
+	_, ok := rolePriority[r]
+	return ok
+}
+
+// HasRole returns true when r's level is at least the level of minRole.
+//
+// BOTH SIDES FAIL CLOSED, and the `minRole` side is the half that used to not.
+// rolePriority is a map, so an unenrolled key read as a plain index yields 0 —
+// which on the RECEIVER side is correct (an unknown role satisfies nothing) and
+// on the MIN side was inverted: a requirement nobody enrolled became a
+// requirement EVERY authenticated role met, RolePublic and typos alike. The
+// only thing standing between that and a silent authorization hole was that
+// every live call site happens to pass one of the three constants, and
+// ui_routes_meta.go carries 18 `MinRole: RolePublic` entries whose routes are
+// short-circuited as Public before the comparison is ever reached. Nothing
+// pinned either fact (see TestRoleMetadata_MinRoleIsAlwaysEnrolled).
+//
+// An unenrolled requirement is therefore UNSATISFIABLE. That is the safe
+// direction: the predicate is used both as an authorization gate (requireRole,
+// C2's uiMetadataEnforcement) and as the ROLE VALIDATOR on POST /api/auth/users
+// — where it already relied on the receiver half failing closed — so denying a
+// requirement no role can be checked against can only ever refuse, never admit.
+func (r UIRole) HasRole(minRole UIRole) bool {
+	required, ok := rolePriority[minRole]
+	if !ok {
+		return false
+	}
+	return rolePriority[r] >= required
 }
 
 // uiAdminUser holds credentials and role for a single UI admin user.
@@ -767,6 +799,14 @@ type uiAdminUser struct {
 	totpSecret      string   // base32 TOTP secret; empty = TOTP not enrolled
 	backupCodes     []string // bcrypt-hashed backup codes
 	totpLastCounter int64    // last successfully-used TOTP time-step; prevents replay
+	// persistedRole is the raw role read from disk when loadedRosterRole had
+	// to clamp it (a role this build does not enroll). role carries the
+	// clamped AUTHORIZATION value; persistedRole is what SaveUIUsersFile
+	// writes back, so an ordinary save on a downgraded build (a password
+	// change, a TOTP login, an unrelated roster edit) never destroys the
+	// assignment a newer build made. Empty when nothing was clamped; cleared
+	// by any explicit role change.
+	persistedRole UIRole
 }
 
 // UIUserInfo is the public (no hash) view of a UI admin user.
@@ -867,10 +907,15 @@ func (c *Config) SetAuth(user, pass string) error {
 	c.passHash = hash
 	c.authRevision++
 	// Mirror into the RBAC user roster so the RBAC path works immediately.
+	// SEC-TOTP-1: preserve an existing TOTP enrolment for this username, for
+	// the same reason SetUIUser does. This path is not boot-only — POST
+	// /api/settings/auth (ui_config.go) reaches it at runtime, and the wipe it
+	// used to perform was persisted by the next SaveUIUsersFile any other
+	// roster mutation triggered.
 	if c.uiUsers == nil {
 		c.uiUsers = map[string]*uiAdminUser{}
 	}
-	c.uiUsers[user] = &uiAdminUser{passHash: hash, role: RoleAdmin}
+	c.uiUsers[user] = newUIAdminUserPreservingTOTP(c.uiUsers[user], hash, RoleAdmin)
 	c.cache.clear()
 	c.mu.Unlock()
 	return nil
@@ -885,6 +930,14 @@ func (c *Config) SetAuth(user, pass string) error {
 // must not survive a failed persist (leaving it in place while telling the
 // operator setup failed would make a retry hit "setup already complete" with
 // no session and no durable credential — a dead end).
+//
+// CHAOS-70 round 3: this has NO production callers left. SetAuthDurably now
+// rolls back through the completed rosterSnapshot, which RESTORES the previous
+// credential instead of deleting the account — the difference that matters once
+// the same primitive serves a rotation and not only a first-time setup. It is
+// kept because it is exported and is still the correct inverse for the narrow
+// case it documents, but prefer mutateRosterDurably: reaching for this on an
+// appliance that already has an admin DELETES that admin.
 func (c *Config) RollbackFailedSetupAuth(user string) {
 	c.mu.Lock()
 	c.user = ""
@@ -1123,6 +1176,17 @@ func (c *Config) setDefaultAuthOutcomeChecked(outcome AuthOutcome) error {
 	if outcome == OutcomeExempt {
 		resolved = OutcomeExempt
 	}
+	// CHAOS-70 (Codex P1): the mutate and the persist are ONE transaction.
+	// mutateRosterDurably restores a whole-roster snapshot when its write
+	// fails, so any roster mutation that is not serialised against it can be
+	// silently reverted by that rollback — and this setter's own compensating
+	// rollback below has the mirror-image problem. saveUIUsersMu is the
+	// transaction lock for every persisted roster mutation; taking it here
+	// means neither writer can observe or discard the other's half-applied
+	// state. Lock order is saveUIUsersMu → c.mu throughout.
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+
 	c.mu.Lock()
 	previous := c.defaultAuthOutcome
 	c.defaultAuthOutcome = resolved
@@ -1132,8 +1196,9 @@ func (c *Config) setDefaultAuthOutcomeChecked(outcome AuthOutcome) error {
 	} else {
 		logger.Printf("Auth: default authentication = Require authentication (defaultAuthOutcome=Default)")
 	}
-	// Persist so the setting survives restarts.
-	if err := c.SaveUIUsersFile(); err != nil {
+	// Persist so the setting survives restarts. saveUIUsersLocked, not
+	// SaveUIUsersFile: saveUIUsersMu is already held above.
+	if err := c.saveUIUsersLocked(); err != nil {
 		// fileutil.ErrReplacedNotSynced means the rename already landed the
 		// new content on disk — only the best-effort parent-directory sync
 		// afterward failed. Its contract explicitly forbids a compensating
@@ -1253,13 +1318,99 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 		if err != nil {
 			return err
 		}
-		c.uiUsers[username] = &uiAdminUser{passHash: hash, role: role}
+		// SEC-TOTP-1: carry the SECOND FACTOR across the credential write.
+		// This used to assign a bare &uiAdminUser{passHash, role}, which
+		// silently dropped totpSecret, backupCodes and totpLastCounter — so an
+		// ordinary password change (self-service POST /api/auth/change-password,
+		// reachable by any principal from viewer up for its own account, or an
+		// admin POST /api/auth/users) de-enrolled the account's TOTP with no
+		// audit entry, no notification and no proof of possession of the
+		// authenticator. That inverts what the second factor is FOR: TOTP
+		// exists to survive a password compromise, so whoever holds the current
+		// password could permanently remove the control that outranks it. The
+		// counter matters on its own — resetting totpLastCounter to 0 reopens
+		// the OTP replay window verifyLoginTOTP/SetTOTPLastCounter close
+		// (RFC 6238 §5.2), the same regression the restore path refuses to
+		// perform without --allow-counter-rollback.
+		//
+		// A NEW record is constructed rather than mutating the stored one in
+		// place: VerifyUIUser takes the entry pointer under RLock and reads
+		// passHash after releasing it, so an in-place credential write would be
+		// a data race on the authentication hot path. De-enrolment stays the
+		// job of the explicit ClearTOTP primitive.
+		//
+		// SEC-RBAC-ROLE-1: SetUIUser is an EXPLICIT role assignment (the admin
+		// user editor, --reset-password), so the persisted raw role a newer
+		// build assigned is always replaced — including when the requested
+		// role equals the clamped effective role and a password is supplied in
+		// the same request. The self-service password change, which must keep
+		// it, goes through ChangeUIUserPassword instead.
+		c.uiUsers[username] = newUIAdminUserPreservingTOTP(existing, hash, role)
 	} else if existing != nil {
+		// A password-empty call IS an explicit role assignment — even when it
+		// names the role the clamp already produced (an admin confirming
+		// "viewer" in the edit UI) — so it always replaces the preserved raw
+		// role rather than letting SaveUIUsersFile write it back.
+		existing.persistedRole = ""
 		existing.role = role
 	} else {
 		return fmt.Errorf("password is required to create a new user")
 	}
 	return nil
+}
+
+// ChangeUIUserPassword is the SELF-SERVICE credential write (POST
+// /api/auth/change-password): it replaces only the password hash, keeping the
+// account's effective role, its TOTP enrolment and — SEC-RBAC-ROLE-1 — the
+// persisted raw role a newer build assigned, so a password change on a
+// downgraded build never destroys that assignment. A password change is not a
+// role assignment. fallbackRole is used only when the account is absent from
+// the roster (the legacy single-user path), which creates it.
+func (c *Config) ChangeUIUserPassword(username, password string, fallbackRole UIRole) error {
+	if password == "" {
+		return fmt.Errorf("password is required")
+	}
+	if err := validatePasswordComplexity(password); err != nil {
+		return err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.uiUsers == nil {
+		c.uiUsers = map[string]*uiAdminUser{}
+	}
+	existing := c.uiUsers[username]
+	role := fallbackRole
+	if existing != nil {
+		role = existing.role
+	}
+	next := newUIAdminUserPreservingTOTP(existing, hash, role)
+	if existing != nil {
+		next.persistedRole = existing.persistedRole
+	}
+	c.uiUsers[username] = next
+	return nil
+}
+
+// newUIAdminUserPreservingTOTP builds the replacement roster record for a
+// credential write: the new password hash and role, plus every TOTP enrolment
+// field carried over verbatim from prior (nil for a brand-new account, which
+// therefore starts un-enrolled). Callers must hold c.mu for writing.
+//
+// Keep this the ONLY way a credential write reaches the roster. Adding a field
+// to uiAdminUser and forgetting it here silently drops that field on every
+// password change — which is exactly how the second factor was being lost.
+func newUIAdminUserPreservingTOTP(prior *uiAdminUser, hash []byte, role UIRole) *uiAdminUser {
+	u := &uiAdminUser{passHash: hash, role: role}
+	if prior != nil {
+		u.totpSecret = prior.totpSecret
+		u.backupCodes = append([]string(nil), prior.backupCodes...)
+		u.totpLastCounter = prior.totpLastCounter
+	}
+	return u
 }
 
 // DeleteUIUser removes a UI admin user.
@@ -1381,12 +1532,19 @@ func (c *Config) LoadUIUsersFile() error {
 		if err != nil {
 			continue
 		}
+		rawRole := rec.Role
+		rec.Role = loadedRosterRole(rec.Username, rec.Role)
+		var persistedRole UIRole
+		if rec.Role != rawRole {
+			persistedRole = rawRole
+		}
 		c.uiUsers[rec.Username] = &uiAdminUser{
 			passHash:        hash,
 			role:            rec.Role,
 			totpSecret:      rec.TOTPSecret,
 			backupCodes:     rec.BackupCodes,
 			totpLastCounter: rec.TOTPLastCounter,
+			persistedRole:   persistedRole,
 		}
 		// Keep legacy single-user in sync with the first admin found.
 		if rec.Role == RoleAdmin && c.user == "" {
@@ -1395,6 +1553,71 @@ func (c *Config) LoadUIUsersFile() error {
 		}
 	}
 	return nil
+}
+
+// loadedRosterRole is the fail-closed door for a role value arriving from DISK.
+//
+// POST /api/auth/users validates the role it is given (`!role.HasRole(RoleViewer)`
+// ⇒ 400), but this loader did not, and the two doors reach the same roster. A
+// record carrying a role no version of this binary enrolls therefore entered the
+// roster verbatim, VerifyUIUser handed it back on a successful login,
+// apiAuthLogin minted a signed session with it, and uiAuthMiddleware's
+// "sessions without role = admin" compat branch — written for a pre-RBAC EMPTY
+// role but keyed on `!HasRole(RoleViewer)`, which is true of EVERY unenrolled
+// string — promoted the holder to ADMIN on every subsequent request.
+//
+// The reachable sources are all the raw-persistence ones: a restore of a backup
+// taken by a newer build that enrolls a role this one does not (the downgrade
+// case), a hand-edited or partially-corrupted ui_users.json, and any future
+// writer that bypasses the API. This mirrors IPFilter.SetMode's recorded
+// doctrine — the validated admin path is clean, the raw persistence paths may
+// carry corruption, and the corruption must land fail-closed.
+//
+// An unenrolled NON-EMPTY role is clamped to the LEAST privilege the roster can
+// express (RoleViewer) rather than dropped: dropping the record would delete an
+// account on a file the operator can still repair, while clamping keeps them
+// able to sign in and read, with no authority they were not already holding. An
+// EMPTY role is left exactly as it was — that is the documented pre-RBAC
+// compatibility value (a bare-array roster predating the role field), and
+// narrowing it here would lock legacy single-admin deployments out of their own
+// appliance.
+func loadedRosterRole(username string, role UIRole) UIRole {
+	if role == "" || roleEnrolled(role) {
+		return role
+	}
+	if logger != nil {
+		logger.Printf("UIUsers: user %q carries unrecognized role %q in the persisted roster — "+
+			"clamped to %q (least privilege). Re-assign the role in Security -> Admin Users; "+
+			"a role this build does not know is never honoured.",
+			sanitizeLog(username), sanitizeLog(string(role)), RoleViewer)
+	}
+	rosterRoleClamped.Add(1)
+	return RoleViewer
+}
+
+// rosterRoleClamped counts roster records whose persisted role this build does
+// not enroll. Non-zero means a ui_users.json on this node names a role the
+// binary cannot grant — the downgrade/corruption signal an operator acts on.
+var rosterRoleClamped atomic.Int64
+
+// RosterRoleClampCount reports the CUMULATIVE clamp counter (the Prometheus
+// _total series). Current-health surfaces use ActiveRosterRoleClamps instead,
+// so a repaired roster stops reporting degraded.
+func RosterRoleClampCount() int64 { return rosterRoleClamped.Load() }
+
+// ActiveRosterRoleClamps reports how many roster records are PRESENTLY held at
+// a clamped effective role (a preserved raw role this build does not enroll).
+// It drops back to zero once every such account has been reassigned.
+func (c *Config) ActiveRosterRoleClamps() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	n := 0
+	for _, u := range c.uiUsers {
+		if u != nil && u.persistedRole != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // SaveUIUsersFile writes the current UI user roster to disk atomically.
@@ -1407,7 +1630,15 @@ func (c *Config) LoadUIUsersFile() error {
 func (c *Config) SaveUIUsersFile() error {
 	c.saveUIUsersMu.Lock()
 	defer c.saveUIUsersMu.Unlock()
+	return c.saveUIUsersLocked()
+}
 
+// saveUIUsersLocked is SaveUIUsersFile's body with saveUIUsersMu already held.
+// Split out for mutateRosterDurably, which must hold that mutex across the
+// whole snapshot → mutate → persist → rollback sequence: a concurrent save
+// landing between this call and a rollback would persist state the rollback is
+// about to undo.
+func (c *Config) saveUIUsersLocked() error {
 	c.mu.RLock()
 	path := c.uiUsersFile
 	// Canonicalize for serialization: an unset in-memory value persists as the
@@ -1424,10 +1655,14 @@ func (c *Config) SaveUIUsersFile() error {
 		Users:              make([]uiUserRecord, 0, len(c.uiUsers)),
 	}
 	for name, u := range c.uiUsers {
+		role := u.role
+		if u.persistedRole != "" {
+			role = u.persistedRole // never serialize the compatibility clamp
+		}
 		env.Users = append(env.Users, uiUserRecord{
 			Username:        name,
 			PassHash:        hex.EncodeToString(u.passHash),
-			Role:            u.role,
+			Role:            role,
 			TOTPSecret:      u.totpSecret,
 			BackupCodes:     u.backupCodes,
 			TOTPLastCounter: u.totpLastCounter,
@@ -1446,6 +1681,238 @@ func (c *Config) SaveUIUsersFile() error {
 	// goroutines, and a shared temp name lets two writers interleave into
 	// the same file before one renames the torn result over the roster.
 	return fileutil.AtomicWrite(path, data, 0o600)
+}
+
+// rosterSnapshot is a deep copy of every piece of state SaveUIUsersFile
+// serialises. It exists so a mutation whose durable write fails can be undone
+// exactly, without each caller having to write an inverse operation — undoing
+// a DeleteUIUser, for instance, means restoring the account's password hash,
+// role, TOTP secret, backup codes AND replay counter, which no caller has in
+// hand by the time the write fails.
+//
+// "Every piece of state" includes the legacy c.user/c.passHash pair, which
+// CHAOS-70 round 3 added — and a CONTROL is what found it missing. SetAuth
+// writes both the roster entry and that pair, so a snapshot holding only the
+// roster could not undo a credential change, which is why first-time setup
+// carried its own inverse (RollbackFailedSetupAuth). That inverse DELETES the
+// account: right for setup, where there is no prior account, and wrong for the
+// rotation of an existing one, where a refused write left the admin with no
+// roster entry at all — locked out until a restart. Completing the snapshot is
+// what lets ONE primitive serve both, which is this file's own rule: a
+// per-caller inverse operation is where the bugs live.
+type rosterSnapshot struct {
+	users      map[string]*uiAdminUser
+	outcome    AuthOutcome
+	legacyUser string
+	legacyHash []byte
+}
+
+// snapshotRoster deep-copies the roster. Takes c.mu itself, so the caller must
+// NOT hold it; saveUIUsersMu is expected to be held by mutateRosterDurably.
+func (c *Config) snapshotRoster() rosterSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	snap := rosterSnapshot{
+		outcome:    c.defaultAuthOutcome,
+		legacyUser: c.user,
+		legacyHash: append([]byte(nil), c.passHash...),
+	}
+	if c.uiUsers != nil {
+		snap.users = make(map[string]*uiAdminUser, len(c.uiUsers))
+		for k, v := range c.uiUsers {
+			cp := *v
+			cp.passHash = append([]byte(nil), v.passHash...)
+			cp.backupCodes = append([]string(nil), v.backupCodes...)
+			snap.users[k] = &cp
+		}
+	}
+	return snap
+}
+
+// restoreRoster puts a snapshot back and invalidates every cached auth
+// decision derived from the state being rolled back. Takes c.mu itself, so the
+// caller must NOT hold it.
+func (c *Config) restoreRoster(snap rosterSnapshot) {
+	c.mu.Lock()
+	c.uiUsers = snap.users
+	c.defaultAuthOutcome = snap.outcome
+	// The legacy pair is restored too: SetAuth sets it alongside the roster
+	// entry, and IsConfigured() reads it, so leaving it behind would report a
+	// configured appliance whose credential was never persisted.
+	c.user = snap.legacyUser
+	c.passHash = snap.legacyHash
+	// A rolled-back password change may have cached a positive verdict for the
+	// NEW password; leaving it would let a credential the roster no longer
+	// contains keep authenticating for the cache TTL. authRevision additionally
+	// invalidates local-auth snapshots already in flight.
+	c.authRevision++
+	c.cache.clear()
+	c.mu.Unlock()
+}
+
+// ErrRosterNotPersisted reports that a roster mutation was rolled back because
+// it could not be written durably. Callers turn it into a non-2xx: the change
+// did not happen, and the operator must retry once the volume is writable.
+var ErrRosterNotPersisted = errors.New("admin roster change was not persisted")
+
+// mutateRosterDurably applies mutate to the admin roster and commits it to
+// disk, rolling the in-memory change back when the write does not land.
+//
+// CHAOS-70. ui_users.json is the ONLY durable home of the admin roster,
+// password hashes, roles, TOTP secrets, consumed backup codes and the TOTP
+// replay counter. Every mutation changes memory first and persists second, so
+// the two can disagree; the disagreement is resolved at the next restart, when
+// the file wins. A handler that mutates memory, logs the persist error and
+// answers 2xx therefore reports a security decision as done while the durable
+// state still says otherwise — deleting a compromised administrator, revoking a
+// role or rotating a leaked password all revert on the next restart, with the
+// audit trail recording the action as successful.
+//
+// apiSetupComplete already treats that as a wrong answer rather than a degraded
+// success (see setDefaultAuthOutcomeChecked and the RollbackFailedSetupAuth
+// branch beside it, both pinned by tests). This is the same rule applied to the
+// ongoing-administration mutations of the same file.
+//
+// fileutil.ErrReplacedNotSynced is deliberately NOT rolled back: its contract
+// says the rename already landed the new content, so restoring the snapshot
+// would leave memory contradicting the file every future reader — including a
+// restart — now sees. The error is still returned so the caller can report that
+// durability across an immediate crash is not guaranteed.
+//
+// Lock order: saveUIUsersMu → c.mu, matching SaveUIUsersFile. mutate is invoked
+// with neither held, so it may take c.mu itself as the ordinary setters do.
+func (c *Config) mutateRosterDurably(mutate func() error) error {
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+
+	snap := c.snapshotRoster()
+	if err := mutate(); err != nil {
+		// CONTRACT: mutate must leave the roster untouched when it returns an
+		// error. Both current mutations satisfy it — SetUIUser validates and
+		// hashes before assigning anything, DeleteUIUser runs its "last admin"
+		// check before the delete — and a future one must too.
+		//
+		// The snapshot is deliberately NOT restored here, because restoring
+		// means clearing the credential-verification cache: that cache is read
+		// by the PROXY data path, and dropping it makes every active user
+		// re-pay a ~80 ms bcrypt on their next request (CHAOS-57). Restoring on
+		// every refused password-complexity check would hand an authenticated
+		// admin a repeatable way to do exactly that. A refused mutation wrote
+		// nothing, so there is nothing to undo.
+		return err
+	}
+	if err := c.saveUIUsersLocked(); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			return err
+		}
+		c.restoreRoster(snap)
+		return fmt.Errorf("%w: %w", ErrRosterNotPersisted, err)
+	}
+	// saveUIUsersLocked is a SUCCESSFUL NO-OP when no roster path is
+	// configured, so "durable-or-refused" cannot be honoured here: there is no
+	// file to be durable in. Report it rather than refuse, and the reason is
+	// NOT availability hand-waving — mutateRosterDurably is also the primitive
+	// behind SetAuthDurably, so refusing would make FIRST-TIME SETUP fail on a
+	// node with no -ui-users-file, i.e. the documented minimal run could never
+	// be configured through the admin UI at all. This mirrors auth_idp.go's
+	// existing verdict for the same shape (a profile change with no
+	// -idp-profiles-file warns and succeeds).
+	//
+	// The exposure is real and is why this is loud: VerifyUIUser falls back to
+	// the legacy c.user/c.passHash pair, which is re-read from -user/auth.user
+	// at every boot, so on such a node a password ROTATION reverts and the
+	// previous (possibly leaked) credential authenticates again after restart.
+	if !c.rosterPathConfigured() {
+		noteRosterNotDurable()
+	}
+	return nil
+}
+
+// rosterPathConfigured reports whether a durable roster path is set. When it is
+// not, every roster write is a successful no-op (saveUIUsersLocked returns nil
+// on an empty path) and the whole roster lives only in this process.
+func (c *Config) rosterPathConfigured() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersFile != ""
+}
+
+// mutateRosterBestEffort is mutateRosterDurably's fail-OPEN sibling for the
+// LOGIN path: it runs mutate and persists under the same transaction lock, but
+// never rolls back on a persist failure — it returns the error for the caller
+// to count and report (see noteRosterPersistBestEffort for why that posture is
+// correct there).
+//
+// Holding saveUIUsersMu across the mutate is what makes the sibling's rollback
+// sound (CHAOS-70, Codex P1). Before this, ConsumeBackupCode and
+// SetTOTPLastCounter took only c.mu, so a login that consumed a single-use
+// backup code between a failing admin mutation's snapshot and its rollback had
+// that consumption DISCARDED — the code became reusable, and the login's own
+// save (which blocks on this mutex) then persisted the reverted state, making
+// it durable. That is precisely the property CHAOS-70 exists to protect,
+// broken by the rollback CHAOS-70 introduced.
+//
+// mutate reports whether it changed anything; when it did not, no write is
+// issued at all — a rejected backup code must not re-serialise the roster.
+func (c *Config) mutateRosterBestEffort(mutate func() bool) error {
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+	if !mutate() {
+		return nil
+	}
+	return c.saveUIUsersLocked()
+}
+
+// SetAuthDurably installs a local admin credential as ONE transaction: it runs
+// SetAuth and persists the roster with saveUIUsersMu held across both, rolling
+// the in-memory change back when the write does not land. It serves first-time
+// setup (apiSetupComplete) and the live credential-change endpoint
+// (apiSettings).
+//
+// CHAOS-70 (Codex round 2). SetAuth mirrors the new admin into c.uiUsers
+// (see its body) while taking only c.mu, so it IS a roster mutation and must
+// sit inside the same transaction as every other one. Round 1 left it out on
+// the recorded reasoning that first-time setup and admin user-management are
+// mutually exclusive, because the latter requires a configured appliance.
+// That was WRONG, and the gate said to be excluding them is what makes them
+// overlap: uiAuthMiddleware injects RoleAdmin into EVERY request while
+// !cfg.IsConfigured(), so POST /api/auth/users is reachable, with admin
+// authority, precisely DURING setup.
+//
+// The interleaving that follows is the hazard apiSetupComplete's own rollback
+// exists to prevent, reached from the opposite direction: an admin mutation
+// snapshots the still-empty roster, SetAuth inserts the initial admin, the
+// admin mutation's write fails and its wholesale restore DELETES that account,
+// and setup's own write — which has been queued behind saveUIUsersMu the whole
+// time — then persists the empty roster and answers 200. IsConfigured() stays
+// true for the rest of the process only because the legacy c.user/c.passHash
+// pair is still set, and those are not in ui_users.json, so the next restart
+// reopens unauthenticated first-time setup.
+//
+// CHAOS-70 round 3 made this a thin delegation to mutateRosterDurably, and
+// round 2's reasoning for NOT doing so is recorded here as SUPERSEDED: it held
+// that the compensation had to be the caller's, because SetAuth also sets
+// c.user/c.passHash and rosterSnapshot did not capture that pair, so a wholesale
+// restore would undo the account while leaving IsConfigured() true with nothing
+// persisted. The premise was true; the conclusion was the wrong fix. The caller's
+// inverse (RollbackFailedSetupAuth) DELETES the account — correct for a
+// first-time setup, and wrong for the rotation of an existing one, where a
+// refused write left the admin with no roster entry at all, locked out until a
+// restart. A CONTROL caught exactly that. COMPLETING THE SNAPSHOT was the answer
+// rather than a second inverse, so both callers now share one rollback, one
+// transaction lock and one ErrReplacedNotSynced rule.
+//
+// That also resolves an inconsistency rather than preserving it: compensating on
+// ANY persist error diverged from setDefaultAuthOutcomeChecked in
+// apiSetupComplete's other branch, which was acceptable while this served setup
+// alone and stopped being so when apiSettings — a LIVE admin endpoint — became
+// the second caller.
+//
+// For setup the snapshot is the pre-setup state (no accounts, empty legacy pair),
+// so a rollback still reverts IsConfigured() to false and keeps the wizard
+// retryable, exactly as the dedicated inverse did.
+func (c *Config) SetAuthDurably(user, pass string) error {
+	return c.mutateRosterDurably(func() error { return c.SetAuth(user, pass) })
 }
 
 // VerifyUIUser checks credentials against the admin user roster and returns
@@ -1523,6 +1990,37 @@ func (c *Config) GetTOTPSecret(username string) string {
 }
 
 // SetTOTPSecret stores a TOTP secret and backup codes for a user.
+//
+// SEC-TOTP-1: the replay counter belongs to the SECRET, so installing a
+// DIFFERENT secret resets it. Codes for a new secret start at the current time
+// step, and a counter left over from the previous authenticator sits at or
+// above it — VerifyTOTPReturnCounter skips every candidate with
+// `candidate <= lastCounter`, so the freshly-enrolled device would be refused
+// until wall-clock time passed the stale value, and indefinitely after a clock
+// rollback.
+//
+// The reset is deliberately conditional on the KEY actually changing. A caller
+// that re-issues BACKUP CODES for the same secret must keep the counter:
+// zeroing it there would reopen the replay window for the live secret, which is
+// the opposite of what this field is for.
+//
+// "The same key" is NOT "the same string" (Codex review round 2, PR #1429).
+// The verifier canonicalises case and surrounding whitespace before decoding,
+// so "jbswy3dpehpk3pxp" and "JBSWY3DPEHPK3PXP" are ONE authenticator producing
+// identical codes. The first version of this guard compared the stored strings
+// raw, so re-issuing backup codes with a differently-spelled identical secret
+// zeroed the counter for a LIVE key — the replay window reopened by the change
+// that closed it, reached through spelling instead of an identical string, and
+// invisible to the control test because that test re-passes the same literal.
+// totp.SameKey compares the DECODED keys through the verifier's own
+// canonicalisation, so the two cannot disagree.
+//
+// The three-way decision is ordered by which way each case must FAIL. Keeping a
+// counter that should have been reset costs at most a step or two of delay on a
+// genuine re-enrolment (counters are time-derived, so a counter from a past
+// enrolment is already in the past); zeroing one that should have been kept
+// reopens a replay window on a live key. So the counter is reset ONLY on
+// positive evidence that the key changed.
 func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1530,12 +2028,38 @@ func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bo
 	if !ok {
 		return false
 	}
+	switch {
+	case !totp.Usable(secret):
+		// The incoming secret cannot validate any code, so there is no new key
+		// to protect and nothing the counter could wrongly refuse. Keep it:
+		// resetting here would zero the counter guarding the key a caller may
+		// restore next, on evidence that proves nothing.
+	case totp.SameKey(u.totpSecret, secret):
+		// Same authenticator, however it is spelled — a backup-code re-issue.
+		// Keeping the counter is the whole point of the guard.
+	default:
+		// Either a different usable key, or the account had no usable key at
+		// all. Both are a genuinely new binding, and a counter carried into one
+		// refuses the new device until wall-clock time passes it — indefinitely
+		// after a clock rollback.
+		u.totpLastCounter = 0
+	}
 	u.totpSecret = secret
 	u.backupCodes = backupCodes
 	return true
 }
 
-// ClearTOTP removes TOTP enrollment for a user.
+// ClearTOTP removes TOTP enrollment for a user — secret, backup codes AND the
+// replay counter.
+//
+// SEC-TOTP-1: the counter is part of the enrolment, not a separate durable
+// fact. It used to be left behind, which was harmless only because SetUIUser
+// replaced the whole record on the very next credential write and zeroed it as
+// a side effect. Now that a credential write PRESERVES the enrolment, a
+// counter left here survives de-enrolment and locks out the re-enrolment the
+// `--reset-password` break-glass explicitly tells the operator to perform
+// (Codex review, PR #1429). With no secret installed the value protects
+// nothing, so keeping it can only cost availability.
 func (c *Config) ClearTOTP(username string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1545,6 +2069,7 @@ func (c *Config) ClearTOTP(username string) bool {
 	}
 	u.totpSecret = ""
 	u.backupCodes = nil
+	u.totpLastCounter = 0
 	return true
 }
 

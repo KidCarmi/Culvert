@@ -65,7 +65,8 @@ type DecryptionOutcome struct {
 }
 
 // decEnum is any bounded decryptobs enum: it can validate its own membership and
-// render its wire form. Used by decEnumOr to keep only-bounded values on a record.
+// render its wire form. Used as decEnumOr's TYPE CONSTRAINT — see the note there for
+// why it is a constraint rather than a parameter type.
 type decEnum interface {
 	Valid() bool
 	String() string
@@ -79,7 +80,32 @@ type decEnum interface {
 // sentinel keeps the wire vocabulary closed even if a future caller under-populates the
 // struct. (Outcome/failure/cert/tls fields all have a natural sentinel; ALPN's is the
 // valid empty member.)
-func decEnumOr(v, fallback decEnum) string {
+//
+// IT IS GENERIC, AND THAT IS A HOT-PATH CONTRACT, NOT A STYLE CHOICE. Every
+// decryptobs enum is a named STRING type, so the previous signature —
+// `func decEnumOr(v, fallback decEnum) string`, taking two INTERFACES — forced the
+// compiler to box each argument to satisfy the interface, and boxing a non-empty
+// string is a heap allocation (runtime.convTstring; only the empty string is free,
+// which is exactly why the waste was invisible on an under-populated outcome and
+// appeared in full on a real one). The two consumers are both per-session:
+// toBlock makes seven of these calls and recordDecryptSession three, so an
+// INSPECTED session — which populates all seven enums — paid 10 heap allocations
+// per tunnel purely to call two methods on values already in registers. Measured on
+// the CONNECT benchmark before the change: 6003 objects from toBlock and 4002 from
+// recordDecryptSession across 2000 tunnels.
+//
+// With a type PARAMETER constrained by the same interface, the compiler instantiates
+// per concrete type and calls Valid/String directly on the value. The result is
+// byte-identical by construction — same two methods, same order, same fallback — and
+// is pinned as such by TestDecEnumOr_MatchesInterfaceProjection and the
+// toBlock/recordDecryptSession differential tests.
+//
+// The single type parameter also makes v and fallback the SAME type, so a mismatched
+// pair (an Outcome coerced to a FailStage sentinel) is now a COMPILE error instead of
+// a silently out-of-vocabulary label. Do not widen this back to two interfaces, and do
+// not give v and fallback separate type parameters — that would restore the mismatch
+// hole without buying anything.
+func decEnumOr[T decEnum](v, fallback T) string {
 	if v.Valid() {
 		return v.String()
 	}

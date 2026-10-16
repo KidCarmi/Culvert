@@ -48,30 +48,15 @@ func newSOCKS5Server(ln net.Listener) *socks5Server {
 	}
 }
 
-// startSOCKS5 binds a TCP listener for SOCKS5 connections, constructs the
-// owner, and spawns the accept loop. Bind failure is fatal — preserving the
-// previous startSOCKS5 behaviour. Returns the server so initSOCKS5 can stash
-// the handle on startupState for runProxyUntilShutdown to Stop.
-// Supports CONNECT (TCP proxy) only; UDP ASSOCIATE is rejected by handleSOCKS5.
-// Respects the global blocklist, IP filter, rate limiter, and plugin chain.
-func startSOCKS5(port int) *socks5Server {
-	// Use ListenConfig.Listen(ctx, ...) per project policy (CLAUDE.md
-	// "HTTP contexts" + golangci noctx); ctx is Background here because
-	// startup binding is synchronous and not user-cancellable.
-	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		logFatalf("SOCKS5 listen error: %v", err)
-	}
-	srv := newSOCKS5Server(ln)
-	// Record the feature as configured BEFORE the accept loop starts, so a
-	// listener that fails on its very first Accept is reported against a
-	// configured service rather than as "SOCKS5 not configured" (CHAOS-54).
-	noteSOCKS5Configured(port)
-	srv.Start()
-	logger.Printf("SOCKS5: socks5://localhost:%d", port)
-	return srv
-}
+// startSOCKS5 lives in socks5_bind.go (CHAOS-66). It used to bind here and
+// `logFatalf` on failure — which os.Exit(1)s the process — so an occupied
+// SOCKS5 port, or a privileged one on a deployment that had dropped
+// CAP_NET_BIND_SERVICE, terminated the whole appliance from `initSOCKS5`,
+// BEFORE the HTTP/HTTPS proxy listener and the admin UI were ever started.
+// The bind is now supervised: it retries at a bounded rate and the rest of the
+// appliance is unaffected. Supports CONNECT (TCP proxy) only; UDP ASSOCIATE is
+// rejected by handleSOCKS5. Respects the global blocklist, IP filter, rate
+// limiter, and plugin chain.
 
 // Start spawns the accept-loop goroutine. No-ops on a nil receiver or a
 // server constructed from a nil listener; that branch exists so future
@@ -265,14 +250,14 @@ func (s *socks5Server) serve() {
 			default:
 			}
 			noteSOCKS5ListenerDown("listener_closed_unexpectedly")
-			logger.Printf("SOCKS5 accept: listener was closed without a shutdown request — SOCKS5 is unavailable until restart")
+			logger.Printf("SOCKS5 accept: listener was closed without a shutdown request — the supervisor is rebinding; no restart required")
 			return
 		}
 		reason := socks5AcceptReason(err)
 		if socks5AcceptFatal(err) {
 			_ = s.ln.Close()
 			noteSOCKS5ListenerDown(reason)
-			logger.Printf("SOCKS5 accept FATAL (%s): %v — listener closed, SOCKS5 is unavailable until restart",
+			logger.Printf("SOCKS5 accept FATAL (%s): %v — listener closed, the supervisor is rebinding; no restart required",
 				reason, err)
 			return
 		}
@@ -476,14 +461,36 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
+	// ── Destination-host bound (CHAOS-69, fail-closed) ──────────────────────
+	// This path needs NO raw pre-cap: RFC 1928 §4 length-prefixes DOMAINNAME with
+	// ONE byte, so the protocol structurally caps the destination at 255 — already
+	// inside maxRawDestAuthorityBytes (1024), which is why a raw gate here would be
+	// permanently dead code. An earlier version of this change added one anyway and
+	// its test passed vacuously; see the note in proxy_host_bounds.go. The bound
+	// that IS reachable here is the CANONICAL one, applied just below once the host
+	// has been normalized — a 255-byte ASCII name measures 255 and is refused, while
+	// a 255-byte UTF-8 IDN normalizes to ~150 and is served.
 	// ── Host canonicalization gate (RISK-013, fail-closed) ──────────────────
 	// Mirror of the handleRequest gate: a destination that cannot be
 	// IDNA-normalized would reach the blocklist/plugin matchers un-normalized.
-	if _, ok := normalizeHostStrict(host); !ok {
+	normSOCKS5Host, ok := normalizeHostStrict(host)
+	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
 		recordRequest(clientIP, "SOCKS5", host, "INVALID_HOST", "idna", "", "", "")
 		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=idna}", clientIP, sanitizeLog(host))
+		return
+	}
+	// CHAOS-69 canonical tier: refuse a destination that cannot be a DNS name.
+	// Nothing is recorded with the destination in it — the counter and the
+	// rate-limited line carry the LENGTH, never the value.
+	if canonicalHostOversize(normSOCKS5Host) {
+		atomic.AddInt64(&statBlocked, 1) // same accounting as the INVALID_HOST twin above
+		// Charge BEFORE replying: the reply is what the client observes, so
+		// an accounting that lands after it races any reader (and a test)
+		// that acts on the refusal.
+		noteOversizeHostRejection("SOCKS5", clientIP, len(normSOCKS5Host), "canonical")
+		socks5Reply(conn, 0x02)
 		return
 	}
 
