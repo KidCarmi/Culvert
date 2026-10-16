@@ -565,7 +565,13 @@ func TestWall_PerRuleCategoryMatchersTakeTheHoistedHost(t *testing.T) {
 			"this wall no longer guards the per-rule path")
 	}
 
-	var checked int
+	// Tracked PER MATCHER, never as an aggregate count. A count of three is
+	// satisfied by three calls to the SAME entry point, so a change that
+	// replaced MatchesHostAdminNorm with a second MatchesHostNorm would keep
+	// the count at three and leave the ADMIN tier (adminIndex) unguarded —
+	// the wall passing against the defect it exists to catch, which is the
+	// failure mode this whole suite is written against (CodeRabbit, PR #1555).
+	seen := map[string]bool{}
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -591,7 +597,7 @@ func TestWall_PerRuleCategoryMatchersTakeTheHoistedHost(t *testing.T) {
 		if !hoisted[name] {
 			return true
 		}
-		checked++
+		seen[name] = true
 		// The host argument is the LAST one for all three matchers.
 		if len(call.Args) == 0 {
 			t.Errorf("%s(...) called with no arguments", name)
@@ -613,9 +619,111 @@ func TestWall_PerRuleCategoryMatchersTakeTheHoistedHost(t *testing.T) {
 	// NOT-VACUOUS: all three matchers must have been seen. A selector typo or a
 	// refactor that moves the calls elsewhere would otherwise leave this gate
 	// passing against nothing.
-	if checked < 3 {
-		t.Fatalf("wall matched only %d hoisted matcher calls, want >= 3 "+
-			"(MatchesHostAdminNorm, MatchesCategoryNorm, MatchesHostNorm); "+
-			"the selector has gone stale", checked)
+	// Not-vacuous, per matcher: EVERY hoisted entry point must actually appear
+	// on the per-rule path. A missing one means either the selector has gone
+	// stale or that tier stopped being consulted — both leave a matcher this
+	// wall claims to guard unguarded.
+	for name := range hoisted {
+		if !seen[name] {
+			t.Fatalf("wall matched no call to %s in matchesCategory; either the "+
+				"selector has gone stale or that tier is no longer consulted, "+
+				"and this wall is not guarding it", name)
+		}
+	}
+}
+
+// TestWall_ScanEntryPointsSeedTheCanonicalHost pins that every SCAN builds its
+// scratch with the seeding constructor.
+//
+// This wall exists because the regression it catches is invisible to every
+// behavioural test in this file, and that is not an accident of coverage — it
+// is the defining property of the change. Swapping newHostCatScratchNorm back
+// to newHostCatScratch leaves the scratch computing normalizeHost(host) lazily,
+// which is byte-for-byte the value the caller would have handed it, so every
+// differential, control, fuzz target and real-Evaluate gate keeps passing while
+// the scan silently canonicalizes the destination twice again. This PR's own
+// body says as much: "a revert to the lazy (unseeded) form still passes,
+// correctly". Correct for a BEHAVIOURAL gate, and exactly why a structural one
+// is required — the same argument that justifies the matcher wall above, where
+// re-introducing a per-rule NormalizeHost also changes no decision.
+//
+// Raised by CodeRabbit on PR #1555 against evalAccessRules. It is walled here
+// for ALL THREE scan entry points rather than the one named: guarding a single
+// sampled call site is the error this PR has already hit twice (a gate that
+// asserted on its own fixture instead of the call site, and a measurement that
+// sampled one representation), and the other two suppliers are the CDR and
+// Stage-1 auth scans, which carry the identical property.
+//
+// The three single-shot callers (matchDest and the two in policy.go that serve
+// one lookup) are deliberately NOT walled: they hold no precomputed normHost,
+// so the lazy constructor is the correct choice there and requiring the seeded
+// one would be wrong.
+func TestWall_ScanEntryPointsSeedTheCanonicalHost(t *testing.T) {
+	const (
+		seeded = "newHostCatScratchNorm"
+		lazy   = "newHostCatScratch"
+	)
+	sites := []struct{ file, fn, why string }{
+		{"policy.go", "evalAccessRules", "the access-rule scan; holds accessEvalInput.normHost"},
+		{"cdrpolicy.go", "Evaluate", "the CDR scan; computes normHost one line above the scratch"},
+		{"authpolicy.go", "hostCat", "the Stage-1 auth scan; holds authMatchScratch's own normHost memo"},
+	}
+
+	for _, site := range sites {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, site.file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", site.file, err)
+		}
+
+		var fn *ast.FuncDecl
+		for _, d := range file.Decls {
+			decl, ok := d.(*ast.FuncDecl)
+			if ok && decl.Name.Name == site.fn {
+				fn = decl
+				break
+			}
+		}
+		if fn == nil {
+			t.Fatalf("%s: %s not found; this wall no longer guards %s",
+				site.file, site.fn, site.why)
+		}
+
+		var seedCalls, lazyCalls int
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			switch id.Name {
+			case seeded:
+				seedCalls++
+				// Two arguments, or the seed is not being supplied at all.
+				if len(call.Args) != 2 {
+					t.Errorf("%s/%s: %s called with %d args, want 2 (host, normHost)",
+						site.file, site.fn, seeded, len(call.Args))
+				}
+			case lazy:
+				lazyCalls++
+			}
+			return true
+		})
+
+		if lazyCalls > 0 {
+			t.Errorf("%s/%s calls %s(...): this is a SCAN (%s), so it must seed the "+
+				"memo with the canonical host it already holds via %s(host, normHost). "+
+				"The lazy form is semantically identical, so no behavioural test can "+
+				"catch this — it only makes the scan canonicalize the destination twice",
+				site.file, site.fn, lazy, site.why, seeded)
+		}
+		if seedCalls == 0 {
+			t.Errorf("%s/%s does not call %s(...); either the scan stopped seeding the "+
+				"canonical host or this wall has gone stale (%s)",
+				site.file, site.fn, seeded, site.why)
+		}
 	}
 }

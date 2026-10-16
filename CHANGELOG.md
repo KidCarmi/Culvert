@@ -89,12 +89,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   keeps passing while the cost silently returns — so
   `TestWall_PerRuleCategoryMatchersTakeTheHoistedHost` AST-walks
   `matchesCategory` and requires every membership matcher to be a `*Norm` entry
-  point handed `sc.normHost()`. Nine reintroduced defects were each verified
-  failing — three against the wall, four against the differentials, and two
-  against the seeding (`evalAccessRules` seeding the raw host, and the auth
-  path seeding from a second normalization pass). A pre-existing asymmetry is
-  confirmed unchanged and now asserted so it is not mistaken for a
-  regression: the forward index keys a pattern without
+  point handed `sc.normHost()`, tracked PER MATCHER rather than as an aggregate
+  count — a count of three is satisfied by three calls to the same entry point,
+  so the aggregate form passed when `MatchesHostAdminNorm` was replaced by a
+  duplicate `MatchesHostNorm`, leaving the admin tier unguarded (verified: the
+  old form returned `ok` against that mutation, the new one fails it).
+
+  A second structural wall pins that every SCAN seeds the memo
+  (`TestWall_ScanEntryPointsSeedTheCanonicalHost`). Swapping
+  `newHostCatScratchNorm` back to the lazy constructor is semantically
+  identical — the scratch then derives the same value itself — so every
+  differential, control, fuzz target and real-`Evaluate` gate keeps passing
+  while the scan canonicalizes the destination twice again. It covers all
+  three scan entry points (access-rule, CDR, Stage-1 auth) rather than the one
+  that was reported; the three single-shot callers hold no precomputed
+  `normHost` and are deliberately excluded.
+
+  Thirteen reintroduced defects were each verified failing — four against the
+  matcher wall, four against the differentials, two against the seeding
+  behaviour, and three against the seeding wall (one per scan entry point).
+
+  A pre-existing asymmetry is confirmed unchanged and now asserted so it is
+  not mistaken for a regression: the forward index keys a pattern without
   IDNA-normalizing it while a query is normalized, so a unicode pattern is
   stored verbatim and never matches the A-label form its own queries
   canonicalize to.
