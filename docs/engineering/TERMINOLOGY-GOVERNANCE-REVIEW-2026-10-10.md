@@ -22,23 +22,24 @@ this PR (net 0). No new open backlog item.
 
 | Business concept | Canonical name (GUI) | Other names found |
 |---|---|---|
-| Accounts that may sign in to the admin UI | **Admin Users** (panel, `/api/auth/users`, `auth.users.*`) | "admin roster" (docs, comments, metric `culvert_ui_roster_role_clamped_total`, `UIUsers` log prefix) |
+| Accounts that may sign in to the admin UI | **Administrators** ([product terminology](../design/PRODUCT-TERMINOLOGY.md); React console nav; `/api/auth/users`, `auth.users.*`) | "Admin Users" (legacy console panel title), "admin roster" (docs, comments, metric `culvert_ui_roster_role_clamped_total`, `UIUsers` log prefix) |
 
-## Finding R-1 (Low) — "admin roster" never tied to "Admin Users"
+## Finding R-1 (Low) — "admin roster" never tied to "Administrators"
 
 - **Business concept:** the set of admin-UI accounts.
-- **Current names:** GUI "Admin Users"; API `/api/auth/users`; audit `auth.users.set|delete`; docs
+- **Current names:** GUI "Administrators" (React console; the legacy console panel is still titled "Admin Users"); API `/api/auth/users`; audit `auth.users.set|delete`; docs
   `docs/operator/admin-roster-durability.md` and a new metric say "roster".
-- **Recommended canonical name:** Admin Users (user-visible). "Roster" stays as the internal term for
+- **Recommended canonical name:** Administrators (user-visible), per the product terminology glossary. "Roster" stays as the internal term for
   the persisted collection, but must be introduced once against the canonical name.
 - **Problem:** an administrator or support engineer reading the durability runbook or the metric HELP
-  cannot tell that "roster" is the Admin Users panel.
+  cannot tell that "roster" is the Administrators panel.
 - **Action taken:** the runbook's opening sentence now states the mapping. The metric name is NOT
   renamed — renaming a shipped Prometheus series costs dashboards and alerts for little gain.
 - **Affected:** docs only (1 line). Migration complexity: none. Compatibility risk: none. PR size: XS.
 
 ## Other sections
 
-- **Legacy / conflicting / ambiguous names:** none new. **Migration risk:** none.
+- **Legacy / conflicting / ambiguous names:** none new. The legacy console's "Admin Users" panel title
+  is a known divergence from "Administrators", tracked separately (#1531). **Migration risk:** none.
 - **Recommended plan:** none beyond R-1. If a future change surfaces "roster" in the GUI, use
-  "Admin Users" instead.
+  "Administrators" instead.
