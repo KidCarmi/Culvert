@@ -93,6 +93,37 @@ func usernameRowDetail(row *OperatorContractCheck) string {
 	return row.Message + "\x00" + row.OperatorAction
 }
 
+// assertRedactedRowIsFixed is the owner-policy floor for every row
+// redactContractForRole withholds below admin (least privilege, PR #1545
+// policy table): the redacted rendering is a FIXED message with no operator
+// action, carries no digit at all (no count, no length, no "since boot"
+// magnitude), and never mentions a second factor ("TOTP") or a single-use
+// credential ("backup") — those are the single-factor and replay-window
+// oracles the policy withholds from viewers and operators. It is deliberately
+// stricter than rosterDisclosureTokens: that list names the phrases one row is
+// known to emit, this asserts the SHAPE every redacted row must have, so a new
+// redacted row cannot leak a count merely by rewording.
+func assertRedactedRowIsFixed(t *testing.T, label string, row *OperatorContractCheck) {
+	t.Helper()
+	if row == nil {
+		t.Fatalf("%s: redacted row is missing entirely", label)
+	}
+	if row.OperatorAction != "" {
+		t.Errorf("%s: redacted row carries operator_action %q, want empty", label, row.OperatorAction)
+	}
+	detail := usernameRowDetail(row)
+	if strings.ContainsAny(detail, "0123456789") {
+		t.Errorf("%s: redacted row contains a digit (a roster-derived count or length): %q", label, detail)
+	}
+	lower := strings.ToLower(detail)
+	for _, word := range []string{"totp", "backup"} {
+		if strings.Contains(lower, word) {
+			t.Errorf("%s: redacted row mentions %q — second-factor/replay posture is admin-only: %q",
+				label, word, detail)
+		}
+	}
+}
+
 // TestApiDiagnostics_UsernameRowDetailIsAdminOnly is the primary regression
 // gate. Verified failing against the pre-fix handler (which passed
 // buildOperatorContract() straight to jsonOK): viewer and operator responses
@@ -132,6 +163,7 @@ func TestApiDiagnostics_UsernameRowDetailIsAdminOnly(t *testing.T) {
 		if row.Message != diagnosticsRedactedUsernameMessage {
 			t.Errorf("role %q: message = %q, want the constant redacted form", role, row.Message)
 		}
+		assertRedactedRowIsFixed(t, "/api/diagnostics "+string(role), row)
 		detail := usernameRowDetail(row)
 		for _, tok := range rosterDisclosureTokens {
 			if strings.Contains(detail, tok) {
@@ -420,6 +452,28 @@ func TestApiDiagnostics_MalformedRoleValueIsRedacted(t *testing.T) {
 	}
 }
 
+// rosterDerivedPrimitives are the reads whose result is admin-only roster
+// state. The first three are the roster accessors; the last three are the
+// CHAOS-70 roster-durability counters (roster_persist_durability.go). The
+// number of refused admin changes, of degraded login-path writes (a consumed
+// backup code or TOTP replay counter that may not survive a restart) and of
+// non-durable roster mutations are admin-only under the PR #1545 policy table,
+// so a diagnostics row that reads one must be classified exactly like a row
+// that reads the roster itself. The counters are matched with a trailing "."
+// so their rate-gate siblings (rosterNotDurableLogLast, …) are not mistaken
+// for them.
+var rosterDerivedPrimitives = []string{
+	"ListUIUsers(", "UserHasTOTP(", "GetUser(",
+	"rosterPersistRefused.", "rosterPersistBestEffort.", "rosterNotDurable.",
+}
+
+// isRosterAccessor reports whether prim is a roster accessor. diagnostics.go
+// calls those on every revision, so they anchor the wall's not-vacuous check;
+// the durability counters may legitimately have no diagnostics reader.
+func isRosterAccessor(prim string) bool {
+	return strings.HasSuffix(prim, "(")
+}
+
 // TestWall_RosterDerivedDiagnosticsAreEnumerated is one of this file's two
 // governance walls, and it enumerates from the PRIMITIVE rather than from the
 // row that happened to be edited. Any check that reads the admin roster
@@ -442,9 +496,11 @@ func TestWall_RosterDerivedDiagnosticsAreEnumerated(t *testing.T) {
 	}
 
 	checked := 0
-	for _, prim := range []string{"ListUIUsers(", "UserHasTOTP(", "GetUser("} {
+	for _, prim := range rosterDerivedPrimitives {
 		for _, site := range scanProductionCallers(t, prim, "diagnostics.go") {
-			checked++
+			if isRosterAccessor(prim) {
+				checked++
+			}
 			if declNames(site.Decl, allowed) {
 				continue
 			}
@@ -594,6 +650,7 @@ func TestApiHealthExplain_UsernameRowDetailIsAdminOnly(t *testing.T) {
 		if row.Message != diagnosticsRedactedUsernameMessage {
 			t.Errorf("role %q: /api/health/explain message = %q, want the redacted constant", role, row.Message)
 		}
+		assertRedactedRowIsFixed(t, "/api/health/explain "+string(role), row)
 		detail := usernameRowDetail(row)
 		for _, tok := range rosterDisclosureTokens {
 			if strings.Contains(detail, tok) {

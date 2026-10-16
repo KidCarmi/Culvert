@@ -39,6 +39,13 @@ verify the affected behavior in the linked implementation/tests at the task SHA.
 - [Governance](../../../ui_governance.go) is read-only. Distinguish genuine
   missing-metadata drift from warnings caused by unsupported methods or viewers
   probing admin actions; do not page on ordinary client probing as structural drift.
+- The operator contract (`/api/diagnostics`, `/api/health/explain`) is
+  viewer-readable, but rows derived from the admin roster or its durability
+  counters are admin-only detail (SEC-DIAG-ROSTER-1). Classify every such row
+  in `redactContractForRole`: below admin it keeps code and status with a fixed
+  message, no action, no counts and no TOTP/backup posture. Un-redact only for a
+  proven admin, and wrap every new `buildOperatorContract` renderer; the walls in
+  [diagnostics_username_role_test.go](../../../diagnostics_username_role_test.go) enforce both.
 - Configuration versioning has explicit exclusions. Follow the current surface
   registry and regression tests in [conventions](../conventions.md#ui-configuration-and-api-changes),
   not a blanket snapshot-after-every-mutation rule. Password changes must not
