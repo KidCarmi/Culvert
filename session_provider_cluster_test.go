@@ -173,3 +173,46 @@ func TestChaos72_ControlNonLastRemovalStillPropagates(t *testing.T) {
 	}
 	c72AssertRevoked(t, "removing one of two profiles on the CP")
 }
+
+// DOCUMENTED RESIDUAL (AU-22, §42.6f). Re-enabling a provider under the SAME
+// id revives the sessions it minted: the predicate is pure derived state, and
+// §42.7 deliberately does not clear the cookie on refusal, so nothing durable
+// records that a cut happened.
+//
+// This pins the AGREEMENT between the runbook and the code, not the gap — the
+// CHAOS-65 ocspCoverage shape. `docs/operator/identity-provider-revocation.md`
+// §4 now tells an operator this happens and names the three workarounds; the
+// previous text promised the opposite, which is a recovery step that misleads
+// mid-incident.
+//
+// WHEN A PROVIDER GENERATION IS STAMPED INTO THE COOKIE, THIS TEST MUST FAIL,
+// and that is the point: invert it and correct §4 in the same change, so the
+// runbook can never be left promising something the code stopped doing.
+func TestChaos72_DocumentedResidual_SameIDRestoration(t *testing.T) {
+	c72Setup(t, "live")
+	c72AssertAuthenticates(t, "the live provider")
+
+	p := idpRegistry.Get("corp")
+	if p == nil {
+		t.Fatal("precondition: the fixture must store a profile")
+	}
+	disabled := *p
+	disabled.Enabled = false
+	idpRegistry.profiles = []*IdPProfile{&disabled}
+	idpRegistry.live = map[string]IdentityProvider{}
+	c72AssertRevoked(t, "disabling the provider")
+
+	// The operator investigates and re-enables the same profile id.
+	resetSessionProviderBoundsForTest()
+	idpRegistry.profiles = []*IdPProfile{p}
+
+	out, proceed, code := c72Resolve(t, "corp")
+	if !proceed || out.identity != "alice@corp.example" || len(out.groups) != 2 {
+		t.Fatalf("documented residual no longer holds — a pre-incident cookie is no longer "+
+			"revived by re-enabling the same profile id: proceed=%v identity=%q groups=%v status=%d.\n"+
+			"If you stamped a provider generation into the cookie, that is the AU-22 fix: invert "+
+			"this gate and correct §4 of docs/operator/identity-provider-revocation.md in the "+
+			"same change, so the runbook stops describing behaviour the code no longer has.",
+			proceed, out.identity, out.groups, code)
+	}
+}

@@ -126,9 +126,26 @@ re-sends its dead cookie on every request until it re-authenticates. So:
 ## 4. Recovery
 
 There is nothing to undo. If a provider was removed by mistake, re-create or
-re-enable it; new logins work immediately. Sessions cut in the meantime are
-**not** restored — their holders simply log in again. No state is written by the
-refusal, so there is no file to repair and no cache to clear.
+re-enable it; new logins work immediately. No state is written by the refusal,
+so there is no file to repair and no cache to clear.
+
+**Re-enabling a provider under the same id REVIVES the sessions it minted, and
+that matters for incident response.** The check is pure derived state — "is
+this profile stored and enabled *right now*" — with nothing durable recording
+that a cut happened, so a cookie refused during the disabled window
+authenticates again, with the subject and groups the provider asserted before
+the incident, as soon as the profile is back. Only cookies that have expired
+(8 hours by default) or whose holder completed a fresh login in the meantime
+are really gone.
+
+So if you disabled a provider **because it was compromised**, treat
+re-enabling as restoring those sessions too. To cut them for good, either keep
+the provider disabled past the session TTL, re-create it under a **different
+id** (sessions naming the old id then resolve to nothing), or rotate the
+session signing key, which invalidates every proxy session on the appliance.
+Closing this properly needs a provider generation stamped into the cookie —
+tracked as register row **AU-22** in
+`roadmap/CHAOS-ENGINEERING-REVIEW.md` §42.6f.
 
 If you removed the **only** interactive provider and no local admin account
 exists, the proxy falls back to the global default authentication outcome. On a
