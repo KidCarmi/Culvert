@@ -52,13 +52,16 @@ It excludes three classes. The first two are what the bound is really for; the
 third is defence in depth against something net/http already refuses:
 
 * **Whitespace, including the space character and `TAB`.** This is the
-  wire-reachable half, and the one that matters. The value reaches roughly
-  twenty process-log sites — every `POLICY_*` decision line, `AUTH_FAIL`,
-  `IP_BLOCKED`, `RATE_LIMITED`, `BLOCKED`, `INVALID_HOST` — where it is rendered
-  inside a space-separated `{req_id=… identity=… action=…}` block, so a value
-  containing a space or a `TAB` injects extra `key=value` tokens that a
-  first-wins log parser reads in preference to the real ones. net/http carries
-  both bytes through to the handler, so Culvert's own bound is what stops them.
+  wire-reachable half, and the one that matters. An *accepted* correlation id is
+  rendered at roughly twenty process-log sites — every `POLICY_*` decision line,
+  `AUTH_FAIL`, `IP_BLOCKED`, `RATE_LIMITED`, `BLOCKED`, `INVALID_HOST` — inside
+  a space-separated `{req_id=… identity=… action=…}` block. A space or a `TAB`
+  in that position would inject extra `key=value` tokens that a first-wins log
+  parser reads in preference to the real ones, and net/http carries both bytes
+  through to the handler, so this bound is what keeps them out. A *rejected*
+  value reaches none of those sites: it is replaced by a freshly minted id
+  before the first line is written, so the exposure described here is what the
+  bound prevents, not something the current build does.
 * **Every byte `0x80`–`0xFF`.** net/http does not restrict non-ASCII in a header
   value at all, so without this bound a correlation id could carry arbitrary
   bytes into the log, the response header and the upstream.
