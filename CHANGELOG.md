@@ -622,7 +622,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (−25.4%)** at four; distinct IPs **105.7 → 70.0 (−33.8%)** and **108.3 → 85.6
   (−21.0%)**; entry churn **99.8 → 67.4 (−32.5%)** and **105.9 → 68.0
   (−35.8%)**; the reject path **62.6 → 29.6 (−52.7%)** and **245.1 → 101.3
-  (−58.7%)** — with **1 → 0 allocs/op** throughout. End to end,
+  (−58.7%)** — with **1 → 0 allocs/op** on the shapes that create an entry per
+  operation (distinct IPs and entry churn at both core counts, single NAT
+  egress at one core). The reject and retained-entry arms, and single NAT
+  egress at four cores, already report **0 allocs/op in both forms**: the entry
+  exists before the timed operation, so neither form allocates a counter for
+  it. End to end,
   `BenchmarkPerfQual_ProxyHTTPForward` goes 177 → 176 allocs/op and `connlimit`
   leaves the `alloc_objects` profile entirely.
 

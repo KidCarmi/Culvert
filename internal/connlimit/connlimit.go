@@ -83,7 +83,7 @@ const defaultMaxConnsPerIP = 1024
 //
 //	shape                      │ before │ after │        │ allocs
 //	single NAT egress, 1 core  │  103.2 │  66.3 │ -35.8% │ 1 -> 0
-//	single NAT egress, 4 cores │  267.6 │ 199.6 │ -25.4% │ 1 -> 0
+//	single NAT egress, 4 cores │  267.6 │ 199.6 │ -25.4% │ 0 -> 0
 //	distinct IPs,      1 core  │  105.7 │  70.0 │ -33.8% │ 1 -> 0
 //	distinct IPs,      4 cores │  108.3 │   85.6│ -21.0% │ 1 -> 0
 //	entry churn,       1 core  │   99.8 │  67.4 │ -32.5% │ 1 -> 0
@@ -92,6 +92,14 @@ const defaultMaxConnsPerIP = 1024
 //	reject path,       4 cores │  245.1 │ 101.3 │ -58.7% │ 0 -> 0
 //	steady state,      1 core  │   58.3 │  60.7 │  +4.2% │ 0 -> 0
 //	steady state,      4 cores │   61.8 │  61.7 │   0.0% │ 0 -> 0
+//
+// THE ALLOCS COLUMN IS PER TIMED OPERATION, so it reads 0 -> 0 wherever the
+// entry already exists when the pair runs: the reject path (the IP is at its
+// cap, so its entry is present), steady state (the entry is retained across
+// the pair), and single NAT egress at FOUR cores — there concurrent holders
+// keep the one entry alive, so the legacy form re-created it only
+// occasionally (3 B/op, ~0.4 allocations per op, which -benchmem truncates to
+// 0). The 1 -> 0 rows are the shapes that create an entry per operation.
 //
 // THE LAST ROW IS THE HONEST PRICE and it is recorded rather than rounded away.
 // "Steady state" is the one shape where the entry is RETAINED across the pair —
