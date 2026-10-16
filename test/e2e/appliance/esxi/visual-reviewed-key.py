@@ -39,7 +39,25 @@ def save(path,value):
         json.dump(value,out,sort_keys=True);out.flush();os.fsync(out.fileno())
 
 
+def no_prior_esc(lab):
+    # A new proof/label/campaign must not hide an ambiguous legacy Esc send.
+    # Only Esc is restricted here; completed Alt+F12/F1 navigation is separate.
+    for claim in lab.sec.glob('visual-esc-*.intent.json'):
+        regular(claim)
+        raise ValueError('prior Esc intent forbids another input')
+    for pattern in ('visual-key-*','visual-reviewed-key-*'):
+        for directory in lab.sec.glob(pattern):
+            for name in ('intent.json','complete.json'):
+                path=directory/name
+                if not path.exists() and not path.is_symlink():continue
+                regular(path);need(path.stat().st_size<=128*1024,'prior intent oversized')
+                key=json.loads(path.read_bytes()).get('key')
+                need(key in ('esc','alt-f12','alt-f1'),'unrecognized prior key evidence')
+                need(key!='esc','prior Esc intent forbids another input')
+
+
 def validate_review(lab,proof,visual,now_ns=None):
+    no_prior_esc(lab)
     now_ns=time.time_ns() if now_ns is None else now_ns
     for key in ('source_sha','ova_sha256','image_id'):
         need(proof.get(key)==lab.c[key],'candidate differs')

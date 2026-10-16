@@ -79,6 +79,15 @@ class ReviewedKeyTests(unittest.TestCase):
         (old/'intent.json').write_text('{}')
         with self.assertRaises(ValueError):m.validate_review(self.lab,self.proof,v)
 
+    def test_omitted_legacy_esc_intent_cannot_be_replayed_with_new_proof(self):
+        old=self.lab.sec/'visual-key-unrelated-label';old.mkdir()
+        (old/'intent.json').write_text(json.dumps({'key':'alt-f12'}))
+        m.validate_review(self.lab,self.proof,v)
+        (old/'intent.json').write_text(json.dumps({'key':'esc'}))
+        with self.assertRaisesRegex(ValueError,'prior Esc intent'):m.validate_review(self.lab,self.proof,v)
+        (old/'intent.json').unlink();(old/'complete.json').write_text(json.dumps({'key':'esc'}))
+        with self.assertRaisesRegex(ValueError,'prior Esc intent'):m.validate_review(self.lab,self.proof,v)
+
     def test_late_ownership_or_scope_change_never_sends(self):
         def capture(path,deadline):
             path.write_bytes(PNG);self.lab.scope_path.write_text('{"changed":true}');return path
