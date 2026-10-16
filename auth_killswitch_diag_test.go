@@ -43,8 +43,10 @@ func TestAuthExemptKillSwitchRowsNoBackend(t *testing.T) {
 		if strings.Contains(rows[0].Message, "must now authenticate") {
 			t.Fatalf("no-backend row must not claim clients now authenticate, got %q", rows[0].Message)
 		}
-		if !strings.Contains(rows[0].Message, "Stage 2") {
-			t.Fatalf("no-backend row must say Stage 2 decides the request, got %q", rows[0].Message)
+		if !strings.Contains(rows[0].Message, "Stage 2 policy decides every other request") ||
+			!strings.Contains(rows[0].Message, "Credential Required rules still return 407") ||
+			!strings.Contains(rows[0].Message, "SSO Required rules still deny with 403") {
+			t.Fatalf("no-backend row must name every scoped outcome before the Stage 2 fall-through, got %q", rows[0].Message)
 		}
 	}
 	withBackend := authExemptKillSwitchRows(false, true, true)
