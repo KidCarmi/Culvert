@@ -335,7 +335,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live under 70 top-level directories in `internal/` (some, like the MCP gateway, further decomposed into dozens of subpackages — 109 directories under `internal/` in total contain non-test Go source; verify with `ls internal | wc -l`). A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live under 70 top-level directories in `internal/` (`ls -d internal/*/ | wc -l`; some, like the MCP gateway, are further decomposed into dozens of subpackages — 109 directories under `internal/` in total contain non-test Go source). A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions are in [`docs/agent-context/conventions.md`](docs/agent-context/conventions.md), the `internal/` decomposition in [`roadmap/PACKAGE-ISOLATION.md`](roadmap/PACKAGE-ISOLATION.md), and the admin-API route-metadata contract in [`docs/agent-context/domains/admin-control-plane.md`](docs/agent-context/domains/admin-control-plane.md); [`AGENTS.md`](AGENTS.md) routes to the rest.
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
