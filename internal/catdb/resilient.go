@@ -24,6 +24,8 @@ package catdb
 //     not reuse that rule — see storeguard.Policy.
 
 import (
+	"path/filepath"
+
 	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
@@ -66,15 +68,39 @@ var communityStorePolicy = storeguard.Policy{}
 //
 // Direct `catdb.Open` remains the entry point for callers that already know the
 // directory is sound.
+//
+// The configured path is resolved through symlinks ONCE, here, and every
+// recovery step — markers, the quarantine rename, the rebuild — acts on the
+// real target. If it used the configured path instead, an alias such as
+// `/var/lib/catdb -> /mnt/data/catdb` would have the SYMLINK renamed aside.
+// badger would then create a plain directory at the alias, so the rebuilt feed
+// would silently leave the persistent volume while the damaged target stayed
+// where it was. The alias itself is never renamed or replaced.
 func OpenResilient(dir string) (*CommunityDB, Recovery, error) {
-	return storeguard.Open(dir, communityStorePolicy, Open)
+	return storeguard.Open(resolveStoreDir(dir), communityStorePolicy, Open)
 }
 
 // QuarantinedCopies returns the `.corrupt.*` siblings of dir, newest last.
 // Exported so the caller can re-surface an unreconciled quarantine from a
 // PRIOR boot: the in-memory record is process-local, so without this a
 // self-healed store looks pristine on the next restart while the evidence — and
-// the disk it occupies — is still sitting there.
+// the disk it occupies — is still sitting there. dir is resolved the same way
+// OpenResilient resolves it, because that is where the copies are.
 func QuarantinedCopies(dir string) []string {
-	return storeguard.QuarantinedCopies(dir)
+	return storeguard.QuarantinedCopies(resolveStoreDir(dir))
+}
+
+// resolveStoreDir returns dir with symlinks resolved, or dir unchanged when it
+// cannot be resolved (first start, before the directory exists, or a dangling
+// alias whose volume is not mounted — badger's open then fails and the caller
+// degrades, exactly as before).
+func resolveStoreDir(dir string) string {
+	if dir == "" {
+		return dir
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return dir
+	}
+	return resolved
 }

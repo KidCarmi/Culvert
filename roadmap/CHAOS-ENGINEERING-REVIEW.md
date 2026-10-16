@@ -8687,6 +8687,36 @@ replacement. Gated by `TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery` and
 `TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery`
 (injected remover).
 
+### Codex round 3 — a symlinked store path, and the non-Linux binaries
+
+**Symlinked path.** With a configured alias such as
+`/var/lib/catdb -> /mnt/data/catdb`, the marker was written beside the alias,
+and the next start's quarantine renamed the symlink itself. badger then created
+a plain directory at the alias, so the rebuilt feed silently left the
+persistent volume and the damaged target was left in place. `catdb` now
+resolves the path through symlinks once, at open (`OpenResilient`, `Open`,
+`QuarantinedCopies`). The marker, the quarantine rename and the rebuild all act
+on the real target, and the alias is never renamed or replaced. Gated by
+`TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget`: after a real
+fault and restart through the alias, the alias is still a symlink to the same
+target, the quarantined copy sits beside the target, and the fresh store lives
+under it. The test fails on the previous head at the marker-location assertion.
+
+**Non-Linux binaries.** The release matrix also publishes Darwin and Windows
+binaries, where `/proc/self/maps` does not exist, so `ContainFault` re-panics
+every fault. That is main's behaviour before this change, so it is not a
+regression, but it is not the Layer-1 fallback this section describes. The
+decision is to make runtime fault containment explicitly **Linux-only**, and
+not to write mach `vm_region` / `VirtualQuery` verifiers: production
+deployments are Linux (Docker/OVA), and those verifiers would be
+platform-specific code CI cannot exercise. `storeguard.FaultContainmentSupported`
+is a compile-time constant. On a non-Linux build the `category_feed_db` row for
+a serving store reports `runtime fault containment: unavailable on <GOOS>`
+(severity unchanged), and `TestContainFault_UnsupportedPlatformRePanics` /
+`TestCheckCategoryFeedDB_ReportsContainmentUnavailableOffLinux` (`!linux` build
+tag) pin the re-panic and the reported status. Everything else in §41 that
+describes containment applies to Linux builds.
+
 ---
 
 ## 42. Adjacent domains swept for §41, recorded and not fixed

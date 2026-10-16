@@ -205,6 +205,35 @@ func TestParseMapsLine(t *testing.T) {
 	}
 }
 
+// faultAt carries Addr() like the runtime's converted-fault error, so the
+// address-to-mapping decision can be driven with an injected memory map.
+type faultAt uintptr
+
+func (f faultAt) Error() string { return "synthetic fault" }
+func (f faultAt) Addr() uintptr { return uintptr(f) }
+
+// The positive case through the seam: an address inside an injected mapping of
+// a file under the store directory is contained.
+func TestContainFault_InStoreAddressFromInjectedMapsIsContained(t *testing.T) {
+	if !FaultContainmentSupported {
+		t.Fatal("FaultContainmentSupported must be true on Linux")
+	}
+	dir := t.TempDir()
+	maps := func() ([]byte, error) {
+		return []byte("1000-2000 r--s 00000000 08:01 1 " + filepath.Join(dir, "000001.sst") + "\n"), nil
+	}
+	err := containFault(dir, maps, func() error { panic(faultAt(0x1800)) })
+	if !IsStoreFault(err) {
+		t.Fatalf("in-store fault not contained: %v", err)
+	}
+	got := rePanicValue(func() {
+		_ = containFault(dir, maps, func() error { panic(faultAt(0x3000)) })
+	})
+	if _, ok := got.(faultAt); !ok {
+		t.Fatalf("out-of-range fault: re-panicked with %T (%v), want the original value", got, got)
+	}
+}
+
 // A sibling store whose name extends this one's must not count as "under" it.
 func TestAddrInStoreMapping_RequiresAPathBoundary(t *testing.T) {
 	maps := func() ([]byte, error) {

@@ -1,3 +1,8 @@
+//go:build linux
+
+// Real mapping faults are contained on Linux only (storeguard.FaultContainmentSupported);
+// elsewhere they re-panic by design, so these gates run where containment exists.
+
 package catdb
 
 import (
@@ -5,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
 // seedOnDisk fills a store, closes it so the memtable is flushed into `.sst`
@@ -206,5 +213,102 @@ func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
 	_ = third.Close()
 	if rec.Trigger != TriggerNone || rec.Quarantined {
 		t.Fatalf("fault signal was not cleared after quarantine: %+v", rec)
+	}
+}
+
+// TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget pins the
+// restart path for a configured path that is an alias onto the data volume
+// (`/var/lib/catdb -> /mnt/data/catdb`). Before the path was resolved once at
+// open, the marker went beside the alias and the next start renamed the
+// SYMLINK aside. badger then created a plain directory at the alias, so the
+// rebuilt feed left the volume and the damaged target was left in place.
+func TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget(t *testing.T) {
+	volume := t.TempDir()
+	target := filepath.Join(volume, "catfeeddb")
+	alias := filepath.Join(t.TempDir(), "catfeeddb")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	seed, err := Open(alias)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	entries := make(map[string]string, 20000)
+	for i := 0; i < 20000; i++ {
+		entries[fmt.Sprintf("evil%d.example", i)] = "Malware"
+	}
+	if err := seed.BulkWrite(entries); err != nil {
+		t.Fatalf("bulkwrite: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	ssts, _ := filepath.Glob(filepath.Join(target, "*.sst"))
+	if len(ssts) == 0 {
+		t.Fatal("expected flushed .sst tables in the target")
+	}
+
+	live, rec, err := OpenResilient(alias)
+	if err != nil || rec.Trigger != TriggerNone {
+		t.Fatalf("healthy open through the alias: err=%v rec=%+v", err, rec)
+	}
+	for _, f := range ssts {
+		if err := os.Truncate(f, 0); err != nil {
+			t.Fatalf("truncate %s: %v", f, err)
+		}
+	}
+	live.Lookup("evil19999.example")
+	if _, mem, degraded := live.LookupFaults(); mem == 0 || !degraded {
+		t.Fatalf("fault through the alias was not contained: mem=%d degraded=%v", mem, degraded)
+	}
+	_ = live.Close()
+
+	if _, err := os.Stat(target + storeguard.FaultMarkerSuffix); err != nil {
+		t.Fatalf("fault marker not beside the real target: %v", err)
+	}
+	if _, err := os.Lstat(alias + storeguard.FaultMarkerSuffix); err == nil {
+		t.Fatal("fault marker written beside the alias")
+	}
+
+	next, rec, err := OpenResilient(alias)
+	if err != nil {
+		t.Fatalf("restart through the alias: err=%v rec=%+v", err, rec)
+	}
+	t.Cleanup(func() { _ = next.Close() })
+	if rec.Trigger != TriggerRuntimeFault || !rec.Quarantined {
+		t.Fatalf("restart did not quarantine: %+v", rec)
+	}
+
+	// The alias is untouched: still a symlink, still onto the same target.
+	fi, err := os.Lstat(alias)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the configured alias was replaced: fi=%v err=%v", fi, err)
+	}
+	if got, err := os.Readlink(alias); err != nil || got != target {
+		t.Fatalf("alias now points at %q (err %v), want %q", got, err, target)
+	}
+	// The damaged target was moved aside BESIDE THE TARGET, on the volume.
+	if filepath.Dir(rec.QuarantinePath) != volume {
+		t.Fatalf("quarantine landed at %q, want beside the target in %q", rec.QuarantinePath, volume)
+	}
+	if strays, _ := filepath.Glob(alias + storeguard.QuarantineSuffix + "*"); len(strays) != 0 {
+		t.Fatalf("something was quarantined beside the alias: %v", strays)
+	}
+	// The fresh store lives under the target and serves through the alias.
+	if err := next.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
+		t.Fatalf("rebuilt store not writable: %v", err)
+	}
+	if cat, ok := next.Lookup("evil.example"); !ok || cat != "Malware" {
+		t.Fatalf("rebuilt store not serving: cat=%q ok=%v", cat, ok)
+	}
+	if fi, err := os.Lstat(target); err != nil || !fi.IsDir() {
+		t.Fatalf("fresh store is not a directory at the target: fi=%v err=%v", fi, err)
+	}
+	if got := QuarantinedCopies(alias); len(got) != 1 || got[0] != rec.QuarantinePath {
+		t.Fatalf("QuarantinedCopies(alias) = %v, want [%s]", got, rec.QuarantinePath)
 	}
 }

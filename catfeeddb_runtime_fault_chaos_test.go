@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 // catfeeddb_runtime_fault_chaos_test.go — CHAOS-74 gates for the OPERATOR
@@ -155,6 +157,8 @@ func TestCheckCategoryFeedDB_HealthyStoreTripsNothing(t *testing.T) {
 
 	if row := checkCategoryFeedDB(); row.Status != diagOK {
 		t.Errorf("healthy store warns: %q %s", row.Status, row.Message)
+	} else if strings.Contains(row.Message, "containment: unavailable") {
+		t.Errorf("Linux build reports containment unavailable: %s", row.Message)
 	}
 	body := renderMetrics(t)
 	for _, want := range []string{

@@ -19,7 +19,6 @@ package catdb
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -34,14 +33,16 @@ import (
 // All exported methods are safe for concurrent use.
 type CommunityDB struct {
 	db *badger.DB
-	// dir is where the store was opened, kept so a contained memory fault can
-	// be recorded beside it for the next OpenResilient (storeguard.RecordFault).
+	// dir is the store's REAL directory: the opened path with symlinks
+	// resolved once, at open time, while the volume is known to be healthy.
+	// Both uses need the resolved form. ContainFault matches a faulting
+	// address against the kernel's view of the mapped files, which uses
+	// resolved paths, and by the time of a fault the volume may be too far
+	// gone to resolve. RecordFault must put the marker beside the real target,
+	// which is where OpenResilient (resolving the same way) looks for it and
+	// what it quarantines. Beside an alias, the marker would make the next
+	// start rename the symlink.
 	dir string
-	// mapRoot is dir with symlinks resolved at open time, while the volume is
-	// known to be healthy. ContainFault matches a faulting address against the
-	// kernel's view of the mapped files, which uses resolved paths, and by the
-	// time a fault happens the volume may be too far gone to resolve.
-	mapRoot string
 
 	// CHAOS-74 runtime health. The boot outcome is recorded by the caller
 	// (catfeeddb_health.go); these are the counters for everything that goes
@@ -95,11 +96,7 @@ func Open(dir string) (*CommunityDB, error) {
 	if err != nil {
 		return nil, err
 	}
-	mapRoot, rerr := filepath.EvalSymlinks(dir)
-	if rerr != nil {
-		mapRoot = dir
-	}
-	return &CommunityDB{db: db, dir: dir, mapRoot: mapRoot}, nil
+	return &CommunityDB{db: db, dir: resolveStoreDir(dir)}, nil
 }
 
 // Close flushes and closes the underlying BadgerDB.
@@ -130,7 +127,7 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 		cat   string
 		found bool
 	)
-	err := storeguard.ContainFault(c.mapRoot, func() error {
+	err := storeguard.ContainFault(c.dir, func() error {
 		var walkErr error
 		cat, found, walkErr = c.walk(host)
 		return walkErr

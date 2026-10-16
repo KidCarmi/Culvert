@@ -24,8 +24,8 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `debug.SetPanicOnFault`, which delivers a fault on mapped memory as a
   recoverable panic; the guard is armed once per domain walk and re-panics
   anything that is not a mapping fault, so a genuine bug still reaches
-  `crashguard` instead of being reported as a failing disk. A node that takes
-  such a fault now latches Layer-2 categorisation off and keeps serving on the
+  `crashguard` instead of being reported as a failing disk. A Linux node that
+  takes such a fault now latches Layer-2 categorisation off and keeps serving on the
   admin-managed Layer 1, which is the existing posture for a store that never
   opened. **The policy outcome is unchanged** — an affected host is still
   "uncategorised", not denied.
@@ -44,6 +44,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   without the record every later start stayed Layer-1-only.
   `culvert_catfeeddb_memory_faults_total > 0` is the
   alerting rule to add: it means a node's data volume is damaging a live store.
+
+  Containment is **Linux-only**. A fault is contained only when its address can
+  be shown to lie in one of the store's mapped files, which is checked against
+  `/proc/self/maps`; anything else re-panics. On the Darwin and Windows release
+  binaries a mapping fault keeps the prior behaviour, and the
+  `category_feed_db` row says `runtime fault containment: unavailable on
+  <GOOS>`. Production deployments (Docker/OVA) are Linux.
 
   Known limit: `SetPanicOnFault` is per-goroutine, so badger's own compaction
   goroutines remain exposed. This closes the reachable, request-driven exposure,

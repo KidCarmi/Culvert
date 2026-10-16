@@ -28,7 +28,10 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
 // catFeedDBHealth is the process-wide record of how the community store came
@@ -119,6 +122,20 @@ func resetCatFeedDBHealthForTest() {
 //     would report a healthy gateway as broken.
 func checkCategoryFeedDB() OperatorContractCheck {
 	h := catFeedDBState()
+	row := categoryFeedDBRow(h)
+	// CHAOS-74 containment of mapping faults is Linux-only (the deployment
+	// target). On another build a damaged mapped table still behaves as it did
+	// before the fix, so a store that is serving says so rather than implying a
+	// fallback that does not exist there. Status is left alone: this is a
+	// property of the build, not a fault of this node.
+	if h.Configured && h.Available && !storeguard.FaultContainmentSupported {
+		row.Message += "; runtime fault containment: unavailable on " + runtime.GOOS
+	}
+	return row
+}
+
+// categoryFeedDBRow is the severity decision for checkCategoryFeedDB.
+func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 	if !h.Configured {
 		return OperatorContractCheck{
 			Code:    "category_feed_db",
