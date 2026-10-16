@@ -89,7 +89,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   Data-Plane startup no longer overwrites a Control Plane role the listener
   already claimed: every role write goes through one arbiter, the role claimed
   first wins, and the refused claim is reported FAIL by the `cluster_posture`
-  diagnostics row. A refused admin/promote
+  diagnostics row; every reader of the role takes one locked snapshot.
+  A serve that ends on its own now stops the retired gRPC server (closing the
+  Data Planes' transports to it) before rebinding, shares the bind path's
+  threshold clamp and alert latch, and a full config publish can no longer
+  overwrite the CP address list the activation published. A self-fenced
+  ex-leader whose CP listener is still dark is no longer AUTO-promoted
+  (manual promotion unchanged). A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

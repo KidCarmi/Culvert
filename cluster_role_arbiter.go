@@ -35,6 +35,30 @@ import (
 	"time"
 )
 
+// clusterRoleView is an immutable copy of the cluster-role tuple, taken under
+// clusterRoleMu so role, address and identity are always mutually consistent.
+type clusterRoleView struct {
+	role, grpcAddr, nodeID, certFile, keyFile, caFile string
+}
+
+// clusterRoleSnapshot is the ONE production read path for the cluster role
+// tuple. Since the CP listener supervisor claims the role ASYNCHRONOUSLY — a
+// retried bind can land while HTTP handlers are already serving — an unlocked
+// field read is a data race and can observe a mixed role/address/identity
+// tuple (Codex review of #1556). Never call it while holding clusterRoleMu.
+func clusterRoleSnapshot() clusterRoleView {
+	clusterRoleMu.RLock()
+	defer clusterRoleMu.RUnlock()
+	return clusterRoleView{
+		role: clusterRole.role, grpcAddr: clusterRole.grpcAddr, nodeID: clusterRole.nodeID,
+		certFile: clusterRole.certFile, keyFile: clusterRole.keyFile, caFile: clusterRole.caFile,
+	}
+}
+
+// isControlPlaneRole reports whether this node currently holds the Control
+// Plane role (a locked read).
+func isControlPlaneRole() bool { return clusterRoleSnapshot().role == "control-plane" }
+
 // clusterRoleConflict is the latched record of a refused role claim. Guarded
 // by clusterRoleMu, like the role it describes.
 var clusterRoleConflict struct {

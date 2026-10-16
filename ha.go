@@ -1269,9 +1269,7 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check that we're already running as CP.
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	if role != "control-plane" {
 		http.Error(w, "must be running as Control Plane to enable HA", http.StatusConflict)
 		return
@@ -1355,12 +1353,8 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 // Includes enterprise TLS cert paths when the leader was started with them,
 // so the admin knows exactly which cert files to stage on the standby server.
 func haDeployCommand() string {
-	clusterRoleMu.RLock()
-	grpcAddr := clusterRole.grpcAddr
-	certFile := clusterRole.certFile
-	keyFile := clusterRole.keyFile
-	caFile := clusterRole.caFile
-	clusterRoleMu.RUnlock()
+	view := clusterRoleSnapshot()
+	grpcAddr, certFile, keyFile, caFile := view.grpcAddr, view.certFile, view.keyFile, view.caFile
 
 	globalHA.mu.RLock()
 	token := globalHA.token

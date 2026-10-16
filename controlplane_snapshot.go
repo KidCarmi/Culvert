@@ -452,6 +452,12 @@ type ConfigStore struct {
 	// catch up incrementally via GetConfigDelta (T3 P1). The zero value is
 	// ready; a swapped-in test store gets a fresh ring automatically.
 	deltaRing blocklistDeltaRing
+	// cpAddrSource, once set (setCPAddressSource, at Control Plane
+	// activation), makes the CP address list OWNED by UpdateCPAddressesFrom:
+	// a full Update keeps the committed list instead of the one its caller
+	// captured, then reconciles it from this source. Nil on bare/test stores
+	// and on non-CP nodes. Guarded by mu.
+	cpAddrSource func() []string
 }
 
 var globalConfigStore = &ConfigStore{}
@@ -582,10 +588,37 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
 
 	s.mu.Lock()
+	src := s.cpAddrSource
+	if src != nil && s.published {
+		// CHAOS-71 (CodeRabbit review of #1556): a full publish built its
+		// snapshot — CPAddresses included — BEFORE taking this lock, so it can
+		// predate a delayed CP activation that has since published the new
+		// address list. Committing the captured list would hand every DP a
+		// list without the new Control Plane. Once a source owns the list, a
+		// full publish keeps the COMMITTED one; any legitimate change is
+		// applied by the reconcile below, which recomputes it after this
+		// commit.
+		snap.CPAddresses = s.snap.CPAddresses
+	}
 	c := s.commitLocked(snap)
 	s.mu.Unlock()
 	s.afterCommit(c)
+	if src != nil {
+		// Propagate an address change this publish was carrying (an HA
+		// enable/peer change rides the next full publish). A rejection is
+		// logged, alerted and surfaced by rejectPublish; this publish itself
+		// already succeeded.
+		_, _ = s.UpdateCPAddressesFrom(src)
+	}
 	return nil
+}
+
+// setCPAddressSource hands ownership of the CP address list to build (see
+// cpAddrSource). Called once at Control Plane activation.
+func (s *ConfigStore) setCPAddressSource(build func() []string) {
+	s.mu.Lock()
+	s.cpAddrSource = build
+	s.mu.Unlock()
 }
 
 // validateSnapshotForPublish runs the commit-time gates every publish passes
@@ -674,9 +707,15 @@ const cpAddrMergeAttempts = 8
 // deterministically.
 var cpAddrMergeBeforeCommit func()
 
-// UpdateCPAddresses publishes addrs as the fleet's CP address list by MERGING
-// onto the latest COMMITTED snapshot — never onto a snapshot captured earlier
-// (CHAOS-71, Codex review of #1556).
+// UpdateCPAddressesFrom publishes build() as the fleet's CP address list by
+// MERGING onto the latest COMMITTED snapshot — never onto a snapshot captured
+// earlier (CHAOS-71, Codex review of #1556).
+//
+// build is re-run on EVERY attempt, after reading the version it will
+// compare-and-swap against: a list computed before a role change could
+// otherwise be committed after a fresher one, so each committed list is
+// computed after the commit it replaces. build must not need s.mu (it runs
+// outside it) — buildCPAddressList takes globalHA.mu and clusterRoleMu only.
 //
 // It exists for the Control Plane's post-bind activation. A full
 // Update(CurrentConfigSnapshot()) whose snapshot was built just before an admin
@@ -693,11 +732,12 @@ var cpAddrMergeBeforeCommit func()
 // carry the address list) or when the committed list already equals addrs. A
 // gate rejection goes through rejectPublish (logged, alerted,
 // LastPublishError) and is RETURNED so activation can refuse to succeed.
-func (s *ConfigStore) UpdateCPAddresses(addrs []string) (changed bool, err error) {
+func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool, err error) {
 	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
 		s.mu.RLock()
 		base, ver, published := s.snap, s.version, s.published
 		s.mu.RUnlock()
+		addrs := build()
 		if !published || slicesEqual(base.CPAddresses, addrs) {
 			return false, nil
 		}
@@ -1559,9 +1599,7 @@ func buildCPAddressList() []string {
 	if !haStatus.Enabled {
 		return nil // no HA = no address list needed
 	}
-	clusterRoleMu.RLock()
-	myAddr := clusterRole.grpcAddr
-	clusterRoleMu.RUnlock()
+	myAddr := clusterRoleSnapshot().grpcAddr
 
 	// haStatus.PeerAddr is the leader's externally reachable address (set during Enable HA).
 	// For the leader, we include: [leader_addr, standby_addr]

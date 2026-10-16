@@ -863,9 +863,7 @@ func diagnoseConfigFrom(snap ConfigSnapshot, syncing bool, now time.Time) config
 func diagnoseCluster(now time.Time) clusterDiagnosis {
 	mode, valid, epoch := globalHA.leaseHealth()
 	total, connected := globalClusterStore.NodeCounts()
-	clusterRoleMu.RLock()
-	nodeRole := clusterRole.role
-	clusterRoleMu.RUnlock()
+	nodeRole := clusterRoleSnapshot().role
 	in := clusterInputs{
 		haStatus:     globalHA.Status(),
 		nodeRole:     nodeRole,
@@ -1014,9 +1012,7 @@ func diagnoseConfig(now time.Time) configDiagnosis {
 // active Data Plane (it applies them); false for a standalone appliance, for
 // which the caps are a dormant cluster-sync bound.
 func nodeParticipatesInConfigSync() bool {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	return role == "control-plane" || role == "data-plane" || activeDPClient.Load() != nil
 }
 

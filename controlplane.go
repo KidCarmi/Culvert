@@ -342,9 +342,7 @@ var (
 // the node from the fleet. A standalone or control-plane node is locally
 // authoritative and may edit freely. Read under clusterRoleMu.
 func isManagedDataPlane() bool {
-	clusterRoleMu.RLock()
-	defer clusterRoleMu.RUnlock()
-	return clusterRole.role == "data-plane"
+	return clusterRoleSnapshot().role == "data-plane"
 }
 
 // enrollRateLimit tracks per-IP enrollment attempt timestamps for rate limiting.

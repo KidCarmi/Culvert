@@ -136,6 +136,8 @@ to this checkout, not to an unmerged branch.
   role / advertised gRPC address goes through
   [cluster_role_arbiter.go](../../cluster_role_arbiter.go): an already-claimed
   role wins, the second claimant is refused and latched (`cluster_posture` FAIL).
+  Reads go through `clusterRoleSnapshot()` only; once the CP is active the CP
+  address list is owned by `ConfigStore.UpdateCPAddressesFrom`.
   `cpActivationMu` is taken
   before `clusterRoleMu`, and nothing may call `CurrentConfigSnapshot` while
   holding `clusterRoleMu`. A lease-mode leader whose listener is dark past 30 s

@@ -61,6 +61,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -408,10 +409,20 @@ func clampCPGRPCBindSleep(d, failingFor time.Duration) time.Duration {
 	return remaining
 }
 
-// noteCPGRPCBindFailure records one failed bind (or TLS-material) attempt and
-// reports whether the caller should log it, plus how long the episode has been
-// running so the caller can clamp its sleep.
+// noteCPGRPCBindFailure records one failed bind (or TLS-material, or rejected
+// commit) attempt. See noteCPGRPCListenFailure.
 func noteCPGRPCBindFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool, failingFor time.Duration) {
+	return noteCPGRPCListenFailure(reason, backoff, now)
+}
+
+// noteCPGRPCListenFailure is the ONE failure recorder for this plane: a failed
+// bind and a serve that ended both go through it, so the counters, the shared
+// log gate, the unavailability episode and the fire-once alert latch can never
+// drift between the two paths. (They did: the serve-end path once skipped the
+// alert latch, so a listener dark past the threshold after a serve death could
+// go unpaged — Codex review of #1556.) Reports whether the caller should log,
+// plus how long the episode has been running so the caller can clamp its sleep.
+func noteCPGRPCListenFailure(reason string, backoff time.Duration, now time.Time) (shouldLog bool, failingFor time.Duration) {
 	cpGRPCEverFailed.Store(true)
 
 	cpGRPCListener.mu.Lock()
@@ -499,44 +510,12 @@ func noteCPGRPCBound() (suppressed int64, recovered bool) {
 // is still running — the listener is gone and a rebind is pending.
 //
 // Distinct from noteCPGRPCSupervisorDown: a rebind IS in progress here, so the
-// operator action must not be "restart this node".
-func noteCPGRPCServeEnded(reason string) (shouldLog bool) {
-	cpGRPCEverFailed.Store(true)
-	now := cpGRPCHealthNow()
-	cpGRPCListener.mu.Lock()
-	cpGRPCListener.serving = false
-	cpGRPCListener.lastReason = reason
-	// A serve that ended is a FAILURE of the listener and is counted as one —
-	// `culvert_cp_grpc_bind_failures_total` says "bind/TLS/serve", matching the
-	// admin UI plane's `listen_failures_total`. Counting it is the whole point:
-	// pre-fix the operator's only evidence that the Control Plane had stopped
-	// serving was a single log line, with `clusterRole.role` still reporting a
-	// healthy CP (this sweep's third defect).
-	cpGRPCListener.total++
-	cpGRPCListener.consecutive++
-	cpGRPCListener.lastFailure = now
-	if cpGRPCListener.firstFailure.IsZero() {
-		cpGRPCListener.firstFailure = now
-	}
-	// SHARED log gate with noteCPGRPCBindFailure, so the two failure paths
-	// cannot flood past one line per minute between them. Found in self-review:
-	// the serve-death line was unconditional while the bind-failure line was
-	// gated, and a listener that binds and dies immediately cycles once per
-	// backoff — at the 30 s ceiling that is ~6x the bind path's allowance, from
-	// the same episode. Symmetry here is cheaper than a second rate policy.
-	if cpGRPCListener.logAt.IsZero() || now.Sub(cpGRPCListener.logAt) >= cpGRPCBindLogInterval {
-		cpGRPCListener.logAt = now
-		shouldLog = true
-	} else {
-		cpGRPCListener.suppressed++
-	}
-	cpGRPCListener.mu.Unlock()
-	// Deliberately does NOT evaluate the alert latch. A serve-death is followed
-	// by a rebind within the backoff floor, so paging here would page on every
-	// transient socket fault; if the rebinds keep failing, the bind-failure
-	// recorder owns the episode and the page. An immediate successful rebind
-	// clears the episode via noteCPGRPCBound.
-	return shouldLog
+// operator action must not be "restart this node". A serve that ended is a
+// FAILURE of the listener and is counted as one — `culvert_cp_grpc_bind_failures_total`
+// says "bind/TLS/serve" — through the same recorder, log gate and alert latch
+// as a failed bind (noteCPGRPCListenFailure).
+func noteCPGRPCServeEnded(reason string, backoff time.Duration) (shouldLog bool, failingFor time.Duration) {
+	return noteCPGRPCListenFailure(reason, backoff, cpGRPCHealthNow())
 }
 
 // noteCPGRPCSupervisorDown records the TERMINAL state: the supervisor goroutine
@@ -827,4 +806,61 @@ func cpGRPCListenerStatus() string {
 		return ""
 	}
 	return cpGRPCHealthPosture()
+}
+
+// writeCPGRPCMetrics emits the culvert_cp_grpc_* series for /metrics. Lives
+// with the plane it describes so handleMetrics carries one call, not the block.
+func writeCPGRPCMetrics(w io.Writer) {
+	// Emitted only on a node that asked to be a Control Plane (the CHAOS-54
+	// emission rule the other listener blocks in handleMetrics follow): a
+	// flat `up 0` from every standalone proxy and every Data Plane in the fleet
+	// is indistinguishable from a broken CP, and the documented paging rule is
+	// `== 0`.
+	//
+	// `up` is 0 whenever the listener is not currently serving — including
+	// while it is rebinding — because the loop rebinds for as long as the
+	// process lives. The alertable pair is `culvert_cp_grpc_unavailable 1`,
+	// latched only once the fault has persisted past the threshold, so it does
+	// not fire on the few seconds of rebinding that follow an ordinary rollout
+	// of the Control Plane.
+	//
+	// Served by the PROXY port's /metrics, which is what makes it reachable
+	// while the cluster plane is down.
+	cp := cpGRPCListenerState()
+	if !cp.Configured {
+		return
+	}
+	up, unavailable := 0, 0
+	if cp.Serving {
+		up = 1
+	}
+	if cp.Unavailable {
+		unavailable = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_cp_grpc_up 1 while the Control Plane gRPC listener is serving; 0 while it is not
+# TYPE culvert_cp_grpc_up gauge
+culvert_cp_grpc_up %d
+
+# HELP culvert_cp_grpc_unavailable 1 while the Control Plane gRPC listener has been unable to serve for longer than the unavailability threshold
+# TYPE culvert_cp_grpc_unavailable gauge
+culvert_cp_grpc_unavailable %d
+
+# HELP culvert_cp_grpc_bind_failures_total Control Plane gRPC bind/TLS/serve failures since startup
+# TYPE culvert_cp_grpc_bind_failures_total counter
+culvert_cp_grpc_bind_failures_total %d
+
+# HELP culvert_cp_grpc_binds_total Successful Control Plane gRPC listener binds since startup
+# TYPE culvert_cp_grpc_binds_total counter
+culvert_cp_grpc_binds_total %d
+
+# HELP culvert_cp_grpc_bind_backoff_seconds Current Control Plane gRPC rebind backoff; 0 while the listener is serving
+# TYPE culvert_cp_grpc_bind_backoff_seconds gauge
+culvert_cp_grpc_bind_backoff_seconds %g
+`,
+		up,
+		unavailable,
+		cp.Total,
+		cp.Binds,
+		cp.Backoff.Seconds(),
+	)
 }

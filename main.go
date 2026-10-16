@@ -1507,9 +1507,7 @@ func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath str
 	cpActivationMu.Lock()
 	defer cpActivationMu.Unlock()
 
-	clusterRoleMu.Lock()
-	alreadyCP := clusterRole.role == "control-plane"
-	clusterRoleMu.Unlock()
+	alreadyCP := isControlPlaneRole()
 	if alreadyCP {
 		return fmt.Errorf("already running as control-plane")
 	}
@@ -1530,6 +1528,10 @@ func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath str
 	// rebind attempt — a write every 30 s for the length of an outage, to
 	// re-derive state that has not changed.
 	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
+	// CHAOS-71: from here on the CP address list is owned by its source, so a
+	// full publish captured before a delayed bind can never overwrite the list
+	// the activation publishes (ConfigStore.Update).
+	globalConfigStore.setCPAddressSource(buildCPAddressList)
 	// Initial publish. A commit-time rejection (startup config already over a
 	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
 	// the CP still serves locally, so boot continues.

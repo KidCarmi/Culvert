@@ -233,13 +233,14 @@ func armHALease(cfg clusterStartupConfig) error {
 	if err != nil {
 		return err
 	}
-	globalHA.SetLeaseProvider(provider, clusterRole.nodeID)
+	nodeID := clusterRoleSnapshot().nodeID
+	globalHA.SetLeaseProvider(provider, nodeID)
 	// CHAOS-55: the recovery loop must look at the fence more often than a
 	// holder's key can appear and expire, or a peer's whole tenure can pass
 	// between two observations. That bound is the TTL.
 	globalHA.SetLeaseTTL(time.Duration(cfg.HALeaseTTLSec) * time.Second)
 	logger.Printf("HA: etcd fencing lease ARMED (endpoints=%s, ttl=%ds, candidate=%s) — leadership is lease-arbitrated (ADR-0005)",
-		sanitizeLog(cfg.HAEtcdEndpoints), cfg.HALeaseTTLSec, sanitizeLog(clusterRole.nodeID))
+		sanitizeLog(cfg.HAEtcdEndpoints), cfg.HALeaseTTLSec, sanitizeLog(nodeID))
 	return nil
 }
 

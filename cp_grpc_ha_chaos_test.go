@@ -450,7 +450,7 @@ func TestChaos71_HADarkLeaderStopsRenewingTheFence(t *testing.T) {
 	renewed("serving listener")
 
 	// Rebinding INSIDE the threshold (an ordinary rollout): keep renewing.
-	noteCPGRPCServeEnded("serve_ended") // episode starts at base
+	noteCPGRPCServeEnded("serve_ended", time.Second) // episode starts at base
 	at(10 * time.Second)
 	noteCPGRPCBindFailure("port_in_use", time.Second, base.Add(10*time.Second))
 	if cpGRPCListenerState().Unavailable {
@@ -486,7 +486,7 @@ func TestChaos71_HADarkLeaderStopsRenewingTheFence(t *testing.T) {
 
 	// Dark past the threshold again, and this time the window runs out.
 	at(40 * time.Second)
-	noteCPGRPCServeEnded("serve_ended") // episode starts at base+40s
+	noteCPGRPCServeEnded("serve_ended", time.Second) // episode starts at base+40s
 	at(71 * time.Second)
 	noteCPGRPCBindFailure("port_in_use", 4*time.Second, base.Add(71*time.Second))
 	h.mu.Lock()
@@ -558,7 +558,7 @@ func TestChaos71_BackoffResetsOnlyAfterAStableServe(t *testing.T) {
 	// between Serve returning and the post-serve sleep.
 	body := cpReadSource(t, "cp_grpc_bind.go")
 	i := strings.Index(body, "serveErr := srv.Serve(ln)")
-	j := strings.Index(body, "wait := jitterDuration(backoff, cpGRPCBindJitter)\n\t\tif !haSleepInterruptible(s.stopping, wait)")
+	j := strings.Index(body, "if !s.handleServeEnded(serveErr, backoff) {")
 	if i < 0 || j < 0 || j < i {
 		t.Fatal("the serve/rebind section of cpListenerSupervisor.run is no longer recognisable")
 	}

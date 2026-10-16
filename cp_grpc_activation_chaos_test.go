@@ -23,7 +23,7 @@ import (
 )
 
 // cpInjectPublish swaps the CP-address publish for fn.
-func cpInjectPublish(t *testing.T, fn func(addrs []string) (bool, error)) {
+func cpInjectPublish(t *testing.T, fn func() (bool, error)) {
 	t.Helper()
 	prev := cpPublishCPAddresses
 	cpPublishCPAddresses = fn
@@ -61,7 +61,7 @@ func TestChaos71_ActivationPublishFailureIsNotASuccess(t *testing.T) {
 	t.Run("runtime_path_refuses", func(t *testing.T) {
 		cpChaosSetup(t)
 		cpInsecure(t)
-		cpInjectPublish(t, func([]string) (bool, error) { return false, rejected })
+		cpInjectPublish(t, func() (bool, error) { return false, rejected })
 		var resumed atomic.Int32
 		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
 
@@ -85,7 +85,7 @@ func TestChaos71_ActivationPublishFailureIsNotASuccess(t *testing.T) {
 	t.Run("boot_path_retries", func(t *testing.T) {
 		cpChaosSetup(t)
 		cpInsecure(t)
-		cpInjectPublish(t, func([]string) (bool, error) { return false, rejected })
+		cpInjectPublish(t, func() (bool, error) { return false, rejected })
 		var resumed atomic.Int32
 		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
 
@@ -128,7 +128,7 @@ func TestChaos71_AddressPublishMergesOntoTheLatestCommit(t *testing.T) {
 	}
 	t.Cleanup(func() { cpAddrMergeBeforeCommit = nil })
 
-	changed, err := s.UpdateCPAddresses([]string{"10.0.0.2:50051"})
+	changed, err := s.UpdateCPAddressesFrom(func() []string { return []string{"10.0.0.2:50051"} })
 	if err != nil || !changed {
 		t.Fatalf("UpdateCPAddresses: changed=%v err=%v", changed, err)
 	}
@@ -161,13 +161,14 @@ func TestChaos71_AddressPublishMergesOntoTheLatestCommit(t *testing.T) {
 // (an ordinary rebind must not spend a config version).
 func TestChaos71_AddressPublishIsANoOpWhenUnchangedOrUnpublished(t *testing.T) {
 	s := &ConfigStore{}
-	if changed, err := s.UpdateCPAddresses([]string{"a:1"}); changed || err != nil {
+	a1 := func() []string { return []string{"a:1"} }
+	if changed, err := s.UpdateCPAddressesFrom(a1); changed || err != nil {
 		t.Fatalf("unpublished store: changed=%v err=%v, want a no-op", changed, err)
 	}
 	if err := s.Update(ConfigSnapshot{CPAddresses: []string{"a:1"}}); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := s.UpdateCPAddresses([]string{"a:1"}); changed || err != nil || s.Version() != 1 {
+	if changed, err := s.UpdateCPAddressesFrom(a1); changed || err != nil || s.Version() != 1 {
 		t.Fatalf("unchanged list: changed=%v err=%v version=%d, want a no-op at v1", changed, err, s.Version())
 	}
 }
@@ -199,18 +200,25 @@ func TestChaos71_ShutdownBeforeActivationAbortsTheClaim(t *testing.T) {
 		cpInsecure(t)
 		var resumed atomic.Int32
 		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
-		// Shutdown begins after the role is claimed, inside the publish step:
-		// the re-check right before onActivated must catch it.
-		cpInjectPublish(t, func([]string) (bool, error) {
-			beginCPActivationShutdown()
+		// Shutdown begins after the role is claimed but before the gated
+		// publish/onActivated step: the gate's re-check must catch it, and
+		// NEITHER the address publish nor onActivated may run.
+		var published atomic.Int32
+		cpInjectPublish(t, func() (bool, error) {
+			published.Add(1)
 			return false, nil
 		})
+		cpActivationAfterClaim = beginCPActivationShutdown
+		t.Cleanup(func() { cpActivationAfterClaim = nil })
 
 		if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, func() { resumed.Add(1) }); err != nil {
 			t.Fatalf("boot path: %v", err)
 		}
 		if resumed.Load() != 0 {
 			t.Fatal("onActivated ran after shutdown had begun — the HA resume could re-acquire the fencing lease during teardown")
+		}
+		if published.Load() != 0 {
+			t.Error("the CP address list was published after shutdown had begun — the fleet would be told a dying node is its Control Plane")
 		}
 		if r := cpRoleNow(); r == "control-plane" {
 			t.Error("the role claimed before shutdown began was not rolled back")

@@ -131,6 +131,11 @@ keepalive renews and logs `resuming fencing-lease renewal`.
 A listener that is merely rebinding inside the 30 s threshold (an ordinary
 rollout) keeps the lease. In legacy mode (no etcd lease) nothing changes.
 
+A self-fenced ex-leader whose listener is still dark is not **auto**-promoted
+back (`HA: auto-promotion refused — "Control Plane gRPC listener unavailable …"`),
+which would only re-acquire the lease to withhold it again. Manual promotion is
+unchanged (break-glass).
+
 On the **promote** path the listener is started synchronously: if it cannot
 bind, the promotion fails and the node stays a retryable standby rather than
 becoming a leader nobody can reach. Once the role is committed the config is

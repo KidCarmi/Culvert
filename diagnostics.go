@@ -1168,9 +1168,7 @@ func checkClusterPosture() OperatorContractCheck {
 				"-dp-* flags / saved enrollment) and restart the node.",
 		}
 	}
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 
 	switch role {
 	case "", "standalone":
@@ -1196,9 +1194,7 @@ func checkClusterPosture() OperatorContractCheck {
 }
 
 func checkSAMLStatePosture() OperatorContractCheck {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	if role == "" || role == "standalone" || !hasLiveSAMLProvider() {
 		return OperatorContractCheck{
 			Code:    "saml_state_posture",

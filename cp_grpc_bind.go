@@ -496,34 +496,79 @@ func (s *cpListenerSupervisor) run() {
 
 		servedFrom := cpGRPCHealthNow()
 		serveErr := srv.Serve(ln)
-		s.release(srv)
 		backoff = cpGRPCBackoffAfterServe(backoff, cpGRPCHealthNow().Sub(servedFrom))
 
 		if s.stopRequested() {
+			// Stop owns this server's teardown (graceful drain, then force):
+			// stopping it here would cut that drain short.
+			s.release(srv)
 			noteCPGRPCListenerStopped()
 			return
 		}
 
 		// Serve returned on its own. Before this change that was terminal and
 		// SILENT: one log line, `clusterRole.role` still "control-plane", and
-		// no rebind ever. A fresh socket is exactly its recovery.
-		reason := "serve_ended"
-		if serveErr != nil {
-			reason = classifyCPGRPCBindError(serveErr)
-		}
-		if noteCPGRPCServeEnded(reason) {
-			logErrorf("ControlPlane gRPC serve on %s ended (%s): %v — rebinding; this node's proxy data "+
-				"plane and admin UI are unaffected",
-				s.cfg.addr, reason, serveErr)
-		}
-
-		wait := jitterDuration(backoff, cpGRPCBindJitter)
-		if !haSleepInterruptible(s.stopping, wait) {
+		// no rebind ever. A fresh socket is exactly its recovery — after the
+		// retired server is STOPPED: on a fatal Accept error grpc-go closes
+		// the listener but not the transports Data Planes already hold, and
+		// only Server.Stop closes those. Dropping the handle without it would
+		// leave an orphaned server generation per listener fault, unreachable
+		// by stopControlPlaneListener (Codex review of #1556).
+		retireCPGRPCServer(srv)
+		s.release(srv)
+		if !s.handleServeEnded(serveErr, backoff) {
 			noteCPGRPCListenerStopped()
 			return
 		}
 		backoff = nextCPGRPCBindBackoff(backoff)
 	}
+}
+
+// retireCPGRPCServer stops a server whose Serve already returned on its own,
+// closing the client transports grpc-go leaves open after a fatal Accept
+// error. A package-level seam so a gate can observe it.
+var retireCPGRPCServer = func(srv *grpc.Server) { srv.Stop() }
+
+// handleServeEnded records a serve that ended on its own and sleeps out the
+// backoff through the SAME failure path as a failed bind (failAndWait), so the
+// threshold clamp and the alert latch apply to both. Reports false when Stop
+// interrupted the sleep.
+func (s *cpListenerSupervisor) handleServeEnded(serveErr error, backoff time.Duration) (keepGoing bool) {
+	reason := "serve_ended"
+	if serveErr != nil {
+		reason = classifyCPGRPCBindError(serveErr)
+	}
+	return s.failAndWait(func() (bool, time.Duration) { return noteCPGRPCServeEnded(reason, backoff) }, backoff,
+		func(wait time.Duration) {
+			logErrorf("ControlPlane gRPC serve on %s ended (%s): %v — rebinding in %s; this node's proxy data "+
+				"plane and admin UI are unaffected", s.cfg.addr, reason, serveErr, wait.Round(time.Millisecond))
+		})
+}
+
+// cpGRPCSleep is the supervisor's interruptible sleep. A package-level seam so
+// a gate can observe the wait failAndWait chose without sleeping.
+var cpGRPCSleep = haSleepInterruptible
+
+// failAndWait is the ONE failure-and-backoff path for a failed bind, a
+// rejected commit and a serve that ended: record through the shared recorder,
+// release the starter, clamp the sleep at the unavailability threshold, log
+// through the shared rate gate, sleep interruptibly.
+//
+// The clamp is load-bearing for BOTH callers: at the 30 s ceiling a jittered
+// sleep can reach 36 s, and the alert is attempt-driven — nothing else wakes
+// this loop — so an unclamped sleep would carry a dark listener past the
+// threshold (where HA starts withholding its lease) with no page.
+func (s *cpListenerSupervisor) failAndWait(record func() (shouldLog bool, failingFor time.Duration), backoff time.Duration, logLine func(wait time.Duration)) (keepGoing bool) {
+	shouldLog, failingFor := record()
+	// Released only AFTER the failure is recorded: the starter may return the
+	// moment this fires, and it must never return to a state that has not been
+	// written yet — the same window the success path closes, in miniature.
+	s.markFirstAttempt()
+	wait := clampCPGRPCBindSleep(jitterDuration(backoff, cpGRPCBindJitter), failingFor)
+	if shouldLog {
+		logLine(wait)
+	}
+	return cpGRPCSleep(s.stopping, wait)
 }
 
 // handleBindFailure records one failed bind attempt, logs it if the rate gate
@@ -536,25 +581,16 @@ func (s *cpListenerSupervisor) run() {
 // load-bearing.
 func (s *cpListenerSupervisor) handleBindFailure(err error, backoff time.Duration) (keepGoing bool) {
 	reason := classifyCPGRPCBindError(err)
-	shouldLog, failingFor := noteCPGRPCBindFailure(reason, backoff, cpGRPCHealthNow())
-	// Released only AFTER the failure is recorded: the starter may return the
-	// moment this fires, and it must never return to a state that has not been
-	// written yet — the same window the success path closes, in miniature.
-	s.markFirstAttempt()
-	// Clamped so this sleep cannot carry us past the unavailability threshold
-	// without an attempt to observe it — the alert is attempt-driven and
-	// nothing else wakes this loop.
-	wait := clampCPGRPCBindSleep(jitterDuration(backoff, cpGRPCBindJitter), failingFor)
-	if shouldLog {
-		// The FULL error goes here and nowhere else: the contract row, the
-		// alert and the readiness detail all carry the bounded class only.
-		// logErrorf applies sanitizeLog (CWE-117) to the whole line.
-		logErrorf("ControlPlane gRPC listener could not start on %s (%s): %v — retrying in %s; "+
-			"this node's proxy data plane and admin UI are unaffected, and enrolled Data Planes "+
-			"keep serving their last-good config",
-			s.cfg.addr, reason, err, wait.Round(time.Millisecond))
-	}
-	return haSleepInterruptible(s.stopping, wait)
+	return s.failAndWait(func() (bool, time.Duration) { return noteCPGRPCBindFailure(reason, backoff, cpGRPCHealthNow()) }, backoff,
+		func(wait time.Duration) {
+			// The FULL error goes here and nowhere else: the contract row, the
+			// alert and the readiness detail all carry the bounded class only.
+			// logErrorf applies sanitizeLog (CWE-117) to the whole line.
+			logErrorf("ControlPlane gRPC listener could not start on %s (%s): %v — retrying in %s; "+
+				"this node's proxy data plane and admin UI are unaffected, and enrolled Data Planes "+
+				"keep serving their last-good config",
+				s.cfg.addr, reason, err, wait.Round(time.Millisecond))
+		})
 }
 
 // firstResolved reports whether the first bind attempt has already been
@@ -627,8 +663,12 @@ func buildControlPlaneServer(cfg cpListenerConfig) (*grpc.Server, net.Listener, 
 		srv.Stop()
 		return nil, nil, "", fmt.Errorf("gRPC listen: %w", err)
 	}
-	return srv, ln, mode, nil
+	return srv, cpWrapListener(ln), mode, nil
 }
+
+// cpWrapListener lets a gate observe (and fault) the bound listener. Identity
+// in production.
+var cpWrapListener = func(ln net.Listener) net.Listener { return ln }
 
 // stopControlPlaneListener stops the supervisor (and with it the current
 // server), bounded by ctx. The shutdown hook's entry point: stopping the

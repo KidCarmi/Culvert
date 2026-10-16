@@ -8732,6 +8732,30 @@ required before merge; each is now in the tree.
   file writes the role outside the arbiter
   (`TestChaos71_Wall_ClusterRoleIsWrittenOnlyByTheArbiter`), each verified
   failing with its guard removed.
+* **Fourth review round (Codex + CodeRabbit on `4044722`).**
+  (a) A `Serve` that returns on a fatal Accept error leaves the Data Planes'
+  established transports open — only `Server.Stop` closes them — so the loop
+  now stops the retired server before rebinding (`retireCPGRPCServer`); not on
+  the Stop path, whose graceful drain owns it. (b) The serve-end and
+  bind-failure paths now share ONE recorder (`noteCPGRPCListenFailure`) and
+  ONE failure-and-wait step (`failAndWait`): the threshold clamp and the alert
+  latch can no longer drift between them (the serve-end sleep could reach 36 s
+  and never page). (c) The arbiter now also owns READS: one locked
+  `clusterRoleSnapshot()`; a wall fails on any direct production access to
+  `clusterRole`/`clusterRoleMu` outside it (the dynamic `-race` gate is a
+  backstop — the detector's per-goroutine shadow lets a later locked read hide
+  an earlier unlocked one, so the wall is the deterministic guard). (d) Once a
+  Control Plane is active, the CP address list is OWNED by
+  `UpdateCPAddressesFrom` (re-computed on every CAS attempt): a full publish
+  keeps the committed list and then reconciles from the source, so a snapshot
+  captured before a delayed bind can never publish the stale list, even for
+  one version. (e) `leaseAutoPromote` refuses while this node's listener is
+  dark — the promote/fence flap recorded as a residual above is closed for
+  the AUTO path. (f) The address publish moved inside the activation gate with
+  `onActivated`, so a node whose shutdown has begun never advertises itself.
+  `handleMetrics`' CP block moved to `writeCPGRPCMetrics` and
+  `apiClusterTokenCreate`'s validation to `validateEnrollmentTokenRequest` to
+  stay within the lint budgets of the functions this PR touches.
 * **CodeRabbit (HA config at bind time).** The boot resume closed over the HA
   config read at boot; with the retrying supervisor it can run minutes later
   and restore a leader the operator had since disabled or flipped to standby.
@@ -8739,8 +8763,6 @@ required before merge; each is now in the tree.
   process already holds an HA role. `clusterRole.grpcSrv` (no readers left,
   stale after a serve ended) was removed.
 
-Remaining risk, recorded rather than fixed: a self-fenced ex-leader whose
-listener is still dark can be re-promoted by `leaseAutoPromote` (its resync
-`onPromote` is a no-op because the CP is "already running") and will withhold
-and fence again — bounded by the self-fence hysteresis, but promotion does not
-yet consult the listener predicate.
+Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
+listener is dark is still allowed (break-glass by design); it will withhold and
+fence again until the listener serves.

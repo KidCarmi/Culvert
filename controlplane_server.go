@@ -446,7 +446,7 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 		CertPEM: string(certPEM),
 		CAPEM:   string(globalClusterCA.CACertPEM()),
 		NodeID:  req.NodeID,
-		CPAddr:  clusterRole.grpcAddr,
+		CPAddr:  clusterRoleSnapshot().grpcAddr,
 		Epoch:   globalHA.CurrentEpoch(), // ADR-0005 S3: seed the DP's epoch ratchet
 	}
 	b, _ := json.Marshal(resp)

@@ -102,9 +102,14 @@ var errCPGRPCAddressPublish = fmt.Errorf("control plane address list publish rej
 
 // cpPublishCPAddresses publishes the committed CP address list. Package-level
 // seam so a gate can inject a commit-time rejection deterministically.
-var cpPublishCPAddresses = func(addrs []string) (changed bool, err error) {
-	return globalConfigStore.UpdateCPAddresses(addrs)
+var cpPublishCPAddresses = func() (changed bool, err error) {
+	return globalConfigStore.UpdateCPAddressesFrom(buildCPAddressList)
 }
+
+// cpActivationAfterClaim, when non-nil, runs between the role claim and the
+// gated publish/onActivated step. Test seam only (nil in production): it opens
+// the "shutdown began after the claim" window deterministically.
+var cpActivationAfterClaim func()
 
 // commitActivation is the ONE post-bind activation step (see the file header
 // for the ordering and why each step is where it is). conflictRole names the
@@ -115,25 +120,15 @@ func (s *cpListenerSupervisor) commitActivation() (outcome cpCommitOutcome, conf
 	if outcome != cpCommitted {
 		return outcome, conflictRole, nil
 	}
-
-	// (3) Outside clusterRoleMu: buildCPAddressList reads it, and RWMutex is
-	// not reentrant (the CHAOS-71 promote-deadlock rider).
-	addrs := buildCPAddressList()
-	changed, perr := cpPublishCPAddresses(addrs)
-	if perr != nil {
-		// (4) Never report success without the address list the fleet needs.
-		s.rollbackRole(prev)
-		return cpCommitPublishFailed, "", fmt.Errorf("%w: %w", errCPGRPCAddressPublish, perr)
-	}
-	if changed {
-		// Operator- and peer-supplied addresses: format, sanitize (CWE-117), %q.
-		logger.Printf("ControlPlane: published the committed CP address list %q", sanitizeLog(fmt.Sprint(addrs)))
+	if hook := cpActivationAfterClaim; hook != nil {
+		hook()
 	}
 
-	// (5) onActivated last, behind the shutdown gate.
-	if !s.runOnActivatedUnlessStopping() {
+	// (3)–(5) behind the shutdown gate, so neither the address publish nor
+	// onActivated can start once shutdown has begun.
+	if outcome, err = s.publishAndActivate(); outcome != cpCommitted {
 		s.rollbackRole(prev)
-		return cpCommitStopped, "", nil
+		return outcome, "", err
 	}
 
 	if prev.role != "control-plane" {
@@ -188,17 +183,32 @@ func (s *cpListenerSupervisor) rollbackRole(prev cpRoleFields) {
 	}
 }
 
-// runOnActivatedUnlessStopping runs the one-time onActivated callback behind
-// the shutdown gate. Reports false — without running it — when Stop or process
-// shutdown has begun.
-func (s *cpListenerSupervisor) runOnActivatedUnlessStopping() bool {
+// publishAndActivate is steps (3)–(5), all behind the shutdown gate
+// (cpActivationGateMu, re-checked first): publish the CP address list, then run
+// the one-time onActivated callback. Keeping the PUBLISH inside the gate too
+// means a node whose shutdown has begun never tells the fleet it is a Control
+// Plane (CodeRabbit review of #1556).
+//
+// The publish runs outside clusterRoleMu: buildCPAddressList reads it, and
+// RWMutex is not reentrant (the CHAOS-71 promote-deadlock rider).
+func (s *cpListenerSupervisor) publishAndActivate() (cpCommitOutcome, error) {
 	cpActivationGateMu.Lock()
 	defer cpActivationGateMu.Unlock()
 	if s.stopRequested() || cpActivationShutdown.Load() {
-		return false
+		return cpCommitStopped, nil
+	}
+	changed, perr := cpPublishCPAddresses()
+	if perr != nil {
+		// (4) Never report success without the address list the fleet needs.
+		return cpCommitPublishFailed, fmt.Errorf("%w: %w", errCPGRPCAddressPublish, perr)
+	}
+	if changed {
+		// Operator- and peer-supplied addresses: format, sanitize (CWE-117), %q.
+		logger.Printf("ControlPlane: published the committed CP address list %q",
+			sanitizeLog(fmt.Sprint(globalConfigStore.Get().CPAddresses)))
 	}
 	s.runOnActivated()
-	return true
+	return cpCommitted, nil
 }
 
 // commitAfterAdopt runs commitActivation for an adopted server and turns the
