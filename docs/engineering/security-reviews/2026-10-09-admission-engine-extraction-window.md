@@ -428,7 +428,7 @@ not made in this commit for one reason only: **one concern per change**. This is
 a docs-only review record, and the fix adds an engine method, re-points two
 snapshot paths and adds two gates, so it needs its own PR and review. The fix is
 not deferred for verifiability. The committed regression test belongs with that
-RISK-030 fix PR, which is pending the owner's decision. It is not added here
+RISK-030 fix PR, now in progress on branch `claude/risk030-ipf-atomic`. It is not added here
 because on the current tree it fails under `-race` by design, which would turn
 this docs-only PR's race gate red.
 
@@ -482,6 +482,9 @@ the recorded output. To re-run it:
 5. Delete the file afterwards. Do not commit it as-is: it fails by design
    until the RISK-030 fix lands, and the committed gate belongs with that fix.
 
+**Historical evidence, kept verbatim:** the block below is exactly what was run.
+It is not a template for the committed gate (see the note after it).
+
 ```go
 package main
 
@@ -530,3 +533,18 @@ func TestRISK030_SnapshotIPFilterSwapRacesRequestPath(t *testing.T) {
 	t.Logf("fail-open admissions observed: %d", wrongAllow.Load())
 }
 ```
+
+> **Note for the committed gate (do not copy the cleanup above).** This scratch
+> test isolates global state only well enough for a one-off run on the pre-fix
+> tree. Its `t.Cleanup(func() { ipf = saved })` works there only because the
+> pre-fix `applySnapshotAdmission` *replaces* the `ipf` pointer. After the fix,
+> `applySnapshotAdmission` mutates the filter in place (`ReplaceAll`), so that
+> cleanup would restore the same, already-mutated allowlist. The helper also
+> reconfigures the global `rl` (`rl.Configure`, `rl.ReplaceExemptions`) and never
+> restores it. Converted as-is into a root-suite gate, it would leak an
+> allowlist and a zero rate limit into later tests and cause order-dependent
+> failures under `-shuffle` or `-count`. Any committed gate **MUST** install
+> test-local `ipf` and `rl` instances *before* applying snapshots, and restore
+> **both** original pointers in `t.Cleanup`. The committed regression test
+> belongs to the RISK-030 fix PR, now in progress on branch
+> `claude/risk030-ipf-atomic`.
