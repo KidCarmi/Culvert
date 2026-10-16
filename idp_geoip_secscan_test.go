@@ -303,36 +303,26 @@ func TestGeoCache_LookupCached_GeoDisabled(t *testing.T) {
 // ─── oidcCacheSetWithExp eviction ─────────────────────────────────────────────
 
 func TestOIDCCacheSetWithExp_Eviction(t *testing.T) {
-	a := &OIDCAuth{
-		cache: make(map[string]*oidcCacheEntry),
-		ttl:   5 * time.Minute,
-	}
+	a := &OIDCAuth{ttl: 5 * time.Minute}
 	// Fill to max
 	for i := 0; i < maxAuthCacheSize; i++ {
 		key := "key" + string(rune(i))
-		a.cache[key] = &oidcCacheEntry{ok: true, expiry: time.Now().Add(5 * time.Minute)}
+		a.cache.set(key, "", &Identity{Sub: "test"}, true, 5*time.Minute)
 	}
 	// Adding one more should trigger eviction
-	a.oidcCacheSetIdentityWithExp("new-key", &Identity{Sub: "test"}, true, nil)
-	a.mu.Lock()
-	size := len(a.cache)
-	a.mu.Unlock()
+	a.oidcCacheSetIdentityWithExp("new-key", "", &Identity{Sub: "test"}, true, nil)
+	size := a.cache.len()
 	if size > maxAuthCacheSize+1 {
 		t.Errorf("oidcCacheSetWithExp: cache too large after eviction: %d", size)
 	}
 }
 
 func TestOIDCCacheSetWithExp_TokenExpiry(t *testing.T) {
-	a := &OIDCAuth{
-		cache: make(map[string]*oidcCacheEntry),
-		ttl:   1 * time.Hour,
-	}
+	a := &OIDCAuth{ttl: 1 * time.Hour}
 	// Set with a token expiry sooner than ttl
 	futureExp := time.Now().Add(5 * time.Minute).Unix()
-	a.oidcCacheSetIdentityWithExp("expiry-test", &Identity{Sub: "test"}, true, &futureExp)
-	a.mu.Lock()
-	e := a.cache["expiry-test"]
-	a.mu.Unlock()
+	a.oidcCacheSetIdentityWithExp("expiry-test", "", &Identity{Sub: "test"}, true, &futureExp)
+	e := a.cache.entryForTest("expiry-test")
 	if e == nil {
 		t.Fatal("cache entry should exist")
 	}

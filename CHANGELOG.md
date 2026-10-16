@@ -515,6 +515,68 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
+- A flood of bogus credentials from a single unauthenticated client could
+  evict another client's cached authentication verdict, and during an identity
+  backend outage that turned a cache hit into a denial (CHAOS-76, register rows
+  AU-20/AU-21). All three identity-backend result caches on the proxy
+  credential path — the LDAP directory bind, the legacy RFC 7662 introspection
+  backend and the IdP-registry introspection provider — evicted "an arbitrary
+  entry" at their 5,000-entry cap: a Go map range that stops at the first key,
+  so a uniformly random **live** entry. That is the same defect CHAOS-57 closed
+  in the local credential cache, on three caches it was never ported to.
+
+  The flood costs nothing to mount. The proxy credential path hands whatever
+  username, password or bearer token the client supplied to the configured
+  backend, and an authoritative denial is cached deliberately — RFC 7662 §2.2
+  answers an unknown or expired token with `200 {"active":false}`, and a
+  directory that answers "no such user" is authoritative — because not caching
+  those would make every wrong credential a fresh round trip. So each bogus
+  credential writes an entry, and a specific honest entry survives `k`
+  insertions past the cap with probability `e^(-k/N)`: one cap-worth of flood
+  removes about 63% of the cached honest verdicts and three remove about 95%,
+  for roughly fifteen thousand requests carrying no credential at all. Nothing
+  reclaimed an expired entry either — a lookup reported a miss and left it in
+  the map — so the steady state under a flood was a cache full of dead
+  verdicts while eviction destroyed the few live ones.
+
+  Displacement alone costs the victim a full directory bind or introspection
+  round trip on every subsequent request, which lands the attacker's
+  amplification on legitimate traffic and on the customer's own IdP. The sharper
+  consequence is the interaction with the unreachable-backend cooldown: when the
+  backend is down the gate denies **without** a round trip, and a client whose
+  verdict is cached is served from the cache and never reaches it. Evicting that
+  entry means the next request falls through and is denied, for the whole
+  cooldown, for a credential that was valid a moment earlier — inverting the
+  cache's purpose for exactly the users it exists to serve. Authentication
+  remained fail-closed throughout and no credential was ever wrongly accepted;
+  what an anonymous client gained was the ability to make authentication fail
+  for other people.
+
+  The three caches now share one policy, the one `internal/authstate` defines
+  and CHAOS-57 put in the local cache, reusing the same victim ordering so there
+  is a single definition of it in the tree: entries are attributed to a client
+  fairness key and eviction takes the oldest entry of the client holding the
+  most, so a flooding source evicts itself and a client holding one entry cannot
+  be displaced until every other client is down to one too. An expired entry is
+  always the better victim, and a lookup now reclaims one in place. Work per
+  insertion stays proportional to the number of active clients rather than to
+  the cache size, which is what keeps the fix clear of the separate
+  full-scan-under-the-mutex defect CHAOS-57 also closed. The fairness key was
+  already computed on both data-plane paths and was being discarded at every
+  provider dispatch point — the two in `store.go` and the IdP-registry loop in
+  `proxy.go`, which is the one tried first in a registry deployment. All three
+  now go through a single helper that prefers the client-attributed form, so a
+  backend keeping no result cache (SAML, which is browser-mediated) is
+  unaffected and a new call site inherits the behaviour instead of re-deciding
+  it. Displacement is counted per backend and exposed as
+  `culvert_identity_cache_evictions_total`, accumulated at the point of
+  eviction into a process-owned total so it covers both the legacy provider and
+  the registry providers and cannot fall when an operator edits an IdP profile
+  (editing one has the registry compile a fresh provider, and a Prometheus
+  counter that decreases reads as a restart). It sits beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache. Gates: sixteen,
+  with every gate that pins a defect verified failing against the behaviour
+  that defect describes.
 
 ### Changed
 

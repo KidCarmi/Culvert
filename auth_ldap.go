@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
@@ -194,16 +193,12 @@ type LDAPConfig struct {
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
-// ldapCacheEntry stores the result of one LDAP authentication attempt.
+// ldapCacheEntry is retired: the shared identityResultCache owns the record
+// shape, its per-entry expiry and the client-attributed eviction policy
+// (CHAOS-76). Kept only as a doc anchor for the fields it used to carry.
 // id is populated only by the identity-resolving (IdP registry) engine; the
 // legacy boolean provider stores nil. Cached identities are only ever handed
 // out via cloneIdentity so callers can't mutate the cached groups slice.
-type ldapCacheEntry struct {
-	ok     bool
-	id     *Identity
-	expiry time.Time
-}
-
 // ldapIdentityAttrs names the directory attributes the identity-resolving
 // engine maps into Identity fields (ADR-0027). Zero value = legacy mode: the
 // engine requests only dn+memberOf and never builds an Identity, keeping the
@@ -232,8 +227,12 @@ type LDAPAuth struct {
 	// providerID is the IdP profile ID for registry engines ("" = legacy);
 	// stamped as Identity.Provider so authSource resolves to the profile.
 	providerID string
-	mu         sync.Mutex
-	cache      map[string]*ldapCacheEntry // key = cacheKey(user, pass)
+	// cache holds AUTHORITATIVE verdicts (an authenticated bind, or a
+	// directory that answered "no such user") keyed by cacheKey(user, pass).
+	// It carries its own mutex and the client-attributed eviction policy —
+	// see identityResultCache for why that policy is a security control
+	// (CHAOS-76).
+	cache identityResultCache[*Identity]
 
 	// gate arms when the directory is unreachable, so an outage denies without
 	// re-dialing and recovers on one probe (CHAOS-47, auth_backend_health.go).
@@ -262,7 +261,7 @@ func NewLDAPAuth(cfg LDAPConfig) (*LDAPAuth, error) {
 	if cfg.TLSSkipVerify {
 		logWarnf("LDAP: TLS certificate verification DISABLED (tls_skip_verify) — credentials traverse an unverified channel vulnerable to MITM; intended for self-signed dev directories only") // RISK-009
 	}
-	return &LDAPAuth{cfg: cfg, ttl: ttl, backendName: "ldap", cache: map[string]*ldapCacheEntry{}}, nil
+	return &LDAPAuth{cfg: cfg, ttl: ttl, backendName: "ldap"}, nil
 }
 
 func (a *LDAPAuth) Name() string { return "ldap" }
@@ -308,7 +307,16 @@ func (a *LDAPAuth) groupAttribute() string {
 // who authenticated during it. Instead the backend is gated, so the outage
 // costs one probe per cooldown and clears the instant the directory answers.
 func (a *LDAPAuth) Verify(username, password string) bool {
-	_, ok := a.authenticate(username, password)
+	return a.VerifyFrom("", username, password)
+}
+
+// VerifyFrom is Verify carrying the caller's client-fairness key, so a flood
+// of distinct credentials from one source cannot displace another client's
+// cached verdict (CHAOS-76). Data-plane callers that know their peer MUST use
+// this; the plain Verify passes the empty key, which is valid but puts every
+// such caller in one shared fairness bucket.
+func (a *LDAPAuth) VerifyFrom(client, username, password string) bool {
+	_, ok := a.authenticateFrom(client, username, password)
 	return ok
 }
 
@@ -317,24 +325,36 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 // the only difference is that the resolved Identity is returned (cloned, so
 // callers can't mutate the cached groups slice).
 func (a *LDAPAuth) resolveIdentity(username, password string) (*Identity, bool) {
-	id, ok := a.authenticate(username, password)
+	return a.resolveIdentityFrom("", username, password)
+}
+
+// resolveIdentityFrom is resolveIdentity carrying the caller's client-fairness
+// key (CHAOS-76); see VerifyFrom.
+func (a *LDAPAuth) resolveIdentityFrom(client, username, password string) (*Identity, bool) {
+	id, ok := a.authenticateFrom(client, username, password)
 	if !ok {
 		return nil, false
 	}
 	return cloneIdentity(id), true
 }
 
-// authenticate runs the shared cache → gate → directory round-trip pipeline.
-// The returned Identity is non-nil only for identity-resolving engines
-// (attrs.enabled()); the legacy boolean provider always yields (nil, ok).
-func (a *LDAPAuth) authenticate(username, password string) (*Identity, bool) {
+// authenticateFrom runs the shared cache → gate → directory round-trip
+// pipeline. The returned Identity is non-nil only for identity-resolving
+// engines (attrs.enabled()); the legacy boolean provider always yields
+// (nil, ok).
+//
+// client is the caller's fairness key, which any cache entry this writes is
+// attributed to (CHAOS-76). The empty key is legitimate and means "attribute
+// this to the shared bucket"; VerifyFrom and resolveIdentityFrom document when
+// a caller may pass it.
+func (a *LDAPAuth) authenticateFrom(client, username, password string) (*Identity, bool) {
 	if password == "" {
 		return nil, false // never permit empty passwords
 	}
 
 	k := cacheKey(username, password)
-	if e, hit := a.cacheGet(k); hit {
-		return e.id, e.ok
+	if id, ok, hit := a.cacheGet(k); hit {
+		return id, ok
 	}
 
 	if !a.gate.allow() {
@@ -353,7 +373,7 @@ func (a *LDAPAuth) authenticate(username, password string) (*Identity, bool) {
 	a.gate.recordReachable()
 	noteAuthBackendReachable(a.backendName)
 
-	a.cacheSet(k, ok, id)
+	a.cacheSet(k, client, ok, id)
 	if ok {
 		logger.Printf("LDAP auth OK: user=%q", sanitizeLog(username))
 	} else {
@@ -585,24 +605,21 @@ func (a *LDAPAuth) isMember(entry *ldap.Entry, groupDN string) bool {
 	return false
 }
 
-func (a *LDAPAuth) cacheGet(key string) (e ldapCacheEntry, hit bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if got, found := a.cache[key]; found && time.Now().Before(got.expiry) {
-		return *got, true
-	}
-	return ldapCacheEntry{}, false
+func (a *LDAPAuth) cacheGet(key string) (id *Identity, ok, hit bool) {
+	return a.cache.get(key)
 }
 
-func (a *LDAPAuth) cacheSet(key string, ok bool, id *Identity) {
-	a.mu.Lock()
-	// Evict a random entry when the cache is full to prevent unbounded growth.
-	if len(a.cache) >= maxAuthCacheSize {
-		for k := range a.cache {
-			delete(a.cache, k)
-			break
-		}
-	}
-	a.cache[key] = &ldapCacheEntry{ok: ok, id: id, expiry: time.Now().Add(a.ttl)}
-	a.mu.Unlock()
+// cacheSet records an authoritative verdict under the shared eviction policy.
+// The pre-CHAOS-76 implementation dropped "a random entry when the cache is
+// full" — a uniformly random LIVE entry, chosen by Go map order, on a key
+// space made entirely of caller-supplied credentials.
+func (a *LDAPAuth) cacheSet(key, client string, ok bool, id *Identity) {
+	a.cache.set(key, client, id, ok, a.ttl)
 }
+
+// CacheEvictions reports how many cached directory verdicts have been
+// displaced to stay under the cap. A climbing counter means either the cap is
+// undersized for real login volume or somebody is flooding the credential
+// path — each eviction costs the displaced client a full bind on its next
+// request, or a denial outright if the directory is in its cooldown.
+func (a *LDAPAuth) CacheEvictions() uint64 { return a.cache.Evictions() }

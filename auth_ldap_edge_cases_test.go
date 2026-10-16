@@ -324,9 +324,7 @@ func TestLDAPEngine_ResolveIdentity_EmptyPasswordShortCircuits(t *testing.T) {
 	if id, ok := prov.ResolveIdentity("alice", ""); ok || id != nil {
 		t.Errorf("ResolveIdentity(_, \"\") = (%+v,%v), want (nil,false)", id, ok)
 	}
-	prov.engine.mu.Lock()
-	n := len(prov.engine.cache)
-	prov.engine.mu.Unlock()
+	n := prov.engine.cache.len()
 	if n != 0 {
 		t.Errorf("empty-password attempt wrote %d cache entries, want 0", n)
 	}
@@ -341,7 +339,7 @@ func TestLDAPEngine_ResolveIdentity_HonorsCachedNegative(t *testing.T) {
 	}
 	// Point the engine at a black-hole URL so any dial would fail loudly; the
 	// cached negative must be returned before we ever get there.
-	prov.engine.cache[cacheKey("mallory", "nope")] = &ldapCacheEntry{ok: false, id: nil, expiry: time.Now().Add(time.Hour)}
+	prov.engine.cache.set(cacheKey("mallory", "nope"), "", nil, false, time.Hour)
 	if id, ok := prov.ResolveIdentity("mallory", "nope"); ok || id != nil {
 		t.Errorf("ResolveIdentity on cached negative = (%+v,%v), want (nil,false)", id, ok)
 	}
