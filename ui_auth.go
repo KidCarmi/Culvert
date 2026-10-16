@@ -455,8 +455,8 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 		// its rate exactly as it bounds apiAuthLogin's own audited failures.
 		//
 		// The identity is bounded in BOTH rendered fields: boundAuditIdentity
-		// here for the Object, and auditEntryActor (inside auditEventDiffID) for
-		// the Actor it rebuilds from the session. The first version of this
+		// here for the Object, and boundAuditActor (applied to every entry by
+		// auditAdd) for the Actor it rebuilds from the session. The first version of this
 		// comment claimed the actor was "still truncated" on the strength of
 		// this call alone — false, because auditEvent derives the Actor
 		// independently, so an oversize CONFIGURED name (-user /

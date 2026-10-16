@@ -49,9 +49,10 @@ third was found by review of the second's fix):
 3. **LOW — the rendered audit *Actor* was unbounded** (`auditEventDiffID` via
    `auditActor`), so the fix for finding 2 bounded the `Object` and left the
    identity it rebuilds from the session full-length in the audit ring. Caught
-   by Codex review of this PR. **Fixed in this PR** at the rendering
-   (`auditEntryActor`); `auditActor` stays the full principal because MCP
-   four-eyes compares it (§3.3).
+   by Codex review of this PR. **Fixed in this PR** at the rendering, in the
+   single audit write chokepoint (`addAuditEntry` → `boundAuditActor`);
+   `auditActor` stays the full principal because MCP four-eyes compares it
+   (§3.3).
 
 Nothing in the window weakened authentication, authorization, policy
 precedence, TLS, or fail-closed behaviour. Three of the window's own commits
@@ -261,7 +262,7 @@ reader takes the named one as the whole gap.**
 
 ### 3.3 LOW — the audit *Actor* was unbounded, product-wide (found in review of 3.2's fix)
 
-**File:** `ui_helpers.go`, `auditActor` / `auditEntryActor`
+**File:** `ui_helpers.go` `auditActor`; `store.go` `addAuditEntry`; `login_input_bounds.go` `boundAuditActor`
 **CWE:** CWE-778 / CWE-770 (allocation without limits)
 **Severity:** Low
 **Found by:** Codex review on PR #1532
@@ -294,15 +295,32 @@ created before the upgrade.
 
 **Fix:** split the principal from its rendering. `auditActor` returns the full,
 unbounded identity (main's behaviour) for every caller that compares or persists
-it. `auditEntryActor` — written into every `AuditEntry` by `auditEventDiffID`,
-and captured as the PAC intent's render-only `AuditActor` — applies
-`boundAuditIdentity`: the 64-byte rune-safe prefix, the original length, and a
-short SHA-256 digest of the full name, so distinct oversize accounts stay
-distinguishable in the trail. The password-change failure's Object uses the same
-bound. Gates assert both rendered fields, that `auditActor` is unbounded, an
-ordinary-name pass-through control, and (`audit_actor_principal_test.go`) the
-four-eyes publication flow with two colliding names plus a self-approval
-control.
+it. The rendering bound — `boundAuditIdentity`: the 64-byte rune-safe prefix,
+the original length, and a short SHA-256 digest of the full name, so distinct
+oversize accounts stay distinguishable in the trail — is applied to the name
+part of `AuditEntry.Actor` by `boundAuditActor`. The password-change failure's
+Object uses the same bound.
+
+**Second round: where the bound lives.** The rendering was first applied only in
+`auditEventDiffID`. Codex review then showed producers that build an
+`AuditEntry` themselves skip it: the release `DispatchService` receives the full
+`auditActor(r)` from `release_api.go` and its `entry` helper hands it straight
+to `auditAdd`. The same shape exists in HA, cluster and PAC lifecycle
+(`sessionAdmin`/`AuditActor`) and in the two direct `audit.Add` callers. The
+bound therefore moved to the one write chokepoint every producer reaches:
+`auditAdd` is `addAuditEntry`, which bounds the Actor and is the only non-test
+caller of `audit.Add`. Producers pass full principals (the PAC intent's
+`AuditActor` is again `auditActor`) and nothing pre-bounds, so there is exactly
+one rendering. `TestAuditActorBoundWall` parses every non-test file in main and
+`internal/` and fails on any `audit.Add` reference outside `addAuditEntry`
+(including an aliased import or a function value), and on `auditAdd` being
+initialised to anything else; a synthetic violating source and a compliant one
+are its negative and positive controls.
+
+Gates assert both rendered fields, that `auditActor` is unbounded, an
+ordinary-name pass-through control, the release dispatch entry rendered through
+the production sink, and (`audit_actor_principal_test.go`) the four-eyes
+publication flow with two colliding names plus a self-approval control.
 
 **The transferable rules:** *a comment asserting that a value is bounded is a
 claim about every field the value reaches, not about the argument in front of

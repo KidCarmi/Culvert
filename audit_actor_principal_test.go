@@ -87,7 +87,7 @@ func TestAuditActor_PrincipalKeepsDistinctLongAdminsDistinct(t *testing.T) {
 			"comparison on it (MCP four-eyes, tool-trust four-eyes) treats them as one person")
 	}
 	// The rendered audit Actor is bounded, but must still tell the two apart.
-	ea, eb := auditEntryActor(ra), auditEntryActor(rb)
+	ea, eb := boundAuditActor(auditActor(ra)), boundAuditActor(auditActor(rb))
 	if ea == eb {
 		t.Errorf("bounded audit Actors are indistinguishable for distinct administrators: %q", ea)
 	}
@@ -101,8 +101,16 @@ func TestAuditActor_PrincipalKeepsDistinctLongAdminsDistinct(t *testing.T) {
 func TestMCPPublication_DistinctLongAdminApprovalIsNotSelfApproval(t *testing.T) {
 	const clientIP = "198.51.100.121"
 	requester, approver := collidingAdminNames()
-	// A unique tenant keeps this request apart from any other test's pending
-	// publications in the process-wide MCP admin singleton.
+	// The approval store lives in the process-wide MCP admin singleton, and the
+	// expected durability refusal below leaves this publication PENDING. Without
+	// a fresh singleton per run, -count=N / -shuffle accumulate pending entries
+	// until creation fails with "pending approval capacity reached". Build a
+	// fresh one now and restore a fresh disabled default on cleanup, the same
+	// isolation TestMCP_DisabledDefaults uses.
+	resetMCPAdminSingleton()
+	t.Cleanup(resetMCPAdminSingleton)
+	// A unique tenant additionally keeps the per-tenant pending quota and the
+	// request lookup scoped to this run.
 	tenant := "tenant-auditactor-" + time.Now().Format("150405.000000000")
 	// The candidate names the revision AFTER the active one, against the base the
 	// store holds now (both are process-wide; see activeMCPPolicyRevision).

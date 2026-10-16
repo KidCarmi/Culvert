@@ -42,37 +42,15 @@ func auditEvent(r *http.Request, action, object, detail string) {
 // distinction existed. A lossy bound here made two distinct configured admins
 // whose names share the bounded prefix and length compare equal, refusing the
 // second one's legitimate approval as self-approval (Codex review, PR #1532).
-// The CHAOS-63 bound applies to the RENDERED audit entry: auditEntryActor.
+// The CHAOS-63 bound applies to the RENDERED audit entry only, and it is
+// applied in exactly one place: addAuditEntry (store.go), behind auditAdd,
+// which every AuditEntry producer reaches. Hand auditActor's full value to the
+// audit sink; never pre-bound it.
 func auditActor(r *http.Request) string {
-	name, ip := auditIdentity(r)
-	if name == "" {
-		return ip
-	}
-	return name + "@" + ip
-}
-
-// auditEntryActor is auditActor rendered for AuditEntry.Actor: the same
-// identity with the name bounded by boundAuditIdentity. A CONFIGURED account
-// name can be arbitrarily long (-user/auth.user reach cfg.SetAuth and
-// --reset-password reaches cfg.SetUIUser, neither bounded, and the name is
-// deliberately never refused for its length), and every audited action by such
-// an account would otherwise retain it full-length in the audit ring. The digest
-// in the bound keeps two such accounts distinguishable in the trail. Use it only
-// for rendering; anything that compares or persists an identity uses auditActor.
-func auditEntryActor(r *http.Request) string {
-	name, ip := auditIdentity(r)
-	if name == "" {
-		return ip
-	}
-	return boundAuditIdentity(name) + "@" + ip
-}
-
-// auditIdentity resolves the authenticated admin name (possibly "") and the
-// attributed client IP for auditActor and auditEntryActor.
-func auditIdentity(r *http.Request) (name, ip string) {
 	// RISK-019: attribute to the real client behind a configured trusted proxy
 	// so audit lines don't all name the reverse proxy (falls back to the peer).
-	ip = realClientIP(r)
+	actor := realClientIP(r)
+	name := ""
 	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
 		name = sess.Sub
 		if name == "" {
@@ -85,7 +63,10 @@ func auditIdentity(r *http.Request) (name, ip string) {
 		// action whose actor the middleware already authenticated.
 		name = uiUser(r)
 	}
-	return name, ip
+	if name != "" {
+		actor = name + "@" + actor
+	}
+	return actor
 }
 
 // auditEventDiff records an audit event with optional before/after JSON snapshots.
@@ -109,7 +90,7 @@ func auditEventDiffID(r *http.Request, action, object, objectID, detail string, 
 	entry := AuditEntry{
 		TS:       time.Now().UnixMilli(),
 		Time:     time.Now().Format("2006-01-02 15:04:05"),
-		Actor:    auditEntryActor(r),
+		Actor:    auditActor(r), // bounded for rendering inside auditAdd (addAuditEntry)
 		Action:   action,
 		Object:   object,
 		ObjectID: objectID,

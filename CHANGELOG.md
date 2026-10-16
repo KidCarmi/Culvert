@@ -9,8 +9,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
-- The **rendered audit `Actor` is now bounded** (`auditEntryActor`,
-  `ui_helpers.go`, written into every `AuditEntry` by `auditEventDiffID`).
+- The **rendered audit `Actor` is now bounded** (`boundAuditActor`, applied to
+  every `AuditEntry` at the single audit write chokepoint `addAuditEntry` behind
+  `auditAdd`, `store.go`).
   `truncateForAudit` was being applied by call sites to the audit **Object**,
   which made each one look bounded, while `auditEvent` derives the **Actor**
   independently and rebuilt `name + "@" + ip` from the session with no bound —
@@ -32,9 +33,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   bounded prefix and length compared equal and the second one's legitimate
   four-eyes approval was refused as self-approval. Non-audit consumers (MCP
   four-eyes and tool-trust, policy learning, CDR receipts, release dispatch,
-  support recipients) therefore keep main's behaviour; the PAC intent's
-  `AuditActor`, which only ever renders a later audit entry, takes the bounded
-  form. Gates: `auth_change_password_reauth_audit_test.go` asserts both rendered
+  support recipients) therefore keep main's behaviour, and so does the PAC
+  intent's `AuditActor`, which is bounded when its entry is rendered. A second
+  Codex round found that a bound living only in `auditEventDiffID` was bypassed
+  by every producer that builds an `AuditEntry` itself — the release
+  `DispatchService` handed the full `auditActor` straight to `auditAdd` — so the
+  bound moved to the one write chokepoint every producer reaches, the two direct
+  `audit.Add` callers were routed through it, and `TestAuditActorBoundWall`
+  fails if any non-test file in main or `internal/` reaches `audit.Add` another
+  way or `auditAdd` stops pointing at the chokepoint. Gates: `auth_change_password_reauth_audit_test.go` asserts both rendered
   fields and that `auditActor` is unbounded, with a control requiring an
   ordinary name to pass through verbatim; `audit_actor_principal_test.go` drives
   the four-eyes publication flow with two colliding names (verified failing

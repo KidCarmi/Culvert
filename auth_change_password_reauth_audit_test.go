@@ -128,7 +128,7 @@ func TestSecReauthAudit1_RepeatedFailuresEachLeaveEvidence(t *testing.T) {
 // full-length value and the gate's own name ("AuditActorIsBounded") described a
 // property it never checked (Codex review, PR #1532). Measured against the
 // pre-fix tree: a 300-byte account name produced a 314-byte Actor. The bound is
-// applied where the entry is RENDERED (auditEntryActor), never to auditActor,
+// applied where the entry is RENDERED (boundAuditActor, inside auditAdd), never to auditActor,
 // which is the full principal MCP four-eyes compares for identity (see
 // audit_actor_principal_test.go).
 //
@@ -186,26 +186,27 @@ func TestSecReauthAudit1_AuditEntryIsBoundedInBothFields(t *testing.T) {
 	}
 }
 
-// TestSecReauthAudit1_AuditEntryActorIsBoundedAuditActorIsNot pins the split:
-// the RENDERED actor (auditEntryActor, which auditEventDiffID writes into every
+// TestSecReauthAudit1_RenderedActorIsBoundedAuditActorIsNot pins the split:
+// the RENDERED actor (boundAuditActor, which auditAdd applies to every
 // AuditEntry) is bounded, so every audited surface inherits the bound, while
 // auditActor — the principal non-audit callers compare and persist — stays
 // full. A first fix bounded auditActor itself, which made two distinct
 // configured admins sharing the bounded prefix and length compare equal in MCP
 // four-eyes (Codex review, PR #1532).
-func TestSecReauthAudit1_AuditEntryActorIsBoundedAuditActorIsNot(t *testing.T) {
+func TestSecReauthAudit1_RenderedActorIsBoundedAuditActorIsNot(t *testing.T) {
+	rendered := func(r *http.Request) string { return boundAuditActor(auditActor(r)) }
 	long := strings.Repeat("v", loginAuditActorMax*5)
 	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/change-password", http.NoBody)
 	r.RemoteAddr = "198.51.100.76:9999"
 	r = r.WithContext(context.WithValue(r.Context(), uiUserKey{}, long))
 
-	got := auditEntryActor(r)
+	got := rendered(r)
 	if strings.Contains(got, long) {
-		t.Errorf("auditEntryActor returned the untruncated %d-byte identity (%d bytes total)",
+		t.Errorf("the rendered actor was the untruncated %d-byte identity (%d bytes total)",
 			len(long), len(got))
 	}
 	if len(got) > loginAuditActorMax+64+len("198.51.100.76")+1 {
-		t.Errorf("auditEntryActor returned %d bytes for an oversize identity: it is the Actor of "+
+		t.Errorf("the rendered actor was %d bytes for an oversize identity: it is the Actor of "+
 			"every audit entry", len(got))
 	}
 	if want := long + "@198.51.100.76"; auditActor(r) != want {
@@ -217,7 +218,7 @@ func TestSecReauthAudit1_AuditEntryActorIsBoundedAuditActorIsNot(t *testing.T) {
 	short := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/change-password", http.NoBody)
 	short.RemoteAddr = "198.51.100.77:9999"
 	short = short.WithContext(context.WithValue(short.Context(), uiUserKey{}, "keeper"))
-	for name, fn := range map[string]func(*http.Request) string{"auditActor": auditActor, "auditEntryActor": auditEntryActor} {
+	for name, fn := range map[string]func(*http.Request) string{"auditActor": auditActor, "rendered": rendered} {
 		if want, got := "keeper@198.51.100.77", fn(short); got != want {
 			t.Errorf("%s for an ordinary name = %q, want %q", name, got, want)
 		}
