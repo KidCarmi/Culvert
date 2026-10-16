@@ -95,6 +95,13 @@ func rebindsName(fn *ast.FuncDecl, name string) bool {
 	if fieldListBinds(fn.Recv, name) || fieldListBinds(fn.Type.Params, name) || fieldListBinds(fn.Type.Results, name) {
 		return true
 	}
+	return bodyRebindsName(fn, name)
+}
+
+// bodyRebindsName is rebindsName restricted to fn's BODY: it ignores fn's own
+// signature, so it can check that a function never rebinds or reassigns one of
+// its PARAMETERS (the gossip loop's limiter) after receiving it.
+func bodyRebindsName(fn *ast.FuncDecl, name string) bool {
 	if fn.Body == nil {
 		return false
 	}
@@ -166,9 +173,34 @@ func gossipLoopLimiterArgs(fn *ast.FuncDecl) []string {
 	return out
 }
 
+// gossipLoopKeepsLimiter returns "" when loop's third parameter (the limiter
+// it is handed) is never rebound or reassigned in its body, else a reason.
+func gossipLoopKeepsLimiter(loop *ast.FuncDecl) string {
+	params := loop.Type.Params
+	var names []string
+	for _, f := range params.List {
+		for _, n := range f.Names {
+			names = append(names, n.Name)
+		}
+	}
+	if len(names) < 3 {
+		return "no longer takes the limiter as its third parameter"
+	}
+	if bodyRebindsName(loop, names[2]) {
+		return "rebinds or reassigns its limiter parameter " + names[2]
+	}
+	return ""
+}
+
 // The gossip loop must be handed the application composition handle the
 // request path enforces with. Any other expression means the node can apply
 // broadcasts to a limiter nobody consults.
+//
+// Scope: this is a syntactic wall over the two hops that carry the handle —
+// DataPlaneClient.Run (which must pass the package-level rl) and
+// rateLimitGossipLoop (which must not rebind its limiter parameter). It is
+// not a whole-program alias proof; what each helper does with the limiter it
+// is handed is pinned by that helper's own tests.
 func TestAdmissionOwner_Wall_GossipLoopIsFedTheEnforcingLimiter(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "controlplane_client.go", nil, parser.ParseComments)
@@ -192,6 +224,43 @@ func TestAdmissionOwner_Wall_GossipLoopIsFedTheEnforcingLimiter(t *testing.T) {
 	if !packageVarDeclared(t, "admission.go", "rl") {
 		t.Error("admission.go no longer declares the package-level composition handle rl; " +
 			"this gate's anchor has gone stale")
+	}
+
+	// The CALLEE must keep the handle it was given: a loop that rebinds or
+	// reassigns its limiter parameter (`limiter = newRateLimiter()`) arms and
+	// feeds an independent limiter while rl stays unarmed (Codex review, PR #1584).
+	loop := findMethodDecl(file, "DataPlaneClient", "rateLimitGossipLoop")
+	if loop == nil {
+		t.Fatal("DataPlaneClient.rateLimitGossipLoop not found; this gate's selector has gone stale")
+	}
+	if msg := gossipLoopKeepsLimiter(loop); msg != "" {
+		t.Errorf("rateLimitGossipLoop %s: broadcasts would arm and feed a limiter the request path "+
+			"does not consult (SEC-ADMISSION-OWNER-1)", msg)
+	}
+	for name, src := range map[string]string{
+		"reassigned parameter": `package main
+func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time.Duration, limiter *RateLimiter) {
+	limiter = newRateLimiter()
+	limiter.SetClusterEnabled(true)
+}`,
+		"shadowed parameter": `package main
+func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time.Duration, limiter *RateLimiter) {
+	if limiter := newRateLimiter(); limiter != nil {
+		limiter.SetClusterEnabled(true)
+	}
+}`,
+	} {
+		cfile, err := parser.ParseFile(token.NewFileSet(), "control.go", src, 0)
+		if err != nil {
+			t.Fatalf("parse %s control: %v", name, err)
+		}
+		cloop := findMethodDecl(cfile, "DataPlaneClient", "rateLimitGossipLoop")
+		if cloop == nil {
+			t.Fatalf("%s control did not parse into rateLimitGossipLoop", name)
+		}
+		if gossipLoopKeepsLimiter(cloop) == "" {
+			t.Errorf("the %s control was ACCEPTED; this gate is matching nothing", name)
+		}
 	}
 
 	// CONTROLS: the shapes this gate exists to reject must be rejected.
