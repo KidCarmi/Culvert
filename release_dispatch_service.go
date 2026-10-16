@@ -294,23 +294,36 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		return nil
 	})
 	rep := reportFromResult(plan, res)
+	// Everything below runs AFTER the executor produced its result, so it is
+	// contained: a fault in an audit or alert sink must not discard a result
+	// that already exists. Uncontained, the caller saw a panic with applied
+	// set and recorded a watch that had in fact completed as an abandoned live
+	// op (FAILED_NEEDS_ATTN + "resume it") — a false failure (CHAOS-75 review).
+	// The fault is still counted on the crash plane.
 	if errors.Is(eerr, errDispatchInFlight) {
 		// Concurrent dispatch on the same agent — rejected before any apply.
-		s.auditDispatch(actor, ep, target, rep)
+		s.contained(crashComponentReleaseDispatch, func() { s.auditDispatch(actor, ep, target, rep) })
 		return rep, eerr
 	}
 	if !applied {
 		// already_current / stale: no apply happened, so the onApplied hook did
 		// not fire — record the dispatch decision here.
-		s.auditDispatch(actor, ep, target, rep)
+		s.contained(crashComponentReleaseDispatch, func() { s.auditDispatch(actor, ep, target, rep) })
 	}
-	s.auditOutcome(actor, ep, target, rep)
+	s.contained(crashComponentReleaseDispatch, func() { s.auditOutcome(actor, ep, target, rep) })
 	// Stale already-current is a re-plan signal, not an incident — audit it but
 	// do NOT page. Genuine FAILED_NEEDS_ATTN terminals still alert.
 	if !errors.Is(eerr, errStaleAlreadyCurrent) {
-		s.maybeAlert(actor, ep, rep)
+		s.contained(crashComponentReleaseDispatch, func() { s.maybeAlert(actor, ep, rep) })
 	}
 	return rep, eerr
+}
+
+// contained runs one post-result audit or alert callback under the crash
+// guard, so a sink fault is counted without discarding the result the caller
+// is about to return.
+func (s *DispatchService) contained(component string, fn func()) {
+	_ = runGuarded(component, fn)
 }
 
 // auditDispatchContained writes the release.dispatch audit and returns the
@@ -352,12 +365,14 @@ func (s *DispatchService) Resume(ctx context.Context, actor string, ep AgentEndp
 	res, eerr := reg.exec.Resume(ctx, rc)
 	rep := reportFromResume(rc, res)
 	target := DispatchTarget{ReleaseID: rc.ReleaseID}
+	// Contained for the same reason as Dispatch's post-result callbacks: the
+	// resume worker writes the terminal only after this returns.
 	if errors.Is(eerr, errDispatchInFlight) {
-		s.auditDispatch(actor, ep, target, rep)
+		s.contained(crashComponentReleaseResume, func() { s.auditDispatch(actor, ep, target, rep) })
 		return rep, eerr
 	}
-	s.auditOutcome(actor, ep, target, rep)
-	s.maybeAlert(actor, ep, rep)
+	s.contained(crashComponentReleaseResume, func() { s.auditOutcome(actor, ep, target, rep) })
+	s.contained(crashComponentReleaseResume, func() { s.maybeAlert(actor, ep, rep) })
 	return rep, eerr
 }
 

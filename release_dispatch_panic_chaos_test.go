@@ -424,6 +424,39 @@ func TestCHAOS75_DispatchAuditPrecedesThe202(t *testing.T) {
 	}
 }
 
+// A fault in the post-watch OUTCOME audit, after the watch verified success,
+// must not turn the completed op into an "abandoned watch" failure.
+func TestCHAOS75_OutcomeAuditPanicKeepsTheVerifiedTerminal(t *testing.T) {
+	resetCrashPlaneForGate(t)
+	agent := &panicAgent{opID: "op-done", runningSeq: freshDispatchSeq()}
+	rm := newPanicReleaseFixture(t, agent)
+	var fired atomic.Bool
+	rm.svc.auditSink = func(e AuditEntry) {
+		if e.Action == "release.dispatch.outcome" && fired.CompareAndSwap(false, true) {
+			panic("CHAOS-75 injected fault: outcome audit sink")
+		}
+	}
+	before := crashCount(crashComponentReleaseDispatch)
+
+	rec := httptest.NewRecorder()
+	apiReleaseDispatch(rec, releaseReq(http.MethodPost, "/api/releases/dispatch",
+		dispatchRequest{ReleaseID: "rel_a", Agent: "A"}, RoleAdmin))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d; want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	got := waitTerminal(t, rm, "A")
+	if !fired.Load() {
+		t.Fatal("control: the outcome audit fault never fired; this test proves nothing")
+	}
+	if got.Terminal != TerminalSucceeded || !got.Verified {
+		t.Fatalf("terminal = %q verified=%v detail=%q; want the verified success the watch produced",
+			got.Terminal, got.Verified, got.Detail)
+	}
+	if crashCount(crashComponentReleaseDispatch) <= before {
+		t.Error("the contained audit fault was not counted on the crash plane")
+	}
+}
+
 // ─── end-to-end: resume panic ───────────────────────────────────────────────
 
 // The resume goroutine is fire-and-forget (the 202 ships before it starts), so
