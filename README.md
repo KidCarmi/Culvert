@@ -242,7 +242,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 | **Certificate revocation** | OCSP checking (fail-closed when a published responder is unreachable), currently scoped to the upstream parent-proxy TLS handshake only - **not yet wired to SSL-inspected origin certificates**. CRL checking is **not yet implemented** - see [Limitations](#limitations--known-gaps) |
 | **Hop-by-hop stripping** | RFC 7230-compliant - parses the `Connection` header for dynamically listed hop-by-hop names |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, drops private `X-Real-IP`, always removes `X-User-Identity` before forwarding |
-| **Password complexity** | 8 characters minimum and 72 bytes maximum (bcrypt's hard limit), with at least one uppercase letter, one lowercase letter and one digit (`validatePasswordComplexity`, `store.go`) |
+| **Password complexity** | 8 bytes minimum and 72 bytes maximum (bcrypt's hard limit; both bounds count UTF-8 bytes, not characters), with at least one uppercase letter, one lowercase letter and one digit (`validatePasswordComplexity`, `store.go`) |
 | **Admin RBAC (defense-in-depth)** | Metadata-driven enforcement layer *in addition to* per-handler `requireRole`; report-only audit-completeness and role-divergence detectors; read-only governance surface at `/api/governance/control-plane` |
 
 ### Post-Quantum key exchange
