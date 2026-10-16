@@ -53,16 +53,20 @@ new IDs → 25 / 24.
 
 - **Business concept:** the opaque ID a caller keeps to poll or reconcile one long-running operation.
 - **Canonical name:** `operationId` on camelCase surfaces, `operation_id` on snake_case surfaces and in
-  `key=value` audit details, and "operation ID" in prose.
+  `key=value` audit details, and "operation ID" in prose. Every row was re-checked against this rule:
+  row 1 (`BackupCreateResult`: `opId`, `filename`, `deduped`) is the only camelCase response, so it
+  alone takes `operationId`. Rows 2-5a are snake_case surfaces or sit inside one (`resume_context`), so
+  they take `operation_id`.
 - **Why problematic:** the *same operation* is created with `opId` and polled as `op_id` on the backup
   resource. Supporting staff correlating an audit line (`op_id=`) with an API response (`opId`) have to
   know both names. "op" is an implementation abbreviation, not a business term.
 - **Why better:** one noun, "operation ID", on every surface a human or integrator reads, with the
   existing spellings kept as aliases so nothing breaks.
 
-**Complete inventory at `fbf6a37`.** The first version of this table used a case-sensitive pattern
-keyed on "id". It missed the untagged `OpID` field and the `op=` alert key (Codex, PR #1602). The
-sweep was redone with these exact commands, so the completeness claim can be checked:
+**Implementation checklist (verify in the implementing PR).** This is the inventory produced by
+the commands below at `fbf6a37`. The implementing PR must re-run them against its base and
+reconcile. The first version of this table used a case-sensitive pattern keyed on "id" and missed
+the untagged `OpID` field and the `op=` alert key (Codex, PR #1602).
 
 ```sh
 # (a) every spelling, case-insensitive, all non-test Go INCLUDING cmd/ (462 lines)
@@ -79,18 +83,20 @@ whether it reaches a JSON response, a request body or a webhook payload. (c) Acc
 and alert/webhook details are included below, not only responses. Not this concept, and omitted:
 OpenAPI route `operationId:` keys and `internal/apicontract`; MCP `Operation` fields (an operation
 *class*); `mcperr` `Op` (a kernel step name); and `static/index.html` MCP panels' `op=` JavaScript
-variables. Every user- or integrator-visible site:
+variables. User- or integrator-visible sites found:
 
 | # | Site (`fbf6a37`) | Surface | Current key | Planned action |
 |---|---|---|---|---|
 | 1 | `backups_api.go:345` — `POST /api/backups` (`BackupCreateResult`, `openapi.yaml:1203`) | API response | `opId` | **Dual-emit** `operationId`; keep `opId` permanently |
-| 2 | `backups_api.go:447` — `GET /api/backups/operations/{id}` (`BackupOperationStatus`, `openapi.yaml:1212-1215`) | API response (agent record, verbatim) | `op_id` | **Dual-emit** `operationId` beside it; keep `op_id` (it is the agent's record field) |
+| 2 | `backups_api.go:447` — `GET /api/backups/operations/{id}` (`BackupOperationStatus`, `openapi.yaml:1212-1215`) | API response (agent record, verbatim; snake_case surface: `op_id`, `kind`, `state`, `progress`) | `op_id` | **Dual-emit** `operation_id` beside it; keep `op_id` (it is the agent's record field) |
 | 3 | `release_api.go:224` (`dispatchRecord`, served by `GET /api/releases/dispatch/status` at `release_api.go:588`; spec `DispatchStatus`, an open object) | API response | `op_id` | **Dual-emit** `operation_id` (snake surface: `dispatch_id`, `release_id`); keep `op_id`. The store is in memory, so this adds a field and does not change persistence |
 | 3a | `release_api.go:229` `dispatchRecord.ResumeContext` (`json:"resume_context"`) of type `DispatchResumeContext` (`release_dispatch_service.go:49-58`), whose fields have **no json tags**. The response is `GET /api/releases/dispatch/status` (`release_api.go:588`) | API response | `resume_context.OpID` (the Go field name) | **Dual-emit**: give `DispatchResumeContext` a `MarshalJSON` that emits a tagged canonical `operation_id` beside the existing `OpID`. Keep `OpID` emitted |
 | 4 | `release_api.go:711` — `POST /api/releases/dispatch` 202 body | API response | `op_id` | **Dual-emit** `operation_id`; keep `op_id` |
 | 5 | `release_api.go:845` — `POST /api/releases/dispatch/resume` 202 body | API response | `op_id` | **Dual-emit** `operation_id`; keep `op_id` |
-| 5a | `release_api.go:784-787` — `POST /api/releases/dispatch/resume` request `resumeRequest.ResumeContext` (`*DispatchResumeContext`), used verbatim at `release_api.go:851-853` | Accepted request field | `resume_context.OpID` | **Accept both keys**: an `UnmarshalJSON` that accepts `operation_id` and `OpID`, and refuses a body where both are present and differ. Keep accepting `OpID` |
+| 5a | `release_api.go:784-787` — `POST /api/releases/dispatch/resume` request `resumeRequest.ResumeContext` (`*DispatchResumeContext`), used verbatim at `release_api.go:851-853` | Accepted request field | `resume_context.OpID` | **Accept both keys**: an `UnmarshalJSON` that accepts `operation_id` and `OpID`, and refuses a body where both are present and differ. Keep accepting `OpID`. It **must keep strict decoding**: the handler's `decodeJSON` (`ui_helpers.go:232-237`, `DisallowUnknownFields`) does not reach inside a custom unmarshaller, so it must decode with `DisallowUnknownFields` itself. Tests: round-trip, conflict refusal and a negative unknown-field test |
 | 6 | `release_api.go:823` — resume 400 text "resume needs an op_id" | API error text | `op_id` | Reword to "operation ID" (copy only; no field) |
+| 6a | `backups_api.go:330-332` — `POST /api/backups` 502 text "malformed operation record (no valid op_id or kind)" | API error text | `op_id` | Reword to "operation ID" (copy only) |
+| 6b | `release_dispatch_exec.go:574-581` — error "dispatch: agent apply returned no op_id". It reaches the dispatch 502 detail, the `release.dispatch.outcome` audit detail and the `release_dispatch_attention` webhook detail | Error text (API, audit, webhook) | `op_id` | Reword to "operation ID" (copy only) |
 | 7 | `backups_api.go:335` — `backup.trigger` | Audit detail | `op_id=` | **Dual-emit** `operation_id=`; keep `op_id=` |
 | 8 | `release_dispatch_service.go:423` — `release.dispatch` | Audit detail | `op_id=` | **Dual-emit** `operation_id=`; keep `op_id=` |
 | 9 | `release_dispatch_service.go:438` — `release.dispatch.outcome` | Audit detail | `op_id=` | **Dual-emit** `operation_id=`; keep `op_id=` |
@@ -116,8 +122,16 @@ stores the receipt as `op_id` on disk and renders it as `operation_id` (row 14).
 error strings at `release_dispatch_exec.go:338` and `release_dispatch_service.go:317`, and the route note
 at `ui_routes_meta.go:810`.
 
-- **Compatibility:** every change in the table is additive. No existing key is renamed or removed in
-  an API response or an audit detail. `opId` may be marked `deprecated: true` with the metadata
+- **Compatibility:** every *key* change in the table is additive. No existing key is renamed or removed
+  in an API response or an audit detail. The T-64 change is **not** yet wholly additive at the
+  contract level, because of a pre-existing drift (next item).
+- **Pre-existing contract drift (separate decision).** The spec documents only `200` for
+  `POST /api/releases/dispatch` and `POST /api/releases/dispatch/resume` (`openapi.yaml:10087-10110`,
+  `10965-10993`), but the handlers return `202 Accepted` (`release_api.go:704-714`, `841-848`).
+  Reconciling this is a separate decision under `docs/api/API-VERSIONING-POLICY.md`. Removing the
+  documented `200` is breaking. The safe path is to add `202` and keep `200` documented as deprecated.
+  The T-64 field additions for rows 4-5 must be documented on whichever response codes that decision
+  keeps. `opId` may be marked `deprecated: true` with the metadata
   `docs/api/API-DEPRECATION-POLICY.md` requires, but *removing* it, or any `op_id`, is a breaking change
   under `API-VERSIONING-POLICY.md` and would need the MAJOR exception process. This report does not
   recommend removal. The bundled GUI is the only *known* consumer, but that does not make the fields
@@ -137,8 +151,8 @@ at `ui_routes_meta.go:810`.
 - **Migration complexity:** Low. **Compatibility risk:** None for the recommended change. Removing any
   alias later would be breaking (MAJOR).
 - **Estimated PR size:** M/L (~180 lines): five response sites (rows 1-5); the `DispatchResumeContext`
-  JSON marshal/unmarshal pair with conflict refusal and its round-trip tests (rows 3a, 5a); one error
-  string (row 6); three audit details and one alert detail (rows 7-9a); two GUI reads and one label
+  JSON marshal/unmarshal pair with strict decoding, conflict refusal and round-trip, conflict and
+  unknown-field tests (rows 3a, 5a); three error strings (rows 6-6b); three audit details and one alert detail (rows 7-9a); two GUI reads and one label
   (rows 11-12); the spec additions; and the contract, audit and alert tests. Add the version bump and the
   regenerated artifacts on top.
 
@@ -156,8 +170,12 @@ at `ui_routes_meta.go:810`.
 - **Affected code/GUI:** the JSX string (it predates the window — #1265 — but was not charged by an
   earlier report). (`static/index.html:8384`'s "not restored by rollback" describes rollback's effect and
   does not name the action; it is not part of T-65.) **API / docs / config:** none.
+- **Shipped bundle:** the binary serves the embedded `frontend/dist` (`ui_frontend_v2.go:34-39`,
+  `//go:embed all:frontend/dist`), so editing `AuthRulesPage.tsx` alone changes nothing an operator
+  sees. The fix must rebuild and commit `frontend/dist`, which the dist drift gate checks.
 - **Migration complexity:** Trivial. **Compatibility risk:** None, unless a test pins the string (check
-  `frontend/src/test` before editing). **Estimated PR size:** XS (1 line).
+  `frontend/src/test` before editing). **Estimated PR size:** XS (1 source line) plus the rebuilt,
+  committed `frontend/dist`.
 - **CDR note (same verb, different defect; not a rename).** The legacy GUI's CDR rule-deletion
   confirmation (`static/index.html:11971`) says the deletion can be undone "via Config Versions". That
   claim is false, not just mis-worded: CDR policies (`cdr_policies.json`) are per-CP local state that
@@ -177,7 +195,7 @@ No new entries. Carried (not re-verified): the 2026-09-24 report's backlog, nota
 
 ## Migration Risk
 
-Only T-64 touches a wire contract, and only additively (new fields on six API response shapes, one more accepted request key, and a new key in three audit details and one alert detail; nothing renamed or removed). That is a MINOR API contract bump, not a no-version change. T-65 is copy.
+Only T-64 touches a wire contract. Its key changes are additive (new fields on six API response shapes, one more accepted request key, and a new key in three audit details and one alert detail; nothing renamed or removed), which is a MINOR API contract bump. It is not wholly additive until the pre-existing dispatch/resume `200` vs `202` drift is settled (T-64, *Pre-existing contract drift*). T-65 is copy.
 
 ## Recommended Refactoring Plan (by priority)
 
@@ -185,8 +203,8 @@ Only T-64 touches a wire contract, and only additively (new fields on six API re
 | --- | --- | --- |
 | Critical | — | none |
 | High | — | none |
-| Medium | T-64 | Implement the T-64 inventory table: dual-emit `operationId`/`operation_id` beside the retained aliases on the five API responses (backup create and poll; release dispatch status, dispatch and resume), on `resume_context` (emit `operation_id` beside `OpID`; accept both on resume input, refusing a conflict), the three `op_id=` audit details and the `release_dispatch_attention` alert `op=`; reword the resume error text; GUI reads with fallback and the release panel label; keep the `pac.*` `operationId=` audit key as recorded; MINOR contract bump (`info.version` + `x-culvert-api-contract-version`) with regenerated artifacts (`make api-bundle`, `types.gen.ts`, `make api-verify`, `make api-breaking-check`); CHANGELOG entry for the new keys |
-| Low | T-65 | Reword the React hint (`AuthRulesPage.tsx:738`) to "roll back to a config version" |
+| Medium | T-64 | Implement the T-64 checklist (re-run its commands against the implementing PR's base first): dual-emit `operationId`/`operation_id` beside the retained aliases on the five API responses (backup create and poll; release dispatch status, dispatch and resume), on `resume_context` (emit `operation_id` beside `OpID`; accept both on resume input, refusing a conflict), the three `op_id=` audit details and the `release_dispatch_attention` alert `op=`; reword the three `op_id` error texts (rows 6-6b); keep strict decoding in the `resume_context` unmarshaller; settle the dispatch/resume `200`/`202` drift as a separate versioning decision; GUI reads with fallback and the release panel label; keep the `pac.*` `operationId=` audit key as recorded; MINOR contract bump (`info.version` + `x-culvert-api-contract-version`) with regenerated artifacts (`make api-bundle`, `types.gen.ts`, `make api-verify`, `make api-breaking-check`); CHANGELOG entry for the new keys |
+| Low | T-65 | Reword the React hint (`AuthRulesPage.tsx:738`) to "roll back to a config version"; rebuild and commit `frontend/dist` (dist drift gate) |
 | Low | T-65 CDR note | Remove the false "restore via Config Versions" recovery claim from the legacy CDR deletion dialog (`static/index.html:11971`); CDR policies are not versioned |
 
 ## Stop-condition assessment
