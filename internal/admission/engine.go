@@ -417,6 +417,37 @@ func (f *IPFilter) ClearAll() {
 	f.mu.Unlock()
 }
 
+// Replace installs mode and entries as the filter's ENTIRE configuration in
+// one pass, under ONE writer lock, publishing the derived view ONCE. Every
+// previous entry is discarded; a nil or empty entries slice leaves the filter
+// with the given mode and no entries. Invalid entries are skipped and
+// returned, as AddAll reports them, for logging after the lock is released.
+//
+// This is the wholesale-replacement primitive for a caller that previously
+// built a fresh filter and swapped the pointer it enforces with (the CP→DP
+// snapshot apply). Replacing a live filter's pointer is a data race against
+// the lock-free Allowed readers in the request path; replacing its contents
+// here is not: readers observe either the previous view or the new one, never
+// an intermediate (a SetMode / ClearAll / AddAll sequence publishes three
+// views, and the middle one is an empty allowlist that denies everything or an
+// empty blocklist that admits everything). Linear in the entry count, like
+// AddAll. The owner's identity, and any observer installed on it, are kept.
+func (f *IPFilter) Replace(mode string, entries []string) []InvalidIPEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mode = mode
+	f.nets = nil
+	f.single = map[string]bool{}
+	var invalid []InvalidIPEntry
+	for _, entry := range entries {
+		if err := f.addLocked(entry); err != nil {
+			invalid = append(invalid, InvalidIPEntry{Entry: entry, Err: err})
+		}
+	}
+	f.publishView()
+	return invalid
+}
+
 // List returns a detached list of configured entries.
 func (f *IPFilter) List() []string {
 	f.mu.RLock()

@@ -24,6 +24,10 @@ func TestDistributedAdmission_ProductionWiring(t *testing.T) {
 	oldCS, oldAgg := globalClusterStore, globalRLAggregator
 	oldConns := connLimiter
 	connLimiter = newConnLimiter()
+	// The snapshot apply below replaces the installed filter's contents in
+	// place (RISK-030), so bind a fresh one rather than applying over the
+	// suite's shared owner and "restoring" the mutated object.
+	ipf = newIPFilter()
 	t.Cleanup(func() {
 		ipf = oldIPF
 		SetProxyBaseURL(oldURL)
