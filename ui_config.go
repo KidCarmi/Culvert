@@ -146,6 +146,24 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// in-memory ring keeps only the newest 500 entries and is wiped on
 		// restart, so this is the only way an operator can see the gap.
 		"auditLogWriteErrors": auditWriteErrors(),
+		// CHAOS-61: the CLUSTER half of the same compliance record. A Data Plane
+		// node whose Control Plane link is down drops the oldest unsent audit
+		// events once its bounded push queue fills, so the CENTRALIZED trail has
+		// a gap even though this node's own local audit file is complete. The
+		// remedy is restoring the CP link, not freeing disk — previously visible
+		// only via /healthz or the culvert_audit_cluster_push_drops_total
+		// Prometheus metric, invisible to an operator without a metrics scraper
+		// or a manual health-probe curl. auditClusterPushDropsTotal aggregates
+		// every DP's latest heartbeat-reported count when this node is a Control
+		// Plane, so the documented single-pane-of-glass dashboard reflects the
+		// whole fleet rather than reading zero forever on the node an admin
+		// actually looks at (a DP's own /api/stats still reports its own count).
+		"auditClusterPushDrops": auditClusterPushDropsTotal(),
+		// Enrolled Data Plane nodes whose drop count cannot be trusted
+		// (disconnected, or a pre-upgrade build that does not report one), so
+		// the dashboard reports centralized-audit completeness as unknown
+		// rather than reading a missing or stale zero as complete.
+		"auditClusterPushUnreportingNodes": auditClusterPushUnreportingNodes(),
 		// SEC-RBAC-ROLE-1. Non-zero means ui_users.json carries a role this
 		// build does not enroll; the account was clamped to viewer at load, so
 		// its effective authority is deliberately lower than the file states.
