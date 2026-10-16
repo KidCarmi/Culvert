@@ -41,6 +41,27 @@ import (
 	"sync/atomic"
 )
 
+// setLeaseEpochLocked records the epoch of our current grant (0 = not held)
+// and refreshes the lock-free mirror. Caller holds h.mu (write).
+func (h *HAState) setLeaseEpochLocked(epoch int64) {
+	h.leaseEpoch = epoch
+	h.syncFenceEpochLocked()
+}
+
+// syncFenceEpochLocked refreshes fenceEpoch from the fields CurrentEpoch
+// reads. Caller holds h.mu (write).
+func (h *HAState) syncFenceEpochLocked() {
+	if h.lease == nil {
+		h.fenceEpoch.Store(0)
+		return
+	}
+	h.fenceEpoch.Store(h.leaseEpoch)
+}
+
+// PublishedFenceEpoch is CurrentEpoch without h.mu — what a config publish
+// stamps (ConfigStore.commitPublish), safe to call while h.mu is held.
+func (h *HAState) PublishedFenceEpoch() int64 { return h.fenceEpoch.Load() }
+
 // CurrentEpoch reports this node's fencing epoch for stamping outbound
 // bundles/snapshots/issuance (0 = legacy mode or lease not held).
 func (h *HAState) CurrentEpoch() int64 {

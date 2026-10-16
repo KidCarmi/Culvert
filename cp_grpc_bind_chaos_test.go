@@ -79,7 +79,7 @@ func cpChaosSetup(t *testing.T) func() []string {
 	var mu sync.Mutex
 	var fired []string
 	prevAlert := fireCPGRPCListenerAlert
-	fireCPGRPCListenerAlert = func(detail string) {
+	fireCPGRPCListenerAlert = func(detail string, _ uint64) {
 		mu.Lock()
 		fired = append(fired, detail)
 		mu.Unlock()

@@ -111,7 +111,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the transition still stands; a new `cp_address_list` diagnostics row reports
   the pending list until a background retry publishes it. An unreadable
   Control Plane TLS file now reports `tls_certificate` instead of the
-  bind-permission advice. A refused admin/promote
+  bind-permission advice. Address-list publishes now carry the current
+  fencing epoch, so Data Planes accept the new list after HA is enabled, and
+  they no longer clear the "config publish rejected" banner left by an
+  earlier rejected config change. A listener-down alert raised before the
+  webhooks loaded is dropped if the listener recovered first. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

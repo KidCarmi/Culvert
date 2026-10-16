@@ -448,6 +448,11 @@ type ConfigStore struct {
 	// operators via LastPublishError() (diagnose/health).
 	lastPublishErr string
 	lastPublishTS  string
+	// addrPublishErr/TS are the ADDRESS-publish rejection latch, kept apart
+	// from the full one above so neither kind's commit clears the other's
+	// (publishKind).
+	addrPublishErr string
+	addrPublishTS  string
 	// published is true once a VALID snapshot has been published at least once.
 	// It stays false if the CP's initial publish was rejected at commit — in
 	// which case s.snap is still the zero ConfigSnapshot and the cluster RPCs
@@ -596,51 +601,34 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	// — CPAddresses included — BEFORE reaching here, so it can predate a delayed
 	// CP activation that has since published the new address list. Once a
 	// source owns the list, a full publish carries the COMMITTED list instead;
-	// a legitimate change is applied by the reconcile below.
-	//
-	// The substitution happens BEFORE validation, and the commit happens only
-	// if the committed list is still the one substituted (Codex review of
-	// #1556): what is committed is exactly what passed the wire-size gate, so a
-	// near-limit snapshot can never be pushed past maxSnapshotWireBytes by a
-	// longer committed list. Validation runs outside the lock (a full marshal
-	// must not stall DP pollers); a lost race re-substitutes and re-validates.
-	var (
-		src func() []string
-		c   configCommit
-	)
-	for attempt := 0; ; attempt++ {
-		if attempt == cpAddrMergeAttempts {
-			// Never commit a payload that was not validated (CodeRabbit review of
-			// #1556): losing the race this many times in a row is reported
-			// through the ordinary rejection path, as UpdateCPAddressesFrom does.
-			return s.rejectPublish(fmt.Errorf("config publish lost the commit race against CP address list updates %d times in a row", cpAddrMergeAttempts))
-		}
-		s.mu.RLock()
-		src = s.cpAddrSource
-		owned := src != nil && s.published
-		committed := s.snap.CPAddresses
-		s.mu.RUnlock()
-		cand := snap
-		if owned {
-			cand.CPAddresses = committed
-		}
-		if err := validateSnapshotForPublish(cand); err != nil {
-			return s.rejectPublish(err)
-		}
-		if hook := configPublishBeforeCommit; hook != nil {
-			hook()
-		}
-		s.mu.Lock()
-		if owned && !slicesEqual(s.snap.CPAddresses, committed) {
-			s.mu.Unlock()
-			continue // the owned list changed after validation: re-substitute, re-validate
-		}
-		recordPublishedSnapshotSizes(cand) // for the utilization metrics (cheap; no per-scrape rebuild)
-		c = s.commitLocked(cand)           // exactly the payload validated above
-		s.mu.Unlock()
-		break
+	// a legitimate change is applied by the reconcile below. The substitution
+	// precedes validation and the commit re-checks the list, so what commits is
+	// exactly what passed the wire-size gate (Codex review of #1556).
+	_, err := s.commitPublish(publishPlan{
+		kind: publishFull,
+		build: func(cur committedView) (ConfigSnapshot, publishAct) {
+			cand := snap
+			if cur.ownsList() {
+				cand.CPAddresses = cur.snap.CPAddresses
+			}
+			return cand, publishCommit
+		},
+		stillValid: func(s *ConfigStore, cur committedView) bool {
+			return !cur.ownsList() || slicesEqual(s.snap.CPAddresses, cur.snap.CPAddresses)
+		},
+		beforeCommit: func() {
+			if hook := configPublishBeforeCommit; hook != nil {
+				hook()
+			}
+		},
+		exhausted: fmt.Errorf("config publish lost the commit race against CP address list updates %d times in a row", cpAddrMergeAttempts),
+	})
+	if err != nil {
+		return err
 	}
-	s.afterCommit(c)
+	s.mu.RLock()
+	src := s.cpAddrSource
+	s.mu.RUnlock()
 	if src != nil {
 		// Propagate an address change this publish was carrying. A failure is
 		// logged and alerted by rejectPublish and latched pending (with a
@@ -719,8 +707,12 @@ type configCommit struct {
 }
 
 // commitLocked stamps and installs snap as the published snapshot. Caller
-// holds s.mu (write) and has already validated snap.
-func (s *ConfigStore) commitLocked(snap ConfigSnapshot) configCommit {
+// holds s.mu (write) and has already validated snap. Called ONLY by
+// commitPublish (TestChaos71_Wall_OnlyCommitPublishCommits). It clears the
+// rejection latch of its OWN kind: an address-only commit carries none of a
+// rejected full publish's policy, so the fleet is still frozen on it (Codex
+// review of #1556).
+func (s *ConfigStore) commitLocked(kind publishKind, snap ConfigSnapshot) configCommit {
 	// Capture the pre-publish blocklist + version for the delta ring. oldHosts
 	// still references the outgoing snapshot's slice (safe — s.snap is replaced,
 	// not mutated in place).
@@ -732,11 +724,129 @@ func (s *ConfigStore) commitLocked(snap ConfigSnapshot) configCommit {
 	c.target, c.epoch = s.version, snap.Epoch
 	s.snap = snap
 	s.published = true
-	s.lastPublishErr = ""
-	s.lastPublishTS = ""
+	s.clearPublishErrLocked(kind)
 	s.persistVersionLocked()
 	c.subs = append([]chan struct{}{}, s.subs...)
 	return c
+}
+
+// publishKind names which publish path a commit or rejection belongs to. The
+// rejection latch is keyed by it: a full-publish rejection ("the fleet is
+// frozen on stale policy") is cleared only by a successful FULL publish, an
+// address-list rejection only by a successful address publish.
+type publishKind int
+
+const (
+	publishFull      publishKind = iota // Update: the whole config
+	publishAddresses                    // UpdateCPAddressesFrom: the CP address list only
+)
+
+// publishAct is a plan's verdict on one attempt.
+type publishAct int
+
+const (
+	publishCommit   publishAct = iota // validate and commit the candidate
+	publishUpToDate                   // the committed snapshot already says this
+	publishNotYet                     // nothing published yet: nothing to correct
+)
+
+// committedView is the committed state one publish attempt builds from, read
+// under s.mu.
+type committedView struct {
+	snap      ConfigSnapshot
+	version   int64
+	published bool
+	owned     bool // an active Control Plane owns the CP address list
+}
+
+func (v committedView) ownsList() bool { return v.owned && v.published }
+
+// publishPlan is the per-kind part of a publish; commitPublish is the rest.
+type publishPlan struct {
+	kind publishKind
+	// build derives the candidate from the committed view. Re-run on every
+	// attempt, after the view it builds from was read.
+	build func(cur committedView) (ConfigSnapshot, publishAct)
+	// stillValid runs under s.mu (write) right before the commit: false means
+	// the candidate was built from state that has since changed — rebuild.
+	stillValid   func(s *ConfigStore, cur committedView) bool
+	beforeCommit func() // test seam window between validation and commit
+	exhausted    error  // reported when every attempt lost the race
+}
+
+// publishFenceEpoch is the fencing epoch every publish is stamped with: the
+// node's CURRENT epoch, read lock-free (PublishedFenceEpoch) because the HA
+// topology writer publishes while holding HAState.mu. It reads the same
+// HAState the CP address list derives from (haTopologySource: globalHA in
+// production). Test seam.
+var publishFenceEpoch = func() int64 { return haTopologySource().PublishedFenceEpoch() }
+
+// commitPublish is the ONE way a snapshot is committed (CHAOS-71, Codex review
+// of #1556). Rounds 4, 5, 7 and 8 of that review each found the address-only
+// path skipping an invariant the full path kept; both now share this, so each
+// invariant holds for every commit by construction:
+//
+//   - Epoch is the CURRENT fencing epoch, stamped here — a DP that learned a
+//     new epoch from its heartbeat must never be handed a snapshot carrying the
+//     previous one (dpObserveEpoch would reject it).
+//   - The candidate is validated with the commit-time gates OUTSIDE the lock
+//     (a full marshal must not stall DP pollers) and committed only if
+//     plan.stillValid holds under it, so what commits is what was validated.
+//   - Version strictly increases (commitLocked), sizes are recorded under the
+//     same lock as the commit, and the rejection latch is keyed by kind.
+func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
+	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
+		s.mu.RLock()
+		cur := committedView{snap: s.snap, version: s.version, published: s.published, owned: s.cpAddrSource != nil}
+		s.mu.RUnlock()
+
+		epoch := publishFenceEpoch()
+		cand, act := p.build(cur)
+		if act == publishUpToDate && cur.snap.Epoch != epoch {
+			// Same content, stale stamp: restamp it (a promotion or a new grant
+			// changes the epoch without changing the list).
+			cand, act = cur.snap, publishCommit
+		}
+		switch act {
+		case publishNotYet:
+			return false, nil
+		case publishUpToDate:
+			s.mu.Lock()
+			s.clearPublishErrLocked(p.kind) // what this kind would publish is already committed
+			s.mu.Unlock()
+			return false, nil
+		}
+		cand.Epoch = epoch
+		if verr := validateSnapshotForPublish(cand); verr != nil {
+			return false, s.rejectPublish(p.kind, verr)
+		}
+		if p.beforeCommit != nil {
+			p.beforeCommit()
+		}
+
+		s.mu.Lock()
+		if !p.stillValid(s, cur) {
+			s.mu.Unlock()
+			continue // built from state that changed after validation: rebuild, revalidate
+		}
+		c := s.commitLocked(p.kind, cand)
+		recordPublishedSnapshotSizes(cand) // under the commit lock: the record matches the last commit
+		s.mu.Unlock()
+		s.afterCommit(c)
+		return true, nil
+	}
+	// Reported through the ordinary rejection path (logged, alerted, latched).
+	return false, s.rejectPublish(p.kind, p.exhausted)
+}
+
+// clearPublishErrLocked clears the rejection latch of one kind. Caller holds
+// s.mu (write).
+func (s *ConfigStore) clearPublishErrLocked(kind publishKind) {
+	if kind == publishFull {
+		s.lastPublishErr, s.lastPublishTS = "", ""
+		return
+	}
+	s.addrPublishErr, s.addrPublishTS = "", ""
 }
 
 // afterCommit records the blocklist delta and notifies subscribers OUTSIDE the
@@ -791,46 +901,43 @@ var cpAddrMergeBeforeCommit func()
 // gate rejection goes through rejectPublish (logged, alerted,
 // LastPublishError) and is RETURNED so activation can refuse to succeed.
 func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool, err error) {
-	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
-		s.mu.RLock()
-		base, ver, published := s.snap, s.version, s.published
-		s.mu.RUnlock()
-		addrs := build()
-		if !published || slicesEqual(base.CPAddresses, addrs) {
-			return false, nil
-		}
-		merged := base // shallow copy: published snapshots are never mutated in place
-		merged.CPAddresses = append([]string(nil), addrs...)
-		if verr := validateSnapshotForPublish(merged); verr != nil {
-			return false, s.rejectPublish(verr)
-		}
-		if hook := cpAddrMergeBeforeCommit; hook != nil {
-			hook()
-		}
-
-		s.mu.Lock()
-		if s.version != ver {
-			s.mu.Unlock()
-			continue // another publish committed in between: merge onto it instead
-		}
-		c := s.commitLocked(merged)
-		s.mu.Unlock()
-		recordPublishedSnapshotSizes(merged)
-		s.afterCommit(c)
-		return true, nil
-	}
-	// Reported through the ordinary rejection path (logged, alerted,
-	// LastPublishError), exactly as Update reports its own exhausted budget.
-	return false, s.rejectPublish(fmt.Errorf("%w %d times in a row", errCPAddrCommitRace, cpAddrMergeAttempts))
+	return s.commitPublish(publishPlan{
+		kind: publishAddresses,
+		build: func(cur committedView) (ConfigSnapshot, publishAct) {
+			if !cur.published {
+				return ConfigSnapshot{}, publishNotYet
+			}
+			addrs := build()
+			if slicesEqual(cur.snap.CPAddresses, addrs) {
+				return ConfigSnapshot{}, publishUpToDate
+			}
+			merged := cur.snap // shallow copy: published snapshots are never mutated in place
+			merged.CPAddresses = append([]string(nil), addrs...)
+			return merged, publishCommit
+		},
+		stillValid: func(s *ConfigStore, cur committedView) bool {
+			return s.version == cur.version // another publish committed in between: merge onto it instead
+		},
+		beforeCommit: func() {
+			if hook := cpAddrMergeBeforeCommit; hook != nil {
+				hook()
+			}
+		},
+		exhausted: fmt.Errorf("%w %d times in a row", errCPAddrCommitRace, cpAddrMergeAttempts),
+	})
 }
 
 // rejectPublish records a commit-time rejection (count OR byte gate): it does
 // NOT publish, stamps LastPublishError, logs, and fires the operator alert.
 // Returns err so callers can surface it inline too.
-func (s *ConfigStore) rejectPublish(err error) error {
+func (s *ConfigStore) rejectPublish(kind publishKind, err error) error {
 	s.mu.Lock()
-	s.lastPublishErr = err.Error()
-	s.lastPublishTS = time.Now().UTC().Format(time.RFC3339)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	if kind == publishFull {
+		s.lastPublishErr, s.lastPublishTS = err.Error(), ts
+	} else {
+		s.addrPublishErr, s.addrPublishTS = err.Error(), ts
+	}
 	curVer := s.version
 	s.mu.Unlock()
 	logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
@@ -898,10 +1005,17 @@ func (s *ConfigStore) ServableConfig() (ok bool, reason string) {
 // rejected at commit (over-cap), plus the timestamp — empty when the last
 // publish succeeded. Read-only; used by the diagnose/health surface so an
 // operator sees "publish rejected, fleet on stale config" as a named error.
+//
+// The two latches are separate (publishKind): the full one — the fleet is on
+// stale POLICY — wins; otherwise an address-list rejection is reported, since
+// the fleet's failover list is behind.
 func (s *ConfigStore) LastPublishError() (msg, ts string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.lastPublishErr, s.lastPublishTS
+	if s.lastPublishErr != "" {
+		return s.lastPublishErr, s.lastPublishTS
+	}
+	return s.addrPublishErr, s.addrPublishTS
 }
 
 // publishCurrentConfigSnapshot publishes the live config to the fleet. Returns

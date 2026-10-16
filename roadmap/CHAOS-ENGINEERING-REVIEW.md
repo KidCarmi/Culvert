@@ -8773,6 +8773,49 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Ninth review round — one commit path.** Rounds 4, 5, 7 and now 8 each
+  found the address-only publish (`UpdateCPAddressesFrom`) skipping an
+  invariant the full path kept. Codex's latest two:
+  - it kept the previous snapshot's fencing epoch, so after `EnableAsLeader`
+    took a new grant, a DP that learned the epoch on heartbeat rejected the
+    snapshot in `dpObserveEpoch`;
+  - `commitLocked` cleared the full-publish rejection latch on an address-only
+    commit, hiding the fleet-freeze banner while the fleet stayed on stale
+    policy.
+
+  Fixed structurally. Both paths are now `publishPlan`s handed to ONE function,
+  `commitPublish`, which builds from the committed view, stamps the CURRENT
+  fence epoch, validates outside the lock, re-checks the plan under it,
+  commits, and records sizes under the commit lock. The rejection latch is
+  keyed by `publishKind`: full-publish errors clear only on a full success,
+  address errors only on an address success. `LastPublishError` reports the
+  full latch first. An address publish whose list is unchanged but whose stamp
+  is stale (a promotion or a fresh grant) is restamped.
+
+  The epoch is read lock-free from `HAState.fenceEpoch`, a mirror of
+  `CurrentEpoch` written only by `syncFenceEpochLocked`, because the topology
+  writer publishes while holding `h.mu`.
+
+  Gates:
+  - `TestChaos71_EveryCommitPathKeepsTheCommitInvariants`: one table run
+    against both paths, covering epoch == the current fence epoch, version
+    strictly increasing, sizes recorded, and the other kind's latch kept;
+  - `TestChaos71_FullRejectionStaysVisibleAcrossAnAddressCommit`;
+  - `TestChaos71_EnableAsLeaderPublishesTheNewFenceEpoch`: a real fake-lease
+    grant through the real DP ratchet;
+  - `TestChaos71_FenceEpochMirrorFollowsTheLease`;
+  - the wall `TestChaos71_Wall_OnlyCommitPublishCommits` (`commitLocked` has
+    one caller, and the mirror has one writer).
+
+  **A queued listener-down page outlived its episode.** The startup queue
+  now carries a per-alert validity predicate (`deferStartupAlertWhile`),
+  re-checked at the flush. A nil predicate means a fact and is always
+  delivered. The CP producer numbers its failure episodes and queues with
+  `cpGRPCEpisodeOpen(episode)`, so a bind, a refused activation, or shutdown
+  before the webhooks load drops the stale page.
+  `TestChaos71_QueuedListenerDownIsDroppedOnceTheEpisodeRecovered` and
+  `TestChaos71_StartupAlertQueueRevalidatesEveryQueuedAlert` gate it. Ten
+  mutations each fail a gate.
 * **Eighth review round.** (a) **A failed topology republish was silent.**
   `setTopologyLocked` discarded `reconcileCPAddressesFrom`'s error, so a list
   that would push a near-budget snapshot past `snapshotWireBudget`, or that

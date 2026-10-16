@@ -198,6 +198,13 @@ type cpGRPCListenerHealth struct {
 	logAt      time.Time
 	suppressed int64
 
+	// episode numbers failure episodes: incremented when one BEGINS
+	// (firstFailure goes from zero to set); an observed bind ends it. A
+	// listener-down page queued before the webhooks load carries its episode,
+	// and the startup flush drops it if that episode has since ended
+	// (cpGRPCEpisodeOpen) — no late "down" page for a listener that is up.
+	episode uint64
+
 	// alerted is a fire-once latch per UNAVAILABILITY episode: one page when the
 	// control plane goes persistently unbindable, not one per retry. Cleared by
 	// an observed bind, so a second incident pages again.
@@ -263,16 +270,39 @@ type cpGRPCListenerSnapshot struct {
 // latches are fire-once — a threshold or terminal page raised before the load
 // would latch and be lost. Until the startup flush it queues through
 // deferStartupAlert, like every other startup-capable producer.
-var fireCPGRPCListenerAlert = func(detail string) {
+//
+// A queued page is delivered at the flush only while its episode is still
+// open (deferStartupAlertWhile + cpGRPCEpisodeOpen): a listener that recovered
+// before the webhooks loaded is not paged as down (Codex review of #1556).
+var fireCPGRPCListenerAlert = func(detail string, episode uint64) {
 	payload := AlertPayload{Detail: detail, Source: "control_plane"}
 	if !startupAlertsFlushed() {
-		deferStartupAlert("cp_grpc_listener_down", payload)
+		deferStartupAlertWhile("cp_grpc_listener_down", payload, func() bool { return cpGRPCEpisodeOpen(episode) })
 		return
 	}
 	if !globalAlertStore.HasSubscriber("cp_grpc_listener_down") {
 		return
 	}
 	go fireAlert("cp_grpc_listener_down", payload)
+}
+
+// cpGRPCBeginEpisodeLocked starts a failure episode if none is open. Caller
+// holds cpGRPCListener.mu.
+func cpGRPCBeginEpisodeLocked(now time.Time) {
+	if cpGRPCListener.firstFailure.IsZero() {
+		cpGRPCListener.firstFailure = now
+		cpGRPCListener.episode++
+	}
+}
+
+// cpGRPCEpisodeOpen reports whether failure episode ep is still the current,
+// unrecovered one on a node that is still a configured, running Control
+// Plane — the validity test for a queued listener-down page.
+func cpGRPCEpisodeOpen(ep uint64) bool {
+	cpGRPCListener.mu.Lock()
+	defer cpGRPCListener.mu.Unlock()
+	l := &cpGRPCListener
+	return l.configured && !l.stopped && l.episode == ep && !l.firstFailure.IsZero()
 }
 
 // noteCPGRPCConfigured records that a Control Plane listener was requested.
@@ -484,9 +514,7 @@ func noteCPGRPCListenFailure(reason string, backoff time.Duration, now time.Time
 	cpGRPCListener.lastFailure = now
 	cpGRPCListener.lastReason = reason
 	cpGRPCListener.backoff = backoff
-	if cpGRPCListener.firstFailure.IsZero() {
-		cpGRPCListener.firstFailure = now
-	}
+	cpGRPCBeginEpisodeLocked(now)
 
 	if cpGRPCListener.logAt.IsZero() || now.Sub(cpGRPCListener.logAt) >= cpGRPCBindLogInterval {
 		cpGRPCListener.logAt = now
@@ -503,6 +531,7 @@ func noteCPGRPCListenFailure(reason string, backoff time.Duration, now time.Time
 	}
 	failures := cpGRPCListener.consecutive
 	everServed := cpGRPCListener.everServed
+	episode := cpGRPCListener.episode
 	cpGRPCListener.mu.Unlock()
 
 	if alertNow {
@@ -518,7 +547,7 @@ func noteCPGRPCListenFailure(reason string, backoff time.Duration, now time.Time
 				"Config distribution, node enrollment and certificate renewal are unavailable fleet-wide. "+
 				"Enrolled Data Planes continue serving their last-good config. "+
 				"This node's own proxy data plane and admin UI are unaffected. The listener keeps retrying.",
-			posture, cpGRPCUnavailableAfter, failures, reason))
+			posture, cpGRPCUnavailableAfter, failures, reason), episode)
 	}
 	return shouldLog, failingFor
 }
@@ -583,13 +612,12 @@ func noteCPGRPCSupervisorDown(reason string) {
 	cpGRPCListener.serving = false
 	cpGRPCListener.supervisorDown = true
 	cpGRPCListener.lastReason = reason
-	if cpGRPCListener.firstFailure.IsZero() {
-		cpGRPCListener.firstFailure = cpGRPCHealthNow()
-	}
+	cpGRPCBeginEpisodeLocked(cpGRPCHealthNow())
 	// Terminal escalation BYPASSES the recoverable latch (see terminalAlerted).
 	alertNow := !cpGRPCListener.terminalAlerted
 	cpGRPCListener.terminalAlerted = true
 	cpGRPCListener.alerted = true
+	episode := cpGRPCListener.episode
 	cpGRPCListener.mu.Unlock()
 
 	if alertNow {
@@ -597,7 +625,7 @@ func noteCPGRPCSupervisorDown(reason string) {
 			"Control Plane gRPC listener supervisor stopped (reason: %s) and will NOT rebind on its own. "+
 				"Config distribution, node enrollment and certificate renewal are unavailable fleet-wide until this node is restarted. "+
 				"Enrolled Data Planes continue serving their last-good config. "+
-				"This node's own proxy data plane and admin UI are unaffected.", reason))
+				"This node's own proxy data plane and admin UI are unaffected.", reason), episode)
 	}
 }
 

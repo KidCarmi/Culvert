@@ -86,7 +86,14 @@ type HAState struct {
 	// ── Fencing lease (ADR-0005 S2; nil provider = legacy manual mode) ──
 	lease            halease.Provider
 	leaseCandidateID string
-	leaseEpoch       int64         // epoch of our current grant; 0 = not held
+	leaseEpoch       int64 // epoch of our current grant; 0 = not held
+	// fenceEpoch mirrors CurrentEpoch (lease == nil ? 0 : leaseEpoch) for
+	// LOCK-FREE readers: a config publish stamps it at commit, and the HA
+	// topology writer publishes while holding h.mu, so the stamp must not
+	// re-enter it. Written only by syncFenceEpochLocked, under h.mu, in the
+	// same critical section as the fields it mirrors
+	// (TestChaos71_Wall_FenceEpochHasOneWriter).
+	fenceEpoch       atomic.Int64
 	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
 	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
 	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running

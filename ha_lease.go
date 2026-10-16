@@ -64,6 +64,7 @@ func (h *HAState) SetLeaseProvider(p halease.Provider, candidateID string) {
 	h.mu.Lock()
 	h.lease = p
 	h.leaseCandidateID = candidateID
+	h.syncFenceEpochLocked()
 	h.mu.Unlock()
 }
 
@@ -124,7 +125,7 @@ func (h *HAState) acquireLeaseAttempt(reason string) (granted bool, st halease.S
 		return false, st, nil
 	}
 	h.mu.Lock()
-	h.leaseEpoch = st.Epoch
+	h.setLeaseEpochLocked(st.Epoch)
 	h.leaseConfirmedAt = time.Now()
 	h.leaseValidFor = st.ValidFor
 	h.mu.Unlock()
@@ -337,7 +338,7 @@ func (h *HAState) selfFence(reason string) {
 	h.setTopologyLocked("standby", h.peerAddr, haTransitionSelfFence)
 	h.since = time.Now()
 	fencedEpoch := h.leaseEpoch // capture the epoch being fenced before it is zeroed
-	h.leaseEpoch = 0
+	h.setLeaseEpochLocked(0)
 	// CLOSE the keepalive stop channel rather than just nil it: when the
 	// loop's own renew round fenced, it exits by returning anyway — but a
 	// fence driven from OUTSIDE the loop (tests exercising leaseRenewOnce,

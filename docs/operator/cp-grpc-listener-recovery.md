@@ -221,6 +221,11 @@ traffic outage this whole change exists to prevent.
 
 If you *do* want such nodes ejected, call `/ready?strict=1`.
 
+A `cp_grpc_listener_down` page raised during boot, before the alert webhooks
+load, is held until they do. If the listener binds in the meantime, the held
+page is **dropped**, not delivered late, so you are not paged for a listener
+that is already serving. The log records the drop.
+
 ### You will need to subscribe to the new alert event
 
 `cp_grpc_listener_down` is a **new** event name. Existing alert webhooks will not

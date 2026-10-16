@@ -169,7 +169,8 @@ func TestChaos71_ListenerAlertBeforeWebhooksLoadIsQueued(t *testing.T) {
 		startupAlertFire = prevFire
 	})
 
-	cpGRPCProductionAlert("supervisor stopped (reason: role_conflict)")
+	ep := cpGRPCOpenEpisodeForTest(t)
+	cpGRPCProductionAlert("supervisor stopped (reason: role_conflict)", ep)
 	if len(delivered) != 0 {
 		t.Fatal("the alert was delivered before the webhooks loaded")
 	}
@@ -182,5 +183,96 @@ func TestChaos71_ListenerAlertBeforeWebhooksLoadIsQueued(t *testing.T) {
 	flushStartupAlerts()
 	if len(delivered) != 1 || !strings.HasPrefix(delivered[0], "cp_grpc_listener_down: ") {
 		t.Errorf("the queued alert was not delivered at the flush: %v", delivered)
+	}
+}
+
+// cpGRPCOpenEpisodeForTest puts the listener plane into an open failure
+// episode on a configured Control Plane and returns its number.
+func cpGRPCOpenEpisodeForTest(t *testing.T) uint64 {
+	t.Helper()
+	resetCPGRPCListenerHealthForTest()
+	t.Cleanup(resetCPGRPCListenerHealthForTest)
+	noteCPGRPCConfigured("127.0.0.1:50051")
+	cpGRPCEverFailed.Store(true) // as both production failure recorders do
+	cpGRPCListener.mu.Lock()
+	cpGRPCBeginEpisodeLocked(time.Now())
+	ep := cpGRPCListener.episode
+	cpGRPCListener.mu.Unlock()
+	return ep
+}
+
+// cpIsolateStartupAlerts gives the test an unflushed queue and a recording
+// delivery sink.
+func cpIsolateStartupAlerts(t *testing.T) *[]string {
+	t.Helper()
+	startupAlertMu.Lock()
+	prevQueue, prevFlushed := startupAlertQueue, startupAlertFlushed
+	startupAlertQueue, startupAlertFlushed = nil, false
+	startupAlertMu.Unlock()
+	delivered := &[]string{}
+	prevFire := startupAlertFire
+	startupAlertFire = func(event string, _ AlertPayload) { *delivered = append(*delivered, event) }
+	t.Cleanup(func() {
+		startupAlertMu.Lock()
+		startupAlertQueue, startupAlertFlushed = prevQueue, prevFlushed
+		startupAlertMu.Unlock()
+		startupAlertFire = prevFire
+	})
+	return delivered
+}
+
+// TestChaos71_QueuedListenerDownIsDroppedOnceTheEpisodeRecovered — Codex P2
+// 4296091792. A listener-down page queued before the webhooks load is
+// delivered only if its episode is still open at the flush: a bind in between
+// (or the node leaving the CP role) drops it, and an old episode's page is not
+// revived by a NEW episode, which pages for itself.
+func TestChaos71_QueuedListenerDownIsDroppedOnceTheEpisodeRecovered(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		between func()
+		want    int
+	}{
+		{"still_down_is_delivered", func() {}, 1},
+		{"recovered_by_a_bind_is_dropped", func() { noteCPGRPCBound() }, 0},
+		{"node_left_the_cp_role_is_dropped", noteCPGRPCActivationRejected, 0},
+		{"recovered_then_failed_again_is_dropped", func() {
+			noteCPGRPCBound() // the queued page's episode ended
+			cpGRPCListener.mu.Lock()
+			cpGRPCBeginEpisodeLocked(time.Now()) // a NEW episode
+			cpGRPCListener.mu.Unlock()
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			delivered := cpIsolateStartupAlerts(t)
+			ep := cpGRPCOpenEpisodeForTest(t)
+			cpGRPCProductionAlert("listener down", ep)
+			tc.between()
+			flushStartupAlerts()
+			if len(*delivered) != tc.want {
+				t.Errorf("delivered %d queued listener-down pages, want %d (%v)", len(*delivered), tc.want, *delivered)
+			}
+		})
+	}
+}
+
+// TestChaos71_StartupAlertQueueRevalidatesEveryQueuedAlert pins the GENERIC
+// rule in deferStartupAlertWhile: each queued alert carries its own validity
+// predicate, re-checked at the flush; a nil predicate (a fact) always
+// delivers; after the flush an alert fires at once.
+func TestChaos71_StartupAlertQueueRevalidatesEveryQueuedAlert(t *testing.T) {
+	delivered := cpIsolateStartupAlerts(t)
+	deferStartupAlertWhile("a_recovered", AlertPayload{}, func() bool { return false })
+	deferStartupAlertWhile("b_still_true", AlertPayload{}, func() bool { return true })
+	deferStartupAlert("c_fact", AlertPayload{})
+	if len(*delivered) != 0 {
+		t.Fatalf("delivered before the flush: %v", *delivered)
+	}
+	flushStartupAlerts()
+	if got := strings.Join(*delivered, ","); got != "b_still_true,c_fact" {
+		t.Errorf("flush delivered %q, want b_still_true,c_fact — a cleared condition must be dropped, a fact kept", got)
+	}
+	deferStartupAlertWhile("d_after_flush", AlertPayload{}, func() bool { return false })
+	if last := (*delivered)[len(*delivered)-1]; last != "d_after_flush" {
+		t.Errorf("after the flush an alert must fire at once (got last %q)", last)
 	}
 }

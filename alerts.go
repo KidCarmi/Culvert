@@ -128,14 +128,32 @@ var (
 type queuedStartupAlert struct {
 	event   string
 	payload AlertPayload
+	// stillValid, when set, is re-checked at the flush. A queued alert whose
+	// condition has cleared since it was raised (its episode recovered before
+	// the webhooks loaded) is DROPPED rather than delivered late as a false
+	// page (Codex review of #1556). Nil means the alert reports a FACT that
+	// stays true once it happened (a file was quarantined, a load failed at
+	// boot) and is always delivered.
+	stillValid func() bool
 }
 
 // deferStartupAlert fires event immediately when the startup flush has
-// already happened, and queues it otherwise. Safe from any init order.
+// already happened, and queues it otherwise. Safe from any init order. For an
+// alert about a condition that can RECOVER, use deferStartupAlertWhile.
 func deferStartupAlert(event string, payload AlertPayload) {
+	deferStartupAlertWhile(event, payload, nil)
+}
+
+// deferStartupAlertWhile is deferStartupAlert for a recoverable condition:
+// if queued, the alert is delivered at the flush only while stillValid still
+// reports the condition (typically: the same episode is still open). It is
+// called without startupAlertMu held, so it may take the producer's own lock.
+// After the flush the alert fires at once and stillValid is not consulted —
+// the producer raised it about the present.
+func deferStartupAlertWhile(event string, payload AlertPayload, stillValid func() bool) {
 	startupAlertMu.Lock()
 	if !startupAlertFlushed {
-		startupAlertQueue = append(startupAlertQueue, queuedStartupAlert{event, payload})
+		startupAlertQueue = append(startupAlertQueue, queuedStartupAlert{event: event, payload: payload, stillValid: stillValid})
 		startupAlertMu.Unlock()
 		return
 	}
@@ -162,6 +180,10 @@ func flushStartupAlerts() {
 	startupAlertFlushed = true
 	startupAlertMu.Unlock()
 	for _, q := range queued {
+		if q.stillValid != nil && !q.stillValid() {
+			logger.Printf("Alerts: dropping queued startup alert %q — its condition cleared before the alert webhooks loaded", q.event)
+			continue
+		}
 		startupAlertFire(q.event, q.payload)
 	}
 }
