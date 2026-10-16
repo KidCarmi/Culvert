@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -139,4 +140,45 @@ func TestOrder_IdentityIngressAttributionIsScopedToOwnRequest(t *testing.T) {
 		t.Fatalf("spoofed request reached upstream %d times, want 0", cb.hitCount())
 	}
 	assertNoIdentityAttributionSince(t, u.Host, prev)
+}
+
+// #1527 (seed 1792141333146841338): TestAPISyslogConfig_Post_EmptyAddr's
+// best-effort save was still in flight when
+// TestAdminSettings_LegacyMigrationSealsUserinfo swapped the settings path to
+// its fixture. The detached SaveAdminSettings read the NEW path and wrote a
+// full snapshot (current SaaS schema, the live pool's empty v2 document) over
+// the legacy fixture before the load, so no migration ran and the file held
+// "Entries:[]". swapAdminSettingsPath must drain pending saves before it hands
+// the path over: with one held open here, a draining helper cannot return.
+func TestOrder_SwapAdminSettingsPathDrainsPendingSaves(t *testing.T) {
+	release := make(chan struct{})
+	adminSettingsSaveWG.Add(1)
+	go func() {
+		defer adminSettingsSaveWG.Done()
+		<-release
+	}()
+	released := false
+	unblock := func() {
+		if !released {
+			released = true
+			close(release)
+		}
+	}
+	t.Cleanup(unblock)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		swapAdminSettingsPath(t, filepath.Join(t.TempDir(), "admin_settings.json"))
+	}()
+	for i := 0; i < 200000; i++ {
+		runtime.Gosched()
+	}
+	select {
+	case <-done:
+		t.Fatal("swapAdminSettingsPath returned while a best-effort save was still pending; that save reads the new path and can overwrite the test's fixture")
+	default:
+	}
+	unblock()
+	<-done
 }
