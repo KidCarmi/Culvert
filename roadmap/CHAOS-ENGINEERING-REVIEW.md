@@ -8709,12 +8709,11 @@ required before merge; each is now in the tree.
   `globalHA.Stop`. A refused runtime activation calls
   `noteCPGRPCActivationRejected` (unconfigured again, counters kept). Gates in
   `cp_grpc_activation_chaos_test.go`, one per face, each verified failing with
-  its guard removed. Residual, recorded: every publisher in the tree builds its
-  snapshot OUTSIDE the store lock and commits last-writer-wins, so an admin
-  snapshot built before the role commit and committed after the address merge
-  can still drop the address until the next publish — pre-existing for all
-  publishers and narrowed here (any build after the role commit carries it);
-  serialising build+commit for every publisher is a broader refactor.
+  its guard removed. (The residual this round first recorded — a full
+  publish built before the role commit and committed after the address merge
+  dropping the address — is closed in the fourth round by making the CP
+  address list owned by `UpdateCPAddressesFrom`; see (d) below. Other snapshot
+  fields remain last-writer-wins across publishers, as before this PR.)
 * **One role arbiter (Codex review of `ac965a0`).** The mirror of (b): with CP
   and DP wiring both present and the first CP bind failing, the async retry
   could claim the role BEFORE boot reached `startDataPlane`, whose UNLOCKED
