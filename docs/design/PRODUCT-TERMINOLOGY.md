@@ -38,8 +38,9 @@ is listed under "replaces".
 | **Traffic** | The request stream (Monitor section) | "Live Feed", "Live Request Log", "Recent Requests" → "Traffic" (nav), "Live traffic" (panel), "Recent requests" (dashboard card) |
 | **Audit Log** | Admin configuration-change history (`/api/audit`) | never mix with request logs |
 | **Configuration versions** | Automatic config snapshots + rollback (`/api/config/versions`) | "Config Versions" ok in dense UI |
-| **Update** | Day-2 software upgrade, performed by the host Maintenance Agent and driven from Release management (`/api/releases*`). The legacy Docker `updater` sidecar and its `/api/update/*` endpoints no longer exist | do not surface "self-update"; say **Release** for the signed catalog and **Upgrade** for applying one |
-| **Release** | Signed-catalog release management (`/api/releases*`) | keep distinct from Update until the M3 "Software" merge |
+| **Update** | Retired term. It named the legacy Docker self-update path; the `updater` sidecar and its `/api/update/*` endpoints no longer exist | do not use it for a current surface, and do not surface "self-update"; say **Release** for the signed catalog and **Upgrade** for applying one |
+| **Upgrade** | Applying a release to a node: dispatched from Release management (the console action is **Dispatch**) and performed by the host Maintenance Agent | replaces "Update" / "self-update" |
+| **Release** | Signed-catalog release management (`/api/releases*`) | keep distinct from Upgrade (applying a release) until the M3 "Software" merge |
 | **Administrator** | A console account (admin/operator/viewer role) | "Users & Roles" → "Administrators" (avoids collision with proxy users/identities) |
 | **Identity** | An authenticated proxy user (from IdP/local auth; `identity.go`) | never "user" alone when it could mean console account |
 | **Inspection** | TLS MITM (SSL inspect) | "SSL inspection" acceptable; be consistent per screen |
