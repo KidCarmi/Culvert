@@ -249,10 +249,13 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    `culvert_cdr_fail_open_total`/`_fail_closed_total` and emits no per-request
    log line or request-log event — it is silent at the request level. The only way
    to notice it is happening is the pool/health surfaces themselves:
-   `GET /api/cdr/health`, `culvert_cdr_instance_healthy`, and the per-instance
-   `culvert_cdr_pool_breaker_state` (see **Multi-instance pool** below). A
-   deployment relying on `closed` for a hard security guarantee must monitor
-   these and alert on "no healthy instance" as its own outage condition —
+   `GET /api/cdr/health` and the per-instance `culvert_cdr_pool_*` series,
+   including `culvert_cdr_pool_breaker_state` (see **Multi-instance pool**
+   below). The aggregate `culvert_cdr_instance_healthy` is **not** enough on
+   its own: it is not reset when the pool becomes empty, so it can read `1`
+   with no client at all. A deployment relying on `closed` for a hard
+   security guarantee must monitor these and alert on both "no healthy
+   instance" and "no pool member series" as outage conditions —
    `fail_mode=closed` alone will **not** block traffic during a total Sluice
    outage.
 2. **A live RPC call fails**, once a client was actually reached:
@@ -278,10 +281,17 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    that SMALLER cap regardless of profile, and a file below the documented
    `cdr.max_file_size_mb` ceiling is silently delivered unsanitized —
    including under `fail_mode=closed` (this is the client-side oversize
-   skip, gate 1 above, which `fail_mode` never governs). Check
-   `GET /api/cdr/config`'s effective cap fields, or the `culvert_cdr_pool_*`
-   surfaces, against what your Sluice deployment advertises per profile if
-   file sizes near the documented limit behave unexpectedly. See
+   skip, gate 1 above, which `fail_mode` never governs). Neither
+   `GET /api/cdr/config` (it returns only the configured `maxFileSizeMB`,
+   where 0 means the 50 MiB default) nor the `culvert_cdr_pool_*` metrics
+   (health and breaker state only) expose the effective cap. The value
+   Culvert applies comes from Sluice's own `Health` response, which
+   `GET /api/cdr/health` returns as `profiles[].maxFileSizeBytes`: the
+   **first** entry's value is the one that tightens the gate. That endpoint
+   shows one cached `Health` response, not one per instance, so in a
+   multi-instance pool check each Sluice's profile order and caps on the
+   Sluice side as well. Compare it with `maxFileSizeMB` if file sizes near
+   the documented limit behave unexpectedly. See
    `cdr_proxy_test.go`'s `TestSafeCDRSanitize_ProfileCapTightensGate` /
    `_ProfileCapLooserThanConfigDoesNotRelax` for the exact behavior.
 
@@ -433,7 +443,19 @@ behavior** above; this is *not* governed by `fail_mode`.
 Two observability tiers exist. `culvert_cdr_instance_healthy` and
 `culvert_cdr_queue_depth` (from the 15-second background health poll) are
 **pool-wide aggregates**: `instance_healthy` is 1 when *at least one*
-enrolled instance's most recent probe succeeded, and `queue_depth` is the
+enrolled instance's most recent probe succeeded **in a round that had
+members to probe**. It is **not** reset when the pool becomes empty: a
+runtime disable (`shutdownCDRClient`) or deleting the last instance leaves
+the poll's zero-member branch (`probeCDRHealth` → `clearCDRHealth`) clearing
+only the cached `Health` snapshot, so the gauge (and the `liveHealthy`
+field derived from it) can stay `1` indefinitely while no client exists and
+every file bypasses CDR, even under `fail_mode=closed`. Do not alert on
+`instance_healthy` alone. Treat an empty pool as its own outage signal:
+the `culvert_cdr_pool_*{instance}` series disappear entirely when the pool
+is empty (alert on their absence, for example
+`absent(culvert_cdr_pool_instance_healthy)` on a node where CDR should be
+on), and `GET /api/cdr/health` answers `503 no active CDR client` once
+there is neither a cached snapshot nor a client. `queue_depth` is the
 *minimum* Sluice-reported queue depth across the currently-healthy
 instances at the LAST round that had one — `applyAggregateHealth` only
 overwrites the gauge when that round found a healthy member, and the
