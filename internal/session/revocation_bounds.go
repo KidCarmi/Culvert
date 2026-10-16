@@ -86,6 +86,10 @@ import (
 // against the live Encode rather than trusting this paragraph.
 const MaxRevocationTokenLen = 8192
 
+// revocationExpirySkew tolerates a peer whose clock runs ahead of ours when an
+// untrusted entry's expiry is bounded by MaxSessionLifetime.
+const revocationExpirySkew = time.Hour
+
 // MaxRevocationEntries caps how many entries an untrusted origin may add. A
 // local, MAC-verified revocation is admitted past it (see the header: refusing
 // one would resurrect a session an operator deliberately killed).
@@ -120,6 +124,12 @@ const (
 	RevokeOversize RevokeReason = "oversize"
 	// RevokeCapacity — untrusted origin only: the entry cap is full.
 	RevokeCapacity RevokeReason = "capacity"
+	// RevokeFarFuture — untrusted origin only: the expiry lies further ahead
+	// than any session this appliance can issue (MaxSessionLifetime plus clock
+	// skew). Such an entry is never reclaimed by the sweeper until then, so
+	// enough of them would fill MaxRevocationEntries and lock out genuine
+	// remote revocations.
+	RevokeFarFuture RevokeReason = "far_future"
 )
 
 // refusal counters, by reason. Read through Refused.
@@ -129,6 +139,7 @@ var revokeRefusals struct {
 	expired   atomic.Int64
 	oversize  atomic.Int64
 	capacity  atomic.Int64
+	farFuture atomic.Int64
 }
 
 func noteRefusal(reason RevokeReason) {
@@ -143,6 +154,8 @@ func noteRefusal(reason RevokeReason) {
 		revokeRefusals.oversize.Add(1)
 	case RevokeCapacity:
 		revokeRefusals.capacity.Add(1)
+	case RevokeFarFuture:
+		revokeRefusals.farFuture.Add(1)
 	}
 }
 
@@ -161,6 +174,8 @@ func Refused(reason RevokeReason) int64 {
 		return revokeRefusals.oversize.Load()
 	case RevokeCapacity:
 		return revokeRefusals.capacity.Load()
+	case RevokeFarFuture:
+		return revokeRefusals.farFuture.Load()
 	}
 	return 0
 }
@@ -172,6 +187,7 @@ func ResetRefusalCountersForTest() {
 	revokeRefusals.expired.Store(0)
 	revokeRefusals.oversize.Store(0)
 	revokeRefusals.capacity.Store(0)
+	revokeRefusals.farFuture.Store(0)
 }
 
 // RevokeVerified records a revocation for a cookie value this appliance
@@ -259,13 +275,27 @@ func (r *RevocationList) sweepLocked(now time.Time) {
 // admitUntrustedLocked decides whether an entry from an untrusted origin
 // (cluster gossip, the persistence file) may be recorded. Caller holds r.mu
 // and must have swept first, so the cap is measured against LIVE entries.
-func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time) bool {
-	if len(e.Token) > MaxRevocationTokenLen {
+//
+// persisted marks the on-disk revocations file. There the key-size bound is
+// waived for an entry that is session-shaped (see persistedSessionShaped):
+// RevokeVerified admits a MAC-verified session of ANY size and SaveRevocations
+// writes it, so bounding it on reload silently resurrected a revoked large
+// cookie after a restart (Codex P1, PR #1591). Gossip keeps the bound.
+func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time, persisted bool) bool {
+	if len(e.Token) > MaxRevocationTokenLen && !(persisted && persistedSessionShaped(e)) {
 		noteRefusal(RevokeOversize)
 		return false
 	}
-	if !now.Before(time.Unix(e.Expiry, 0)) {
+	exp := time.Unix(e.Expiry, 0)
+	if !now.Before(exp) {
 		return false // already expired; not a refusal worth counting
+	}
+	// No genuine session outlives MaxSessionLifetime, so an untrusted expiry
+	// beyond it (plus skew) is refused: it would otherwise pin an entry the
+	// sweeper cannot reclaim and, in volume, fill the cap (Codex P1, PR #1591).
+	if exp.After(now.Add(MaxSessionLifetime + revocationExpirySkew)) {
+		noteRefusal(RevokeFarFuture)
+		return false
 	}
 	if _, exists := r.tokens[e.Token]; exists {
 		return false
@@ -275,6 +305,27 @@ func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time) 
 		return false
 	}
 	return true
+}
+
+// persistedSessionShaped reports whether a persisted entry's key decodes as a
+// Session payload whose own expiry is the one recorded beside it — the shape
+// RevokeVerified writes for a MAC-verified session. It is the waiver for the
+// key-size bound on reload only. It is not proof of provenance (the file
+// carries no MAC), but no NEW unverified entry can reach the file any more:
+// the local path verifies the MAC and the gossip path keeps the size bound.
+// What it can still admit is an oversized, session-shaped residue written by a
+// pre-CHAOS-73 build, and the MaxSessionLifetime expiry bound above sweeps
+// that within one session lifetime.
+func persistedSessionShaped(e RevocationEntry) bool {
+	payload, err := base64.RawURLEncoding.DecodeString(e.Token)
+	if err != nil {
+		return false
+	}
+	var s Session
+	if err := json.Unmarshal(payload, &s); err != nil {
+		return false
+	}
+	return s.Exp == e.Expiry
 }
 
 // Tracked returns the number of revocation entries currently held.

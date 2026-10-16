@@ -735,3 +735,82 @@ func TestChaos73_WallRunbookLogFieldsMatchTheEmitter(t *testing.T) {
 		}
 	}
 }
+
+// A MAC-verified revocation of a LARGE genuine cookie is admitted past the key
+// bound and persisted; it must still be admitted when the file is reloaded,
+// or a restart with the same signing key resurrects the revoked session
+// (Codex P1, PR #1591).
+func TestChaos73_ControlLargeVerifiedRevocationSurvivesReload(t *testing.T) {
+	chaos73Setup(t)
+	session.SetRevocationsPath(filepath.Join(t.TempDir(), "revocations.json"))
+	groups := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
+		groups = append(groups, fmt.Sprintf("CN=group-%04d,OU=Groups,DC=corp,DC=example,DC=com", i))
+	}
+	cookie := genuineCookie(t, "big-groups-reload", time.Hour, groups)
+	if dot := strings.LastIndex(cookie, "."); dot <= session.MaxRevocationTokenLen {
+		t.Fatalf("setup: payload is %d bytes, not above the %d bound — this control is vacuous", dot, session.MaxRevocationTokenLen)
+	}
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+
+	// Simulate the restart: an empty list reloading the persisted file.
+	session.Revoked.SwapForTest() // restored by chaos73Setup's cleanup
+	if err := session.Revoked.LoadRevocations(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := session.Revoked.Tracked(); got != 1 {
+		t.Fatalf("after reload entries = %d; want 1 — the large revocation was dropped on restart", got)
+	}
+	if _, err := session.Decode(cookie); err == nil {
+		t.Error("the revoked large cookie decodes again after a restart")
+	}
+
+	// CONTROL: gossip keeps the bound for the very same entry.
+	entries := session.Revoked.ExportRevocations()
+	session.Revoked.SwapForTest()
+	before := session.Refused(session.RevokeOversize)
+	if added := session.Revoked.MergeRevocations(entries); added != 0 {
+		t.Errorf("gossip admitted %d oversized entries; the remote path must keep the key bound", added)
+	}
+	if session.Refused(session.RevokeOversize) <= before {
+		t.Error("control: the gossip refusal was not counted as oversize")
+	}
+}
+
+// An untrusted entry may not claim an expiry no genuine session can have:
+// such an entry is never swept until then, and enough of them fill the cap
+// and lock out genuine remote revocations (Codex P1, PR #1591).
+func TestChaos73_DefectRemoteFarFutureExpiryIsRefused(t *testing.T) {
+	chaos73Setup(t)
+	far := time.Now().Add(session.MaxSessionLifetime + 2*time.Hour).Unix()
+	near := time.Now().Add(session.MaxSessionLifetime).Unix()
+	added := session.Revoked.MergeRevocations([]session.RevocationEntry{
+		{Token: "far-future", Expiry: far},
+		{Token: "within-lifetime", Expiry: near},
+	})
+	if added != 1 {
+		t.Fatalf("merged %d entries; want 1 (only the within-lifetime one)", added)
+	}
+	if got := session.Refused(session.RevokeFarFuture); got != 1 {
+		t.Errorf("far_future refusals = %d; want 1", got)
+	}
+}
+
+// The Control Plane's retained slice must not keep a backing array sized by
+// the peer's request: the per-node cap bounds memory, not just length.
+func TestChaos73_DefectControlPlaneRetainedCapacityIsBounded(t *testing.T) {
+	prevDrops := clusterRevocationDrops.Load()
+	t.Cleanup(func() { clusterRevocationDrops.Store(prevDrops) })
+	agg := &revocationAggregator{perNode: map[string][]RevocationEntry{}}
+	exp := time.Now().Add(time.Hour).Unix()
+	big := make([]RevocationEntry, maxRevocationsPerNode*4)
+	for i := range big {
+		big[i] = RevocationEntry{Token: fmt.Sprintf("t%06d", i), Expiry: exp}
+	}
+	agg.Update("dp-1", big)
+	if got := cap(agg.perNode["dp-1"]); got > maxRevocationsPerNode {
+		t.Fatalf("retained capacity = %d; want at most %d", got, maxRevocationsPerNode)
+	}
+}

@@ -223,13 +223,19 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 // is swept first so the cap is measured against LIVE entries rather than
 // against expired ones nobody has read since they died.
 func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
+	return r.mergeUntrusted(entries, false)
+}
+
+// mergeUntrusted admits entries from an untrusted origin; persisted marks the
+// on-disk revocations file (see admitUntrustedLocked).
+func (r *RevocationList) mergeUntrusted(entries []RevocationEntry, persisted bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
 	r.sweepLocked(now)
 	added := 0
 	for _, e := range entries {
-		if !r.admitUntrustedLocked(e, now) {
+		if !r.admitUntrustedLocked(e, now, persisted) {
 			continue
 		}
 		r.tokens[e.Token] = time.Unix(e.Expiry, 0)
@@ -319,7 +325,7 @@ func (r *RevocationList) LoadRevocations() error {
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return fmt.Errorf("unmarshal revocations: %w", err)
 	}
-	added := r.MergeRevocations(entries)
+	added := r.mergeUntrusted(entries, true)
 	if added > 0 {
 		obs.Printf("Session: loaded %d revocations from disk", added)
 	}
@@ -344,15 +350,18 @@ func TTL() time.Duration {
 	return ttl
 }
 
-// SetTTL updates the session lifetime. Clamped to [15min, 7d].
+// MaxSessionLifetime is the longest session TTL SetTTL admits. No session
+// this appliance issues can expire later than issue time plus this.
+const MaxSessionLifetime = 7 * 24 * time.Hour
+
+// SetTTL updates the session lifetime. Clamped to [15min, MaxSessionLifetime].
 func SetTTL(d time.Duration) {
 	const minTTL = 15 * time.Minute
-	const maxTTL = 7 * 24 * time.Hour
 	if d < minTTL {
 		d = minTTL
 	}
-	if d > maxTTL {
-		d = maxTTL
+	if d > MaxSessionLifetime {
+		d = MaxSessionLifetime
 	}
 	ttlMu.Lock()
 	ttl = d

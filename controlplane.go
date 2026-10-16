@@ -265,7 +265,10 @@ const maxRevocationsPerNode = 4096
 // counted, because a dropped revocation means a session an operator killed
 // may still authenticate on other nodes.
 func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) {
-	kept := make([]RevocationEntry, 0, len(entries))
+	// Capacity is bounded by the cap, not by the peer-supplied length: the
+	// stored slice must not retain a backing array proportional to the whole
+	// request (Codex P2, PR #1591).
+	kept := make([]RevocationEntry, 0, min(len(entries), maxRevocationsPerNode))
 	dropped := 0
 	for _, e := range entries {
 		if len(e.Token) > session.MaxRevocationTokenLen {

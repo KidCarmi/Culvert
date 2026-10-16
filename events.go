@@ -340,11 +340,11 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_refused_total Logout requests whose session cookie was refused before anything was retained because this appliance did not sign it (bad signature or malformed). Ordinary traffic cannot produce one — a genuine expired cookie and a replayed logout are both excluded — so sustained growth means an unauthenticated source is probing /api/auth/logout\n")
 	fmt.Fprintf(w, "# TYPE culvert_session_revoke_refused_total counter\nculvert_session_revoke_refused_total %d\n",
 		sessionRevocationRefusedTotal())
-	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_rejected_total Revocation entries rejected by reason. unsigned/malformed/expired are the public logout endpoint; oversize/capacity are the UNTRUSTED-origin paths (cluster gossip, the on-disk revocations file), where a rejection means cluster-wide revocation is incomplete on this node\n")
+	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_rejected_total Revocation entries rejected by reason. unsigned/malformed/expired are the public logout endpoint; oversize/capacity/far_future are the UNTRUSTED-origin paths (cluster gossip, the on-disk revocations file); oversize/capacity mean cluster-wide revocation is incomplete on this node, far_future means an entry claimed an expiry no session this appliance issues can have\n")
 	fmt.Fprintf(w, "# TYPE culvert_session_revoke_rejected_total counter\n")
 	for _, reason := range []session.RevokeReason{
 		session.RevokeUnsigned, session.RevokeMalformed, session.RevokeExpired,
-		session.RevokeOversize, session.RevokeCapacity,
+		session.RevokeOversize, session.RevokeCapacity, session.RevokeFarFuture,
 	} {
 		fmt.Fprintf(w, "culvert_session_revoke_rejected_total{reason=%q} %d\n", string(reason), session.Refused(reason))
 	}
