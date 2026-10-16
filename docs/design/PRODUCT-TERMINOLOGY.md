@@ -31,7 +31,7 @@ is listed under "replaces".
 | **Control Plane / Data Plane (CP/DP)** | Node roles per `controlplane.go` | spell out on first use per screen |
 | **Leader / Standby** | HA roles (`/api/cluster/ha`) | — |
 | **Health** | A component's operational state: **Healthy / Degraded / Down / Unknown** | unify: today "connected/disconnected", "ok", "live/stale" are mixed. Wire states ("connected") remain in tables where they are the literal backend status; roll-ups use the Health scale |
-| **Status** | The lifecycle state of an entity (node: connected/draining/revoked; rule: enabled/disabled; update: available/current) | do not use "status" for health roll-ups |
+| **Status** | The lifecycle state of an entity (node: connected/draining/revoked; rule: enabled/disabled; release: available/installed; upgrade: dispatch status) | do not use "status" for health roll-ups |
 | **Blocklist / Allowlist** | The host list and its mode (`/api/blocklist`, `/mode`) | never "blacklist/whitelist" (already clean) |
 | **Exception** | A never-blocked host (`/api/blocklist/exceptions`) | keep — but see Bypass below |
 | **Bypass** | Skipping an *inspection* step for matching traffic: SSL-inspection bypass, content-scan bypass | today: "bypass", "exclusion", "allowlist", "exception" all mean skip-something. Rule: **Exception** = not blocked; **Bypass** = not inspected/scanned; **Feed allowlist** = never blocked *by feeds* |
