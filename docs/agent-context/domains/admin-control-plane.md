@@ -46,6 +46,9 @@ verify the affected behavior in the linked implementation/tests at the task SHA.
   message, no action, no counts and no TOTP/backup posture. Un-redact only for a
   proven admin, and wrap every new `buildOperatorContract` renderer; the walls in
   [diagnostics_username_role_test.go](../../../diagnostics_username_role_test.go) enforce both.
+  Exception, intended least privilege: `admin_roster_durability` recomputes
+  status and verdict below admin, so a degraded login write alone reads `ok`
+  to viewers; status itself would be a replay-window oracle.
 - Configuration versioning has explicit exclusions. Follow the current surface
   registry and regression tests in [conventions](../conventions.md#ui-configuration-and-api-changes),
   not a blanket snapshot-after-every-mutation rule. Password changes must not

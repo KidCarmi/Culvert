@@ -69,7 +69,7 @@ func TestCheckAdminRosterDurability_WarnsWhenMemoryOnly(t *testing.T) {
 	if got.Code != adminRosterDurabilityCode || got.Status != diagWarn {
 		t.Fatalf("got %+v, want warn admin_roster_durability", got)
 	}
-	if !strings.Contains(got.Message, "LOST on restart") || !strings.Contains(got.Message, "1 such change") {
+	if !strings.Contains(got.Message, "LOST on restart") || !strings.Contains(got.Message, "1 in-memory-only account change") {
 		t.Errorf("message = %q, want loss statement and change count", got.Message)
 	}
 	if !strings.Contains(got.OperatorAction, "-ui-users-file") {
@@ -78,6 +78,79 @@ func TestCheckAdminRosterDurability_WarnsWhenMemoryOnly(t *testing.T) {
 	// TestApiDiagnostics_NoSensitiveValues forbids /data/ paths on the contract.
 	if strings.Contains(got.Message+got.OperatorAction, "/data/") {
 		t.Errorf("row names a /data/ path: %+v", got)
+	}
+}
+
+// rosterDurabilityStubProvider makes a node "set up" through a legacy
+// identity provider alone, with no local account.
+type rosterDurabilityStubProvider struct{}
+
+func (rosterDurabilityStubProvider) Verify(string, string) bool { return false }
+func (rosterDurabilityStubProvider) Name() string               { return "stub" }
+
+// TestCheckAdminRosterDurability_ProviderOnlyNamesBreakGlassGap pins the owner
+// decision answering Codex's P2 on #1601: a provider-only node with no local
+// administrator still warns, and the admin rendering says WHY — an IdP outage
+// locks everyone out — and names the break-glass remedy in the console's own
+// term ("Administrators"). Below admin the fixed not-durable message is
+// unchanged: whether a local admin exists is roster-derived.
+func TestCheckAdminRosterDurability_ProviderOnlyNamesBreakGlassGap(t *testing.T) {
+	c := &Config{}
+	c.SetProvider(rosterDurabilityStubProvider{})
+	swapCfgForRosterDurability(t, c)
+	if !cfg.IsConfigured() || cfg.hasLocalAdministrator() {
+		t.Fatal("precondition: provider-only node must be set up with no local administrator")
+	}
+
+	got := checkAdminRosterDurability()
+	if got.Status != diagWarn {
+		t.Fatalf("provider-only: status = %q, want warn", got.Status)
+	}
+	if !strings.Contains(got.Message, "No local administrator account: if the identity provider is unavailable, nobody can sign in.") {
+		t.Errorf("message = %q, want the break-glass rationale", got.Message)
+	}
+	if !strings.Contains(got.OperatorAction, "Create a local break-glass administrator in Administrators") ||
+		!strings.Contains(got.OperatorAction, "-ui-users-file") {
+		t.Errorf("operator_action = %q, want the break-glass remedy plus the roster file", got.OperatorAction)
+	}
+
+	// Control: a node WITH a local admin keeps the plain durability message.
+	swapCfgForRosterDurability(t, configuredRosterCfg(t, false))
+	if got := checkAdminRosterDurability(); strings.Contains(got.Message, "No local administrator") {
+		t.Errorf("node with a local admin got the break-glass message: %q", got.Message)
+	}
+
+	// Below admin: the same fixed message as any non-durable node.
+	swapCfgForRosterDurability(t, c)
+	_, row := durabilityRowAt(t, RoleViewer)
+	assertRedactedRowIsFixed(t, "provider-only viewer", row)
+	if row.Message != rosterDurabilityViewerNotDurable {
+		t.Errorf("viewer message = %q, want the fixed not-durable message", row.Message)
+	}
+}
+
+func TestHasLocalAdministrator(t *testing.T) {
+	c := &Config{}
+	if c.hasLocalAdministrator() {
+		t.Error("empty config reports a local administrator")
+	}
+	if err := c.SetAuth("legacy", "Or1ginalPass!"); err != nil {
+		t.Fatalf("SetAuth: %v", err)
+	}
+	if !c.hasLocalAdministrator() {
+		t.Error("an unshadowed legacy login is a local administrator (VerifyUIUser grants RoleAdmin)")
+	}
+	c.mu.Lock()
+	c.uiUsers = map[string]*uiAdminUser{"legacy": {role: RoleViewer}}
+	c.mu.Unlock()
+	if c.hasLocalAdministrator() {
+		t.Error("a legacy login shadowed by a viewer roster entry is not an administrator")
+	}
+	c.mu.Lock()
+	c.uiUsers["root"] = &uiAdminUser{role: RoleAdmin}
+	c.mu.Unlock()
+	if !c.hasLocalAdministrator() {
+		t.Error("a roster admin is a local administrator")
 	}
 }
 

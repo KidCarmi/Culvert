@@ -463,7 +463,7 @@ func TestApiDiagnostics_MalformedRoleValueIsRedacted(t *testing.T) {
 // so their rate-gate siblings (rosterNotDurableLogLast, …) are not mistaken
 // for them.
 var rosterDerivedPrimitives = []string{
-	"ListUIUsers(", "UserHasTOTP(", "GetUser(",
+	"ListUIUsers(", "UserHasTOTP(", "GetUser(", "hasLocalAdministrator(",
 	"rosterPersistRefused.", "rosterPersistBestEffort.", "rosterNotDurable.",
 }
 

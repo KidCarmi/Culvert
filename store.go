@@ -1434,6 +1434,27 @@ func (c *Config) DeleteUIUser(username string) error {
 	return nil
 }
 
+// hasLocalAdministrator reports whether at least one LOCAL account can sign in
+// to the console as admin, independent of any identity provider: a roster
+// entry with RoleAdmin, or the legacy single-user login when no roster entry
+// shadows it (VerifyUIUser grants that login RoleAdmin). A boolean existence
+// probe only; it never exposes a name, role or count. Used by the
+// admin_roster_durability diagnostics row to name the break-glass gap.
+func (c *Config) hasLocalAdministrator() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, u := range c.uiUsers {
+		if u.role.HasRole(RoleAdmin) {
+			return true
+		}
+	}
+	if c.user == "" {
+		return false
+	}
+	_, shadowed := c.uiUsers[c.user]
+	return !shadowed
+}
+
 // ListUIUsers returns a snapshot of all admin UI users (without password hashes).
 func (c *Config) ListUIUsers() []UIUserInfo {
 	c.mu.RLock()

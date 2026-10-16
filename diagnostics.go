@@ -860,6 +860,7 @@ const (
 type rosterDurabilityFacts struct {
 	configured bool
 	persisted  bool // a roster file (-ui-users-file) is configured
+	localAdmin bool // a local account can sign in as admin without the IdP
 	notDurable int64
 	refused    int64
 	degraded   int64
@@ -872,6 +873,7 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	return rosterDurabilityFacts{
 		configured: true,
 		persisted:  cfg.rosterPathConfigured(),
+		localAdmin: cfg.hasLocalAdministrator(),
 		notDurable: rosterNotDurable.Load(),
 		refused:    rosterPersistRefused.Load(),
 		degraded:   rosterPersistBestEffort.Load(),
@@ -896,15 +898,7 @@ func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
 	case !f.configured:
 		row.Message = "initial setup is not complete; there are no admin credentials to persist yet"
 	case !f.persisted:
-		row.Status = diagWarn
-		row.Message = "no admin roster file is configured — admin account deletes, role changes and password " +
-			"rotations apply in memory only and are LOST on restart (a rotated password reverts to the " +
-			"-user/auth.user credential)"
-		if f.notDurable > 0 {
-			row.Message += fmt.Sprintf(" — %d such change(s) since this process started", f.notDurable)
-		}
-		row.OperatorAction = "Set the admin users file (-ui-users-file) to a path on a persistent volume and restart, " +
-			"then re-apply any account changes made since the last restart."
+		row = f.notDurableAdminRow()
 	case f.refused == 0 && f.degraded == 0:
 		row.Message = "admin roster is persisting to disk"
 	default:
@@ -913,9 +907,38 @@ func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
 			"roster could not be written (nothing was changed), and %d login-time write(s) failed (a consumed "+
 			"backup code or TOTP replay counter may not survive a restart)", f.refused, f.degraded)
 		row.OperatorAction = "Fix free space or permissions on the data volume (see the storage_write_failed alert), " +
-			"then re-apply the refused change from Admin Users — nothing retries it automatically. If login-time " +
+			"then re-apply the refused change from Administrators — nothing retries it automatically. If login-time " +
 			"writes failed, rotate the affected administrator's TOTP backup codes once the volume is healthy. " +
 			"The counts clear on restart."
+	}
+	return row
+}
+
+// notDurableAdminRow is the admin rendering when no roster file is configured.
+//
+// A set-up node with NO local administrator (e.g. a deployment that signs in
+// only through an identity provider) still warns here, deliberately (owner
+// decision, PR #1601): with no local admin, an identity-provider outage locks
+// everyone out of the console, and a local break-glass administrator is
+// standard practice. So that case names the break-glass gap rather than only
+// the durability gap — and the remedy orders the roster file first, because a
+// break-glass account created without it is itself lost on restart.
+func (f rosterDurabilityFacts) notDurableAdminRow() OperatorContractCheck {
+	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagWarn}
+	if f.localAdmin {
+		row.Message = "no admin roster file is configured — admin account deletes, role changes and password " +
+			"rotations apply in memory only and are LOST on restart (a rotated password reverts to the " +
+			"-user/auth.user credential)"
+		row.OperatorAction = "Set the admin users file (-ui-users-file) to a path on a persistent volume and restart, " +
+			"then re-apply any account changes made since the last restart."
+	} else {
+		row.Message = "No local administrator account: if the identity provider is unavailable, nobody can sign in. " +
+			"No admin roster file is configured either, so any account created now is LOST on restart"
+		row.OperatorAction = "Create a local break-glass administrator in Administrators. First set the admin users file " +
+			"(-ui-users-file) to a path on a persistent volume and restart, so the account survives a restart."
+	}
+	if f.notDurable > 0 {
+		row.Message += fmt.Sprintf(" — %d in-memory-only account change(s) since this process started", f.notDurable)
 	}
 	return row
 }
