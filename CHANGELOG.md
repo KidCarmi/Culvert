@@ -30,55 +30,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
   Two independent guarantees now hold. `HalfOpenProbeTimeout` re-arms a budget
   whose reserved probe never reported an outcome, so the breaker self-heals
-  against any non-recording caller; it defaults to 2×`ResetTimeout` with a 90s
-  floor, comfortably above the 35s per-file deadline, so it cannot preempt a
+  against any non-recording caller; it is the larger of 2×`ResetTimeout` and
+  the configured per-file deadline (`cdr.timeout_sec`, seeded from the config
+  being applied) plus a 30s grace, with a 90s floor, so it cannot preempt a
   probe that is merely slow, and each re-arm is counted as `staleProbes` in the
   breaker stats because a non-zero value means some caller is taking a
   reservation it cannot release. And `Breaker.Available()` /
   `cdrAnyInstanceAvailable()` give the hot path a non-consuming liveness gate,
   leaving the probe for the call that can record the outcome. No persisted
   state, wire format or configuration default changes.
-
-### Fixed
-
-- A Data Plane could not escalate its Control-Plane retry backoff, so a
-  CP-tier outage became a self-sustaining retry storm (CHAOS-71). Three
-  defects interacted. `failover()` cleared `failCount` on a connection it
-  never verified — `grpc.NewClient` dials lazily, so `connect()` succeeds
-  against a dead address and `failover()` always reports success — so with
-  two or more CP addresses configured (every HA deployment) the rotation every
-  third failure kept zeroing the ladder and the 60s ceiling was unreachable.
-  Measured steady state under a total outage was 2s → 8s → 2s → 8s forever,
-  with a fresh TCP+TLS handshake every other cycle, which also resets gRPC's
-  own transport-level reconnect backoff. `failCount` was separately
-  incremented twice per failed poll (in `pollConfig` and again in `backoff`),
-  so the documented 2s/4s/8s ladder was really 4s/16s/60s and the documented
-  "failover after 3 consecutive failures" fired on the second. And nothing in
-  the path was jittered, so every DP failing on the same outage walked an
-  identical deterministic ladder and retried in lockstep, arriving together
-  exactly when the recovering CP was least able to serve.
-
-  Only a call that actually returns a reply now clears the ladder; `backoff`
-  solely owns `failCount` while a separate `sinceFailover` counter paces
-  rotation, so rotating addresses never shortens the next delay; and retries
-  are spread ±15%, re-rolled per attempt (a fixed per-node offset would
-  preserve the fleet's relative phase for the whole outage, which is precisely
-  what must decorrelate here — unlike `feedsched.StableJitter`'s
-  steady-cadence case).
-
-  Two limits of that jitter are deliberate. The initial poll at loop start is
-  un-jittered: a starting DP should converge on policy immediately, and
-  smoothing a rolling-restart herd is not worth delaying enforcement. And
-  because `backoff` sleeps inside the poll goroutine while `pollLoop` is driven
-  by a fixed `time.Ticker`, a ladder delay SHORTER than the poll interval
-  (default 30s — so the 2s/4s/8s/16s steps) does not move the next poll: the
-  loop still waits for the same tick. The jitter therefore takes effect from
-  the 32s step onward, which is the sustained-outage regime where the fleet
-  actually converges on the ceiling and where a recovering CP gets hit; the
-  early steps are paced by the ticker at the normal poll rate and form no
-  storm. Making the ladder drive the schedule directly would require moving
-  backoff ownership out of `pollConfig`/`fetchAndApply` into a timer-driven
-  `pollLoop`, which changes production poll cadence — left as a follow-up.
 
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
