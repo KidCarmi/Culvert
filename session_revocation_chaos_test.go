@@ -814,3 +814,96 @@ func TestChaos73_DefectControlPlaneRetainedCapacityIsBounded(t *testing.T) {
 		t.Fatalf("retained capacity = %d; want at most %d", got, maxRevocationsPerNode)
 	}
 }
+
+// THE CONTROL FOR THE RELOAD WAIVER, and it is what keeps the waiver narrow.
+//
+// ControlLargeVerifiedRevocationSurvivesReload above proves the persisted path
+// admits an oversized GENUINE entry. On its own that is satisfied just as well
+// by a waiver that admits any oversized entry at all, which would re-open the
+// disk half of the original defect: a revocations file written by a build that
+// predates this sweep holds attacker-chosen keys of arbitrary length, and
+// LoadRevocations feeds it straight back in.
+//
+// So this pins that the waiver is SHAPE-GATED, which is exactly what
+// persistedSessionShaped's own comment claims ("the waiver for the key-size
+// bound on reload only"). Verified failing against a build whose waiver
+// returns true unconditionally — a mutation that passes every other CHAOS-73
+// gate, which is why this one is not redundant.
+//
+// The second case pins the Exp match specifically: a payload that merely
+// decodes as a Session is not enough, because the stored expiry is what the
+// sweeper keys on, and an entry whose recorded expiry disagrees with the
+// session it claims to be is not a revocation this appliance wrote.
+func TestChaos73_ControlPersistedOversizeWaiverIsShapeGated(t *testing.T) {
+	oversize := session.MaxRevocationTokenLen + 1
+
+	// A session-shaped payload whose own Exp is far future, re-labelled on
+	// disk with a near expiry: the two disagree, so it is not our shape.
+	inner := session.Session{
+		Sub: "mismatched", Provider: "local", Role: "admin",
+		Exp: time.Now().Add(72 * time.Hour).Unix(), Jti: session.NewJti(),
+		Groups: []string{strings.Repeat("g", oversize)},
+	}
+	raw, err := json.Marshal(&inner)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	shapedButMismatched := base64.RawURLEncoding.EncodeToString(raw)
+
+	cases := []struct {
+		name  string
+		entry session.RevocationEntry
+	}{
+		{
+			// Exactly what the vulnerable build wrote: opaque attacker bytes.
+			name: "opaque attacker bytes",
+			entry: session.RevocationEntry{
+				Token:  strings.Repeat("A", oversize),
+				Expiry: time.Now().Add(time.Hour).Unix(),
+			},
+		},
+		{
+			// Decodes as base64 but is not a Session at all.
+			name: "valid base64, not a session",
+			entry: session.RevocationEntry{
+				Token:  base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("{", oversize))),
+				Expiry: time.Now().Add(time.Hour).Unix(),
+			},
+		},
+		{
+			name:  "session-shaped but the expiry disagrees",
+			entry: session.RevocationEntry{Token: shapedButMismatched, Expiry: time.Now().Add(time.Hour).Unix()},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chaos73Setup(t)
+			path := filepath.Join(t.TempDir(), "revocations.json")
+			session.SetRevocationsPath(path)
+
+			if len(tc.entry.Token) <= session.MaxRevocationTokenLen {
+				t.Fatalf("setup: token is %d bytes, not above the %d bound — this case is vacuous",
+					len(tc.entry.Token), session.MaxRevocationTokenLen)
+			}
+			data, err := json.Marshal([]session.RevocationEntry{tc.entry})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if err := session.Revoked.LoadRevocations(); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := session.Revoked.Tracked(); got != 0 {
+				t.Errorf("admitted %d oversized entries from the file; want 0 — the reload "+
+					"waiver is no longer shape-gated and the disk half of the bound is gone", got)
+			}
+			if session.Refused(session.RevokeOversize) == 0 {
+				t.Error("the refusal was not counted, so an operator has no signal that a " +
+					"legacy file is being rejected")
+			}
+		})
+	}
+}
