@@ -8430,7 +8430,7 @@ simulate list.
 
 ### The fix
 
-**`internal/storeguard/faultguard.go` (new).** `ContainFault(op) error` arms
+**`internal/storeguard/faultguard.go` (new).** `ContainFault(storeDir, op) error` arms
 `debug.SetPanicOnFault(true)` on the calling goroutine, runs `op`, restores the
 previous setting, and converts a contained fault into an error wrapping
 `ErrStoreFault`. It sits in `storeguard` because that package is already the
@@ -8455,6 +8455,20 @@ bug inside `op` keeps reaching `crashguard` instead of being quietly reported as
 a failing disk. `TestContainFault_NilDerefIsNotAStoreFault` fails if that
 discrimination ever stops holding, which is the gate that keeps this fix from
 becoming a bug-swallower.
+
+`Addr()` is necessary but not sufficient (Codex round 2): a wild non-nil
+`unsafe.Pointer` dereference on the lookup path carries it too. So the faulting
+address must also fall inside a file-backed mapping whose file is under the
+store directory. That is checked against `/proc/self/maps` at recover time,
+which is free because it only runs after a fault has happened. `catdb` passes
+the directory with symlinks resolved at open, because the kernel reports
+resolved paths. The check fails closed: if the maps are unreadable or
+unparseable, the platform is not Linux, or the address is outside the store's
+mappings, the original panic propagates. Gated by
+`TestContainFault_FaultOutsideTheStoreIsRePanicked`,
+`TestContainFault_UnreadableMapsRePanics` (injected reader),
+`TestContainFault_StoreReachedThroughASymlinkIsContained`, `TestParseMapsLine`
+and `TestAddrInStoreMapping_RequiresAPathBoundary`.
 
 **`internal/catdb`.** The guard is armed in `Lookup`, **once for the whole
 domain walk** rather than per point lookup. The walk issues up to four or five
@@ -8658,6 +8672,20 @@ the fault is the only one holding the evidence, so it is the one that records
 it, whatever the reopen happens to report. The marker is
 opt-in — only a rebuildable store calls `RecordFault` — so `internal/logstore`
 is unaffected.
+
+### Codex round 2 — the fault origin, and a marker that will not clear
+
+The address-to-mapping discriminator is described under "The fix" above.
+Separately, the clearing step was best-effort. If the quarantine
+succeeded but unlinking `<store>.faulted` failed, a healthy replacement opened
+with the marker still present. The next start would then quarantine that
+healthy replacement, and the one-copy prune could delete the original evidence.
+A marker-removal error other than not-exist now fails the open: the store stays
+unopened, Layer 2 stays off, and the error reaches the caller's startup alert.
+The next start finds the directory gone and retries the clear before creating a
+replacement. Gated by `TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery` and
+`TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery`
+(injected remover).
 
 ---
 

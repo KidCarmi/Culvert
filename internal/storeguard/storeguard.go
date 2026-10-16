@@ -209,10 +209,23 @@ type Recovery struct {
 // the answer has been the same: run without it, because refusing to run an
 // in-line gateway over a damaged local store is a self-inflicted outage.
 func Open[T any](dir string, policy Policy, open func(string) (T, error)) (T, Recovery, error) {
+	return openWith(dir, policy, open, os.Remove)
+}
+
+// openWith is Open with the marker remover injected, so a recovery whose
+// fault marker cannot be cleared can be exercised.
+func openWith[T any](dir string, policy Policy, open func(string) (T, error), remove func(string) error) (T, Recovery, error) {
 	var zero T
 	var rec Recovery
 
-	recoverBeforeOpen(dir, &rec)
+	if err := recoverBeforeOpen(dir, &rec, remove); err != nil {
+		// The recovery could not be completed safely. Opening a replacement
+		// now would leave a marker that quarantines it on the next start, so
+		// the store stays unopened and the caller degrades (Layer 1 only for
+		// catdb) and reports the error through its own sink.
+		rec.ResidualQuarantines = QuarantinedCopies(dir)
+		return zero, rec, err
+	}
 
 	store, err := openGuarded(dir, open)
 	if err == nil {
@@ -252,7 +265,11 @@ func Open[T any](dir string, policy Policy, open func(string) (T, error)) (T, Re
 // store's mapped tables after a healthy open — see RecordFault). Either one
 // quarantines through ApplyQuarantine, so the store lock still vetoes a move of
 // a directory a live process holds.
-func recoverBeforeOpen(dir string, rec *Recovery) {
+//
+// A non-nil error means the fault marker could not be cleared after the
+// condition was resolved; the caller must NOT open a replacement (see
+// clearFault).
+func recoverBeforeOpen(dir string, rec *Recovery, remove func(string) error) error {
 	poison := AbandonedMarkers(dir)
 	faulted := faultRecorded(dir)
 	switch {
@@ -261,22 +278,27 @@ func recoverBeforeOpen(dir string, rec *Recovery) {
 		rec.Cause = "a previous start entered the store open and never returned (corrupt table, kill, or out-of-memory)"
 	case faulted:
 		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-			// The faulted store is already gone (an operator removed it), so
-			// the condition the marker records is resolved. Keeping it would
-			// report a phantom recovery on every start from here on.
-			clearFault(dir)
-			return
+			// The faulted store is already gone (an operator removed it, or a
+			// previous start quarantined it and then failed to clear the
+			// marker), so the condition the marker records is resolved.
+			// Keeping the marker would report a phantom recovery on every start.
+			if cerr := clearFault(dir, remove); cerr != nil {
+				rec.Trigger = TriggerRuntimeFault
+				rec.Cause = "a previous run recorded a memory fault on this store"
+				return fmt.Errorf("the faulted store is gone but its fault marker could not be cleared, refusing to create a replacement that the next start would quarantine: %w", cerr)
+			}
+			return nil
 		}
 		rec.Trigger = TriggerRuntimeFault
 		rec.Cause = "a previous run contained a memory fault reading the store's mapped tables after a healthy open (damaged or vanished data volume)"
 	default:
-		return
+		return nil
 	}
 	ApplyQuarantine(dir, rec)
 	if !rec.Quarantined {
 		// A skipped quarantine leaves the condition unresolved, so every
 		// breadcrumb must survive for the next start.
-		return
+		return nil
 	}
 	// Clear only markers this call acted on — markers belonging to a LIVE
 	// opener are never in the poison list to begin with.
@@ -284,8 +306,11 @@ func recoverBeforeOpen(dir string, rec *Recovery) {
 		_ = os.Remove(m)
 	}
 	if faulted {
-		clearFault(dir)
+		if err := clearFault(dir, remove); err != nil {
+			return fmt.Errorf("quarantined the faulted store to %s but could not clear its fault marker, refusing to create a replacement that the next start would quarantine: %w", rec.QuarantinePath, err)
+		}
 	}
+	return nil
 }
 
 // ApplyQuarantine moves dir aside, recording the outcome on rec. It refuses

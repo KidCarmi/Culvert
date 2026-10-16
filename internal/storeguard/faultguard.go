@@ -54,9 +54,12 @@ package storeguard
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -80,16 +83,37 @@ var ErrStoreFault = errors.New("storeguard: memory fault reading the store's map
 // swallowed: it is re-panicked so it keeps reaching the existing crashguard
 // machinery instead of being quietly reported as a failing volume.
 //
-// Telling those two apart matters and is not guesswork. Both arrive carrying the
-// text "invalid memory address or nil pointer dereference", so the message is
-// useless as a discriminator. The runtime attaches an `Addr() uintptr` method
-// ONLY to the error it synthesises for a SetPanicOnFault-converted fault
-// (`runtime.errorAddressString`), which is the documented way to recover the
-// faulting address; a nil dereference panics with a plain runtime error that has
-// no such method. Measured both ways in `faultguard_test.go`:
-// a nil dereference reports hasAddr=false, and truncating a live `.sst` under an
-// open store reports hasAddr=true with the mapped address.
-func ContainFault(op func() error) (err error) {
+// Telling those two apart takes two checks, because neither one is enough by
+// itself:
+//
+//  1. Both arrive carrying the text "invalid memory address or nil pointer
+//     dereference", so the message is useless. The runtime attaches an
+//     `Addr() uintptr` method only to the error it builds for a fault at a
+//     NON-NIL address (`runtime.errorAddressString`). A nil dereference panics
+//     with a plain runtime error that has no such method, so it is re-panicked.
+//  2. Addr() alone does not prove the fault came from the STORE's mapping. A
+//     wild non-nil `unsafe.Pointer` dereference, or any other runtime-corruption
+//     bug on the lookup path, also gets Addr(). Swallowing that would disable
+//     Layer 2 and keep a process with corrupted state running. So the faulting
+//     address must also fall inside a file-backed mapping whose file is under
+//     storeDir, checked against `/proc/self/maps` at recover time. This only
+//     runs after a fault has already happened, so the read costs nothing on the
+//     normal path.
+//
+// The check fails closed. If the maps can't be read or parsed, or the platform
+// has no `/proc/self/maps`, or the address lies outside the store's mappings,
+// the original panic propagates. For a real mapping fault that is no worse than
+// running without the guard at all. Measured in `faultguard_test.go`: a nil
+// dereference has no Addr(), a fault on a mapping under storeDir is contained,
+// and the same fault checked against another directory (or with unreadable
+// maps) is re-panicked.
+func ContainFault(storeDir string, op func() error) (err error) {
+	return containFault(storeDir, readProcMaps, op)
+}
+
+// containFault is ContainFault with the maps reader injected, so the fail-closed
+// branches can be exercised without depending on what the host kernel exposes.
+func containFault(storeDir string, readMaps func() ([]byte, error), op func() error) (err error) {
 	prev := debug.SetPanicOnFault(true)
 	defer func() {
 		debug.SetPanicOnFault(prev)
@@ -97,14 +121,102 @@ func ContainFault(op func() error) (err error) {
 		if r == nil {
 			return
 		}
-		// Addr() is present only on a converted memory fault (see above).
-		if fault, ok := r.(interface{ Addr() uintptr }); ok {
+		if fault, ok := r.(interface{ Addr() uintptr }); ok && addrInStoreMapping(fault.Addr(), storeDir, readMaps) {
 			err = fmt.Errorf("%w at 0x%x: %v", ErrStoreFault, fault.Addr(), r)
 			return
 		}
 		panic(r)
 	}()
 	return op()
+}
+
+// addrInStoreMapping reports whether addr lies inside a file-backed mapping of
+// a file under storeDir. Any doubt answers false (re-panic).
+func addrInStoreMapping(addr uintptr, storeDir string, readMaps func() ([]byte, error)) bool {
+	roots := storeRoots(storeDir)
+	if len(roots) == 0 || readMaps == nil {
+		return false
+	}
+	data, err := readMaps()
+	if err != nil {
+		return false
+	}
+	a := uint64(addr)
+	for _, line := range strings.Split(string(data), "\n") {
+		lo, hi, path, ok := parseMapsLine(line)
+		if !ok || a < lo || a >= hi {
+			continue
+		}
+		// Mappings never overlap, so the first range holding addr is THE one.
+		return underAnyRoot(path, roots)
+	}
+	return false
+}
+
+// parseMapsLine parses one `/proc/self/maps` line:
+//
+//	start-end perms offset dev inode [pathname]
+//
+// The pathname is everything after the fifth field, so a path containing spaces
+// survives intact. The kernel appends " (deleted)" to a mapped file that has
+// been unlinked, which is still the store's file. ok is false for a line that
+// does not parse or has no absolute path (anonymous, [heap], [stack]...).
+func parseMapsLine(line string) (lo, hi uint64, path string, ok bool) {
+	rest := line
+	var fields [5]string
+	for i := range fields {
+		rest = strings.TrimLeft(rest, " ")
+		cut := strings.IndexByte(rest, ' ')
+		if cut < 0 {
+			return 0, 0, "", false
+		}
+		fields[i], rest = rest[:cut], rest[cut+1:]
+	}
+	path = strings.TrimSuffix(strings.TrimLeft(rest, " "), " (deleted)")
+	if !strings.HasPrefix(path, "/") {
+		return 0, 0, "", false
+	}
+	start, end, found := strings.Cut(fields[0], "-")
+	if !found {
+		return 0, 0, "", false
+	}
+	var err error
+	if lo, err = strconv.ParseUint(start, 16, 64); err != nil {
+		return 0, 0, "", false
+	}
+	if hi, err = strconv.ParseUint(end, 16, 64); err != nil || hi <= lo {
+		return 0, 0, "", false
+	}
+	return lo, hi, path, true
+}
+
+// storeRoots returns the absolute forms of storeDir that a maps pathname can
+// take: as given, and with symlinks resolved, because the kernel reports the
+// resolved path. Resolving can fail if the volume has gone away, so callers
+// that can should pass an already-resolved directory (catdb does, at Open).
+func storeRoots(storeDir string) []string {
+	base := trimSep(storeDir)
+	if base == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(base)
+	if err != nil {
+		return nil
+	}
+	roots := []string{abs}
+	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil && resolved != abs {
+		roots = append(roots, resolved)
+	}
+	return roots
+}
+
+func underAnyRoot(path string, roots []string) bool {
+	for _, root := range roots {
+		if path == root || strings.HasPrefix(path, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsStoreFault reports whether err came from a contained memory fault.
@@ -188,16 +300,25 @@ func faultRecorded(dir string) bool {
 // resolved, together with any temp file a death mid-write left behind (litter,
 // not a signal). Called only after the damaged directory is gone, so no live
 // writer can still be producing either file.
-func clearFault(dir string) {
+//
+// A failure to remove the MARKER is returned, not swallowed. If it were
+// swallowed, a healthy replacement store would open with the marker still
+// present, the next start would quarantine that healthy replacement, and the
+// one-copy prune would then delete the original evidence. remove is injected so
+// that failure can be tested.
+func clearFault(dir string, remove func(string) error) error {
 	base := trimSep(dir)
 	if base == "" {
-		return
+		return nil
 	}
-	_ = os.Remove(base + FaultMarkerSuffix)
+	if err := remove(base + FaultMarkerSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("clear fault marker: %w", err)
+	}
 	for _, tmp := range siblings(base, FaultMarkerTempSuffix) {
 		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().IsRegular() {
-			_ = os.Remove(tmp)
+			_ = remove(tmp)
 		}
 	}
 	syncDir(filepath.Dir(base))
+	return nil
 }

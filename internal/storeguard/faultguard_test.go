@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux
 
 package storeguard
 
@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -15,9 +16,10 @@ import (
 // zero, so touching it raises SIGBUS. This is the kernel behavior that makes a
 // badger `.sst` on a failing volume able to kill the process: the mapping stays
 // valid, the pages behind it stop existing.
-func mapTruncatedFile(t *testing.T) []byte {
+func mapTruncatedFile(t *testing.T) (mapping []byte, storeDir string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "mapped")
+	storeDir = t.TempDir()
+	path := filepath.Join(storeDir, "mapped")
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -36,16 +38,16 @@ func mapTruncatedFile(t *testing.T) []byte {
 	if err := f.Truncate(0); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
-	return m
+	return m, storeDir
 }
 
 // TestContainFault_MemoryFaultBecomesError is the core CHAOS-74 gate. Without
 // ContainFault this read is `fatal error: fault` and the test binary dies, so
 // this test passing at all is the containment working.
 func TestContainFault_MemoryFaultBecomesError(t *testing.T) {
-	m := mapTruncatedFile(t)
+	m, dir := mapTruncatedFile(t)
 	var sink byte
-	err := ContainFault(func() error {
+	err := ContainFault(dir, func() error {
 		sink = m[0]
 		return nil
 	})
@@ -72,7 +74,7 @@ func TestContainFault_NilDerefIsNotAStoreFault(t *testing.T) {
 	var got any
 	func() {
 		defer func() { got = recover() }()
-		_ = ContainFault(func() error {
+		_ = ContainFault(t.TempDir(), func() error {
 			var p *int
 			_ = *p
 			return nil
@@ -89,13 +91,13 @@ func TestContainFault_NilDerefIsNotAStoreFault(t *testing.T) {
 
 func TestContainFault_PassesErrorsAndSuccessThrough(t *testing.T) {
 	sentinel := errors.New("badger said no")
-	if err := ContainFault(func() error { return sentinel }); !errors.Is(err, sentinel) {
+	if err := ContainFault(t.TempDir(), func() error { return sentinel }); !errors.Is(err, sentinel) {
 		t.Fatalf("op error not returned verbatim: %v", err)
 	}
 	if IsStoreFault(sentinel) {
 		t.Fatal("an ordinary error must not classify as a store fault")
 	}
-	if err := ContainFault(func() error { return nil }); err != nil {
+	if err := ContainFault(t.TempDir(), func() error { return nil }); err != nil {
 		t.Fatalf("clean op returned %v", err)
 	}
 }
@@ -105,11 +107,117 @@ func TestContainFault_PassesErrorsAndSuccessThrough(t *testing.T) {
 func TestContainFault_RestoresPanicOnFault(t *testing.T) {
 	for _, want := range []bool{false, true} {
 		prev := debug.SetPanicOnFault(want)
-		_ = ContainFault(func() error { return nil })
+		_ = ContainFault(t.TempDir(), func() error { return nil })
 		got := debug.SetPanicOnFault(prev)
 		if got != want {
 			t.Fatalf("SetPanicOnFault(%v) not restored: got %v", want, got)
 		}
+	}
+}
+
+// rePanicValue runs fn and returns what it panicked with (nil if it returned).
+func rePanicValue(fn func()) (got any) {
+	defer func() { got = recover() }()
+	fn()
+	return nil
+}
+
+// A real mapping fault whose address is NOT inside a mapping under the given
+// store directory must propagate. This is the stand-in for a wild non-nil
+// pointer dereference: it carries Addr() exactly like a store fault, and only
+// the address-to-mapping check tells them apart.
+func TestContainFault_FaultOutsideTheStoreIsRePanicked(t *testing.T) {
+	m, _ := mapTruncatedFile(t)
+	otherStore := t.TempDir()
+	var sink byte
+	got := rePanicValue(func() {
+		_ = ContainFault(otherStore, func() error {
+			sink = m[0]
+			return nil
+		})
+	})
+	_ = sink
+	if got == nil {
+		t.Fatal("a fault outside the store's mappings was swallowed; it must keep propagating")
+	}
+	if _, isAddr := got.(interface{ Addr() uintptr }); !isAddr {
+		t.Fatalf("re-panicked value lost its fault address: %v", got)
+	}
+}
+
+// Fail closed: when the memory map cannot be read, the fault's origin cannot be
+// established, so even a genuine in-store fault re-panics.
+func TestContainFault_UnreadableMapsRePanics(t *testing.T) {
+	m, dir := mapTruncatedFile(t)
+	unreadable := func() ([]byte, error) { return nil, errors.New("maps unavailable") }
+	var sink byte
+	got := rePanicValue(func() {
+		_ = containFault(dir, unreadable, func() error {
+			sink = m[0]
+			return nil
+		})
+	})
+	_ = sink
+	if got == nil {
+		t.Fatal("a fault was contained without evidence it came from the store")
+	}
+}
+
+// The kernel reports resolved paths, so a store opened through a symlink must
+// still match its own mapping.
+func TestContainFault_StoreReachedThroughASymlinkIsContained(t *testing.T) {
+	m, dir := mapTruncatedFile(t)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	var sink byte
+	err := ContainFault(link, func() error {
+		sink = m[0]
+		return nil
+	})
+	_ = sink
+	if !IsStoreFault(err) {
+		t.Fatalf("fault on a symlinked store was not contained: %v", err)
+	}
+}
+
+func TestParseMapsLine(t *testing.T) {
+	cases := []struct {
+		line   string
+		ok     bool
+		lo, hi uint64
+		path   string
+	}{
+		{"7f00a000-7f00b000 r--s 00000000 08:01 1234    /data/cat feed/000001.sst", true, 0x7f00a000, 0x7f00b000, "/data/cat feed/000001.sst"},
+		{"7f00a000-7f00b000 r--s 00000000 08:01 1234 /data/cat/000001.sst (deleted)", true, 0x7f00a000, 0x7f00b000, "/data/cat/000001.sst"},
+		{"7f00a000-7f00b000 rw-p 00000000 00:00 0 ", false, 0, 0, ""},
+		{"7ffd0000-7ffd1000 rw-p 00000000 00:00 0                          [stack]", false, 0, 0, ""},
+		{"garbage", false, 0, 0, ""},
+		{"zz-7f00b000 r--s 00000000 08:01 1234 /x", false, 0, 0, ""},
+		{"7f00b000-7f00a000 r--s 00000000 08:01 1234 /x", false, 0, 0, ""},
+	}
+	for _, c := range cases {
+		lo, hi, path, ok := parseMapsLine(c.line)
+		if ok != c.ok || lo != c.lo || hi != c.hi || path != c.path {
+			t.Errorf("parseMapsLine(%q) = (%x, %x, %q, %v), want (%x, %x, %q, %v)", c.line, lo, hi, path, ok, c.lo, c.hi, c.path, c.ok)
+		}
+	}
+}
+
+// A sibling store whose name extends this one's must not count as "under" it.
+func TestAddrInStoreMapping_RequiresAPathBoundary(t *testing.T) {
+	maps := func() ([]byte, error) {
+		return []byte("1000-2000 r--s 00000000 08:01 1 /data/catfeeddb-old/000001.sst\n"), nil
+	}
+	if addrInStoreMapping(0x1800, "/data/catfeeddb", maps) {
+		t.Fatal("matched a neighbouring directory that merely shares a prefix")
+	}
+	if !addrInStoreMapping(0x1800, "/data/catfeeddb-old", maps) {
+		t.Fatal("did not match the store's own mapping")
+	}
+	if addrInStoreMapping(0x2000, "/data/catfeeddb-old", maps) {
+		t.Fatal("end of range is exclusive")
 	}
 }
 
@@ -207,5 +315,73 @@ func TestOpen_DirectoryAtFaultMarkerPathIsIgnored(t *testing.T) {
 	_, rec, err := Open(dir, Policy{}, (&opener{}).open)
 	if err != nil || rec.Trigger != TriggerNone || rec.Quarantined {
 		t.Fatalf("Open = (%+v, %v), want a plain open", rec, err)
+	}
+}
+
+// failMarkerRemoval is a remover that refuses to unlink the fault marker and
+// behaves like os.Remove for everything else.
+func failMarkerRemoval(path string) error {
+	if strings.HasSuffix(path, FaultMarkerSuffix) {
+		return &os.PathError{Op: "remove", Path: path, Err: syscall.EACCES}
+	}
+	return os.Remove(path)
+}
+
+// If the marker cannot be cleared after a successful quarantine, recovery is
+// NOT complete: opening a replacement would leave a marker that quarantines the
+// healthy replacement on the next start, and the one-copy prune would then
+// delete the original evidence. The store must stay unopened and the error must
+// reach the caller.
+func TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	if err := RecordFault(dir, "test fault"); err != nil {
+		t.Fatalf("RecordFault: %v", err)
+	}
+	o := &opener{}
+	st, rec, err := openWith(dir, Policy{}, o.open, failMarkerRemoval)
+	if err == nil || st != nil {
+		t.Fatalf("openWith = (%v, %+v, %v), want an error and no store", st, rec, err)
+	}
+	if !errors.Is(err, syscall.EACCES) {
+		t.Errorf("removal cause not wrapped: %v", err)
+	}
+	if o.calls != 0 {
+		t.Errorf("opener ran %d time(s); no replacement may be created while the marker remains", o.calls)
+	}
+	if !rec.Quarantined || rec.Trigger != TriggerRuntimeFault {
+		t.Errorf("recovery = %+v, want the quarantine reported", rec)
+	}
+	if !faultRecorded(dir) {
+		t.Fatal("test precondition: marker should still be present")
+	}
+	evidence := rec.QuarantinePath
+
+	// Next start, the remover works again: the store is already gone, so the
+	// marker is cleared, a fresh store opens, and the evidence is untouched.
+	o2 := &opener{}
+	st, rec, err = Open(dir, Policy{}, o2.open)
+	if err != nil || st == nil || rec.Quarantined {
+		t.Fatalf("follow-up Open = (%v, %+v, %v), want a plain open", st, rec, err)
+	}
+	if faultRecorded(dir) {
+		t.Error("marker survived a working remover")
+	}
+	if _, serr := os.Stat(evidence); serr != nil {
+		t.Errorf("original evidence lost: %v", serr)
+	}
+}
+
+// Same rule when the store is already gone: a marker that cannot be cleared
+// must not be followed by creating a replacement.
+func TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	if err := RecordFault(dir, "test fault"); err != nil {
+		t.Fatalf("RecordFault: %v", err)
+	}
+	o := &opener{}
+	st, _, err := openWith(dir, Policy{}, o.open, failMarkerRemoval)
+	if err == nil || st != nil || o.calls != 0 {
+		t.Fatalf("openWith = (%v, %v) after %d open(s), want an error and no open", st, err, o.calls)
 	}
 }
