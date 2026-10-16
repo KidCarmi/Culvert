@@ -33,12 +33,8 @@ func mustRemainder(t *testing.T, snap ConfigSnapshot) json.RawMessage {
 func restoreBlAndIPF(t *testing.T) {
 	t.Helper()
 	feed := bl.FeedList()
-	oldIPF, oldRL := ipf, rl
-	ipf, rl = newIPFilter(), newRateLimiter()
-	t.Cleanup(func() {
-		bl.ReplaceFeedEntries(feed)
-		ipf, rl = oldIPF, oldRL
-	})
+	bindFreshAdmissionOwners(t)
+	t.Cleanup(func() { bl.ReplaceFeedEntries(feed) })
 }
 
 // TestApplyBlocklistDeltaSnapshot_ConvergesAndAppliesRemainder: the DP delta
@@ -148,6 +144,7 @@ func TestDataPlaneClient_DeltaSyncApplies(t *testing.T) {
 // TestDataPlaneClient_DeltaUnchanged: an unchanged reply advances nothing and
 // does not fall through to a full pull.
 func TestDataPlaneClient_DeltaUnchanged(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
 	c := &DataPlaneClient{}

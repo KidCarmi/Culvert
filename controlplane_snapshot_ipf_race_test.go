@@ -28,25 +28,10 @@ import (
 // posture every other live writer already has (rl is Configure'd in place; bl
 // is ReplaceFeedEntries'd in place — "the previous wholesale `bl = newBL`
 // pattern" was retired for the same class of defect).
-
-// snapshotIPFixture binds a FRESH filter and a FRESH limiter into the
-// composition handles for the duration of the test and restores both previous
-// owners afterwards. Both are required: applySnapshotAdmission now mutates the
-// installed owners in place, so saving the old pointer and applying over it
-// would "restore" an object that already carries this test's allowlist, and
-// the apply's rl side effects land on whichever limiter is installed: it calls
-// rl.Configure only when the snapshot RPM differs from rl.Limit() (so a
-// snapshot without a rate limit zeroes a configured limiter) and
-// rl.ReplaceExemptions only when RateLimitExempt is non-nil. Either leak makes
-// later root tests order-dependent under -shuffle / -count=2.
-func snapshotIPFixture(t *testing.T) *IPFilter {
-	t.Helper()
-	oldIPF, oldRL := ipf, rl
-	f := newIPFilter()
-	ipf, rl = f, newRateLimiter()
-	t.Cleanup(func() { ipf, rl = oldIPF, oldRL })
-	return f
-}
+//
+// Every test here binds fresh owners through bindFreshAdmissionOwners
+// (snapshot_apply_fixture_test.go): the apply mutates the installed objects in
+// place, so a saved pointer is not a saved state.
 
 // TestRISK030_SnapshotApplyDoesNotRaceRequestPath drives applySnapshotAdmission
 // while request-path readers call ipf.Allowed concurrently, exactly as
@@ -57,7 +42,7 @@ func snapshotIPFixture(t *testing.T) *IPFilter {
 // an address the allowlist does not contain and every reader admits the one
 // it does, in the middle of thousands of applies.
 func TestRISK030_SnapshotApplyDoesNotRaceRequestPath(t *testing.T) {
-	snapshotIPFixture(t)
+	bindFreshAdmissionOwners(t)
 
 	snap := ConfigSnapshot{IPFilterMode: "allow", IPList: []string{"10.0.0.1", "198.51.100.0/24"}}
 	applySnapshotAdmission(snap)
@@ -106,7 +91,7 @@ func TestRISK030_SnapshotApplyDoesNotRaceRequestPath(t *testing.T) {
 // path reads must be the SAME object before and after an apply. A new object
 // is only reachable through an unsynchronised store into the global.
 func TestRISK030_SnapshotApplyKeepsTheCompositionHandle(t *testing.T) {
-	before := snapshotIPFixture(t)
+	before, _ := bindFreshAdmissionOwners(t)
 	applySnapshotAdmission(ConfigSnapshot{IPFilterMode: "block", IPList: []string{"203.0.113.5"}})
 	if ipf != before {
 		t.Fatal("applySnapshotAdmission replaced the ipf composition handle; the request path reads it unsynchronised")
@@ -123,7 +108,7 @@ func TestRISK030_SnapshotApplyKeepsTheCompositionHandle(t *testing.T) {
 // a FRESH filter built with SetMode + AddAll. Mode and the reported entry list
 // must match too, since CurrentConfigSnapshot and the admin API read them.
 func TestRISK030_SnapshotApplyVerdictsUnchanged(t *testing.T) {
-	snapshotIPFixture(t)
+	bindFreshAdmissionOwners(t)
 	probes := []string{
 		"10.0.0.1", "10.0.0.2", "198.51.100.9", "198.51.100.255", "198.51.101.1",
 		"203.0.113.5", "::ffff:10.0.0.1", "2001:db8::1", "2001:db8::2", "192.0.2.77", "not-an-ip",
@@ -164,6 +149,10 @@ func TestRISK030_SnapshotApplyVerdictsUnchanged(t *testing.T) {
 
 // ── Structural wall ─────────────────────────────────────────────────────────
 
+// isAdmissionHandle reports whether name is one of the bare admission
+// composition handles the request path reads unsynchronised.
+func isAdmissionHandle(name string) bool { return name == "ipf" || name == "rl" }
+
 // admissionHandleAssignments reports every assignment whose left-hand side is
 // one of the bare admission composition handles (ipf, rl). The declaring
 // `var` in admission.go is a GenDecl, not an AssignStmt, so it is not counted.
@@ -175,7 +164,7 @@ func admissionHandleAssignments(file *ast.File) []string {
 			return true
 		}
 		for _, lhs := range as.Lhs {
-			if id, ok := lhs.(*ast.Ident); ok && (id.Name == "ipf" || id.Name == "rl") {
+			if id, ok := lhs.(*ast.Ident); ok && isAdmissionHandle(id.Name) {
 				out = append(out, id.Name)
 			}
 		}
@@ -184,22 +173,37 @@ func admissionHandleAssignments(file *ast.File) []string {
 	return out
 }
 
-// TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles pins the
-// contract the fix restores: in production code the composition handles ipf
-// and rl are written ONCE, by their declaration, and every live configuration
-// path mutates the owner in place. A reassignment anywhere in package main's
-// non-test files is a data race against the request path (ADR-0038: "No
-// production reassignment of rl"; this wall extends it to ipf). Tests may
-// still bind their own owner into the handle — they are excluded by name.
-func TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles(t *testing.T) {
-	matches, err := filepath.Glob("*.go")
+// admissionHandleDeclarations counts package-level `var` declarations of the
+// admission handles in file — the wall's not-vacuous anchor.
+func admissionHandleDeclarations(file *ast.File) int {
+	n := 0
+	for _, d := range file.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, s := range gd.Specs {
+			for _, name := range s.(*ast.ValueSpec).Names {
+				if isAdmissionHandle(name.Name) {
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
+// productionHandleWallScan parses every non-test Go file of package main and
+// reports how many were scanned, how many handle declarations were seen, and
+// every production assignment to a handle, as "file: name".
+func productionHandleWallScan(t *testing.T) (scanned, declared int, offenders []string) {
+	t.Helper()
+	paths, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	var scanned, declared int
-	var offenders []string
-	for _, path := range matches {
+	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
@@ -212,23 +216,23 @@ func TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles(t *testing.T) {
 			t.Fatalf("parse %s: %v", path, err)
 		}
 		scanned++
-		for _, d := range file.Decls {
-			gd, ok := d.(*ast.GenDecl)
-			if !ok || gd.Tok != token.VAR {
-				continue
-			}
-			for _, s := range gd.Specs {
-				for _, name := range s.(*ast.ValueSpec).Names {
-					if name.Name == "ipf" || name.Name == "rl" {
-						declared++
-					}
-				}
-			}
-		}
+		declared += admissionHandleDeclarations(file)
 		for _, name := range admissionHandleAssignments(file) {
 			offenders = append(offenders, path+": "+name)
 		}
 	}
+	return scanned, declared, offenders
+}
+
+// TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles pins the
+// contract the fix restores: in production code the composition handles ipf
+// and rl are written ONCE, by their declaration, and every live configuration
+// path mutates the owner in place. A reassignment anywhere in package main's
+// non-test files is a data race against the request path (ADR-0038: "No
+// production reassignment of rl"; this wall extends it to ipf). Tests may
+// still bind their own owner into the handle — they are excluded by name.
+func TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles(t *testing.T) {
+	scanned, declared, offenders := productionHandleWallScan(t)
 	if scanned == 0 {
 		t.Fatal("scanned no production files; the wall is looking at the wrong directory")
 	}
@@ -240,9 +244,14 @@ func TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles(t *testing.T) {
 			"ipf/rl unsynchronised, so a reassignment is a data race; mutate the owner in place "+
 			"(IPFilter.Replace / RateLimiter.Configure) instead (RISK-030)", offenders)
 	}
+	assertHandleWallControls(t)
+}
 
-	// CONTROL: the exact pre-fix shape must be rejected, and in-place use accepted.
-	for name, tc := range map[string]struct {
+// assertHandleWallControls proves the matcher rejects the exact pre-fix shape
+// and a limiter reassignment, and accepts in-place mutation.
+func assertHandleWallControls(t *testing.T) {
+	t.Helper()
+	controls := map[string]struct {
 		src  string
 		want int
 	}{
@@ -258,7 +267,8 @@ func applySnapshotAdmission(snap ConfigSnapshot) {
 	for _, bad := range ipf.Replace(snap.IPFilterMode, snap.IPList) { _ = bad }
 	rl.Configure(1, 0)
 }`, 0},
-	} {
+	}
+	for name, tc := range controls {
 		cfile, err := parser.ParseFile(token.NewFileSet(), "control.go", tc.src, 0)
 		if err != nil {
 			t.Fatalf("parse %s control: %v", name, err)

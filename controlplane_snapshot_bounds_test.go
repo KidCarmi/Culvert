@@ -188,14 +188,12 @@ func TestFetchAndApply_OverCapDoesNotPoisonLastVersion(t *testing.T) {
 func resetSnapshotBoundsTestGlobals(t *testing.T) {
 	t.Helper()
 	origBL := bl
-	origIPF, origRL := ipf, rl
 	// Fresh owners: the apply path mutates ipf and rl in place (RISK-030), so
 	// restoring a saved pointer would hand back an object the apply changed.
-	ipf, rl = newIPFilter(), newRateLimiter()
+	bindFreshAdmissionOwners(t)
 	origAction := defaultPolicyActionState.Load()
 	t.Cleanup(func() {
 		bl = origBL
-		ipf, rl = origIPF, origRL
 		defaultPolicyActionState.Store(origAction)
 	})
 }

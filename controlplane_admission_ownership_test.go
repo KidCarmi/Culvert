@@ -18,18 +18,14 @@ import (
 // The transport is the only stub: real authenticated CP aggregation feeds the
 // real DP loop, then the same owner drives HTTP admission, metrics and the API.
 func TestDistributedAdmission_ProductionWiring(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	r := newRateLimiter()
 	useProductionRateLimiter(t, r)
-	oldIPF, oldURL, oldTrust := ipf, cfg.ProxyBaseURL(), trustForwardedHeaders
+	oldURL, oldTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
 	oldCS, oldAgg := globalClusterStore, globalRLAggregator
 	oldConns := connLimiter
 	connLimiter = newConnLimiter()
-	// The snapshot apply below replaces the installed filter's contents in
-	// place (RISK-030), so bind a fresh one rather than applying over the
-	// suite's shared owner and "restoring" the mutated object.
-	ipf = newIPFilter()
 	t.Cleanup(func() {
-		ipf = oldIPF
 		SetProxyBaseURL(oldURL)
 		trustForwardedHeaders = oldTrust
 		globalClusterStore, globalRLAggregator = oldCS, oldAgg
