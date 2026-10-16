@@ -176,66 +176,30 @@ func (c *HashCache) Clear() {
 // afterward, it drops approximately 25 % of the remaining entries.
 // Must be called with c.mu held for writing.
 //
-// ── Measured cost (Go 1.26, 4-vCPU amd64, 64-hex-char keys as SHA256Hex
-// produces, hashcache_evict_bench_test.go; 2026-10-16 on a ~3x-oversubscribed
-// shared host, so read the figures as upper-biased) ───────────────────────────
+// Cost shape (behaviour only; measurements live in
+// roadmap/SCAN-CACHE-EVICTION-COST.md, not here, so they cannot go stale in
+// a production comment):
 //
-// This runs on the Set path, synchronously, under the EXCLUSIVE write lock, on
-// whichever scan arrives when the map is full — so its duration stalls every
-// concurrent verdict lookup, not just that one caller. The expiry sweep is
-// O(maxSize): proving no entry is expired means looking at all of them. The
-// 25 % drop then makes room for maxSize/4 inserts, over which one call's cost
-// amortizes:
+//   - It runs on the Set path, synchronously, under the EXCLUSIVE write lock,
+//     on whichever Set arrives when the map is full. While it runs, every
+//     concurrent Get (hits included) waits, not just that one caller.
+//   - The expiry sweep is O(maxSize): proving no entry is expired means
+//     looking at all of them. The 25 % drop then makes room for maxSize/4
+//     inserts, over which one call's cost amortizes.
+//   - It gets SLOWER the more of the cache has expired, because a sweep that
+//     finds expired entries also deletes them. A full cache left idle past its
+//     TTL and then hit by one Set is therefore the worst case, not the busy
+//     steady state.
+//   - cache_size is an operator YAML knob that config validation only FLOORS
+//     (non-positive → 10 000) and never caps, so the lock hold grows with it
+//     and nothing warns the operator.
 //
-//	cache_size │ one evictLocked │ recurs every      │ amortized per Set
-//	   10 000  │    0.54 ms      │ 2 500 inserts     │  ~218 ns
-//	  100 000  │    10.4 ms      │ 25 000 inserts    │  ~414 ns
-//	1 000 000  │     150 ms      │ 250 000 inserts   │  ~600 ns
-//
-// (10-sample medians in the busy steady state: nothing expired. This is NOT
-// the worst case: at 10 000 the all-expired case measured ~0.94 ms against
-// 0.54 ms. The realistic worst case, a full cache idle past its TTL and then
-// one Set, is therefore HIGHER and is not yet bounded at 100 000 or
-// 1 000 000; BenchmarkEvictLocked_AllExpired_100k/_1M exist to bound it on an
-// idle host. The 1 000 000 row is BenchmarkEvictLocked_NothingExpired_1M and
-// is the noisiest: read it as 150-300 ms. The amortized
-// column is this implementation's own per-Set cost; do not confuse it with
-// the base-vs-candidate difference reported in the roadmap note.)
-//
-// cache_size is an operator YAML knob that config validation only FLOORS
-// (non-positive → 10 000) and never caps, so the spike grows with it without
-// anything warning the operator. Eviction also gets SLOWER the more
-// reclaimable the cache is (0.94 ms at 10 000 fully expired, against 0.54 ms
-// with none expired), because a sweep that finds expired entries also deletes
-// them.
-//
-// At the 10 000 default this is deliberately left alone: ~218 ns amortized per
-// Set. When at least one engine (ClamAV or YARA) is active, a Set follows a
-// scan MISS that costs a scan measured in MILLISECONDS, three to four orders of
-// magnitude more. With NO engine configured (YARA disabled and no ClamAV),
-// ScanBody still caches a clean result without scanning
-// (TestYARA_DisabledSkipsScanAndDiagnosticsWarn pins that). The Set then
-// follows only a SHA-256 of the body, and how the eviction cost compares with
-// that is UNMEASURED. That covers the Set path only. Cache HITS also wait behind the exclusive lock
-// hold, and the reader tail-latency impact is UNMEASURED, pending a contention
-// run on an idle host. Bounding it independent of
-// maxSize means giving up the "no expired entry survives an eviction"
-// invariant that TestSet_EvictsExpiredFirst pins (an early exit cannot know
-// what it did not look at) or sharding the map — both change observable
-// behaviour and need their own change and review.
-//
-// Do not reach for the obvious layout fix without reading the measurements
-// first. Holding entries by value instead of behind a pointer makes this sweep
-// 9-62 % faster (no change when everything has expired) and removes one
-// allocation per Set. It also costs ~10 ns (+27 %) on every Get miss, and the
-// steady-state Set cost showed no significant change at either 10 000 or
-// 100 000. That is a MIXED and IMMATERIAL result at the default size, so it
-// was measured and NOT shipped, for want of a payoff rather than because it is
-// harmful. At large cache_size the real fix is bounding or sharding the
-// eviction, not a constant-factor layout change.
-// roadmap/SCAN-CACHE-EVICTION-COST.md has the interleaved benchstat numbers,
-// the superseded short-key figures, and the retraction of an earlier,
-// stronger claim that the comparison refuted it.
+// Bounding the hold independently of maxSize means either giving up the "no
+// expired entry survives an eviction" invariant that TestSet_EvictsExpiredFirst
+// pins (an early exit cannot know what it did not look at) or sharding the map.
+// Both change observable behaviour and need their own change and review. A
+// by-value entry layout was measured and not shipped; read the roadmap note
+// before retrying it.
 func (c *HashCache) evictLocked() {
 	now := time.Now()
 	for k, e := range c.entries {

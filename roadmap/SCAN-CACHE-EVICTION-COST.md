@@ -1,25 +1,25 @@
 # Scan-cache eviction cost — measurement and a rejected optimization
 
-**All absolute figures were measured on a loaded 4-vCPU host (load 12–14);
-re-measure on an idle host before using them for a design decision.**
+**Every figure in this note is historical and pre-harness-fix.** All were
+measured on a loaded 4-vCPU host (load 12–14) before the harness fixes listed
+under Method (GC quiescing before timing, guaranteed and counted in-window
+evictions). Re-measure on an idle host with the current harness before using any
+of them for a design decision. None of them is a current measurement.
 
 > Status: **MEASURED, NO IMPLEMENTATION CHANGE (2026-10-11; re-measured
 > 2026-10-16 with production-shaped keys).** Verdict: the scan cache's eviction
-> stall is real and grows linearly with the operator's `cache_size`. It reaches
-> roughly 150-300 ms at `cache_size: 1000000`, a case the committed benchmarks
-> now cover, in the busy steady state (nothing expired). The all-expired case
-> costs more and is not yet bounded at large sizes. At the shipped 10 000
-> default the amortized cost is ~218 ns per Set. That is small relative to the
-> scan miss it follows **when a ClamAV or YARA engine is active**. With no engine
-> configured, a Set follows only a SHA-256 of the body, and that comparison is
-> unmeasured. The reader tail-latency impact is **UNMEASURED**,
-> pending a contention run on an idle host: hits also wait behind the lock
-> hold. The obvious
+> stall is real, runs under the exclusive lock, and grows linearly with the
+> operator's `cache_size`. Historical, pre-harness-fix runs put one busy
+> steady-state call at roughly 150-300 ms at `cache_size: 1000000`; the
+> all-expired case costs more and is not yet bounded at large sizes. **What is
+> NOT measured, and what the verdict does not rest on:** how the eviction cost
+> compares with the scan a Set follows on any engine path (ClamAV, YARA-only or
+> no engine), and the reader tail latency behind the lock hold. The obvious
 > layout fix (holding entries by value rather than behind a pointer) was
-> implemented, measured against an interleaved baseline, and **not shipped**.
-> The reason is that the result is mixed and immaterial, not that it is harmful:
-> the eviction sweep gets faster, the per-`Set` cost does not change
-> significantly, and a `Get` miss gets slower. An earlier revision of this note
+> implemented, measured against an interleaved baseline, and **not shipped**,
+> because the historical result is mixed, not because it is harmful: the
+> eviction sweep got faster, the per-`Set` cost showed no significant change,
+> and a `Get` miss got slower. An earlier revision of this note
 > claimed it "loses it again on the far more frequent Get and Set paths"; that
 > framing did not survive re-measurement and is retracted below. This change
 > therefore ships the missing benchmarks and this record, and leaves
@@ -78,7 +78,7 @@ problem?
   evictions. The figures below predate both changes. The next idle-host run
   must re-measure them.
 
-## Results — the cost that exists
+## Results — the cost that exists (historical, pre-harness-fix; re-measure on an idle host)
 
 `evictLocked`, one call, cache full, in the busy steady state (nothing
 expired). This is **not** the worst case (see below). Taken from a dedicated
@@ -120,7 +120,7 @@ Two further properties worth having pinned:
 An operator who raises it buys a proportionally larger stall with nothing
 warning them.
 
-## Results — why no change ships
+## Results — why no change ships (historical, pre-harness-fix; re-measure on an idle host)
 
 Holding entries in the map **by value** instead of behind a pointer removes the
 per-entry dereference from the sweep and the per-`Set` heap allocation of the
@@ -168,12 +168,10 @@ nothing or half expired, which matters most at large `cache_size` and does not
 change when everything has expired. It also makes one fewer allocation per
 `Set` and uses half the `B/op` at the default size.
 
-That is a **mixed and immaterial result, not a refutation**. In absolute terms,
-at the shipped default, `Get_Miss` costs +10 ns and the `Set` difference is not
-distinguishable from noise. With a ClamAV or YARA engine active, both sit
-four to five orders of magnitude below the scan that a `Set` follows and a
-`Get` precedes. With no engine configured, there is no scan to compare against
-(see the verdict). The eviction saving
+That is a **mixed result, not a refutation**. In these historical runs, at the
+shipped default, `Get_Miss` got slower and the `Set` difference was not
+statistically significant. This note does not compare either difference with
+scan cost on any engine path; that comparison is unmeasured. The eviction saving
 is the only large number, and only at operator-raised sizes: the
 `cache_size: 1000000` stall shrinks from roughly 150-300 ms to roughly 115 ms. A
 real fix for that case is bounding or sharding the eviction (below), not a
@@ -183,14 +181,14 @@ So the verdict is unchanged and so is its reasoning: there is **no performance
 case for the layout change at the default size, and none against it either**.
 Rewriting how a shared cache stores its entries — touching `Get`, `Set`,
 `SetTTLUnless`, `Clear` and a white-box test's mutation semantics — to buy a
-result this small and this mixed is churn without a payoff. The allocation
-reduction is the one non-noise argument in its favour at the default (GC
+result this mixed is churn without a demonstrated payoff. The allocation
+reduction is the one consistent argument in its favour at the default (GC
 pressure lands in the heap the proxy's latency-critical goroutines share, the
 point [scanbuffer](../internal/secscan/scanbuffer.go) makes for its own path).
 It is not enough on its own, and it is the thing to re-examine first if this is
 ever revisited.
 
-### Contention
+### Contention (historical, pre-harness-fix)
 
 `Get_ParallelDuringEviction` compared against `Get_Parallel` cannot isolate lock
 contention. The writer displaces the seeded keys, so the two sides read
@@ -210,7 +208,7 @@ reader goroutines plus a writer are not a meaningful contention experiment.
 Re-run the pair on an idle host before quoting any reader-slowdown ratio. The
 stall itself is not in doubt: it is the exclusive lock hold measured above.
 
-## Historical measurements (short keys, superseded)
+## Historical measurements (short keys, superseded; also pre-harness-fix)
 
 Kept so the corrections stay traceable. These figures used 2-6 character keys
 (`k0`, …) on a less loaded host, so they **understate** production cost. Do not
@@ -249,18 +247,22 @@ the frequent operations slower to speed up a rare one", with that benchmark as
 ## Verdict and what would actually help
 
 At the shipped `cache_size: 10000` default, **leave `evictLocked` alone for
-now**. The verdict is narrower than "not a bottleneck". When a ClamAV or YARA
-engine is active, a Set happens only after a scan MISS that costs a scan
-measured in milliseconds, so ~218 ns of amortized eviction is small relative to
-it. With **no engine configured** (YARA disabled and no ClamAV), `ScanBody`
-still caches a clean result without scanning
-(`TestYARA_DisabledSkipsScanAndDiagnosticsWarn` pins this). There, a Set
-follows only a SHA-256 of the body, and the eviction cost relative to that path
-is **UNMEASURED**. Cache hits,
-however, also wait behind the exclusive lock hold, and that reader tail-latency
-impact is **UNMEASURED**, pending a contention run on an idle host (see
-"Contention"). Revisit this verdict if that run shows a material hit-path
-stall.
+now**. The verdict rests only on this: no measurement here shows a problem that
+justifies a behaviour change (bounded eviction or sharding), and the one
+constant-factor alternative measured, the by-value layout, gave a mixed result.
+It does **not** rest on any comparison with scan cost. These comparisons are
+**UNMEASURED**:
+- eviction cost relative to the scan a Set follows, on every engine path:
+  ClamAV, YARA-only (a YARA-only scan can be far cheaper than milliseconds;
+  see the benchmarks in `internal/yara/regexrunner_bench_test.go`, so a
+  "milliseconds per miss" assumption does not hold there), and no engine,
+  where `ScanBody` caches a clean result without scanning
+  (`TestYARA_DisabledSkipsScanAndDiagnosticsWarn`) and a Set follows only a
+  SHA-256 of the body;
+- the reader tail latency of cache hits waiting behind the exclusive lock hold
+  (see "Contention").
+Revisit this verdict once an idle-host run with the current harness has measured
+those.
 
 If production telemetry ever shows this stall mattering — the benchmarks added
 here make it measurable, and `culvert_scan_cache_size` already exposes the
@@ -281,7 +283,7 @@ and its own review:
    real concurrency-contract change.
 
 A cheaper mitigation that needs no structural change: **cap or warn on
-`cache_size`** at startup, so the 150-300 ms lock hold at 1 000 000 is not
+`cache_size`** at startup, so the lock hold at 1 000 000 (historically 150-300 ms) is not
 reachable by a config edit alone.
 
 ## Scope

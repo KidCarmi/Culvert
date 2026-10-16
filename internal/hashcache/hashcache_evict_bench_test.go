@@ -28,9 +28,8 @@ import (
 // Production reaches this cache only through SHA256Hex, so every real key is a
 // 64-character lowercase hex string. Map hashing and deletion cost grows with
 // key length, so short keys such as "k0" measure a cheaper map than the one a
-// gateway holds: on the same host, 64-byte keys raised AllExpired_10k from
-// ~0.67 ms to ~0.84 ms (Codex, PR #1604). Every key these benchmarks insert or
-// look up is therefore 64 hex characters.
+// gateway holds (Codex, PR #1604). Every key these benchmarks insert or look
+// up is therefore 64 hex characters.
 //
 // Fixture and reader keys are real SHA256Hex digests, built once per namespace
 // and memoized. The table only ever grows to the largest fixture size (1 000 000
@@ -124,8 +123,8 @@ func startTimedAfterGC(b *testing.B) {
 // retain b.N x maxSize entries, and b.N grows with -benchtime: at the
 // -benchtime 1s suggested above that is ~2 GB for the 10 000 case and ~1.3 GB
 // for the 100 000 one, which exhausts a constrained runner before the first
-// timed call. The StopTimer/StartTimer pair costs ~100 ns against a measured
-// 0.5 ms-300 ms, so it does not move the figures.
+// timed call. The StopTimer/StartTimer pair is tiny next to an eviction over
+// thousands of entries, so it does not move the figures.
 //
 // Building a fixture allocates maxSize entries, which can leave a concurrent
 // GC cycle running into the timed call and charge its work to evictLocked
@@ -168,9 +167,8 @@ func BenchmarkEvictLocked_NothingExpired_1M(b *testing.B) {
 // relationship stays visible — it is the opposite of the intuitive direction.
 //
 // All-expired is the realistic WORST case: a full cache idle past its TTL,
-// then one Set. At 10 000 it measured ~0.94 ms against 0.54 ms with nothing
-// expired. The 100 000 and 1 000 000 cases exist so an idle-host run can bound
-// it at larger sizes; no figure from them is quoted yet. Like the other large
+// then one Set. The 100 000 and 1 000 000 cases exist so an idle-host run can
+// bound it at larger sizes. Like the other large
 // fixtures they are skipped under -short.
 func BenchmarkEvictLocked_HalfExpired_10k(b *testing.B) { benchEvictLocked(b, 10_000, 0.5) }
 func BenchmarkEvictLocked_AllExpired_10k(b *testing.B)  { benchEvictLocked(b, 10_000, 1.0) }
@@ -194,7 +192,7 @@ func BenchmarkEvictLocked_AllExpired_1M(b *testing.B) {
 // one eviction between them, so this is where a regression in the amortized
 // shape would show. ReportAllocs covers the per-Set allocations: the key string
 // and the hashCacheEntry itself. Folding the entry into the map by value
-// removes one of them and was measured — it is NOT a win overall; see
+// removes one of them. It was measured, with a mixed result, and not shipped; see
 // roadmap/SCAN-CACHE-EVICTION-COST.md before trying it again.
 func benchChurn(b *testing.B, maxSize int) {
 	c := New(maxSize, time.Hour)
@@ -244,8 +242,8 @@ func BenchmarkGet_Miss(b *testing.B) {
 // The hit rate is reported because it is not a constant across these two
 // benchmarks: a writer that trips eviction deletes seeded keys, so the
 // contended benchmark below reads a mix of hits and misses where the
-// uncontended one reads hits only. A miss is CHEAPER than a hit (roughly 38 ns
-// against 124 ns with 64-hex keys), so a falling hit rate pushes ns/op DOWN.
+// uncontended one reads hits only. A miss is CHEAPER than a hit, so a falling
+// hit rate pushes ns/op DOWN.
 // The two are not a like-for-like read workload, and %hit is what lets a
 // reader see by how much. Hits are
 // counted in a per-goroutine local and folded in once at the end, so the
@@ -299,32 +297,6 @@ func BenchmarkGet_Parallel(b *testing.B) {
 // had a turn.
 const minContendedWindow = 50 * time.Millisecond
 
-// Readers contending with a writer that keeps tripping eviction — the shape
-// that makes the lock hold a system-wide cost rather than a local one.
-//
-// Read %hit against BenchmarkGet_Parallel's before drawing a ratio from the two.
-// The writer runs for the whole benchmark, and each Set it lands at capacity
-// evicts 25 % of the map, so the seeded keys are steadily displaced by the
-// writer's own keys: measured, this reads only **a few percent hits** against
-// the uncontended benchmark's 100 % (a median 6.6 % at -benchtime 300ms with
-// 64-hex keys; the superseded short-key runs read 4.7 % at 500ms and 1.4 % at
-// 1s), falling as the run lengthens and the writer displaces more. (An earlier
-// revision of this comment guessed ~75 % from the first eviction alone; the
-// %hit metric exists because that guess was wrong by more than an order of
-// magnitude.) The pair therefore cannot isolate contention.
-//
-// The changed mix makes the contended side CHEAPER per read, since misses cost
-// ~38 ns against a hit's ~124 ns. In the short-key runs it was still ~3x
-// slower despite that. In the 64-hex-key A/B on an oversubscribed host it was
-// faster (95 ns against 174 ns), so this pair proves nothing about contention
-// by itself. Use the miss-only control below, on an idle host.
-//
-// Reader throughput is what a bounded eviction would be trying to protect, so
-// this is the benchmark to re-read if that follow-up is attempted. The pre-fix
-// A/B of the rejected layout change reported this case 13 % WORSE. That run
-// used the fixture-retention harness that has since been corrected, and the
-// corrected A/Bs show no significant change (p=0.083 with short keys, p=0.328
-// with 64-hex keys; roadmap/SCAN-CACHE-EVICTION-COST.md).
 // evictingWriter is the contention benchmarks' writer goroutine. It Sets unique
 // 64-hex keys into a full cache as fast as it can, so it keeps tripping
 // evictLocked under the exclusive lock.
@@ -414,6 +386,20 @@ func assertContended(b *testing.B, writes, evictions int64) {
 	}
 }
 
+// Readers contending with a writer that keeps tripping eviction — the shape
+// that makes the lock hold a system-wide cost rather than a local one.
+//
+// Read %hit against BenchmarkGet_Parallel's before drawing a ratio from the
+// two. The writer runs for the whole benchmark and each eviction drops 25 % of
+// the map, so the seeded keys are steadily displaced by the writer's own keys.
+// This benchmark therefore reads far fewer hits than the uncontended one, and
+// fewer the longer it runs. Because a miss is cheaper than a hit, the changed
+// mix makes the contended side cheaper per read. The pair cannot isolate
+// contention, so use the miss-only control below. The roadmap note records
+// what earlier runs saw, labelled as historical.
+//
+// Reader throughput is what a bounded eviction would be trying to protect, so
+// this is the benchmark to re-read if that follow-up is attempted.
 func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	const maxSize = 10_000
 	c := fillCache(maxSize, 0)
@@ -453,11 +439,9 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 //
 // Read it as a control, not as a replacement: it measures the MISS path, which
 // is cheaper than the hit path the scanners actually take, and the writer's
-// cost here is eviction plus ordinary Set work, not eviction alone. With short
-// keys it showed a 2.0-2.7x slowdown. The 64-hex-key run, on a ~3x
-// oversubscribed host, showed only a 1.26x median with heavily overlapping
-// ranges, which does not establish one (roadmap/SCAN-CACHE-EVICTION-COST.md).
-// Re-run it on an idle host before quoting a ratio.
+// cost here is eviction plus ordinary Set work, not eviction alone. No ratio
+// from it is established yet; the roadmap note records the historical runs.
+// Re-run it on an idle host before quoting one.
 
 // benchMissOnlyParallel reads a never-inserted keyspace on every core, with an
 // eviction-tripping writer when withWriter is set. %hit must be 0 in both.
