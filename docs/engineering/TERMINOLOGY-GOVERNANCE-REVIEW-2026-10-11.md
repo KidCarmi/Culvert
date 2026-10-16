@@ -22,7 +22,7 @@ Two new drifts found, both small. No Critical or High item.
 | ID | Priority | Concept | Drift |
 | --- | --- | --- | --- |
 | T-64 | Medium | Operation identifier | `opId` / `op_id` / `operation_id` / `operationId` for the same idea, **including two spellings on one resource** |
-| T-65 | Low | Config-version rollback | One GUI hint says "restore a config version"; everywhere else says "roll back" |
+| T-65 | Low | Config-version rollback | Two deletion hints (React and legacy GUI) say "restore" a config version; everywhere else says "roll back" |
 
 Confirmed consistent in the window (no action): `Rollback` for config versions
 (`POST /api/config/versions`, `/api/config/rollback-scope`, GUI "Rollback Configuration", runbooks);
@@ -60,10 +60,14 @@ new IDs → 25 / 24.
     (`backups_api.go`, `op_id=%s`), and `release.dispatch` audit details (`release_dispatch_service.go:423,438`).
   - `operation_id` — traffic-redaction key rotation request/receipts (`openapi.yaml:1014,1896`).
   - `operationId` — PAC lifecycle and CDR responses (`openapi.yaml:552-558,2191,2232,2254`).
-- **Recommended canonical name:** `operationId` on the camelCase `/api/backups` create response (matches
-  its sibling fields `passphraseEnvVar`, `ifRevision`-style camelCase on that surface); `operation_id`
-  where the surface is snake_case; prose "operation ID". `op_id` remains only where it is the
-  maintenance agent's own wire format, with the API response schema documenting the mapping.
+- **Recommended canonical name:** `operationId` on the camelCase `/api/backups` resource (its create
+  request already uses camelCase, e.g. `passphraseEnvVar`); `operation_id` where the surface is
+  snake_case; prose "operation ID". **Recorded exception:** `op_id` stays in `BackupOperationStatus`
+  because that schema is the maintenance agent's operation record passed through verbatim
+  (`additionalProperties: true`); it is the agent's wire format, not a Culvert-chosen name. To close the
+  create-versus-poll mismatch the poll response should *also* carry `operationId` (copied from the
+  agent's `op_id`), so a client can read one field name from both responses while `op_id` remains for
+  existing readers.
 - **Why problematic:** the *same operation* is created with `opId` and polled as `op_id`; a client
   written against one response cannot reuse the field name against the other. Support correlating a
   `backup.trigger` audit line (`op_id=`) with the API response (`opId`) has to know both. "op" is an
@@ -73,28 +77,34 @@ new IDs → 25 / 24.
 - **Affected code:** `backups_api.go:328-345`; `static/index.html` 16080-16177; audit detail strings.
 - **Affected API:** `BackupCreateResult.opId` (additive: emit `operationId`; keep `opId` for one release as
   a deprecated alias — the field is new in #1468 and its only known consumer is the bundled GUI).
-  `BackupOperationStatus.op_id` is agent pass-through; document, do not rename.
+  `BackupOperationStatus`: add `operationId` beside the verbatim `op_id` (additive; the schema already
+  allows extra properties); do not rename or drop `op_id`, which is the agent's own record field.
 - **Affected GUI:** `backupNowPendingOp.opId` JS naming only; no visible label.
 - **Affected documentation:** OpenAPI description at line 1203; any backup runbook that quotes the field.
 - **Affected configuration:** none.
-- **Migration complexity:** Low. **Compatibility risk:** Low (dual-emit for one release; single in-tree
-  consumer). **Estimated PR size:** S (~40 lines + contract test update). Do NOT rename `op_id` in
+- **Migration complexity:** Low. **Compatibility risk:** Low (additive on both responses; dual-emit on
+  create for one release; single in-tree consumer). **Estimated PR size:** S (~60 lines + contract test
+  update). Do NOT rename `op_id` in
   audit detail strings without a CHANGELOG note: SIEM parsers may key on it.
 
 ### T-65 — "restore a config version" vs "roll back" (Low)
 
 - **Business concept:** reverting configuration to an earlier version.
 - **Current names:** "restore a config version" (`frontend/src/features/policy/AuthRulesPage.tsx:738`,
-  rule-deletion rollback hint); "roll back" / "Rollback" everywhere else (`static/index.html:2648,8388`,
+  rule-deletion rollback hint) and "restore via Config Versions" (`static/index.html:11971`, the legacy
+  GUI's CDR rule-deletion confirmation); "roll back" / "Rollback" everywhere else (`static/index.html:2648,8388`,
   `docs/enterprise/POLICY-ROLLOUT-GUIDE.md:49`, `OPERATIONS-RUNBOOK.md:43`, `diagnostics.go:1701`).
 - **Recommended canonical name:** "roll back to a config version".
 - **Why problematic:** "restore" is the backup/DR verb (`/data` restore). An operator reading
   "restore a config version" on a deletion dialog may look in the backup area instead of Config Versions.
 - **Why better:** one verb per action; rollback keeps its meaning of "revert settings in a snapshot".
-- **Affected code/GUI:** that one JSX string (the string predates the window — #1265 — but was not
-  charged by an earlier report). **API / docs / config:** none.
-- **Migration complexity:** Trivial. **Compatibility risk:** None, unless a frontend test pins the string
-  (check `frontend/src/test` before editing). **Estimated PR size:** XS (1 line).
+- **Affected code/GUI:** the JSX string (it predates the window — #1265 — but was not charged by an
+  earlier report) and the legacy-GUI confirmation string. (`static/index.html:8384`'s "not restored by
+  rollback" describes rollback's effect and does not name the action; it is not part of T-65.)
+  **API / docs / config:** none.
+- **Migration complexity:** Trivial. **Compatibility risk:** None, unless a test pins either string
+  (check `frontend/src/test` and the root GUI string tests before editing). **Estimated PR size:** XS
+  (2 lines).
 
 ---
 
@@ -106,7 +116,7 @@ No new entries. Carried (not re-verified): the 2026-09-24 report's backlog, nota
 
 ## Migration Risk
 
-Only T-64 touches a wire contract, and only additively. T-65 is copy.
+Only T-64 touches a wire contract, and only additively (a new field on each backup response; nothing renamed or removed). T-65 is copy.
 
 ## Recommended Refactoring Plan (by priority)
 
@@ -114,8 +124,8 @@ Only T-64 touches a wire contract, and only additively. T-65 is copy.
 | --- | --- | --- |
 | Critical | — | none |
 | High | — | none |
-| Medium | T-64 | Dual-emit `operationId` on `POST /api/backups`; deprecate `opId`; update GUI + spec + contract test |
-| Low | T-65 | Reword the one hint to "roll back to a config version" |
+| Medium | T-64 | Dual-emit `operationId` on `POST /api/backups` (deprecate `opId`) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test |
+| Low | T-65 | Reword both hints (React `AuthRulesPage.tsx:738`, legacy `static/index.html:11971`) to "roll back to a config version" |
 
 ## Stop-condition assessment
 
