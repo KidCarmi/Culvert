@@ -495,18 +495,6 @@ func (s *Writer) tryEnqueue(item queuedLine) enqueueResult {
 	}
 }
 
-// enqueue hands one formatted line to the drain goroutine without blocking.
-// Reports whether it was accepted; a rejected line is already counted.
-func (s *Writer) enqueue(item queuedLine) bool {
-	switch s.tryEnqueue(item) {
-	case enqAccepted:
-		return true
-	case enqClosed:
-		s.noteDrop(&reasonClosed)
-	}
-	return false
-}
-
 // handOffQueued re-routes one line still queued on a displaced Writer to its
 // successor chain. Reports whether the line has been DEALT WITH — accepted by
 // some successor, or lost and counted on the way. A line no successor accepts
@@ -656,6 +644,13 @@ func (s *Writer) WriteProbe(msg string) (<-chan ProbeOutcome, bool) {
 		return nil, false // queue full: already counted on s by tryEnqueue
 	}
 	// enqClosed: s was displaced by a re-point after the caller captured it.
+	//
+	// This used to call a single-writer `enqueue` helper that dropped straight
+	// onto s. That helper is now gone rather than left unused: it was a second
+	// caller-side enqueue path with DIFFERENT semantics from the one send
+	// walks, and WriteProbe picking the wrong one is precisely how this defect
+	// arose. A dead duplicate of a path that must not be chosen is an invitation
+	// to choose it.
 	// Follow the successor chain exactly as an ordinary line does, so the
 	// REPLACEMENT collector is the one probed and a loss is charged where the
 	// health plane can read it. Dropping directly on s instead reported a

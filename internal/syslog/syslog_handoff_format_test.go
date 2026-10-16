@@ -1,6 +1,7 @@
 package syslog
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -444,5 +445,117 @@ func TestWriteProbeFollowsTheSuccessorOfAClosedWriter(t *testing.T) {
 	}
 	if lone.Stats().Drops != 1 {
 		t.Errorf("control: the closed writer counted %d drops; want 1", lone.Stats().Drops)
+	}
+}
+
+// chainTo builds head -> n closed writers -> one LIVE writer, linked exactly as
+// releaseReplacedSyslogWriter does it (retire, hand off, close), and returns the
+// head and the live tail. Every writer in between is closed, so a line sent
+// through the head must walk the whole chain to be delivered.
+func chainTo(t *testing.T, closedLinks int) (head, live *Writer) {
+	t.Helper()
+	mk := func() *Writer {
+		return &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	}
+	head = mk()
+	prev := head
+	for i := 0; i < closedLinks; i++ {
+		nx := mk()
+		prev.MarkRetired()
+		prev.HandOffTo(nx)
+		prev.closed.Store(true)
+		prev = nx
+	}
+	return head, prev
+}
+
+// TestSendAndHandOffAgreeOnChainDepth pins the PROPERTY behind the hop-bound
+// finding rather than the depth it happened to have.
+//
+// The defect was not that one number was better than the other: it was that two
+// walks over ONE chain disagreed about how deep it goes, so the same line was
+// delivered or lost depending only on which path it took. The exhaustion test
+// above asserts the fixed depth and so catches this instance; this asserts the
+// agreement, and so catches a future divergence in either direction — including
+// one introduced by changing maxHandoffHops or by touching only one walk.
+func TestSendAndHandOffAgreeOnChainDepth(t *testing.T) {
+	for _, depth := range []int{1, maxHandoffHops - 1, maxHandoffHops, maxHandoffHops + 1} {
+		t.Run(fmt.Sprintf("depth=%d", depth), func(t *testing.T) {
+			sendHead, sendLive := chainTo(t, depth)
+			sendHead.send(13, "via send")
+			sendReached := len(sendLive.queue) == 1
+
+			hoHead, hoLive := chainTo(t, depth)
+			if !hoHead.handOffQueued(hoHead.formatLine(13, "via handoff", time.Now())) {
+				t.Fatal("handOffQueued declined to take the line")
+			}
+			hoReached := len(hoLive.queue) == 1
+
+			if sendReached != hoReached {
+				t.Fatalf("at %d successor links send reached the live writer = %v but handOffQueued = %v: "+
+					"one chain walked by two functions must drop at the SAME depth",
+					depth, sendReached, hoReached)
+			}
+		})
+	}
+}
+
+// TestProbeRefusalOnASealedWriterReachesTheExportedTotal closes the accounting
+// half of the probe finding at the SURFACE rather than at the counter.
+//
+// A displaced writer's own counters stop being read once its finals are folded,
+// which is exactly why lateDrops exists. The no-successor control above asserts
+// Stats().Drops on a writer that was never retired or sealed — the case where
+// the writer's own counter IS still read — so it cannot see a loss charged to a
+// sealed one. That is the shape this plane has recorded repeatedly: when a fix
+// routes a loss to a counter, the deliverable is the exported total, not the
+// counter.
+func TestProbeRefusalOnASealedWriterReachesTheExportedTotal(t *testing.T) {
+	ResetLateDropsForTest()
+	t.Cleanup(ResetLateDropsForTest)
+
+	// Retired AND sealed, closed, with no successor: the chain ends here and
+	// this writer's own counters are no longer folded by the health plane.
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	w.closed.Store(true)
+	w.MarkRetired()
+	final := Stats{}
+	w.finalStats.Store(&final)
+
+	before := LateDrops()
+	if ack, ok := w.WriteProbe("refused at the end of the chain"); ok || ack != nil {
+		t.Fatalf("a probe no writer can take was reported queued (ok=%v, ack!=nil=%v)", ok, ack != nil)
+	}
+	if got := LateDrops(); got == before {
+		t.Fatalf("a probe refused on a retired+sealed writer left the late-drop total at %d: "+
+			"that writer's own counters are not read any more, so the loss is absent from "+
+			"culvert_syslog_drops_total and /healthz", got)
+	}
+}
+
+// TestProbeOnAnOpenWriterWithASuccessorStaysPut is the CONTROL for walking.
+// The cheapest way to pass a "the probe reaches the replacement" gate is to walk
+// unconditionally, which would hand a probe past a perfectly healthy collector
+// and report on the wrong one.
+func TestProbeOnAnOpenWriterWithASuccessorStaysPut(t *testing.T) {
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	nx := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	w.HandOffTo(nx) // a successor exists, but w is OPEN and must keep the line
+
+	ack, ok := w.WriteProbe("stays on the healthy writer")
+	if !ok || ack == nil {
+		t.Fatal("a probe on a healthy writer was refused")
+	}
+	if len(w.queue) != 1 {
+		t.Fatalf("the healthy writer holds %d queued lines, want 1", len(w.queue))
+	}
+	if len(nx.queue) != 0 {
+		t.Fatal("the probe was handed to a successor although the writer it was submitted to was " +
+			"open and accepted it")
+	}
+	select {
+	case out := <-ack:
+		t.Fatalf("an accepted probe was acknowledged %+v before the drain delivered it", out)
+	default:
 	}
 }

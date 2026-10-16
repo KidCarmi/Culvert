@@ -9862,3 +9862,92 @@ fails only on `sw` itself, so `sw` *is* the writer that charged it.
   an AST wall on the handler's ack branch, because *walling the function is not
   walling the path*, and `ProbeReportsTheRealOutcome` passed unchanged against a
   reverted handler once already in this sweep.
+
+### Round 16 — one chain, two walks
+
+Two P2s with **one root cause**: `enqueue`, a single-writer caller-side helper,
+had exactly one caller left — `WriteProbe`. `send` outgrew it in round 11 when
+it gained the successor walk, and the probe was left on the old path. One chain
+with two walks over it produced exactly the two defects that shape produces.
+
+#### (a) A probe must follow the chain its ordinary lines follow
+
+`POST /api/syslog/test` captures a Writer, and a concurrent re-point can close
+it before the enqueue. The probe was then dropped against the **displaced**
+Writer: the healthy replacement never saw the test event and the endpoint
+answered `dropped` for a collector that was working — in the one endpoint whose
+whole job is to be believed. The refusal also went through a bare `noteDrop`
+rather than `chargeTerminalDrop`, so whenever the old Writer had already sealed
+the loss landed on counters no surface reads: *counting into a void*, recorded
+for the third time in this sweep.
+
+`WriteProbe` now routes an `enqClosed` through `handOffQueued`, the same walk a
+queued line takes. That walk already charges and acknowledges every in-chain
+terminal itself, so the surviving `(nil, false)` return is reached only when
+there is no successor at all — the one case where the captured Writer really is
+the terminal, and therefore the one case where the handler may still read the
+reason from it. The attribution round 15 established is preserved rather than
+re-derived.
+
+#### (b) The hop bound counts successor links, and `send` stopped one short
+
+`handOffQueued` offers the line to `maxHandoffHops` successors. `send` compared
+`hop+1` against the bound **before** advancing, so it followed only
+`maxHandoffHops-1` links and charged the line to the second-to-last. At exactly
+that depth the Writer it skipped is the **live** one, so a security event was
+lost to a collector that would have accepted it.
+
+**That off-by-one was introduced by round 11's own fix for the opposite error.**
+The bound used to be checked at the *top* of the loop, which charged a Writer
+that had been assigned and never asked; moving it below the attempt corrected
+the attribution and over-corrected the depth by one.
+
+> **A fix that moves a bound corrects one end and must be re-counted at the
+> other.**
+
+#### Provenance, and what this round adds
+
+The code fix for both findings was written and pushed independently as
+`f31bded` while this session was preparing its own. That fix is correct and
+smaller: it leaves `send`'s per-attempt formatting alone, where the competing
+version unified the two walks into one and changed the event-timestamp
+semantics on the hot path — a refactor the findings did not require. It was
+therefore discarded in favour of the landed fix. What survives from it is
+evidence, documentation, and one deletion:
+
+- `TestSendAndHandOffAgreeOnChainDepth` pins the **property** rather than the
+  depth. The landed exhaustion gate asserts the writer at exactly
+  `maxHandoffHops` links receives the line, which catches this instance; the
+  parity gate asserts the two walks reach the same writer at depths 1,
+  bound-1, bound and bound+1, so it also catches a future divergence in either
+  direction — including one introduced by changing the constant or by touching
+  only one walk.
+- `TestProbeRefusalOnASealedWriterReachesTheExportedTotal` closes the
+  accounting half at the **surface**. The landed no-successor control asserts
+  `Stats().Drops` on a Writer that was never retired or sealed — the case where
+  that counter IS still read — so it cannot see a loss charged to a sealed one.
+  Verified: a mutation that keeps the handoff but charges the terminal with a
+  bare `noteDrop` passes every landed gate and fails only this one.
+- `TestProbeOnAnOpenWriterWithASuccessorStaysPut` is the control against
+  walking unconditionally, which would hand a probe past a perfectly healthy
+  collector. Verified: that mutation passes every landed gate and fails only
+  this one.
+- The dead `enqueue` helper is **deleted** rather than left unused. It was a
+  second caller-side enqueue path with different semantics from the one `send`
+  walks, and `WriteProbe` picking the wrong one is how this defect arose. A
+  dead duplicate of a path that must not be chosen is an invitation to choose
+  it.
+
+> **Two independent fixes for one finding is a merge, not a race. Evaluate the
+> landed one on its merits, keep the gates it does not have, and record whose
+> code shipped.**
+
+#### Note on this round's documentation
+
+`main` has since decomposed `CLAUDE.md` into `AGENTS.md` plus
+`docs/agent-context/`, with a hash-verified preserved archive and an enforced
+eager-load budget. Architecture prose no longer belongs in `CLAUDE.md`, so this
+record is the canonical one. The preserved archive was checked for statements
+this round falsifies and contains none — its baseline predates the probe
+acknowledgement and the hop bound entirely — so no `errata.md` entry is
+required.

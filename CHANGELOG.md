@@ -7,6 +7,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `POST /api/syslog/test` no longer reports `dropped` for a collector that is
+  working. The probe used a single-writer enqueue path that the ordinary send
+  path had outgrown, so a probe submitted at the instant an admin re-points the
+  collector was dropped against the **displaced** writer: the healthy
+  replacement never saw the test event, and because the refusal went through a
+  bare drop rather than the shared terminal charge, the loss also escaped
+  `culvert_syslog_drops_total` and `/healthz` whenever the old writer had
+  already sealed. The probe now follows the same successor chain an ordinary
+  audit line follows.
+
+- A SIEM line could be lost to a live collector that would have accepted it. The
+  successor-chain walk in the send path followed one fewer link than the walk
+  used for already-queued lines, so at exactly the bound's depth the final (and
+  live) writer was never offered the line. Both walks now follow the same number
+  of links, pinned by a parity gate that asserts they reach the same writer at
+  several depths rather than asserting any one depth.
+
+
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable

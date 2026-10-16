@@ -212,6 +212,12 @@ POST /api/syslog/test        (admin)
 | `delivered` | the collector accepted **this** event (TCP only) |
 | `sent` | the datagram left this host; UDP cannot confirm receipt |
 | `dropped` | the event was lost before reaching the collector, with the bounded reason **from the writer that actually handled it** — after a re-point a queued probe can be handed to the replacement, and the answer names that collector, not the one the probe was submitted to |
+
+A probe submitted at the instant you re-point the collector is **not** reported
+as dropped: it follows the same successor chain an ordinary audit line follows,
+so the replacement you just configured receives the test event and answers it.
+Only a probe that no writer in that chain will take is `dropped`, and the reason
+then names the writer that actually refused it.
 | `unknown` | still queued after the 3-second probe window — retry |
 | `unconfigured` | no collector is configured |
 
