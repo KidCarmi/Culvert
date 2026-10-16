@@ -39,6 +39,16 @@ var monoEpoch = time.Now()
 // correct across a step in either direction, so neither caller needs a
 // negative-age branch at all.
 //
+// NEVER PERSIST OR TRANSMIT A monoNanos STAMP. It is relative to THIS
+// process's monoEpoch, so it is meaningless in another process or on another
+// node: written to disk and read back after a restart, or gossiped to a peer,
+// it would decode as an arbitrary instant. Every current holder is a
+// process-local atomic.Int64 (the per-tunnel activity stamp,
+// dpCPPollFailingSince, the two roster log gates) and none is serialised. A
+// stamp that must survive a restart or cross a node boundary is an ABSOLUTE
+// instant and belongs on the wall clock — see internal/mcp/rollout's persisted
+// soak start, which pairs time.Unix(seconds, 0) with a negative-age clamp.
+//
 // Scope note: a monotonic reading does not advance while the machine is
 // suspended on some platforms, so this measures elapsed RUNNING time. For an
 // idle-teardown deadline and a probe grace window — both of which exist to

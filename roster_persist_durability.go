@@ -64,10 +64,10 @@ var (
 	// configure -ui-users-file rather than investigate a failing volume.
 	rosterNotDurable atomic.Int64
 
-	rosterPersistLogLast  atomic.Int64 // unix nanos of the last emitted line
+	rosterPersistLogLast  atomic.Int64 // monoNanos stamp of the last emitted line (CHAOS-71)
 	rosterPersistSuppress atomic.Int64
 
-	rosterNotDurableLogLast  atomic.Int64 // unix nanos, own gate
+	rosterNotDurableLogLast  atomic.Int64 // monoNanos stamp (CHAOS-71), own gate
 	rosterNotDurableSuppress atomic.Int64
 )
 
