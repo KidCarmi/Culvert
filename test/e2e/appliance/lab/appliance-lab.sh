@@ -851,6 +851,12 @@ EOS
     until curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do (( $(date +%s) < deadline )) || break; sleep 5; done
     : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | code)"
     rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
+    # A restore resets the threat-feed domain allowlist to defaults (it is a
+    # re-downloadable cache, not in the backup manifest), and the re-synced
+    # urlhaus feed can re-block the allowed canary. Re-assert the exemption so
+    # this step measures that the restore brought the POLICY back, not the
+    # feed's contents today. example.net stays a denied canary (not allowlisted).
+    allowlist_threat_domain example.com > "$EV/06b-threat-allowlist.txt" 2>&1 || true
     local ra; ra="$(through_proxy http://example.com/) $(through_proxy http://example.net/)"
     printf 'exit %s\nlogin %s\nrules %s\ntraffic example.com/example.net %s\n' "$rc" "$c" "$rules" "$ra" >> "$EV/06b-restore-offline.txt"
     if [[ $rc == 0 && $c == 200 && " $rules " == *" lab-allow-example "* && " $rules " != *" lab-post-backup "* && "$ra" == "200 403" ]]; then
@@ -1623,6 +1629,10 @@ EOS
   if [[ $rc == 0 && $c == 200 && "$same" == 1 ]]; then
     check H history-recovered pass "$(grep -m1 '^imported=' "$EV/H-09-import-offline.txt"); the $(hist_total "$after") marker records read back identical (ts, host, status, method) under the ROTATED log key"
   else check H history-recovered fail "import rc $rc, login $c, markers $(hist_total "$after") of $(hist_total "$before"), identical=$same ($(grep -E '^(imported|import-rc|up-rc)=' "$EV/H-09-import-offline.txt" | tr '\n' ' '))"; fi
+  # The history recovery destroys and restores the data volume, resetting the
+  # threat-feed domain allowlist; re-assert the allowed canary's exemption so
+  # this check measures enforcement after recovery, not the live urlhaus feed.
+  allowlist_threat_domain example.com > "$EV/H-11-threat-allowlist.txt" 2>&1 || true
   local ok; ok="$(through_proxy http://example.com/)"
   [[ "$ok" == 200 ]] && check H history-enforcement pass "example.com 200 through the proxy after the recovery" || check H history-enforcement fail "example.com $ok"
   redact_tree
