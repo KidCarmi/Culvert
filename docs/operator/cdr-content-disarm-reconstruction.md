@@ -143,11 +143,26 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    > is simply the one field where the default it's replaced with is LESS
    > safe than what you likely configured**; every other field's default is
    > merely different from yours, not unsafe. If you rely on `fail_mode:
-   > closed` OR on any other non-default `cdr.*` setting, either
-   > start the process with `-cdr-enabled`/`cdr.enabled: true` from the very
-   > first boot, or
-   > restart once after your first GUI enrollment so `loadCDR` re-resolves
-   > the full static config with CDR already enabled.
+   > closed` OR on any other non-default `cdr.*` setting, restart once after
+   > your first GUI enrollment so `loadCDR` re-resolves the full static
+   > config with CDR already enabled.
+   >
+   > **Booting with `-cdr-enabled`/`cdr.enabled: true` from the very first
+   > boot does NOT by itself avoid this**, and is not a substitute for the
+   > restart above, unless you also supply a complete CLI/YAML bootstrap
+   > (`-cdr-endpoint` AND `-cdr-server-fingerprint`, with no instance ever
+   > enrolled yet). `loadCDR` calls `initCDRClient(cdrCfg)` at boot, which
+   > for an empty registry delegates to `bootstrapPoolFromConfig`; that
+   > function returns an error immediately when `Endpoint` or
+   > `ServerFingerprint` is empty, and `initCDRClient` returns on that
+   > error **before** ever reaching the `cdrActiveCfg = cfg` assignment —
+   > `loadCDR` only logs it ("CDR: initial client dial failed, CDR
+   > effectively disabled"). So on the single most common fresh-install
+   > path — enable CDR, plan to enroll an instance through the GUI, no
+   > CLI/YAML endpoint/fingerprint configured — `cdrActiveCfg` stays at its
+   > zero value even with `cdr.enabled: true` from boot, identically to the
+   > disabled-boot case this callout opened with. The restart-after-enrollment
+   > step is the one reliable fix.
 
 > **Scan-engine gate.** Enrollment turns CDR on, but CDR only runs on a
 > response body that the SSL-inspection path has decided to buffer.
@@ -583,6 +598,17 @@ enrolled instances — manual action is a fallback, not the normal path:
   still present). The actual recovery is: `DELETE` the stale instance
   (`?name=…`), then re-enroll it via `POST /api/cdr/instances/enroll`,
   which persists the current server fingerprint as the new registry pin.
+  **Restart afterward if you rely on `fail_mode: closed` or any other
+  non-default `cdr.*` setting.** When the stale instance was still
+  pickable at the moment of `DELETE` (i.e. `cdrActiveClient()` was
+  non-nil — any other pool member still up counts), the handler calls
+  `shutdownCDRClient()`, which zeroes `cdrActiveCfg`. The re-enrollment
+  that follows only flips the zeroed `Enabled` field back on
+  (`setCDREnabledRuntime`, the same auto-enable-on-first-enroll path) —
+  it does not restore `fail_mode`/profile/timeout/limits from your static
+  config. This is the same zero-config exposure documented above under
+  **Enabling it**, reached a second way; the same restart-after-enrollment
+  fix applies.
 
 ## Policy rules
 
