@@ -40,6 +40,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   leaving the probe for the call that can record the outcome. No persisted
   state, wire format or configuration default changes.
 
+  A third leak of the same reservation sat inside `safeCDRSanitize` itself:
+  it picks an instance (reserving the probe) and only then reaches the
+  oversize gate, which needs that instance's profile cap, and the cache
+  lookup — both return without calling Sluice and so without an outcome. An
+  oversize file arriving first after each re-arm therefore kept the breaker
+  half-open indefinitely while normal documents skipped CDR. The pick now
+  returns the reservation and a deferred, outcome-neutral `Release` hands it
+  back on every non-recording return (oversize, cache hit, client-side
+  `file_too_large`, panic). Releases are scoped to the budget's generation,
+  and the wedge escape now measures staleness from the newest reservation
+  rather than the arm time, so a slot handed back and re-taken is never
+  mistaken for an abandoned one.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:

@@ -204,10 +204,21 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	if !cfg.Enabled {
 		return cdrPassSkipped("SKIPPED")
 	}
-	pooled := cdrPickPooled()
+	pooled, resv := cdrPickPooledReserved()
 	if pooled == nil {
 		return cdrPassSkipped("SKIPPED")
 	}
+	// Hand back the half-open probe slot on EVERY return below that does not
+	// record an outcome: the oversize gate (it needs this instance's profile
+	// cap, so it cannot run before the pick), a cache hit, a client-side
+	// file_too_large refusal, a panic, and an outcome lost because the
+	// instance left the pool. Each of those used to abandon the reservation,
+	// so a non-RPC request arriving first after every re-arm kept the breaker
+	// in half-open indefinitely while normal documents skipped CDR (fail-open
+	// by default: forwarded unsanitized). One unconditional defer rather than
+	// a flag: after OnSuccess/OnFailure the breaker has left half-open, which
+	// makes Release a no-op, so it cannot undo a recorded outcome.
+	defer pooled.Breaker.Release(resv)
 	client := pooled.Client
 	instanceName := pooled.Name
 

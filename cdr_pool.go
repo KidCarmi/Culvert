@@ -155,11 +155,19 @@ func (p *cdrClientPool) Get(name string) *cdrPooledClient {
 // Allow() returns true wins.  Advances the cursor before returning so
 // subsequent calls on a stable pool spread load.
 func (p *cdrClientPool) Pick() *cdrPooledClient {
+	pc, _ := p.PickReserved()
+	return pc
+}
+
+// PickReserved is Pick plus the half-open reservation the winning breaker
+// handed out. A caller that may return without recording an outcome must
+// hand it back with pc.Breaker.Release (see safeCDRSanitize).
+func (p *cdrClientPool) PickReserved() (*cdrPooledClient, cdrProbeReservation) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	n := len(p.clients)
 	if n == 0 {
-		return nil
+		return nil, cdrProbeReservation{}
 	}
 	// Reserve the starting cursor once so concurrent Pick() calls
 	// don't all probe the same client.
@@ -169,11 +177,11 @@ func (p *cdrClientPool) Pick() *cdrPooledClient {
 	}
 	for i := 0; i < n; i++ {
 		candidate := p.clients[(start+i)%n]
-		if candidate.Breaker.Allow() {
-			return candidate
+		if ok, resv := candidate.Breaker.Reserve(); ok {
+			return candidate, resv
 		}
 	}
-	return nil
+	return nil, cdrProbeReservation{}
 }
 
 // replace swaps the pool contents atomically.  Old clients NOT in the new
@@ -244,6 +252,14 @@ func cdrAnyInstanceAvailable() bool {
 // fail_mode.  This is the proxy hot path's selector.
 func cdrPickPooled() *cdrPooledClient {
 	return cdrPool.Pick()
+}
+
+// cdrPickPooledReserved is cdrPickPooled for a caller that may finish
+// without issuing the RPC: it also returns the half-open reservation, which
+// that caller must Release so the breaker is not left holding a slot nobody
+// will report on.
+func cdrPickPooledReserved() (*cdrPooledClient, cdrProbeReservation) {
+	return cdrPool.PickReserved()
 }
 
 // cdrPoolInstallSingleForTest registers `c` as the sole pool member
