@@ -65,22 +65,25 @@ func cpRejectFull(t *testing.T, s *ConfigStore) string {
 	return msg
 }
 
-// cpRejectAddresses latches an ADDRESS-publish rejection.
+// cpRejectAddresses latches an ADDRESS-publish rejection through the owned
+// publish path (the only writer of the address latch). The store is marked as
+// already retrying, so no background retry loop is spawned.
 func cpRejectAddresses(t *testing.T, s *ConfigStore) {
 	t.Helper()
 	long := make([]string, 400)
 	for i := range long {
 		long[i] = fmt.Sprintf("cp-%03d.a-rather-long-control-plane-hostname.example.internal:50051", i)
 	}
+	s.addrPubMu.Lock()
+	s.addrPub.retrying = true
+	s.addrPubMu.Unlock()
 	snapshotWireBudget = 8192
-	_, err := s.UpdateCPAddressesFrom(func() []string { return long })
+	_, err := s.publishOwnedCPAddresses("test", func() []string { return long })
 	snapshotWireBudget = maxSnapshotWireBytes
 	if err == nil {
 		t.Fatal("precondition: the over-budget address publish was accepted")
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.addrPublishErr == "" {
+	if cpLatch(s, publishAddresses) == "" {
 		t.Fatal("precondition: no address-publish rejection latched")
 	}
 }
@@ -99,7 +102,7 @@ func TestChaos71_EveryCommitPathKeepsTheCommitInvariants(t *testing.T) {
 		{"full_update", publishFull, func(s *ConfigStore, n int) error { return s.Update(cpCommitSnapshot(n)) },
 			func(n int) int { return n }},
 		{"address_publish", publishAddresses, func(s *ConfigStore, n int) error {
-			_, err := s.UpdateCPAddressesFrom(func() []string { return []string{fmt.Sprintf("10.0.0.%d:50051", n)} })
+			_, err := s.publishOwnedCPAddresses("test", func() []string { return []string{fmt.Sprintf("10.0.0.%d:50051", n)} })
 			return err
 		}, func(int) int { return 50 }}, // address-only: the committed policy is unchanged
 	}
@@ -148,14 +151,15 @@ func cpAssertCommitInvariants(t *testing.T, s *ConfigStore, round int, epoch, be
 	}
 }
 
-// cpLatch reads one kind's rejection latch.
+// cpLatch reads one kind's rejection latch: the full kind's is store state,
+// the address kind's is part of the generation-guarded publish record.
 func cpLatch(s *ConfigStore, kind publishKind) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if kind == publishFull {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
 		return s.lastPublishErr
 	}
-	return s.addrPublishErr
+	return s.cpAddrPublishSnapshot().rejectErr
 }
 
 // TestChaos71_FullRejectionStaysVisibleAcrossAnAddressCommit is the operator
@@ -632,7 +636,6 @@ func TestChaos71_ReleaseCPAddressSourceClearsOwnershipState(t *testing.T) {
 	if err := s.Update(ConfigSnapshot{}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	_ = s.rejectPublish(publishAddresses, errors.New("injected address rejection"))
 	_ = s.noteCPAddrPublish("test", errors.New("injected address rejection"), s.cpAddrPublishGen())
 	if row := checkCPAddressList(); row.Status != diagFail {
 		t.Fatalf("precondition: row %+v", row)

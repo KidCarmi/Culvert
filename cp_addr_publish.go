@@ -54,6 +54,30 @@ type cpAddrPublishState struct {
 	// committed while topology B's publish failed) must not erase B's latch
 	// (Codex review of #1556). Never reset.
 	gen uint64
+
+	// The rest of the address-rejection latch lives HERE, under the same
+	// generation guard, and is written only by noteCPAddrPublish and
+	// resetCPAddrPublish (TestChaos71_Wall_AddressRejectionLatchHasOneWriter).
+	// It used to sit on ConfigStore under s.mu, where an up-to-date check or a
+	// commit decided before a newer failure cleared it unconditionally (Codex
+	// review of #1556) — so B paged again, and B's queued startup page was
+	// invalidated.
+	//
+	// rejectPaged: config_snapshot_rejected has been paged (fired or queued)
+	// for this episode; rejectEpisode numbers episodes, so a page queued before
+	// the webhooks load can test at the flush that its episode is still open.
+	// rejectErr/rejectErrTS: the address half of LastPublishError.
+	rejectPaged   bool
+	rejectEpisode uint64
+	rejectErr     string
+	rejectErrTS   string
+}
+
+// cpAddrNote is noteCPAddrPublish's verdict for its caller.
+type cpAddrNote struct {
+	startRetry bool   // a failure with no retry loop running: start one
+	page       bool   // this failure opened an episode: page it
+	episode    uint64 // the episode the page belongs to
 }
 
 // cpAddrRetryBackoffMin and cpAddrRetryBackoffMax bound the retry cadence. A
@@ -89,7 +113,11 @@ var cpAddrPublishNow = time.Now
 func (s *ConfigStore) publishOwnedCPAddresses(trigger string, build func() []string) (bool, error) {
 	gen := s.cpAddrPublishGen()
 	changed, err := s.UpdateCPAddressesFrom(build)
-	if s.noteCPAddrPublish(trigger, err, gen) {
+	note := s.noteCPAddrPublish(trigger, err, gen)
+	if note.page {
+		s.pageCPAddrRejection(note.episode, err)
+	}
+	if note.startRetry {
 		go s.retryCPAddrPublish(cpAddrRetryCtx())
 	}
 	return changed, err
@@ -103,27 +131,32 @@ func (s *ConfigStore) cpAddrPublishGen() uint64 {
 	return s.addrPub.gen
 }
 
-// noteCPAddrPublish records one owned-publish outcome and reports whether the
-// caller must start the retry loop (a failure with no loop running). startGen
-// is the generation the publish captured before it began: a success clears
-// the pending state only if no failure has latched since (gen unchanged);
-// otherwise the newer failure's retry still owns it.
-func (s *ConfigStore) noteCPAddrPublish(trigger string, err error, startGen uint64) (startRetry bool) {
+// noteCPAddrPublish is the SINGLE WRITER of the address-rejection record: it
+// records one owned-publish outcome and tells the caller whether to page and
+// whether to start the retry loop. startGen is the generation the publish
+// captured before it began. A success (or an up-to-date list) ends the episode
+// — pending state, page latch and error together — only if no failure has
+// latched since (gen unchanged); a stale success leaves a newer episode
+// entirely alone. A failure bumps gen, records the error, and opens the
+// episode's page latch if it is not open yet (page once per episode).
+func (s *ConfigStore) noteCPAddrPublish(trigger string, err error, startGen uint64) cpAddrNote {
 	s.addrPubMu.Lock()
 	defer s.addrPubMu.Unlock()
 	st := &s.addrPub
 	if err == nil {
-		if st.pending && st.gen != startGen {
-			return false // a newer failure latched while this publish ran: not ours to clear
+		if st.gen != startGen {
+			return cpAddrNote{} // a newer failure latched while this publish ran: not ours to clear
 		}
 		if st.pending {
 			logger.Printf("ControlPlane: CP address list republished after %d failed attempts (pending since %s, first failed on %q)",
 				st.attempts, st.since.UTC().Format(time.RFC3339), st.trigger)
 		}
 		st.pending, st.attempts, st.trigger, st.reason = false, 0, "", ""
-		return false
+		st.rejectPaged, st.rejectErr, st.rejectErrTS = false, "", ""
+		return cpAddrNote{}
 	}
 	st.gen++
+	st.rejectErr, st.rejectErrTS = err.Error(), time.Now().UTC().Format(time.RFC3339)
 	if !st.pending {
 		st.pending, st.since, st.trigger = true, cpAddrPublishNow(), trigger
 		logWarnf("ControlPlane: CP address list publish FAILED on %q — Data Planes keep the last committed list until a retry succeeds: %v", trigger, err)
@@ -133,11 +166,53 @@ func (s *ConfigStore) noteCPAddrPublish(trigger string, err error, startGen uint
 	if errors.Is(err, errCPAddrCommitRace) {
 		st.reason = "commit_race"
 	}
-	if st.retrying {
-		return false
+	var note cpAddrNote
+	if !st.rejectPaged {
+		st.rejectPaged = true
+		st.rejectEpisode++
+		note.page, note.episode = true, st.rejectEpisode
 	}
-	st.retrying = true
-	return true
+	if !st.retrying {
+		st.retrying = true
+		note.startRetry = true
+	}
+	return note
+}
+
+// resetCPAddrPublish ends every episode: ownership was released or replaced.
+// The other writer of the record. A running retry loop keeps running (it
+// exits on its own once nothing is owned); gen is bumped so an in-flight
+// outcome from the old owner cannot touch the new state.
+func (s *ConfigStore) resetCPAddrPublish() {
+	s.addrPubMu.Lock()
+	defer s.addrPubMu.Unlock()
+	s.addrPub = cpAddrPublishState{retrying: s.addrPub.retrying, gen: s.addrPub.gen + 1, rejectEpisode: s.addrPub.rejectEpisode}
+}
+
+// cpAddrRejectEpisodeOpen reports whether rejection episode ep is still the
+// current, paged one — the validity test for a queued page.
+func (s *ConfigStore) cpAddrRejectEpisodeOpen(ep uint64) bool {
+	s.addrPubMu.Lock()
+	defer s.addrPubMu.Unlock()
+	return s.addrPub.rejectPaged && s.addrPub.rejectEpisode == ep
+}
+
+// pageCPAddrRejection delivers an episode's config_snapshot_rejected page.
+// Before the startup flush (a persisted leader's boot republish runs in
+// initCluster, before the webhooks load) it queues, valid only while its
+// episode is still open; after the flush it fires at once.
+func (s *ConfigStore) pageCPAddrRejection(episode uint64, err error) {
+	payload := AlertPayload{
+		Event:  "config_snapshot_rejected",
+		Actor:  "culvert",
+		Source: "cluster",
+		Detail: "config publish rejected at commit: " + err.Error() + " — the cluster stays on the last valid config; reduce the oversized collection to resume sync",
+	}
+	if !startupAlertsFlushed() {
+		deferStartupAlertWhile("config_snapshot_rejected", payload, func() bool { return s.cpAddrRejectEpisodeOpen(episode) })
+		return
+	}
+	fireAlert("config_snapshot_rejected", payload)
 }
 
 // retryCPAddrPublish republishes from the store's live source until the
@@ -171,7 +246,9 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 		} else {
 			gen = s.cpAddrPublishGen() // no source: nothing is owned any more, so nothing is pending
 		}
-		s.noteCPAddrPublish("retry", err, gen)
+		if note := s.noteCPAddrPublish("retry", err, gen); note.page {
+			s.pageCPAddrRejection(note.episode, err)
+		}
 
 		s.addrPubMu.Lock()
 		if !s.addrPub.pending {

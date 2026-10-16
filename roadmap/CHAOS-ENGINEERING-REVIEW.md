@@ -8773,6 +8773,46 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Sixteenth review round — the address latch is part of the
+  generation-guarded publish record.** An address publish that found the list
+  already current cleared the rounds-14/15 latch (`addrRejectPaged`) in
+  `commitPublish`'s up-to-date branch, under `s.mu`, with no publish
+  generation. When topology B's publish failed and armed the latch while
+  topology A was mid-publish, A's stale "up to date" erased it. B's next retry
+  paged again, and B's page queued before the webhooks loaded was dropped at
+  the flush. This was the second follow-on from the round-13 latch. The class
+  is the latch as separate state that the generation does not guard.
+
+  The whole address-rejection latch now lives in `cpAddrPublishState`, beside
+  `gen` and under `addrPubMu`. That covers the error text behind
+  `LastPublishError`, the page-once latch and the episode number.
+  `noteCPAddrPublish` is its single writer: a success or an up-to-date list ends
+  the episode only if no failure has latched since the publish captured its
+  generation. A failure opens the episode and returns the page decision to its
+  caller, and `pageCPAddrRejection` delivers it (queued before the startup
+  flush, valid while `cpAddrRejectEpisodeOpen(episode)`). `resetCPAddrPublish`
+  ends the episode on an ownership change and keeps the episode counter, so a
+  released owner's queued page cannot match the next owner's episode.
+
+  `commitPublish` and `rejectPublish` no longer touch the address latch. The
+  activation publish (`cpPublishCPAddresses`) now goes through
+  `publishOwnedCPAddresses` as well, so every address publish is recorded.
+
+  Gates:
+  - `TestChaos71_StaleUpToDateKeepsANewerRejectionLatch_Direct` and `_Queued`.
+    B fails while A builds, or between A's up-to-date decision and A's
+    record. B's pending state, latch and `LastPublishError` survive, the queued
+    page is delivered once at the flush, and B's retries stay silent.
+  - `TestChaos71_QueuedPageOfAReplacedOwnerIsDropped`.
+  - `TestChaos71_Wall_AddressRejectionLatchHasOneWriter`: the latch fields
+    appear only in the writer, the reset and the episode read, and the error
+    text is assigned only by the writer.
+  - `TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded`, which no longer
+    exempts the activation publish.
+
+  Five mutations each fail a gate: an unconditional clear, the old up-to-date
+  clear, a page that bypasses the record, an activation that bypasses the
+  recording path, and a reset that forgets the episode counter.
 * **Fifteenth review round — the address latch arms only with a deliverable
   page.** A persisted leader's boot-time address rejection runs in
   `initCluster`, before `initPersistentAdminState` loads the webhooks. The

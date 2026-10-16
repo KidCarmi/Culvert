@@ -99,8 +99,13 @@ var errCPGRPCAddressPublish = fmt.Errorf("control plane address list publish rej
 
 // cpPublishCPAddresses publishes the committed CP address list. Package-level
 // seam so a gate can inject a commit-time rejection deterministically.
+//
+// It goes through publishOwnedCPAddresses, so a rejection is recorded, paged
+// once per episode and retried like every other owned republish — the
+// listener supervisor re-runs activation on each rebind, and a separate
+// unrecorded path is what let its rejections page per attempt.
 var cpPublishCPAddresses = func() (changed bool, err error) {
-	return globalConfigStore.UpdateCPAddressesFrom(buildCPAddressList)
+	return globalConfigStore.publishOwnedCPAddresses("activation", buildCPAddressList)
 }
 
 // cpActivationAfterClaim, when non-nil, runs between the role claim and the

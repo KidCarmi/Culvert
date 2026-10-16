@@ -107,7 +107,7 @@ func TestChaos71_AddressRejectionPagesOncePerEpisode(t *testing.T) {
 	// The supervisor's activation re-runs the same address publish on every
 	// rebind: latched by the same episode.
 	for i := 0; i < 3; i++ {
-		_, _ = s.UpdateCPAddressesFrom(src)
+		_, _ = s.publishOwnedCPAddresses("activation", src)
 	}
 	if got := pages(); got != 1 {
 		t.Errorf("repeated activation publishes paged again (%d pages)", got)
@@ -261,7 +261,7 @@ func TestChaos71_BootAddressRejectionIsPagedOnceAfterTheWebhooksLoad(t *testing.
 		t.Fatalf("the startup flush delivered %d config_snapshot_rejected page(s), want exactly 1", f)
 	}
 	runRetries(4)
-	_, _ = s.UpdateCPAddressesFrom(src) // an activation retry, same episode
+	_, _ = s.publishOwnedCPAddresses("activation", src) // an activation retry, same episode
 	if d, f := direct(), flushed(); d != 0 || f != 1 {
 		t.Errorf("retries in the same episode paged again after the flush (direct=%d flushed=%d)", d, f)
 	}

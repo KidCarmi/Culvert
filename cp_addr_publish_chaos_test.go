@@ -265,11 +265,11 @@ func TestChaos71_CPAddrCommitRaceIsPendingAndWarned(t *testing.T) {
 }
 
 // TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded: UpdateCPAddressesFrom
-// is called only from the recording path, its retry loop, and the activation
-// publish (whose failure refuses the activation), so no new caller can drop
-// a failed republish on the floor.
+// is called only from the recording path and its retry loop — the activation
+// publish included, which goes through publishOwnedCPAddresses — so no caller
+// can drop a failed republish on the floor or page outside the episode latch.
 func TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded(t *testing.T) {
-	allowed := map[string]bool{"publishOwnedCPAddresses": true, "retryCPAddrPublish": true, "cpPublishCPAddresses": true}
+	allowed := map[string]bool{"publishOwnedCPAddresses": true, "retryCPAddrPublish": true}
 	dir := pkgSourceDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -304,7 +304,7 @@ func TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded(t *testing.T) {
 			})
 		}
 	}
-	if found < 3 {
+	if found < 2 {
 		t.Fatalf("the wall found only %d calls — its selector has gone stale", found)
 	}
 }
