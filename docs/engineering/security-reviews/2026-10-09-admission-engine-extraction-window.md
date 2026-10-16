@@ -347,7 +347,7 @@ This is strictly preferable:
 The first and sixth gates below can both be shown RED against the current
 tree on amd64. The structural wall fails by construction on the existing
 `ipf = newIPF`. The concurrency gate's pre-fix form was run and reports the race
-(*Verification* below). The others are deterministic:
+(*Verification* below), and gate 6 must run under `-race`. The others are deterministic:
 
 1. **Structural wall** — AST-walk `controlplane_snapshot.go` and fail on any
    assignment to `ipf`. This is the repo's established pattern where behavioural
@@ -364,9 +364,13 @@ tree on amd64. The structural wall fails by construction on the existing
 5. **No intermediate allow-all** — a `publishHook` observer asserts no
    published view during `ReplaceAll` ever has mode `""` while entries are
    configured, i.e. the old two-step `SetMode`+`AddAll` window is gone.
-6. **Concurrency** — `-race`, concurrent `Allowed` readers against repeated
+6. **Concurrency** — concurrent `Allowed` readers against repeated
    `ReplaceAll` writers, asserting every observed verdict matches either the
-   pre- or post-state and never allow-all.
+   pre- or post-state and never allow-all. This gate **MUST run under
+   `-race`**. Its pre-fix run on amd64 observed zero fail-open admissions and
+   failed only through the race detector (*Verification* below), so without
+   `-race` it passes the defective swap. Only its functional fail-open
+   assertion is meaningful without `-race`.
 7. **Snapshot integration** — a CP→DP apply (full *and* delta) leaves the
    filter enforcing the snapshot's mode and list.
 
@@ -437,4 +441,5 @@ snapshot path that the refactor happened to touch: publishing a security gate by
 reassigning a shared pointer is unsound, and the failure direction is open, not
 closed. It is registered as RISK-030, confirmed by the race detector on amd64,
 with a required fix that removes the race rather than guarding it, and with
-gates that do not depend on reproducing a memory reordering.
+gates that do not depend on reproducing a memory reordering (the concurrency gate
+relies on `-race` for that reason).
