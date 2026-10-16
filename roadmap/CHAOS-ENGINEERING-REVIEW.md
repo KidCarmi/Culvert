@@ -8773,6 +8773,24 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Seventh review round — the CP address list follows the HA topology by
+  construction.** A recovered persisted leader whose bind was delayed
+  published its address list BEFORE `onActivated` resumed HA, and nothing
+  republished after, so Data Planes held a list with no standby address. The
+  class, not the call order, is fixed: `HAState.role` and `peerAddr` — the two
+  fields `buildCPAddressList` derives from — now have ONE writer,
+  `setTopologyLocked` (`ha_topology.go`), which republishes from the new
+  values under `h.mu` whenever an active Control Plane owns the list. Enable,
+  resume, standby entry, promote and self-fence all go through it (no HA
+  disable transition exists; the setter treats an empty role as HA off).
+  `TestChaos71_Wall_HATopologyHasOneWriter` (AST) pins the single writer and
+  `TestChaos71_HATransitionsRepublishTheCPAddressList` drives every
+  transition, the delayed-bind-then-resume path first, asserting the
+  published list equals `buildCPAddressList()` after each. Mutations: a
+  setter that skips the republish, and a direct field write in
+  `ResumeAsLeader` or `selfFence`, each fail a gate. Lock order:
+  `cpActivationGateMu → HAState.mu → clusterRoleMu → ConfigStore.mu`; the
+  derivation takes its inputs as arguments, so nothing re-enters `h.mu`.
 * **Sixth review round.** (a) **A self-fenced standby kept serving config.**
   ADR-0005 keeps a demoted leader's CP gRPC server running and fences its
   WRITES (S3 issuance gating) — `enterStandbyResync` says so — but its READS

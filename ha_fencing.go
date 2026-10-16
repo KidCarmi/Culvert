@@ -18,13 +18,17 @@ package main
 //     - ConfigSnapshot — stamped; DPs reject snapshots below their
 //       last-seen epoch and ratchet forward otherwise.
 //
-//   DELIBERATELY NOT FENCED (telemetry aggregation, not authority):
+//   NOT EPOCH-FENCED (telemetry aggregation, not authority):
 //     - PushMetrics / SyncRateLimits / PushAuditEvents — DP→CP telemetry;
-//       accepting these on a zombie wastes memory but grants nothing. The
-//       PushMetrics REPLY carries the epoch so DPs learn it on every
-//       heartbeat.
+//       accepting these on a zombie would grant nothing. The PushMetrics
+//       REPLY carries the epoch so DPs learn it on every heartbeat.
 //     - GetConfig — reads are epoch-checked on the DP side (the snapshot
-//       carries the stamp), which is stronger than gating the serve.
+//       carries the stamp).
+//   Separately from epoch fencing, with HA enabled EVERY ConfigService
+//   method (these included) is leader-gated by role at the server
+//   (gatedUnary / cpRPCPolicies in controlplane_server.go, CHAOS-71): a
+//   standby or self-fenced node refuses with a retriable Unavailable so DPs
+//   fail over, requeueing refused audit batches for the new leader.
 //
 // Epoch semantics: 0 = no fencing information (legacy mode / standalone) —
 // checks pass. A positive epoch only ever ratchets forward.

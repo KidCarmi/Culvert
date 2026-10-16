@@ -192,6 +192,12 @@ func (s *cpListenerSupervisor) rollbackRole(prev cpRoleFields) {
 //
 // The publish runs outside clusterRoleMu: buildCPAddressList reads it, and
 // RWMutex is not reentrant (the CHAOS-71 promote-deadlock rider).
+//
+// This publish reflects the HA topology AS OF NOW. An HA transition after it —
+// onActivated's leadership resume included (Codex review of #1556) — is
+// republished by the HA topology writer itself (setTopologyLocked,
+// ha_topology.go), so no caller here has to order anything after the resume.
+// Lock order: cpActivationGateMu → HAState.mu → clusterRoleMu → ConfigStore.mu.
 func (s *cpListenerSupervisor) publishAndActivate() (cpCommitOutcome, error) {
 	cpActivationGateMu.Lock()
 	defer cpActivationGateMu.Unlock()

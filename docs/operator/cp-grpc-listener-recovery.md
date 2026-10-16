@@ -141,6 +141,11 @@ enabled **only the leader answers Control Plane RPCs**: a standby refuses Data
 Planes with a retriable `Unavailable`, so they fail over to the new leader
 rather than staying on the standby's non-advancing config.
 
+The Control Plane address list Data Planes fail over with is republished on
+every HA transition, so a leader whose listener bound late (after a restart)
+still publishes its standby's address once HA resumes; no manual republish is
+needed.
+
 On the **promote** path the listener is started synchronously: if it cannot
 bind, the promotion fails and the node stays a retryable standby rather than
 becoming a leader nobody can reach. Once the role is committed the config is

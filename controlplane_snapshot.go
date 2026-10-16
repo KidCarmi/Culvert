@@ -650,6 +650,19 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 // changed after validation" window deterministically.
 var configPublishBeforeCommit func()
 
+// reconcileCPAddressesFrom republishes the CP address list from build when
+// this store's list is owned (an active Control Plane set a source); a no-op
+// otherwise, so a standby or a Data Plane never publishes one.
+func (s *ConfigStore) reconcileCPAddressesFrom(build func() []string) (changed bool, err error) {
+	s.mu.RLock()
+	owned := s.cpAddrSource != nil
+	s.mu.RUnlock()
+	if !owned {
+		return false, nil
+	}
+	return s.UpdateCPAddressesFrom(build)
+}
+
 // setCPAddressSource hands ownership of the CP address list to build (see
 // cpAddrSource). Called once at Control Plane activation.
 func (s *ConfigStore) setCPAddressSource(build func() []string) {
@@ -1631,20 +1644,15 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 // buildCPAddressList returns the list of all CP gRPC addresses for DP failover.
 // Includes this leader's address + the HA standby address (if HA is enabled).
+//
+// haStatus.PeerAddr is the leader's externally reachable address (set during
+// Enable HA); the local listen address is added when it differs. The
+// derivation itself is cpAddressListFor (ha_topology.go), shared with the HA
+// topology writer that republishes on every transition.
 func buildCPAddressList() []string {
-	haStatus := globalHA.Status()
+	haStatus := haTopologySource().Status()
 	if !haStatus.Enabled {
-		return nil // no HA = no address list needed
+		return nil // no HA = no address list needed (clusterRoleMu deliberately not touched)
 	}
-	myAddr := clusterRoleSnapshot().grpcAddr
-
-	// haStatus.PeerAddr is the leader's externally reachable address (set during Enable HA).
-	// For the leader, we include: [leader_addr, standby_addr]
-	// The leader's reachable addr is stored as peerAddr in the HA state.
-	addrs := []string{haStatus.PeerAddr}
-	// Also include the local listen addr if it's different and looks reachable.
-	if myAddr != "" && myAddr != haStatus.PeerAddr {
-		addrs = append(addrs, myAddr)
-	}
-	return addrs
+	return cpAddressListFor(true, haStatus.PeerAddr, clusterRoleSnapshot().grpcAddr)
 }

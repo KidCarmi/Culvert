@@ -103,7 +103,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   Control Plane RPC is now leader-gated: a self-fenced standby whose listener
   rebinds refuses Data Planes with a retriable error, so they fail over to the
   new leader instead of staying on its stale config; and a listener alert
-  raised before the webhooks load at boot is queued, not lost. A refused admin/promote
+  raised before the webhooks load at boot is queued, not lost. Every HA
+  transition (enable, resume, standby entry, promote, self-fence) now
+  republishes the Control Plane address list itself, so a persisted leader
+  whose listener bound late no longer hands Data Planes a list without its
+  standby. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long
