@@ -1,6 +1,7 @@
 package hashcache
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"runtime"
 	"strconv"
@@ -69,13 +70,10 @@ const (
 
 // seqKey returns a 64-hex-character key for counter i in namespace ns. One
 // allocation, no hashing, so it is cheap enough for a timed loop.
-func seqKey(ns byte, i int) string {
+func seqKey(ns byte, i uint64) string {
 	var buf [64]byte
 	var n [8]byte
-	u := uint64(i)
-	for b := 0; b < 8; b++ {
-		n[b] = byte(u >> (8 * b)) // little-endian: the fastest-changing byte first
-	}
+	binary.LittleEndian.PutUint64(n[:], i) // the fastest-changing byte first
 	hex.Encode(buf[:16], n[:])
 	buf[16] = ns
 	copy(buf[17:], seqKeyTail)
@@ -194,8 +192,8 @@ func BenchmarkEvictLocked_AllExpired_1M(b *testing.B) {
 // one eviction between them, so this is where a regression in the amortized
 // shape would show. ReportAllocs covers the per-Set allocations: the key string
 // and the hashCacheEntry itself. Folding the entry into the map by value
-// removes one of them. It was measured, with a mixed result, and not shipped; see
-// roadmap/SCAN-CACHE-EVICTION-COST.md before trying it again.
+// removes one of them. Whether to adopt it is undecided pending re-measurement
+// with the current harness; see roadmap/SCAN-CACHE-EVICTION-COST.md.
 func benchChurn(b *testing.B, maxSize int) {
 	c := New(maxSize, time.Hour)
 	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
@@ -204,8 +202,10 @@ func benchChurn(b *testing.B, maxSize int) {
 	}
 	b.ReportAllocs()
 	startTimedAfterGC(b)
+	var next uint64
 	for i := 0; i < b.N; i++ {
-		c.Set(seqKey(nsChurn, i), res)
+		c.Set(seqKey(nsChurn, next), res)
+		next++
 	}
 }
 
@@ -345,11 +345,11 @@ func startEvictingWriter(c *HashCache, maxSize int, res ScanCacheResult) *evicti
 		// the calibration call (b.N=1) can return and stop the writer before
 		// it is ever scheduled.
 		set(seqKey(nsWriter, 0))
-		for j := 0; w.size < maxSize; j++ {
+		for j := uint64(0); w.size < maxSize; j++ {
 			set(seqKey(nsTopUp, j)) // top up: the next Set evicts
 		}
 		close(ready)
-		for i := 1; ; i++ {
+		for i := uint64(1); ; i++ {
 			select {
 			case <-w.stop:
 				return

@@ -4,7 +4,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -56,11 +55,9 @@ func TestBenchFiles_NoPackageLevelVars(t *testing.T) {
 		if strings.HasSuffix(name, "_bench_test.go") {
 			sawBench = true
 		}
-		src, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, v := range packageLevelVars(t, fset, name, src) {
+		// src nil: the parser reads the file itself (a Glob result in this
+		// package's own directory).
+		for _, v := range packageLevelVars(t, fset, name, nil) {
 			t.Errorf("package-level var in a test file: %s — benchmarks must not share fixture state across runs; build it inside the benchmark", v)
 		}
 	}

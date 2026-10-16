@@ -1,4 +1,4 @@
-# Scan-cache eviction cost — measurement and a rejected optimization
+# Scan-cache eviction cost — benchmarks and an undecided optimization
 
 **Every figure in this note is historical and pre-harness-fix.** All were
 measured on a loaded 4-vCPU host (load 12–14) before the harness fixes listed
@@ -6,24 +6,20 @@ under Method (GC quiescing before timing, guaranteed and counted in-window
 evictions). Re-measure on an idle host with the current harness before using any
 of them for a design decision. None of them is a current measurement.
 
-> Status: **MEASURED, NO IMPLEMENTATION CHANGE (2026-10-11; re-measured
-> 2026-10-16 with production-shaped keys).** Verdict: the scan cache's eviction
-> stall is real, runs under the exclusive lock, and grows linearly with the
-> operator's `cache_size`. Historical, pre-harness-fix runs put one busy
+> Status: **BENCHMARKS ADDED; NO BEHAVIOUR CHANGE; NO DECISION (2026-10-11,
+> revised 2026-10-16).** By construction, the scan cache's eviction runs under
+> the exclusive lock and its sweep is O(`cache_size`). Historical, pre-harness-fix runs put one busy
 > steady-state call at roughly 150-300 ms at `cache_size: 1000000`; the
 > all-expired case costs more and is not yet bounded at large sizes. **What is
-> NOT measured, and what the verdict does not rest on:** how the eviction cost
-> compares with the scan a Set follows on any engine path (ClamAV, YARA-only or
-> no engine), and the reader tail latency behind the lock hold. The obvious
-> layout fix (holding entries by value rather than behind a pointer) was
-> implemented, measured against an interleaved baseline, and **not shipped**,
-> because the historical result is mixed, not because it is harmful: the
-> eviction sweep got faster, the per-`Set` cost showed no significant change,
-> and a `Get` miss got slower. An earlier revision of this note
-> claimed it "loses it again on the far more frequent Get and Set paths"; that
-> framing did not survive re-measurement and is retracted below. This change
-> therefore ships the missing benchmarks and this record, and leaves
-> `internal/hashcache` as it was.
+> NOT measured:** how the eviction cost compares with the scan a Set follows on
+> any engine path (ClamAV, YARA-only or no engine), and the reader tail latency
+> behind the lock hold. The obvious layout fix (holding entries by value rather
+> than behind a pointer) was implemented and measured against an interleaved
+> baseline. Its status is no decision — current evidence lacking. The historical comparison is biased: it predates the setup-GC quiescing, and the missing quiescing biases the pointer and by-value layouts unevenly (see `startTimedAfterGC` in `internal/hashcache/hashcache_evict_bench_test.go`). Re-run both layouts with the current harness on an idle host before deciding. An
+> earlier revision of this note rejected it, first as "losing on the far more
+> frequent Get and Set paths" and later as "mixed"; both rejections are
+> withdrawn. This change ships only the missing benchmarks and this record. It
+> changes no behaviour in `internal/hashcache` and takes no decision.
 
 ## Question
 
@@ -97,7 +93,7 @@ expired). This is **not** the worst case (see below). Taken from a dedicated
 The amortized column is one call's cost (the 10-sample median) divided by the
 `maxSize/4` inserts it makes room for. It is this implementation's own per-Set
 cost and is **not** the same quantity as the base-vs-candidate difference in the
-rejection table below. An earlier revision conflated the two and understated
+layout table below. An earlier revision conflated the two and understated
 the column by roughly 9x (CodeRabbit, PR #1604). The 1 000 000 figure is the
 noisiest. On this host, read it as "on the order of 150-300 ms" for a single
 lock hold.
@@ -123,12 +119,12 @@ Two further properties worth having pinned:
 An operator who raises it buys a proportionally larger stall with nothing
 warning them.
 
-## Results — why no change ships (historical, pre-harness-fix; re-measure on an idle host)
+## Results — the by-value layout (historical, pre-harness-fix; undecided)
 
 Holding entries in the map **by value** instead of behind a pointer removes the
 per-entry dereference from the sweep and the per-`Set` heap allocation of the
-entry. It does what it was meant to do. Nothing ships anyway, but **not for the
-reason an earlier revision of this note gave** — see the retraction below.
+entry. **Decision: no decision — current evidence lacking. The historical comparison is biased: it predates the setup-GC quiescing, and the missing quiescing biases the pointer and by-value layouts unevenly (see `startTimedAfterGC` in `internal/hashcache/hashcache_evict_bench_test.go`). Re-run both layouts with the current harness on an idle host before deciding.** The table below is
+kept only as the historical record.
 
 Measured 2026-10-16 with 64-byte keys and the corrected fixture harness compiled
 identically into both sides. Separate binaries, 8 alternating rounds at
@@ -171,25 +167,24 @@ nothing or half expired, which matters most at large `cache_size` and does not
 change when everything has expired. It also makes one fewer allocation per
 `Set` and uses half the `B/op` at the default size.
 
-That is a **mixed result, not a refutation**. In these historical runs, at the
-shipped default, `Get_Miss` got slower and the `Set` difference was not
-statistically significant. This note does not compare either difference with
+In these historical runs the result looked mixed: at the shipped default,
+`Get_Miss` got slower and the `Set` difference was not statistically
+significant. That reading rests on the biased comparison and is not a basis for
+a decision. This note does not compare either difference with
 scan cost on any engine path; that comparison is unmeasured. The eviction saving
 is the only large number, and only at operator-raised sizes: the
-`cache_size: 1000000` stall shrinks from roughly 150-300 ms to roughly 115 ms. A
-real fix for that case is bounding or sharding the eviction (below), not a
-constant-factor layout change.
+`cache_size: 1000000` stall shrank from roughly 150-300 ms to roughly 115 ms.
+Bounding or sharding the eviction (below) would change how the lock hold grows
+with `cache_size`, which a constant-factor layout change cannot; which option,
+if any, to pursue is undecided pending re-measurement.
 
-So the verdict is unchanged and so is its reasoning: there is **no performance
-case for the layout change at the default size, and none against it either**.
-Rewriting how a shared cache stores its entries — touching `Get`, `Set`,
-`SetTTLUnless`, `Clear` and a white-box test's mutation semantics — to buy a
-result this mixed is churn without a demonstrated payoff. The allocation
-reduction is the one consistent argument in its favour at the default (GC
-pressure lands in the heap the proxy's latency-critical goroutines share, the
-point [scanbuffer](../internal/secscan/scanbuffer.go) makes for its own path).
-It is not enough on its own, and it is the thing to re-examine first if this is
-ever revisited.
+**Decision: none.** Re-run both layouts with the current harness on an idle host
+first. Things the re-run should weigh: the change touches `Get`, `Set`,
+`SetTTLUnless`, `Clear` and a white-box test's mutation semantics. Its
+allocation reduction (one fewer allocation per `Set`) is the one effect that
+follows from the code rather than from timing. It matters because GC pressure
+lands in the heap the proxy's latency-critical goroutines share, the point
+[scanbuffer](../internal/secscan/scanbuffer.go) makes for its own path.
 
 ### Contention (historical, pre-harness-fix)
 
@@ -247,14 +242,12 @@ win shrank, `SetChurn_10k` became a win, and the `Get_ParallelDuringEviction`
 the frequent operations slower to speed up a rare one", with that benchmark as
 "the clearest refutation", is withdrawn.
 
-## Verdict and what would actually help
+## Status and options (undecided pending re-measurement)
 
-At the shipped `cache_size: 10000` default, **leave `evictLocked` alone for
-now**. The verdict rests only on this: no measurement here shows a problem that
-justifies a behaviour change (bounded eviction or sharding), and the one
-constant-factor alternative measured, the by-value layout, gave a mixed result.
-It does **not** rest on any comparison with scan cost. These comparisons are
-**UNMEASURED**:
+**No decision is taken about `evictLocked`, at the default size or any other.**
+This PR changes no behaviour. No current-harness measurement shows whether the
+stall justifies a behaviour change, and the layout comparison lacks current
+evidence (above). The following are **UNMEASURED**:
 - eviction cost relative to the scan a Set follows, on every engine path:
   ClamAV, YARA-only (a YARA-only scan can be far cheaper than milliseconds;
   see the benchmarks in `internal/yara/regexrunner_bench_test.go`, so a
@@ -264,14 +257,14 @@ It does **not** rest on any comparison with scan cost. These comparisons are
   SHA-256 of the body;
 - the reader tail latency of cache hits waiting behind the exclusive lock hold
   (see "Contention").
-Revisit this verdict once an idle-host run with the current harness has measured
-those.
+Decide only once an idle-host run with the current harness has measured those,
+and has re-run the layout comparison.
 
-If production telemetry ever shows this stall mattering — the benchmarks added
-here make it measurable, and `culvert_scan_cache_size` already exposes the
-occupancy that drives it — the fix is **not** a layout change. There are two
-candidates, and both change observable behaviour, so each needs its own change
-and its own review:
+The benchmarks added here make the stall measurable, and
+`culvert_scan_cache_size` already exposes the occupancy that drives it. The
+options to evaluate then, all undecided, are the by-value layout above and two
+structural changes. Both structural changes alter observable behaviour, so each
+needs its own change and its own review:
 
 1. **Bounded eviction** (an examination window and delete batch capped by a
    constant rather than a fraction of `maxSize`), which makes the lock hold O(1)
@@ -285,13 +278,13 @@ and its own review:
    the hold time and the share of traffic it blocks to 1/N, at the cost of a
    real concurrency-contract change.
 
-A cheaper mitigation that needs no structural change: **cap or warn on
-`cache_size`** at startup, so the lock hold at 1 000 000 (historically 150-300 ms) is not
-reachable by a config edit alone.
+A cheaper option to evaluate, also undecided, needs no structural change: **cap
+or warn on `cache_size`** at startup, so a lock hold at 1 000 000 entries
+(historically 150-300 ms) is not reachable by a config edit alone.
 
 ## Scope
 
-Benchmarks and documentation only. `internal/hashcache/hashcache.go` keeps its
-existing behaviour; the only edit to it is the measured cost table on
-`evictLocked` recording what the numbers above found, so the next reader does not
-re-derive them or retry the rejected layout change.
+Benchmarks, a harness wall test and documentation only.
+`internal/hashcache/hashcache.go` keeps its existing behaviour. The only edit to
+it is a comment on `evictLocked` that describes its cost shape and points here;
+it carries no measurements and no decision.

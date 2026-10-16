@@ -198,8 +198,9 @@ func (c *HashCache) Clear() {
 // expired entry survives an eviction" invariant that TestSet_EvictsExpiredFirst
 // pins (an early exit cannot know what it did not look at) or sharding the map.
 // Both change observable behaviour and need their own change and review. A
-// by-value entry layout was measured and not shipped; read the roadmap note
-// before retrying it.
+// by-value entry layout was measured once with a since-corrected harness;
+// whether to adopt it is undecided pending re-measurement (see the roadmap
+// note).
 func (c *HashCache) evictLocked() {
 	now := time.Now()
 	for k, e := range c.entries {
