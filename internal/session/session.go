@@ -342,11 +342,31 @@ func RevocationsPath() string {
 }
 
 // SaveRevocations writes all non-expired revocations to disk as JSON.
+// saveMu serializes the WHOLE save — snapshot, marshal and write — for every
+// caller.
+//
+// r.mu is released when exportPersisted returns, so without this two writers
+// (a logout request goroutine and the DP's 3 s revocation-sync loop) can each
+// snapshot and then race to AtomicWrite: the rename that lands LAST wins, and
+// it may carry the OLDER snapshot. The file then silently lacks a revocation
+// that is still live in memory, and a restart inside that window resurrects
+// the session (CodeRabbit, PR #1591).
+//
+// Serializing here rather than at one call site is deliberate: a lock around
+// a single caller is no protection while another writer calls SaveRevocations
+// directly. Holding it across the write is safe for the request path because
+// it is NOT r.mu — IsRevoked, and therefore authentication, never waits on it.
+var saveMu sync.Mutex
+
 func (r *RevocationList) SaveRevocations() error {
 	path := RevocationsPath()
 	if path == "" {
 		return nil
 	}
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	// Snapshot INSIDE the lock, so the write that lands last is the one whose
+	// snapshot was taken last.
 	entries := r.exportPersisted()
 	data, err := json.Marshal(entries)
 	if err != nil {

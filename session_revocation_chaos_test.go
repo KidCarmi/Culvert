@@ -1058,3 +1058,72 @@ func TestChaos73_DefectPeerProvenanceIsNotRetained(t *testing.T) {
 		t.Errorf("token = %q; the legitimate part of the entry must survive", kept[0].Token)
 	}
 }
+
+// TestChaos73_WallSavesGoThroughTheCoordinator AST-walks every non-test file
+// of package main and fails on a direct `sessionRevoked.SaveRevocations()`
+// outside persistRevocations.
+//
+// The dirty-state retry is only as good as the set of writers that maintain
+// it. The control-plane revocation-sync loop called SaveRevocations directly,
+// so a failure there left the file behind memory with nothing recording that a
+// retry was owed — and a later logout, finding nothing dirty, wrote nothing
+// (CodeRabbit, PR #1591).
+//
+// Scoped to the PRIMITIVE rather than to one file, for the reason CHAOS-70
+// recorded and this PR has now hit twice: the writer that escapes a claim
+// lives in a file nobody thought to look at.
+func TestChaos73_WallSavesGoThroughTheCoordinator(t *testing.T) {
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(pkgSourceDir())
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	checked, offenders := 0, []string{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), name), nil, 0)
+		if err != nil {
+			continue // not this gate's job to police parse errors
+		}
+		checked++
+		ast.Inspect(file, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok {
+				return true
+			}
+			// The coordinator is the one function allowed to call it.
+			if fn.Name.Name == "persistRevocations" {
+				return false
+			}
+			ast.Inspect(fn, func(inner ast.Node) bool {
+				call, ok := inner.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "SaveRevocations" {
+					return true
+				}
+				recv, ok := sel.X.(*ast.Ident)
+				if !ok || recv.Name != "sessionRevoked" {
+					return true
+				}
+				offenders = append(offenders, fmt.Sprintf("%s:%s", name, fn.Name.Name))
+				return true
+			})
+			return false
+		})
+	}
+	if checked < 50 {
+		t.Fatalf("only %d non-test files parsed; the selector is not matching the package "+
+			"and this wall is vacuous", checked)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("direct sessionRevoked.SaveRevocations() outside persistRevocations: %v — "+
+			"a save that bypasses the coordinator does not record that a retry is owed when "+
+			"it fails", offenders)
+	}
+}
