@@ -907,3 +907,154 @@ func TestChaos73_ControlPersistedOversizeWaiverIsShapeGated(t *testing.T) {
 		})
 	}
 }
+
+// ── CODEX ROUND 2: the retry, the accusation, and the peer's extra field ────
+
+// A revocation whose durable write FAILED must be repaired by the browser's
+// retry, not silently lost at the next restart.
+//
+// Persisting only when the list changes (CHAOS-70's rule) is what removes most
+// of the amplification, but it also removes the second chance: the retry
+// reports RevokeAlreadyKnown, the handler returns, and nothing rewrites the
+// file unless an UNRELATED revocation happens later. Verified failing against
+// the previous shape, where the no-change branch returned without saving.
+func TestChaos73_DefectFailedPersistIsRetriedByTheReplay(t *testing.T) {
+	chaos73Setup(t)
+	resetSessionRevocationsDirtyForTest()
+	t.Cleanup(resetSessionRevocationsDirtyForTest)
+
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no-such-dir")
+	path := filepath.Join(missing, "revocations.json")
+	session.SetRevocationsPath(path)
+
+	cookie := genuineCookie(t, "persist-retry", time.Hour, nil)
+
+	// First logout: the revocation is recorded in memory and the write fails.
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("setup: the file exists, so the write did not fail — this gate is vacuous")
+	}
+	if session.Revoked.Tracked() != 1 {
+		t.Fatalf("the revocation is not in memory; want 1 entry")
+	}
+
+	// The volume comes back, and the browser retries the logout.
+	if err := os.MkdirAll(missing, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("replayed logout = %d; want 200", code)
+	}
+
+	data, err := os.ReadFile(path) // #nosec G304 -- temp path created by this test
+	if err != nil {
+		t.Fatalf("the failed write was never retried, so the revocation is lost at the next "+
+			"restart and the revoked cookie authenticates again: %v", err)
+	}
+	var entries []session.RevocationEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("persisted %d entries; want 1", len(entries))
+	}
+}
+
+// THE CONTROL for the retry. The cheapest way to pass the gate above is to
+// save on EVERY logout, which restores the write amplification this sweep
+// measured at 441 MB from 3.2 MB of input. After a SUCCESSFUL save, a replayed
+// logout must write nothing at all.
+func TestChaos73_ControlReplayedLogoutStillWritesNothingWhenClean(t *testing.T) {
+	chaos73Setup(t)
+	resetSessionRevocationsDirtyForTest()
+	t.Cleanup(resetSessionRevocationsDirtyForTest)
+
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+
+	cookie := genuineCookie(t, "no-rewrite", time.Hour, nil)
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("setup: the first save did not land: %v", err)
+	}
+
+	// Remove the file. A clean replay must NOT recreate it.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("replayed logout = %d; want 200", code)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("a replayed logout rewrote the file although nothing changed; the " +
+			"no-change-no-write rule that removes the quadratic amplification is gone")
+	}
+}
+
+// The refusal surfaces must not assert that a refusal IS an attack.
+//
+// A cookie signed under a previous session secret — after a rotation, or after
+// a restart that minted a fresh random key — is a genuine cookie from an
+// ordinary browser and is refused here as unverifiable. The counter cannot
+// tell it from a forgery, so the operator-facing text must not claim it can
+// (Codex P2, PR #1591; the same accusation-counter rule CHAOS-65 recorded).
+func TestChaos73_RefusalSurfaceDoesNotAssertProbing(t *testing.T) {
+	chaos73Setup(t)
+	if code := logoutWith(t, forgedCookie(t, 32, "accusation")); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+	row := checkSessionRevocation()
+	if row.Status != diagWarn {
+		t.Fatalf("row status = %v; want warn after a refusal", row.Status)
+	}
+	text := row.Message + " " + row.OperatorAction
+	if strings.Contains(text, "Ordinary traffic does not produce this") {
+		t.Error("the row still asserts that ordinary traffic cannot produce a refusal; a " +
+			"session-secret rotation makes every old cookie unverifiable and ordinary " +
+			"browsers produce exactly this")
+	}
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "rotation") && !strings.Contains(lower, "key change") {
+		t.Error("the row does not name the benign cause, so an operator is sent hunting an " +
+			"attacker after their own key rotation")
+	}
+	if !strings.Contains(lower, "could not verify") && !strings.Contains(lower, "unverifiable") {
+		t.Error("the row should describe the cookie as unverifiable rather than as forged")
+	}
+}
+
+// A peer's provenance field is never retained or re-broadcast.
+//
+// `Prov` is decodable on the SyncRevocations wire (the RPC carries raw JSON),
+// and the per-node bounds measure the TOKEN, so a malfunctioning or hostile
+// node can attach an arbitrarily large value that the Control Plane stores and
+// fans to every other node every 3 s. Verified failing against the previous
+// `kept = append(kept, e)`.
+func TestChaos73_DefectPeerProvenanceIsNotRetained(t *testing.T) {
+	agg := &revocationAggregator{perNode: map[string][]RevocationEntry{}}
+	huge := strings.Repeat("P", 1<<20) // 1 MiB, well inside the inbound budget
+	agg.Update("node-a", []RevocationEntry{{
+		Token: "ordinary-token", Expiry: time.Now().Add(time.Hour).Unix(), Prov: huge,
+	}})
+
+	agg.mu.Lock()
+	kept := agg.perNode["node-a"]
+	agg.mu.Unlock()
+
+	if len(kept) != 1 {
+		t.Fatalf("retained %d entries; want 1 — the entry itself is legitimate", len(kept))
+	}
+	if kept[0].Prov != "" {
+		t.Errorf("retained %d bytes of peer-supplied provenance; the per-node bound measures "+
+			"the token only, so this is unbounded state the CP also re-broadcasts",
+			len(kept[0].Prov))
+	}
+	if kept[0].Token != "ordinary-token" {
+		t.Errorf("token = %q; the legitimate part of the entry must survive", kept[0].Token)
+	}
+}

@@ -69,6 +69,30 @@ logout endpoint.
 3. Nothing is retained and nothing is written, so there is no state to clean
    up. No restart is required.
 
+### A key rotation makes this counter climb, and that is not an attack
+
+`culvert_session_revoke_refused_total` counts logout requests carrying a cookie
+this appliance **could not verify**. It cannot distinguish a forgery from a
+genuine cookie signed under a **previous** session secret, because neither
+verifies under the current key.
+
+So after a deliberate `session_secret` rotation — or a restart on a deployment
+that mints a fresh random key, which is the default when no secret is
+configured — every browser still holding a pre-rotation cookie produces one of
+these the next time it logs out. The counter climbs, the
+`SESSION_REVOKE_REFUSED` lines appear, and the `session_revocation` row goes
+WARN, with no attacker involved.
+
+**Check the key first.** If you rotated the session secret (or restarted
+without a configured one) around the time the count started rising, this is
+expected and self-limiting: it stops once those sessions re-authenticate.
+Nothing is lost by the refusal — a cookie signed under the old key no longer
+decodes, so it is already invalid and there is nothing left to revoke.
+
+A count that keeps climbing with **no** recent key change is the signal the
+counter exists for: treat it as probing of the public `/api/auth/logout`
+endpoint and confirm the admin port is not reachable from untrusted networks.
+
 ### `culvert_cluster_revocation_drops_total` is non-zero
 
 A revocation entry was dropped because its key was longer than any cookie this

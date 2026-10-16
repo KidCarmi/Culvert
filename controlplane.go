@@ -279,6 +279,14 @@ func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) 
 			dropped++
 			continue
 		}
+		// Provenance is meaningful ONLY for this node's own persistence file,
+		// and nothing on the gossip path reads it — but it is a decodable
+		// field on the wire, so a peer can attach an arbitrarily large value
+		// that the length bound above (which measures the TOKEN) does not see.
+		// The Control Plane retains these entries and fans them to every other
+		// node every 3 s, so clearing it here is what makes the per-node
+		// bounds bound what is actually stored and broadcast (Codex P2).
+		e.Prov = ""
 		kept = append(kept, e)
 	}
 	if dropped > 0 {

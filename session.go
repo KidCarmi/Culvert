@@ -142,16 +142,27 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 		//     there is nothing to record. It is still visible in the
 		//     per-reason series for diagnostics, just not in the aggregate.
 		//
-		// Everything else means the caller sent something this appliance did
-		// not sign, which ordinary traffic cannot produce.
+		// Everything else means the caller sent something this appliance
+		// cannot VERIFY. That is usually a forgery, but it is not only a
+		// forgery: a cookie signed under a PREVIOUS session secret — after a
+		// deliberate rotation, or after a restart that minted a fresh random
+		// key — is a genuine cookie from an ordinary browser and lands here
+		// too. The counter cannot tell them apart, so the surfaces it feeds
+		// must not claim it can (Codex P2, PR #1591).
 		if reason != session.RevokeAlreadyKnown && reason != session.RevokeExpired {
 			noteSessionRevokeRefusal(r, reason, len(c.Value))
 		}
+		// A replayed logout is the one chance to repair a file that is BEHIND
+		// the in-memory list. RevokeAlreadyKnown is reached only after the MAC
+		// verified, so this retry cannot be driven by an unauthenticated
+		// caller; without it, a transient save failure is never retried for
+		// that token and the revocation is lost at the next restart.
+		if reason == session.RevokeAlreadyKnown {
+			persistRevocationsIfDirty()
+		}
 		return
 	}
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		logger.Printf("Session: failed to persist revocations: %v", err)
-	}
+	persistRevocations()
 }
 
 // ---------------------------------------------------------------------------

@@ -136,6 +136,40 @@ func noteSessionRevokeRefusal(r *http.Request, reason session.RevokeReason, cook
 		sessionRevokeRefused.Load())
 }
 
+// sessionRevocationsDirty records that the in-memory revocation list is AHEAD
+// of the file because a durable write failed.
+//
+// Persisting only when the list actually changes is what removes most of the
+// quadratic amplification (CHAOS-70's rule), but it also means a failed write
+// has no second chance: the browser's retry reports RevokeAlreadyKnown, the
+// caller returns without saving, and nothing repairs the file unless an
+// UNRELATED revocation happens to be recorded later. A restart before that
+// resurrects the revoked session (Codex P1, PR #1591).
+var sessionRevocationsDirty atomic.Bool
+
+// persistRevocations saves and tracks whether the file is in step with memory.
+func persistRevocations() {
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		sessionRevocationsDirty.Store(true)
+		logger.Printf("Session: failed to persist revocations: %v", err)
+		return
+	}
+	sessionRevocationsDirty.Store(false)
+}
+
+// persistRevocationsIfDirty retries a previously failed write. Callers reach
+// it on a no-change revocation, so it must do nothing at all in the healthy
+// case — the point of not writing when nothing changed.
+func persistRevocationsIfDirty() {
+	if !sessionRevocationsDirty.Load() {
+		return
+	}
+	persistRevocations()
+}
+
+// resetSessionRevocationsDirtyForTest clears the flag between tests.
+func resetSessionRevocationsDirtyForTest() { sessionRevocationsDirty.Store(false) }
+
 // sessionRevocationRefusedTotal reports the cumulative refusal count for the
 // metrics surface.
 func sessionRevocationRefusedTotal() int64 { return sessionRevokeRefused.Load() }
@@ -145,6 +179,13 @@ func sessionRevocationRefusedTotal() int64 { return sessionRevokeRefused.Load() 
 func resetSessionRevokeCountersForTest() {
 	sessionRevokeRefused.Store(0)
 	sessionRevokeLogLast.Store(0)
+	sessionRevocationsDirty.Store(false)
+	// clusterRevocationDrops is a process-global the CP aggregator feeds, and
+	// checkSessionRevocation reads it: without this reset, ONE earlier test
+	// that exercised the aggregator makes the contract row take its drop
+	// branch for every later test in the binary, so a gate asserting on the
+	// refusal branch silently examines the wrong row.
+	clusterRevocationDrops.Store(0)
 	session.ResetRefusalCountersForTest()
 }
 
@@ -201,11 +242,14 @@ func checkSessionRevocation() OperatorContractCheck {
 		return OperatorContractCheck{
 			Code:   "session_revocation",
 			Status: diagWarn,
-			Message: fmt.Sprintf("%d logout requests carried a session cookie this appliance did not sign "+
-				"(refused before anything was retained); %d entries currently tracked", refused, tracked),
-			OperatorAction: "Ordinary traffic does not produce this. Treat it as probing of the public " +
-				"/api/auth/logout endpoint: confirm the admin port is not reachable from untrusted " +
-				"networks, and check the rate-limited SESSION_REVOKE_REFUSED log lines for the source.",
+			Message: fmt.Sprintf("%d logout requests carried a session cookie this appliance could not "+
+				"verify (refused before anything was retained); %d entries currently tracked", refused, tracked),
+			OperatorAction: "Check the benign cause FIRST: a session-secret rotation, or a restart that " +
+				"minted a fresh random key, makes every cookie issued under the previous key unverifiable, " +
+				"and ordinary browsers logging out will produce this until they re-authenticate. A count " +
+				"that keeps climbing with no recent key change is probing of the public /api/auth/logout " +
+				"endpoint: confirm the admin port is not reachable from untrusted networks, and check the " +
+				"rate-limited SESSION_REVOKE_REFUSED log lines for the source.",
 		}
 	}
 	return OperatorContractCheck{
