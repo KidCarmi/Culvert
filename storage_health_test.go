@@ -555,14 +555,14 @@ const (
 // ONLY TestStorageWriteAlertGoroutineProbe in the given mode, so no other
 // test's goroutines share the process, and returns the goroutine-count delta
 // the probe measured across one failed durable write.
-func goroutinesLeftByFailedWriteIsolated(t *testing.T, mode string) (int, string) {
+func goroutinesLeftByFailedWriteIsolated(t *testing.T, mode string) (left int, out string) {
 	t.Helper()
 	// #nosec G204,G702 -- re-exec of THIS test binary (os.Args[0]) with a fixed,
 	// literal test selector and a fixed mode; no external input.
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStorageWriteAlertGoroutineProbe$", "-test.count=1", "-test.v")
 	cmd.Env = append(os.Environ(), storageProbeEnv+"="+mode)
 	raw, err := cmd.CombinedOutput()
-	out := string(raw)
+	out = string(raw)
 	if err != nil {
 		t.Fatalf("isolated goroutine probe (%s) failed: %v\n%s", mode, err, out)
 	}

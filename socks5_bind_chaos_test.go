@@ -25,9 +25,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -269,6 +271,57 @@ func TestChaos66_ListenerRebindsOnceThePortIsFree(t *testing.T) {
 
 	// And it really holds the socket, not merely a record saying so.
 	assertPortHeld(t, port)
+}
+
+// socks5LogProbe is an io.Writer that hands every log line to fn.
+type socks5LogProbe func(line string)
+
+func (p socks5LogProbe) Write(b []byte) (int, error) { p(string(b)); return len(b), nil }
+
+// TestChaos66_BindIsRecordedOnlyOnceTheAddressIsPublished pins the publish
+// order of a successful bind: the supervisor must make the bound server
+// visible (Addr) BEFORE it records the bind. noteSOCKS5Bound is what flips
+// /healthz socks5 to "ready", the contract row to accepting, and Binds and
+// EverBound. When it ran first, there was a window in which every surface
+// reported a ready listener whose address was nil. That window is what failed
+// TestChaos66_ListenerRebindsOnceThePortIsFree under the Deep determinism gate
+// (#1634, seed 1792147529230590875: "a bound listener reports no address").
+//
+// The recovery log line is emitted from the supervisor goroutine strictly
+// after the bind is recorded, so a probe on it observes the order
+// deterministically, with no sleep and no race: at that moment Addr() must
+// already be non-nil.
+func TestChaos66_BindIsRecordedOnlyOnceTheAddressIsPublished(t *testing.T) {
+	socks5ChaosSetup(t)
+	port, release := occupyPort(t)
+
+	var sup atomic.Pointer[socks5Supervisor]
+	var probed, unpublished atomic.Int32
+	prev := logger
+	logger = log.New(socks5LogProbe(func(line string) {
+		if !strings.Contains(line, "bound and accepting again") {
+			return
+		}
+		probed.Add(1)
+		if s := sup.Load(); s != nil && s.Addr() == nil && socks5ListenerState().Binds > 0 {
+			unpublished.Add(1)
+		}
+	}), "", 0)
+	// Registered BEFORE startSupervisedSOCKS5: cleanups are LIFO, so the
+	// supervisor is stopped before the logger global is restored.
+	t.Cleanup(func() { logger = prev })
+
+	sup.Store(startSupervisedSOCKS5(t, port))
+	waitForSOCKS5(t, 5*time.Second, "a recorded bind failure", func() bool {
+		return socks5ListenerState().BindTotal > 0
+	})
+	release()
+	waitForSOCKS5(t, 20*time.Second, "the recovery line", func() bool { return probed.Load() > 0 })
+
+	if n := unpublished.Load(); n > 0 {
+		t.Errorf("the bind was recorded (Binds > 0, /healthz %q) while Addr() was still nil: "+
+			"the supervisor records the bind before it publishes the server", socks5ListenerStatus())
+	}
 }
 
 // ── Rate, duration and evidence discipline ───────────────────────────────────

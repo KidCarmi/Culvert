@@ -365,6 +365,21 @@ func (s *socks5Supervisor) run() {
 			continue
 		}
 
+		// Publish the bound server BEFORE recording the bind. noteSOCKS5Bound
+		// is what turns /healthz socks5 "ready", the contract row "accepting"
+		// and Binds/EverBound on; recording it first left a window in which
+		// every surface reported a ready listener whose Addr() was nil
+		// (TestChaos66_BindIsRecordedOnlyOnceTheAddressIsPublished). If Stop
+		// wins the race no bind is recorded: the socket never served.
+		srv := newSOCKS5Server(ln)
+		if !s.adopt(srv) {
+			// Stop won the race: close the listener we just bound rather than
+			// serving on a socket nobody will ever stop.
+			_ = ln.Close()
+			noteSOCKS5ListenerStopped()
+			return
+		}
+
 		// The success line is emitted AFTER the bind, never before it. The
 		// pre-CHAOS-66 code announced `SOCKS5: socks5://localhost:%d` from a
 		// path that could only be reached by a successful bind, but the admin
@@ -378,15 +393,6 @@ func (s *socks5Supervisor) run() {
 				s.port, suppressed)
 		} else {
 			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
-		}
-
-		srv := newSOCKS5Server(ln)
-		if !s.adopt(srv) {
-			// Stop won the race: close the listener we just bound rather than
-			// serving on a socket nobody will ever stop.
-			_ = ln.Close()
-			noteSOCKS5ListenerStopped()
-			return
 		}
 		srv.Start()
 		<-srv.done
