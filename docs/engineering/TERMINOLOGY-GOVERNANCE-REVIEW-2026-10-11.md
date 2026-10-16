@@ -93,9 +93,18 @@ new IDs → 25 / 24.
   both `info.version` and `x-culvert-api-contract-version` in `api/openapi/openapi.yaml` (2.1.0 → 2.2.0
   at the time of writing), regenerate the committed contract artifacts (`make api-bundle`:
   `openapi.json`, the HTML docs, `docs/api/API-INVENTORY.md`) and pass `make api-verify` and
-  `make api-breaking-check`. **Estimated PR size:** S/M (~60 lines of handler, spec, GUI and contract-test
-  change, plus the version bump and regenerated artifacts). Do NOT rename `op_id` in
-  audit detail strings without a CHANGELOG note: SIEM parsers may key on it.
+  `make api-breaking-check`.
+- **Audit details (additive, like the API fix):** the `op_id=` key appears in three audit details:
+  `backup.trigger` (`backups_api.go:335`), `release.dispatch` (`release_dispatch_service.go:423`) and
+  `release.dispatch.outcome` (`release_dispatch_service.go:438`). Each should **dual-emit**
+  `operation_id=<same value>` beside the existing `op_id=`, so audit-to-API correlation can use the
+  canonical key while SIEM parsers that already match `op_id=` keep working. Never rename or drop `op_id=`
+  in an audit detail; it stays as a permanent alias. Record the new key in the CHANGELOG. Existing tests
+  match on `op_id=` substrings (`release_dispatch_service_test.go`), so they keep passing, and new
+  assertions should pin `operation_id=`.
+- **Estimated PR size:** M (~60 lines of handler, spec, GUI and contract-test change, ~15 lines of
+  audit-detail and test change for the three `operation_id=` keys, plus the version bump and
+  regenerated artifacts).
 
 ### T-65 — "restore a config version" vs "roll back" (Low)
 
@@ -132,7 +141,7 @@ No new entries. Carried (not re-verified): the 2026-09-24 report's backlog, nota
 
 ## Migration Risk
 
-Only T-64 touches a wire contract, and only additively (a new field on each backup response; nothing renamed or removed). That is a MINOR API contract bump, not a no-version change. T-65 is copy.
+Only T-64 touches a wire contract, and only additively (a new field on each backup response and a new key in three audit details; nothing renamed or removed). That is a MINOR API contract bump, not a no-version change. T-65 is copy.
 
 ## Recommended Refactoring Plan (by priority)
 
@@ -140,7 +149,7 @@ Only T-64 touches a wire contract, and only additively (a new field on each back
 | --- | --- | --- |
 | Critical | — | none |
 | High | — | none |
-| Medium | T-64 | Add `operationId` on `POST /api/backups` beside a permanently kept `opId` (optionally marked deprecated, never removed without a MAJOR exception) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test; MINOR contract bump (`info.version` + `x-culvert-api-contract-version`) with regenerated artifacts (`make api-bundle`, `make api-verify`) |
+| Medium | T-64 | Add `operationId` on `POST /api/backups` beside a permanently kept `opId` (optionally marked deprecated, never removed without a MAJOR exception) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test; MINOR contract bump (`info.version` + `x-culvert-api-contract-version`) with regenerated artifacts (`make api-bundle`, `make api-verify`); dual-emit `operation_id=` beside `op_id=` in the `backup.trigger`, `release.dispatch` and `release.dispatch.outcome` audit details (CHANGELOG note; `op_id=` kept) |
 | Low | T-65 | Reword the React hint (`AuthRulesPage.tsx:738`) to "roll back to a config version" |
 | Low | T-65 CDR note | Remove the false "restore via Config Versions" recovery claim from the legacy CDR deletion dialog (`static/index.html:11971`); CDR policies are not versioned |
 
