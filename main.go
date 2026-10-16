@@ -689,6 +689,15 @@ func loadFileConfigAndFlags(s *startupState) {
 	default:
 		s.rlRPM = s.fc.Security.RateLimit
 	}
+	// Checked on the RESOLVED value, mirroring validatePortRanges just above:
+	// FileConfig.validateLimits only rejects a negative security.rate_limit/
+	// rate_limit_rpm in config.yaml, which a CLI flag bypasses entirely. Without
+	// this, a typo like "-rate-limit-rpm=-1" would reach loadConnAndRateLimit's
+	// "> 0" enable check and silently behave as disabled instead of failing
+	// startup (Codex review, PR #1504).
+	if err := validateRateLimitRPM(s.rlRPM); err != nil {
+		log.Fatalf("Invalid rate limit configuration: %v", err)
+	}
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 	// config.yaml's security.ip_filter_mode is validated at load time
 	// (FileConfig.validateEnums, via loadFileConfig -> fc.validate()) — an
@@ -1439,6 +1448,23 @@ func validatePortRanges(proxyPort, uiPort, socks5Port int) error {
 		if n.port < 1 || n.port > 65535 {
 			return fmt.Errorf("%s must be 1-65535, got %d", n.name, n.port)
 		}
+	}
+	return nil
+}
+
+// validateRateLimitRPM checks the RESOLVED per-IP rate limit (already merged
+// through the canonical/deprecated-flag presence switch and
+// firstNonZero(CLI, config.yaml) in loadFileConfigAndFlags). FileConfig's own
+// validateLimits rejects a negative security.rate_limit/rate_limit_rpm, but
+// that check runs on the raw YAML fields before CLI overrides are applied —
+// exactly the gap validatePortRanges/validatePortCollisions close for the
+// three listener ports — so a CLI-only negative value (e.g. a
+// "-rate-limit-rpm=-1" typo) would otherwise reach loadConnAndRateLimit's
+// "> 0" enable check and be silently treated as "disabled" rather than
+// failing startup (Codex review, PR #1504).
+func validateRateLimitRPM(n int) error {
+	if n < 0 {
+		return fmt.Errorf("rate limit must be >= 0, got %d", n)
 	}
 	return nil
 }

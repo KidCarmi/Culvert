@@ -270,6 +270,72 @@ func TestValidatePortRanges_DisabledSOCKS5Ignored(t *testing.T) {
 	}
 }
 
+// TestValidateRateLimitRPM is the Codex-review regression (PR #1504): a
+// negative RESOLVED rate limit — reachable only via a CLI flag, since
+// FileConfig.validateLimits already rejects a negative YAML value before any
+// CLI override is applied — must fail validation instead of silently
+// reaching loadConnAndRateLimit's "> 0" enable check, where it would behave
+// identically to "disabled".
+func TestValidateRateLimitRPM(t *testing.T) {
+	if err := validateRateLimitRPM(0); err != nil {
+		t.Errorf("expected no error for 0 (disabled), got: %v", err)
+	}
+	if err := validateRateLimitRPM(60); err != nil {
+		t.Errorf("expected no error for a positive limit, got: %v", err)
+	}
+	err := validateRateLimitRPM(-1)
+	if err == nil {
+		t.Fatal("expected an error for a negative rate limit, got nil")
+	}
+	if !strings.Contains(err.Error(), "-1") {
+		t.Errorf("expected the error to name the offending value, got: %v", err)
+	}
+}
+
+// TestLoadFileConfigAndFlags_RateLimitRPM_NegativeCanonicalFlagResolvesToError
+// drives the real flag.Parse()/flag.Visit path end to end: a CLI typo like
+// "-rate-limit-rpm=-1" must be caught at the same merge point ports are
+// validated at, not silently treated as "rate limiting disabled". Asserting
+// on a log.Fatalf call without exiting the test binary isn't practical here,
+// so this test exercises the resolution up to the point validateRateLimitRPM
+// is called and checks ITS verdict directly — the equivalent of asserting
+// validatePortRanges/validatePortCollisions's error without going through
+// log.Fatalf.
+func TestLoadFileConfigAndFlags_RateLimitRPM_NegativeCanonicalFlagResolvesToError(t *testing.T) {
+	origArgs := os.Args
+	origCommandLine := flag.CommandLine
+	t.Cleanup(func() {
+		os.Args = origArgs
+		flag.CommandLine = origCommandLine
+	})
+
+	flag.CommandLine = flag.NewFlagSet("culvert", flag.ContinueOnError)
+	os.Args = []string{"culvert", "-rate-limit-rpm", "-1"}
+
+	s := &startupState{}
+	parseFlags(s)
+
+	// Mirror loadFileConfigAndFlags's own precedence switch up to the
+	// validation call, without invoking the real function (which would
+	// os.Exit the test binary via log.Fatalf on this exact input).
+	s.fc = &FileConfig{}
+	switch {
+	case s.rateLimitRPMCanonicalSet:
+		s.rlRPM = *s.rateLimitRPMCanonical
+	case s.rateLimitRPMFlagSet:
+		s.rlRPM = *s.rateLimitRPM
+	default:
+		s.rlRPM = s.fc.Security.RateLimit
+	}
+
+	if s.rlRPM != -1 {
+		t.Fatalf("test setup invalid: s.rlRPM = %d, want -1", s.rlRPM)
+	}
+	if err := validateRateLimitRPM(s.rlRPM); err == nil {
+		t.Error("expected validateRateLimitRPM to reject the resolved -1, got nil")
+	}
+}
+
 // TestLoadFileConfigAndFlags_PortCollision_ResolvedByCLIOverride proves the
 // false-positive the raw-field check would have produced: config.yaml sets
 // proxy.port and proxy.ui_port to the SAME value, but a CLI -ui-port flag
