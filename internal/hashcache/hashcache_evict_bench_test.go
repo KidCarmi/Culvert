@@ -190,9 +190,11 @@ func BenchmarkGet_Parallel(b *testing.B) {
 // to lock contention alone, and %hit on both is what makes that visible.
 //
 // Reader throughput is what a bounded eviction would be trying to protect, so
-// this is the benchmark to re-read if that follow-up is attempted — and the one
-// that caught the rejected layout change making this case 13 % WORSE while the
-// stall itself got faster.
+// this is the benchmark to re-read if that follow-up is attempted. The pre-fix
+// A/B of the rejected layout change reported this case 13 % WORSE. That run
+// used the fixture-retention harness that has since been corrected, and the
+// corrected A/B shows no significant change (p=0.083;
+// roadmap/SCAN-CACHE-EVICTION-COST.md).
 // minContendedWindow is the shortest timed window in which the contention
 // benchmarks require at least one writer Set to have landed: several multiples
 // of the Go scheduler's 10 ms preemption slice, so a runnable writer must have

@@ -145,18 +145,25 @@ Re-measuring moved the wins in **both** directions and changed two conclusions:
 | `SetChurn_AtCapacity_10k` | ~ | −4.55 % (now a **win**) |
 | `Get_ParallelDuringEviction` | +13.39 % | **~ (n.s.)** — regression gone |
 
-Netting the eviction saving against the per-`Set` delta over the inserts each
-eviction makes room for, post-fix:
+The net per-`Set` effect is read directly from `SetChurn_AtCapacity_*`. Those
+benchmarks Set continuously into a full cache, so every `maxSize/4` inserts
+they pay one `evictLocked`, and their ns/op already includes the amortized
+eviction saving. Post-fix:
 
-- `cache_size: 10000` — **+41.5 ns per Set** (favours the candidate)
-- `cache_size: 100000` — **+12.3 ns per Set** (favours the candidate)
+- `cache_size: 10000` — 558.8 → 533.4 ns: candidate **25.4 ns per Set faster**
+- `cache_size: 100000` — 760.6 → 837.9 ns: candidate **77.3 ns per Set slower**
 
-So the earlier framing — "it makes the frequent operations slower to speed up a
+(Correction, review round on PR #1604: an earlier revision added the standalone
+`EvictLocked_*` saving on top of the `SetChurn` delta and reported +41.5 and
++12.3 ns in the candidate's favour at both sizes. That counted the eviction
+saving twice, and at 100 000 it reversed the sign.)
+
+So the earlier framing, "it makes the frequent operations slower to speed up a
 rare one, and nets to zero", with `Get_ParallelDuringEviction` as "the clearest
-refutation" — **does not survive the corrected measurement**. The netting is
-weakly positive at both sizes and that reader-throughput regression is not
-significant. Both of those were load-bearing in the old argument and both are
-withdrawn.
+refutation", **does not survive the corrected measurement either**. The net is
+**mixed by size**: slightly in the candidate's favour at the 10 000 default and
+against it at 100 000. The reader-throughput regression is not significant.
+Both claims were load-bearing in the old argument and both are withdrawn.
 
 ### What the numbers actually support
 
@@ -169,9 +176,10 @@ sweep (11–32 % faster), one fewer allocation per `Set`, and 70 % less `B/op` a
 the default size.
 
 That is a **mixed and immaterial result, not a refutation**. In absolute terms
-the whole argument is tens of nanoseconds: `Get_Miss` costs +8.5 ns, `Set` at
-`cache_size: 100000` costs +77 ns, the eviction saving returns 16–90 ns per
-`Set`. Every one of those sits four to five orders of magnitude below the
+the whole argument is tens of nanoseconds: `Get_Miss` costs +8.5 ns, and a
+`Set` nets −25 ns at `cache_size: 10000` and +77 ns at `cache_size: 100000`,
+with the 16–90 ns per-`Set` amortized eviction saving already counted inside
+those `SetChurn` figures. Every one of those sits four to five orders of magnitude below the
 ClamAV/YARA scan that a `Set` follows and a `Get` precedes.
 
 So the verdict is unchanged and its reasoning is not: there is **no performance
