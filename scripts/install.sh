@@ -1530,10 +1530,28 @@ env_put() {
 }
 
 gen_passphrase() {
-  local p
-  p="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  [[ -n "$p" ]] || p="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  [[ -n "$p" ]] || error "Could not generate a passphrase (openssl and /dev/urandom both unavailable)."
+  local raw p=""
+  # Validate the GENERATOR's raw output BEFORE filtering/truncating it. A
+  # degraded openssl (FIPS-mode engine warning, a stubbed binary in a hardened
+  # image) can print a deterministic diagnostic to stdout ahead of — or
+  # instead of — the base64 data. Filtering to alnum and truncating to 40 first
+  # hides that: a short diagnostic ("FIPSmodeselftestfailed", 22 chars) would
+  # pass validate_passphrase_for_env_file's 12-char floor, and a LONG one (50
+  # zeroes) would be cut to exactly 40 and look like real key material (Codex
+  # review, PR #1491). 48 random bytes base64-encode to exactly 64 characters
+  # of [A-Za-z0-9+/] on ONE line with no padding, so anything else — a
+  # non-zero exit, extra lines, a different length, foreign characters — is
+  # rejected and the /dev/urandom path is tried instead.
+  if raw="$(openssl rand -base64 48 2>/dev/null)" && [[ "$raw" =~ ^[A-Za-z0-9+/]{64}$ ]]; then
+    p="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9' | head -c 40)"
+  fi
+  if [[ "${#p}" -ne 40 ]]; then
+    p=""
+    if raw="$(head -c 48 /dev/urandom 2>/dev/null | base64 2>/dev/null)" && [[ "$raw" =~ ^[A-Za-z0-9+/]{64}$ ]]; then
+      p="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9' | head -c 40)"
+    fi
+  fi
+  [[ "${#p}" -eq 40 ]] || error "Could not generate a 40-character passphrase (openssl and /dev/urandom both unavailable or degraded)."
   printf '%s' "$p"
 }
 
@@ -1782,6 +1800,15 @@ setup_at_rest_encryption() {
       ;;
     *)
       pass="$(gen_passphrase)"
+      # gen_passphrase()'s only guard is "non-empty" (it falls back to
+      # /dev/urandom, then error(), only on a fully empty result) — a
+      # degraded `openssl` (e.g. a FIPS-mode build that writes an engine
+      # warning ahead of the base64 data on stdout) can still yield a
+      # short-but-non-empty alnum string. Apply the same floor/charset
+      # contract enforced on the operator-typed and host-env-supplied
+      # passphrases so a degraded auto-generate can never silently persist
+      # a weak CA/log encryption key instead of failing loudly.
+      validate_passphrase_for_env_file "Auto-generated passphrase" "$pass"
       info "Generated a random 40-character passphrase."
       ;;
   esac

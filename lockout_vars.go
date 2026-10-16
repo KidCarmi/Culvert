@@ -15,6 +15,13 @@ type (
 var (
 	loginLimiter = lockout.NewLoginLimiter()
 	apiLimiter   = lockout.NewAPIRateLimiter()
+	// basicAuthFailLimiter charges only FAILED admin-plane HTTP Basic
+	// verifications, per client IP (SEC-BASIC-1). The two-tier loginLimiter
+	// is keyed by (IP, username), so an unauthenticated caller rotating
+	// usernames over GET — which apiLimiter does not gate — never trips it;
+	// this bounds that caller's bcrypt work, limiter-map entries and audit
+	// writes to the same Burst-per-RateWindow the POST login path gets.
+	basicAuthFailLimiter = lockout.NewAPIRateLimiter()
 )
 
 // LockoutMsg is re-exposed unqualified so ui_auth.go and the test suite keep

@@ -159,3 +159,133 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	noteWriteSuccess(path)
 	return nil
 }
+
+// ── Predictable-path secret writes (SEC-SECRETWRITE-1) ───────────────────────
+
+// WriteFileExclusive is the safe counterpart to AtomicWrite for the few
+// callers that CANNOT use a random temp name because the path itself is a
+// rendezvous another code path looks for by name (the CDR renewal's
+// "<bundle>.tmp" files, which reconcileCredentialLineage finds at the next
+// boot to finish an interrupted swap).
+//
+// It exists because os.WriteFile is unsafe for secret material on a
+// predictable path, in two ways that are easy to miss and were each
+// reproduced against this tree:
+//
+//   - IT FOLLOWS SYMLINKS. O_CREATE without O_EXCL opens the link's TARGET,
+//     so an entry planted at the path before the first write sends the bytes
+//     somewhere the writer never chose — outside the data directory
+//     entirely. For a key file the read side makes this worse rather than
+//     better: os.ReadFile on a DANGLING link reports fs.ErrNotExist, which is
+//     exactly the condition every mint path treats as "no key yet, create
+//     one".
+//   - ITS perm ARGUMENT APPLIES ONLY ON CREATION. Writing over a file that
+//     already exists keeps that file's mode, so a 0666 file planted at the
+//     path receives the secret and stays world-readable however carefully
+//     0600 was passed.
+//
+// WriteFileExclusive removes any pre-existing entry — link or file, which is
+// what makes the create exclusive rather than merely racy — then creates the
+// path with O_EXCL at perm, writes, fsyncs and closes. Removing first keeps
+// the drop-in semantics of os.WriteFile (a stale rendezvous file from an
+// interrupted predecessor is superseded, exactly as a truncating write
+// superseded it before); O_EXCL then guarantees the descriptor refers to a
+// file THIS call created, at THIS mode, at THIS path.
+//
+// Anything the remove cannot clear — a non-empty directory, a parent that
+// denies unlink — fails the call CLOSED, with nothing written and the
+// existing entry untouched. An EMPTY directory is cleared like a stale file;
+// that is a deliberate widening over os.WriteFile's EISDIR, since nothing
+// security-relevant distinguishes an empty directory at a rendezvous path
+// from no entry at all.
+//
+// Callers that do NOT need a predictable path must use AtomicWrite instead:
+// it is the durable-write chokepoint, it is atomic against readers, and its
+// rename-over-the-target replaces a planted symlink rather than writing
+// through it.
+//
+// Deliberately NOT wired to the AtomicWrite observers (CHAOS-45): this is not
+// that chokepoint, and every call site checks the returned error itself.
+// Notifying only the failure seam would degrade the storage row with no
+// success seam able to clear it by evidence.
+func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("exclusive write %s: clear existing: %w", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if err != nil {
+		return fmt.Errorf("exclusive write %s: create: %w", path, err)
+	}
+	// perm is filtered through the process umask at creation, so a umask
+	// that masks owner bits would leave the rendezvous unreadable after a
+	// restart. Apply the requested mode explicitly, as AtomicWrite does.
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		return exclusiveFail(path, "chmod", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return exclusiveFail(path, "write", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return exclusiveFail(path, "fsync", err)
+	}
+	if err := f.Close(); err != nil {
+		return exclusiveFail(path, "close", err)
+	}
+	// The file's fsync makes its CONTENT durable, not its directory entry:
+	// after a power loss the freshly created name can vanish, and a
+	// rendezvous that vanished is exactly what the next boot's recovery
+	// cannot finish. So the parent directory is synced too, with the same
+	// unsupported-filesystem tolerance AtomicWrite applies.
+	if err := exclusiveSyncDir(filepath.Dir(path)); err != nil {
+		return exclusiveFail(path, "parent dir fsync", err)
+	}
+	return nil
+}
+
+// exclusiveFail undoes a WriteFileExclusive that failed after creating the
+// file, and makes the undo DURABLE: the unlink is verified and the parent
+// directory synced again, so "failed closed" means the path is empty after a
+// crash too. A cleanup that could not be verified or synced is joined into
+// the returned error, so the caller is never told the path is clear when it
+// may still hold (or, after a crash, regain) the partially written file.
+func exclusiveFail(path, stage string, cause error) error {
+	err := fmt.Errorf("exclusive write %s: %s: %w", path, stage, cause)
+	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: remove: %w", path, rerr))
+	}
+	if serr := exclusiveSyncDir(filepath.Dir(path)); serr != nil {
+		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: parent dir fsync: %w", path, serr))
+	}
+	return err
+}
+
+// exclusiveSyncDir is the parent-directory fsync WriteFileExclusive runs
+// before reporting success. A package var so a test can observe that it
+// runs and that its failure fails the write closed.
+var exclusiveSyncDir = syncDirTolerant
+
+// syncDirTolerant fsyncs dir. Opening a directory for sync is not portable,
+// so an open failure is best-effort (same as AtomicWrite), and a filesystem
+// that does not support directory fsync (EINVAL/ENOTSUP/EOPNOTSUPP) is
+// treated as success.
+func syncDirTolerant(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil &&
+		!errors.Is(syncErr, syscall.EINVAL) &&
+		!errors.Is(syncErr, syscall.ENOTSUP) &&
+		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
+		return syncErr
+	}
+	if syncErr == nil && closeErr != nil {
+		return closeErr
+	}
+	return nil
+}

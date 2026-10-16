@@ -73,7 +73,7 @@ ADMINISTRATION
 
 - Expanded Certificates panel in `static/index.html`
 - API: `/api/ca-cert`, `/api/ocsp`, `/api/ca/key-provider`
-- Features: Root CA info + download PEM, OCSP/CRL toggle + cache stats, HSM/KMS provider status, dual-CA overlap
+- Features: Root CA info + download PEM, OCSP toggle + cache stats, HSM/KMS provider status, dual-CA overlap
 
 ---
 

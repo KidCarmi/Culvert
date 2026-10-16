@@ -33,7 +33,7 @@ fault; the counter below is how you tell expected from broken.
 which stops country-scoped rules from matching new hosts — is visible without
 scraping `/metrics` or reading the process log. It warns only while the pool
 is saturated, and stays `ok` (reporting the cumulative counts) the rest of the
-time, including on an appliance with no GeoIP database or no
+time, including on an instance with no GeoIP database or no
 destination-country rules, where it simply reports that no resolution has
 been attempted.
 

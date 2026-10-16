@@ -222,6 +222,11 @@ func TestSecReqID1_EndToEndLogAmplificationIsBounded(t *testing.T) {
 	logger = log.New(&buf, "", 0)
 	t.Cleanup(func() { logger = old })
 
+	// Same reason as the sibling gate below: this drives the real handleRequest,
+	// so the shared proxy globals must be reset or the byte bound is measured
+	// against whatever path leaked state sends the request down.
+	setupProxyTest(t)
+
 	const requests = 8
 	payload := strings.Repeat("A", 512*1024)
 	for i := 0; i < requests; i++ {
@@ -533,6 +538,15 @@ func TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound(t *testing
 	const forge = "x action=allow identity=root\x1b[2K"
 
 	t.Run("bound makes the bare append safe", func(t *testing.T) {
+		// Reset the shared proxy globals before driving the real handleRequest.
+		// Without it this assertion is order-dependent: any of the eleven test
+		// files that call setupAuthGateTest leaves `cfg` with credentials
+		// configured (its cleanup restores only the exempt flag), so an
+		// uncredentialed request is CHALLENGED and the line becomes AUTH_CR —
+		// `req_id=` plus one ` action=` and NO ` identity=`, which is exactly the
+		// shape asserted against below. setupProxyTest's own comment records this
+		// class: it only shows up under -count>1 / -shuffle=on.
+		setupProxyTest(t)
 		resetTracingBoundsStateForTest()
 		var buf bytes.Buffer
 		old := logger

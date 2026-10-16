@@ -72,6 +72,12 @@ type policyDraftCoordinator struct {
 
 var policyDraft = &policyDraftCoordinator{cand: &PolicyStore{}}
 
+// policyDraftPathFor is the draft file initPolicyDraft derives from a policy
+// path — the location the NEXT boot will reload a pending draft from.
+func policyDraftPathFor(policyPath string) string {
+	return filepath.Join(filepath.Dir(policyPath), "policy_draft.json")
+}
+
 // initPolicyDraft wires the coordinator's persistence path (sibling of the
 // policy file) and reloads any draft left pending by a prior run. A "" policy
 // path (in-memory mode) leaves the draft in-memory too.
@@ -82,7 +88,7 @@ func initPolicyDraft(policyPath string) {
 		policyDraft.path = ""
 		return
 	}
-	policyDraft.path = filepath.Join(filepath.Dir(policyPath), "policy_draft.json")
+	policyDraft.path = policyDraftPathFor(policyPath)
 	data, err := os.ReadFile(policyDraft.path)
 	if err != nil {
 		return // no pending draft
@@ -872,13 +878,28 @@ func effectivePolicyVersion() (version int64, updatedAt string) {
 // (c.mu → PolicyStore.mu, the stageTarget convention); the per-store pair is
 // itself one PolicyStore.SnapshotWithVersion read so rules/version cannot
 // tear inside the selected store either.
-func effectiveManagementSnapshot() (snap PolicyStoreSnapshot, draft bool) {
+// persisted reports durability of the SELECTED domain, not always the
+// running store: while a draft is active, GET /api/policy renders the
+// candidate, and the candidate's own persistence path (policyDraft.path) is
+// wired up only at startup (initPolicyDraft) — a hot reload that turns
+// persistence on for the running store does NOT rewire the draft, so a
+// staged edit can still be lost on restart even though the running store
+// now reports true. Reporting the running store's flag regardless of which
+// rulebase is shown would silence that warning for exactly the rulebase the
+// admin is looking at (Codex review, PR #1445).
+func effectiveManagementSnapshot() (snap PolicyStoreSnapshot, draft bool, persisted bool) {
 	policyDraft.mu.Lock()
 	defer policyDraft.mu.Unlock()
 	if requireCommitEnabled() && policyDraft.state.Active {
-		return policyDraft.cand.SnapshotWithVersion(), true
+		// The draft is durable only if its file is where the next boot will
+		// look: a SIGHUP that moves proxy.policy_file to another directory
+		// leaves policyDraft.path at the OLD sibling, which initPolicyDraft
+		// will never reload after a restart (Codex review, PR #1445).
+		p := policyDraft.path
+		return policyDraft.cand.SnapshotWithVersion(), true,
+			p != "" && p == policyDraftPathFor(policyStore.Path())
 	}
-	return policyStore.SnapshotWithVersion(), false
+	return policyStore.SnapshotWithVersion(), false, policyStore.Persisted()
 }
 
 // afterPolicyWrite is RETIRED (2B.0b): ordinary policy mutations run their

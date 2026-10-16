@@ -44,6 +44,12 @@ func yaraInflightLoad() int64 { return yara.Inflight() }
 // same admin-visible stats map as the other YARA runtime-health counters.
 func yaraMatchPanicsLoad() int64 { return yara.MatchPanics() }
 
+// yaraSaturationSkipsLoad reports how many regex matches were skipped because
+// the in-flight cap was reached. The skip's log line is rate-limited (a match
+// is evaluated per string definition per scanned body, so an unbounded line is
+// a request-path amplifier), so this counter is where the magnitude lives.
+func yaraSaturationSkipsLoad() int64 { return yara.SaturationSkips() }
+
 // Posture strings for on_timeout / on_saturation, re-exposed unqualified for
 // diagnostics.go and ui_security.go.
 const (

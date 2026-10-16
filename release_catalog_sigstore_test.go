@@ -297,6 +297,58 @@ func TestResolveSigstoreWiring_BakedRootActive(t *testing.T) {
 	}
 }
 
+// Baked defaults ⇒ both sources report "default" (positive confirmation that
+// nothing is silently running on an operator override the operator forgot
+// about, and the counterpart to the override case below).
+func TestResolveSigstoreWiring_BakedSourcesReportDefault(t *testing.T) {
+	w := resolveSigstoreWiring(env(nil))
+	if !w.active {
+		t.Fatal("baked root should activate the scheme")
+	}
+	if w.identitySource != sigstoreSourceDefault || w.rootSource != sigstoreSourceDefault {
+		t.Fatalf("baked wiring sources = (%q, %q), want (%q, %q)",
+			w.identitySource, w.rootSource, sigstoreSourceDefault, sigstoreSourceDefault)
+	}
+}
+
+// A valid identity override (with the baked root left in place) ⇒ active, and
+// identitySource reports "override" while rootSource stays "default" — an
+// operator can positively confirm THEIR identity policy is the one enforcing.
+func TestResolveSigstoreWiring_ValidIdentityOverrideSourceReportsOverride(t *testing.T) {
+	w := resolveSigstoreWiring(env(map[string]string{
+		envReleaseSigstoreIdentity: `{"issuer":"https://x","san_regex":"^https://y.*$"}`,
+	}))
+	if !w.active || w.err != nil {
+		t.Fatalf("valid identity override with the baked root should activate the scheme; got %+v", w)
+	}
+	if w.identitySource != sigstoreSourceOverride {
+		t.Fatalf("identitySource = %q, want %q", w.identitySource, sigstoreSourceOverride)
+	}
+	if w.rootSource != sigstoreSourceDefault {
+		t.Fatalf("rootSource = %q, want %q (root was not overridden)", w.rootSource, sigstoreSourceDefault)
+	}
+}
+
+// An inactive wiring (identity-without-root dormant case) must report NO
+// source at all — a source string is meaningful only for an ACTIVE scheme, and
+// a stray "override" on a dormant scheme would misleadingly imply enforcement.
+func TestResolveSigstoreWiring_InactiveWiringHasNoSourceFields(t *testing.T) {
+	emptyRoot := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(emptyRoot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := resolveSigstoreWiring(env(map[string]string{
+		envReleaseSigstoreIdentity:    `{"issuer":"https://x","san_regex":"^https://y$"}`,
+		envReleaseSigstoreTrustedRoot: emptyRoot,
+	}))
+	if w.active {
+		t.Fatal("this case should be inactive")
+	}
+	if w.identitySource != "" || w.rootSource != "" {
+		t.Fatalf("inactive wiring must carry no source fields; got identitySource=%q rootSource=%q", w.identitySource, w.rootSource)
+	}
+}
+
 // Identity override set WITHOUT a trusted root ⇒ inactive + a visible warning.
 // With the official root now baked, "no root" is reachable only by overriding the
 // trusted-root path with an EMPTY file (deactivation).
