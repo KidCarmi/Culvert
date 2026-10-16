@@ -11,8 +11,9 @@ func TestAuthExemptKillSwitchRows(t *testing.T) {
 	}
 	rt := authExemptKillSwitchRows(false, true)
 	if len(rt) != 1 || rt[0].Code != "auth_exempt_kill_switch" || rt[0].Status != diagWarn ||
-		!strings.Contains(rt[0].Message, "ENGAGED") || strings.Contains(rt[0].OperatorAction, "restart") {
-		t.Fatalf("runtime-only: want warn, GUI-clearable, got %+v", rt)
+		!strings.Contains(rt[0].Message, "ENGAGED") || !strings.Contains(rt[0].Message, "reverts on restart") ||
+		strings.Contains(rt[0].OperatorAction, "CULVERT_AUTHBYPASS_DISABLE") {
+		t.Fatalf("runtime-only: want warn, GUI-clearable, reverts-on-restart hint, got %+v", rt)
 	}
 	env := authExemptKillSwitchRows(true, false)
 	if len(env) != 1 || !strings.Contains(env[0].OperatorAction, "restart") {
@@ -25,7 +26,8 @@ func TestAuthExemptKillSwitchRows(t *testing.T) {
 }
 
 func TestAuthExemptKillSwitchSurfacesInContract(t *testing.T) {
-	t.Cleanup(func() { setAuthExemptDisabled(false) })
+	prev := authExemptDisabledRuntimeState()
+	t.Cleanup(func() { setAuthExemptDisabled(prev) })
 	setAuthExemptDisabled(true)
 	found := false
 	for _, c := range buildOperatorContract().Checks {

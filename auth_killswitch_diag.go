@@ -18,12 +18,14 @@ func authExemptKillSwitchRows(envDisabled, runtimeDisabled bool) []OperatorContr
 	if !envDisabled && !runtimeDisabled {
 		return nil
 	}
-	layer := "runtime toggle"
-	action := "Return to normal operation from Auth Policy → Kill switch (clear the toggle) once the incident is resolved, then confirm exempt clients stop receiving 407."
+	// The runtime layer is an in-memory toggle (not persisted), so it reverts
+	// on restart; the env layer is read once at startup and survives it.
+	layer := "runtime toggle, reverts on restart"
+	action := "Return to normal operation from Auth Policy → Kill switch (clear the toggle) once the incident is resolved, then confirm exempt clients stop receiving 407. The runtime toggle is not persisted: a restart also clears it, so re-engage it after a restart if the incident is still ongoing."
 	switch {
 	case envDisabled && runtimeDisabled:
 		layer = "environment variable CULVERT_AUTHBYPASS_DISABLE and runtime toggle"
-		action = "Clear the runtime toggle in Auth Policy → Kill switch, then unset CULVERT_AUTHBYPASS_DISABLE and restart: the environment layer is read once at startup and cannot be cleared from the GUI."
+		action = "Clear the runtime toggle in Auth Policy → Kill switch, then unset CULVERT_AUTHBYPASS_DISABLE and restart: the environment layer is read once at startup and cannot be cleared from the GUI (the runtime toggle reverts on restart on its own)."
 	case envDisabled:
 		layer = "environment variable CULVERT_AUTHBYPASS_DISABLE"
 		action = "Unset CULVERT_AUTHBYPASS_DISABLE and restart the node: the environment layer is read once at startup and cannot be cleared from the GUI."
