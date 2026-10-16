@@ -62,19 +62,27 @@ consistent with every other live surface, via an additive alias with zero breaki
   name every other surface uses) and not find it in the one place they are most likely to be reading
   or writing it by hand.
 - **Fix (additive, zero breaking changes), following the T-10 DPI precedent exactly:**
-  1. **YAML:** added the canonical key `security.rate_limit_rpm` (`config.go`, `FileConfig.Security`);
-     `security.rate_limit` remains a fully supported, non-deprecated-for-removal alias. A new
-     `FileConfig.reconcileDeprecatedRateLimitKey()` method — called from `loadFileConfig` immediately
-     after the existing `reconcileDeprecatedDPIKeys()` — resolves the two: the canonical key wins when
-     both are set to a nonzero value, and the deprecated key still works but emits the same one-line
-     startup notice format (`"[Culvert] config: %q is deprecated, use %q instead"`) the DPI reconciler
-     already established. Downstream code keeps reading `fc.Security.RateLimit` unchanged — this is the
-     single reconciliation point, mirroring `reconcileDeprecatedDPIKeys` field-for-field.
+  1. **YAML:** added the canonical key `security.rate_limit_rpm` (`config.go`, `FileConfig.Security`,
+     typed `*int`); `security.rate_limit` remains a fully supported, non-deprecated-for-removal alias.
+     A new `FileConfig.reconcileDeprecatedRateLimitKey()` method — called from `loadFileConfig`
+     immediately after the existing `reconcileDeprecatedDPIKeys()` — resolves the two: the canonical
+     key wins whenever it is PRESENT (pointer nil-vs-non-nil, not whether the decoded value is
+     nonzero), including an explicit `rate_limit_rpm: 0` disabling rate limiting even while the
+     deprecated `rate_limit` is still nonzero — a migration-window case a nonzero-based check cannot
+     express, caught by Codex review and fixed in the same PR (commit bae2897). The deprecated key
+     still works, unchanged, when the canonical key is absent, and emits the same one-line startup
+     notice format (`"[Culvert] config: %q is deprecated, use %q instead"`) the DPI reconciler already
+     established. Downstream code keeps reading `fc.Security.RateLimit` unchanged — this is the single
+     reconciliation point, mirroring `reconcileDeprecatedDPIKeys`' slice-presence reasoning field-for-field.
   2. **CLI flag:** added the canonical `-rate-limit-rpm` flag (`main.go`) alongside the existing
      `-rate-limit`, which stays supported and now documents itself as the deprecated alias in its own
-     `-h` usage text. Both flags, plus the (already-reconciled) YAML value, are merged via the existing
-     `firstNonZero(*s.rateLimitRPMCanonical, *s.rateLimitRPM, s.fc.Security.RateLimit)` precedence chain
-     — the same idiom every other CLI/YAML-merged setting in `main.go` already uses.
+     `-h` usage text. Precedence is decided by EXPLICIT PRESENCE, not by value: `parseFlags` tracks
+     which of the two flags were actually passed via `flag.Visit` (`rateLimitRPMCanonicalSet`/
+     `rateLimitRPMFlagSet`), and `loadFileConfigAndFlags` consults that tracking — not
+     `firstNonZero` — so `-rate-limit-rpm 0` wins even when `-rate-limit`/config.yaml supplies a
+     nonzero value (same Codex-review fix, commit bae2897). `firstNonZero`-style merging remains the
+     correct idiom for every other CLI/YAML-merged setting in `main.go` that has no "explicit zero
+     must win" requirement; this pair is a deliberate, documented exception.
   3. **Validation:** `FileConfig.validateLimits` now checks both `security.rate_limit` and
      `security.rate_limit_rpm` for a negative value, each with its own error message naming the offending
      key.
@@ -88,7 +96,26 @@ consistent with every other live surface, via an additive alias with zero breaki
   5. **Regression tests:** `TestLoadFileConfig_RateLimitRPMCanonicalWins` and
      `TestLoadFileConfig_DeprecatedRateLimitKeyStillWorks` (`logger_ca_clam_test.go`, placed directly
      alongside the three existing DPI-alias tests they mirror) assert the precedence and the
-     back-compat path at the YAML-parsing layer.
+     back-compat path at the YAML-parsing layer; `TestLoadFileConfig_ExplicitZeroRateLimitRPMDisables`
+     (same file) plus `TestLoadFileConfigAndFlags_RateLimitRPM_ExplicitZeroCLIOverridesNonzeroYAML` and
+     `TestLoadFileConfigAndFlags_RateLimitRPM_CanonicalWinsOverDeprecatedFlag`
+     (`main_config_precedence_test.go`, the latter two driven end to end through the real
+     `flag.Parse()`/`flag.Visit` path) assert the explicit-zero-wins fix from the Codex review round.
+  6. **SIGHUP hot-reload:** `applyHotReload` (`main.go`) reads the already-reconciled
+     `fc.Security.RateLimit` from a `loadFileConfig`-produced `FileConfig`, so the YAML-side canonical/
+     deprecated precedence (including an explicit `rate_limit_rpm: 0`) was already correct on reload —
+     but the surrounding `if fc.Security.RateLimit > 0 { rl.Configure(...) }` guard, unrelated to this
+     PR and pre-existing, meant a reload could never use that resolved value to DISABLE an
+     already-running limiter (CodeRabbit review). Narrowed to `if fc.Security.RateLimitRPM != nil ||
+     fc.Security.RateLimit > 0`: the canonical key's pointer presence is preserved through
+     reconciliation, so an explicit `rate_limit_rpm: 0` in a reloaded file now correctly calls
+     `rl.Configure(0, …)` and disables the limiter, while a reloaded file that omits the setting
+     entirely (`RateLimitRPM == nil`, legacy `RateLimit == 0`) is untouched exactly as before — the
+     existing SIGHUP contract (only reapply settings the reloaded file actually specifies) is
+     unchanged for the deprecated key and every other `applyHotReload` block. Fixing the equivalent gap
+     for the deprecated `rate_limit` key alone (turning it into a pointer too) is out of scope here —
+     it is a pre-existing ambiguity shared by every other int-typed hot-reload setting, not something
+     this PR's canonical-key work introduced.
 - **Deliberately NOT touched in this pass**, per the same boundary the T-10/T-17 precedents drew around
   their own residuals: `AdminSettings.RateLimitRPM`, `ConfigSnapshot.RateLimitRPM`, and the
   config-version diff key were already canonical and needed no change; this fix touches only the

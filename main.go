@@ -1585,8 +1585,17 @@ func applyHotReload(fc *FileConfig) {
 		logger.Printf("Reload: default action %s", fc.DefaultAction)
 	}
 
-	// Rate limit
-	if fc.Security.RateLimit > 0 {
+	// Rate limit. fc.Security.RateLimit is already reconciled (loadFileConfig ->
+	// reconcileDeprecatedRateLimitKey), so the canonical/deprecated precedence —
+	// including an explicit rate_limit_rpm: 0 — is already correct here. But a
+	// plain "> 0" guard would only ever be able to RAISE the limit on reload,
+	// never disable it: a reloaded file explicitly setting rate_limit_rpm: 0 to
+	// turn rate limiting off would silently do nothing. RateLimitRPM's pointer
+	// survives reconciliation, so its presence still distinguishes "the
+	// canonical key was explicitly set in this reload" from "the reloaded file
+	// doesn't mention rate limiting at all" (the latter must stay a no-op, same
+	// as every other applyHotReload block) — CodeRabbit review, PR #1504.
+	if fc.Security.RateLimitRPM != nil || fc.Security.RateLimit > 0 {
 		rl.Configure(fc.Security.RateLimit, time.Minute)
 		logger.Printf("Reload: rate limit %d req/min", fc.Security.RateLimit)
 	}
