@@ -15,27 +15,30 @@ One small drift found and fixed; everything else in the window is consistent.
   existing vocabulary (`backup`, `auth.<mechanism>.<outcome>`, `quarantine`).
 - **Findings:** 1 (Low) — below.
 
-**Terminology Health Score:** carried baseline from the 2026-09-24 report plus 1 new item fixed in
-this PR (net 0). No new open backlog item.
+**Terminology Health Score:** carried baseline from the 2026-09-24 report plus 1 new item, fixed in
+this PR for the runbook; its metric-HELP half stays open until #1630 (T-64) merges.
 
 ## Canonical Concepts
 
 | Business concept | Canonical name (GUI) | Other names found |
 |---|---|---|
-| Accounts that may sign in to the admin UI | **Administrators** ([product terminology](../design/PRODUCT-TERMINOLOGY.md); React console nav; `/api/auth/users`, `auth.users.*`) | "Admin Users" (legacy console panel title), "admin roster" (docs, comments, metric `culvert_ui_roster_role_clamped_total`, `UIUsers` log prefix) |
+| Accounts that may sign in to the admin UI | **Administrators** ([product terminology](../design/PRODUCT-TERMINOLOGY.md); `/api/auth/users`, `auth.users.*`) | "Admin Users" (the legacy console's management panel title; the React console lists Administrators as a planned, not yet routed, entry), "admin roster" (docs, comments, metric `culvert_ui_roster_role_clamped_total`, `UIUsers` log prefix) |
 
 ## Finding R-1 (Low) — "admin roster" never tied to "Administrators"
 
 - **Business concept:** the set of admin-UI accounts.
-- **Current names:** GUI "Administrators" (React console; the legacy console panel is still titled "Admin Users"); API `/api/auth/users`; audit `auth.users.set|delete`; docs
+- **Current names:** product term "Administrators"; the only working management panel is the legacy console's "Admin Users"; API `/api/auth/users`; audit `auth.users.set|delete`; docs
   `docs/operator/admin-roster-durability.md` and a new metric say "roster".
 - **Recommended canonical name:** Administrators (user-visible), per the product terminology glossary. "Roster" stays as the internal term for
   the persisted collection, but must be introduced once against the canonical name.
 - **Problem:** an administrator or support engineer reading the durability runbook or the metric HELP
-  cannot tell that "roster" is the Administrators panel.
+  cannot tell that "roster" means the administrator accounts.
 - **Action taken:** the runbook's opening sentence now states the mapping. The metric name is NOT
-  renamed — renaming a shipped Prometheus series costs dashboards and alerts for little gain.
-- **Affected:** docs only (1 line). Migration complexity: none. Compatibility risk: none. PR size: XS.
+  renamed here, and its HELP text is not edited in this PR: T-64 (#1630) rewrites that same HELP line
+  (canonical `culvert_admin_roster_role_clamped_total`, old name kept as a deprecated alias), so the
+  metric-side mapping lands there to avoid two PRs editing one line. R-1 is therefore fixed for the
+  runbook and remains open for the metric HELP until #1630 merges.
+- **Affected:** docs only (1 line); metric HELP via #1630. Migration complexity: none. Compatibility risk: none. PR size: XS.
 
 ## Other sections
 
