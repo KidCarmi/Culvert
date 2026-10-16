@@ -518,6 +518,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- `GET /api/diagnostics` now carries a `saas_feed` row when the signed SaaS feed
+  is stale, failing to refresh, waiting for authority, or critical. Previously
+  that state was visible only on `/ready` and the Signed SaaS Feed tab, so the
+  one-page health report read as an all-clear. It also reports an enabled feed
+  that has never activated while every refresh fails. The row names the source
+  actually serving and keys its remedy on the failure class. Additive and
+  report-only; no row is emitted when the feed is healthy, disabled or serving
+  the embedded baseline without failures.
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
   line and the digest-pinned `golang:1.26.9-alpine` builder images, index
   `sha256:cdfd4fe2…`, verified against Docker Hub), and `golang.org/x/net`
