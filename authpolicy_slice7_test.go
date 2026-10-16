@@ -52,11 +52,11 @@ func setupAuthGateTest(t *testing.T) {
 //
 // Call it from the tests that mint a SESSION naming "test-idp" to assert that
 // a valid session wins over an Exempt or CredentialRequired rule. Before
-// CHAOS-71 the `pvd` field was never validated, so those fixtures
+// CHAOS-72 the `pvd` field was never validated, so those fixtures
 // authenticated against no registry at all; now a session naming a provider
 // outside the live set stops being an identity, so an empty registry would
 // turn each of them into the REMOVED-provider case — testing the opposite of
-// the property each one states. TestChaos71_* owns that case deliberately.
+// the property each one states. TestChaos72_* owns that case deliberately.
 //
 // IT IS DELIBERATELY NOT FOLDED INTO setupAuthGateTest. Several tests on that
 // helper re-reset the globals MID-TEST to reach a different posture —
@@ -292,7 +292,7 @@ func TestSlice7_ValidCredentialsWin(t *testing.T) {
 
 func TestSlice7_ValidSessionWins(t *testing.T) {
 	setupAuthGateTest(t)
-	installAuthGateTestIdP(t) // the session below names it; see CHAOS-71
+	installAuthGateTestIdP(t) // the session below names it; see CHAOS-72
 	const host = "slice7-session.example.test"
 	policyStore.Add(slice7ExemptRule(host))
 

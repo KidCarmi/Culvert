@@ -351,7 +351,7 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 		Email:  "alice@example.test",
 		Groups: []string{"engineering"},
 		// OIDC-SHAPED and LIVE: the prefixed spelling is what this fixture
-		// exists to cover, and since CHAOS-71 a session naming a provider
+		// exists to cover, and since CHAOS-72 a session naming a provider
 		// outside the live set is no longer an identity — so it points at the
 		// profile setupProxyIdentityE2E installs rather than an id no
 		// registry holds.

@@ -13866,7 +13866,7 @@ function idpProviderMeta(p) {
   return { label: p.type === 'saml' ? 'SAML 2.0' : 'OIDC',  color: '#14b8a6' };
 }
 
-// CHAOS-71: deleting or disabling a provider now also cuts the sessions it
+// CHAOS-72: deleting or disabling a provider now also cuts the sessions it
 // already minted, and that refusal is deliberately indistinguishable from a
 // user who simply has no cookie — the client is re-challenged through the
 // ordinary no-credential path. So the only way an admin can confirm the

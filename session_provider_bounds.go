@@ -6,7 +6,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// CHAOS-71 — a session is an identity only while the provider that minted it
+// CHAOS-72 — a session is an identity only while the provider that minted it
 // is still an identity source this appliance honours.
 //
 // A `ps_session` cookie is minted in exactly two places, both interactive IdP
@@ -75,7 +75,7 @@ const sessionProviderLocal = "local"
 //     carried into the policy decision as a federation name. Two layers
 //     disagreeing about which values mean "no provider" is the defect; the
 //     rule is that this predicate asks the SAME question `identityAuthSource`
-//     asks, never a re-derived one, and `TestChaos71_ProviderEmptinessAgreesWithIdentityAuthSource`
+//     asks, never a re-derived one, and `TestChaos72_ProviderEmptinessAgreesWithIdentityAuthSource`
 //     pins the agreement from both sides. Caught by this sweep's own
 //     `ControlPrefixAloneIsNotAProvider` gate, which is why that control
 //     enumerates whitespace.

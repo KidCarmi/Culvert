@@ -3,7 +3,7 @@
 **Audience:** operators and incident responders.
 **Scope:** the proxy data path's session identity (`ps_session`), not the admin
 UI session (`ps_ui_session`), which is a separate cookie covered below.
-**Engineering reference:** `roadmap/CHAOS-ENGINEERING-REVIEW.md` §41 (CHAOS-71),
+**Engineering reference:** `roadmap/CHAOS-ENGINEERING-REVIEW.md` §42 (CHAOS-72),
 register row **AU-2**.
 
 ---

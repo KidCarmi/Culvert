@@ -295,7 +295,7 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_login_oversize_rejected_total counter\nculvert_login_oversize_rejected_total %d\n",
 		loginOversizeRejected.Load())
 
-	// CHAOS-71: proxied requests whose VERIFIED session named an identity
+	// CHAOS-72: proxied requests whose VERIFIED session named an identity
 	// provider that is no longer enabled. Always emitted, for the same reason
 	// as the CHAOS-69 counter below: there is no configuration to gate it on,
 	// so a flat zero means "nothing has carried a session from a removed
