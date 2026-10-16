@@ -85,15 +85,20 @@ jobs:
           # as PSIRT-0035161972. This BUILDS a fresh candidate OVA from PR #1528
           # head 6aa900cd (its own Deep PR Gate image, run 38873584208) and
           # qualifies it (preflight -> up -> qualify -> recovery -> history).
-          # The 1.5.4 scanner-specific legs run as a SECOND phase against THIS
-          # build's retained OVA, once it records the artifact id + sidecar
-          # archive sha256 + index digest: [cache-bypass] re-proves the 60s
-          # clean-verdict quarantine on the 1.5.4 engine, and [fp2-isolated]
-          # re-runs the F-P2 reproduction against the baked 1.5.4 sidecar (must
-          # deliver 0, where the 1.4.6 sidecar delivered > 0).
-          - variant: candidate-6aa900cdbb96
+          # SOURCE is the PR #1528 MERGE commit 9e34452677d7 (head 6aa900cd
+          # merged into base main 77c0c583) — the exact commit the deep-gate
+          # image (run 38873584208) was built and version-stamped from, which
+          # build-ova.sh's candidate-source guard requires to match. That is
+          # also what ships when #1528 merges. The 1.5.4 scanner-specific legs
+          # run as a SECOND phase against THIS build's retained OVA, once it
+          # records the artifact id + sidecar archive sha256 + index digest:
+          # [cache-bypass] re-proves the 60s clean-verdict quarantine on the
+          # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
+          # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
+          # sidecar delivered > 0).
+          - variant: candidate-9e34452677d7
             provisioning: source
-            source_sha: "6aa900cdbb964f8b79c4eaba8fad62148e4a0322"
+            source_sha: "9e34452677d77f574f5c3c08ba23ea897d8e17cb"
             image_run: "38873584208"
             image_tar_sha256: "ede6e067d6ec89d0084e1caf4346ee48794a8addeb2b176b55e106605731118d"
             expect_image_id: "sha256:11fc13cd07ac4f54032e31877cd383f0d4297ec6671f0a68ebb29f2b24cad39f"
