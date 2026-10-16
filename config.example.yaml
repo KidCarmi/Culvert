@@ -4,7 +4,8 @@
 # falls through to it). Exceptions are noted per key: list keys such as ui_sans are MERGED with
 # their flag, and for keys the admin UI also manages (e.g. ui_sans, log_level, syslog_addr,
 # otlp_endpoint) a NON-EMPTY value saved there (admin_settings.json in the data dir) is re-applied at
-# boot after this file and the CLI, and wins. A value cleared in the UI does NOT win: after a restart
+# boot after this file and the CLI and normally wins (a saved syslog target that cannot connect at boot
+# leaves the earlier one active). A value cleared in the UI does NOT win: after a restart
 # the value set here or on the CLI applies again (e.g. a syslog or OTLP exporter the UI disabled
 # resumes), so remove it here and from the CLI as well.
 #
@@ -136,13 +137,16 @@ security_scan:
 # Validated only when enabled: true. Fields below are optional unless noted.
 
 cdr:
-  enabled: false
+  enabled: false          # Also forced ON at boot, whatever this says, while <data-dir>/cdr_enabled exists (written
+                          # by the admin UI toggle or the first enrollment); disable via the UI, which removes it.
   endpoint: ""            # Sluice "host:port" (e.g. "sluice:8443"); required when enabled
   fail_mode: "open"       # A live Sanitize call that fails (unreachable mid-call / timeout / ERROR): "open" = deliver the
                           # original (CDR_ERROR request-log event) | "closed" = 403 block page. The cdr_unavailable
                           # alert fires only for transport/RPC failures, NOT for an ERROR result Sluice returns.
                           # NOT consulted when there is no client to call (initial dial failed at startup, nothing
                           # enrolled, every breaker open): files then pass through unsanitized in either mode.
+                          # Enabling CDR from the admin UI at runtime (first enable, or disable + re-enable) runs it
+                          # with this and the other cdr values at their DEFAULTS, i.e. "open", until the next restart.
   default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
   default_mode: "ENFORCE" # "ENFORCE" | "REPORT_ONLY" | "BYPASS_WITH_REPORT"
   timeout_sec: 35         # Per-Sanitize deadline in seconds (must be >= 30)
@@ -152,9 +156,11 @@ cdr:
                           # and the remainder is appended UNSANITIZED, so the delivered file can be corrupt and keep
                           # active content past the window. CDR covers a file completely only when it fits within
                           # that window. A SANITIZED body is currently forwarded with the origin's Content-Length,
-                          # so when its size differs the download can be truncated or fail. A body that fits the window but
-                          # exceeds this cap is NOT rejected: it skips sanitization and passes through unmodified
-                          # (SKIPPED_OVERSIZE), whatever fail_mode says. Keep equal to Sluice's own cap.
+                          # so when its size differs the download can be truncated or fail. A body that fits the
+                          # window but exceeds this cap is NOT rejected: it skips sanitization and passes through
+                          # unmodified (SKIPPED_OVERSIZE), whatever fail_mode says. Values above 50 do NOT widen
+                          # coverage: the client refuses payloads over its fixed 50 MiB cap, and those files also
+                          # pass through unsanitized (SKIPPED_OVERSIZE). Keep equal to Sluice's own cap.
   chunk_size_kb: 0        # gRPC stream chunk in KiB, 16-3072 (0 = default 64 KiB)
   server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix). REQUIRED
                           # for the config-only bootstrap path (no enrolled instance): without it the client is never
