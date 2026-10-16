@@ -20181,6 +20181,11 @@ async function renderMCPCommandCenter(){
   var items=[];
   if(rolloutErr) items.push(['warn','Rollout posture unavailable: /api/mcp/rollout did not respond - kill switch, hard-fail and production-lock state are unknown','mcp-rollout']);
   if(distErr) items.push(['warn','Distribution posture unavailable: /api/mcp/distribution did not respond - fleet-effective state is unknown','mcp-health']);
+  // The DP applier fails CLOSED when its trust config is bad (previously visible only in the
+  // startup log and the raw API): the node silently ignores signed CP rollouts. Read-only
+  // surfacing of the bounded dp_compose_reason; "not_configured"/"ready" are healthy states.
+  var dpWarn=distErr?'':mcpxDpComposeWarning(d.dp_compose_reason);
+  if(dpWarn) items.push(['warn',dpWarn,'mcp-health']);
   if(gwKilled) items.push(['crit','Emergency kill switch active on gateway: all admission stopped (node-local)','mcp-rollout']);
   if(mgmtKilled) items.push(['crit','Emergency kill switch active on management: all admission stopped (node-local)','mcp-rollout']);
   if(gwSev!=='none') items.push([(gwSev==='high'||gwSev==='critical')?'crit':'warn','Gateway durability '+gwSev+': see durability meters','mcp-health']);
@@ -22089,6 +22094,16 @@ function mcpxFmtBytes(n){
   var u=['KiB','MiB','GiB','TiB'], i=-1; do{ n/=1024; i++; }while(n>=1024 && i<u.length-1);
   return n.toFixed(n<10?1:0)+' '+u[i];
 }
+// mcpxDpComposeWarning maps the bounded dp_compose_reason to an operator
+// message, or '' for the healthy states ("not_configured"/"ready"). Shared by the
+// Command Center "Needs attention" item and its Health drill-down, so the view
+// the item links to shows the same diagnosis.
+function mcpxDpComposeWarning(reason){
+  reason=reason||'';
+  if(!reason || reason==='not_configured' || reason==='ready') return '';
+  var dpWhy={invalid_trust_json:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS is present but is not valid JSON',invalid_trust_alg:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS names an unsupported algorithm',invalid_trust_key:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS holds a malformed public key',invalid_trust_store:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS could not form a trust store',state_dir_unavailable:'the durable state directory could not be created',recover_failed:'durable state could not be recovered',invalid_applier:'the applier could not be built'};
+  return 'This node ignores signed MCP distribution (fail-closed): '+(dpWhy[reason]||('reason '+reason))+'. Fix it and restart; see the startup log for detail.';
+}
 async function mcpxHealthLoad(){
   var root=document.getElementById('mcpx-health-root'); if(!root) return;
   var myTicket=++mcpxHealthTicket;
@@ -22097,6 +22112,17 @@ async function mcpxHealthLoad(){
   if(myTicket!==mcpxHealthTicket) return;
   root.textContent='';
   if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Health unavailable - '+d.__err+'. (Unavailable read - not zero sessions and not zero durability use.)')); mcpxAnnounce('MCP health unavailable'); return; }
+  // DP distribution composition (fail-closed applier): the Command Center links
+  // here for it, so render it here. A failed read is shown as unavailable, never
+  // as healthy.
+  var dist=await mcpxRfFetch('/api/mcp/distribution');
+  if(myTicket!==mcpxHealthTicket) return;
+  if(mcpxRfErr(dist)){
+    root.appendChild(mcpxEl('div','mcpx-source','DP distribution composition unavailable - '+dist.__err+'.'));
+  } else {
+    var dpWarn=mcpxDpComposeWarning(dist.dp_compose_reason);
+    if(dpWarn){ var w=mcpxEl('div','mcpx-empty',dpWarn); w.setAttribute('role','alert'); root.appendChild(w); }
+  }
   var cards=mcpxEl('div','mcpx-cards2');
   cards.appendChild(mcpxHealthCard('Gateway', d.gateway));
   cards.appendChild(mcpxHealthCard('Management', d.management));
