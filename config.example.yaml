@@ -1,6 +1,9 @@
 # Culvert Configuration
 # Copy to config.yaml and edit as needed.
-# CLI flags always override values in this file.
+# A non-empty CLI flag overrides the matching value in this file (an empty, zero or false flag
+# falls through to it). Exceptions are noted per key: list keys such as ui_sans are MERGED with
+# their flag, and for keys the admin UI also manages (e.g. ui_sans, log_level) a value saved there
+# (admin_settings.json in the data dir) is re-applied at boot after this file and the CLI, and wins.
 #
 # Usage:
 #   ./culvert -config config.yaml
@@ -15,7 +18,9 @@ proxy:
   log_max_mb: 50      # Rotate log when it reaches this size in MB
   tls_cert: ""        # Custom TLS certificate for Web UI (PEM, optional)
   tls_key: ""         # Custom TLS key for Web UI (PEM, optional)
-  ui_sans: []         # Extra SANs (IPs or hostnames) for the auto-generated self-signed Web UI cert
+  ui_sans: []         # Extra SANs (IPs or hostnames) for the auto-generated self-signed Web UI cert. MERGED with
+                      # --ui-san (flag values first, then these), so the CLI cannot remove a SAN listed here;
+                      # a non-empty list saved from the admin UI replaces both at boot.
   ca_path: "/data/ca.bundle"      # Persistent Root CA bundle (mount /data as Docker volume)
   metrics_token: ""   # Bearer token for /metrics endpoint (empty = open access)
   policy_file: ""     # JSON file for PBAC policy rules
@@ -108,7 +113,10 @@ security_scan:
   cache_ttl: "1h"        # SHA-256 scan result cache TTL
   cache_size: 10000      # Max entries in scan result cache
   max_scan_mb: 5         # Max response size to buffer for scanning (MiB)
-  scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. ":8484".
+  scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. "127.0.0.1:8484".
+                         # /scan, /health and /status have NO authentication or rate limit: bind loopback or a
+                         # private interface and firewall it; never expose it to untrusted networks (":8484"
+                         # binds every interface).
                          # /scan inspects bodies only with clamav_addr or loaded yara_rules_dir rules on THIS
                          # process (configured DPI patterns apply separately to text content). enabled: true
                          # or threat_feed_db alone does not scan bodies (feeds check URLs/domains only):
@@ -116,7 +124,11 @@ security_scan:
   scan_svc_url: ""       # Delegate body scanning to a scan sidecar instead of in-process, e.g. "http://scan-svc:8484"
 
 # ── Content Disarm & Reconstruction (Sluice) ───────────────────────────────
-# Strips active content (macros, JS, OLE) from downloads via the Sluice sidecar.
+# Strips active content (macros, JS, OLE) from SSL-inspected downloads via the Sluice sidecar.
+# PREREQUISITE: CDR runs only on response bodies the inspection path buffers for scanning, i.e. when
+# a body scanner is active (security_scan clamav_addr / yara_rules_dir rules / scan_svc_url, or DPI
+# patterns for text). With none, every response bypasses CDR even with enabled: true. Hosts on the
+# scan-exclusion list skip CDR too.
 # Validated only when enabled: true. Fields below are optional unless noted.
 
 cdr:
@@ -132,7 +144,7 @@ cdr:
   max_file_size_mb: 0     # Per-file CDR cap (0 = default 50 MiB). Larger files are NOT rejected: they skip
                           # sanitization and pass through unmodified (SKIPPED_OVERSIZE), whatever fail_mode
                           # says. Keep equal to Sluice's own cap.
-  chunk_size_kb: 0        # gRPC stream chunk, 16-3072 (0 = default)
+  chunk_size_kb: 0        # gRPC stream chunk in KiB, 16-3072 (0 = default 64 KiB)
   server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix). REQUIRED
                           # for the config-only bootstrap path (no enrolled instance): without it the client is never
                           # built and CDR stays effectively off, although config validation passes.
@@ -175,7 +187,9 @@ file_block:
 # ── Logging & Observability ───────────────────────────────────────────────
 
 log_format: "text"      # "text" (default) | "json" (structured, fields: time, msg, req_id, identity, rule, action)
-log_level: ""           # Minimum level: DEBUG | INFO (default) | WARN | ERROR
+log_level: ""           # DEBUG | INFO (default) | WARN | ERROR. NOT a general severity filter: DEBUG enables debug
+                        # lines and ERROR suppresses WARN-helper lines, but ordinary log output (INFO, POLICY_*
+                        # decisions) is always written. A level saved from the admin UI wins at boot.
 default_action: ""      # "allow" (passthrough) | "deny" (zero-trust); auto-detected if empty
 audit_log_file: ""      # Persistent JSONL audit log path (e.g. "/data/audit.jsonl")
 syslog_addr: ""         # Syslog forwarding: "udp://host:514" or "tcp://host:601"
