@@ -37,3 +37,27 @@ func TestMCPDistributionComposeReasonsAreLabelledInGUI(t *testing.T) {
 		}
 	}
 }
+
+// The Command Center item links to the Health view, so that view must render
+// the same compose diagnosis; otherwise the drill-down lands on healthy-looking
+// cards and hides the cause.
+func TestMCPHealthViewRendersComposeReason(t *testing.T) {
+	gui, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(gui)
+	i := regexp.MustCompile(`async function mcpxHealthLoad\(\)\{`).FindStringIndex(html)
+	if i == nil {
+		t.Fatal("mcpxHealthLoad not found")
+	}
+	body := html[i[1]:]
+	if end := regexp.MustCompile(`\n\}\n`).FindStringIndex(body); end != nil {
+		body = body[:end[0]]
+	}
+	for _, want := range []string{`/api/mcp/distribution`, `mcpxDpComposeWarning(dist.dp_compose_reason)`} {
+		if !regexp.MustCompile(regexp.QuoteMeta(want)).MatchString(body) {
+			t.Errorf("mcpxHealthLoad must render the DP compose diagnosis; missing %q", want)
+		}
+	}
+}
