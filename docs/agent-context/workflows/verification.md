@@ -52,10 +52,10 @@ Read [`internal/admission/doc.go`](../../../internal/admission/doc.go), its scop
 ```sh
 go test -race -shuffle=on -count=2 ./internal/admission
 go test -race -count=1 -run 'TestAdmissionMigration_|TestDistributedAdmission_ProductionWiring' .
-go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v . ./internal/admission
+go test -tags benchgate -run 'TestBenchGate_' -count=1 -p 1 -timeout=10m -v . ./internal/admission ./internal/threatfeed
 ```
 
-The root selection is a starting point, not exhaustive coverage of changed HTTP/SOCKS5, persistence, or cluster behavior. Inspect those callers and add their existing tests. The tagged command must include both root and admission: package-only success misses root gates and root-only success misses the moved rate-window gates. Test names do not establish build-tag membership; inspect each file's `//go:build` header. `TestChaos61_` admission tests need no chaos tag.
+The root selection is a starting point, not exhaustive coverage of changed HTTP/SOCKS5, persistence, or cluster behavior. Inspect those callers and add their existing tests. The tagged command must include both root and admission: package-only success misses root gates and root-only success misses the moved rate-window and CIDR-flatness gates. (`./internal/threatfeed` is listed because the CI benchgate commands also carry its wall-clock gate.) A wall-clock ratio gate belongs in a `benchgate`-tagged file, never the default suite, where the shuffled determinism job runs it under load. Test names do not establish build-tag membership; inspect each file's `//go:build` header. `TestChaos61_` admission tests need no chaos tag.
 
 [`coverage-floor.sh`](../../../.github/scripts/coverage-floor.sh) owns the existing global and per-file contracts: global 55%, plus its complete per-file table, including 70% for root `security.go`, admission `engine.go`, and `freshness.go`. Per-file values are averages of function coverage, not package coverage. Omitted floor files must fail. Do not replace this with a new package threshold.
 
