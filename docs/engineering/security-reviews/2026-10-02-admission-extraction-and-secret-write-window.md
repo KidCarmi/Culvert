@@ -46,11 +46,12 @@ third was found by review of the second's fix):
    recorded trade-off; its missing *evidence* was not recorded anywhere, which
    made the single unlocked password oracle in the admin API also the single
    silent one. **Fixed in this PR.**
-3. **LOW — the audit *Actor* was unbounded product-wide** (`auditActor`), so the
-   fix for finding 2 bounded the `Object` and left the identity it rebuilds from
-   the session full-length — in the audit ring and in the five other stores that
-   persist `auditActor`'s result. Caught by Codex review of this PR.
-   **Fixed in this PR.**
+3. **LOW — the rendered audit *Actor* was unbounded** (`auditEventDiffID` via
+   `auditActor`), so the fix for finding 2 bounded the `Object` and left the
+   identity it rebuilds from the session full-length in the audit ring. Caught
+   by Codex review of this PR. **Fixed in this PR** at the rendering
+   (`auditEntryActor`); `auditActor` stays the full principal because MCP
+   four-eyes compares it (§3.3).
 
 Nothing in the window weakened authentication, authorization, policy
 precedence, TLS, or fail-closed behaviour. Three of the window's own commits
@@ -260,7 +261,7 @@ reader takes the named one as the whole gap.**
 
 ### 3.3 LOW — the audit *Actor* was unbounded, product-wide (found in review of 3.2's fix)
 
-**File:** `ui_helpers.go`, `auditActor`
+**File:** `ui_helpers.go`, `auditActor` / `auditEntryActor`
 **CWE:** CWE-778 / CWE-770 (allocation without limits)
 **Severity:** Low
 **Found by:** Codex review on PR #1532
@@ -274,26 +275,40 @@ produced a **314-byte Actor**. And the gate that was supposed to catch it was
 named `AuditActorIsBounded` while asserting only on `Object` — a test that reads
 as if it covered the property it is named for.
 
-**It is broader than this handler.** `auditActor`'s result is not only the audit
-ring's Actor: call sites persist it into the MCP tool-trust store, policy-learning
-decision records, CDR receipts, PAC lifecycle operations, support-bundle approval
-state and support-recipient records. So every audited admin action by an oversize
-configured account retained the full name in each of those stores. Severity stays
-**Low** because the name is *configured*, not attacker-chosen — this is a
-retention bound, not an unauthenticated amplifier.
+It is broader than this handler: every audited admin action by an oversize
+configured account wrote the full name into the ring. Severity stays **Low**
+because the name is *configured*, not attacker-chosen — this is a retention
+bound, not an unauthenticated amplifier.
 
-**Fix:** bound it at the **chokepoint** (`auditActor`), not at the call site.
-Bounding per call site is precisely what hid the defect — the call sites were
-already applying `truncateForAudit` to the Object, so each one *looked* bounded.
-This is CLAUDE.md's own governance lesson arriving again: **enumerate the class
-from the PRIMITIVE, not from the file being edited.** The gate now asserts both
-fields plus the chokepoint directly, with a control requiring an ordinary name to
-pass through verbatim — the cheapest way to pass a bound is to truncate
-everything, which would rewrite every audit actor in the product.
+**First fix, and why it was wrong.** The first version bounded `auditActor`
+itself, on the reasoning that its result is also persisted by the MCP tool-trust
+store, policy-learning records, CDR receipts, PAC lifecycle operations and
+support state. Codex review showed that value is not display-only: the MCP
+publication and approval handlers cast it to `approval.PrincipalID`, and the
+approval store's four-eyes check is `approver == requester`. A prefix-plus-length
+bound made two DISTINCT configured admins whose names share the first 64 bytes
+and the total length, from the same client address, compare equal — the second
+admin's legitimate approval was refused as self-approval, and their audit
+entries merged. It would also have changed the principal recorded for requests
+created before the upgrade.
 
-**The transferable rule:** *a comment asserting that a value is bounded is a
+**Fix:** split the principal from its rendering. `auditActor` returns the full,
+unbounded identity (main's behaviour) for every caller that compares or persists
+it. `auditEntryActor` — written into every `AuditEntry` by `auditEventDiffID`,
+and captured as the PAC intent's render-only `AuditActor` — applies
+`boundAuditIdentity`: the 64-byte rune-safe prefix, the original length, and a
+short SHA-256 digest of the full name, so distinct oversize accounts stay
+distinguishable in the trail. The password-change failure's Object uses the same
+bound. Gates assert both rendered fields, that `auditActor` is unbounded, an
+ordinary-name pass-through control, and (`audit_actor_principal_test.go`) the
+four-eyes publication flow with two colliding names plus a self-approval
+control.
+
+**The transferable rules:** *a comment asserting that a value is bounded is a
 claim about every field the value reaches, not about the argument in front of
-you — and a gate must assert the property it is named for.*
+you — and a gate must assert the property it is named for.* And: *before bounding
+a shared primitive, enumerate what its callers DO with it; a lossy bound belongs
+to the rendering, never to a value something compares for identity.*
 
 ---
 

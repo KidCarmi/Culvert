@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"sync"
@@ -87,6 +88,30 @@ func truncateForAudit(s string) string {
 	if len(s) <= loginAuditActorMax {
 		return s
 	}
+	return fmt.Sprintf("%s…[truncated, %d bytes]", s[:auditCut(s)], len(s))
+}
+
+// boundAuditIdentity is truncateForAudit for an AUTHENTICATED identity rendered
+// into an audit field (AuditEntry.Actor, or the account named as the Object).
+// A prefix plus the original length is not enough there: two distinct
+// configured accounts that share the first loginAuditActorMax bytes and the
+// total length would render identically, and their audit trails would merge.
+// The marker therefore also carries a short stable digest of the full name, so
+// the bounded renderings stay distinguishable and an operator can match an
+// entry to an account by recomputing it. It is a RENDERING only — never compare
+// it for authorization; the full principal is auditActor's.
+func boundAuditIdentity(s string) string {
+	if len(s) <= loginAuditActorMax {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%s…[truncated, %d bytes, sha256:%x]", s[:auditCut(s)], len(s), sum[:8])
+}
+
+// auditCut returns the byte offset at which an oversize s is clamped to
+// loginAuditActorMax on a UTF-8 rune boundary. Callers guarantee
+// len(s) > loginAuditActorMax.
+func auditCut(s string) int {
 	// Same bounded rune-boundary search as lockout.boundUsername: a rune is at
 	// most 4 bytes, and falling back to the raw cut for input that is not valid
 	// UTF-8 keeps the result bounded and deterministic.
@@ -100,7 +125,7 @@ func truncateForAudit(s string) string {
 	if cut == 0 || !utf8.RuneStart(s[cut]) {
 		cut = loginAuditActorMax
 	}
-	return fmt.Sprintf("%s…[truncated, %d bytes]", s[:cut], len(s))
+	return cut
 }
 
 // rejectOversizeLoginUser refuses a login whose username exceeds

@@ -127,10 +127,10 @@ func TestSecReauthAudit1_RepeatedFailuresEachLeaveEvidence(t *testing.T) {
 // auditActor, which did not bound the name, so every attempt still retained the
 // full-length value and the gate's own name ("AuditActorIsBounded") described a
 // property it never checked (Codex review, PR #1532). Measured against the
-// pre-fix tree: a 300-byte account name produced a 314-byte Actor. The Actor is
-// the worse half, because callers persist auditActor's result into the MCP
-// tool-trust store, policy-learning records, CDR receipts, PAC lifecycle
-// operations and support-recipient state — not just the audit ring.
+// pre-fix tree: a 300-byte account name produced a 314-byte Actor. The bound is
+// applied where the entry is RENDERED (auditEntryActor), never to auditActor,
+// which is the full principal MCP four-eyes compares for identity (see
+// audit_actor_principal_test.go).
 //
 // A gate must assert the property it is named for; asserting the adjacent field
 // is how an unbounded value survives a test that reads as if it covered it.
@@ -152,10 +152,11 @@ func TestSecReauthAudit1_AuditEntryIsBoundedInBothFields(t *testing.T) {
 	})
 	apiAuthChangePassword(httptest.NewRecorder(), r)
 
-	// truncateForAudit appends a self-describing "…[truncated, N bytes]"
-	// marker, so the bound is the cap plus that marker (plus "@" + the IP for
-	// the Actor). Anything near len(long) means the field was never bounded.
-	const markerSlack = 48
+	// boundAuditIdentity appends a self-describing
+	// "…[truncated, N bytes, sha256:<16 hex>]" marker, so the bound is the cap
+	// plus that marker (plus "@" + the IP for the Actor). Anything near
+	// len(long) means the field was never bounded.
+	const markerSlack = 64
 	var found bool
 	for _, e := range auditGet() {
 		if e.Action != "auth.password_change.fail" || e.TS < baselineTS {
@@ -185,33 +186,41 @@ func TestSecReauthAudit1_AuditEntryIsBoundedInBothFields(t *testing.T) {
 	}
 }
 
-// TestSecReauthAudit1_AuditActorIsBoundedAtTheChokepoint pins the fix where it
-// belongs — in auditActor — so EVERY audited surface inherits it, not just this
-// handler. Bounding it per call site is what let the defect hide: the call sites
-// were already passing truncateForAudit(username) as the Object.
-func TestSecReauthAudit1_AuditActorIsBoundedAtTheChokepoint(t *testing.T) {
+// TestSecReauthAudit1_AuditEntryActorIsBoundedAuditActorIsNot pins the split:
+// the RENDERED actor (auditEntryActor, which auditEventDiffID writes into every
+// AuditEntry) is bounded, so every audited surface inherits the bound, while
+// auditActor — the principal non-audit callers compare and persist — stays
+// full. A first fix bounded auditActor itself, which made two distinct
+// configured admins sharing the bounded prefix and length compare equal in MCP
+// four-eyes (Codex review, PR #1532).
+func TestSecReauthAudit1_AuditEntryActorIsBoundedAuditActorIsNot(t *testing.T) {
 	long := strings.Repeat("v", loginAuditActorMax*5)
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/change-password", http.NoBody)
 	r.RemoteAddr = "198.51.100.76:9999"
 	r = r.WithContext(context.WithValue(r.Context(), uiUserKey{}, long))
 
-	got := auditActor(r)
+	got := auditEntryActor(r)
 	if strings.Contains(got, long) {
-		t.Errorf("auditActor returned the untruncated %d-byte identity (%d bytes total)",
+		t.Errorf("auditEntryActor returned the untruncated %d-byte identity (%d bytes total)",
 			len(long), len(got))
 	}
-	if len(got) > loginAuditActorMax+48+len("198.51.100.76")+1 {
-		t.Errorf("auditActor returned %d bytes for an oversize identity: it is persisted by the MCP "+
-			"tool-trust, policy-learning, CDR-receipt, PAC-lifecycle and support-recipient paths",
-			len(got))
+	if len(got) > loginAuditActorMax+64+len("198.51.100.76")+1 {
+		t.Errorf("auditEntryActor returned %d bytes for an oversize identity: it is the Actor of "+
+			"every audit entry", len(got))
 	}
-	// CONTROL: an ordinary name must pass through verbatim, or the bound has
-	// silently changed every audit entry's actor in the product.
-	short := httptest.NewRequest(http.MethodPost, "/api/auth/change-password", http.NoBody)
+	if want := long + "@198.51.100.76"; auditActor(r) != want {
+		t.Errorf("auditActor must stay the full principal (%d bytes), got %d bytes: non-audit "+
+			"callers compare it for identity", len(want), len(auditActor(r)))
+	}
+	// CONTROL: an ordinary name must pass through verbatim in BOTH, or the
+	// bound has silently changed every audit entry's actor in the product.
+	short := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/change-password", http.NoBody)
 	short.RemoteAddr = "198.51.100.77:9999"
 	short = short.WithContext(context.WithValue(short.Context(), uiUserKey{}, "keeper"))
-	if want, got := "keeper@198.51.100.77", auditActor(short); got != want {
-		t.Errorf("auditActor for an ordinary name = %q, want %q", got, want)
+	for name, fn := range map[string]func(*http.Request) string{"auditActor": auditActor, "auditEntryActor": auditEntryActor} {
+		if want, got := "keeper@198.51.100.77", fn(short); got != want {
+			t.Errorf("%s for an ordinary name = %q, want %q", name, got, want)
+		}
 	}
 }
 
@@ -223,13 +232,24 @@ func TestSecReauthAudit1_ConcurrentFailuresAreRecorded(t *testing.T) {
 	snapshotAuthGlobals(t)
 	_ = seedRoster(t)
 
+	const attempts = 8
+	// A per-run account name, so an exact per-attempt count cannot pick up a
+	// previous -count=N run's entries written in the same millisecond.
+	user := fmt.Sprintf("doomed-%d", time.Now().UnixNano())
+	if err := cfg.SetUIUser(user, "Sup3rSecret3", RoleAdmin); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
 	baselineTS := time.Now().UnixMilli()
+	// A distinct client address per attempt, so each concurrent attempt is
+	// independently attributable and the assertion below is per attempt, not
+	// "at least one of eight".
+	clientIP := func(n int) string { return fmt.Sprintf("198.51.100.%d", 90+n) }
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := 0; i < attempts; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			r := reauthReq(t, "doomed", "198.51.100.90", map[string]any{
+			r := reauthReq(t, user, clientIP(n), map[string]any{
 				"current_password": fmt.Sprintf("parallel-guess-%d", n),
 				"new_password":     "Rotat3dSecret9",
 			})
@@ -238,9 +258,18 @@ func TestSecReauthAudit1_ConcurrentFailuresAreRecorded(t *testing.T) {
 	}
 	wg.Wait()
 
-	if !hasMatchingAuditEntry(auditGet(), reauthActor("doomed", "198.51.100.90"),
-		"auth.password_change.fail", "doomed", baselineTS) {
-		t.Error("concurrent rejected re-authentications left no audit entry")
+	snap := auditGet()
+	for i := 0; i < attempts; i++ {
+		var n int
+		for _, e := range snap {
+			if e.Action == "auth.password_change.fail" && e.TS >= baselineTS &&
+				e.Actor == reauthActor(user, clientIP(i)) && e.Object == user {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("concurrent attempt %d from %s left %d fail entries, want exactly 1", i, clientIP(i), n)
+		}
 	}
 }
 

@@ -34,11 +34,45 @@ func auditEvent(r *http.Request, action, object, detail string) {
 // a bare IP in the audit trail next to a username in config history. The Basic
 // username is only ever present after cfg.VerifyUIUser succeeded
 // (uiAuthMiddleware), so it is authenticated, never request-asserted.
+//
+// The result is a PRINCIPAL and is deliberately NOT length-bounded. Non-audit
+// callers compare it for identity — the MCP publication and approval handlers
+// cast it to approval.PrincipalID, so four-eyes (approver == requester) is an
+// equality test on it — and persist it in records written before this
+// distinction existed. A lossy bound here made two distinct configured admins
+// whose names share the bounded prefix and length compare equal, refusing the
+// second one's legitimate approval as self-approval (Codex review, PR #1532).
+// The CHAOS-63 bound applies to the RENDERED audit entry: auditEntryActor.
 func auditActor(r *http.Request) string {
+	name, ip := auditIdentity(r)
+	if name == "" {
+		return ip
+	}
+	return name + "@" + ip
+}
+
+// auditEntryActor is auditActor rendered for AuditEntry.Actor: the same
+// identity with the name bounded by boundAuditIdentity. A CONFIGURED account
+// name can be arbitrarily long (-user/auth.user reach cfg.SetAuth and
+// --reset-password reaches cfg.SetUIUser, neither bounded, and the name is
+// deliberately never refused for its length), and every audited action by such
+// an account would otherwise retain it full-length in the audit ring. The digest
+// in the bound keeps two such accounts distinguishable in the trail. Use it only
+// for rendering; anything that compares or persists an identity uses auditActor.
+func auditEntryActor(r *http.Request) string {
+	name, ip := auditIdentity(r)
+	if name == "" {
+		return ip
+	}
+	return boundAuditIdentity(name) + "@" + ip
+}
+
+// auditIdentity resolves the authenticated admin name (possibly "") and the
+// attributed client IP for auditActor and auditEntryActor.
+func auditIdentity(r *http.Request) (name, ip string) {
 	// RISK-019: attribute to the real client behind a configured trusted proxy
 	// so audit lines don't all name the reverse proxy (falls back to the peer).
-	actor := realClientIP(r)
-	name := ""
+	ip = realClientIP(r)
 	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
 		name = sess.Sub
 		if name == "" {
@@ -51,27 +85,7 @@ func auditActor(r *http.Request) string {
 		// action whose actor the middleware already authenticated.
 		name = uiUser(r)
 	}
-	if name != "" {
-		// CHAOS-63: BOUND the identity, at the chokepoint. The roster's own
-		// creation API caps a name at 64 bytes, but -user/auth.user reach
-		// cfg.SetAuth and --reset-password reaches cfg.SetUIUser, and neither
-		// bounds the name — so a CONFIGURED account name can be arbitrarily
-		// long, and it is deliberately never refused for its length (see
-		// rejectOversizeLoginUser / verifyUIBasicAuth). This value is not just
-		// the audit ring's Actor: callers persist it into the MCP tool-trust
-		// store, policy-learning decision records, CDR receipts, PAC lifecycle
-		// operations and support-recipient/approval state, so an unbounded name
-		// here is retained by every one of them.
-		//
-		// Bounding belongs HERE rather than at each call site: truncateForAudit
-		// was already being applied to the audit Object at the call sites, which
-		// made every one of them look bounded while the Actor this function
-		// rebuilt from the session stayed full-length (found by Codex review on
-		// PR #1532). Fixing one surface does not fix the call — enumerate the
-		// class from the PRIMITIVE, not from the file being edited.
-		actor = truncateForAudit(name) + "@" + actor
-	}
-	return actor
+	return name, ip
 }
 
 // auditEventDiff records an audit event with optional before/after JSON snapshots.
@@ -95,7 +109,7 @@ func auditEventDiffID(r *http.Request, action, object, objectID, detail string, 
 	entry := AuditEntry{
 		TS:       time.Now().UnixMilli(),
 		Time:     time.Now().Format("2006-01-02 15:04:05"),
-		Actor:    auditActor(r),
+		Actor:    auditEntryActor(r),
 		Action:   action,
 		Object:   object,
 		ObjectID: objectID,

@@ -9,28 +9,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
-- The **audit `Actor` is now bounded at the chokepoint** (`auditActor`,
-  `ui_helpers.go`). `truncateForAudit` was being applied by call sites to the
-  audit **Object**, which made each one look bounded, while `auditEvent` derives
-  the **Actor** independently and rebuilt `name + "@" + ip` from the session with
-  no bound — so a CONFIGURED account name longer than the 64-byte cap (which
+- The **rendered audit `Actor` is now bounded** (`auditEntryActor`,
+  `ui_helpers.go`, written into every `AuditEntry` by `auditEventDiffID`).
+  `truncateForAudit` was being applied by call sites to the audit **Object**,
+  which made each one look bounded, while `auditEvent` derives the **Actor**
+  independently and rebuilt `name + "@" + ip` from the session with no bound —
+  so a CONFIGURED account name longer than the 64-byte cap (which
   `-user`/`auth.user` and `--reset-password` can persist, and which is
-  deliberately never refused for its length) was retained full-length. Measured:
-  a 300-byte name produced a 314-byte Actor. It is not only the audit ring —
-  call sites persist `auditActor`'s result into the MCP tool-trust store,
-  policy-learning decision records, CDR receipts, PAC lifecycle operations and
-  support-recipient/approval state, so every one of them retained it. Low
-  severity (the name is configured, not attacker-chosen: a retention bound, not
-  an unauthenticated amplifier), but it is CHAOS-63's rule unapplied at the one
-  place that would have covered every surface at once. Found by Codex review of
-  the `auth.password_change.fail` entry added in this same window, whose first
+  deliberately never refused for its length) was retained full-length in the
+  audit ring. Measured: a 300-byte name produced a 314-byte Actor. Low severity
+  (the name is configured, not attacker-chosen: a retention bound, not an
+  unauthenticated amplifier). Found by Codex review of the
+  `auth.password_change.fail` entry added in this same window, whose first
   version claimed in its comment that the actor was "still truncated" and whose
-  gate was named `AuditActorIsBounded` while asserting only on `Object`. Fixed
-  at the primitive rather than per call site — bounding per call site is exactly
-  what hid it. Gates assert BOTH fields plus `auditActor` directly, with a
-  control requiring an ordinary name to pass through verbatim. **The rule: a
-  comment asserting a value is bounded is a claim about every field that value
-  reaches, and a gate must assert the property it is named for.**
+  gate was named `AuditActorIsBounded` while asserting only on `Object`. The
+  bound (`boundAuditIdentity`) keeps a 64-byte prefix plus the original length
+  AND a short SHA-256 digest of the full name, so two distinct oversize accounts
+  stay distinguishable in the trail. **`auditActor` itself stays the full,
+  unbounded principal**: a first version of this fix bounded it, and Codex
+  review showed that is not display-only — the MCP publication and approval
+  handlers cast it to `approval.PrincipalID`, so two distinct admins sharing the
+  bounded prefix and length compared equal and the second one's legitimate
+  four-eyes approval was refused as self-approval. Non-audit consumers (MCP
+  four-eyes and tool-trust, policy learning, CDR receipts, release dispatch,
+  support recipients) therefore keep main's behaviour; the PAC intent's
+  `AuditActor`, which only ever renders a later audit entry, takes the bounded
+  form. Gates: `auth_change_password_reauth_audit_test.go` asserts both rendered
+  fields and that `auditActor` is unbounded, with a control requiring an
+  ordinary name to pass through verbatim; `audit_actor_principal_test.go` drives
+  the four-eyes publication flow with two colliding names (verified failing
+  against the bound-at-`auditActor` tree) plus a self-approval control. **The
+  rules: a gate must assert the property it is named for, and a length bound
+  belongs to the rendering, never to a value something compares for identity.**
 
 - The **cluster CA private key** backup completed SEC-SECRETWRITE-1. That sweep
   was scoped to the four key writers introduced in its own review window, so
@@ -64,7 +74,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `apiLimiter`'s rate, indefinitely, with no trace in the compliance record —
   and the password is durable persistence that outlives the session being
   revoked (CWE-778 / OWASP A09:2021). The rejection now emits
-  `auth.password_change.fail` with a `truncateForAudit`'d actor, deliberately
+  `auth.password_change.fail` with a bounded actor and object, deliberately
   NOT reusing `auth.password_change.refused` (which `refuseRosterChange` already
   uses for the persistence refusal — an operator must be able to tell "wrong
   password" from "the disk failed"). The lockout trade-off is unchanged; this

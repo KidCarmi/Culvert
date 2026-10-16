@@ -713,7 +713,7 @@ func pacRunOperationLocked(w http.ResponseWriter, r *http.Request, id string, lc
 		CandidateSpecDigest: binding.CandidateSpecDigest, CandidateSpec: candidate,
 		PoolDigest: binding.PoolDigest, ArtifactDigest: chk.Digest,
 		ChallengePoolDigest: binding.PoolDigest, ChallengeArtifactDigest: chk.Digest, Challenge: challengeToken,
-		TargetN: req.TargetN, Actor: sessionAdmin(r), AuditActor: auditActor(r), Reason: reason,
+		TargetN: req.TargetN, Actor: sessionAdmin(r), AuditActor: auditEntryActor(r), Reason: reason,
 		TS: time.Now().UTC().Format(time.RFC3339), State: pac.OpPending,
 	}
 	pacCommitOperationLocked(w, r, id, lc, &op, cfg, gen)
