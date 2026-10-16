@@ -56,7 +56,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   per writer, structurally as an inventory, and behaviourally through all twelve
   public mutators), because a forgotten publish would leave the policy path
   probing a stale view — a Deny rule keyed on a just-added category host would
-  fail **open**.
+  fail **open**. The structural scan covers every non-test source file in
+  `internal/urlcat` and any receiver name, so a writer added in a new file or
+  under a renamed receiver is still caught. The two entry points now share one
+  probe body (`matchesHostIn`) so they cannot drift apart.
 
   The publish's cost is a **benchmark, not a gate**. A wall-clock ratio bounded
   at 1.25x was tried and removed: run the way CI runs every non-root package

@@ -243,7 +243,7 @@ func TestForwardView_ZeroValueStoreMatchesNothing(t *testing.T) {
 func fvIndexWriters(t *testing.T, src string) (writers, publishers, inPlace []string) {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "urlcat.go", src, 0)
+	f, err := parser.ParseFile(fset, "", src, 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -304,16 +304,51 @@ func fvClassifyAssign(a *ast.AssignStmt) (wrote, inPlace bool) {
 	return wrote, inPlace
 }
 
-// fvIsForwardField reports whether e names s.index or s.adminIndex.
+// fvIsForwardField reports whether e names the index or adminIndex field on
+// ANY receiver identifier — not only the conventional `s`, so a writer spelled
+// `st.index = …` (or a method with a renamed receiver) cannot slip past.
 func fvIsForwardField(e ast.Expr) bool {
 	sel, ok := e.(*ast.SelectorExpr)
 	if !ok {
 		return false
 	}
-	if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "s" {
+	if _, ok := sel.X.(*ast.Ident); !ok {
 		return false
 	}
 	return sel.Sel.Name == "index" || sel.Sel.Name == "adminIndex"
+}
+
+// fvPackageWriters runs fvIndexWriters over EVERY non-test .go file in the
+// package, not only urlcat.go, so a forward-index writer added in a new file
+// is still inventoried (and still has to publish).
+func fvPackageWriters(t *testing.T) (writers, publishers, inPlace []string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(".", "*.go"))
+	if err != nil {
+		t.Fatalf("glob package sources: %v", err)
+	}
+	scanned := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f) // #nosec G304 -- package source files from a fixed glob
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		w, p, ip := fvIndexWriters(t, string(src))
+		writers = append(writers, w...)
+		publishers = append(publishers, p...)
+		inPlace = append(inPlace, ip...)
+		scanned++
+	}
+	if scanned == 0 {
+		t.Fatal("not vacuous check: no non-test package sources found")
+	}
+	sort.Strings(writers)
+	sort.Strings(publishers)
+	sort.Strings(inPlace)
+	return writers, publishers, inPlace
 }
 
 // fvIsPublishCall reports whether c is a call to publishForwardLocked.
@@ -331,11 +366,7 @@ func fvIsPublishCall(c *ast.CallExpr) bool {
 // broke only for OTHER categories, and the in-place form is a data race that
 // -race observes only if a reader happens to be running.
 func TestForwardView_EveryWriterRepublishes(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(".", "urlcat.go"))
-	if err != nil {
-		t.Fatalf("read urlcat.go: %v", err)
-	}
-	writers, publishers, inPlace := fvIndexWriters(t, string(src))
+	writers, publishers, inPlace := fvPackageWriters(t)
 
 	if len(writers) < 2 {
 		t.Fatalf("not vacuous check: expected at least 2 forward-index writers, found %v", writers)
@@ -364,11 +395,7 @@ func TestForwardView_EveryWriterRepublishes(t *testing.T) {
 // writer appears, so whoever adds it has to state that it publishes rather
 // than inheriting a pass from the per-writer loop above.
 func TestForwardView_WriterInventoryIsComplete(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(".", "urlcat.go"))
-	if err != nil {
-		t.Fatalf("read urlcat.go: %v", err)
-	}
-	writers, _, _ := fvIndexWriters(t, string(src))
+	writers, _, _ := fvPackageWriters(t)
 	want := []string{"addHostToIndexes", "rebuildIndex"}
 	if strings.Join(writers, ",") != strings.Join(want, ",") {
 		t.Errorf("forward-index writer inventory = %v, want %v.\n"+

@@ -1179,7 +1179,10 @@ const maxInlineCategoryKey = 64
 // identical except for where the fold runs) put the hoisted form ahead on the
 // 4-way parallel path in both rounds with NON-OVERLAPPING distributions:
 // 83.8 vs 91.4 ns/op on a quiet box and 125.8 vs 155.0 ns/op on a busier one.
-// The serial path is unchanged either way.
+// The serial path is unchanged either way. (Since forwardView the probe takes
+// no lock at all, so the shared helper matchesHostIn now carries the fold with
+// no critical section to lengthen; the measurement above is why it was not
+// folded into one under the old RLock.)
 //
 // Quote the RATIO, never those absolutes: between the two rounds the box drifted
 // by half again, which is precisely why both arms must be timed in ONE run. An
@@ -1228,22 +1231,46 @@ func lowerASCIIInto(dst []byte, s string) bool {
 
 // MatchesHost checks whether host belongs to the named URL category.
 // Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
+// LOCK-FREE: it probes the published forwardView, never s.mu.
 func (s *Store) MatchesHost(cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
-	var keyBuf [maxInlineCategoryKey]byte
-	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
-
 	v := s.forward()
 	if v == nil {
 		return false
 	}
+	return matchesHostIn(v.index, cat, host)
+}
+
+// MatchesHostAdmin is MatchesHost restricted to admin-created (BuiltIn=false)
+// categories. The signed-feed F3b-4 policy path consults this so the built-in /
+// embedded SaaS taxonomy is served exclusively by the atomic effective view and
+// never double-served (or served stale) from this store after a signed
+// activation supersedes it. Same normalization + exact-then-suffix semantics as
+// MatchesHost, and LOCK-FREE on the same contract.
+func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
+	v := s.forward()
+	if v == nil {
+		return false
+	}
+	return matchesHostIn(v.adminIndex, cat, host)
+}
+
+// matchesHostIn is the SHARED probe body behind MatchesHost and
+// MatchesHostAdmin: normalize the host, fold the category key without
+// allocating (categoryKey), then exact-then-suffix membership against ONE
+// forward index taken from an already-loaded forwardView. Sharing it keeps the
+// two entry points from drifting apart; idx is immutable (see forwardView), so
+// no lock is needed and none is taken.
+func matchesHostIn(idx map[string]map[string]bool, cat Category, host string) bool {
+	host = hostutil.NormalizeHost(host)
+	var keyBuf [maxInlineCategoryKey]byte
+	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
+
 	var hostSet map[string]bool
 	if inlineOK {
-		hostSet = v.index[string(inlineKey)]
+		hostSet = idx[string(inlineKey)]
 	} else {
-		hostSet = v.index[strKey]
+		hostSet = idx[strKey]
 	}
-
 	if hostSet == nil {
 		return false
 	}
@@ -1252,42 +1279,6 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 		return true
 	}
 	// Subdomain match: foo.example.com → check "example.com", "com", etc.
-	for i, ch := range host {
-		if ch == '.' && hostSet[host[i+1:]] {
-			return true
-		}
-	}
-	return false
-}
-
-// MatchesHostAdmin is MatchesHost restricted to admin-created (BuiltIn=false)
-// categories. The signed-feed F3b-4 policy path consults this so the built-in /
-// embedded SaaS taxonomy is served exclusively by the atomic effective view and
-// never double-served (or served stale) from this store after a signed
-// activation supersedes it. Same normalization + exact-then-suffix semantics as
-// MatchesHost.
-func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
-	var keyBuf [maxInlineCategoryKey]byte
-	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
-
-	v := s.forward()
-	if v == nil {
-		return false
-	}
-	var hostSet map[string]bool
-	if inlineOK {
-		hostSet = v.adminIndex[string(inlineKey)]
-	} else {
-		hostSet = v.adminIndex[strKey]
-	}
-
-	if hostSet == nil {
-		return false
-	}
-	if hostSet[host] {
-		return true
-	}
 	for i, ch := range host {
 		if ch == '.' && hostSet[host[i+1:]] {
 			return true
