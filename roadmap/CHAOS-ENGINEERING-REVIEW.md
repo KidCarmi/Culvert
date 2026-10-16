@@ -95,6 +95,22 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-16 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: elapsed-time
+measurement taken on the WALL clock on the data path and the readiness probe —
+the `time.Since(time.Unix(0, stamp))` idiom, where the stamp was written by
+`time.Now().UnixNano()` and the monotonic reading was therefore discarded on
+both sides. `internal/admission` already treats this exact hazard as a
+contract (`FreshCount`, engine.go: "A NEGATIVE age (the clock moved back
+between the stamp and this read) is stale, not fresh", and
+`internal/admission/AGENTS.md` lists "future stamps" as a standing review
+control); the sweep asks where else the idiom appears WITHOUT that reasoning
+applied. Claimed as `CHAOS-71` / §41 after reading merged `main`: 67 and 68
+remain allocated to other open sweeps (§§37–38 reserved), 69 and 70 are
+merged. Findings and gates are written up in §41 below.** This row is
+committed before any code is written — the remedy the header above reaches
+independently after ten collisions, and which §35, §39 and §40 each applied
+first.
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
