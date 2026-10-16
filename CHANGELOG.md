@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **CHAOS-73 review rounds.** A genuine revocation whose cookie exceeded the
+  untrusted-origin key bound was dropped when the revocations file was
+  reloaded, so the revoked cookie authenticated again after a restart;
+  locally verified entries are now persisted with a provenance MAC
+  (domain-separated, never the cookie's own signature, never on the gossip
+  wire) and restored past both the size bound and the entry cap, while gossip
+  and legacy entries keep the untrusted rules. Untrusted entries may no longer
+  claim an expiry beyond the maximum session lifetime: such entries are never
+  swept, and enough of them permanently fill the list so that legitimate
+  remote revocations are refused at capacity. A revocation whose durable write
+  failed is repaired by the browser's retry instead of being lost at the next
+  restart. The Control Plane bounds the memory it retains per node, not just
+  the entry count, and clears peer-supplied provenance before storing or
+  re-broadcasting an entry. The refusal counter, its metric help, the
+  `session_revocation` contract row and the runbook no longer assert that a
+  refusal is an attack — a cookie signed under a previous session secret is
+  genuine and unverifiable, and a key rotation makes ordinary browsers
+  produce one.
+
 - `/api/auth/logout` is on the admin-UI auth middleware's **public** allowlist
   — correctly, since an expired or already-revoked session cannot authenticate
   a request and must still be able to clear its own cookie. But
