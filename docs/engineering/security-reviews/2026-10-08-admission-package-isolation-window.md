@@ -149,6 +149,8 @@ tree restored after each):
 | §4 adds a row the gate cannot run | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (no silent skip) |
 | §4 deletes a row the gate knows | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (as required) |
 | §4's table header renamed | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (parser cannot match nothing and pass) |
+| global write beside an inner shadow | NoProductionReassignmentOfTheOwner | FAIL — **green before round 5** |
+| owner walls run from another CWD | GossipLoopIsFedTheEnforcingLimiter, RequestPathUsesClusterAwareEntryPoint | FAIL — **green before round 5** (parse error, not a verdict) |
 
 ### Review rounds — the wall checked the SPELLING, not the BINDING
 
@@ -253,6 +255,64 @@ both outcomes, and the parsed row count must cover every call the gate knows.
 less than it claimed; round 4 is the same defect one layer up — *the document*
 proved less than it claimed, and nothing checked it. Where a security record
 states a behavioural fact, bind the fact to the code that decides it.
+
+### Round 5 — the predicate resolved bindings at the wrong granularity, and the walls read files by bare name
+
+Two findings on `fad9ca6`, both Codex P2, both this PR's.
+
+**(a) The reassignment wall could accept the regression it exists to prevent** —
+strictly worse than rounds 1–3, where a wall merely proved less than it
+claimed. `assignsPackageHandle` computed ONE `local` flag over the whole
+function and used it as a blanket skip, so a helper that both wrote the global
+and separately declared an unrelated inner local of the same name
+(`rl = newRateLimiter()` beside `if b { rl := newRateLimiter(); _ = rl }`) was
+skipped entirely and reported nothing. Shadowing is now resolved PER
+ASSIGNMENT: a write reaches the global unless a declaration of that name is
+visible at that assignment — in an enclosing scope, and lexically before it.
+Receiver, parameters, named results, `var` declarations and range clauses
+shadow; closures deliberately do not, since a closure can still write the
+global. Codex's repro is a control, with five more pinning the scope rule in
+both directions (inner shadow written while the global is untouched; a write
+before its local comes into scope; a `var`-declared shadow; a parameter shadow;
+a closure writing the global). Verified RED against the pre-fix predicate.
+
+**(b) Every on-disk parse in the owner walls was CWD-relative** — the same
+defect round 4's commit had just fixed one file over. Reproduced with Codex's
+own method, the compiled root test binary run from `/tmp`: two of the four
+walls failed with `open controlplane_client.go: no such file or directory` and
+`open proxy.go: …`. All three on-disk parses now go through `pkgSourcePath()`
+over the `runtime.Caller`-anchored `pkgSourceDir()`; the two in-memory parses
+are untouched, since their filename is only a label. The failure mode is a
+`t.Fatalf`, so these walls failed loudly rather than passing vacuously — a
+flake risk rather than a silent hole, but a wall that errors out is not
+checking its invariant, and the sharded race runner compiles the root binary
+once and runs it as shards, which is exactly the shape that can move the
+working directory.
+
+**A recorded misjudgement, because the reasoning was the problem and not the
+conclusion.** (b) had been examined a few commits earlier and set aside as
+"pre-existing, and not mine to widen here". The supporting argument — that the
+repo's `static_read_wall_test.go` regex matches only
+`os.ReadFile/Open/Stat`, so the sibling wall sits in a tolerated gap — was
+correct and irrelevant, because `admission_owner_wall_test.go` is ADDED BY THIS
+PR and nothing about it was pre-existing. One command settles it
+(`git cat-file -e origin/main:admission_owner_wall_test.go`); it was not run,
+and a recollection was trusted instead. **Verify the premise of a
+scope decision against the repository, not against memory of it.**
+
+**THE CROSS-ROUND PATTERN NOW HAS FIVE INSTANCES AND ONE CAUSE.** Round 1
+compared the identifier's SPELLING instead of its binding; round 2 missed the
+CALLEE's rebinding; round 3 missed the HANDLE both of them name; round 4 was
+the DOCUMENT reporting on all three; round 5(a) is the PREDICATE resolving
+bindings at FUNCTION granularity when the question is per-assignment. Every one
+is the same error at a different altitude: reasoning about a binding at the
+wrong granularity, and each fix was correct at its own level while leaving the
+next level unexamined. Round 5(b) is its verification twin — having just fixed
+a CWD-relative read, the question to ask was *where else does this change read
+a file by bare name*, and it was answered for the file being edited rather than
+for the primitive. That is the same "enumerate from the primitive" rule this
+record already states for contracts, which evidently has to be applied to
+verification and to review scope as well.
 
 ## 3. Reviewed and found safe
 
