@@ -116,8 +116,9 @@ security_scan:
   sync_interval: "6h"    # Threat feed re-download interval
   cache_ttl: "1h"        # SHA-256 scan result cache TTL
   cache_size: 10000      # Max entries in scan result cache
-  max_scan_mb: 5         # Max response size to buffer for scanning (MiB). Local scanning only: with scan_svc_url set
-                         # this value is ignored and the window stays at the 5 MiB default.
+  max_scan_mb: 5         # Max response size to buffer for scanning (MiB). Applied only when local scanning is
+                         # initialised (enabled: true, or clamav_addr / yara_rules_dir / threat_feed_db set);
+                         # otherwise (scan_svc_url mode, or DPI patterns alone) the window stays at 5 MiB.
   scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. "127.0.0.1:8484".
                          # /scan, /health and /status have NO authentication or rate limit: bind loopback or a
                          # private interface and firewall it; never expose it to untrusted networks (":8484"
@@ -150,17 +151,17 @@ cdr:
   default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
   default_mode: "ENFORCE" # "ENFORCE" | "REPORT_ONLY" | "BYPASS_WITH_REPORT"
   timeout_sec: 35         # Per-Sanitize deadline in seconds (must be >= 30)
-  max_file_size_mb: 0     # Per-file CDR cap (0 = default 50 MiB), compared against the bytes CDR receives. CDR
-                          # receives only the scan window (security_scan.max_scan_mb in local mode; a fixed 5 MiB
-                          # when scan_svc_url is set): a response larger than the window is sent to Sluice TRUNCATED
+  max_file_size_mb: 0     # Per-file CDR cap (0 = default 50 MiB), compared against the bytes CDR receives. CDR receives
+                          # only the scan window (security_scan.max_scan_mb when local scanning is initialised, else a
+                          # fixed 5 MiB; see max_scan_mb): a response larger than the window is sent to Sluice TRUNCATED
                           # and the remainder is appended UNSANITIZED, so the delivered file can be corrupt and keep
-                          # active content past the window. CDR covers a file completely only when it fits within
-                          # that window. A SANITIZED body is currently forwarded with the origin's Content-Length,
-                          # so when its size differs the download can be truncated or fail. A body that fits the
-                          # window but exceeds this cap is NOT rejected: it skips sanitization and passes through
-                          # unmodified (SKIPPED_OVERSIZE), whatever fail_mode says. Values above 50 do NOT widen
-                          # coverage: the client refuses payloads over its fixed 50 MiB cap, and those files also
-                          # pass through unsanitized (SKIPPED_OVERSIZE). Keep equal to Sluice's own cap.
+                          # active content past the window. CDR covers a file completely only when it fits within that
+                          # window. A SANITIZED body is currently forwarded with the origin's Content-Length, so when its
+                          # size differs the download can be truncated or fail. A body that fits the window but exceeds
+                          # this cap is NOT rejected: it skips sanitization and passes through unmodified
+                          # (SKIPPED_OVERSIZE), whatever fail_mode says. Values above 50 do NOT widen coverage: the client
+                          # refuses payloads over its fixed 50 MiB cap, and those files also pass through unsanitized
+                          # (SKIPPED_OVERSIZE). Keep equal to Sluice's own cap.
   chunk_size_kb: 0        # gRPC stream chunk in KiB, 16-3072 (0 = default 64 KiB)
   server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix). REQUIRED
                           # for the config-only bootstrap path (no enrolled instance): without it the client is never
@@ -335,4 +336,5 @@ session_timeout_hours: 8  # Admin session lifetime (1–168 hours)
 session_secret: ""      # Hex (>=64 chars / 32 bytes) HMAC key for session cookies; set the SAME value on every node behind a
                         # load balancer. CULVERT_SESSION_SECRET takes priority when set — prefer the env var so the secret
                         # stays out of the config file. A random per-start key (single node only) is used when neither is
-                        # set, or when this value is not valid hex of >=32 bytes (a warning is logged; startup continues).
+                        # set, or when this value is not valid hex of >=32 bytes (startup continues; the warning for an
+                        # invalid value is logged unless log_level is ERROR, which suppresses it).
