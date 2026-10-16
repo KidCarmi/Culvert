@@ -10,6 +10,8 @@ func TestIPFilterRemove_AcceptsTheSpellingAddAccepted(t *testing.T) {
 	cases := []struct{ name, add, probe string }{
 		{"ipv6 uppercase", "2001:DB8::1", "2001:db8::1"},
 		{"ipv6 expanded", "2001:0db8:0:0:0:0:0:1", "2001:db8::1"},
+		{"ipv6 expanded loopback", "0:0:0:0:0:0:0:1", "::1"},
+		{"ipv4-mapped", "::ffff:1.2.3.4", "1.2.3.4"},
 		{"cidr with host bits", "10.1.2.3/8", "10.9.9.9"},
 	}
 	for _, c := range cases {
@@ -26,6 +28,9 @@ func TestIPFilterRemove_AcceptsTheSpellingAddAccepted(t *testing.T) {
 			if f.Allowed(c.probe) {
 				t.Fatalf("Remove(%q) left %s allowed; entries=%v", c.add, c.probe, f.List())
 			}
+			if got := f.List(); len(got) != 0 {
+				t.Fatalf("Remove(%q) left entries %v", c.add, got)
+			}
 		})
 	}
 }
@@ -33,6 +38,11 @@ func TestIPFilterRemove_AcceptsTheSpellingAddAccepted(t *testing.T) {
 func TestRateLimitRemoveExemption_AcceptsTheSpellingAddAccepted(t *testing.T) {
 	cases := []struct{ name, add, probe string }{
 		{"ipv6 uppercase", "2001:DB8::1", "2001:db8::1"},
+		{"ipv6 expanded loopback", "0:0:0:0:0:0:0:1", "::1"},
+		// Exemption singles probe the raw caller string against the stored
+		// canonical form, so the mapped spelling is stored as, and probed by,
+		// its dotted-quad canonical text.
+		{"ipv4-mapped", "::ffff:1.2.3.4", "1.2.3.4"},
 		{"cidr with host bits", "10.1.2.3/8", "10.9.9.9"},
 	}
 	for _, c := range cases {
@@ -47,6 +57,9 @@ func TestRateLimitRemoveExemption_AcceptsTheSpellingAddAccepted(t *testing.T) {
 			r.RemoveExemption(c.add)
 			if r.IsExempt(c.probe) {
 				t.Fatalf("RemoveExemption(%q) left %s exempt; entries=%v", c.add, c.probe, r.ListExemptions())
+			}
+			if got := r.ListExemptions(); len(got) != 0 {
+				t.Fatalf("RemoveExemption(%q) left entries %v", c.add, got)
 			}
 		})
 	}
