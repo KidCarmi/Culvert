@@ -19,7 +19,12 @@ func checkReleaseVerifyPosture() []OperatorContractCheck {
 	var msg string
 	switch rm.verifyMode {
 	case VerifyPermissive:
-		msg = "release catalog signature verification is PERMISSIVE (break-glass) — an UNSIGNED catalog is accepted; only a present-but-invalid signature is still rejected"
+		// verifyIndexSignature consults a signature only for a CONFIGURED scheme
+		// (ed25519 keys or Sigstore); with neither, permissive falls straight to
+		// noArtifactOutcome and accepts the catalog, invalid signature or not.
+		msg = "release catalog signature verification is PERMISSIVE (break-glass) — an UNSIGNED catalog is accepted; " +
+			"a present-but-invalid signature is still rejected only for a configured trust scheme (operator or baked keys, or Sigstore), " +
+			"so with no trust scheme configured every catalog is accepted"
 	case VerifyDisabled:
 		msg = "release catalog signature verification is DISABLED (break-glass) — catalog contents are trusted without any signature check, so unsigned or forged catalogs are accepted"
 	default:

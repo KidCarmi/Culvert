@@ -31,6 +31,13 @@ func TestCheckReleaseVerifyPosture(t *testing.T) {
 		if c.Code != "release_catalog_verify" || c.Status != diagWarn || c.OperatorAction == "" {
 			t.Errorf("mode %s: unexpected row %+v", mode, c)
 		}
+		// verifyIndexSignature rejects an invalid signature only for a configured
+		// scheme; permissive with none accepts every catalog, so the row must not
+		// claim an unconditional rejection.
+		if mode == VerifyPermissive && (!strings.Contains(c.Message, "only for a configured trust scheme") ||
+			!strings.Contains(c.Message, "with no trust scheme configured every catalog is accepted")) {
+			t.Errorf("permissive: rejection claim must be limited to configured schemes, got %q", c.Message)
+		}
 		if !strings.Contains(c.OperatorAction, envReleaseCatalogTrustKeys) ||
 			!strings.Contains(c.OperatorAction, envReleaseCatalogVerify) {
 			t.Errorf("mode %s: remediation must name %s and %s, got %q",
