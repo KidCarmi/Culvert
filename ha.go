@@ -1126,6 +1126,15 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := auditPendingDrops(); n > 0 {
 		resp["auditClusterPushDrops"] = n
 	}
+	// CHAOS-72: the SIEM half of the same compliance record. A collector that
+	// is unreachable, not draining, or slower than this node's event rate
+	// loses audit and request events on the way OUT — they are in the local
+	// JSONL but never reach the customer's SIEM, and are never replayed.
+	// Reported separately because the remedy is the collector, not the disk
+	// and not the CP link.
+	if n := syslogDropCount(); n > 0 {
+		resp["syslogDrops"] = n
+	}
 	// SEC-RBAC-ROLE-1: a roster record named a role this build does not
 	// enroll and was clamped to viewer at load. Reported only when non-zero,
 	// like the two above: it is an authorization-surface fact (someone's
