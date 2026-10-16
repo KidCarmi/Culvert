@@ -21,12 +21,22 @@ import (
 // effectiveCategoryView.MatchesCategory each normalized independently. The
 // normalization now happens once per scan, in hostCatScratch.normHost.
 //
-// Measured on the shipped taxonomy against a 3-label uncategorized
-// destination: NormalizeHost was 45.97 ns of MatchesHost's 105.8 ns total
+// Measured on the shipped taxonomy against a 3-label ASCII uncategorized
+// destination (ASCII matters: hostutil's IDNA memo sits below the
+// already-canonical fast path, so it changes the A-label/U-label branch and
+// not this one): NormalizeHost was 45.97 ns of MatchesHost's 105.8 ns total
 // (43%). The DestCategory policy scan, timed as an ADJACENT pair (it cannot be
 // timed same-run), went 2809 ns → 2519 ns at 50 rules — roughly 10–18% across
 // rule counts. An earlier cross-run reading overstated this 3–4x; see the
 // CHANGELOG entry for the retraction and the per-count figures.
+//
+// The reliable component figure is the per-rule probe, 112.6 → 71.0 ns (−37%),
+// with BOTH arms timed in ONE run by the _Legacy arms in
+// internal/urlcat/urlcat_matcheshost_norm_test.go. Quote that for the
+// component and the adjacent pair for the request, and do NOT reintroduce a
+// cross-run figure here: the same trap is already on record for the
+// categoryKey work, where a cross-run reading was wrong by an order of
+// magnitude.
 //
 // Nothing about the DECISION may change, and these tests are what makes that
 // checkable. The oracle below is a VERBATIM copy of the pre-hoist

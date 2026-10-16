@@ -66,6 +66,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   arms take exactly the same number of read locks, so they converge under
   saturation and the hoist is never the slower of the two.
 
+  Relationship to the IDNA memo landed separately in this window: that memo
+  sits strictly BELOW `NormalizeHostStrict`'s already-canonical ASCII fast
+  path, so it makes the *slow* (A-label / U-label) branch cheap and leaves
+  the ASCII branch these figures were measured on untouched. The two are
+  complementary rather than alternatives: the memo collapses a repeat across
+  INDEPENDENT engines, which is the fan-out it was written for, while this
+  hoist removes the repeat inside ONE scan's per-rule loop, where the
+  multiplier is the rule count rather than the engine count. Re-measured on
+  the merged tree, the same-run per-rule probe reproduces at 141.8 → 89.9 ns
+  (−36.6%) against the −37% published here — the absolutes moved because the
+  hardware did, the ratio did not, which is why this entry quotes ratios.
+
   Equivalence is the deliverable, not the speed: a divergence here is a
   silently mis-enforced Allow/Deny rule. Both differentials run against
   **verbatim frozen copies of the pre-hoist bodies** (comparing the new wrapper
@@ -77,9 +89,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   keeps passing while the cost silently returns — so
   `TestWall_PerRuleCategoryMatchersTakeTheHoistedHost` AST-walks
   `matchesCategory` and requires every membership matcher to be a `*Norm` entry
-  point handed `sc.normHost()`. Seven reintroduced defects were each verified
-  failing. A pre-existing asymmetry is confirmed unchanged and now asserted so
-  it is not mistaken for a regression: the forward index keys a pattern without
+  point handed `sc.normHost()`. Nine reintroduced defects were each verified
+  failing — three against the wall, four against the differentials, and two
+  against the seeding (`evalAccessRules` seeding the raw host, and the auth
+  path seeding from a second normalization pass). A pre-existing asymmetry is
+  confirmed unchanged and now asserted so it is not mistaken for a
+  regression: the forward index keys a pattern without
   IDNA-normalizing it while a query is normalized, so a unicode pattern is
   stored verbatim and never matches the A-label form its own queries
   canonicalize to.
