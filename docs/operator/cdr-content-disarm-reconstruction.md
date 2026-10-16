@@ -1,9 +1,11 @@
 # Content Disarm & Reconstruction (CDR)
 
-Culvert's CDR stage sends files passing through SSL-inspected traffic to
-**Sluice**, a separate CDR microservice (gRPC + mTLS), which strips active
-content (macros, embedded OLE objects, PDF JavaScript/launch actions, etc.)
-and returns a sanitized file. CDR runs **after** file-type/extension
+Culvert's CDR stage sends eligible, buffered response bodies from
+SSL-inspected traffic to **Sluice**, a separate CDR microservice (gRPC +
+mTLS), which strips active content (macros, embedded OLE objects, PDF
+JavaScript/launch actions, etc.) and returns a sanitized file. "Eligible"
+is load-bearing — see **Scan-engine gate** below for exactly when a body
+does and does not reach Sluice. CDR runs **after** file-type/extension
 checks and **before** ClamAV/YARA scanning in the inspect pipeline. Manage it
 via `/api/cdr/*`, or from the GUI: the default admin UI's **CDR** panel
 (`data-view="cdr"`, nav item gated at the **operator** role) or, when the
