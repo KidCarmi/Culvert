@@ -88,8 +88,13 @@ new IDs → 25 / 24.
 - **Affected documentation:** OpenAPI description at line 1203; any backup runbook that quotes the field.
 - **Affected configuration:** none.
 - **Migration complexity:** Low. **Compatibility risk:** None for the recommended change (additive on
-  both responses; `opId` and `op_id` both stay). Removing `opId` later would be breaking (MAJOR). **Estimated PR size:** S (~60 lines + contract test
-  update). Do NOT rename `op_id` in
+  both responses; `opId` and `op_id` both stay). Removing `opId` later would be breaking (MAJOR). **Contract version:** new optional response fields
+  are a **MINOR** contract change (`docs/api/API-VERSIONING-POLICY.md`, SemVer rules). The change must bump
+  both `info.version` and `x-culvert-api-contract-version` in `api/openapi/openapi.yaml` (2.1.0 → 2.2.0
+  at the time of writing), regenerate the committed contract artifacts (`make api-bundle`:
+  `openapi.json`, the HTML docs, `docs/api/API-INVENTORY.md`) and pass `make api-verify` and
+  `make api-breaking-check`. **Estimated PR size:** S/M (~60 lines of handler, spec, GUI and contract-test
+  change, plus the version bump and regenerated artifacts). Do NOT rename `op_id` in
   audit detail strings without a CHANGELOG note: SIEM parsers may key on it.
 
 ### T-65 — "restore a config version" vs "roll back" (Low)
@@ -127,7 +132,7 @@ No new entries. Carried (not re-verified): the 2026-09-24 report's backlog, nota
 
 ## Migration Risk
 
-Only T-64 touches a wire contract, and only additively (a new field on each backup response; nothing renamed or removed). T-65 is copy.
+Only T-64 touches a wire contract, and only additively (a new field on each backup response; nothing renamed or removed). That is a MINOR API contract bump, not a no-version change. T-65 is copy.
 
 ## Recommended Refactoring Plan (by priority)
 
@@ -135,7 +140,7 @@ Only T-64 touches a wire contract, and only additively (a new field on each back
 | --- | --- | --- |
 | Critical | — | none |
 | High | — | none |
-| Medium | T-64 | Add `operationId` on `POST /api/backups` beside a permanently kept `opId` (optionally marked deprecated, never removed without a MAJOR exception) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test |
+| Medium | T-64 | Add `operationId` on `POST /api/backups` beside a permanently kept `opId` (optionally marked deprecated, never removed without a MAJOR exception) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test; MINOR contract bump (`info.version` + `x-culvert-api-contract-version`) with regenerated artifacts (`make api-bundle`, `make api-verify`) |
 | Low | T-65 | Reword the React hint (`AuthRulesPage.tsx:738`) to "roll back to a config version" |
 | Low | T-65 CDR note | Remove the false "restore via Config Versions" recovery claim from the legacy CDR deletion dialog (`static/index.html:11971`); CDR policies are not versioned |
 
