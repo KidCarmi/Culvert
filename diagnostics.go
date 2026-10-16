@@ -605,6 +605,14 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 const diagnosticsRedactedUsernameMessage = "one or more admin accounts have a username above the " +
 	"supported account limit; sign in as an admin for the affected count and the remediation steps"
 
+// diagnosticsRedactedAction is the operator_action of every redacted warn/fail
+// row. The contract requires an action on any non-ok row so the GUI can
+// render a hint, but the real remediation is admin-only, so the redacted row
+// carries this FIXED text: it names no account, role, count or second-factor
+// posture and only routes the reader to an administrator.
+const diagnosticsRedactedAction = "Ask an administrator to review this row in Diagnostics; " +
+	"the details and the remediation steps are shown to administrators only."
+
 // redactContractForRole strips admin-roster-derived detail from the operator
 // contract for any caller that is not a proven admin.
 //
@@ -661,7 +669,7 @@ func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
 				continue
 			}
 			checks[i].Message = diagnosticsRedactedUsernameMessage
-			checks[i].OperatorAction = ""
+			checks[i].OperatorAction = diagnosticsRedactedAction
 		case adminRosterDurabilityCode:
 			// Re-derived from the viewer-safe facts rather than edited: the
 			// admin row's STATUS may itself be admin-only (a degraded
@@ -986,7 +994,8 @@ func (f rosterDurabilityFacts) notDurableAdminRow() OperatorContractCheck {
 
 // viewerRow is the rendering for every caller below admin: status from the
 // viewer-safe facts only (not durable, any refusal), a fixed message, no
-// count and no operator action.
+// count, and on a warn row the fixed diagnosticsRedactedAction (the contract
+// requires an action on every non-ok row; the real remedy is admin-only).
 func (f rosterDurabilityFacts) viewerRow() OperatorContractCheck {
 	row := f.adminRow()
 	row.OperatorAction = ""
@@ -999,6 +1008,9 @@ func (f rosterDurabilityFacts) viewerRow() OperatorContractCheck {
 		row.Status, row.Message = diagWarn, rosterDurabilityViewerRefused
 	default:
 		row.Status, row.Message = diagOK, rosterDurabilityViewerConfigured
+	}
+	if row.Status != diagOK {
+		row.OperatorAction = diagnosticsRedactedAction
 	}
 	return row
 }

@@ -93,8 +93,10 @@ func usernameRowDetail(row *OperatorContractCheck) string {
 
 // assertRedactedRowIsFixed is the owner-policy floor for every row
 // redactContractForRole withholds below admin (least privilege, PR #1545
-// policy table): the redacted rendering is a FIXED message with no operator
-// action, carries no digit at all (no count, no length, no "since boot"
+// policy table): the redacted rendering is a FIXED message whose only
+// operator action is the fixed diagnosticsRedactedAction on a non-ok row (the
+// contract requires an action there; assertCheckShape), carries no digit at
+// all (no count, no length, no "since boot"
 // magnitude), and never mentions a second factor ("TOTP") or a single-use
 // credential ("backup") — those are the single-factor and replay-window
 // oracles the policy withholds from viewers and operators. It is deliberately
@@ -106,9 +108,14 @@ func assertRedactedRowIsFixed(t *testing.T, label string, row *OperatorContractC
 	if row == nil {
 		t.Fatalf("%s: redacted row is missing entirely", label)
 	}
-	if row.OperatorAction != "" {
-		t.Errorf("%s: redacted row carries operator_action %q, want empty", label, row.OperatorAction)
+	wantAction := diagnosticsRedactedAction
+	if row.Status == diagOK {
+		wantAction = ""
 	}
+	if row.OperatorAction != wantAction {
+		t.Errorf("%s: redacted %s row carries operator_action %q, want %q", label, row.Status, row.OperatorAction, wantAction)
+	}
+	assertCheckShape(t, -1, *row)
 	detail := usernameRowDetail(row)
 	if strings.ContainsAny(detail, "0123456789") {
 		t.Errorf("%s: redacted row contains a digit (a roster-derived count or length): %q", label, detail)
@@ -154,8 +161,8 @@ func TestApiDiagnostics_UsernameRowDetailIsAdminOnly(t *testing.T) {
 		if row == nil {
 			t.Fatalf("role %q: admin_username_length row is missing entirely", role)
 		}
-		if row.OperatorAction != "" {
-			t.Errorf("role %q: operator_action = %q, want empty — it names the legacy "+
+		if row.OperatorAction != diagnosticsRedactedAction {
+			t.Errorf("role %q: operator_action = %q, want the fixed redacted action — the real one names the legacy "+
 				"login's role, the TOTP posture and the roster remediation", role, row.OperatorAction)
 		}
 		if row.Message != diagnosticsRedactedUsernameMessage {
@@ -241,7 +248,7 @@ func TestRedactContractForRole_FailsClosedForEveryNonAdminRole(t *testing.T) {
 			t.Fatalf("test premise broken: role %q satisfies RoleAdmin", role)
 		}
 		got := redactContractForRole(full, role.HasRole(RoleAdmin))
-		if got.Checks[0].OperatorAction != "" {
+		if got.Checks[0].OperatorAction != diagnosticsRedactedAction {
 			t.Errorf("role %q: operator_action survived redaction", role)
 		}
 		if got.Checks[0].Message != diagnosticsRedactedUsernameMessage {
@@ -370,7 +377,7 @@ func TestApiDiagnostics_MalformedRoleValueIsRedacted(t *testing.T) {
 			t.Fatalf("role %q: body is not an OperatorContract: %v", role, err)
 		}
 		row := findDiagnosticCheck(c, adminUsernameLengthCode)
-		if row != nil && row.OperatorAction != "" {
+		if row != nil && row.OperatorAction != "" && row.OperatorAction != diagnosticsRedactedAction {
 			t.Errorf("role %q: answered 200 with the full remediation", role)
 		}
 	}
@@ -412,7 +419,7 @@ func TestApiHealthExplain_UsernameRowDetailIsAdminOnly(t *testing.T) {
 		if row == nil {
 			t.Fatalf("role %q: admin_username_length row missing from /api/health/explain", role)
 		}
-		if row.OperatorAction != "" {
+		if row.OperatorAction != diagnosticsRedactedAction {
 			t.Errorf("role %q: /api/health/explain leaked operator_action = %q", role, row.OperatorAction)
 		}
 		if row.Message != diagnosticsRedactedUsernameMessage {

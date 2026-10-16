@@ -31,6 +31,27 @@ func swapCfgForRosterDurability(t *testing.T, c *Config) {
 	t.Cleanup(resetRosterPersistCountersForTest)
 }
 
+// pinRosterDurabilityBaseline makes the shared cfg's admin_roster_durability
+// row deterministic for a test that expects a default report: a usable
+// roster target (an absent file under an existing directory, the first-run
+// state) and zeroed CHAOS-70 counters, regardless of what an earlier
+// shuffled test left in the process-global cfg. Restored on cleanup.
+func pinRosterDurabilityBaseline(t *testing.T) {
+	t.Helper()
+	cfg.mu.Lock()
+	prevFile, prevErr := cfg.uiUsersFile, cfg.uiUsersLoadErr
+	cfg.uiUsersFile = filepath.Join(t.TempDir(), "ui_users.json")
+	cfg.uiUsersLoadErr = nil
+	cfg.mu.Unlock()
+	resetRosterPersistCountersForTest()
+	t.Cleanup(func() {
+		cfg.mu.Lock()
+		cfg.uiUsersFile, cfg.uiUsersLoadErr = prevFile, prevErr
+		cfg.mu.Unlock()
+		resetRosterPersistCountersForTest()
+	})
+}
+
 // configuredRosterCfg returns a set-up node, optionally with a roster file.
 func configuredRosterCfg(t *testing.T, withFile bool) *Config {
 	t.Helper()
@@ -181,89 +202,108 @@ func TestCheckAdminRosterDurability_UnusableRosterTarget(t *testing.T) {
 		setup func(t *testing.T, c *Config) // configures and loads the roster path
 		warn  bool
 	}{
-		{"directory-as-path", func(t *testing.T, c *Config) {
-			c.SetUIUsersFile(t.TempDir())
-			if err := c.LoadUIUsersFile(); err == nil {
-				t.Fatal("precondition: loading a directory must fail")
-			}
-		}, true},
-		{"missing-parent", func(t *testing.T, c *Config) {
-			c.SetUIUsersFile(filepath.Join(t.TempDir(), "missing", "ui_users.json"))
-			if err := c.LoadUIUsersFile(); err != nil {
-				t.Fatalf("precondition: a missing file loads as first run, got %v", err)
-			}
-		}, true},
-		{"unreadable-file", func(t *testing.T, c *Config) {
-			p := filepath.Join(t.TempDir(), "ui_users.json")
-			if err := os.WriteFile(p, []byte(`{"users":[]}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(p, 0); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
-			c.SetUIUsersFile(p)
-			if err := c.LoadUIUsersFile(); err == nil {
-				t.Skip("running with privileges that read a mode-000 file; unreadable case not reproducible here")
-			}
-		}, true},
+		{"directory-as-path", setupRosterDirectoryAsPath, true},
+		{"missing-parent", setupRosterMissingParent, true},
+		{"unreadable-file", setupRosterUnreadableFile, true},
 		// Deterministic twin of unreadable-file for privileged runners: the
 		// read error a mode-000 file produces, recorded as the load outcome.
-		{"unreadable-file-recorded", func(t *testing.T, c *Config) {
-			p := filepath.Join(t.TempDir(), "ui_users.json")
-			if err := os.WriteFile(p, []byte(`{"users":[]}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			c.SetUIUsersFile(p)
-			c.mu.Lock()
-			c.uiUsersLoadErr = &os.PathError{Op: "open", Path: p, Err: os.ErrPermission}
-			c.mu.Unlock()
-		}, true},
-		{"missing-file-first-run", func(t *testing.T, c *Config) {
-			c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
-			if err := c.LoadUIUsersFile(); err != nil {
-				t.Fatalf("first-run load: %v", err)
-			}
-		}, false},
-		{"healthy-file", func(t *testing.T, c *Config) {
-			c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
-			if err := c.SaveUIUsersFile(); err != nil {
-				t.Fatalf("SaveUIUsersFile: %v", err)
-			}
-			if err := c.LoadUIUsersFile(); err != nil {
-				t.Fatalf("LoadUIUsersFile: %v", err)
-			}
-		}, false},
+		{"unreadable-file-recorded", setupRosterRecordedReadError, true},
+		{"missing-file-first-run", setupRosterFirstRun, false},
+		{"healthy-file", setupRosterHealthyFile, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := configuredRosterCfg(t, false)
 			swapCfgForRosterDurability(t, c)
 			tc.setup(t, c)
-			path, _ := c.rosterPersistTarget()
-
-			got := checkAdminRosterDurability()
-			if (got.Status == diagWarn) != tc.warn {
-				t.Fatalf("admin: %+v, want warn=%v", got, tc.warn)
-			}
-			if strings.Contains(got.Message+got.OperatorAction, path) {
-				t.Errorf("admin row names the roster path: %+v", got)
-			}
-			_, viewer := durabilityRowAt(t, RoleViewer)
-			assertRedactedRowIsFixed(t, "viewer "+tc.name, viewer)
-			if !tc.warn {
-				if viewer.Status != diagOK {
-					t.Errorf("viewer: %+v, want ok", viewer)
-				}
-				return
-			}
-			if !strings.Contains(got.OperatorAction, "-ui-users-file") || !strings.Contains(got.OperatorAction, "restart") {
-				t.Errorf("admin operator_action = %q, want the fix-path-and-restart remedy", got.OperatorAction)
-			}
-			if viewer.Status != diagWarn || viewer.Message != rosterDurabilityViewerNotDurable {
-				t.Errorf("viewer: %+v, want warn with the fixed not-durable message", viewer)
-			}
+			assertRosterTargetRow(t, c, tc.name, tc.warn)
 		})
+	}
+}
+
+func setupRosterDirectoryAsPath(t *testing.T, c *Config) {
+	c.SetUIUsersFile(t.TempDir())
+	if err := c.LoadUIUsersFile(); err == nil {
+		t.Fatal("precondition: loading a directory must fail")
+	}
+}
+
+func setupRosterMissingParent(t *testing.T, c *Config) {
+	c.SetUIUsersFile(filepath.Join(t.TempDir(), "missing", "ui_users.json"))
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("precondition: a missing file loads as first run, got %v", err)
+	}
+}
+
+func writeRosterFixture(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "ui_users.json")
+	if err := os.WriteFile(p, []byte(`{"users":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func setupRosterUnreadableFile(t *testing.T, c *Config) {
+	p := writeRosterFixture(t)
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+	c.SetUIUsersFile(p)
+	if err := c.LoadUIUsersFile(); err == nil {
+		t.Skip("running with privileges that read a mode-000 file; unreadable case not reproducible here")
+	}
+}
+
+func setupRosterRecordedReadError(t *testing.T, c *Config) {
+	p := writeRosterFixture(t)
+	c.SetUIUsersFile(p)
+	c.mu.Lock()
+	c.uiUsersLoadErr = &os.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+	c.mu.Unlock()
+}
+
+func setupRosterFirstRun(t *testing.T, c *Config) {
+	c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("first-run load: %v", err)
+	}
+}
+
+func setupRosterHealthyFile(t *testing.T, c *Config) {
+	c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("LoadUIUsersFile: %v", err)
+	}
+}
+
+// assertRosterTargetRow checks the admin and viewer renderings for one
+// roster-target state.
+func assertRosterTargetRow(t *testing.T, c *Config, name string, warn bool) {
+	t.Helper()
+	path, _ := c.rosterPersistTarget()
+	got := checkAdminRosterDurability()
+	if (got.Status == diagWarn) != warn {
+		t.Fatalf("admin: %+v, want warn=%v", got, warn)
+	}
+	if strings.Contains(got.Message+got.OperatorAction, path) {
+		t.Errorf("admin row names the roster path: %+v", got)
+	}
+	_, viewer := durabilityRowAt(t, RoleViewer)
+	assertRedactedRowIsFixed(t, "viewer "+name, viewer)
+	wantViewer, wantMsg := diagOK, rosterDurabilityViewerConfigured
+	if warn {
+		wantViewer, wantMsg = diagWarn, rosterDurabilityViewerNotDurable
+		if !strings.Contains(got.OperatorAction, "-ui-users-file") || !strings.Contains(got.OperatorAction, "restart") {
+			t.Errorf("admin operator_action = %q, want the fix-path-and-restart remedy", got.OperatorAction)
+		}
+	}
+	if viewer.Status != wantViewer || viewer.Message != wantMsg {
+		t.Errorf("viewer: %+v, want %s with %q", viewer, wantViewer, wantMsg)
 	}
 }
 
