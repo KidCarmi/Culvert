@@ -3,6 +3,9 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 spec=importlib.util.spec_from_file_location('shutdown',Path(__file__).with_name('lifecycle-shutdown.py'))
@@ -55,6 +58,21 @@ class ShutdownTests(unittest.TestCase):
             code=text.split("python3 - <<'CULVERT_SHUTDOWN_PROOF'\n",1)[1].rsplit('\nCULVERT_SHUTDOWN_PROOF',1)[0]
             compile(code,'guest-proof','exec')
             self.assertNotIn('systemctl reboot',code)
+
+    def test_cli_shell_payload_is_exact_lf_bytes(self):
+        # Use a real pipe: Windows text stdout translates LF to CRLF even
+        # when the in-memory payload and compile-only tests are correct.
+        with tempfile.TemporaryDirectory() as directory:
+            before=Path(directory)/'before.json'
+            before.write_text(json.dumps(self.before),encoding='utf-8')
+            for phase in ('before','after'):
+                argv=[sys.executable,str(Path(m.__file__)),phase]
+                if phase=='after':argv+=['--before',str(before)]
+                result=subprocess.run(argv,capture_output=True,timeout=10,check=True)
+                self.assertEqual(result.stdout.count(b'\r'),0,phase+' output must contain no CR bytes')
+                expected=m.payload(phase,self.before if phase=='after' else None).encode('utf-8')
+                self.assertEqual(result.stdout,expected)
+                self.assertEqual(result.stderr,b'')
 
     def test_journal_command_uses_canonical_boot_and_exact_session(self):
         command=m.journal_command(self.before)

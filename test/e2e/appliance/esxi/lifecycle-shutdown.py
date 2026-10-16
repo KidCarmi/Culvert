@@ -136,7 +136,8 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('mode',choices=('before','after','verify'))
     p.add_argument('--before',type=Path);p.add_argument('--after',type=Path);p.add_argument('--timing',type=Path);p.add_argument('--output',type=Path)
     a=p.parse_args();before=json.loads(a.before.read_bytes()) if a.before else None
-    if a.mode!='verify':print(payload(a.mode,before),end='');return
+    # This output is piped into a Linux shell; Windows text stdout adds CRLF.
+    if a.mode!='verify':sys.stdout.buffer.write(payload(a.mode,before).encode('utf-8'));return
     report={'result':'fail'}
     try:report=verdict(before,json.loads(a.after.read_bytes()),[json.loads(x) for x in a.timing.read_text().splitlines()])
     except (ValueError,KeyError,TypeError) as error:report['reason']=str(error)
