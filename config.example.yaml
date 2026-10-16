@@ -93,7 +93,10 @@ security:
   ip_list: []
     # - 192.168.1.0/24
     # - 10.0.0.5
-  rate_limit: 0       # Max requests per minute per IP (0 = disabled)
+  rate_limit_rpm: 0   # Max requests per minute per IP (0 = disabled). Canonical key — matches the
+    # name used by the admin API, the CP->DP wire, config-version diffs, and the
+    # culvert_rate_limit_rpm metric. rate_limit is accepted as a deprecated alias
+    # (a startup log line is emitted when it's used); prefer rate_limit_rpm in new configs.
   max_conns_per_ip: 0 # Max concurrent connections per IP (0 = disabled, e.g. 256)
 
 # ── Security Scanning ──────────────────────────────────────────────────────

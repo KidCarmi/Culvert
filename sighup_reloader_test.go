@@ -135,3 +135,55 @@ func TestSighupReloader_ClosedSigChan_ExitsWithoutReload(t *testing.T) {
 		t.Errorf("reload callback was invoked %d time(s) on a closed signal channel; want 0", n)
 	}
 }
+
+// TestApplyHotReload_ExplicitCanonicalZeroDisablesRateLimit is the
+// CodeRabbit review regression (PR #1504): fc.Security.RateLimit is already
+// reconciled by the time applyHotReload sees it (loadFileConfig ->
+// reconcileDeprecatedRateLimitKey), but the old "> 0" guard around
+// rl.Configure meant a reload could only ever RAISE the rate limit, never
+// use that resolved value to disable an already-running limiter — an
+// explicit "rate_limit_rpm: 0" in the reloaded file was silently ignored.
+func TestApplyHotReload_ExplicitCanonicalZeroDisablesRateLimit(t *testing.T) {
+	snapshotConnAndRateLimitGlobals(t)
+
+	rl.Configure(60, time.Minute)
+	if !rl.Enabled() {
+		t.Fatal("test setup invalid: rl should be enabled after Configure(60, ...)")
+	}
+
+	zero := 0
+	fc := &FileConfig{}
+	fc.Security.RateLimitRPM = &zero // explicit "rate_limit_rpm: 0" in the reloaded file
+
+	applyHotReload(fc)
+
+	if rl.Enabled() {
+		t.Error("applyHotReload left the rate limiter enabled after an explicit canonical rate_limit_rpm: 0 reload")
+	}
+}
+
+// TestApplyHotReload_AbsentRateLimitSettingLeavesLimiterUntouched is the
+// companion control: a reloaded file that does not mention rate limiting at
+// all (RateLimitRPM nil, legacy RateLimit zero-valued) must NOT disable an
+// already-running limiter — applyHotReload's existing contract is to only
+// reapply settings the reloaded file actually specifies, same as every
+// other block in the function.
+func TestApplyHotReload_AbsentRateLimitSettingLeavesLimiterUntouched(t *testing.T) {
+	snapshotConnAndRateLimitGlobals(t)
+
+	rl.Configure(60, time.Minute)
+	if !rl.Enabled() {
+		t.Fatal("test setup invalid: rl should be enabled after Configure(60, ...)")
+	}
+
+	fc := &FileConfig{} // no security section at all: RateLimitRPM nil, RateLimit 0
+
+	applyHotReload(fc)
+
+	if !rl.Enabled() {
+		t.Error("applyHotReload disabled the rate limiter on a reload that never mentioned rate limiting")
+	}
+	if got := rl.Limit(); got != 60 {
+		t.Errorf("rl.Limit() = %d, want unchanged 60", got)
+	}
+}
