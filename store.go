@@ -1587,7 +1587,7 @@ func loadedRosterRole(username string, role UIRole) UIRole {
 	}
 	if logger != nil {
 		logger.Printf("UIUsers: user %q carries unrecognized role %q in the persisted roster — "+
-			"clamped to %q (least privilege). Re-assign the role in Security -> Admin Users; "+
+			"clamped to %q (least privilege). Re-assign the role in the Administrators panel; "+
 			"a role this build does not know is never honoured.",
 			sanitizeLog(username), sanitizeLog(string(role)), RoleViewer)
 	}
