@@ -8743,6 +8743,50 @@ best-effort by design. Gated by `TestRecordFault_DirectorySyncFailureIsReported`
 and `TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery` (injected
 `markerFS`).
 
+### Codex rounds 5–6 — a torn health snapshot, and containment that leaked past Lookup
+
+**Snapshot order (P3).** The writer adds to `memFaults` and then latches
+`degraded`, but `LookupFaults` loaded `memFaults` first. A scrape racing the
+first fault could therefore report a degraded store with `memory_faults_total
+0`. The reader now loads `degraded` first, and Go's atomics are sequentially
+consistent, so degraded ⇒ memFaults ≥ 1 with no mutex.
+`TestLookupFaults_DegradedImpliesACountedFault` pins the source order of both
+halves (AST check) and stress-tests the invariant under `-race`.
+
+**One choke point (P1).** Only `Lookup` was guarded. After the latch, `Stats`
+(`db.Tables` → `getTableInfo`) and `BulkWrite` still reached the damaged
+database, and the feed syncer calls both from its own goroutine. That was
+reproduced here as `fatal error: fault` / SIGBUS in `getTableInfo`. Every badger
+touch in `CommunityDB` now goes through one accessor, `access`, which refuses
+with `catdb.ErrDegraded` once latched without touching badger. Otherwise it
+runs the operation under `ContainFault`, so a first fault in ANY method latches
+the store instead of killing the process. `Close` goes through `contain`
+(contained, not refused), because it must still release the directory lock.
+What each method returns when degraded:
+
+- `Lookup` returns uncategorised.
+- `Stats` returns 0. The only caller is the syncer's boot-time RunNow probe,
+  and the round that probe triggers refuses before fetching.
+- `BulkWrite` returns `ErrDegraded`.
+
+The syncer checks the latch before downloading, so a degraded store costs no
+50 MB fetch. It charges the round as a bounded `write` failure, so the scheduler
+backs off rather than hot-looping. Gates:
+
+- `TestCommunityDB_EveryBadgerAccessIsGuarded`: an AST/reflection wall.
+  Every `c.db` reference must sit in an `access`/`contain` closure or in a
+  helper reachable only from one, and every exported method must arm the guard
+  or be on a reasoned no-badger allowlist. An unguarded probe method fails it.
+- `TestCommunityDB_DegradedStoreNeverReachesBadger`: no badger handle at all,
+  so any touch would nil-deref.
+- `TestStats_FirstFaultLatchesTheStore`: real truncation, with Stats as the
+  first faulting call. Unguarded, it dies with the reproduced SIGBUS.
+- The latch → Stats/BulkWrite repro inside
+  `TestLookup_VolumeDamageAfterHealthyOpenIsContained`.
+- `TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing`: no
+  download, a `write` failure, a backoff delay, and a live loop that does not
+  spin.
+
 ---
 
 ## 42. Adjacent domains swept for §41, recorded and not fixed

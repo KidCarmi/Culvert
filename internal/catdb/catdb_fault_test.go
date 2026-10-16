@@ -6,6 +6,7 @@
 package catdb
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,6 +109,43 @@ func TestLookup_VolumeDamageAfterHealthyOpenIsContained(t *testing.T) {
 	if _, memAfter, _ := db.LookupFaults(); memAfter != mem {
 		t.Fatalf("degraded store kept re-entering badger: mem went %d -> %d", mem, memAfter)
 	}
+
+	// Codex's reproduction: after the latch, Stats (db.Tables → getTableInfo)
+	// SIGBUS'd and BulkWrite reached the same damaged database. Both are what
+	// the feed syncer calls. They must refuse on the latch without touching
+	// badger; this test cannot pass in a process that died.
+	if keys := db.Stats(); keys != 0 {
+		t.Fatalf("Stats on a degraded store = %d, want 0", keys)
+	}
+	if err := db.BulkWrite(map[string]string{"evil.example": "Malware"}); !errors.Is(err, ErrDegraded) {
+		t.Fatalf("BulkWrite on a degraded store = %v, want ErrDegraded", err)
+	}
+}
+
+// TestStats_FirstFaultLatchesTheStore covers a fault that reaches a method
+// OTHER than Lookup first, such as the feed syncer's Stats on its own
+// goroutine. It must be contained and must latch the store exactly as a
+// lookup fault would.
+func TestStats_FirstFaultLatchesTheStore(t *testing.T) {
+	db, ssts := seedOnDisk(t, 20000)
+	for _, f := range ssts {
+		if err := os.Truncate(f, 0); err != nil {
+			t.Fatalf("truncate %s: %v", f, err)
+		}
+	}
+	keys := db.Stats()
+	_, mem, degraded := db.LookupFaults()
+	if !degraded {
+		// Some badger builds keep the table metadata off the mapping. Then
+		// Stats legitimately does not fault, and there is nothing to contain.
+		t.Skipf("Stats did not touch the damaged mapping on this badger build (keys=%d)", keys)
+	}
+	if keys != 0 || mem != 1 {
+		t.Fatalf("contained Stats fault: keys=%d mem=%d, want 0 and 1", keys, mem)
+	}
+	if cat, ok := db.Lookup("evil7.example"); ok || cat != "" {
+		t.Fatalf("a store latched by Stats still answered a lookup: (%q, %v)", cat, ok)
+	}
 }
 
 // TestLookup_OrdinaryMissIsNotAFault is the negative control. The fix now
@@ -139,21 +177,17 @@ func TestLookup_OrdinaryMissIsNotAFault(t *testing.T) {
 	}
 }
 
-// TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen closes CHAOS-74's
-// fault-to-restart path. Containing the fault keeps the process alive, but the
-// diagnostics row tells the operator to restart, and the restart is the only
-// point at which this derived store can be rebuilt. Measured before the fault
-// was persisted: the reopen returned badger's unclassified
-// `mmapping ... size: 0` error with Trigger="" and Quarantined=false, so every
-// later start stayed Layer-1-only and never rebuilt the store.
-func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "catfeeddb")
-	db, err := Open(dir)
+// seedFlushed fills the store opened at openPath with n entries and closes it,
+// so the memtable lands in `.sst` tables, and returns those tables (globbed
+// under tablesDir, which differs from openPath when openPath is an alias).
+func seedFlushed(t *testing.T, openPath, tablesDir string, n int) []string {
+	t.Helper()
+	db, err := Open(openPath)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	entries := make(map[string]string, 20000)
-	for i := 0; i < 20000; i++ {
+	entries := make(map[string]string, n)
+	for i := 0; i < n; i++ {
 		entries[fmt.Sprintf("evil%d.example", i)] = "Malware"
 	}
 	if err := db.BulkWrite(entries); err != nil {
@@ -162,12 +196,19 @@ func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	ssts, _ := filepath.Glob(filepath.Join(dir, "*.sst"))
+	ssts, _ := filepath.Glob(filepath.Join(tablesDir, "*.sst"))
 	if len(ssts) == 0 {
-		t.Fatal("expected flushed .sst tables on disk")
+		t.Fatalf("expected flushed .sst tables in %s", tablesDir)
 	}
+	return ssts
+}
 
-	live, rec, err := OpenResilient(dir)
+// faultLiveStore opens openPath healthily through OpenResilient, truncates the
+// tables under the live mapping, takes one real contained fault, and closes
+// (the operator's restart; a damaged store may refuse a clean close).
+func faultLiveStore(t *testing.T, openPath string, ssts []string) {
+	t.Helper()
+	live, rec, err := OpenResilient(openPath)
 	if err != nil || rec.Trigger != TriggerNone {
 		t.Fatalf("healthy open: err=%v rec=%+v", err, rec)
 	}
@@ -180,7 +221,69 @@ func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
 	if _, mem, degraded := live.LookupFaults(); mem == 0 || !degraded {
 		t.Fatalf("store did not latch degraded: mem=%d degraded=%v", mem, degraded)
 	}
-	_ = live.Close() // the operator's restart; a damaged store may refuse a clean close
+	_ = live.Close()
+}
+
+// makeSymlinkedStore returns a store target on a "volume" directory and a
+// configured alias onto it (`/var/lib/catdb -> /mnt/data/catdb`).
+func makeSymlinkedStore(t *testing.T) (volume, target, alias string) {
+	t.Helper()
+	volume = t.TempDir()
+	target = filepath.Join(volume, "catfeeddb")
+	alias = filepath.Join(t.TempDir(), "catfeeddb")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	return volume, target, alias
+}
+
+// assertAliasIntact checks the configured alias was never replaced: it is
+// still a symlink onto the same target.
+func assertAliasIntact(t *testing.T, alias, target string) {
+	t.Helper()
+	fi, err := os.Lstat(alias)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the configured alias was replaced: fi=%v err=%v", fi, err)
+	}
+	if got, err := os.Readlink(alias); err != nil || got != target {
+		t.Fatalf("alias now points at %q (err %v), want %q", got, err, target)
+	}
+}
+
+// assertRebuiltUnderTarget checks a fresh store is a directory at target and
+// is writable and serving.
+func assertRebuiltUnderTarget(t *testing.T, db *CommunityDB, target string) {
+	t.Helper()
+	if fi, err := os.Lstat(target); err != nil || !fi.IsDir() {
+		t.Fatalf("store not rebuilt as a directory at the target: fi=%v err=%v", fi, err)
+	}
+	assertServing(t, db)
+}
+
+// assertServing checks the store accepts a write and answers it.
+func assertServing(t *testing.T, db *CommunityDB) {
+	t.Helper()
+	if err := db.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
+		t.Fatalf("rebuilt store not writable: %v", err)
+	}
+	if cat, ok := db.Lookup("evil.example"); !ok || cat != "Malware" {
+		t.Fatalf("rebuilt store not serving: cat=%q ok=%v", cat, ok)
+	}
+}
+
+// TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen closes CHAOS-74's
+// fault-to-restart path. Containing the fault keeps the process alive, but the
+// diagnostics row tells the operator to restart, and the restart is the only
+// point at which this derived store can be rebuilt. Measured before the fault
+// was persisted: the reopen returned badger's unclassified
+// `mmapping ... size: 0` error with Trigger="" and Quarantined=false, so every
+// later start stayed Layer-1-only and never rebuilt the store.
+func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "catfeeddb")
+	faultLiveStore(t, dir, seedFlushed(t, dir, dir, 20000))
 
 	next, rec, err := OpenResilient(dir)
 	if err != nil {
@@ -198,12 +301,7 @@ func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
 	if cat, ok := next.Lookup("evil7.example"); ok || cat != "" {
 		t.Fatalf("rebuilt store answered from quarantined data: cat=%q ok=%v", cat, ok)
 	}
-	if err := next.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
-		t.Fatalf("rebuilt store not writable: %v", err)
-	}
-	if cat, ok := next.Lookup("evil.example"); !ok || cat != "Malware" {
-		t.Fatalf("rebuilt store not serving: cat=%q ok=%v", cat, ok)
-	}
+	assertServing(t, next)
 
 	// The signal is consumed: a third start is a plain healthy open.
 	_ = next.Close()
@@ -224,49 +322,8 @@ func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
 // SYMLINK aside. badger then created a plain directory at the alias, so the
 // rebuilt feed left the volume and the damaged target was left in place.
 func TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget(t *testing.T) {
-	volume := t.TempDir()
-	target := filepath.Join(volume, "catfeeddb")
-	alias := filepath.Join(t.TempDir(), "catfeeddb")
-	if err := os.MkdirAll(target, 0o700); err != nil {
-		t.Fatalf("mkdir target: %v", err)
-	}
-	if err := os.Symlink(target, alias); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-
-	seed, err := Open(alias)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	entries := make(map[string]string, 20000)
-	for i := 0; i < 20000; i++ {
-		entries[fmt.Sprintf("evil%d.example", i)] = "Malware"
-	}
-	if err := seed.BulkWrite(entries); err != nil {
-		t.Fatalf("bulkwrite: %v", err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	ssts, _ := filepath.Glob(filepath.Join(target, "*.sst"))
-	if len(ssts) == 0 {
-		t.Fatal("expected flushed .sst tables in the target")
-	}
-
-	live, rec, err := OpenResilient(alias)
-	if err != nil || rec.Trigger != TriggerNone {
-		t.Fatalf("healthy open through the alias: err=%v rec=%+v", err, rec)
-	}
-	for _, f := range ssts {
-		if err := os.Truncate(f, 0); err != nil {
-			t.Fatalf("truncate %s: %v", f, err)
-		}
-	}
-	live.Lookup("evil19999.example")
-	if _, mem, degraded := live.LookupFaults(); mem == 0 || !degraded {
-		t.Fatalf("fault through the alias was not contained: mem=%d degraded=%v", mem, degraded)
-	}
-	_ = live.Close()
+	volume, target, alias := makeSymlinkedStore(t)
+	faultLiveStore(t, alias, seedFlushed(t, alias, target, 20000))
 
 	if _, err := os.Stat(target + storeguard.FaultMarkerSuffix); err != nil {
 		t.Fatalf("fault marker not beside the real target: %v", err)
@@ -283,15 +340,7 @@ func TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget(t *testing.T
 	if rec.Trigger != TriggerRuntimeFault || !rec.Quarantined {
 		t.Fatalf("restart did not quarantine: %+v", rec)
 	}
-
-	// The alias is untouched: still a symlink, still onto the same target.
-	fi, err := os.Lstat(alias)
-	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("the configured alias was replaced: fi=%v err=%v", fi, err)
-	}
-	if got, err := os.Readlink(alias); err != nil || got != target {
-		t.Fatalf("alias now points at %q (err %v), want %q", got, err, target)
-	}
+	assertAliasIntact(t, alias, target)
 	// The damaged target was moved aside BESIDE THE TARGET, on the volume.
 	if filepath.Dir(rec.QuarantinePath) != volume {
 		t.Fatalf("quarantine landed at %q, want beside the target in %q", rec.QuarantinePath, volume)
@@ -299,16 +348,7 @@ func TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget(t *testing.T
 	if strays, _ := filepath.Glob(alias + storeguard.QuarantineSuffix + "*"); len(strays) != 0 {
 		t.Fatalf("something was quarantined beside the alias: %v", strays)
 	}
-	// The fresh store lives under the target and serves through the alias.
-	if err := next.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
-		t.Fatalf("rebuilt store not writable: %v", err)
-	}
-	if cat, ok := next.Lookup("evil.example"); !ok || cat != "Malware" {
-		t.Fatalf("rebuilt store not serving: cat=%q ok=%v", cat, ok)
-	}
-	if fi, err := os.Lstat(target); err != nil || !fi.IsDir() {
-		t.Fatalf("fresh store is not a directory at the target: fi=%v err=%v", fi, err)
-	}
+	assertRebuiltUnderTarget(t, next, target)
 	if got := QuarantinedCopies(alias); len(got) != 1 || got[0] != rec.QuarantinePath {
 		t.Fatalf("QuarantinedCopies(alias) = %v, want [%s]", got, rec.QuarantinePath)
 	}
@@ -321,25 +361,8 @@ func TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget(t *testing.T
 // MkdirAll refused the existing symlink, and Layer 2 never came back even once
 // space was freed.
 func TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart(t *testing.T) {
-	volume := t.TempDir()
-	target := filepath.Join(volume, "catfeeddb")
-	alias := filepath.Join(t.TempDir(), "catfeeddb")
-	if err := os.MkdirAll(target, 0o700); err != nil {
-		t.Fatalf("mkdir target: %v", err)
-	}
-	if err := os.Symlink(target, alias); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	seed, err := Open(alias)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if err := seed.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
-		t.Fatalf("bulkwrite: %v", err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	_, target, alias := makeSymlinkedStore(t)
+	seedFlushed(t, alias, target, 2000)
 	// The previous run contained a fault on this store and recorded it.
 	if err := storeguard.RecordFault(resolveStoreDir(alias), "test fault"); err != nil {
 		t.Fatalf("RecordFault: %v", err)
@@ -364,22 +387,8 @@ func TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart(t *testi
 	if rec.Quarantined {
 		t.Fatalf("the restart quarantined again: %+v", rec)
 	}
-	fi, err := os.Lstat(alias)
-	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("the alias was replaced: fi=%v err=%v", fi, err)
-	}
-	if got, err := os.Readlink(alias); err != nil || got != target {
-		t.Fatalf("alias now points at %q (err %v), want %q", got, err, target)
-	}
-	if fi, err := os.Lstat(target); err != nil || !fi.IsDir() {
-		t.Fatalf("store not rebuilt at the original target: fi=%v err=%v", fi, err)
-	}
-	if err := next.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
-		t.Fatalf("rebuilt store not writable: %v", err)
-	}
-	if cat, ok := next.Lookup("evil.example"); !ok || cat != "Malware" {
-		t.Fatalf("rebuilt store not serving: cat=%q ok=%v", cat, ok)
-	}
+	assertAliasIntact(t, alias, target)
+	assertRebuiltUnderTarget(t, next, target)
 }
 
 // danglingAliasTarget must refuse anything that is not a dangling alias onto

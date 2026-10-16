@@ -118,10 +118,68 @@ func Open(dir string) (*CommunityDB, error) {
 	return &CommunityDB{db: db, dir: resolveStoreDir(dir)}, nil
 }
 
+// ErrDegraded is returned by a data method of a store that has latched degraded
+// after a contained memory fault. The store is refused WITHOUT touching badger:
+// its mappings are damaged, and every further access is another chance to fault,
+// possibly on a goroutine with no guard at all.
+var ErrDegraded = errors.New("catdb: community category store is degraded after a memory fault on its mapped tables; Layer 2 is off until restart")
+
+// ── the single choke point for badger data access ────────────────────────────
+//
+// CHAOS-74. Containment that guards one method leaks through the others. When
+// only Lookup was guarded, a latched store still had Stats (db.Tables) and
+// BulkWrite reaching the damaged database, and the feed syncer calls both from
+// its own goroutine. The reproduction was SIGBUS in badger's getTableInfo after
+// the latch. So every method that touches badger goes through access (or, for
+// Close, contain), and TestCommunityDB_EveryBadgerAccessIsGuarded fails the
+// build if a method reaches c.db any other way.
+
+// access runs op against badger. It refuses with ErrDegraded once the store has
+// latched, without touching badger. Otherwise op runs under memory-fault
+// containment, and a first contained fault from ANY method latches the store
+// instead of killing the process.
+func (c *CommunityDB) access(op func() error) error {
+	if c.degraded.Load() {
+		return ErrDegraded
+	}
+	return c.contain(op)
+}
+
+// contain runs op under memory-fault containment and latches the store on a
+// contained fault. It does not refuse a degraded store. That is for Close, which
+// must still release badger's resources and directory lock on a store that has
+// already faulted.
+func (c *CommunityDB) contain(op func() error) error {
+	err := storeguard.ContainFault(c.dir, op)
+	if storeguard.IsStoreFault(err) {
+		c.latchFault(err)
+	}
+	return err
+}
+
+// latchFault accounts a contained memory fault, and on the latch transition
+// reports it ONCE and records it for the next start. A log line per fault would
+// be a flood driven by request volume, which is the outage shape this package
+// exists to prevent.
+func (c *CommunityDB) latchFault(err error) {
+	if !c.noteMemFault() {
+		return
+	}
+	// The error text is object-derived and can embed a filesystem path, so it
+	// goes through the recognized sanitizer and %q rather than %v (CWE-117).
+	obs.Printf("CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: %q", obs.Sanitize(err.Error()))
+	c.recordFault(err)
+}
+
 // Close flushes and closes the underlying BadgerDB.
 // Must be called on graceful shutdown to prevent value-log corruption.
+//
+// Close is contained but NOT refused on a degraded store. It still has to
+// release badger's resources and its directory lock, and a fault while flushing
+// a damaged store is returned as an error instead of killing a process that is
+// shutting down.
 func (c *CommunityDB) Close() error {
-	return c.db.Close()
+	return c.contain(func() error { return c.db.Close() })
 }
 
 // Lookup returns the mapped category for host (or any of its parent domains).
@@ -129,24 +187,22 @@ func (c *CommunityDB) Close() error {
 // stopping when no further parent exists above the TLD.
 // Returns ("", false) when no entry is found.
 //
-// CHAOS-74: this is where memory-fault containment is armed, and it is armed
-// ONCE for the whole walk rather than per point lookup. The walk issues up to
-// four or five badger reads for a deep hostname, and this runs on the proxy
-// data path, so a guard per read would pay the defer/recover cost several times
-// per request to protect against a fault that makes all of them equally
-// hopeless. One guard per walk is the same protection at a fraction of the
-// cost. A store that has already latched degraded returns here without arming
-// anything at all.
+// CHAOS-74: containment is armed ONCE for the whole walk rather than per point
+// lookup. The walk issues up to four or five badger reads for a deep hostname,
+// and this runs on the proxy data path, so a guard per read would pay the
+// defer/recover cost several times per request to protect against a fault that
+// makes all of them equally hopeless. A store that has already latched degraded
+// is refused by access without arming anything at all.
 func (c *CommunityDB) Lookup(host string) (string, bool) {
 	if c.degraded.Load() {
-		return "", false
+		return "", false // fast path: skip host normalisation on a dead store
 	}
 	host = hostutil.NormalizeHost(host)
 	var (
 		cat   string
 		found bool
 	)
-	err := storeguard.ContainFault(c.dir, func() error {
+	err := c.access(func() error {
 		var walkErr error
 		cat, found, walkErr = c.walk(host)
 		return walkErr
@@ -154,17 +210,8 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 	switch {
 	case err == nil:
 		return cat, found
-	case storeguard.IsStoreFault(err):
-		// The mapping is gone. Latch degraded and report ONCE: a per-request
-		// log line here would be a log flood driven by request volume, which is
-		// the shape of outage this package exists to prevent.
-		if c.noteMemFault() {
-			// The error text is object-derived and can embed a filesystem
-			// path, so it goes through the recognized sanitizer and %q
-			// rather than %v (CWE-117).
-			obs.Printf("CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: %q", obs.Sanitize(err.Error()))
-			c.recordFault(err)
-		}
+	case storeguard.IsStoreFault(err), errors.Is(err, ErrDegraded):
+		// Latched (by access): the host is uncategorised, Layer 1 stands.
 		return "", false
 	default:
 		// A returned badger error: the store is answering, badly. Not latched —
@@ -225,7 +272,9 @@ func (c *CommunityDB) walk(host string) (category string, found bool, err error)
 	return "", false, nil
 }
 
-// getExact performs a single BadgerDB point lookup for the given domain.
+// getExact performs a single BadgerDB point lookup for the given domain. It
+// touches badger directly and is therefore reachable ONLY through walk, inside
+// Lookup's access closure (enforced by TestCommunityDB_EveryBadgerAccessIsGuarded).
 //
 // CHAOS-74. This used to end in `if err != nil { return "", false }`, which
 // collapsed three different things into one answer: a clean miss, a store that
@@ -267,25 +316,41 @@ func (c *CommunityDB) getExact(domain string) (category string, found bool, err 
 // Existing entries for the same domain are overwritten.
 // Uses WriteBatch for high-throughput ingestion without holding a long-lived
 // transaction — safe to call while the DB serves concurrent reads.
+//
+// A degraded store refuses with ErrDegraded and is never written. The feed
+// syncer charges that as a failed round and backs off. It also checks the latch
+// before downloading, so a dead store does not cost a 50 MB fetch per round. A
+// fault contained here latches the store like one in Lookup. badger's own flush
+// goroutines are outside any guard; see the CHAOS-74 residual-risk notes.
 func (c *CommunityDB) BulkWrite(entries map[string]string) error {
-	wb := c.db.NewWriteBatch()
-	for domain, category := range entries {
-		key := []byte(domain)
-		val := []byte(category)
-		if err := wb.Set(key, val); err != nil {
-			wb.Cancel()
-			return err
+	return c.access(func() error {
+		wb := c.db.NewWriteBatch()
+		for domain, category := range entries {
+			if err := wb.Set([]byte(domain), []byte(category)); err != nil {
+				wb.Cancel()
+				return err
+			}
 		}
-	}
-	return wb.Flush()
+		return wb.Flush()
+	})
 }
 
 // Stats returns the estimated number of keys stored in the DB.
+//
+// A degraded store, or a fault contained while reading the table metadata,
+// reports 0 rather than an error. The only production caller is the feed
+// syncer's "is the store empty, sync at once?" check, and a dead store answering
+// 0 there is harmless: the round it triggers refuses on the latch before
+// downloading anything.
 func (c *CommunityDB) Stats() (keys int64) {
-	// BadgerDB provides only estimated counts via LSM metadata.
-	tables := c.db.Tables()
-	for _, t := range tables {
-		keys += int64(t.KeyCount)
+	if err := c.access(func() error {
+		// BadgerDB provides only estimated counts via LSM metadata.
+		for _, t := range c.db.Tables() {
+			keys += int64(t.KeyCount)
+		}
+		return nil
+	}); err != nil {
+		return 0
 	}
 	return keys
 }
