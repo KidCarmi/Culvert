@@ -1214,7 +1214,14 @@ jobs:
   adopted-sidecar-scan:
     name: "Lab · ADOPTED ClamAV sidecar (built on the appliance): exact-byte scan + SBOM"
     needs: guest-boot
-    if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
+    # OPT-IN ([adopted-scan]). This scans the sidecar an ADOPTION variant built
+    # on the appliance (the host-component-refresh flow, matrix adopt_image_run),
+    # downloaded from appliance-lab-adopted-sidecar-$ADOPT_VARIANT. A default
+    # candidate build runs no adoption flow and produces no such artifact, so
+    # running by default only fails on a missing/stale artifact (it was pinned
+    # to the retired 2e3bcc2a round). Set ADOPT_VARIANT to the adoption variant
+    # and push with [adopted-scan] when that flow has produced the artifact.
+    if: ${{ contains(github.event.head_commit.message, '[adopted-scan]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
