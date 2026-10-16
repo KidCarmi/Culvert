@@ -887,8 +887,10 @@ endpoints for credentialed parents.
   *forwards* is the mirror image and tears down every long-lived tunnel at once.
   The **data-plane readiness grace** (5min) stopped closing, so `/ready` kept
   reporting `cp_poll: ok` while the control plane was genuinely unreachable and
-  the node stayed in the load-balancer rotation serving policy it could no
-  longer refresh. And both **roster durability-degraded log gates** latched
+  the node's policy went stale. The default verdict is report-only on that row,
+  so there the loss is the signal itself; on a strict probe (`/ready?strict=1`),
+  which does gate on the row, the suppressed `fail` also kept the node's verdict
+  `ready` and so held it in the load-balancer rotation. And both **roster durability-degraded log gates** latched
   suppressed (a negative age is always under the interval), silencing the only
   operator-visible signal that admin roster writes are not surviving a restart
   while the suppressed counter climbed where nobody reads it.
@@ -914,7 +916,7 @@ endpoints for credentialed parents.
   pre-fix tree, including an AST guard over all 385 package-main sources that
   bans the `time.Unix(0, nanos)` elapsed idiom while leaving the legitimate
   `time.Unix(seconds, 0)` absolute uses alone. `internal/ocsp` has the same
-  defect in a log gate, recorded as register row CA-15 rather than widening this
+  defect in a log gate, recorded as register row CA-21 rather than widening this
   change into another package. Review:
   `roadmap/CHAOS-ENGINEERING-REVIEW.md` §41 (CHAOS-71).
 

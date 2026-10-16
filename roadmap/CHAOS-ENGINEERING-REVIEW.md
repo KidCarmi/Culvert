@@ -8308,7 +8308,7 @@ domain — the least-covered entry in this register: one prior mention of NTP) �
 **Code:** `monotime.go` (new), `proxy_tunnel.go` (`newTunnelActivityStamp`,
 `idleCopyCounted`), `readyz_dp_health.go` (`dpCPPollFailingSince`,
 `appendDPHealthChecks`), `roster_persist_durability.go` (both log gates) ·
-**Register rows:** PX-22 (CLOSED), HA-19 (CLOSED), ST-13 (CLOSED), CA-15 (OPEN) ·
+**Register rows:** PX-26 (CLOSED), HA-20 (CLOSED), ST-13 (CLOSED), CA-21 (OPEN) ·
 **Gates:** `monotime_chaos_test.go` (9)
 
 ### Executive summary
@@ -8342,10 +8342,17 @@ went:
   in the fleet is torn down at once on its next deadline pop.
 - **the DP readiness grace window** (`readyz_dp_health.go`, 5min) stops closing.
   `cp_poll` keeps reporting `ok` while the control plane is genuinely
-  unreachable, so a data-plane node stays in the load-balancer rotation serving
-  policy it can no longer refresh — with the probe asserting it is fine. This is
-  the fail-**open** direction of a probe whose whole job is to make a sustained
-  CP outage visible.
+  unreachable and the node's policy goes stale — with the probe asserting it is
+  fine. This is the fail-**open** direction of a probe whose whole job is to
+  make a sustained CP outage visible. Be precise about the blast radius: the
+  DEFAULT `/ready` verdict is report-only on this row (200/ready either way —
+  `TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow` pins that, and it
+  is a deliberate contract so a CP outage cannot eject the whole DP fleet from a
+  default-configured LB), so what the suppressed row costs there is the SIGNAL.
+  On a **strict** probe (`/ready?strict=1`), which does gate on the row
+  (`TestHandleReady_StrictGatesFailRows`: 503/not_ready), the suppressed `fail`
+  also keeps the verdict `ready` and so holds the node in the load-balancer
+  rotation.
 - **the roster durability-degraded log gate** (`roster_persist_durability.go`)
   stops opening. A negative age is always `< interval`, so the gate latches into
   its suppressed branch and the one operator-visible line saying admin roster
@@ -8437,10 +8444,10 @@ failing, not by inspection.
 
 | Row | Finding | Likelihood | Impact | Status |
 |---|---|---|---|---|
-| **PX-22** | Tunnel idle reaper measured its 1h deadline on the wall clock, so a backwards step suspended reaping of exactly the idle/half-open tunnels it exists to collect — two sockets, two goroutines and two pooled buffers each, on the CONNECT-bypass and SOCKS5 paths | Medium (any NTP step-back, VM suspend/resume, host clock correction; routine in virtualised fleets) | **High** — FD/goroutine/memory exhaustion on the data plane under connection pressure; forward steps tear down every long-lived tunnel at once | **CLOSED** |
-| **HA-19** | DP `cp_poll` readiness grace measured on the wall clock, so a backwards step kept the row at `ok` while the control plane was unreachable | Medium (same producers; needs a step larger than the 5min grace to fully mask) | **High** — fail-**open** readiness: the node stays in the LB rotation serving policy it cannot refresh, with the probe asserting health | **CLOSED** |
+| **PX-26** | Tunnel idle reaper measured its 1h deadline on the wall clock, so a backwards step suspended reaping of exactly the idle/half-open tunnels it exists to collect — two sockets, two goroutines and two pooled buffers each, on the CONNECT-bypass and SOCKS5 paths | Medium (any NTP step-back, VM suspend/resume, host clock correction; routine in virtualised fleets) | **High** — FD/goroutine/memory exhaustion on the data plane under connection pressure; forward steps tear down every long-lived tunnel at once | **CLOSED** |
+| **HA-20** | DP `cp_poll` readiness grace measured on the wall clock, so a backwards step kept the row at `ok` while the control plane was unreachable | Medium (same producers; needs a step larger than the 5min grace to fully mask) | **High** — fail-**open** readiness: the outage signal is lost on the default (report-only) probe, and on a strict probe (`/ready?strict=1`) the suppressed `fail` also holds the node in the LB rotation serving policy it cannot refresh | **CLOSED** |
 | **ST-13** | Roster durability-degraded log gate measured on the wall clock; a negative age is always `< interval`, latching the gate suppressed | Medium | Medium — the only operator-visible signal that admin roster writes are not surviving a restart (§40's subject) goes unsaid while the suppressed counter climbs unread | **CLOSED** |
-| **CA-15** | `internal/ocsp`'s `allowTruncationLog` has the identical defect over an `atomic.Int64` nanos stamp | Medium | Low — a log gate with no enforcement consequence | **OPEN — deferred, see residual risk** |
+| **CA-21** | `internal/ocsp`'s `allowTruncationLog` has the identical defect over an `atomic.Int64` nanos stamp | Medium | Low — a log gate with no enforcement consequence | **OPEN — deferred, see residual risk** |
 | — | HA self-fence deadline (`ha_lease.go:232`), `internal/halease` lease authority, `internal/admission` `FreshCount`, `internal/mcp/rollout` `elapsed()` | — | — | **Already correct** — see the storage-type table above for why |
 
 ### Verification
@@ -8497,7 +8504,7 @@ not be produced here. CI's `go install` under the pinned compiler is unaffected.
 - **`internal/ocsp`'s `allowTruncationLog` is the same defect, unfixed**
   (`internal/ocsp/ocsp.go:101`): `now.Sub(time.Unix(0, last))` over an
   `atomic.Int64` nanos stamp, so a backwards step latches the responder-cap
-  notice into its suppressed branch. Left open as **CA-15** rather than fixed
+  notice into its suppressed branch. Left open as **CA-21** rather than fixed
   here: it is a log gate with no enforcement consequence, and the fix belongs to
   that package — it takes an injected `now time.Time`, so it needs either a
   package-local monotonic source or admission's negative-age guard, not package
@@ -8505,7 +8512,7 @@ not be produced here. CI's `go install` under the pinned compiler is unaffected.
   log interval is not proportionate.
 - **The AST guard covers package main only.** Internal packages are not scanned;
   extending it needs a per-package decision about absolute-vs-elapsed stamps,
-  which is the same judgement CA-15 defers.
+  which is the same judgement CA-21 defers.
 - **Monotonic readings do not advance while the machine is suspended** on some
   platforms, so `monoNanos` measures elapsed *running* time. For an idle-teardown
   deadline and a probe grace window — both of which bound how long this process

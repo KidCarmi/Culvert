@@ -74,9 +74,13 @@ const dpCPPollFailGrace = 5 * time.Minute
 // Monotonic, not UnixNano: the grace window below is the only thing that turns
 // a sustained CP outage into a probe-visible failure, and on the wall clock a
 // backwards step left the stamp in the future, so time.Since went NEGATIVE and
-// the row stayed "ok" for however far the step went — a DP node held in the
-// load-balancer rotation, serving policy it could no longer refresh, with the
-// probe asserting it was fine (CHAOS-71).
+// the row stayed "ok" for however far the step went — the probe asserting the
+// control plane was fine while it was unreachable and the node's policy went
+// stale. The default /ready verdict does not gate on this row (report-only —
+// see TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow), so what the
+// suppressed row costs there is the SIGNAL; on a strict probe
+// (/ready?strict=1), which does gate on it, it also keeps the node's verdict
+// "ready" and so holds it in the load-balancer rotation (CHAOS-71).
 var dpCPPollFailingSince atomic.Int64
 
 // dpMarkCPPollFailing flags CP polling as failing, stamping the transition
