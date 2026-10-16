@@ -38,10 +38,46 @@ import (
 // It lives in its own file rather than beside the other walls so that it
 // merges cleanly alongside concurrent edits to them.
 
+// pkgSourcePath anchors a package source filename to the package source
+// directory, so a parse resolves the same file whatever the process working
+// directory is. pkgSourceDir() is itself anchored via runtime.Caller.
+func pkgSourcePath(filename string) string {
+	return filepath.Join(pkgSourceDir(), filename)
+}
+
+// localShadow is one declaration of the handle's name that shadows the package
+// handle: pos is where it becomes visible, [lo, hi) is the scope it is visible in.
+type localShadow struct {
+	pos, lo, hi token.Pos
+}
+
+// scopeExtent reports the extent of the scope a node opens, if it opens one.
+func scopeExtent(n ast.Node) (lo, hi token.Pos, opens bool) {
+	switch v := n.(type) {
+	case *ast.BlockStmt:
+		return v.Lbrace, v.Rbrace, true
+	case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt,
+		*ast.TypeSwitchStmt, *ast.CaseClause, *ast.CommClause, *ast.FuncLit:
+		return n.Pos(), n.End(), true
+	}
+	return 0, 0, false
+}
+
 // assignsPackageHandle reports the functions in file that assign to the
-// package-level name, i.e. an `=` assignment to it from a function that does
-// not bind that name locally. A short variable declaration (`rl := …`) creates
-// a local and is somebody else's problem — the in-function walls cover it.
+// PACKAGE-LEVEL name.
+//
+// Shadowing is resolved PER ASSIGNMENT, not per function. An earlier version
+// computed one `local` flag over the whole body and skipped the function when
+// it was set, so a helper that both wrote the global AND separately declared an
+// unrelated inner local of the same name —
+//
+//	rl = newRateLimiter()                     // the regression
+//	if b { rl := newRateLimiter(); _ = rl }    // unrelated shadow
+//
+// — was skipped entirely, and the wall accepted the exact split-owner
+// regression it exists to prevent (Codex P2 on fad9ca6). An assignment is a
+// write to the global unless a declaration of that name is visible AT THAT
+// ASSIGNMENT: in an enclosing scope, and lexically before it.
 func assignsPackageHandle(file *ast.File, name string) []string {
 	var out []string
 	for _, d := range file.Decls {
@@ -49,34 +85,102 @@ func assignsPackageHandle(file *ast.File, name string) []string {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		local := false
-		ast.Inspect(fn, func(n ast.Node) bool {
-			as, ok := n.(*ast.AssignStmt)
-			if !ok || as.Tok != token.DEFINE {
-				return true
+
+		// The receiver, parameters and named results shadow the handle for the
+		// whole body.
+		var shadows []localShadow
+		for _, fl := range []*ast.FieldList{fn.Recv, fn.Type.Params, fn.Type.Results} {
+			if fl == nil {
+				continue
 			}
-			for _, lhs := range as.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
-					local = true
+			for _, f := range fl.List {
+				for _, id := range f.Names {
+					if id.Name == name {
+						shadows = append(shadows, localShadow{pos: fn.Body.Lbrace, lo: fn.Body.Lbrace, hi: fn.Body.Rbrace})
+					}
 				}
 			}
-			return true
-		})
-		if local {
-			continue
 		}
+
+		// Collect every local declaration of the name with the scope it opens in,
+		// and every `=` write to it, tracking the ancestor stack as we go.
+		type write struct {
+			pos token.Pos
+		}
+		var writes []write
+		var stack []ast.Node
 		ast.Inspect(fn, func(n ast.Node) bool {
-			as, ok := n.(*ast.AssignStmt)
-			if !ok || as.Tok != token.ASSIGN {
-				return true
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return false
 			}
-			for _, lhs := range as.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
-					out = append(out, fn.Name.Name)
+			stack = append(stack, n)
+
+			declaringScope := func(at int) (lo, hi token.Pos) {
+				for i := at; i >= 0; i-- {
+					if l, h, opens := scopeExtent(stack[i]); opens {
+						return l, h
+					}
+				}
+				return fn.Body.Lbrace, fn.Body.Rbrace
+			}
+
+			switch v := n.(type) {
+			case *ast.AssignStmt:
+				for _, lhs := range v.Lhs {
+					id, ok := lhs.(*ast.Ident)
+					if !ok || id.Name != name {
+						continue
+					}
+					if v.Tok == token.DEFINE {
+						lo, hi := declaringScope(len(stack) - 2)
+						shadows = append(shadows, localShadow{pos: id.Pos(), lo: lo, hi: hi})
+					} else if v.Tok == token.ASSIGN {
+						writes = append(writes, write{pos: id.Pos()})
+					}
+				}
+			case *ast.GenDecl:
+				if v.Tok != token.VAR {
+					return true
+				}
+				for _, spec := range v.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for _, id := range vs.Names {
+						if id.Name == name {
+							lo, hi := declaringScope(len(stack) - 2)
+							shadows = append(shadows, localShadow{pos: id.Pos(), lo: lo, hi: hi})
+						}
+					}
+				}
+			case *ast.RangeStmt:
+				if v.Tok != token.DEFINE {
+					return true
+				}
+				for _, k := range []ast.Expr{v.Key, v.Value} {
+					if id, ok := k.(*ast.Ident); ok && id.Name == name {
+						shadows = append(shadows, localShadow{pos: id.Pos(), lo: v.Pos(), hi: v.End()})
+					}
 				}
 			}
 			return true
 		})
+
+		for _, w := range writes {
+			shadowed := false
+			for _, sh := range shadows {
+				if sh.pos <= w.pos && w.pos >= sh.lo && w.pos < sh.hi {
+					shadowed = true
+					break
+				}
+			}
+			if !shadowed {
+				out = append(out, fn.Name.Name)
+				break
+			}
+		}
 	}
 	return out
 }
@@ -129,6 +233,23 @@ func TestAdmissionOwner_Wall_NoProductionReassignmentOfTheOwner(t *testing.T) {
 		"package declaration only":  {"package main\nvar rl = newRateLimiter()", false},
 		"local of the same name":    {"package main\nfunc h() { rl := newRateLimiter(); rl = newRateLimiter(); _ = rl }", false},
 		"unrelated global assigned": {"package main\nfunc h() { other = newRateLimiter() }", false},
+
+		// Codex P2 on fad9ca6: a global write PLUS an unrelated inner shadow.
+		// The pre-fix predicate set one per-function `local` flag and skipped
+		// the whole function, so it reported nothing for this input — the wall
+		// accepted the very regression it exists to prevent.
+		"global write beside an inner shadow": {
+			"package main\nfunc h(b bool) { rl = newRateLimiter(); if b { rl := newRateLimiter(); _ = rl } }", true},
+		"inner shadow written, global untouched": {
+			"package main\nfunc h(b bool) { if b { rl := newRateLimiter(); rl = newRateLimiter(); _ = rl } }", false},
+		"write before the local is in scope": {
+			"package main\nfunc h() { rl = newRateLimiter(); rl := newRateLimiter(); _ = rl }", true},
+		"var-declared local shadows": {
+			"package main\nfunc h() { var rl *RateLimiter; rl = newRateLimiter(); _ = rl }", false},
+		"parameter shadows": {
+			"package main\nfunc h(rl *RateLimiter) { rl = newRateLimiter() }", false},
+		"closure writes the global": {
+			"package main\nfunc h() { go func() { rl = newRateLimiter() }() }", true},
 	} {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, "control.go", tc.src, 0)

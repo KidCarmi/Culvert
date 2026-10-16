@@ -203,7 +203,10 @@ func gossipLoopKeepsLimiter(loop *ast.FuncDecl) string {
 // is handed is pinned by that helper's own tests.
 func TestAdmissionOwner_Wall_GossipLoopIsFedTheEnforcingLimiter(t *testing.T) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "controlplane_client.go", nil, parser.ParseComments)
+	// Anchored to the package source dir, never the process CWD: a concurrent
+	// test's os.Chdir would otherwise make this parse fail before it checks the
+	// invariant, so the wall would go green by erroring out.
+	file, err := parser.ParseFile(fset, pkgSourcePath("controlplane_client.go"), nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse controlplane_client.go: %v", err)
 	}
@@ -319,7 +322,9 @@ func rlAdmissionEntryPoints(t *testing.T, filename, src string) []string {
 	var file *ast.File
 	var err error
 	if src == "" {
-		file, err = parser.ParseFile(fset, filename, nil, mode)
+		// On-disk parse: anchor it (see pkgSourcePath). The src != "" branch
+		// below parses an in-memory string, so its filename is only a label.
+		file, err = parser.ParseFile(fset, pkgSourcePath(filename), nil, mode)
 	} else {
 		file, err = parser.ParseFile(fset, filename, src, mode)
 	}
@@ -360,7 +365,7 @@ func rlAdmissionEntryPoints(t *testing.T, filename, src string) []string {
 // named name.
 func packageVarDeclared(t *testing.T, filename, name string) bool {
 	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), filename, nil, 0)
+	file, err := parser.ParseFile(token.NewFileSet(), pkgSourcePath(filename), nil, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", filename, err)
 	}
