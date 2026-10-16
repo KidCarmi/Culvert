@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 // ── IPFilter tests ────────────────────────────────────────────────────────────
 
 func freshIPF() *IPFilter {
-	return &IPFilter{single: map[string]bool{}}
+	return NewIPFilter()
 }
 
 func TestIPFilter_ModeOff(t *testing.T) {
@@ -134,7 +134,7 @@ func TestIPFilter_List(t *testing.T) {
 // ── RateLimiter tests ─────────────────────────────────────────────────────────
 
 func freshRL() *RateLimiter {
-	return newRateLimiter()
+	return NewRateLimiter()
 }
 
 func TestRateLimiter_Disabled(t *testing.T) {

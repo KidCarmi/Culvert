@@ -41,7 +41,7 @@ func snapshotConnAndRateLimitGlobals(t *testing.T) {
 	oldRL := rl
 
 	connLimiter = newConnLimiter()
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	rl = newRateLimiter()
 
 	t.Cleanup(func() {
