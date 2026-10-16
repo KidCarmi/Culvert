@@ -205,7 +205,8 @@ func TestChaos71_CPPollGraceFlipsOnMonotonicElapsedOnly(t *testing.T) {
 	dpCPPollFailingSince.Store(1 + int64(dpCPPollFailGrace) + int64(time.Hour))
 	if row := dpCPPollRow(t); row != "ok" {
 		t.Errorf("cp_poll = %q for a stamp in the future, want ok — treating a negative age as "+
-			"expired would mark every node unready on a trivial backwards step", row)
+			"expired would flip the row on every node in the fleet on a trivial "+
+			"backwards step", row)
 	}
 }
 

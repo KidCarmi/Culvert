@@ -8412,7 +8412,7 @@ admission: a bad stamp there must fail toward the local decision, so reading a
 future stamp as stale is fail-closed.
 
 At these sites "expired" does not mean *fall back* — it means **tear something
-down**, or **mark a node unready**. `negative ⇒ expired` would reap live tunnels
+down**, or **flip a readiness row to fail**. `negative ⇒ expired` would reap live tunnels
 and flap `cp_poll` on every node in the fleet on *any* backwards step, including
 the sub-second NTP corrections that are entirely routine. Measuring on the
 monotonic clock removes the choice: the elapsed time is simply correct across a

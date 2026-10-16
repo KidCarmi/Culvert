@@ -905,7 +905,7 @@ endpoints for credentialed parents.
 
   Deliberately *not* implemented as `internal/admission`'s negative-age guard:
   there a bad stamp must fail toward the local decision, but here "expired"
-  tears a tunnel down or marks a node unready, so "negative means expired"
+  tears a tunnel down or flips a readiness row to fail, so "negative means expired"
   would reap live tunnels and flap every node's probe on any backwards step,
   including the sub-second NTP corrections that are routine. A negative control
   pins that choice. Absolute-time decisions are untouched: session and IdP token

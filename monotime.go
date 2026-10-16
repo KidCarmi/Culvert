@@ -33,8 +33,8 @@ var monoEpoch = time.Now()
 // internal/admission/AGENTS.md lists "future stamps" as a standing review
 // control). Rejecting negatives is right where a bad stamp must fail CLOSED.
 // It is the WRONG answer for a deadline whose expiry tears something down or
-// marks a node unready: there, "negative means expired" would reap live
-// tunnels and flap a readiness probe on any backwards step, however small.
+// flips a readiness row to fail: there, "negative means expired" would reap
+// live tunnels and flap the probe on any backwards step, however small.
 // Measuring on the monotonic clock removes the choice — the elapsed time is
 // correct across a step in either direction, so neither caller needs a
 // negative-age branch at all.
