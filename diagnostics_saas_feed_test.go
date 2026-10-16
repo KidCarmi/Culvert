@@ -41,7 +41,23 @@ func TestSaaSFeedDiagnostics(t *testing.T) {
 			v := viewFor(sourceCached, 5, "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z")
 			v.Stale = true
 			s.noteActivation(v, saasFeedActivationDelta{})
-		}, diagWarn, "expired last-known-good"},
+		}, diagWarn, "past its signed expiry"},
+		{"stale_served_recovery_is_stale_not_critical", func(s *saasFeedStatus) {
+			s.noteConfig(enabled)
+			v := viewFor(sourceCached, 5, "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z")
+			v.Stale = true
+			s.noteRecovery(recoveryResult{Class: recoveryStaleServed, ActiveVersion: 5, Stale: true, Critical: true, View: v})
+		}, diagWarn, "signed generation 5 (cached) is serving as the last-known-good"},
+		{"waiting_with_cached_generation", func(s *saasFeedStatus) {
+			s.noteConfig(enabled)
+			s.noteRecovery(recoveryResult{Class: recoveryActiveServed, ActiveVersion: 5,
+				View: viewFor(sourceCached, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z")})
+			s.noteWaitingForAuthority("authority mirror missing")
+		}, diagWarn, "signed generation 5 (cached) is serving"},
+		{"embedded_never_activated_failing", func(s *saasFeedStatus) {
+			s.noteConfig(enabled)
+			s.noteAttemptFailure(saasFeedErrFetch, 0, false, "dial tcp 10.0.0.1:443: raw detail")
+		}, diagWarn, "has not activated a signed generation and refresh is failing (1 consecutive failures) — the embedded baseline is serving"},
 		{"degraded", func(s *saasFeedStatus) {
 			fresh(s)
 			s.noteAttemptFailure(saasFeedErrFetch, 0, false, "dial tcp 10.0.0.1:443: raw detail")
@@ -49,7 +65,12 @@ func TestSaaSFeedDiagnostics(t *testing.T) {
 		{"critical", func(s *saasFeedStatus) {
 			s.noteConfig(enabled)
 			s.noteRecovery(recoveryResult{Class: recoveryEquivocation, Critical: true, Detail: "equivocation"})
-		}, diagFail, "critical state"},
+		}, diagFail, "critical state (corruption, equivocation or lost authority: equivocation) — the embedded baseline is serving"},
+		{"critical_with_signed_view", func(s *saasFeedStatus) {
+			s.noteConfig(enabled)
+			s.noteRecovery(recoveryResult{Class: recoveryEquivocation, ActiveVersion: 5, Critical: true,
+				View: viewFor(sourceCached, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z")})
+		}, diagFail, "signed generation 5 (cached) is serving"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,9 +94,39 @@ func TestSaaSFeedDiagnostics(t *testing.T) {
 			if c.OperatorAction == "" {
 				t.Error("warn/fail row must carry an operator action")
 			}
+			if strings.Count(c.Message, " is serving") != 1 {
+				t.Errorf("message must name exactly one serving source: %q", c.Message)
+			}
 			if strings.Contains(c.Message, "10.0.0.1") || strings.Contains(c.Message, "raw detail") {
 				t.Errorf("message leaked raw error detail: %q", c.Message)
 			}
 		})
+	}
+}
+
+// TestSaaSFeedDiagAction_ByErrorClass pins that only fetch/http failures are
+// told to wait for the network: persist, verify, parse, freshness, floor and
+// config failures persist after the origin recovers.
+func TestSaaSFeedDiagAction_ByErrorClass(t *testing.T) {
+	network := "once the origin or network path is reachable"
+	for _, class := range []string{saasFeedErrNone, saasFeedErrFetch, saasFeedErrHTTP} {
+		if a := saasFeedDiagAction(saasFeedStatusSnapshot{LastErrorClass: class}); !strings.Contains(a, network) {
+			t.Errorf("class %q: want network guidance, got %q", class, a)
+		}
+	}
+	want := map[string]string{
+		saasFeedErrPersist:   "write access",
+		saasFeedErrVerify:    "feed is rejected",
+		saasFeedErrParse:     "feed is rejected",
+		saasFeedErrFreshness: "node clock",
+		saasFeedErrFloor:     "rollback",
+		saasFeedErrConfig:    "control-plane authority",
+		saasFeedErrInternal:  "correct the reported failure class",
+	}
+	for class, frag := range want {
+		a := saasFeedDiagAction(saasFeedStatusSnapshot{LastErrorClass: class})
+		if strings.Contains(a, network) || !strings.Contains(a, frag) || !strings.Contains(a, "Signed SaaS Feed tab") {
+			t.Errorf("class %q: want %q without network-only guidance, got %q", class, frag, a)
+		}
 	}
 }
