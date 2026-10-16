@@ -188,11 +188,11 @@ func auditClusterPushDropsTotal() int64 {
 	self := clusterRole.nodeID
 	clusterRoleMu.RUnlock()
 	nodeMetricsMu.RLock()
-	for id, m := range nodeMetrics {
+	for id := range nodeMetrics {
 		if self != "" && id == self {
 			continue
 		}
-		total += m.AuditClusterPushDrops
+		total += nodeMetrics[id].AuditClusterPushDrops
 	}
 	nodeMetricsMu.RUnlock()
 	return total
