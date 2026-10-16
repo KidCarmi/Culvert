@@ -913,6 +913,21 @@ jobs:
             sidecar_archive_sha256: "39a0f7c83bc05f313fd374895bdfe8840c40a418834301de9f8d5a7cb12979ef"
             sidecar_index: "sha256:dc96d2f249d20a8a899fd1f965af18cd4cd54fe9f66d7a278199fd29195a4280"
             expect: zero
+          # CANDIDATE (SHIPPED, owner P1): the 1.5.4 sidecar baked into the
+          # allowlist-fix candidate OVA a80be4b6 — an INDEPENDENT rebuild of the
+          # same sidecar inputs on a later day. Its bytes DIFFER from 9e344526
+          # (image id b11e29c5 vs dc96d2f2, archive 9404b981 vs 39a0f7c8,
+          # upstream clamav/clamav:1.5 index 638d9020 vs 9e344526's; same
+          # pcre2-10.49-r0): the reproducible build pins byte-identity WITHIN a
+          # run, not ACROSS builds, so Alpine/upstream re-pulls drift the bytes.
+          # Proving F-P2 closed here answers "a future rebuild is not guaranteed
+          # byte-identical" — two independent 1.5.4 builds, both wrong-cleans=0.
+          - label: candidate-1.5.4-a80be4b6
+            ova_artifact: "12047875462"
+            ova_sha256: "394788af5b839c8ff895f8e36b67ad0ca89d3c4f6ed9c71d4112416d6626ebe0"
+            sidecar_archive_sha256: "9404b98152723b5edf20403e98e724a2ed5b4e72c0caf18732df6196d0317f05"
+            sidecar_index: "sha256:b11e29c503a4acb1c0196db9ad771d2cf49de8991b7c3be1a592292501ab6c0e"
+            expect: zero
     env:
       OVA_ARTIFACT_ID: ${{ matrix.ova_artifact }}
       OVA_SHA256: ${{ matrix.ova_sha256 }}
@@ -1145,18 +1160,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Candidate 1.5.4 OVA (appliance-lab-ova-candidate-9e34452677d7, lab run
-      # 38881775755 — the F-P2 sidecar bump 1.4.6 -> 1.5.4). Archive + index
-      # pins are the OVA's own build record (build-info.json
-      # clamav_baked_tar_sha256 and clamav_sidecar_image_id). The amd64 manifest
-      # and config are DERIVED from the re-hashed index (exported via
-      # GITHUB_ENV), so every link stays hash-bound. This scans the EXACT 1.5.4
-      # sidecar baked into the candidate OVA; the 1.4.6 scans are not reusable
-      # (different engine, different bytes).
-      OVA_ARTIFACT_ID: "12038600454"   # appliance-lab-ova-candidate-9e34452677d7, run 38881775755
-      OVA_SHA256: 47cb50f08d09efac5b6a970cc71517598a8edbb75805cb4b55cc2271e81a5313
-      SIDECAR_ARCHIVE_SHA256: 39a0f7c83bc05f313fd374895bdfe8840c40a418834301de9f8d5a7cb12979ef
-      SIDECAR_INDEX: sha256:dc96d2f249d20a8a899fd1f965af18cd4cd54fe9f66d7a278199fd29195a4280
+      # SHIPPED candidate 1.5.4 OVA (appliance-lab-ova-candidate-a80be4b6, lab
+      # run 38903245843 — the allowlist-preservation P1 on top of the F-P2
+      # 1.4.6 -> 1.5.4 bump). Archive + index pins are the OVA's own build
+      # record (build-info.json clamav_baked_tar_sha256 and
+      # clamav_sidecar_image_id). The amd64 manifest and config are DERIVED from
+      # the re-hashed index (exported via GITHUB_ENV), so every link stays
+      # hash-bound. This scans the EXACT 1.5.4 sidecar baked into THIS candidate
+      # OVA — an independent rebuild whose bytes differ from 9e344526's, so its
+      # scan is not reusable from 9e344526's (different engine pull, different
+      # bytes). The 1.4.6 scans are not reusable either.
+      OVA_ARTIFACT_ID: "12047875462"   # appliance-lab-ova-candidate-a80be4b6, run 38903245843 (allowlist P1, SHIPPED candidate)
+      OVA_SHA256: 394788af5b839c8ff895f8e36b67ad0ca89d3c4f6ed9c71d4112416d6626ebe0
+      SIDECAR_ARCHIVE_SHA256: 9404b98152723b5edf20403e98e724a2ed5b4e72c0caf18732df6196d0317f05
+      SIDECAR_INDEX: sha256:b11e29c503a4acb1c0196db9ad771d2cf49de8991b7c3be1a592292501ab6c0e
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -1243,7 +1260,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-bad788e54ffe
+          name: appliance-lab-sidecar-scan-a80be4b6
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
