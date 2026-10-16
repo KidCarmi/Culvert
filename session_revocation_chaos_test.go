@@ -824,16 +824,16 @@ func TestChaos73_DefectControlPlaneRetainedCapacityIsBounded(t *testing.T) {
 // predates this sweep holds attacker-chosen keys of arbitrary length, and
 // LoadRevocations feeds it straight back in.
 //
-// So this pins that the waiver is SHAPE-GATED, which is exactly what
-// persistedSessionShaped's own comment claims ("the waiver for the key-size
-// bound on reload only"). Verified failing against a build whose waiver
-// returns true unconditionally — a mutation that passes every other CHAOS-73
-// gate, which is why this one is not redundant.
-//
-// The second case pins the Exp match specifically: a payload that merely
-// decodes as a Session is not enough, because the stored expiry is what the
-// sweeper keys on, and an entry whose recorded expiry disagrees with the
-// session it claims to be is not a revocation this appliance wrote.
+// So this pins that the waiver is AUTHENTICATED: only an entry carrying a
+// valid provenance MAC (written by SaveRevocations for revocations this node
+// verified itself) reloads past the key bound. Shape alone was the first
+// version of the waiver and reviewers rejected it, because an external writer
+// can produce a session-shaped payload with a matching expiry; every case
+// below is MAC-less and must be refused, including the shaped ones. Verified
+// failing against a build whose waiver returns true unconditionally — a
+// mutation that passes every other CHAOS-73 gate, which is why this one is
+// not redundant. (internal/session's provenance tests cover wrong-token and
+// wrong-expiry MACs.)
 func TestChaos73_ControlPersistedOversizeWaiverIsShapeGated(t *testing.T) {
 	oversize := session.MaxRevocationTokenLen + 1
 
