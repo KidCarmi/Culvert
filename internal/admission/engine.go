@@ -360,7 +360,8 @@ type InvalidIPEntry struct {
 // (each doubling ~4x), which extrapolates to minutes at 100k — and the
 // ConfigSnapshot cap for this list is maxSnapIPList (2,000,000). That would
 // stall a boot or a snapshot apply on a legitimate enterprise allowlist.
-// AddAll is linear. Pinned by TestBenchGate_IPFilterBulkLoadIsLinear.
+// AddAll is linear. Pinned by TestIPFilterView_BulkLoadPublishesOnce (exactly
+// one publish per AddAll, at any entry count).
 func (f *IPFilter) AddAll(entries []string) []InvalidIPEntry {
 	if len(entries) == 0 {
 		return nil
@@ -512,6 +513,11 @@ type RateLimiter struct {
 	// IsExempt.
 	exemptView atomic.Pointer[rlExemptView]
 
+	// exemptPublishHook is an instance-local test observer, nil in production
+	// (the IPFilter.publishHook pattern). Called under exemptMu after
+	// publication; it must not re-enter locking methods.
+	exemptPublishHook atomic.Pointer[func(*RateLimiter)]
+
 	// Distributed admission and its diagnostic history belong to this limiter.
 	// All three zero values are usable; constructors create no goroutines.
 	remoteCounts       clusterCountStore
@@ -565,6 +571,9 @@ func (r *RateLimiter) publishExemptViewLocked() {
 		}
 	}
 	r.exemptView.Store(v)
+	if h := r.exemptPublishHook.Load(); h != nil {
+		(*h)(r)
+	}
 }
 
 // clientBucket is one IP's sliding window of in-window request stamps, held as
@@ -786,7 +795,7 @@ func (r *RateLimiter) AddExemption(entry string) error {
 // instead makes a bulk load O(N²) in the entry count, and the ConfigSnapshot
 // cap for this list is maxSnapRateLimitExempt (10,000). Same trap, same shape
 // and same reason as IPFilter.AddAll; pinned by
-// TestBenchGate_RateLimitExemptBulkLoadIsLinear.
+// TestRLExemptView_BulkLoadPublishesOnce.
 func (r *RateLimiter) AddExemptions(entries []string) []InvalidIPEntry {
 	if len(entries) == 0 {
 		return nil
