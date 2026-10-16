@@ -102,6 +102,20 @@ func fillCache(maxSize int, expiredFrac float64) *HashCache {
 	return c
 }
 
+// startTimedAfterGC finishes any GC cycle the setup started, then resets the
+// timer. Every benchmark here seeds a cache (fillCache, or Set in a loop)
+// before timing, and those allocations can leave a concurrent GC cycle running
+// into the timed region. The pointer layout allocates one object per entry and
+// the by-value candidate does not, so that GC would bias the layout A/B
+// unevenly (Codex, PR #1604). benchEvictLocked does the same per iteration.
+// In the contention benchmarks the writer keeps allocating after this point,
+// and the GC it causes is part of the workload being measured.
+func startTimedAfterGC(b *testing.B) {
+	b.Helper()
+	runtime.GC()
+	b.ResetTimer()
+}
+
 // benchEvictLocked times ONE evictLocked call on a full cache. Each iteration
 // needs a fresh full cache, because an evicted one is no longer at capacity.
 //
@@ -189,7 +203,7 @@ func benchChurn(b *testing.B, maxSize int) {
 		c.Set(k, res)
 	}
 	b.ReportAllocs()
-	b.ResetTimer()
+	startTimedAfterGC(b)
 	for i := 0; i < b.N; i++ {
 		c.Set(seqKey("n", i), res)
 	}
@@ -204,7 +218,7 @@ func BenchmarkGet_Hit(b *testing.B) {
 	c := fillCache(10_000, 0)
 	hit := keyTable("k", 10_000)[512]
 	b.ReportAllocs()
-	b.ResetTimer()
+	startTimedAfterGC(b)
 	for i := 0; i < b.N; i++ {
 		if _, ok := c.Get(hit); !ok {
 			b.Fatal("seeded entry must hit")
@@ -216,7 +230,7 @@ func BenchmarkGet_Miss(b *testing.B) {
 	c := fillCache(10_000, 0)
 	absent := keyTable("absent", 1)[0] // 64 hex chars, never inserted
 	b.ReportAllocs()
-	b.ResetTimer()
+	startTimedAfterGC(b)
 	for i := 0; i < b.N; i++ {
 		if _, ok := c.Get(absent); ok {
 			b.Fatal("unseeded entry must miss")
@@ -273,7 +287,7 @@ func BenchmarkGet_Parallel(b *testing.B) {
 	c := fillCache(10_000, 0)
 	keys := keyTable("k", 10_000) // built before the timer starts
 	b.ReportAllocs()
-	b.ResetTimer()
+	startTimedAfterGC(b)
 	hits, total := readParallel(b, c, keys)
 	b.StopTimer()
 	reportHitRate(b, hits, total)
@@ -415,7 +429,7 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	// in the measured read path would distort the ns/op this benchmark exists
 	// to report (CodeRabbit minor, PR #1604). The count is evidence, not proof.
 	b.ReportAllocs()
-	b.ResetTimer()
+	startTimedAfterGC(b)
 	writesBefore, evictionsBefore := w.writes.Load(), w.evictions.Load()
 	hits, total := readParallel(b, c, keys)
 	landed, evicted := w.writes.Load()-writesBefore, w.evictions.Load()-evictionsBefore
@@ -459,7 +473,7 @@ func benchMissOnlyParallel(b *testing.B, withWriter bool) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
+	startTimedAfterGC(b)
 	var writesBefore, evictionsBefore int64
 	if w != nil {
 		writesBefore, evictionsBefore = w.writes.Load(), w.evictions.Load()

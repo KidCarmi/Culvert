@@ -210,9 +210,13 @@ func (c *HashCache) Clear() {
 // them.
 //
 // At the 10 000 default this is deliberately left alone: ~218 ns amortized per
-// Set, and a Set happens only on a scan MISS, which then costs a ClamAV/YARA
-// scan measured in MILLISECONDS — three to four orders of magnitude more. That
-// covers the Set path only. Cache HITS also wait behind the exclusive lock
+// Set. When at least one engine (ClamAV or YARA) is active, a Set follows a
+// scan MISS that costs a scan measured in MILLISECONDS, three to four orders of
+// magnitude more. With NO engine configured (YARA disabled and no ClamAV),
+// ScanBody still caches a clean result without scanning
+// (TestYARA_DisabledSkipsScanAndDiagnosticsWarn pins that). The Set then
+// follows only a SHA-256 of the body, and how the eviction cost compares with
+// that is UNMEASURED. That covers the Set path only. Cache HITS also wait behind the exclusive lock
 // hold, and the reader tail-latency impact is UNMEASURED, pending a contention
 // run on an idle host. Bounding it independent of
 // maxSize means giving up the "no expired entry survives an eviction"

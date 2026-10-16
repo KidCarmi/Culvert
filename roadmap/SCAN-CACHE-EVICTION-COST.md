@@ -9,8 +9,10 @@ re-measure on an idle host before using them for a design decision.**
 > roughly 150-300 ms at `cache_size: 1000000`, a case the committed benchmarks
 > now cover, in the busy steady state (nothing expired). The all-expired case
 > costs more and is not yet bounded at large sizes. At the shipped 10 000
-> default the amortized cost is ~218 ns per Set, which is small relative to the
-> scan miss it follows. The reader tail-latency impact is **UNMEASURED**,
+> default the amortized cost is ~218 ns per Set. That is small relative to the
+> scan miss it follows **when a ClamAV or YARA engine is active**. With no engine
+> configured, a Set follows only a SHA-256 of the body, and that comparison is
+> unmeasured. The reader tail-latency impact is **UNMEASURED**,
 > pending a contention run on an idle host: hits also wait behind the lock
 > hold. The obvious
 > layout fix (holding entries by value rather than behind a pointer) was
@@ -69,6 +71,12 @@ problem?
   oversubscribed. Spreads are wide (up to ±94 %). The interleaving keeps the A/B
   comparison fair, but treat the absolute figures as upper-biased. The parallel
   benchmarks are the most affected, because they assume idle cores.
+- **Harness changes after the 2026-10-16 run (not re-measured).** The
+  benchmarks now finish any setup-triggered GC cycle before timing
+  (`runtime.GC()` per eviction fixture, and `startTimedAfterGC` everywhere
+  else). The contention benchmarks also guarantee and count in-window
+  evictions. The figures below predate both changes. The next idle-host run
+  must re-measure them.
 
 ## Results — the cost that exists
 
@@ -162,8 +170,10 @@ change when everything has expired. It also makes one fewer allocation per
 
 That is a **mixed and immaterial result, not a refutation**. In absolute terms,
 at the shipped default, `Get_Miss` costs +10 ns and the `Set` difference is not
-distinguishable from noise. Both sit four to five orders of magnitude below the
-ClamAV/YARA scan that a `Set` follows and a `Get` precedes. The eviction saving
+distinguishable from noise. With a ClamAV or YARA engine active, both sit
+four to five orders of magnitude below the scan that a `Set` follows and a
+`Get` precedes. With no engine configured, there is no scan to compare against
+(see the verdict). The eviction saving
 is the only large number, and only at operator-raised sizes: the
 `cache_size: 1000000` stall shrinks from roughly 150-300 ms to roughly 115 ms. A
 real fix for that case is bounding or sharding the eviction (below), not a
@@ -239,9 +249,14 @@ the frequent operations slower to speed up a rare one", with that benchmark as
 ## Verdict and what would actually help
 
 At the shipped `cache_size: 10000` default, **leave `evictLocked` alone for
-now**. The verdict is narrower than "not a bottleneck". A Set happens only on a
-scan MISS, and a miss then costs a ClamAV/YARA scan measured in milliseconds, so
-~218 ns of amortized eviction is small relative to a scan miss. Cache hits,
+now**. The verdict is narrower than "not a bottleneck". When a ClamAV or YARA
+engine is active, a Set happens only after a scan MISS that costs a scan
+measured in milliseconds, so ~218 ns of amortized eviction is small relative to
+it. With **no engine configured** (YARA disabled and no ClamAV), `ScanBody`
+still caches a clean result without scanning
+(`TestYARA_DisabledSkipsScanAndDiagnosticsWarn` pins this). There, a Set
+follows only a SHA-256 of the body, and the eviction cost relative to that path
+is **UNMEASURED**. Cache hits,
 however, also wait behind the exclusive lock hold, and that reader tail-latency
 impact is **UNMEASURED**, pending a contention run on an idle host (see
 "Contention"). Revisit this verdict if that run shows a material hit-path
