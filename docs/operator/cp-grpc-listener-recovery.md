@@ -141,10 +141,24 @@ enabled **only the leader answers Control Plane RPCs**: a standby refuses Data
 Planes with a retriable `Unavailable`, so they fail over to the new leader
 rather than staying on the standby's non-advancing config.
 
-The Control Plane address list Data Planes fail over with is republished on
-every HA transition, so a leader whose listener bound late (after a restart)
-still publishes its standby's address once HA resumes; no manual republish is
-needed.
+The Control Plane address list that Data Planes use for failover is
+republished on every HA transition. A leader whose listener bound late (after a
+restart) therefore still publishes its standby's address once HA resumes, and no
+manual republish is needed.
+
+That republish can be rejected at commit. Usually this is a config already at
+its cluster-sync size cap, which the longer list would push over. When that
+happens, the HA transition **still stands**:
+- A self-fence or standby entry is never undone, because fencing is the safety
+  property.
+- Enable, resume and promote keep leadership, because write authority comes from
+  the fencing lease and the list is only the Data Planes' failover hint.
+
+Instead, the `config_snapshot_rejected` alert fires and the `cp_address_list`
+diagnostics row reports **fail** until a republish succeeds. The node retries in
+the background every 1–30 s, so reducing the oversized collection is enough to
+clear it; no restart or HA change is needed. While the row is failing, Data
+Planes still hold the last committed list.
 
 On the **promote** path the listener is started synchronously: if it cannot
 bind, the promotion fails and the node stays a retryable standby rather than
@@ -178,6 +192,7 @@ probe against it reports nothing when it is down.
 | | `culvert_cp_grpc_binds_total` | successful binds (flap counter) |
 | | `culvert_cp_grpc_bind_backoff_seconds` | current rebind backoff |
 | `GET /api/diagnostics` | `cp_grpc_listener` row | ok / warn / **fail**, with a per-reason operator action |
+| | `cp_address_list` row | ok, or **fail** (warn for a transient commit race) while a CP address-list republish is pending |
 | Alerts | `cp_grpc_listener_down` | fire-once per episode |
 
 **Every metric in this family is emitted only on a node that asked to be a
@@ -237,6 +252,11 @@ port nobody holds.
 | `listen_failed` | nothing above matched | See the rate-limited `ControlPlane gRPC listener` log line for the underlying error. |
 | `serve_ended` | the listener was serving and stopped | The listener rebinds. If it recurs, check `culvert_cp_grpc_binds_total` for flapping. |
 | `address_publish_rejected` | the socket bound, but publishing the CP address list to the fleet was rejected at commit | See `config_snapshot_rejected` / LastPublishError — usually a config at its sync size cap. Activation is refused (role rolled back) rather than leaving Data Planes on a stale address list; it retries. |
+
+Classes are matched in a fixed order: the explicit stage tags
+(`tls_certificate`, `address_publish_rejected`) come before the errno classes. So
+an unreadable certificate file, which is a wrapped `EACCES`, reports
+`tls_certificate` and not the bind-port `permission_denied`.
 
 In **every** class two things are true and the operator action says so: the
 listener rebinds by itself (so a restart costs an outage to achieve what is

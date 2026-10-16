@@ -8773,6 +8773,43 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Eighth review round.** (a) **A failed topology republish was silent.**
+  `setTopologyLocked` discarded `reconcileCPAddressesFrom`'s error, so a list
+  that would push a near-budget snapshot past `snapshotWireBudget`, or that
+  lost the commit race every attempt, left Data Planes on a stale list while
+  the transition reported success. Every owned republish (HA transitions, the
+  reconcile after a full publish, the retry loop) now goes through
+  `publishOwnedCPAddresses` (`cp_addr_publish.go`). On a failure it latches a
+  per-store pending state, reported by the new `cp_address_list` contract row
+  (FAIL; WARN for a commit race), and starts ONE retry loop. The loop
+  republishes from the live source with 1–30 s backoff until it succeeds,
+  stops on shutdown via the lifecycle context, and decides to exit under the
+  same lock a new failure latches under. Commit-race exhaustion now also goes
+  through `rejectPublish`.
+
+  The error policy is the same for both transition kinds: **the transition is
+  never rolled back.** Safety transitions (self-fence, standby entry) keep
+  fencing. Authority-gaining ones (enable, resume, promote) keep leadership,
+  per ADR-0005: authority is the fence's, and the list is a failover hint.
+  Refusing leadership over the list would turn a sync-size condition that does
+  not clear on its own into a leaderless cluster retrying promotion.
+
+  Gates:
+  - `TestChaos71_AuthorityGainingTransitionWithARejectedRepublishStaysLeaderAndRetries`
+    (enable, and resume after a delayed bind) and
+    `TestChaos71_SafetyTransitionWithARejectedRepublishIsNeverRolledBack`
+    (standby entry), both against a near-budget snapshot;
+  - `TestChaos71_CPAddrCommitRaceIsPendingAndWarned`;
+  - the wall `TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded` (no
+    unrecorded `UpdateCPAddressesFrom` caller).
+
+  (b) **Tagged errors are classified before errnos.** An unreadable TLS file is
+  a wrapped `EACCES` under `errCPGRPCTLSMaterial`, and the errno check ran
+  first, so the outage got the bind-port advice. The classifier is now one
+  ordered table, `cpGRPCReasonRules`: tags, then errnos, then timeout.
+  `TestChaos71_CPGRPCReasonTable` checks every class, with each tag wrapping
+  every known errno. `classifyAdminUIListenError` on main has the same
+  ordering; it is recorded here and not changed in this PR.
 * **Seventh review round — the CP address list follows the HA topology by
   construction.** A recovered persisted leader whose bind was delayed
   published its address list BEFORE `onActivated` resumed HA, and nothing

@@ -463,6 +463,12 @@ type ConfigStore struct {
 	// captured, then reconciles it from this source. Nil on bare/test stores
 	// and on non-CP nodes. Guarded by mu.
 	cpAddrSource func() []string
+	// addrPub is the owned address list's pending-republish record
+	// (cp_addr_publish.go): set when an owned republish fails, cleared by the
+	// retry loop or the next success. Guarded by addrPubMu, which is never held
+	// while taking mu.
+	addrPubMu sync.Mutex
+	addrPub   cpAddrPublishState
 }
 
 var globalConfigStore = &ConfigStore{}
@@ -636,11 +642,11 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	}
 	s.afterCommit(c)
 	if src != nil {
-		// Propagate an address change this publish was carrying (an HA
-		// enable/peer change rides the next full publish). A rejection is
-		// logged, alerted and surfaced by rejectPublish; this publish itself
-		// already succeeded.
-		_, _ = s.UpdateCPAddressesFrom(src)
+		// Propagate an address change this publish was carrying. A failure is
+		// logged and alerted by rejectPublish and latched pending (with a
+		// retry) by publishOwnedCPAddresses; this publish itself already
+		// succeeded.
+		_, _ = s.publishOwnedCPAddresses("config_publish", src)
 	}
 	return nil
 }
@@ -652,15 +658,17 @@ var configPublishBeforeCommit func()
 
 // reconcileCPAddressesFrom republishes the CP address list from build when
 // this store's list is owned (an active Control Plane set a source); a no-op
-// otherwise, so a standby or a Data Plane never publishes one.
-func (s *ConfigStore) reconcileCPAddressesFrom(build func() []string) (changed bool, err error) {
+// otherwise, so a standby or a Data Plane never publishes one. A failure is
+// recorded pending and retried (publishOwnedCPAddresses).
+func (s *ConfigStore) reconcileCPAddressesFrom(trigger string, build func() []string) error {
 	s.mu.RLock()
 	owned := s.cpAddrSource != nil
 	s.mu.RUnlock()
 	if !owned {
-		return false, nil
+		return nil
 	}
-	return s.UpdateCPAddressesFrom(build)
+	_, err := s.publishOwnedCPAddresses(trigger, build)
+	return err
 }
 
 // setCPAddressSource hands ownership of the CP address list to build (see
@@ -811,7 +819,9 @@ func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool
 		s.afterCommit(c)
 		return true, nil
 	}
-	return false, fmt.Errorf("CP address list publish lost the commit race %d times in a row", cpAddrMergeAttempts)
+	// Reported through the ordinary rejection path (logged, alerted,
+	// LastPublishError), exactly as Update reports its own exhausted budget.
+	return false, s.rejectPublish(fmt.Errorf("%w %d times in a row", errCPAddrCommitRace, cpAddrMergeAttempts))
 }
 
 // rejectPublish records a commit-time rejection (count OR byte gate): it does

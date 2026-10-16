@@ -288,7 +288,7 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 		return "", fmt.Errorf("fencing lease not acquired — cannot enable HA leadership (see logs)")
 	}
 	h.mu.Lock()
-	h.setTopologyLocked("leader", peerAddr)
+	h.setTopologyLocked("leader", peerAddr, haTransitionEnable)
 	h.since = time.Now()
 	h.autoFailover = autoFailover
 	if h.lease != nil {
@@ -352,7 +352,7 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 		}
 	}
 	h.mu.Lock()
-	h.setTopologyLocked("leader", cfg.PeerAddr)
+	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
 	h.token = cfg.Token
 	h.autoFailover = cfg.AutoFailover
 	h.term = cfg.Term
@@ -405,7 +405,7 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 		logger.Printf("HA: stop in progress — not (re-)entering standby against %s", sanitizeLog(leaderAddr))
 		return
 	}
-	h.setTopologyLocked("standby", leaderAddr)
+	h.setTopologyLocked("standby", leaderAddr, haTransitionStandby)
 	h.token = token
 	h.since = time.Now()
 	h.autoFailover = autoFailover
@@ -934,7 +934,7 @@ func (h *HAState) promote(reason string) {
 	}
 
 	h.mu.Lock()
-	h.setTopologyLocked("leader", h.peerAddr)
+	h.setTopologyLocked("leader", h.peerAddr, haTransitionPromote)
 	h.since = time.Now()
 	if h.lease != nil {
 		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)

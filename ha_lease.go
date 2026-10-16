@@ -334,7 +334,7 @@ func (h *HAState) selfFence(reason string) {
 		h.mu.Unlock()
 		return
 	}
-	h.setTopologyLocked("standby", h.peerAddr)
+	h.setTopologyLocked("standby", h.peerAddr, haTransitionSelfFence)
 	h.since = time.Now()
 	fencedEpoch := h.leaseEpoch // capture the epoch being fenced before it is zeroed
 	h.leaseEpoch = 0

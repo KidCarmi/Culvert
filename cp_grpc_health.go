@@ -308,11 +308,20 @@ var errCPGRPCTLSMaterial = errors.New("control plane grpc tls material")
 // alert dedup key one distinct value per failure, which is the WK-12/RS-5
 // defect. The full error goes to the rate-limited log line and nowhere else.
 //
-// Matched via errors.As on syscall.Errno, never by string: net wraps as
-// *net.OpError{*os.SyscallError{syscall.Errno}} and the text is
+// The classes are ONE ordered table, cpGRPCReasonRules, and the first match
+// wins. Its order is the contract: EXPLICIT sentinel tags first, generic
+// errnos after (Codex review of #1556). A tagged error routinely WRAPS an
+// errno — an unreadable cert/key/CA file is tls.LoadX509KeyPair's wrapped
+// EACCES under errCPGRPCTLSMaterial — and the tag is what names the failing
+// stage; checking the errno first sent a TLS-permission outage to the
+// bind-port/CAP_NET_BIND_SERVICE remedy. TestChaos71_CPGRPCReasonTable pins
+// every class with a wrapped errno inside each tag.
+//
+// Errnos are matched via errors.As on syscall.Errno, never by string: net
+// wraps as *net.OpError{*os.SyscallError{syscall.Errno}} and the text is
 // platform-specific (the CHAOS-54 rule).
 //
-// The `network_error` branch requires an actual TIMEOUT, carrying forward
+// The `network_error` rule requires an actual TIMEOUT, carrying forward
 // CHAOS-66's correction to the two sibling classifiers: *net.OpError satisfies
 // net.Error UNCONDITIONALLY (Timeout() false for a bind EINVAL), so the
 // unqualified form reports every unrecognised errno as a network fault — and
@@ -322,30 +331,56 @@ func classifyCPGRPCBindError(err error) string {
 	if err == nil {
 		return "none"
 	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EADDRINUSE:
-			return "port_in_use"
-		case syscall.EACCES, syscall.EPERM:
-			return "permission_denied"
-		case syscall.EADDRNOTAVAIL:
-			return "address_unavailable"
-		case syscall.EMFILE, syscall.ENFILE:
-			return "descriptors_exhausted"
+	for _, r := range cpGRPCReasonRules {
+		if r.match(err) {
+			return r.reason
 		}
 	}
-	if errors.Is(err, errCPGRPCTLSMaterial) {
-		return "tls_certificate"
-	}
-	if errors.Is(err, errCPGRPCAddressPublish) {
-		return "address_publish_rejected"
-	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return "network_error"
-	}
 	return "listen_failed"
+}
+
+// cpGRPCReasonRule is one row of the classifier table.
+type cpGRPCReasonRule struct {
+	reason string
+	match  func(error) bool
+}
+
+// cpGRPCReasonRules is the ordered classifier table (first match wins):
+// sentinel tags, then errnos, then the timeout test. A new tag goes in the
+// first block, never after an errno rule.
+var cpGRPCReasonRules = []cpGRPCReasonRule{
+	// 1. Explicit stage tags.
+	{"tls_certificate", cpGRPCTagged(errCPGRPCTLSMaterial)},
+	{"address_publish_rejected", cpGRPCTagged(errCPGRPCAddressPublish)},
+	// 2. Generic errnos.
+	{"port_in_use", cpGRPCErrno(syscall.EADDRINUSE)},
+	{"permission_denied", cpGRPCErrno(syscall.EACCES, syscall.EPERM)},
+	{"address_unavailable", cpGRPCErrno(syscall.EADDRNOTAVAIL)},
+	{"descriptors_exhausted", cpGRPCErrno(syscall.EMFILE, syscall.ENFILE)},
+	// 3. Network timeout.
+	{"network_error", func(err error) bool {
+		var ne net.Error
+		return errors.As(err, &ne) && ne.Timeout()
+	}},
+}
+
+func cpGRPCTagged(tag error) func(error) bool {
+	return func(err error) bool { return errors.Is(err, tag) }
+}
+
+func cpGRPCErrno(want ...syscall.Errno) func(error) bool {
+	return func(err error) bool {
+		var errno syscall.Errno
+		if !errors.As(err, &errno) {
+			return false
+		}
+		for _, w := range want {
+			if errno == w {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // cpGRPCBindRemedy returns the operator action for a bounded reason class.

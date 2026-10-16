@@ -21,6 +21,15 @@ import "sync/atomic"
 // drive a private HAState through real transitions without mutating globalHA.
 var haTopologyOverride atomic.Pointer[HAState]
 
+// Bounded transition labels for setTopologyLocked.
+const (
+	haTransitionEnable    = "ha_enable"
+	haTransitionResume    = "ha_resume"
+	haTransitionStandby   = "ha_standby_entry"
+	haTransitionPromote   = "ha_promote"
+	haTransitionSelfFence = "ha_self_fence"
+)
+
 // haTopologySource is the HAState the CP address list derives from.
 func haTopologySource() *HAState {
 	if h := haTopologyOverride.Load(); h != nil {
@@ -44,7 +53,8 @@ func cpAddressListFor(haEnabled bool, peer, myAddr string) []string {
 }
 
 // setTopologyLocked is the ONE writer of h.role and h.peerAddr. Caller holds
-// h.mu (write). When the topology source actually changes, the CP address
+// h.mu (write). transition is a bounded label (haTransition*) naming the
+// caller, carried into the pending state if the republish fails. When the topology source actually changes, the CP address
 // list is republished right here, from the NEW values — under h.mu, so no
 // other transition can interleave, and without re-reading h (the derivation
 // takes the values as arguments; Status() would self-deadlock).
@@ -62,7 +72,7 @@ func cpAddressListFor(haEnabled bool, peer, myAddr string) []string {
 // nothing; the full validate/commit runs only when the list actually changes
 // (enable with a new peer, standby entry against a new leader, a resume after
 // a delayed bind) — boot- and admin-rate events.
-func (h *HAState) setTopologyLocked(role, peer string) {
+func (h *HAState) setTopologyLocked(role, peer, transition string) {
 	if h.role == role && h.peerAddr == peer {
 		return
 	}
@@ -72,9 +82,13 @@ func (h *HAState) setTopologyLocked(role, peer string) {
 	}
 	enabled := role != ""
 	// A no-op unless this node is an active Control Plane (the store has an
-	// address source). A rejection is logged, alerted and surfaced by
-	// rejectPublish; the HA transition itself never fails on it.
-	_, _ = globalConfigStore.reconcileCPAddressesFrom(func() []string {
+	// address source). A failure is NEVER dropped and NEVER rolls the
+	// transition back (Codex review of #1556): rejectPublish logs and alerts
+	// it, and publishOwnedCPAddresses latches the `cp_address_list` pending
+	// state and retries from the live source until it publishes. Why no
+	// transition — authority-gaining included — is refused over it is the
+	// ADR-0005 reasoning in cp_addr_publish.go's header.
+	_ = globalConfigStore.reconcileCPAddressesFrom(transition, func() []string {
 		return cpAddressListFor(enabled, peer, clusterRoleSnapshot().grpcAddr)
 	})
 }

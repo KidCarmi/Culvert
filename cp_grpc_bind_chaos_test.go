@@ -683,6 +683,39 @@ func TestChaos71_DefectBindFailureLogIsRateLimited(t *testing.T) {
 	}
 }
 
+// TestChaos71_ShutdownWithNoControlPlaneReturnsAtOnce is the compose-default
+// counterpart of the backoff gate below: on a node that never asked to be a
+// Control Plane (no supervisor, no activation in flight) both CHAOS-71
+// shutdown steps — the ha-stop hook's activation gate and the
+// control-plane-grpc-stop hook — return immediately, well inside the drain
+// deadline, and the listener plane stays unconfigured.
+func TestChaos71_ShutdownWithNoControlPlaneReturnsAtOnce(t *testing.T) {
+	cpChaosSetup(t) // also clears cpSupervisor for the test
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		beginCPActivationShutdown()
+		done <- stopControlPlaneListener(ctx)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stopControlPlaneListener with no Control Plane: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("shutdown with no Control Plane blocked past the drain deadline")
+	}
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Errorf("shutdown with no Control Plane took %s; it has nothing to stop", d)
+	}
+	if cpGRPCConfigured() {
+		t.Error("a node with no Control Plane reports a configured listener after shutdown")
+	}
+}
+
 // TestChaos71_DefectShutdownIsNotDelayedByABackoff pins rule 4: the
 // control-plane-grpc-stop hook (order 20, inside the 12 s early phase) must
 // never wait out a 30 s backoff.
