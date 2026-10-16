@@ -11,18 +11,47 @@ package main
 // Contributes nothing while the switch is clear, like the other auth_exempt_*
 // rows, so a healthy appliance's report is unchanged.
 //
-// authBackend mirrors the Stage-1 gate's backend term in resolveRequestAuth
-// (credCapable || ssoCapable). Both are LIVE predicates: a persisted SAML/OIDC
-// profile that failed to compile is configured but not usable, so the row
-// says "usable", never "configured". Without a backend the no-credential Default arm
-// is inert and falls through to Stage 2 (TestKillSwitchNoBackend_NoRule_InertStage2),
-// so the row must not claim formerly exempt clients are now authenticated.
+// The backend state mirrors the Stage-1 gate's backend term in
+// resolveRequestAuth (credCapable || ssoCapable) and then separates what is
+// actually loaded:
+//   - ssoCapable (HasEnabledInteractiveProvider) is a LIVE predicate;
+//   - credCapable (hasCredentialCapableProvider) is NOT: it counts an enabled
+//     OIDC/LDAP profile even when it failed to compile and has no live
+//     provider (it is read on every request and deliberately skips the live
+//     map). The gate still challenges then, but nothing loaded can validate
+//     the credential, so the row reports that state on its own.
+//
+// Without any backend the no-credential Default arm is inert and falls
+// through to Stage 2 (TestKillSwitchNoBackend_NoRule_InertStage2), so the row
+// must not claim formerly exempt clients are now authenticated.
+type killSwitchBackend int
+
+const (
+	killSwitchBackendNone      killSwitchBackend = iota // gate sees no backend: Stage 2 decides
+	killSwitchBackendNotLoaded                          // gate sees an enabled credential profile, but none is loaded
+	killSwitchBackendLive                               // a loaded validator or live SSO provider exists
+)
+
 func checkAuthExemptKillSwitch() []OperatorContractCheck {
-	authBackend := hasCredentialCapableProvider() || idpRegistry.HasEnabledInteractiveProvider()
-	return authExemptKillSwitchRows(authBypassDisabled(), authExemptDisabledRuntimeState(), authBackend)
+	return authExemptKillSwitchRows(authBypassDisabled(), authExemptDisabledRuntimeState(), currentKillSwitchBackend())
 }
 
-func authExemptKillSwitchRows(envDisabled, runtimeDisabled, authBackend bool) []OperatorContractCheck {
+func currentKillSwitchBackend() killSwitchBackend {
+	sso := idpRegistry.HasEnabledInteractiveProvider()
+	if !hasCredentialCapableProvider() && !sso {
+		return killSwitchBackendNone
+	}
+	liveCred := cfg != nil && (cfg.GetUser() != "" || cfg.ProviderEnabled())
+	if !liveCred && idpRegistry != nil {
+		liveCred = len(idpRegistry.EnabledCredentialProviders()) > 0
+	}
+	if liveCred || sso {
+		return killSwitchBackendLive
+	}
+	return killSwitchBackendNotLoaded
+}
+
+func authExemptKillSwitchRows(envDisabled, runtimeDisabled bool, backend killSwitchBackend) []OperatorContractCheck {
 	if !envDisabled && !runtimeDisabled {
 		return nil
 	}
@@ -39,7 +68,11 @@ func authExemptKillSwitchRows(envDisabled, runtimeDisabled, authBackend bool) []
 		action = "Unset CULVERT_AUTHBYPASS_DISABLE and restart the node: the environment layer is read once at startup and cannot be cleared from the GUI."
 	}
 	effect := "so clients that were exempt from authentication must now authenticate"
-	if !authBackend {
+	if backend == killSwitchBackendNotLoaded {
+		effect = "so formerly exempt clients are now challenged for credentials, but no loaded provider can validate them: an enabled credential (OIDC/LDAP) profile is configured but failed to load"
+		action = "Fix or re-enable the failed profile under Identity Providers (the startup log names the error) so challenged clients can authenticate. " + action
+	}
+	if backend == killSwitchBackendNone {
 		// Deliberately not an enumeration of per-rule outcomes: without a
 		// backend the result depends on the global default, the rule order
 		// and whether the client presented Proxy-Authorization (which turns
@@ -48,7 +81,7 @@ func authExemptKillSwitchRows(envDisabled, runtimeDisabled, authBackend bool) []
 		// It does not point at the Policy Tester: its stage2Reached flag
 		// assumes a backend for the Default outcome, so on this node it would
 		// contradict the runtime fall-through to Stage 2.
-		effect = "but no credential-capable or live SSO provider is usable on this node (none is configured, or a configured one is disabled or failed to load), so this does not make formerly exempt clients authenticate: their requests are decided by the remaining authentication rules and Stage 2 policy"
+		effect = "but no credential or SSO provider is usable on this node (none is enabled, or an SSO profile failed to load), so this does not make formerly exempt clients authenticate: their requests are decided by the remaining authentication rules and Stage 2 policy"
 	}
 	return []OperatorContractCheck{{
 		Code:           "auth_exempt_kill_switch",
