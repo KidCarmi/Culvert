@@ -78,8 +78,13 @@ func spawnBlockedConsole(t *testing.T, grace time.Duration, watchdog bool) (*exe
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A cancellable context satisfies noctx without capping the run: it is
+	// cancelled only at cleanup, never on a timer, so it cannot mask the hang
+	// the control relies on (production run() has no overall timeout either).
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	// #nosec G204 -- fixed selector against this test binary.
-	cmd := exec.Command(exe, "-test.run=^TestShutdownExitProcess$", "--", "blocked-write")
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestShutdownExitProcess$", "--", "blocked-write")
 	wd := "on"
 	if !watchdog {
 		wd = "off"
