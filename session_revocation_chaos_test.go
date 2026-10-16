@@ -1155,6 +1155,65 @@ func TestChaos73_WallSavesGoThroughTheCoordinator(t *testing.T) {
 // there is no deterministic way to drive it from a test, and a probabilistic
 // one would pass against the defect most runs. Removing the Lock line — the
 // cheapest wrong fix, and exactly the pre-fix shape — fails this gate.
+// persistShape is what the wall below reads out of persistRevocations: the
+// byte offset of each call it cares about, so their ORDER can be asserted.
+type persistShape struct {
+	lockAt          int   // earliest persistMu.Lock, -1 if absent
+	saves           []int // sessionRevoked.SaveRevocations
+	stores          []int // sessionRevocationsDirty.Store
+	allUnlocks      []int // every persistMu.Unlock, however spelled
+	deferredUnlocks map[int]bool
+}
+
+// readPersistShape walks one function body and records those offsets. Split
+// out from the gate so each stays within the repository's complexity budget.
+func readPersistShape(fset *token.FileSet, fn *ast.FuncDecl) persistShape {
+	sh := persistShape{lockAt: -1, deferredUnlocks: map[int]bool{}}
+	named := func(n ast.Node) (recv, name string, off int, ok bool) {
+		call, isCall := n.(*ast.CallExpr)
+		if !isCall {
+			return "", "", 0, false
+		}
+		sel, isSel := call.Fun.(*ast.SelectorExpr)
+		if !isSel {
+			return "", "", 0, false
+		}
+		id, isID := sel.X.(*ast.Ident)
+		if !isID {
+			return "", "", 0, false
+		}
+		return id.Name, sel.Sel.Name, fset.Position(call.Pos()).Offset, true
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		// An unlock that is NOT deferred releases the lock part-way through
+		// the body, which is the defect wearing a lock.
+		if d, isDefer := n.(*ast.DeferStmt); isDefer {
+			if recv, name, off, ok := named(d.Call); ok && recv == "persistMu" && name == "Unlock" {
+				sh.deferredUnlocks[off] = true
+			}
+			return true
+		}
+		recv, name, off, ok := named(n)
+		if !ok {
+			return true
+		}
+		switch {
+		case recv == "persistMu" && name == "Lock":
+			if sh.lockAt < 0 || off < sh.lockAt {
+				sh.lockAt = off
+			}
+		case recv == "sessionRevoked" && name == "SaveRevocations":
+			sh.saves = append(sh.saves, off)
+		case recv == "sessionRevocationsDirty" && name == "Store":
+			sh.stores = append(sh.stores, off)
+		case recv == "persistMu" && name == "Unlock":
+			sh.allUnlocks = append(sh.allUnlocks, off)
+		}
+		return true
+	})
+	return sh
+}
+
 func TestChaos73_WallPersistHoldsOneLockOverSaveAndFlag(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "session_revocation_bounds.go"), nil, 0)
@@ -1174,48 +1233,9 @@ func TestChaos73_WallPersistHoldsOneLockOverSaveAndFlag(t *testing.T) {
 			"longer exists and proves nothing")
 	}
 
-	lockAt := -1
-	saves, stores := []int{}, []int{}
-	// Unlocks that run at return, and every unlock however it is spelled. An
-	// unlock that is NOT deferred releases the lock part-way through the body,
-	// which is the defect wearing a lock.
-	deferredUnlocks, allUnlocks := map[int]bool{}, []int{}
-	ast.Inspect(fn, func(n ast.Node) bool {
-		if d, ok := n.(*ast.DeferStmt); ok {
-			if sel, ok := d.Call.Fun.(*ast.SelectorExpr); ok {
-				if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "persistMu" && sel.Sel.Name == "Unlock" {
-					deferredUnlocks[fset.Position(d.Call.Pos()).Offset] = true
-				}
-			}
-			return true
-		}
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		recv, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		off := fset.Position(call.Pos()).Offset
-		switch {
-		case recv.Name == "persistMu" && sel.Sel.Name == "Lock":
-			if lockAt < 0 || off < lockAt {
-				lockAt = off
-			}
-		case recv.Name == "sessionRevoked" && sel.Sel.Name == "SaveRevocations":
-			saves = append(saves, off)
-		case recv.Name == "sessionRevocationsDirty" && sel.Sel.Name == "Store":
-			stores = append(stores, off)
-		case recv.Name == "persistMu" && sel.Sel.Name == "Unlock":
-			allUnlocks = append(allUnlocks, off)
-		}
-		return true
-	})
+	sh := readPersistShape(fset, fn)
+	lockAt, saves, stores := sh.lockAt, sh.saves, sh.stores
+	deferredUnlocks, allUnlocks := sh.deferredUnlocks, sh.allUnlocks
 
 	// Not vacuous: the body must still contain the write and BOTH flag stores
 	// this gate claims to be ordering.
