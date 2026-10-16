@@ -80,19 +80,24 @@ jobs:
         # console, access binary and provisioning from a clean checkout of the
         # SAME commit. Image ID is the tar's OCI manifest digest.
         include:
-          # On-appliance LDAP/AD (owner follow-up 6097484537 item 4): the RETAINED
-          # bad788e5 OVA against a Samba AD DC provisioned on the runner from
-          # Ubuntu packages (an AD stand-in, not Microsoft AD).
-          - variant: candidate-bad788e54ffe
+          # F-P2 fix (owner-approved, #1528): the ClamAV sidecar engine moves
+          # 1.4.6 -> 1.5.4, closing the detection bypass reported to Cisco PSIRT
+          # as PSIRT-0035161972. This BUILDS a fresh candidate OVA from PR #1528
+          # head 6aa900cd (its own Deep PR Gate image, run 38873584208) and
+          # qualifies it (preflight -> up -> qualify -> recovery -> history).
+          # The 1.5.4 scanner-specific legs run as a SECOND phase against THIS
+          # build's retained OVA, once it records the artifact id + sidecar
+          # archive sha256 + index digest: [cache-bypass] re-proves the 60s
+          # clean-verdict quarantine on the 1.5.4 engine, and [fp2-isolated]
+          # re-runs the F-P2 reproduction against the baked 1.5.4 sidecar (must
+          # deliver 0, where the 1.4.6 sidecar delivered > 0).
+          - variant: candidate-6aa900cdbb96
             provisioning: source
-            source_sha: "bad788e54ffef2a2f8490ba27ebfe027a2a6eb11"
-            image_run: "38040017115"
-            image_tar_sha256: "b1d63190dec3f45a733fc78e40fd4f844390f4b918c66c9f1ae3f573d6835790"
-            expect_image_id: "sha256:ac1909ec95d7588a86737cfa6d8927b0e7c04a5fe12891706eec86591dbb2ad7"
-            retained_run: "38040972664"
-            retained_sha256: "87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c"
+            source_sha: "6aa900cdbb964f8b79c4eaba8fad62148e4a0322"
+            image_run: "38873584208"
+            image_tar_sha256: "ede6e067d6ec89d0084e1caf4346ee48794a8addeb2b176b55e106605731118d"
+            expect_image_id: "sha256:11fc13cd07ac4f54032e31877cd383f0d4297ec6671f0a68ebb29f2b24cad39f"
             recovery_reboots: "0"
-            ldap: "1"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
