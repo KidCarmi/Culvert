@@ -49,6 +49,11 @@ func TestAuthExemptKillSwitchRowsNoBackend(t *testing.T) {
 		}
 		// Per-rule outcomes depend on the default, rule order and presented
 		// headers; the row must not present a list of them as exhaustive.
+		// The backend predicates are live: a configured profile that failed to
+		// load is not usable, so the row must not claim nothing is configured.
+		if strings.Contains(rows[0].Message, "backend is configured") || !strings.Contains(rows[0].Message, "failed to load") {
+			t.Fatalf("no-backend row must describe usable providers, not configured ones, got %q", rows[0].Message)
+		}
 		if strings.Contains(rows[0].Message, "407") || strings.Contains(rows[0].Message, "403") {
 			t.Fatalf("no-backend row must not enumerate per-rule status codes, got %q", rows[0].Message)
 		}

@@ -12,7 +12,9 @@ package main
 // rows, so a healthy appliance's report is unchanged.
 //
 // authBackend mirrors the Stage-1 gate's backend term in resolveRequestAuth
-// (credCapable || ssoCapable). Without a backend the no-credential Default arm
+// (credCapable || ssoCapable). Both are LIVE predicates: a persisted SAML/OIDC
+// profile that failed to compile is configured but not usable, so the row
+// says "usable", never "configured". Without a backend the no-credential Default arm
 // is inert and falls through to Stage 2 (TestKillSwitchNoBackend_NoRule_InertStage2),
 // so the row must not claim formerly exempt clients are now authenticated.
 func checkAuthExemptKillSwitch() []OperatorContractCheck {
@@ -46,7 +48,7 @@ func authExemptKillSwitchRows(envDisabled, runtimeDisabled, authBackend bool) []
 		// It does not point at the Policy Tester: its stage2Reached flag
 		// assumes a backend for the Default outcome, so on this node it would
 		// contradict the runtime fall-through to Stage 2.
-		effect = "but no credential or SSO backend is configured, so this does not make formerly exempt clients authenticate: their requests are decided by the remaining authentication rules and Stage 2 policy"
+		effect = "but no credential-capable or live SSO provider is usable on this node (none is configured, or a configured one is disabled or failed to load), so this does not make formerly exempt clients authenticate: their requests are decided by the remaining authentication rules and Stage 2 policy"
 	}
 	return []OperatorContractCheck{{
 		Code:           "auth_exempt_kill_switch",
