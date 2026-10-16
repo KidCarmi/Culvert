@@ -63,6 +63,128 @@ func scopeExtent(n ast.Node) (lo, hi token.Pos, opens bool) {
 	return 0, 0, false
 }
 
+// handleScan is the per-function result of resolving one name: every local
+// declaration that shadows the package handle, and every `=` write to the name.
+type handleScan struct {
+	shadows []localShadow
+	writes  []token.Pos
+}
+
+// signatureShadows returns the shadow a receiver, parameter or named result
+// named name casts over the whole body.
+func signatureShadows(fn *ast.FuncDecl, name string) []localShadow {
+	var out []localShadow
+	for _, fl := range []*ast.FieldList{fn.Recv, fn.Type.Params, fn.Type.Results} {
+		if fl == nil {
+			continue
+		}
+		for _, f := range fl.List {
+			for _, id := range f.Names {
+				if id.Name == name {
+					out = append(out, localShadow{pos: fn.Body.Lbrace, lo: fn.Body.Lbrace, hi: fn.Body.Rbrace})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// enclosingScope walks the ancestor stack outward from at and returns the
+// extent of the nearest scope-opening node, defaulting to the function body.
+func enclosingScope(stack []ast.Node, at int, body *ast.BlockStmt) (lo, hi token.Pos) {
+	for i := at; i >= 0; i-- {
+		if l, h, opens := scopeExtent(stack[i]); opens {
+			return l, h
+		}
+	}
+	return body.Lbrace, body.Rbrace
+}
+
+// assignNode records a `:=` shadow or an `=` write to name from one assignment.
+func (sc *handleScan) assignNode(v *ast.AssignStmt, name string, scope func() (token.Pos, token.Pos)) {
+	for _, lhs := range v.Lhs {
+		id, ok := lhs.(*ast.Ident)
+		if !ok || id.Name != name {
+			continue
+		}
+		switch v.Tok {
+		case token.DEFINE:
+			lo, hi := scope()
+			sc.shadows = append(sc.shadows, localShadow{pos: id.Pos(), lo: lo, hi: hi})
+		case token.ASSIGN:
+			sc.writes = append(sc.writes, id.Pos())
+		}
+	}
+}
+
+// varNode records a `var name …` shadow.
+func (sc *handleScan) varNode(v *ast.GenDecl, name string, scope func() (token.Pos, token.Pos)) {
+	if v.Tok != token.VAR {
+		return
+	}
+	for _, spec := range v.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for _, id := range vs.Names {
+			if id.Name == name {
+				lo, hi := scope()
+				sc.shadows = append(sc.shadows, localShadow{pos: id.Pos(), lo: lo, hi: hi})
+			}
+		}
+	}
+}
+
+// rangeNode records a `for name := range …` shadow, scoped to the range stmt.
+func (sc *handleScan) rangeNode(v *ast.RangeStmt, name string) {
+	if v.Tok != token.DEFINE {
+		return
+	}
+	for _, k := range []ast.Expr{v.Key, v.Value} {
+		if id, ok := k.(*ast.Ident); ok && id.Name == name {
+			sc.shadows = append(sc.shadows, localShadow{pos: id.Pos(), lo: v.Pos(), hi: v.End()})
+		}
+	}
+}
+
+// scanFuncForHandle collects the shadows and writes of name within fn.
+func scanFuncForHandle(fn *ast.FuncDecl, name string) handleScan {
+	sc := handleScan{shadows: signatureShadows(fn, name)}
+	var stack []ast.Node
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		stack = append(stack, n)
+		scope := func() (token.Pos, token.Pos) {
+			return enclosingScope(stack, len(stack)-2, fn.Body)
+		}
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			sc.assignNode(v, name, scope)
+		case *ast.GenDecl:
+			sc.varNode(v, name, scope)
+		case *ast.RangeStmt:
+			sc.rangeNode(v, name)
+		}
+		return true
+	})
+	return sc
+}
+
+// shadowedAt reports whether a declaration of the handle's name is visible at
+// pos: in an enclosing scope, and lexically before it.
+func shadowedAt(shadows []localShadow, pos token.Pos) bool {
+	for _, sh := range shadows {
+		if sh.pos <= pos && pos >= sh.lo && pos < sh.hi {
+			return true
+		}
+	}
+	return false
+}
+
 // assignsPackageHandle reports the functions in file that assign to the
 // PACKAGE-LEVEL name.
 //
@@ -85,98 +207,9 @@ func assignsPackageHandle(file *ast.File, name string) []string {
 		if !ok || fn.Body == nil {
 			continue
 		}
-
-		// The receiver, parameters and named results shadow the handle for the
-		// whole body.
-		var shadows []localShadow
-		for _, fl := range []*ast.FieldList{fn.Recv, fn.Type.Params, fn.Type.Results} {
-			if fl == nil {
-				continue
-			}
-			for _, f := range fl.List {
-				for _, id := range f.Names {
-					if id.Name == name {
-						shadows = append(shadows, localShadow{pos: fn.Body.Lbrace, lo: fn.Body.Lbrace, hi: fn.Body.Rbrace})
-					}
-				}
-			}
-		}
-
-		// Collect every local declaration of the name with the scope it opens in,
-		// and every `=` write to it, tracking the ancestor stack as we go.
-		type write struct {
-			pos token.Pos
-		}
-		var writes []write
-		var stack []ast.Node
-		ast.Inspect(fn, func(n ast.Node) bool {
-			if n == nil {
-				stack = stack[:len(stack)-1]
-				return false
-			}
-			stack = append(stack, n)
-
-			declaringScope := func(at int) (lo, hi token.Pos) {
-				for i := at; i >= 0; i-- {
-					if l, h, opens := scopeExtent(stack[i]); opens {
-						return l, h
-					}
-				}
-				return fn.Body.Lbrace, fn.Body.Rbrace
-			}
-
-			switch v := n.(type) {
-			case *ast.AssignStmt:
-				for _, lhs := range v.Lhs {
-					id, ok := lhs.(*ast.Ident)
-					if !ok || id.Name != name {
-						continue
-					}
-					if v.Tok == token.DEFINE {
-						lo, hi := declaringScope(len(stack) - 2)
-						shadows = append(shadows, localShadow{pos: id.Pos(), lo: lo, hi: hi})
-					} else if v.Tok == token.ASSIGN {
-						writes = append(writes, write{pos: id.Pos()})
-					}
-				}
-			case *ast.GenDecl:
-				if v.Tok != token.VAR {
-					return true
-				}
-				for _, spec := range v.Specs {
-					vs, ok := spec.(*ast.ValueSpec)
-					if !ok {
-						continue
-					}
-					for _, id := range vs.Names {
-						if id.Name == name {
-							lo, hi := declaringScope(len(stack) - 2)
-							shadows = append(shadows, localShadow{pos: id.Pos(), lo: lo, hi: hi})
-						}
-					}
-				}
-			case *ast.RangeStmt:
-				if v.Tok != token.DEFINE {
-					return true
-				}
-				for _, k := range []ast.Expr{v.Key, v.Value} {
-					if id, ok := k.(*ast.Ident); ok && id.Name == name {
-						shadows = append(shadows, localShadow{pos: id.Pos(), lo: v.Pos(), hi: v.End()})
-					}
-				}
-			}
-			return true
-		})
-
-		for _, w := range writes {
-			shadowed := false
-			for _, sh := range shadows {
-				if sh.pos <= w.pos && w.pos >= sh.lo && w.pos < sh.hi {
-					shadowed = true
-					break
-				}
-			}
-			if !shadowed {
+		sc := scanFuncForHandle(fn, name)
+		for _, w := range sc.writes {
+			if !shadowedAt(sc.shadows, w) {
 				out = append(out, fn.Name.Name)
 				break
 			}
