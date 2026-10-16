@@ -96,7 +96,7 @@ outage is adopted within minutes of recovery, not when the 7-day ceiling
 expires. It logs `IDP_METADATA_REVALIDATED` when it does. While the IdP is
 still unreachable the cached provider keeps serving.
 
-**The degradation alert does not depend on another fetch.** A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence — and it does not run at all on a node with no enabled remote-metadata profile.
+**The degradation alert does not depend on another fetch.** A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence. It runs on **every** node, including one that has no remote-metadata profile yet: a Data Plane receives its profiles through the CP→DP snapshot, so starting the watchdog only where a profiles file is configured would leave exactly the pushed-configuration nodes unwatched. With no open episode its sweep does nothing.
 
 **A dark provider recovers on its own.** If a profile still cannot be compiled
 — unreachable at boot with nothing cached — the appliance retries at a bounded
@@ -265,7 +265,8 @@ safe at any time; it costs only the fallback.
   resolver outage reject a cached document, which is the whole failure this
   page exists to prevent. So the trade is deliberate and it is visible:
   `culvert_idp_authz_endpoint_unverified_total` rising, plus one
-  `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line per minute naming the profile.
+  `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line **per 5 minutes** naming the profile
+  that triggered it (the counter carries the full magnitude).
   **If you see it: fix this node's DNS.** A provider compiled while the
   resolver was healthy carries a verified endpoint.
 
