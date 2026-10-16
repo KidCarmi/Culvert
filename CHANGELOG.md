@@ -93,6 +93,36 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and serialized with an empty `Host`, then asserts the refusal, so the branch
   cannot be reverted by repeating the original reasoning.
 
+  **Correction round 2 — the comparison must not repair what the wire keeps
+  (Codex P1, PR #1632).** Square brackets are legal only around an IP literal,
+  but `hostutil.StripHostPort` ends in `strings.Trim(host, "[]")` — correct for
+  its own callers, which must accept the de-bracketed IPv6 shapes that reach
+  scan/bypass lookups — so it turned `Host: [allowed.example.com]` into the bare
+  authorized name. Measured, not argued: `http.ReadRequest` accepts that header
+  and keeps the brackets in `req.Host`, and `Request.Write` forwards those bytes
+  **verbatim**. So the pin saw a match for the authorized host and forwarded a
+  bracketed authority no vhost is configured for, letting a shared front end
+  answer from its default vhost — this gate's own bypass, reached *through* the
+  comparison rather than around it. The inner authority's bracket syntax is now
+  validated before anything is stripped: brackets must enclose a value that
+  parses as an IP, and a stray, unmatched or nested bracket is refused. The
+  check sits in this gate, not in `StripHostPort`, because that helper is a
+  shared seam the threat feed, DPI scanner, scan-exclusion matcher, autoexclude
+  cache and traffic redactor all read through. Only the inner side is checked:
+  `handleTunnelInspect` derives `hostOnly` through `net.SplitHostPort`, so a
+  bracketed CONNECT authority is already de-bracketed consistently for policy,
+  the dial and the upstream `ServerName`.
+
+  The sibling spellings were measured too, and are deliberately still accepted
+  because they are not this defect: a U-label is sent as the A-label by
+  `Request.Write` (`bücher.example.com` goes out as `xn--bcher-kva.example.com`),
+  so its forwarded bytes already match what was authorized; the `Host` field is
+  case-insensitive; and a trailing root dot is a valid authority for the same DNS
+  name. `TestInnerHostPin_BracketedDNSAuthorityIsRefused` gates the refusal and
+  pins the U-label control beside it, both asserted against the real stdlib
+  before the predicate is consulted, since the defect is exactly that the
+  comparison and the wire disagreed.
+
   New counter `culvert_proxy_inner_host_mismatch_blocked_total` (always emitted,
   so a flat zero means "no client has done this", never "the gate is off") and an
   `INNER_HOST_MISMATCH` log line naming **both** hosts, since either alone says

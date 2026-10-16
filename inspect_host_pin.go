@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strings"
 	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -173,6 +174,11 @@ func innerHostPinnedToTunnel(innerHost, tunnelHost string) bool {
 	if tunnelHost == "" {
 		return false
 	}
+	if !innerAuthorityBracketsValid(innerHost) {
+		// Brackets that do not enclose an IP literal: a malformed authority the
+		// comparison would repair but the wire would not. See the function.
+		return false
+	}
 	tunnelBare := hostutil.StripHostPort(tunnelHost)
 	if net.ParseIP(tunnelBare) != nil {
 		// CONNECT by address: the proxy holds no name for this destination, so
@@ -188,6 +194,68 @@ func innerHostPinnedToTunnel(innerHost, tunnelHost string) bool {
 		return false
 	}
 	return inner == tunnel
+}
+
+// innerAuthorityBracketsValid reports whether any square brackets in a
+// client-supplied inner authority are the RFC 3986 IPv6-literal form. Brackets
+// are legal ONLY around an IP literal.
+//
+// It exists because the pin compares a REPAIRED value while the origin receives
+// an UNREPAIRED one, and that gap is exploitable (Codex P1 on PR #1632,
+// verified). Measured against the stdlib: http.ReadRequest accepts
+// "Host: [allowed.example.com]" and yields req.Host with the brackets intact,
+// and Request.Write forwards those bytes verbatim. hostutil.StripHostPort,
+// meanwhile, ends in strings.Trim(host, "[]") — correct for its own callers,
+// which must accept the de-bracketed IPv6 shapes that reach scan/bypass
+// lookups — so it silently turns "[allowed.example.com]" into
+// "allowed.example.com". The pin would therefore see a match for the authorized
+// host and forward a bracketed authority no vhost is configured for, letting a
+// shared front end answer from its default vhost: the same unevaluated-
+// destination bypass this gate exists to close, reached through the comparison
+// rather than around it.
+//
+// The check belongs HERE and not in hostutil.StripHostPort. That helper is a
+// shared seam the threat feed, the DPI scanner, the scan-exclusion matcher, the
+// autoexclude cache and the traffic redactor all read through, and its
+// bracket-trimming is deliberate for them; tightening it for this gate's needs
+// would change behaviour for every one of those callers.
+//
+// Only the INNER side is checked. The tunnel side cannot carry brackets:
+// handleTunnelInspect derives hostOnly through net.SplitHostPort, which removes
+// them, so a bracketed CONNECT authority is already de-bracketed consistently
+// for policy, the dial and the upstream ServerName before this gate runs.
+//
+// The sibling spellings the probe covered are deliberately NOT refused here,
+// because they are not this defect:
+//
+//   - A U-label inner host is safe: Request.Write converts it to the A-label on
+//     the wire (measured — "bücher.example.com" is sent as
+//     "xn--bcher-kva.example.com"), so the forwarded bytes already match what
+//     the pin authorized.
+//   - Case is safe: the Host field is case-insensitive, so an origin cannot
+//     route on it differently.
+//   - A trailing root dot is a VALID authority for the same DNS name and is
+//     treated as equivalent by the origin stacks that matter, so refusing it
+//     would reject conforming clients. It is the one accepted spelling whose
+//     forwarded bytes still differ from the authorized form; see §6 of the
+//     review document.
+func innerAuthorityBracketsValid(authority string) bool {
+	if !strings.ContainsAny(authority, "[]") {
+		return true
+	}
+	bare := authority
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		// "[v6]:port" — SplitHostPort removes the brackets for this shape.
+		bare = h
+	} else if len(bare) >= 2 && bare[0] == '[' && bare[len(bare)-1] == ']' {
+		bare = bare[1 : len(bare)-1]
+	} else {
+		return false // a bracket present without a matched surrounding pair
+	}
+	if strings.ContainsAny(bare, "[]") {
+		return false // nested or stray brackets
+	}
+	return net.ParseIP(bare) != nil
 }
 
 // blockInnerHostMismatch charges the counters, logs the refusal and emits the

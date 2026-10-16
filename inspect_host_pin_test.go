@@ -161,6 +161,8 @@ func TestInnerHostPinnedToTunnel_Equivalences(t *testing.T) {
 		{"IPv4 literal", "203.0.113.5", "203.0.113.5", true, "IP literals have no IDNA form"},
 		{"bracketed IPv6 inner against de-ported tunnel", "[2001:db8::1]", "2001:db8::1", true,
 			"the Host header brackets IPv6; SplitHostPort already de-bracketed the tunnel side"},
+		{"bracketed IPv6 with a port", "[2001:db8::1]:8443", "2001:db8::1", true,
+			"the legitimate bracket form must keep working, with and without a port"},
 		// SCOPE: a CONNECT to an address carries no name to pin against. The
 		// client resolved the origin itself and names it in SNI and Host — the
 		// shape connectAndTLS models and real clients produce (curl --resolve).
@@ -186,6 +188,20 @@ func TestInnerHostPinnedToTunnel_Equivalences(t *testing.T) {
 			"not a prefix game either"},
 		{"different IP literal", "203.0.113.6", "203.0.113.5", true,
 			"the tunnel side is an address, so the pin does not fire at all (scope)"},
+		// Brackets are legal ONLY around an IP literal. StripHostPort would
+		// repair "[name]" to a bare name that MATCHES, while Request.Write
+		// forwards the bracketed bytes verbatim — so the comparison and the wire
+		// would disagree. Codex P1 on PR #1632.
+		{"bracketed DNS name posing as the authorized host", "[allowed.example.com]", "allowed.example.com", false,
+			"StripHostPort repairs it to a match; the wire keeps the brackets and no vhost is configured for them"},
+		{"bracketed DNS name with a port", "[allowed.example.com]:443", "allowed.example.com", false,
+			"SplitHostPort de-brackets this shape too, so it needs the same refusal"},
+		{"stray closing bracket", "allowed.example.com]", "allowed.example.com", false,
+			"a bracket without a matched surrounding pair is malformed"},
+		{"stray opening bracket", "[allowed.example.com", "allowed.example.com", false,
+			"likewise"},
+		{"nested brackets", "[[2001:db8::1]]", "allowed.example.com", false,
+			"never a valid authority"},
 		{"inner IP literal against a named tunnel", "203.0.113.5", "allowed.example.com", false,
 			"no conforming client sends an address in Host for a connection it opened to a name"},
 		{"unnormalizable inner host", "xn--.example.com", "allowed.example.com", false,
@@ -437,4 +453,76 @@ func TestInnerHostPin_EmptyInnerHostIsRefused(t *testing.T) {
 	if got, want := proxyInnerHostMismatchBlocked.Load(), int64(2); got != want {
 		t.Errorf("counter = %d, want %d", got, want)
 	}
+}
+
+// TestInnerHostPin_BracketedDNSAuthorityIsRefused is the third DEFECT GATE
+// (Codex P1 on PR #1632). It states the MECHANISM against the real stdlib
+// rather than trusting the claim, because the defect is precisely that the
+// comparison and the wire disagree — a test that only checked the predicate
+// would not show why the predicate has to care.
+//
+// It also pins what must NOT be refused alongside it: Request.Write converts a
+// U-label to the A-label on the wire, so that spelling's forwarded bytes
+// already match what the pin authorized and refusing it would reject a
+// conforming client.
+func TestInnerHostPin_BracketedDNSAuthorityIsRefused(t *testing.T) {
+	resetInnerHostMismatchStateForTest()
+	t.Cleanup(resetInnerHostMismatchStateForTest)
+	chaos66CaptureLog(t)
+
+	wireHost := func(t *testing.T, hostHdr string) string {
+		t.Helper()
+		req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(
+			"GET /x HTTP/1.1\r\nHost: " + hostHdr + "\r\nConnection: close\r\n\r\n")))
+		if err != nil {
+			t.Fatalf("precondition: http.ReadRequest must accept Host %q on this path; got %v", hostHdr, err)
+		}
+		req.URL.Scheme = "https"
+		var sb strings.Builder
+		if werr := req.Write(&sb); werr != nil {
+			t.Fatalf("precondition: Request.Write(%q) errored: %v", hostHdr, werr)
+		}
+		for _, line := range strings.Split(sb.String(), "\r\n") {
+			if strings.HasPrefix(strings.ToLower(line), "host:") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "Host:"))
+			}
+		}
+		t.Fatalf("precondition: no Host line serialized for %q", hostHdr)
+		return ""
+	}
+
+	// PRECONDITION: the bracketed authority survives to the wire unrepaired,
+	// while StripHostPort repairs it into the authorized name.
+	const bracketed = "[allowed.example.com]"
+	if got := wireHost(t, bracketed); got != bracketed {
+		t.Fatalf("precondition: expected %q forwarded verbatim, got %q", bracketed, got)
+	}
+	if repaired := hostutil.StripHostPort(bracketed); repaired != "allowed.example.com" {
+		t.Fatalf("precondition: expected StripHostPort to repair %q to the bare name, got %q",
+			bracketed, repaired)
+	}
+
+	// THE GATE: the pin must refuse it rather than compare the repaired value.
+	ex, forwarded, _, spy := pinExchange("allowed.example.com", bracketed)
+	if out := runInspectExchange(ex); out.kind != exBlocked || *forwarded {
+		t.Errorf("a bracketed authority posing as the authorized host was forwarded "+
+			"(kind=%v forwarded=%v) — the wire would carry %q, which no vhost is configured for, "+
+			"so a shared front end can answer from its default", out.kind, *forwarded, bracketed)
+	}
+	if spy.calls != 1 {
+		t.Errorf("responder calls = %d, want 1", spy.calls)
+	}
+
+	// CONTROL: a U-label is NOT this defect — Go sends the A-label, so the
+	// forwarded bytes already match the authorized host.
+	t.Run("u-label is not refused because the wire carries the A-label", func(t *testing.T) {
+		const ulabel = "bücher.example.com"
+		const alabel = "xn--bcher-kva.example.com"
+		if got := wireHost(t, ulabel); got != alabel {
+			t.Fatalf("precondition: expected Request.Write to send %q for %q, got %q", alabel, ulabel, got)
+		}
+		if !innerHostPinnedToTunnel(ulabel, alabel) {
+			t.Error("a U-label inner host against its own A-label tunnel must stay pinned")
+		}
+	})
 }

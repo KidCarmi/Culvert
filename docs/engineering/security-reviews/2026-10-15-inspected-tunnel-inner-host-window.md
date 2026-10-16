@@ -246,6 +246,54 @@ against the real stdlib before asserting the refusal, so the branch cannot be
 reverted by someone repeating the original reasoning. Verified failing against
 the pre-correction body on both a named and an address tunnel.
 
+### 2.2 Correction round 2 — the comparison must not repair what the wire keeps (Codex P1)
+
+The pin reduced both sides with `hostutil.StripHostPort` before comparing. That
+helper ends in `strings.Trim(host, "[]")`, which is right for *its* callers (the
+threat feed, DPI scanner, scan-exclusion matcher, autoexclude cache and traffic
+redactor all need the de-bracketed IPv6 shapes), but it meant the pin **repaired**
+a malformed authority into a match that the wire never saw.
+
+Measured against the stdlib, not argued:
+
+| Inner `Host` | `req.Host` after `ReadRequest` | Forwarded by `Request.Write` |
+|---|---|---|
+| `[allowed.example.com]` | `[allowed.example.com]` | **`[allowed.example.com]`** (verbatim) |
+| `[allowed.example.com]:443` | same, with port | same, with port |
+| `bücher.example.com` | `bücher.example.com` | `xn--bcher-kva.example.com` |
+| `allowed.example.com.` | `allowed.example.com.` | `allowed.example.com.` |
+| `ALLOWED.EXAMPLE.COM` | uppercase | uppercase |
+
+So a client could send `Host: [allowed.example.com]` on a tunnel authorized for
+`allowed.example.com`: `StripHostPort` trimmed the brackets, the comparison
+matched, and the upstream received a bracketed authority **no vhost is
+configured for** — so a shared front end answers from its default vhost. That is
+this finding's own bypass, reached through the comparison rather than around it.
+
+**Fix.** The inner authority's bracket syntax is validated before anything is
+stripped (`innerAuthorityBracketsValid`): brackets must enclose a value that
+parses as an IP, and a stray, unmatched or nested bracket is refused. Placed in
+this gate rather than in `StripHostPort`, so the shared seam's behaviour is
+unchanged for every other caller. Only the inner side needs it —
+`handleTunnelInspect` derives `hostOnly` through `net.SplitHostPort`, which
+removes brackets, so a bracketed CONNECT authority is already de-bracketed
+consistently for policy, the dial and the upstream `ServerName`.
+
+**What is deliberately still accepted, and why it is not the same defect.** The
+U-label row above is the useful one: Go converts it to the A-label on the wire,
+so its forwarded bytes already match what the pin authorized — refusing it would
+reject a conforming client for no gain. Case is spec-insensitive. The trailing
+root dot is a valid authority for the same DNS name, universally treated as
+equivalent by the origin stacks that matter; it is the one accepted spelling
+whose forwarded bytes still differ from the authorized form, and it is recorded
+as residual in §6 rather than refused.
+
+`TestInnerHostPin_BracketedDNSAuthorityIsRefused` gates it, verified failing
+against the pre-correction body, and asserts both preconditions (verbatim
+forwarding, and `StripHostPort`'s repair) against the real stdlib before
+consulting the predicate — because the defect is precisely that the comparison
+and the wire disagreed, which a predicate-only test would not show.
+
 ## 3. Files
 
 | File | Change |
@@ -429,18 +477,27 @@ suite under) — and `AGENTS.md` and `conventions.md` both forbid those. **Corre
    rather than merely consistent. That is a policy-engine change, not a gate, and is the
    recorded follow-up. This change closes the case that is both exploitable today and
    decidable at this seam: a tunnel authorized for a **name**, reused for a different name.
-3. **Attribution is now consistent but still coarse.** A refused mismatch is logged, but an
+3. **One accepted spelling still differs from the authorized bytes on the wire:
+   a trailing root dot.** `Host: allowed.example.com.` is canonicalized to the
+   authorized host by the pin and forwarded with the dot intact (§2.2's table).
+   It is a valid authority for the same DNS name and the origin stacks that
+   matter treat it as equivalent, so refusing it would reject conforming
+   clients — but a front end that matched vhosts byte-exactly could in principle
+   fall through to its default. The general principle §2.2 establishes is that
+   the comparison must not repair what the wire keeps; this is the one place the
+   gate accepts a difference, knowingly.
+4. **Attribution is now consistent but still coarse.** A refused mismatch is logged, but an
    *allowed* inner request is still recorded under the CONNECT host. With the pin in place
    those are the same string, so the log is no longer wrong — but a deployment relying on
    per-URL attribution should read `LogFullURI`, not the host column.
-4. **`#1626`'s crash containment is a genuine fail-closed→fail-contained direction change**
+5. **`#1626`'s crash containment is a genuine fail-closed→fail-contained direction change**
    (flagged by the cluster review, not independently re-derived): a panic mid-snapshot-apply
    now leaves a *blended* configuration for up to one poll interval instead of killing the
    process, and `markConfigSnapshotApplyRejected` is report-only. If the new generation
    tightens policy, the tightening is not enforced for that window. That is the stated
    CHAOS-24 containment trade applied repo-wide; recorded for the owner's call, not as a
    defect.
-5. **Not run in this environment.** `golangci-lint` v2.5.0 is built with go1.25.1 and
+6. **Not run in this environment.** `golangci-lint` v2.5.0 is built with go1.25.1 and
    panics on this repo's go1.26 packages — including untouched files, which I confirmed — so
    the lint lane is **not run** here and belongs to CI. The frontend tree, the
    `cmd/culvert-maint` module, the `benchgate` lane, the sharded race lane with its
