@@ -430,18 +430,17 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		return // nothing changed
 	}
 	snapForDisk := snap
-	applyExternalAuthSnapshotSettings(snap)
-	if err := syncSnapshotIdPProfiles(snap); err != nil {
-		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
-		markConfigSnapshotApplyRejected()
-		return
-	}
-	snap.IdPProfiles = nil
-	// fetchAndApply pre-validated above, so a rejection here is unexpected; log
-	// and do NOT persist last-good or advance lastVersion on it (a partial/empty
-	// apply must not be recorded as the new good state).
-	if err := applyConfigSnapshot(snap); err != nil {
-		logger.Printf("DataPlane: config snapshot v%d apply rejected: %v", snap.Version, err)
+	// CHAOS-71: the full path's mutations START HERE, not at applyConfigSnapshot
+	// — external-auth settings and the IdP registry are live state, and the IdP
+	// sync compiles every enabled provider. Bracketing only the inner region
+	// left a panic in either of them looking like a clean apply. One begin and
+	// one end around a single call, so no future early return inside the
+	// sequence can bypass the clear; only a panic can, which is the condition.
+	// end is NOT deferred — see configsnapshot_apply_health.go.
+	beginConfigSnapshotApplyMutation()
+	err := applyFullSnapshotMutations(&snap)
+	endConfigSnapshotApplyMutation()
+	if err != nil {
 		markConfigSnapshotApplyRejected()
 		return
 	}
@@ -450,6 +449,30 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	markConfigSnapshotApplyOK()
 	c.lastVersion.Store(snap.Version)
 	c.lastPolicyVersion.Store(snap.PolicyVersion)
+}
+
+// applyFullSnapshotMutations is the full path's mutating sequence: every call
+// here replaces live enforcement state. Extracted so fetchAndApply brackets it
+// with exactly one begin/end (CHAOS-71); order is preserved verbatim.
+//
+// snap is taken by pointer only because the caller's copy must observe the
+// IdPProfiles clearing between the sync and the snapshot apply, which the
+// pre-extraction code did inline.
+func applyFullSnapshotMutations(snap *ConfigSnapshot) error {
+	applyExternalAuthSnapshotSettings(*snap)
+	if err := syncSnapshotIdPProfiles(*snap); err != nil {
+		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
+		return err
+	}
+	snap.IdPProfiles = nil
+	// fetchAndApply pre-validated above, so a rejection here is unexpected; log
+	// and do NOT persist last-good or advance lastVersion on it (a partial/empty
+	// apply must not be recorded as the new good state).
+	if err := applyConfigSnapshot(*snap); err != nil {
+		logger.Printf("DataPlane: config snapshot v%d apply rejected: %v", snap.Version, err)
+		return err
+	}
+	return nil
 }
 
 // tryDeltaSync performs one GetConfigDelta poll. Returns true when the cycle is
@@ -547,8 +570,15 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// mutation happens for a delta whose blocklist is rejected. snapForDisk keeps
 	// the full remainder (incl. IdP profiles) for the last-good file.
 	snapForDisk := remainder
-	if err := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP); err != nil {
-		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, err)
+	// CHAOS-71: the delta path never calls applyConfigSnapshot, so it needs its
+	// OWN bracket — applyBlocklistDeltaSnapshot swaps the blocklist chain and
+	// then the non-blocklist remainder, and an interrupted delta previously left
+	// the apply-health surface reporting success over mixed-generation state.
+	beginConfigSnapshotApplyMutation()
+	deltaErr := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP)
+	endConfigSnapshotApplyMutation()
+	if deltaErr != nil {
+		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, deltaErr)
 		markConfigSnapshotApplyRejected()
 		return false
 	}

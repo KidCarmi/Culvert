@@ -580,3 +580,116 @@ func TestChaos71_InterruptedMarkerIsConsumedByTheRoundThatReadsIt(t *testing.T) 
 		t.Error("a completed mutating region must leave no interrupted marker")
 	}
 }
+
+// ── 8. Codex second pass: EVERY mutating path must bracket itself ───────────
+//
+// The marker's first shape bracketed only applyConfigSnapshot's inner region,
+// which missed two mutating paths: the delta path never calls
+// applyConfigSnapshot at all, and the full path mutates external-auth and IdP
+// state before reaching it. An interrupted apply on either therefore left the
+// apply-health surface reporting SUCCESS over mixed-generation enforcement.
+// The marker is now a depth counter so the paths can nest.
+
+// TestChaos71_MutationMarkerNestsWithoutFalseClear pins the counter semantics
+// that make nesting safe. With a flag, the inner region's end would clear a
+// marker the outer region still needs — so an interrupted outer region would
+// report clean purely because an inner one finished.
+func TestChaos71_MutationMarkerNestsWithoutFalseClear(t *testing.T) {
+	resetConfigSnapshotApplyHealth(t)
+	if consumeConfigSnapshotApplyInterrupted() {
+		t.Fatal("precondition: the marker must start clear")
+	}
+
+	// Outer region enters, inner region enters AND completes.
+	beginConfigSnapshotApplyMutation() // outer (e.g. fetchAndApply)
+	beginConfigSnapshotApplyMutation() // inner (applyConfigSnapshot)
+	endConfigSnapshotApplyMutation()   // inner completes
+	if !consumeConfigSnapshotApplyInterrupted() {
+		t.Fatal("an unfinished OUTER region must still read interrupted after an inner one completed — " +
+			"a flag would have been cleared by the inner end")
+	}
+
+	// Both complete: nothing left behind.
+	beginConfigSnapshotApplyMutation()
+	beginConfigSnapshotApplyMutation()
+	endConfigSnapshotApplyMutation()
+	endConfigSnapshotApplyMutation()
+	if consumeConfigSnapshotApplyInterrupted() {
+		t.Error("two fully completed nested regions must leave no interrupted marker")
+	}
+}
+
+// TestChaos71_EachMutatingPathLeavesTheMarkerBalanced drives the REAL full and
+// delta paths to a successful apply and requires each bracket to balance.
+//
+// It calls fetchAndApply / applyDeltaReply DIRECTLY rather than through
+// guardedConfigRound, and that is load-bearing: guardedConfigRound consumes the
+// marker at the end of every round, so routing through it would absorb an
+// unbalanced bracket and make this assertion unfalsifiable. Called directly,
+// nothing consumes, so a missing or skipped end is visible here.
+func TestChaos71_EachMutatingPathLeavesTheMarkerBalanced(t *testing.T) {
+	t.Run("full path", func(t *testing.T) {
+		resetConfigSnapshotApplyHealth(t)
+		restoreEpoch := resetDPLastSeenEpochForTest()
+		t.Cleanup(restoreEpoch)
+		snapshotPolicyStoreForTest(t) // registers its own restore
+		if consumeConfigSnapshotApplyInterrupted() {
+			t.Fatal("precondition: the marker must start clear")
+		}
+
+		raw, err := json.Marshal(ConfigSnapshot{Version: 4242})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		c := &DataPlaneClient{}
+		c.lastVersion.Store(0) // force the full path, not the delta path
+		c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+			if method != methodGetConfig {
+				t.Errorf("unexpected method %s", method)
+			}
+			return raw, nil
+		}
+
+		c.fetchAndApply(context.Background())
+
+		if !lastConfigSnapshotApplyOK() {
+			t.Fatal("the full path did not reach a successful apply; the balance assertion would be vacuous")
+		}
+		if consumeConfigSnapshotApplyInterrupted() {
+			t.Error("a COMPLETED full apply left the mutation marker unbalanced — " +
+				"its bracket is missing an end, so a later round would mis-read an interruption")
+		}
+	})
+
+	t.Run("delta path", func(t *testing.T) {
+		resetConfigSnapshotApplyHealth(t)
+		restoreEpoch := resetDPLastSeenEpochForTest()
+		t.Cleanup(restoreEpoch)
+		snapshotPolicyStoreForTest(t)
+		if consumeConfigSnapshotApplyInterrupted() {
+			t.Fatal("precondition: the marker must start clear")
+		}
+
+		// A delta whose blocklist chain is REJECTED still enters and leaves the
+		// mutating bracket, which is what this asserts; the reject path is the
+		// one reachable without a live CP-consistent fingerprint.
+		c := &DataPlaneClient{}
+		c.lastVersion.Store(7)
+		remainder, err := json.Marshal(ConfigSnapshot{Version: 8})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		c.applyDeltaReply(getConfigDeltaReply{
+			BaseVersion:   7,
+			TargetVersion: 8,
+			Remainder:     remainder,
+			Deltas:        []blocklistDelta{{}},
+			TargetFP:      "deliberately-inconsistent",
+		})
+
+		if consumeConfigSnapshotApplyInterrupted() {
+			t.Error("the delta path left the mutation marker unbalanced — " +
+				"its bracket is missing an end")
+		}
+	})
+}

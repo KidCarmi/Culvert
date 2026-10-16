@@ -270,6 +270,48 @@ That marker is also exactly the signal §7's readiness discussion needs: it is
 the one that means *this node cannot vouch for its policy coherence*, as
 distinct from the pre-mutation rejections that must never gate readiness.
 
+### P2, second pass — the marker covered one mutating path out of three
+
+The first bracket went around `applySnapshotMutations`, i.e. `applyConfigSnapshot`'s
+inner region, and that is **not** where the mutations start. Codex's re-review
+caught both misses:
+
+| Path | Where it mutates | Covered by the first bracket? |
+|---|---|---|
+| Full snapshot | `applyExternalAuthSnapshotSettings` then `syncSnapshotIdPProfiles` (which compiles every enabled provider), **before** `applyConfigSnapshot` | **No** |
+| Delta | `applyBlocklistDeltaSnapshot` — the blocklist chain, then the non-blocklist remainder. **`applyDeltaReply` never calls `applyConfigSnapshot` at all** | **No** |
+| Last-known-good replay | `applyConfigSnapshot` → `applySnapshotMutations` | Yes |
+
+So on either live path, `runGuarded` contained the panic, `guardedConfigRound`
+consumed `false`, and the apply-health surface reported **success** over
+mixed-generation enforcement — indefinitely for a deterministic fault. The fix
+the first pass claimed to make was only made for the path that production
+reaches least often.
+
+Every mutating path now brackets itself, and because the full path's bracket
+**encloses** `applyConfigSnapshot`'s own, the marker had to become a **depth
+counter**: with a flag, the inner region's `end` would clear a marker the outer
+region still needs, so an interrupted outer apply would report clean purely
+because an inner one finished. begin increments, end decrements, and a panic
+unwinding past either skips its decrement — a non-zero depth is exactly "some
+mutating region did not finish".
+
+**One gate here had to be rewritten before it was worth anything.** The first
+version of the balance assertion drove the path through `guardedConfigRound`,
+which consumes the marker at the end of every round — so it absorbed the very
+imbalance the test was looking for, and removing a bracket's `end` left it
+passing. It now calls `fetchAndApply` and `applyDeltaReply` directly, where
+nothing consumes, and both mutations are detectable. The lesson is the CONTROLS
+discipline turned on the controls themselves: **a gate that cannot fail is worse
+than no gate, because it advertises coverage that does not exist.**
+
+What is *not* test-proven, stated plainly: the three brackets sit around the
+right code by construction and by reading, not by a test that fails if one is
+moved. The mutating steps are plain functions with no injection seam, and adding
+a production hook purely so a test could observe them would be a worse trade
+than the honest gap. The balance gates do catch a missing `end`; they do not
+catch a bracket that starts too late.
+
 ---
 
 ## 7. Residual Risk / deliberately left

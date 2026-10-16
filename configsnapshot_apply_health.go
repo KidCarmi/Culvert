@@ -95,18 +95,37 @@ func lastConfigSnapshotApplyOK() bool { return !configSnapshotApplyFailing.Load(
 // would eject healthy nodes serving last-known-good config — see
 // readyz_dp_health.go on why its DP rows are report-only). That row is NOT
 // added here; see the CHAOS-71 review's residual risk.
-var configSnapshotApplyInterrupted atomic.Bool
+// It is a DEPTH COUNTER, not a flag, because the mutating regions NEST and
+// because there is more than one of them — the correction to this marker's
+// first shape (Codex, second pass). Bracketing only applyConfigSnapshot's
+// inner region missed two mutating paths outright:
+//
+//   - the DELTA path never calls applyConfigSnapshot at all. applyDeltaReply
+//     mutates through applyBlocklistDeltaSnapshot (blocklist chain, then the
+//     non-blocklist remainder), so an interrupted delta left the marker unset
+//     and the apply-health surface reporting SUCCESS over mixed-generation
+//     enforcement — the exact state the marker exists to catch.
+//   - the FULL path mutates BEFORE that inner region: fetchAndApply applies
+//     external-auth settings and syncs IdP profiles (which compiles every
+//     enabled provider) ahead of applyConfigSnapshot.
+//
+// So every mutating path now brackets itself, and the full path's bracket
+// encloses applyConfigSnapshot's own — hence the counter. A flag would let the
+// inner end() clear a marker the outer region still needs. begin increments,
+// end decrements, and a panic unwinding past either skips its decrement, so a
+// non-zero depth is exactly "some mutating region did not finish".
+var configSnapshotApplyDepth atomic.Int32
 
-// beginConfigSnapshotApplyMutation marks the start of the mutating region.
-func beginConfigSnapshotApplyMutation() { configSnapshotApplyInterrupted.Store(true) }
+// beginConfigSnapshotApplyMutation enters a mutating region.
+func beginConfigSnapshotApplyMutation() { configSnapshotApplyDepth.Add(1) }
 
-// endConfigSnapshotApplyMutation marks its normal completion (success or a
-// reported failure). Never call this through defer — see above.
-func endConfigSnapshotApplyMutation() { configSnapshotApplyInterrupted.Store(false) }
+// endConfigSnapshotApplyMutation leaves one normally (success or a reported
+// failure). Never call this through defer — see above.
+func endConfigSnapshotApplyMutation() { configSnapshotApplyDepth.Add(-1) }
 
-// consumeConfigSnapshotApplyInterrupted reports whether the last mutating
-// region failed to complete, and clears the marker so one interrupted apply is
-// accounted once and a later pre-mutation panic cannot read a stale true.
+// consumeConfigSnapshotApplyInterrupted reports whether any mutating region
+// failed to complete, and resets the depth so one interrupted apply is
+// accounted once and a later pre-mutation panic cannot read a stale value.
 func consumeConfigSnapshotApplyInterrupted() bool {
-	return configSnapshotApplyInterrupted.Swap(false)
+	return configSnapshotApplyDepth.Swap(0) != 0
 }

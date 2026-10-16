@@ -576,6 +576,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   fails that surface closed — which is also the signal that distinguishes "this
   node cannot vouch for its policy coherence" from a snapshot refused before any
   mutation.
+- The interrupted-apply marker above covered one mutating path out of three on
+  its first attempt. The full path mutates external-auth and IdP state (the IdP
+  sync compiles every enabled provider) *before* `applyConfigSnapshot`, and the
+  delta path never calls `applyConfigSnapshot` at all — it mutates through
+  `applyBlocklistDeltaSnapshot`. On either live path a contained panic therefore
+  left the apply-health surface reporting success over mixed-generation
+  enforcement. Every mutating path now brackets itself, and since the full
+  path's bracket encloses the inner one, the marker is a depth counter rather
+  than a flag: with a flag the inner `end` would clear a marker the outer region
+  still needs.
 - A Data Plane boot **silently discarded the bandwidth/QoS and node-group
   slices** of its last-known-good config snapshot and still recorded a complete,
   version-advancing apply (CHAOS-72). `initCluster` replays that snapshot
