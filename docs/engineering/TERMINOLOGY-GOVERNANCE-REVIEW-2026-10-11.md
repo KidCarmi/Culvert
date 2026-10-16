@@ -22,7 +22,7 @@ Two new drifts found, both small. No Critical or High item.
 | ID | Priority | Concept | Drift |
 | --- | --- | --- | --- |
 | T-64 | Medium | Operation identifier | `opId` / `op_id` / `operation_id` / `operationId` for the same idea, **including two spellings on one resource** |
-| T-65 | Low | Config-version rollback | Two deletion hints (React and legacy GUI) say "restore" a config version; everywhere else says "roll back" |
+| T-65 | Low | Config-version rollback | The React auth-rule deletion hint says "restore a config version"; everywhere else says "roll back". (A legacy CDR hint makes the same claim about state that is not versioned at all; see T-65's CDR note.) |
 
 Confirmed consistent in the window (no action): `Rollback` for config versions
 (`POST /api/config/versions`, `/api/config/rollback-scope`, GUI "Rollback Configuration", runbooks);
@@ -75,15 +75,20 @@ new IDs → 25 / 24.
 - **Why better:** one noun, "operation ID", on every surface a human or integrator reads; the abbreviation
   disappears from the public contract.
 - **Affected code:** `backups_api.go:328-345`; `static/index.html` 16080-16177; audit detail strings.
-- **Affected API:** `BackupCreateResult.opId` (additive: emit `operationId`; keep `opId` for one release as
-  a deprecated alias — the field is new in #1468 and its only known consumer is the bundled GUI).
+- **Affected API:** `BackupCreateResult.opId` (additive: emit `operationId` beside it and keep `opId`
+  **permanently**). `opId` may be marked `deprecated: true` with the deprecation metadata
+  `docs/api/API-DEPRECATION-POLICY.md` requires, but *removing* it is a breaking change for any external
+  client of `POST /api/backups` (removing a field is breaking under `API-VERSIONING-POLICY.md`) and would
+  need the MAJOR-version exception process (`api-breaking-approved`, rationale, migration instructions,
+  version impact). This report does not recommend that removal. The bundled GUI is the only *known*
+  consumer, but that does not make the field private.
   `BackupOperationStatus`: add `operationId` beside the verbatim `op_id` (additive; the schema already
   allows extra properties); do not rename or drop `op_id`, which is the agent's own record field.
 - **Affected GUI:** `backupNowPendingOp.opId` JS naming only; no visible label.
 - **Affected documentation:** OpenAPI description at line 1203; any backup runbook that quotes the field.
 - **Affected configuration:** none.
-- **Migration complexity:** Low. **Compatibility risk:** Low (additive on both responses; dual-emit on
-  create for one release; single in-tree consumer). **Estimated PR size:** S (~60 lines + contract test
+- **Migration complexity:** Low. **Compatibility risk:** None for the recommended change (additive on
+  both responses; `opId` and `op_id` both stay). Removing `opId` later would be breaking (MAJOR). **Estimated PR size:** S (~60 lines + contract test
   update). Do NOT rename `op_id` in
   audit detail strings without a CHANGELOG note: SIEM parsers may key on it.
 
@@ -91,20 +96,26 @@ new IDs → 25 / 24.
 
 - **Business concept:** reverting configuration to an earlier version.
 - **Current names:** "restore a config version" (`frontend/src/features/policy/AuthRulesPage.tsx:738`,
-  rule-deletion rollback hint) and "restore via Config Versions" (`static/index.html:11971`, the legacy
-  GUI's CDR rule-deletion confirmation); "roll back" / "Rollback" everywhere else (`static/index.html:2648,8388`,
+  auth-rule deletion rollback hint; auth rules are policy rules, which are on the rollback surface,
+  `config_surfaces.go` `policy_rules` `Rollback: true`); "roll back" / "Rollback" everywhere else (`static/index.html:2648,8388`,
   `docs/enterprise/POLICY-ROLLOUT-GUIDE.md:49`, `OPERATIONS-RUNBOOK.md:43`, `diagnostics.go:1701`).
 - **Recommended canonical name:** "roll back to a config version".
 - **Why problematic:** "restore" is the backup/DR verb (`/data` restore). An operator reading
   "restore a config version" on a deletion dialog may look in the backup area instead of Config Versions.
 - **Why better:** one verb per action; rollback keeps its meaning of "revert settings in a snapshot".
 - **Affected code/GUI:** the JSX string (it predates the window — #1265 — but was not charged by an
-  earlier report) and the legacy-GUI confirmation string. (`static/index.html:8384`'s "not restored by
-  rollback" describes rollback's effect and does not name the action; it is not part of T-65.)
-  **API / docs / config:** none.
-- **Migration complexity:** Trivial. **Compatibility risk:** None, unless a test pins either string
-  (check `frontend/src/test` and the root GUI string tests before editing). **Estimated PR size:** XS
-  (2 lines).
+  earlier report). (`static/index.html:8384`'s "not restored by rollback" describes rollback's effect and
+  does not name the action; it is not part of T-65.) **API / docs / config:** none.
+- **Migration complexity:** Trivial. **Compatibility risk:** None, unless a test pins the string (check
+  `frontend/src/test` before editing). **Estimated PR size:** XS (1 line).
+- **CDR note (same verb, different defect; not a rename).** The legacy GUI's CDR rule-deletion
+  confirmation (`static/index.html:11971`) says the deletion can be undone "via Config Versions". That
+  claim is false, not just mis-worded: CDR policies (`cdr_policies.json`) are per-CP local state that
+  configuration versioning never captures or restores (`cdr_ui.go` header, `config_surfaces.go`
+  `offRegistryRollbackExclusions` `cdr_policies`, `cdr_hygiene_no_versioning_test.go`). Rewording it to
+  "roll back to a config version" would keep the false recovery path. The fix is to remove the
+  Config Versions claim (for example, "This cannot be undone; re-create the rule to restore it"). This
+  is a correctness fix to copy, sized XS, and is listed separately in the plan below.
 
 ---
 
@@ -124,8 +135,9 @@ Only T-64 touches a wire contract, and only additively (a new field on each back
 | --- | --- | --- |
 | Critical | — | none |
 | High | — | none |
-| Medium | T-64 | Dual-emit `operationId` on `POST /api/backups` (deprecate `opId`) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test |
-| Low | T-65 | Reword both hints (React `AuthRulesPage.tsx:738`, legacy `static/index.html:11971`) to "roll back to a config version" |
+| Medium | T-64 | Add `operationId` on `POST /api/backups` beside a permanently kept `opId` (optionally marked deprecated, never removed without a MAJOR exception) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test |
+| Low | T-65 | Reword the React hint (`AuthRulesPage.tsx:738`) to "roll back to a config version" |
+| Low | T-65 CDR note | Remove the false "restore via Config Versions" recovery claim from the legacy CDR deletion dialog (`static/index.html:11971`); CDR policies are not versioned |
 
 ## Stop-condition assessment
 
