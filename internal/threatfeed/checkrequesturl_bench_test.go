@@ -21,7 +21,12 @@ package threatfeed
 //	go test -run '^$' -bench 'BenchmarkFeedCheckRequestURL' -benchmem -count=6 ./internal/threatfeed/
 
 import (
+	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -147,6 +152,84 @@ func TestBenchGate_CheckRequestURLAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_CheckRequestURLTakesNoRoundTrip is the STRUCTURAL half of the
+// cost contract: CheckRequestURL must reach its verdict from the *url.URL it was
+// handed, and may serialise-and-reparse only on the documented fallback path.
+//
+// IT USED TO BE A TIMING COMPARISON, and that criterion is not measurable in the
+// lane that runs it. Two CI failures, both with zero real regressions:
+//
+//   - a single measurement per arm compared with `>=`, i.e. no margin at all
+//     while its own comment claimed the bound was "deliberately loose", INVERTED
+//     on a saturated runner (8387 vs 7551 ns/op, against documented ~376 and
+//     ~887);
+//   - with best-of-5 per arm the inversion was fixed but the RATIO COMPRESSED to
+//     1.17x against a 1.20x bound (9957 vs 11627 ns/op).
+//
+// The compression could not be reproduced locally: under full CPU saturation the
+// ratio HELD (4.61x loaded against 4.42x idle under -race, the measured per-op
+// floor moving only 15 -> 19 ns with b.N in the tens of millions), so neither
+// additive noise nor an overhead-dominated iteration count explains it. A bound
+// loose enough to survive whatever the lane does to this measurement would be too
+// loose to catch the regression — this repo's recorded conclusion for exactly this
+// wall, which internal/threatfeed is named among the packages to have hit, and a
+// gate that can flake gets muted.
+//
+// So the verdict is the structural property, which is load-invariant. Nothing is
+// left unasserted: the substantive claim is covered by two further gates that
+// cannot flake — TestBenchGate_CheckRequestURLAllocs (AllocsPerRun: the fast path
+// at <= 2 allocs AND the legacy round trip strictly more) and
+// TestCheckRequestURL_FastPathIsActuallyTaken (normaliseParsedURL reports handled
+// for ordinary traffic). What is gone is a verdict the environment cannot support.
+//
+// The NUMBERS have a home that does not cost the race lane 12 s per run to log
+// something nobody gates on — the four BenchmarkFeedCheckRequestURL{,_Legacy}
+// arms at the top of this file, invoked as the header documents.
+func TestBenchGate_CheckRequestURLTakesNoRoundTrip(t *testing.T) {
+	// u.String() is the serialise step of the round trip this optimisation
+	// removes; it must appear ONLY inside the `!handled` fallback. Deleting the
+	// fast path would make it unconditional, which is precisely the regression
+	// the timing comparison existed to catch.
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "threatfeed.go")) //nolint:gosec // fixed in-package path
+	if err != nil {
+		t.Fatalf("read threatfeed.go: %v", err)
+	}
+	body, err := funcBody(string(src), "func (tf *Feed) CheckRequestURL(")
+	if err != nil {
+		t.Fatalf("locate CheckRequestURL: %v", err)
+	}
+	if !strings.Contains(body, "normaliseParsedURL(u)") {
+		t.Error("CheckRequestURL no longer consults normaliseParsedURL — the parsed-URL fast path is gone, " +
+			"so every call serialises and reparses the URL net/http already parsed")
+	}
+	fallback := strings.Index(body, "if !handled {")
+	if fallback < 0 {
+		t.Fatal("CheckRequestURL no longer has an `if !handled {` fallback — this wall must be updated with it")
+	}
+	// CONFINE the serialisation, do not merely order it against the fallback.
+	// The first version of this wall asserted only that no u.String() appeared
+	// BEFORE the fallback, which is a weaker claim than the sentence above it
+	// makes: a SECOND, unconditional u.String() added AFTER the fallback block
+	// restores the exact round trip and sailed straight through (Codex, round 9;
+	// reproduced — the wall reported ok while CheckRequestURL had gone back to
+	// 6 allocs/op). Counting and locating is what makes the assertion match the
+	// claim; a gap in a wall is how the class it guards returns by another route.
+	if n := strings.Count(body, "u.String()"); n != 1 {
+		t.Errorf("CheckRequestURL serialises the URL %d times, want exactly 1 (inside the `!handled` fallback) — "+
+			"a second u.String() makes the round trip unconditional again however it is guarded", n)
+		return
+	}
+	blockEnd := strings.Index(body[fallback:], "\n\t}")
+	if blockEnd < 0 {
+		t.Fatal("cannot delimit the `if !handled {` block — this wall must be updated with it")
+	}
+	blockEnd += fallback
+	if at := strings.Index(body, "u.String()"); at < fallback || at > blockEnd {
+		t.Error("CheckRequestURL's only u.String() is OUTSIDE the `!handled` fallback — " +
+			"the serialise-and-reparse round trip runs on every call again")
+	}
+}
+
 // TestBenchGate_CheckRequestURLBeatsLegacy is the timing half, expressed as a
 // RATIO measured in ONE run so it is machine-independent and needs no
 // re-baselining. The bound is deliberately loose (the measured saving is far
@@ -188,4 +271,30 @@ func TestBenchGate_CheckRequestURLBeatsLegacy(t *testing.T) {
 		t.Errorf("CheckRequestURL %d ns/op is not faster than CheckURL(u.String()) %d ns/op",
 			fast.NsPerOp(), legacy.NsPerOp())
 	}
+}
+
+// funcBody returns the source of the function whose declaration starts with
+// prefix, delimited by the closing brace at column 0.
+func funcBody(src, prefix string) (string, error) {
+	i := strings.Index(src, prefix)
+	if i < 0 {
+		return "", fmt.Errorf("declaration %q not found", prefix)
+	}
+	rest := src[i:]
+	j := strings.Index(rest, "\n}\n")
+	if j < 0 {
+		return "", fmt.Errorf("could not delimit %q", prefix)
+	}
+	return rest[:j], nil
+}
+
+// pkgSourceDir returns this package's source directory, so the structural read
+// above cannot be flaked by a concurrent os.Chdir in the same test binary — the
+// anchoring rule the root package's static_read_wall_test.go enforces.
+func pkgSourceDir() string {
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		return "."
+	}
+	return filepath.Dir(self)
 }
