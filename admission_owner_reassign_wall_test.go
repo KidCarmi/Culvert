@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -82,7 +83,13 @@ func assignsPackageHandle(file *ast.File, name string) []string {
 
 // Nothing in production may reassign the admission composition handle.
 func TestAdmissionOwner_Wall_NoProductionReassignmentOfTheOwner(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	// Both the enumeration AND the parse are anchored to the package source dir,
+	// never to the process CWD: a concurrent test's os.Chdir would otherwise make
+	// this scan read another directory (TestTestFileReadsAreCWDIndependent is the
+	// wall for that class). Anchoring only the ReadDir would satisfy that wall's
+	// literal check while leaving the parse exposed to the same race.
+	dir := pkgSourceDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
@@ -93,7 +100,7 @@ func TestAdmissionOwner_Wall_NoProductionReassignmentOfTheOwner(t *testing.T) {
 			continue
 		}
 		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, n, nil, 0)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, n), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", n, err)
 		}
