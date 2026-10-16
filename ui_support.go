@@ -297,7 +297,13 @@ func apiHealthExplain(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, buildOperatorContract())
+	// SEC-DIAG-ROSTER-1: this endpoint renders the SAME OperatorContract as
+	// /api/diagnostics, so it carries the same admin-only roster-derived row and
+	// needs the same role redaction. Redacting only the other renderer left this
+	// one as a complete bypass of that fix (Codex P1, PR #1545) — see
+	// redactContractForRole, and TestWall_EveryOperatorContractRendererIsClassified
+	// which fails the build if a THIRD renderer appears unclassified.
+	jsonOK(w, redactContractForRole(buildOperatorContract(), uiRole(r).HasRole(RoleAdmin)))
 }
 
 // supportCollectorInfo is the read-only view of one registered collector.
