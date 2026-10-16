@@ -183,6 +183,19 @@ Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
 
+Less common flags (the full list is `culvert -h`). Unless noted, a non-empty / non-zero / `true` flag value overrides the matching `config.yaml` value; an empty, zero or `false` flag falls through to the YAML value, so a flag cannot clear a setting the config file makes:
+
+| Flag | Purpose |
+|---|---|
+| `-ip-filter-mode allow\|block` | IP filter mode. Any other value aborts startup. YAML: `security.ip_filter_mode`. Filtering is off only when both are empty: `-ip-filter-mode=` does not disable a mode set in YAML; clear the YAML key instead. |
+| `-trust-forwarded-headers` | Trust `X-Forwarded-Host` and `X-Forwarded-Proto` only (OIDC redirect URL when `proxy.base_url` is unset, CP/DP bootstrap URLs). It does **not** trust `X-Forwarded-For`: client-IP resolution for admin allowlists, rate limits, lockout and audit uses `-trusted-proxy-cidrs` / `proxy.trusted_proxy_cidrs`. OR-ed with `proxy.trust_forwarded_headers` (either enables it). Unscoped (any direct peer) - read [OPERATIONS.md](docs/OPERATIONS.md) item 6 first. |
+| `-syslog-format rfc3164\|rfc5424` | Remote syslog message format (default `rfc3164`); used with `-syslog`. |
+| `-revocations-file`, `-fileprofiles-file`, `-cluster-db` | Persistence paths for session revocations, file-extension profiles and cluster state (e.g. `/data/revocations.json`). |
+| `-cat-sync-interval 24h` | Re-sync interval for the URL category community feed (with `-cat-feed-db`). |
+| `-scan-svc-listen :8484` | Run as the scan-microservice sidecar on this address (the client side is `-scan-svc-url`). `/scan` inspects bodies only with ClamAV (`-clamav-addr` / `security_scan.clamav_addr`) or loaded YARA rules (`-yara-rules-dir`) on the sidecar process itself; configured DPI patterns apply separately to text content types. `security_scan.enabled` or a threat-feed DB alone does not scan bodies (threat feeds check URLs and domains only): `/health` still reports ok and `/scan` answers clean for every body. |
+| `-list-backups -backup-dir /backup` | Print every regular file in `-backup-dir` (absolute path, default `/backup`) as a JSON array and exit. Entries are not filtered or validated as Culvert backups (directories and symlinks are skipped; `encrypted` is a magic-byte probe only), so keep the directory free of unrelated files. |
+| `-cdr-enabled`, `-cdr-endpoint`, `-cdr-certs-dir`, `-cdr-default-profile`, `-cdr-timeout-sec`, `-cdr-max-file-size-mb` | Sluice CDR client: enable, gRPC endpoint, bootstrap mTLS bundle directory (`ca.pem`, `client.pem`, `client.key`; read only while no instance is enrolled; UI enrollment writes `<data-dir>/integrations/sluice/<name>` instead), fallback profile (`default`), per-file deadline (>=30 s, default 35) and per-file size cap (default 50 MiB; larger files are not rejected: they skip sanitization and pass through unmodified, whatever the fail mode). `-cdr-enabled` can only turn CDR on; it cannot disable a config that enables it. |
+
 > In the shipped Docker image, persistence paths such as `/data/ca.bundle` and `/data/ui_users.json` are supplied by the compose command line, not by binary flag defaults.
 
 ### Environment variables
