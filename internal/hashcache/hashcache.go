@@ -192,9 +192,13 @@ func (c *HashCache) Clear() {
 //	  100 000  │    10.4 ms      │ 25 000 inserts    │  ~414 ns
 //	1 000 000  │     150 ms      │ 250 000 inserts   │  ~600 ns
 //
-// (10-sample medians, nothing expired: the state a busy gateway holds, and
-// the worst realistic one. The 1 000 000 row is BenchmarkEvictLocked_
-// NothingExpired_1M and is the noisiest: read it as 150-300 ms. The amortized
+// (10-sample medians in the busy steady state: nothing expired. This is NOT
+// the worst case: at 10 000 the all-expired case measured ~0.94 ms against
+// 0.54 ms. The realistic worst case, a full cache idle past its TTL and then
+// one Set, is therefore HIGHER and is not yet bounded at 100 000 or
+// 1 000 000; BenchmarkEvictLocked_AllExpired_100k/_1M exist to bound it on an
+// idle host. The 1 000 000 row is BenchmarkEvictLocked_NothingExpired_1M and
+// is the noisiest: read it as 150-300 ms. The amortized
 // column is this implementation's own per-Set cost; do not confuse it with
 // the base-vs-candidate difference reported in the roadmap note.)
 //
@@ -207,8 +211,10 @@ func (c *HashCache) Clear() {
 //
 // At the 10 000 default this is deliberately left alone: ~218 ns amortized per
 // Set, and a Set happens only on a scan MISS, which then costs a ClamAV/YARA
-// scan measured in MILLISECONDS — three to four orders of magnitude more. The
-// spike is noise against the work it guards. Bounding it independent of
+// scan measured in MILLISECONDS — three to four orders of magnitude more. That
+// covers the Set path only. Cache HITS also wait behind the exclusive lock
+// hold, and the reader tail-latency impact is UNMEASURED, pending a contention
+// run on an idle host. Bounding it independent of
 // maxSize means giving up the "no expired entry survives an eviction"
 // invariant that TestSet_EvictsExpiredFirst pins (an early exit cannot know
 // what it did not look at) or sharding the map — both change observable

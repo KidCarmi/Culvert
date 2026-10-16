@@ -2,6 +2,7 @@ package hashcache
 
 import (
 	"encoding/hex"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -111,21 +112,28 @@ func fillCache(maxSize int, expiredFrac float64) *HashCache {
 // for the 100 000 one, which exhausts a constrained runner before the first
 // timed call. The StopTimer/StartTimer pair costs ~100 ns against a measured
 // 0.5 ms-300 ms, so it does not move the figures.
+//
+// Building a fixture allocates maxSize entries, which can leave a concurrent
+// GC cycle running into the timed call and charge its work to evictLocked
+// (Codex, PR #1604). runtime.GC() after each build, with the timer stopped,
+// finishes that cycle before timing starts.
 func benchEvictLocked(b *testing.B, maxSize int, expiredFrac float64) {
 	b.StopTimer()
 	for i := 0; i < b.N; i++ {
 		c := fillCache(maxSize, expiredFrac)
+		runtime.GC()
 		b.StartTimer()
 		c.evictLocked()
 		b.StopTimer()
 	}
 }
 
-// The stall, by configured cache size, in the state a busy gateway holds: the
-// cache full and nothing expired yet, so the sweep looks at every entry and
-// finds nothing to drop. This is the worst realistic case and the one whose
-// growth with cache_size matters, cache_size being floored by config
-// validation and never capped.
+// The stall, by configured cache size, in the busy steady state (nothing
+// expired): the cache is full and nothing has expired yet, so the sweep looks
+// at every entry and finds nothing to drop. It is NOT the worst case. A full
+// cache left idle past its TTL and then hit by one Set expires everything at
+// once, and that costs more (AllExpired below). Its growth with cache_size
+// matters because cache_size is floored by config validation and never capped.
 func BenchmarkEvictLocked_NothingExpired_10k(b *testing.B)  { benchEvictLocked(b, 10_000, 0) }
 func BenchmarkEvictLocked_NothingExpired_100k(b *testing.B) { benchEvictLocked(b, 100_000, 0) }
 
@@ -144,8 +152,28 @@ func BenchmarkEvictLocked_NothingExpired_1M(b *testing.B) {
 // expired entries also deletes them, and at 100 % it deletes the whole map
 // instead of the 25 % the capacity drop would have taken. Worth pinning so the
 // relationship stays visible — it is the opposite of the intuitive direction.
+//
+// All-expired is the realistic WORST case: a full cache idle past its TTL,
+// then one Set. At 10 000 it measured ~0.94 ms against 0.54 ms with nothing
+// expired. The 100 000 and 1 000 000 cases exist so an idle-host run can bound
+// it at larger sizes; no figure from them is quoted yet. Like the other large
+// fixtures they are skipped under -short.
 func BenchmarkEvictLocked_HalfExpired_10k(b *testing.B) { benchEvictLocked(b, 10_000, 0.5) }
 func BenchmarkEvictLocked_AllExpired_10k(b *testing.B)  { benchEvictLocked(b, 10_000, 1.0) }
+
+func BenchmarkEvictLocked_AllExpired_100k(b *testing.B) {
+	if testing.Short() {
+		b.Skip("100 000-entry all-expired fixture; skipped under -short")
+	}
+	benchEvictLocked(b, 100_000, 1.0)
+}
+
+func BenchmarkEvictLocked_AllExpired_1M(b *testing.B) {
+	if testing.Short() {
+		b.Skip("1 000 000-entry all-expired fixture; skipped under -short")
+	}
+	benchEvictLocked(b, 1_000_000, 1.0)
+}
 
 // Amortized Set cost at steady-state churn above capacity — the throughput
 // number, as opposed to the lock-hold spike above. Every maxSize/4 inserts pay

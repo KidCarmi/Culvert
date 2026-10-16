@@ -1,11 +1,18 @@
 # Scan-cache eviction cost — measurement and a rejected optimization
 
+**All absolute figures were measured on a loaded 4-vCPU host (load 12–14);
+re-measure on an idle host before using them for a design decision.**
+
 > Status: **MEASURED, NO IMPLEMENTATION CHANGE (2026-10-11; re-measured
 > 2026-10-16 with production-shaped keys).** Verdict: the scan cache's eviction
 > stall is real and grows linearly with the operator's `cache_size`. It reaches
 > roughly 150-300 ms at `cache_size: 1000000`, a case the committed benchmarks
-> now cover. At the shipped 10 000 default it amortizes to ~218 ns per Set,
-> against a scan that costs milliseconds, so it is not a bottleneck. The obvious
+> now cover, in the busy steady state (nothing expired). The all-expired case
+> costs more and is not yet bounded at large sizes. At the shipped 10 000
+> default the amortized cost is ~218 ns per Set, which is small relative to the
+> scan miss it follows. The reader tail-latency impact is **UNMEASURED**,
+> pending a contention run on an idle host: hits also wait behind the lock
+> hold. The obvious
 > layout fix (holding entries by value rather than behind a pointer) was
 > implemented, measured against an interleaved baseline, and **not shipped**.
 > The reason is that the result is mixed and immaterial, not that it is harmful:
@@ -65,8 +72,9 @@ problem?
 
 ## Results — the cost that exists
 
-`evictLocked`, one call, cache full, nothing expired (the state a busy gateway
-holds). Taken from a dedicated 10-sample run of the shipped layout
+`evictLocked`, one call, cache full, in the busy steady state (nothing
+expired). This is **not** the worst case (see below). Taken from a dedicated
+10-sample run of the shipped layout
 (`-benchtime 300ms -count 10`), with the A/B baseline medians beside it:
 
 | `cache_size` | one `evictLocked` (10 samples) | A/B baseline median | recurs every | amortized per Set |
@@ -88,7 +96,11 @@ Two further properties worth having pinned:
 - Eviction gets **slower the more reclaimable the cache is**: at 10 000 it takes
   0.54 ms with nothing expired, 0.63 ms with half expired and 0.94 ms with all
   expired (10-sample medians). A sweep that finds expired entries also deletes
-  them. This is the opposite of the intuitive direction.
+  them. This is the opposite of the intuitive direction. It makes the realistic
+  worst case, a full cache idle past its TTL and then one Set, HIGHER than the
+  table above. That case is not yet bounded at 100 000 or 1 000 000:
+  `BenchmarkEvictLocked_AllExpired_100k` and `_1M` exist to bound it on an idle
+  host, and no figure from them is quoted here.
 - The stall is **system-wide by construction**: `evictLocked` runs under the
   exclusive write lock, so every concurrent `Get` waits for it, which is a
   property of the code, not of a benchmark. *How much* that costs readers is
@@ -226,11 +238,14 @@ the frequent operations slower to speed up a rare one", with that benchmark as
 
 ## Verdict and what would actually help
 
-At the shipped `cache_size: 10000` default, **leave `evictLocked` alone**. A Set
-happens only on a scan MISS, and a miss then costs a ClamAV/YARA scan measured
-in milliseconds. ~218 ns of amortized eviction is noise against the work it
-guards. Optimizing it would be spending complexity on a path that is not the
-bottleneck.
+At the shipped `cache_size: 10000` default, **leave `evictLocked` alone for
+now**. The verdict is narrower than "not a bottleneck". A Set happens only on a
+scan MISS, and a miss then costs a ClamAV/YARA scan measured in milliseconds, so
+~218 ns of amortized eviction is small relative to a scan miss. Cache hits,
+however, also wait behind the exclusive lock hold, and that reader tail-latency
+impact is **UNMEASURED**, pending a contention run on an idle host (see
+"Contention"). Revisit this verdict if that run shows a material hit-path
+stall.
 
 If production telemetry ever shows this stall mattering — the benchmarks added
 here make it measurable, and `culvert_scan_cache_size` already exposes the
