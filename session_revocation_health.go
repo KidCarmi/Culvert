@@ -397,6 +397,20 @@ func revocationTargetParentMissing() bool {
 	return err != nil && os.IsNotExist(err)
 }
 
+// revocationTargetIsDirectory reports that the configured revocations path is
+// itself a directory. os.Stat succeeds, so neither the missing-file nor the
+// missing-parent check fires, yet AtomicWrite's final rename over a directory
+// fails: every save is lost while the surfaces stayed green (Codex P2, PR
+// #1437).
+func revocationTargetIsDirectory() bool {
+	path := session.RevocationsPath()
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
 // revocationsAreDurable reports whether a revocation applied right now would
 // survive this process.
 //
@@ -421,7 +435,7 @@ func revocationsAreDurable() bool {
 	}
 	// AU-39: the one ENOENT case that DOES falsify this predicate's claim.
 	// A missing file is recreated by the next save; a missing parent is not.
-	return !revocationTargetParentMissing()
+	return !revocationTargetParentMissing() && !revocationTargetIsDirectory()
 }
 
 // resetSessionRevocationHealthForTest clears the record. Test isolation only.
@@ -528,9 +542,24 @@ func checkSessionRevocation() OperatorContractCheck {
 		return OperatorContractCheck{
 			Code:   "session_revocation",
 			Status: diagFail,
-			Message: fmt.Sprintf("the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node, and %d applied since have been held in memory only",
-				sessionRevocationPersistRefused.Load()),
+			// The LIVE counts, not the cumulative refusal counter: an expired
+			// refusal is pruned from the list but never from the counter, and
+			// extending one user revocation can count twice, so the counter
+			// overstated what is held in memory and what must be reapplied
+			// (Codex P2, PR #1437). Nothing was loaded from the file, so the
+			// live list is exactly what this boot applied.
+			Message: fmt.Sprintf("the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node, and the %d token and %d account revocation(s) in force now are held in memory only",
+				tokens, users),
 			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and is NOT being written to while it cannot be read, so its contents may still be intact and a restart after the repair recovers them. Every revocation applied on this node in the meantime is in force now and gone at the next restart, so re-apply any logout or account deletion that must hold.",
+		}
+	}
+	if h.Configured && revocationTargetIsDirectory() {
+		return OperatorContractCheck{
+			Code:   "session_revocation",
+			Status: diagFail,
+			Message: fmt.Sprintf("the revocations file path is now a DIRECTORY — the %d token and %d account revocation(s) in force on this node are held in memory only, and no save can replace it",
+				tokens, users),
+			OperatorAction: "Move the directory away from the configured revocations path (or point the setting at a file path), then trigger a save with a logout or restart. Re-apply any logout or account deletion that must hold.",
 		}
 	}
 	if h.Configured && revocationTargetParentMissing() {

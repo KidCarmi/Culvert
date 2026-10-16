@@ -128,7 +128,7 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_persist_failures_total` | counter | **Failed save attempts**, not affected revocations — the boot probe attempts a save on an empty list and the sync loop retries every 3–5 s, so one fault reaches hundreds. The scope is `..._tokens` + `..._users` |
 | `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
 | `culvert_session_revocation_persist_refused_total` | counter | Revocations not written because overwriting the file was refused — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b) |
-| `culvert_ha_bundle_revocations_subset` | gauge | Entries left out of the **most recent** HA state bundle — `> 0` means the standby is holding a subset right now (§6d, the page signal) |
+| `culvert_ha_bundle_revocations_subset` | gauge | Entries left out of the **most recent** HA state bundle the leader prepared — `> 0` means the standby can hold at most a subset (§6d, the page signal). `0` means the last bundle sent was complete, not that the standby acknowledged applying it |
 | `culvert_ha_bundle_revocations_dropped_total` | counter | Cumulative entries left out of HA state bundles — magnitude and rate only; it never decreases, so do not alert on `> 0` (§6d) |
 
 These are emitted **unconditionally**, which is the deliberate exception to
@@ -382,9 +382,10 @@ meantime is memory-only (counted by
    them and their cookies become valid again.
 3. Free its path — shorten the configured filename, or fix the directory's
    permissions.
-4. Restart, then **reapply the revocations from step 2**: delete or disable
-   the affected accounts again, or force those users to re-authenticate
-   (rotating the session signing key revokes every session at once). Until the
+4. Restart, then **reapply the revocations from step 2**: delete the affected
+   accounts again (deletion revokes their sessions), or rotate the session
+   signing key, which invalidates every session at once. Disabling an account
+   or asking a user to sign in again does not revoke an existing cookie. Until the
    restart nothing is written, so the on-disk copy is preserved, but the
    memory-only revocations are lost at the restart unless reapplied.
 
@@ -438,7 +439,7 @@ question they answer:
 
 | Series | Kind | Answers |
 | --- | --- | --- |
-| `culvert_ha_bundle_revocations_subset` | gauge | Is the standby holding a subset **right now**? Alert on this one. |
+| `culvert_ha_bundle_revocations_subset` | gauge | Did the **last bundle sent** leave revocations out? Alert on this one (it reflects what the leader sent, not a standby acknowledgment). |
 | `culvert_ha_bundle_revocations_dropped_total` | counter | How much has this leader had to give up in total? Magnitude and rate only. |
 
 A non-zero **gauge** means the standby holds a subset of the leader's

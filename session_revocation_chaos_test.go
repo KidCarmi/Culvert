@@ -1373,12 +1373,22 @@ func TestChaos68_AU37_RefusalsAreCountedAndSurfaced(t *testing.T) {
 	noteRevocationPersistenceConfigured(path)
 	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", os.ErrPermission))
 
-	noteRevocationPersistRefused(3)
-	if got := sessionRevocationPersistRefused.Load(); got != 3 {
-		t.Fatalf("refused counter = %d, want 3", got)
+	// Three revocations are live; the cumulative refusal counter reads 7
+	// (refusals of entries since expired, a user revocation extended twice).
+	// The row must report what is held in memory NOW, not the counter.
+	for i := 0; i < 3; i++ {
+		sessionRevoked.Revoke(fmt.Sprintf("live-%d", i), time.Now().Add(time.Hour))
 	}
-	if msg := checkSessionRevocation().Message; !strings.Contains(msg, "3") {
-		t.Errorf("the row does not report how many revocations are memory-only: %q", msg)
+	noteRevocationPersistRefused(7)
+	if got := sessionRevocationPersistRefused.Load(); got != 7 {
+		t.Fatalf("refused counter = %d, want 7", got)
+	}
+	msg := checkSessionRevocation().Message
+	if !strings.Contains(msg, "3 token") {
+		t.Errorf("the row does not report the live memory-only revocations: %q", msg)
+	}
+	if strings.Contains(msg, "7") {
+		t.Errorf("the row reports the cumulative refusal counter as if it were held in memory: %q", msg)
 	}
 }
 
@@ -1774,5 +1784,32 @@ func TestChaos68_FencedListReportsNoVanishedDoubt(t *testing.T) {
 	sessionRevoked.FenceWritesUnquarantined() // reset by withChaos68Revocations' SwapForTest restore
 	if failing, vanished := revocationDurabilityDoubt(); failing || vanished {
 		t.Errorf("fenced list reported failing=%v vanished=%v; want neither — no save can repair it", failing, vanished)
+	}
+}
+
+// A revocations path replaced by a DIRECTORY passes every stat-based check,
+// but no save can rename over it, so it must not read as durable.
+func TestChaos68_TargetIsADirectoryIsNotDurable(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("baseline save: %v", err)
+	}
+	if !revocationsAreDurable() {
+		t.Fatal("precondition: a healthy node must read durable")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove file: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("replace with a directory: %v", err)
+	}
+	if revocationsAreDurable() {
+		t.Error("durable is true although the revocations path is a directory every save fails on")
+	}
+	if row := checkSessionRevocation(); row.Status != diagFail {
+		t.Errorf("status = %q, want %q with the path a directory", row.Status, diagFail)
 	}
 }

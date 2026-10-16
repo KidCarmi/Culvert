@@ -1173,7 +1173,7 @@ culvert_session_revocation_persist_refused_total %d
 # TYPE culvert_ha_bundle_revocations_dropped_total counter
 culvert_ha_bundle_revocations_dropped_total %d
 
-# HELP culvert_ha_bundle_revocations_subset Revocation entries left out of the MOST RECENT HA state bundle; > 0 means the standby is holding a subset of this leader's revocations now, so a promotion would admit sessions this leader rejects
+# HELP culvert_ha_bundle_revocations_subset Revocation entries left out of the MOST RECENT HA state bundle this leader PREPARED for the standby; > 0 means the standby can hold at most a subset of this leader's revocations, so a promotion would admit sessions this leader rejects. 0 means the last bundle sent was complete, not that the standby acknowledged applying it
 # TYPE culvert_ha_bundle_revocations_subset gauge
 culvert_ha_bundle_revocations_subset %d
 `,
