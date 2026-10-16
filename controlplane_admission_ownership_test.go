@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,10 +16,13 @@ import (
 	"time"
 )
 
-// The transport is the only stub: real authenticated CP aggregation feeds the
-// real DP loop, then the same owner drives HTTP admission, metrics and the API.
-func TestDistributedAdmission_ProductionWiring(t *testing.T) {
-	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
+// installDistributedAdmissionOwners binds fresh admission owners, installs r
+// as the production limiter, and swaps the cluster store, the fleet aggregator
+// and the connection limiter for test-local instances, restoring everything on
+// cleanup. The snapshot apply mutates ipf/rl in place (RISK-030).
+func installDistributedAdmissionOwners(t *testing.T) *RateLimiter {
+	t.Helper()
+	bindFreshAdmissionOwners(t)
 	r := newRateLimiter()
 	useProductionRateLimiter(t, r)
 	oldURL, oldTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
@@ -33,6 +37,74 @@ func TestDistributedAdmission_ProductionWiring(t *testing.T) {
 	})
 	globalClusterStore = &ClusterStore{st: ClusterState{Nodes: map[string]*EnrolledNode{}}}
 	globalRLAggregator = &rateLimitAggregator{perNode: map[string]map[string]int{}, expireAt: map[string]time.Time{}}
+	return r
+}
+
+// gossipStub is the one stubbed layer of the production wiring: the transport.
+// Every SyncRateLimits call reaches the real CP handler with a real peer
+// certificate until fail is set, after which each call reports a controlled
+// outage and signals calls once.
+type gossipStub struct {
+	fail  atomic.Bool
+	calls chan struct{}
+}
+
+func (g *gossipStub) client(t *testing.T, cp *controlPlaneServer, cert *x509.Certificate, ip string) *DataPlaneClient {
+	t.Helper()
+	return &DataPlaneClient{nodeID: "local", callForTest: func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
+		if method != methodSyncRateLimits {
+			return nil, errors.New("unexpected method")
+		}
+		if g.fail.Load() {
+			select {
+			case g.calls <- struct{}{}:
+			default:
+			}
+			return nil, errors.New("controlled CP outage")
+		}
+		response, err := cp.SyncRateLimits(ctxWithPeerCert(cert), raw)
+		if err == nil {
+			var broadcast RateLimitBroadcast
+			if e := json.Unmarshal(response, &broadcast); e != nil || broadcast.RemoteCounts[ip] != 2 {
+				t.Errorf("CP must exclude this node's six requests: response=%s err=%v", response, e)
+			}
+		}
+		return response, err
+	}}
+}
+
+// assertClusterRateLimitDiagnosticsLive checks that metrics and the cluster
+// rate-limit API read the application owner's live broadcast.
+func assertClusterRateLimitDiagnosticsLive(t *testing.T) {
+	t.Helper()
+	if body := renderMetrics(t); !strings.Contains(body, "culvert_cluster_ratelimit_remote_stale 0") {
+		t.Fatalf("metrics missed live broadcast: %s", extractClusterRLMetrics(body))
+	}
+	out := httptest.NewRecorder()
+	apiClusterRateLimits(out, withRole(httptest.NewRequest(http.MethodGet, "/api/cluster/rate-limits", http.NoBody), RoleViewer))
+	var status map[string]any
+	if err := json.Unmarshal(out.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if out.Code != http.StatusOK || status["enabled"] != true || status["remote_ips"] != float64(1) || status["rate_limit_rpm"] != float64(8) || status["remote_counts_applied"] != true || status["remote_counts_stale"] != false {
+		t.Fatalf("diagnostics missed admission owner: %s", out.Body.String())
+	}
+}
+
+// awaitSignal waits for one signal or fails with msg.
+func awaitSignal(t *testing.T, ch <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal(msg)
+	}
+}
+
+// The transport is the only stub: real authenticated CP aggregation feeds the
+// real DP loop, then the same owner drives HTTP admission, metrics and the API.
+func TestDistributedAdmission_ProductionWiring(t *testing.T) {
+	r := installDistributedAdmissionOwners(t)
 	const ip = "198.51.100.71"
 	r.Configure(10, time.Minute)
 	for i := 0; i < 6; i++ {
@@ -48,29 +120,8 @@ func TestDistributedAdmission_ProductionWiring(t *testing.T) {
 	cert := makeTestLeafCert(t, big.NewInt(71))
 	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "local", CertSerial: cert.SerialNumber.Text(16)})
 	globalRLAggregator.Update("remote", []RateLimitDelta{{IP: ip, Count: 2}})
-	cp := &controlPlaneServer{}
-	var fail atomic.Bool
-	calls := make(chan struct{}, 1)
-	c := &DataPlaneClient{nodeID: "local", callForTest: func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
-		if method != methodSyncRateLimits {
-			return nil, errors.New("unexpected method")
-		}
-		if fail.Load() {
-			select {
-			case calls <- struct{}{}:
-			default:
-			}
-			return nil, errors.New("controlled CP outage")
-		}
-		response, err := cp.SyncRateLimits(ctxWithPeerCert(cert), raw)
-		if err == nil {
-			var broadcast RateLimitBroadcast
-			if e := json.Unmarshal(response, &broadcast); e != nil || broadcast.RemoteCounts[ip] != 2 {
-				t.Errorf("CP must exclude this node's six requests: response=%s err=%v", response, e)
-			}
-		}
-		return response, err
-	}}
+	stub := &gossipStub{calls: make(chan struct{}, 1)}
+	c := stub.client(t, &controlPlaneServer{}, cert, ip)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); c.rateLimitGossipLoop(ctx, time.Millisecond, r) }()
@@ -90,35 +141,17 @@ func TestDistributedAdmission_ProductionWiring(t *testing.T) {
 		t.Fatal("6 local + 2 remote did not deny at snapshot limit 8")
 	}
 	assertDistributedIngressDenied(t, ip)
-	if body := renderMetrics(t); !strings.Contains(body, "culvert_cluster_ratelimit_remote_stale 0") {
-		t.Fatalf("metrics missed live broadcast: %s", extractClusterRLMetrics(body))
-	}
-	out := httptest.NewRecorder()
-	apiClusterRateLimits(out, withRole(httptest.NewRequest(http.MethodGet, "/api/cluster/rate-limits", http.NoBody), RoleViewer))
-	var status map[string]any
-	if err := json.Unmarshal(out.Body.Bytes(), &status); err != nil {
-		t.Fatal(err)
-	}
-	if out.Code != http.StatusOK || status["enabled"] != true || status["remote_ips"] != float64(1) || status["rate_limit_rpm"] != float64(8) || status["remote_counts_applied"] != true || status["remote_counts_stale"] != false {
-		t.Fatalf("diagnostics missed admission owner: %s", out.Body.String())
-	}
-	fail.Store(true)
-	select {
-	case <-calls:
-	case <-time.After(5 * time.Second):
-		t.Fatal("did not exercise failed RPC")
-	}
+	assertClusterRateLimitDiagnosticsLive(t)
+
+	stub.fail.Store(true)
+	awaitSignal(t, stub.calls, "did not exercise failed RPC")
 	if r.AllowAuto(ip) || r.RemoteIPCount() != 1 {
 		t.Fatal("failed RPC cleared a still-fresh broadcast")
 	}
 	other := withClusterRateLimiter(t, 8, time.Minute)
 	other.ApplyRemoteCounts(map[string]int{ip: 8})
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("gossip did not stop")
-	}
+	awaitSignal(t, done, "gossip did not stop")
 	if r.ClusterEnabled() || r.ClusterFreshness().Armed || !r.AllowAuto(ip) {
 		t.Fatal("stop did not restore this owner's local-only admission")
 	}
