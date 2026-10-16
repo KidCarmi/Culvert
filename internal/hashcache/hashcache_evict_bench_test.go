@@ -193,6 +193,12 @@ func BenchmarkGet_Parallel(b *testing.B) {
 // this is the benchmark to re-read if that follow-up is attempted — and the one
 // that caught the rejected layout change making this case 13 % WORSE while the
 // stall itself got faster.
+// minContendedWindow is the shortest timed window in which the contention
+// benchmarks require at least one writer Set to have landed: several multiples
+// of the Go scheduler's 10 ms preemption slice, so a runnable writer must have
+// had a turn.
+const minContendedWindow = 50 * time.Millisecond
+
 func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	const maxSize = 10_000
 	c := fillCache(maxSize, 0)
@@ -248,11 +254,14 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	reportHitRate(b, hits, total)
 	b.ReportMetric(float64(landed), "writes")
 
-	// The b.N=1 calibration pass times a window of microseconds, in which the
-	// writer legitimately may not be scheduled at all — failing there is the
-	// flake the handshake was added to avoid. Assert only once b.N is large
-	// enough that no overlapping write means something is actually wrong.
-	if b.N >= 1000 && landed == 0 {
+	// Calibration passes time windows of microseconds to a few milliseconds,
+	// in which the writer legitimately may not be scheduled at all: with every
+	// P running a reader, a runnable writer can wait for the scheduler's ~10 ms
+	// preemption tick (observed: b.N=9512, 1.87 ms timed, 0 writes). Gating on
+	// b.N let that pass fail spuriously, so gate on the timed duration instead:
+	// assert only once the window spans several preemption ticks, where no
+	// overlapping write means something is actually wrong.
+	if b.Elapsed() >= minContendedWindow && landed == 0 {
 		b.Fatal("no write landed inside the timed window; the contention this benchmark measures did not happen")
 	}
 }
@@ -314,7 +323,7 @@ func benchMissOnlyParallel(b *testing.B, withWriter bool) {
 	}
 	if withWriter {
 		b.ReportMetric(float64(landed), "writes")
-		if b.N >= 1000 && landed == 0 {
+		if b.Elapsed() >= minContendedWindow && landed == 0 { // see BenchmarkGet_ParallelDuringEviction
 			b.Fatal("no write landed inside the timed window; nothing was contended")
 		}
 	}
