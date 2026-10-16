@@ -2,7 +2,10 @@
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review
 > **Window:** `45eaf07..fbf6a37` (the last published review's merge to `origin/main` HEAD at review
-> time): 13 first-parent merges, 67 non-test files. Backlog IDs from earlier reports (T-11, T-12,
+> time): 13 first-parent commits (7 of them merges). `git diff --name-only 45eaf07 fbf6a37` lists
+> 172 files: 114 after excluding `*_test.go`, of which 47 are under `docs/` or `roadmap/` and 67 are
+> code, UI, CI and packaging files. All 114 were in scope; the 67 were swept for added operator-facing
+> strings and names, and the 47 documents were sampled. Backlog IDs from earlier reports (T-11, T-12,
 > T-29/30, T-54 and others) were not re-verified; no window change touches them.
 
 ## Executive Summary
