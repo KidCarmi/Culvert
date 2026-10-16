@@ -57,5 +57,5 @@ lineages disclosed in earlier reports are not reconciled here.
 Apart from T-64, no production-worthy terminology improvement was identified in the window. No cosmetic
 or preference-driven renames are proposed. The glossary sweep covered the literal forbidden terms in
 Go non-test lines added in the window (blacklist/whitelist, unauth mode, scanner, live feed, recent
-requests, users & roles, cluster nodes, proxy pool, appliance): only three comment-only "appliance" hits
+requests, users & roles, cluster nodes, proxy pool, appliance): only three comment-only hits ("appliance" x2, "scanner" x1)
 (no product copy).
