@@ -9,6 +9,58 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- An explicitly logged-out session cookie was still accepted for up to one
+  second (SEC-REVEXP-1). Two predicates decided whether a session's lifetime
+  had ended and they disagreed in the fail-open direction: `Decode` accepts
+  while `time.Now().Unix() <= s.Exp`, while the revocation list retained an
+  entry only while `!time.Now().After(exp)`. Every production revocation
+  expiry is a whole second (`revokeSessionCookie` stores `time.Unix(s.Exp, 0)`,
+  `MergeRevocations` stores `time.Unix(e.Expiry, 0)`) and `time.Now()` carries
+  a sub-second remainder, so for the whole wall-clock second numbered `s.Exp`
+  the revocation was evicted — and `delete`d — while the cookie it named was
+  still honoured.
+
+  Reproduced against the real `Decode`: a session with `Exp == time.Now().Unix()`,
+  revoked the way the logout path revokes it, reported `IsRevoked=false` and
+  `Decode err=<nil>`. `ExportRevocations` applied the same test, so the hole
+  also propagated: the entry vanished from the on-disk revocations file and
+  from the next DP→CP gossip export on the same tick. The window is predictable
+  to anyone holding the cookie, because `exp` is in it.
+
+  There is now one oracle (`internal/session/revocation_expiry.go`) and the
+  revocation list is the side that moved, because a revocation must outlive the
+  session it revokes and never the reverse. `Decode` was deliberately left
+  alone: tightening it would shorten every session and change the meaning of
+  the `exp` claim this appliance signs into a cookie. The change can only
+  retain an entry longer — by under one second — and never drop one sooner, so
+  it cannot resurrect a session, refuse a legitimate logout, or unbound the
+  list. Applied at all four sites that decided the question: `IsRevoked`,
+  `IsUserRevoked`, `ExportRevocations` and `MergeRevocations`.
+
+  Gates: 9 new tests in `internal/session/revocation_expiry_test.go` — **7
+  regression gates**, each measured to fail against the pre-fix predicate and
+  pass after it (the differential against `Decode`, the map-level boundary, the
+  persistence and cluster-merge paths, the username-keyed list that gates a
+  deleted account, and a concurrent storm across all five entry points under
+  `-race`), plus **2 controls** that pass under both predicates by design and
+  are therefore not regression evidence: `UnambiguouslyPastEntriesStillEvict`
+  (2 s / 1 min / 24 h old entries still evict — had it flipped, the fix would
+  have made the list an unbounded leak) and `MalformedPeerExpiries` (`Expiry` of
+  `0`, `-1`, `-(1<<40)` refused, none panics — widening retention must not
+  widen what a peer can inject). An earlier revision of this entry claimed all
+  of them failed pre-fix; that was wrong and is corrected here, because
+  presenting a control as a regression gate makes the evidence irreproducible.
+
+  One pre-existing assertion (`TestRevocationList_PastExpiryEvicts`) used a
+  `-1ms` expiry, which is inside the current second and therefore no longer
+  expired; it now uses `-1m` and the boundary it used to straddle is pinned by
+  two of the new gates.
+
+  Review of the rest of the in-flight change set — the IDNA memo, the urlcat
+  lock-free read view, the config BOM fix, and four reported findings against
+  branches this change does not own — is recorded in
+  `docs/engineering/security-reviews/2026-10-11-in-flight-session-and-category-plane-window.md`.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
