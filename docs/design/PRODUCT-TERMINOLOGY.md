@@ -31,15 +31,16 @@ is listed under "replaces".
 | **Control Plane / Data Plane (CP/DP)** | Node roles per `controlplane.go` | spell out on first use per screen |
 | **Leader / Standby** | HA roles (`/api/cluster/ha`) | — |
 | **Health** | A component's operational state: **Healthy / Degraded / Down / Unknown** | unify: today "connected/disconnected", "ok", "live/stale" are mixed. Wire states ("connected") remain in tables where they are the literal backend status; roll-ups use the Health scale |
-| **Status** | The lifecycle state of an entity (node: connected/draining/revoked; rule: enabled/disabled; update: available/current) | do not use "status" for health roll-ups |
+| **Status** | The lifecycle state of an entity (node: connected/draining/revoked; rule: enabled/disabled; release: available/installed; upgrade: dispatch status) | do not use "status" for health roll-ups |
 | **Blocklist / Allowlist** | The host list and its mode (`/api/blocklist`, `/mode`) | never "blacklist/whitelist" (already clean) |
 | **Exception** | A never-blocked host (`/api/blocklist/exceptions`) | keep — but see Bypass below |
 | **Bypass** | Skipping an *inspection* step for matching traffic: SSL-inspection bypass, content-scan bypass | today: "bypass", "exclusion", "allowlist", "exception" all mean skip-something. Rule: **Exception** = not blocked; **Bypass** = not inspected/scanned; **Feed allowlist** = never blocked *by feeds* |
 | **Traffic** | The request stream (Monitor section) | "Live Feed", "Live Request Log", "Recent Requests" → "Traffic" (nav), "Live traffic" (panel), "Recent requests" (dashboard card) |
 | **Audit Log** | Admin configuration-change history (`/api/audit`) | never mix with request logs |
 | **Configuration versions** | Automatic config snapshots + rollback (`/api/config/versions`) | "Config Versions" ok in dense UI |
-| **Update** | Legacy Docker self-update path (`/api/update/*`) | — |
-| **Release** | Signed-catalog release management (`/api/releases*`) | keep distinct from Update until the M3 "Software" merge |
+| **Update** | Retired term. It named the legacy Docker self-update path; the `updater` sidecar and its `/api/update/*` endpoints no longer exist | do not use it for a current surface, and do not surface "self-update"; say **Release** for the signed catalog and **Upgrade** for applying one |
+| **Upgrade** | Applying a release to a node: dispatched from Release management (the console action is **Dispatch**) and performed by the host Maintenance Agent | replaces "Update" / "self-update" |
+| **Release** | Signed-catalog release management (`/api/releases*`) | keep distinct from Upgrade (applying a release) until the M3 "Software" merge |
 | **Administrator** | A console account (admin/operator/viewer role) | "Users & Roles" → "Administrators" (avoids collision with proxy users/identities) |
 | **Identity** | An authenticated proxy user (from IdP/local auth; `identity.go`) | never "user" alone when it could mean console account |
 | **Inspection** | TLS MITM (SSL inspect) | "SSL inspection" acceptable; be consistent per screen |
