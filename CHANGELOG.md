@@ -516,6 +516,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- Two security-regression gates added for the memoized IDNA slow path
+  (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
+  and each verified failing in both against the specific defect it claims to
+  catch. No runtime behaviour changes; ported from the closed PR #1617.
+
+  `NormalizeHostStrict` is the fail-closed dispatch gate: `ok=false` means the
+  request is REFUSED, so a host that cannot be canonicalized never reaches FQDN,
+  blocklist or category matching un-normalized (RISK-013). The memo's slots are
+  shared by design — each tier is direct-mapped and a colliding host overwrites
+  the entry that was there — so the crossing that matters is a REJECTED host
+  meeting a resident ACCEPTED entry, which the existing collision test cannot
+  observe because it alternates two accepted hosts.
+  `TestIDNMemo_RejectionIsNeverUpgradedToAcceptance` pins that crossing in
+  both directions in the main tier, and in the long tier (which never retains a
+  rejection) on every round. Against a memo whose hit skips the full-key
+  re-verification, `xn--0.example.com` is answered as another host's A-label
+  with `ok=true` — a client-chosen unnormalizable authority admitted and
+  evaluated as a different destination than the one it names.
+
+  `TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer` pins that the stored key is
+  a CLONE of the caller's string. The key arrives as a substring of whatever
+  buffer the caller holds — on the request path, net/http's header buffer — so
+  an entry that kept it would pin that whole backing array per slot while every
+  byte-counting test still reported a short key. The gate drops every
+  reference it holds to a 16 MiB buffer the probe host was sliced out of and
+  asks the collector what is still reachable: a few hundred bytes when the key
+  is cloned, ~16.8 MB against the un-cloned shape, for a 25-byte main-tier key
+  and a 505-byte long-tier key alike. The review is
+  `docs/engineering/security-reviews/2026-10-13-idna-memo-and-host-bounds-window.md`;
+  its single-tier "un-memoized band is deliberate" finding is superseded by the
+  long tier and its gate for that gap is intentionally not ported.
+
 ### Changed
 
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
