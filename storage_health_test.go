@@ -14,9 +14,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -462,194 +462,157 @@ func TestStorageWriteAlert_RetryQueueDoesNotConsumeAlertGate(t *testing.T) {
 // It showed up as a spurious failure in an unrelated guardrail that samples
 // runtime.NumGoroutine() over a 50ms window.
 //
-// The measurement is ATTRIBUTED, not process-global. An earlier version
-// compared runtime.NumGoroutine() before and after, so any goroutine another
-// test left behind (an LDAP timeout, a CDR renewal, a CP publish) that started
-// inside the 50ms window was blamed on this write; the Deep determinism gate
-// failed on unrelated PRs with "spawned 1 goroutine(s)" (#1437 seed
-// 1790363966990362284, #1529 seed 1792140730415552198). Every live goroutine
-// records the goroutine that created it, so the test counts exactly the new
-// goroutines descended from its own goroutine, which is where the failing
-// write and its synchronous observer run. The threshold is unchanged: one
-// spawned goroutine fails.
+// The test used to sample that same process-global counter itself, so any
+// goroutine an earlier test left behind that started inside its 50ms window
+// was blamed on this write, and the Deep determinism gate failed on unrelated
+// PRs with "spawned 1 goroutine(s)" (#1437 seed 1790363966990362284, #1529
+// seed 1792140730415552198). It now asserts in two layers, neither of which
+// another test's goroutines can reach:
+//
+//  1. The gate itself, in-process and exact: the real fireStorageWriteAlert
+//     runs, and its launcher seam counts deliveries. No subscriber means zero
+//     launches; a subscriber means a launch naming this write (the control
+//     that proves the seam is on the delivery path).
+//  2. The whole failed-write path with the REAL launcher, measured with the
+//     original goroutine-count guard in a re-executed copy of this binary that
+//     runs nothing else. The count sees every goroutine still running,
+//     including one whose spawner already exited (Codex review on #1634),
+//     which a parent-attribution snapshot cannot.
 func TestStorageWriteAlert_NoGoroutineWithoutSubscriber(t *testing.T) {
 	withCleanStorageWriteHealth(t)
 
-	// The PRODUCTION seam, deliberately not swapped: this test is about what
-	// the real one does.
+	// The PRODUCTION gate, deliberately not swapped: this test is about what
+	// the real one does. Only the launcher under it is recorded.
 	prevStore := globalAlertStore
 	globalAlertStore = &AlertStore{}
 	t.Cleanup(func() { globalAlertStore = prevStore })
-
-	self := currentGoroutineID(t)
-	before := liveGoroutines(t)
-	failingWrite(t, "policy.json")
-	time.Sleep(50 * time.Millisecond) // let anything spawned get scheduled
-	if spawned := goroutinesSpawnedBy(self, before, liveGoroutines(t)); len(spawned) > 0 {
-		t.Errorf("a failed durable write spawned %d goroutine(s) with no webhook subscribed:\n\n%s",
-			len(spawned), strings.Join(spawned, "\n\n"))
+	var mu sync.Mutex
+	var launched []string
+	prevGo := goStorageWriteAlert
+	goStorageWriteAlert = func(detail string, _ func()) {
+		mu.Lock()
+		launched = append(launched, detail)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { goStorageWriteAlert = prevGo })
+	launches := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), launched...)
 	}
 
-	// With a subscriber, delivery is attempted (the goroutine is legitimate).
+	const target = "nogoroutine-probe.json"
+	failingWrite(t, target)
+	if got := launches(); len(got) != 0 {
+		t.Errorf("a failed durable write launched %d alert deliveries with no webhook subscribed: %q", len(got), got)
+	}
+
+	// CONTROL: with a subscriber the same failure launches a delivery. The rate
+	// gate is reopened first so the second failure is alertable.
 	globalAlertStore.Add(AlertWebhook{
 		URL: "https://alerts.invalid/hook", Enabled: true, Events: []string{"storage_write_failed"},
 	})
 	if !globalAlertStore.HasSubscriber("storage_write_failed") {
 		t.Fatal("setup: webhook not registered as a subscriber")
 	}
-}
-
-// goroutineRecord is one live goroutine from a full runtime.Stack dump.
-type goroutineRecord struct {
-	parent uint64 // creating goroutine; 0 when the dump records none
-	stack  string
-}
-
-// liveGoroutines snapshots every live goroutine by ID with its creator. The
-// creator comes from the "created by F in goroutine N" line the runtime
-// prints for each goroutine.
-func liveGoroutines(t *testing.T) map[uint64]goroutineRecord {
-	t.Helper()
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
+	resetStorageWriteHealthForTest()
+	already := len(launches())
+	failingWrite(t, target)
+	ours := 0
+	for _, d := range launches()[already:] {
+		if strings.Contains(d, target) {
+			ours++
 		}
-		buf = make([]byte, 2*len(buf))
 	}
-	out := make(map[uint64]goroutineRecord)
-	for _, block := range strings.Split(strings.TrimSpace(string(buf)), "\n\n") {
-		id, ok := parseGoroutineID(block)
-		if !ok {
-			t.Fatalf("unparseable goroutine dump block:\n%s", block)
-		}
-		out[id] = goroutineRecord{parent: parseGoroutineCreator(block), stack: block}
+	if ours != 1 {
+		t.Errorf("a subscribed failure launched %d deliveries naming %s, want 1: the launcher seam is not on the "+
+			"delivery path, so the zero above proves nothing", ours, target)
 	}
-	return out
+
+	if n, out := goroutinesLeftByFailedWriteIsolated(t, storageProbeProduction); n > 0 {
+		t.Errorf("a failed durable write left %d goroutine(s) running with no webhook subscribed "+
+			"(isolated process):\n%s", n, out)
+	}
 }
 
-// currentGoroutineID returns the calling goroutine's ID.
-func currentGoroutineID(t *testing.T) uint64 {
+// TestStorageWriteAlert_IsolatedGuardCatchesNestedSpawn is the control for
+// layer 2: a write path that spawns a goroutine which spawns the long-lived
+// one and exits before the sample (the Codex shape) must still be counted.
+func TestStorageWriteAlert_IsolatedGuardCatchesNestedSpawn(t *testing.T) {
+	if n, out := goroutinesLeftByFailedWriteIsolated(t, storageProbeNestedSpawn); n < 1 {
+		t.Fatalf("the isolated guard counted %d goroutines for a nested spawn whose spawner exited; want 1:\n%s", n, out)
+	}
+}
+
+const (
+	storageProbeEnv         = "CULVERT_STORAGE_GOROUTINE_PROBE"
+	storageProbeProduction  = "production"
+	storageProbeNestedSpawn = "nested-spawn-control"
+	storageProbeResultMark  = "storage-goroutine-probe spawned="
+)
+
+// goroutinesLeftByFailedWriteIsolated re-executes this test binary to run
+// ONLY TestStorageWriteAlertGoroutineProbe in the given mode, so no other
+// test's goroutines share the process, and returns the goroutine-count delta
+// the probe measured across one failed durable write.
+func goroutinesLeftByFailedWriteIsolated(t *testing.T, mode string) (int, string) {
 	t.Helper()
-	buf := make([]byte, 256)
-	id, ok := parseGoroutineID(string(buf[:runtime.Stack(buf, false)]))
-	if !ok {
-		t.Fatal("cannot parse the current goroutine's ID from its stack header")
-	}
-	return id
-}
-
-// parseGoroutineID reads N from a "goroutine N [state]:" header.
-func parseGoroutineID(block string) (uint64, bool) {
-	rest, ok := strings.CutPrefix(block, "goroutine ")
-	if !ok {
-		return 0, false
-	}
-	field, _, ok := strings.Cut(rest, " ")
-	if !ok {
-		return 0, false
-	}
-	id, err := strconv.ParseUint(field, 10, 64)
-	return id, err == nil
-}
-
-// parseGoroutineCreator reads N from a "created by F in goroutine N" line.
-func parseGoroutineCreator(block string) uint64 {
-	i := strings.LastIndex(block, "\ncreated by ")
-	if i < 0 {
-		return 0
-	}
-	line, _, _ := strings.Cut(block[i+1:], "\n")
-	j := strings.LastIndex(line, " in goroutine ")
-	if j < 0 {
-		return 0
-	}
-	id, err := strconv.ParseUint(line[j+len(" in goroutine "):], 10, 64)
+	// #nosec G204,G702 -- re-exec of THIS test binary (os.Args[0]) with a fixed,
+	// literal test selector and a fixed mode; no external input.
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStorageWriteAlertGoroutineProbe$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), storageProbeEnv+"="+mode)
+	raw, err := cmd.CombinedOutput()
+	out := string(raw)
 	if err != nil {
-		return 0
+		t.Fatalf("isolated goroutine probe (%s) failed: %v\n%s", mode, err, out)
 	}
-	return id
+	i := strings.LastIndex(out, storageProbeResultMark)
+	if i < 0 {
+		t.Fatalf("isolated goroutine probe (%s) reported no result:\n%s", mode, out)
+	}
+	field, _, _ := strings.Cut(out[i+len(storageProbeResultMark):], "\n")
+	n, err := strconv.Atoi(strings.TrimSpace(field))
+	if err != nil {
+		t.Fatalf("isolated goroutine probe (%s) result %q: %v", mode, field, err)
+	}
+	return n, out
 }
 
-// goroutinesSpawnedBy returns the stacks of goroutines that are live in after,
-// were not live in before, and descend from root through live creators.
-// Goroutines that other tests left running, and their new children, are not
-// counted.
-func goroutinesSpawnedBy(root uint64, before, after map[uint64]goroutineRecord) []string {
-	ours := map[uint64]bool{root: true}
-	for changed := true; changed; {
-		changed = false
-		for id, g := range after {
-			if _, existed := before[id]; existed || ours[id] || !ours[g.parent] {
-				continue
-			}
-			ours[id] = true
-			changed = true
+// TestStorageWriteAlertGoroutineProbe is the child half of
+// goroutinesLeftByFailedWriteIsolated; it does nothing in a normal run. It
+// applies the original guard (goroutine count before and after a failed write
+// plus a 50ms settle), which is sound in a process that runs nothing else.
+func TestStorageWriteAlertGoroutineProbe(t *testing.T) {
+	mode := os.Getenv(storageProbeEnv)
+	if mode == "" {
+		t.Skip("child process for TestStorageWriteAlert_NoGoroutineWithoutSubscriber")
+	}
+	withCleanStorageWriteHealth(t)
+	prevStore := globalAlertStore
+	globalAlertStore = &AlertStore{}
+	t.Cleanup(func() { globalAlertStore = prevStore })
+	switch mode {
+	case storageProbeProduction:
+		// The real gate and the real launcher.
+	case storageProbeNestedSpawn:
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop) })
+		prev := fireStorageWriteAlert
+		fireStorageWriteAlert = func(string) {
+			done := make(chan struct{})
+			go func() {
+				go func() { <-stop }()
+				close(done)
+			}()
+			<-done
 		}
+		t.Cleanup(func() { fireStorageWriteAlert = prev })
+	default:
+		t.Fatalf("unknown probe mode %q", mode)
 	}
-	delete(ours, root)
-	stacks := make([]string, 0, len(ours))
-	for id := range ours {
-		stacks = append(stacks, after[id].stack)
-	}
-	sort.Strings(stacks)
-	return stacks
-}
 
-// TestGoroutinesSpawnedBy_AttributesOnlyOwnDescendants is the control for the
-// instrument above. A child and a grandchild of the test goroutine are counted.
-// A goroutine started during the window by an unrelated, pre-existing
-// goroutine (what a test left behind looks like) is not.
-func TestGoroutinesSpawnedBy_AttributesOnlyOwnDescendants(t *testing.T) {
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	t.Cleanup(func() { close(stop); wg.Wait() })
-	park := func() { defer wg.Done(); <-stop }
-
-	// The unrelated goroutine exists before the snapshot and spawns later.
-	spawnForeign := make(chan struct{})
-	foreignID := make(chan uint64, 1)
-	foreignSpawned := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 256)
-		id, _ := parseGoroutineID(string(buf[:runtime.Stack(buf, false)]))
-		foreignID <- id
-		<-spawnForeign
-		wg.Add(1)
-		go park()
-		close(foreignSpawned)
-		<-stop
-	}()
-	foreign := <-foreignID
-
-	self := currentGoroutineID(t)
-	before := liveGoroutines(t)
-
-	close(spawnForeign)
-	<-foreignSpawned
-	childSpawned := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		wg.Add(1)
-		go park()
-		close(childSpawned)
-		<-stop
-	}()
-	<-childSpawned
-
-	after := liveGoroutines(t)
-	if got := goroutinesSpawnedBy(self, before, after); len(got) != 2 {
-		t.Fatalf("attributed %d goroutine(s), want 2 (child and grandchild only):\n\n%s",
-			len(got), strings.Join(got, "\n\n"))
-	}
-	// The foreign goroutine's new child must be visible to the instrument, or
-	// the exclusion above proves nothing.
-	if got := goroutinesSpawnedBy(foreign, before, after); len(got) != 1 {
-		t.Fatalf("setup: foreign goroutine has %d new descendant(s), want 1", len(got))
-	}
+	before := runtime.NumGoroutine()
+	failingWrite(t, "policy.json")
+	time.Sleep(50 * time.Millisecond) // let anything spawned get scheduled
+	fmt.Printf("%s%d\n", storageProbeResultMark, runtime.NumGoroutine()-before)
 }

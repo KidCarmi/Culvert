@@ -176,6 +176,10 @@ func TestOrder_SwapAdminSettingsPathDrainsPendingSaves(t *testing.T) {
 	}
 	select {
 	case <-done:
+		// Release the held save BEFORE failing: t.Fatal runs cleanups LIFO, so
+		// the helper's own draining cleanup would otherwise wait on it forever
+		// and a regression would hang instead of failing.
+		unblock()
 		t.Fatal("swapAdminSettingsPath returned while a best-effort save was still pending; that save reads the new path and can overwrite the test's fixture")
 	default:
 	}
