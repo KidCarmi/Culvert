@@ -173,8 +173,11 @@ administrative decision was affected, and therefore what the operator must redo.
 ## Recovery
 
 1. The Diagnostics panel (`GET /api/diagnostics`, also rendered by
-   `GET /api/health/explain`) carries an `admin_roster_durability` row: `warn`
-   when no `-ui-users-file` is configured (changes revert at restart) or when
+   `GET /api/health/explain`) carries an `admin_roster_durability` row. It is
+   `ok` while initial setup is incomplete (there is no credential to persist
+   yet). Once setup is complete it is `warn` when no `-ui-users-file` is
+   configured (changes revert at restart; on a node with no local
+   administrator it also names the missing break-glass account) or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. The counts, the remedy and the degraded login-write
