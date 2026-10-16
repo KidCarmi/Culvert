@@ -5225,6 +5225,7 @@
         "additionalProperties": false,
         "properties": {
           "addr": {
+            "description": "The collector the operator CONFIGURED. It is what the settings form and the persisted admin settings are about, so it stays populated when the dial for it failed — `degraded` beside an empty `addr` used to read as \"not configured\" and hide the loss row on the one feed losing every event.",
             "type": "string"
           },
           "degraded": {
@@ -5282,6 +5283,14 @@
           "secondsSinceEvent": {
             "description": "Seconds since the last delivered event, or since this target was configured when none ever was.",
             "type": "integer"
+          },
+          "servingAddr": {
+            "description": "The collector actually being served, empty when none is. Differs from addr when a re-point's dial failed and the previous collector is still delivering.",
+            "type": "string"
+          },
+          "targetMet": {
+            "description": "True when servingAddr is addr, i.e. when format, lastSuccessUnix, deliveryProvable and the queue fields — all properties of the SERVING writer — describe the configured collector. degraded, neverDelivered and secondsSinceEvent are always the verdict on the CONFIGURED one.",
+            "type": "boolean"
           }
         },
         "required": [

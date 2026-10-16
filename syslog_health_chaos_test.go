@@ -141,6 +141,22 @@ func (c *syslogTestCollector) waitForConnection(t *testing.T) {
 	}
 }
 
+// noteSyslogFailedDial is the BOOT sequence for a collector that could not be
+// connected: the intent is recorded, and the synchronous dial that would have
+// decided it has returned empty-handed.
+//
+// Every gate about a configured-but-unserved feed wants this rather than a
+// bare noteSyslogIntent, which is only HALF of what a boot path does — it now
+// leaves the intent PENDING for the length of one dial
+// (syslogDialVerdictGrace) so a watchdog tick inside that dial cannot page an
+// outage for a collector that is about to connect (Codex P2, PR #1494). The
+// gates that are specifically about the pending window call the two halves
+// themselves and drive the injected clock across the grace.
+func noteSyslogFailedDial(target string) {
+	noteSyslogIntent(target)
+	noteSyslogDialResolved()
+}
+
 // armSyslogFeed points the process at a collector exactly as InitSyslog does
 // on both the startup and the admin path, and isolates the health record.
 func armSyslogFeed(t *testing.T, addr string) {
@@ -1197,7 +1213,7 @@ func TestChaos72_ConfiguredButNeverConnectedIsExportedAsDown(t *testing.T) {
 
 	// Exactly what loadObservability does when the dial fails: intent is
 	// recorded, no Writer is published.
-	noteSyslogIntent("tcp://collector.invalid:601")
+	noteSyslogFailedDial("tcp://collector.invalid:601")
 	if activeSyslog() != nil {
 		t.Fatal("fixture published a writer; this gate is about the case where none exists")
 	}
@@ -1265,7 +1281,7 @@ func TestChaos72_UnmetIntentDoesNotWidenTheEmissionRule(t *testing.T) {
 		t.Fatalf("emitted %q on a node that never configured a collector", none.String())
 	}
 
-	noteSyslogIntent("tcp://collector.invalid:601")
+	noteSyslogFailedDial("tcp://collector.invalid:601")
 	var armed strings.Builder
 	syslogWritePrometheus(&armed)
 	if armed.Len() == 0 {
@@ -1465,7 +1481,7 @@ func TestChaos72_AdminAPIAnswersFromTheDeliverySnapshot(t *testing.T) {
 		t.Cleanup(resetSyslogHealthForTest)
 
 		// Exactly what loadObservability leaves behind when the dial fails.
-		noteSyslogIntent("tcp://collector.invalid:601")
+		noteSyslogFailedDial("tcp://collector.invalid:601")
 		syslogConfiguredAddr = "tcp://collector.invalid:601"
 
 		body := readSyslogAdminAPI(t)
@@ -1538,7 +1554,7 @@ func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 
 	// An operator asked for a collector and the boot dial failed: intent
 	// recorded, no Writer installed.
-	noteSyslogIntent("tcp://siem.invalid:514")
+	noteSyslogFailedDial("tcp://siem.invalid:514")
 
 	const lost = 7
 	// Measured as a DELTA. The exported total is process-lifetime and can be
@@ -1618,7 +1634,7 @@ func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
-	noteSyslogIntent("tcp://siem.invalid:514")
+	noteSyslogFailedDial("tcp://siem.invalid:514")
 	base := syslogFeedState().Drops
 	noteSyslogEventSkipped(syslogSkipArmed())
 	if got := syslogFeedState().Drops - base; got != 1 {
@@ -1649,7 +1665,7 @@ func TestChaos72_HealthzReportsTheLossMetricsReports(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
-	noteSyslogIntent("tcp://siem.invalid:514")
+	noteSyslogFailedDial("tcp://siem.invalid:514")
 	const lost = 4
 	for i := 0; i < lost; i++ {
 		noteSyslogEventSkipped(syslogSkipArmed())
@@ -1692,7 +1708,7 @@ func TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
 
 	// An operator asked for a collector; the dial failed, so no Writer exists.
 	setActiveSyslog(nil)
-	noteSyslogIntent("tcp://siem.invalid:514")
+	noteSyslogFailedDial("tcp://siem.invalid:514")
 	if activeSyslog() != nil {
 		t.Fatal("precondition: want no active writer")
 	}
@@ -1728,7 +1744,7 @@ func TestChaos72_FailedToConnectRowNamesTheLoss(t *testing.T) {
 	setActiveSyslog(nil)
 	syslogConfigured = ""
 	syslogConfiguredAddr = "tcp://siem.invalid:514"
-	noteSyslogIntent(syslogConfiguredAddr)
+	noteSyslogFailedDial(syslogConfiguredAddr)
 
 	row := checkSyslogFeed()
 	if row.Status != diagFail {
@@ -1840,7 +1856,7 @@ func TestChaos72_SupersededTargetIsNotReportedAsNeverConnected(t *testing.T) {
 
 	// The operator's persisted target B never connects: intent moves, the
 	// writer for A stays live.
-	noteSyslogIntent("tcp://siem-b.invalid:514")
+	noteSyslogFailedDial("tcp://siem-b.invalid:514")
 
 	snap := syslogFeedState()
 	if !snap.IntentUnmet || !snap.Configured {
@@ -1868,7 +1884,7 @@ func TestChaos72_SupersededTargetIsNotReportedAsNeverConnected(t *testing.T) {
 	// above is to use the superseded wording unconditionally, which would be
 	// just as false in the other direction.
 	resetSyslogHealthForTest()
-	noteSyslogIntent("tcp://siem-b.invalid:514")
+	noteSyslogFailedDial("tcp://siem-b.invalid:514")
 	snap2 := syslogFeedState()
 	if snap2.Configured {
 		t.Fatalf("control precondition: want no writer, got Configured=true")
@@ -1934,7 +1950,7 @@ func TestChaos72_RecordWriterPairingIsAnInvariant(t *testing.T) {
 	resetSyslogHealthForTest()
 	check("after reset")
 
-	noteSyslogIntent("tcp://siem.invalid:514")
+	noteSyslogFailedDial("tcp://siem.invalid:514")
 	check("intent recorded, no writer")
 
 	col := startSyslogCollector(t)
@@ -1942,7 +1958,7 @@ func TestChaos72_RecordWriterPairingIsAnInvariant(t *testing.T) {
 	check("writer installed")
 
 	// A superseded target: intent moves, the writer stays.
-	noteSyslogIntent("tcp://siem-b.invalid:514")
+	noteSyslogFailedDial("tcp://siem-b.invalid:514")
 	check("intent superseded")
 
 	noteSyslogForwardingDisabled()
@@ -1997,7 +2013,7 @@ func TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
 	// An operator asks for a collector whose dial fails: intent recorded, no
 	// Writer installed. Nothing retries, so the plane reports it degraded
 	// immediately — this is the snapshot that goes in flight.
-	noteSyslogIntent("tcp://siem.invalid:601")
+	noteSyslogFailedDial("tcp://siem.invalid:601")
 	snap := syslogFeedState()
 	if !snap.IntentUnmet || snap.writer != nil {
 		t.Fatalf("precondition: want an unmet intent with NO writer, got IntentUnmet=%v writer=%v", snap.IntentUnmet, snap.writer)
@@ -2025,7 +2041,7 @@ func TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
 	// a commit half that refuses everything, which would delete the alert this
 	// whole plane exists to produce.
 	resetSyslogHealthForTest()
-	noteSyslogIntent("tcp://siem.invalid:601")
+	noteSyslogFailedDial("tcp://siem.invalid:601")
 	fresh := syslogFeedState()
 	if !fresh.Degraded {
 		t.Fatal("control precondition: the control snapshot is not degraded")
@@ -2149,7 +2165,7 @@ func TestChaos72_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
 	step("re-point", func() { noteSyslogWriterInstalled(sw2, "udp://127.0.0.1:65532") })
 	// An intent that does not change the writer need not bump; the invariant
 	// is one-directional and this exercises that it does not over-claim.
-	step("intent superseded", func() { noteSyslogIntent("tcp://siem-b.invalid:514") })
+	step("intent superseded", func() { noteSyslogFailedDial("tcp://siem-b.invalid:514") })
 	// The reset is stepped while a writer is INSTALLED. Stepping it after the
 	// disable would observe no writer change at all, so a tree that had
 	// dropped its bump would pass — the same masking the install site had.
@@ -2242,12 +2258,12 @@ func TestChaos72_TransportClaimHasOneSource(t *testing.T) {
 	// would put the caveat on a TCP feed that never came up and tell an
 	// operator their evidence-capable collector cannot give evidence.
 	resetSyslogHealthForTest()
-	noteSyslogIntent("tcp://siem.invalid:601")
+	noteSyslogFailedDial("tcp://siem.invalid:601")
 	if snap := syslogFeedState(); snap.UDP {
 		t.Error("control: a configured-but-unconnected tcp:// collector must not carry the UDP caveat")
 	}
 	resetSyslogHealthForTest()
-	noteSyslogIntent("udp://siem.invalid:514")
+	noteSyslogFailedDial("udp://siem.invalid:514")
 	if snap := syslogFeedState(); !snap.UDP {
 		t.Error("control: a configured-but-unconnected udp:// collector must still carry the UDP caveat")
 	}
@@ -2763,7 +2779,7 @@ func TestChaos72_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent(t *testing.
 
 	// A is serving; the operator's current intent is B, which never connected.
 	noteSyslogWriterInstalled(serving, "udp://127.0.0.1:65533")
-	noteSyslogIntent("tcp://persisted-collector.invalid:601")
+	noteSyslogFailedDial("tcp://persisted-collector.invalid:601")
 
 	if snap := syslogFeedState(); !snap.IntentUnmet {
 		t.Fatal("precondition: a serving target that is not the intended one must read as an unmet intent")
@@ -2881,7 +2897,10 @@ func TestChaos72_ALossOnAnInstalledWriterIsNeverCountedAsLate(t *testing.T) {
 
 // configMetadataReaders names the functions that report or PERSIST the syslog
 // target, together with the file each lives in. Each must obtain the Writer
-// from syslogConfiguredSnapshot, not from a second, unsynchronised load.
+// from the SAME critical section as the target it reports it beside — either
+// syslogConfiguredSnapshot() (the config-metadata pair) or syslogFeedState()'s
+// captured `writer` (the health record's pair, which carries both the serving
+// and the intended target) — never a second, unsynchronised load.
 var configMetadataReaders = map[string]string{
 	"snapshotAdminEndpoints": "admin_settings.go",
 	"checkSyslogFeed":        "diagnostics.go",
@@ -2946,9 +2965,10 @@ func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 		checked++
 		for _, at := range activeSyslogCallSites(fset, fd) {
 			t.Errorf("%s: %s calls activeSyslog() at %s\n\t"+
-				"the writer must come from syslogConfiguredSnapshot(), in the same critical section as "+
-				"the target it is reported or persisted beside; a separate load belongs to a different "+
-				"generation (Codex P2, PR #1494)", file, fn, at)
+				"the writer must come from syslogConfiguredSnapshot() or from syslogFeedState()'s "+
+				"captured writer, in the same critical section as the target it is reported or "+
+				"persisted beside; a separate load belongs to a different generation "+
+				"(Codex P2, PR #1494)", file, fn, at)
 		}
 	}
 	if checked != len(configMetadataReaders) {
@@ -2986,7 +3006,7 @@ func TestChaos72_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved(t *testing.T
 
 	// A configured collector whose dial never produced a Writer: the fan-outs
 	// find nothing and every event is a loss.
-	noteSyslogIntent("tcp://siem.invalid:514")
+	noteSyslogFailedDial("tcp://siem.invalid:514")
 	if !syslogSkipArmed() {
 		t.Fatal("precondition: an unmet configured collector must arm skip accounting")
 	}
@@ -3350,5 +3370,388 @@ func TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters(t *testing.T) {
 	if !usesOutcomeReason {
 		t.Fatal("the acknowledgement branch names no reason at all: a probe that says only " +
 			"\"lost\" without the bounded class is the diagnostic this endpoint exists to give")
+	}
+}
+
+// ── A dial in flight is not a verdict ────────────────────────────────────────
+//
+// Both boot paths record the intent and then dial SYNCHRONOUSLY, and the dial
+// takes up to syslog.DialTimeout. The watchdog is started one init slice
+// earlier (initBackgroundServices, before initPersistentAdminState) and the
+// webhook store is already loaded, so a tick landing inside that dial
+// dispatched `syslog_feed_down` — and logged that "the collector could not be
+// connected 0s ago and nothing retries" — for a collector that connected a
+// moment later. Installing the writer clears the fire-once latch but cannot
+// retract the webhook (Codex P2, PR #1494).
+//
+// That log line is the same class of defect this whole plane exists to remove:
+// a health surface asserting a false statement. Nothing had failed yet.
+
+// The watchdog tick that used to page must not, while the dial is in flight.
+func TestChaos72_PendingDialIsNeitherDegradedNorPaged(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	// applyAdminServices / loadObservability, verbatim: the intent, then the
+	// dial. noteSyslogDialResolved is deliberately NOT called — that is the
+	// state the process is in while InitSyslog is blocked in connect().
+	noteSyslogIntent("tcp://collector.example:601")
+	if activeSyslog() != nil {
+		t.Fatal("fixture published a writer; this gate is about the window before one exists")
+	}
+
+	if snap := syslogFeedState(); snap.Degraded || snap.IntentUnmet {
+		t.Errorf("reported degraded=%v intentUnmet=%v while the dial deciding the intent was still in flight", snap.Degraded, snap.IntentUnmet)
+	}
+	evaluateSyslogDegradation()
+	if len(fired) != 0 {
+		t.Errorf("paged %d time(s) for an intent whose own dial had not returned: %q", len(fired), fired)
+	}
+}
+
+// ...and the suppression is BOUNDED. A flag a caller forgets to clear is a
+// latch that makes the feed permanently unpageable — the fail-OPEN failure
+// this plane keeps recording — so the window is a DEADLINE that expires on its
+// own. Correctness must not depend on anyone reporting back.
+func TestChaos72_PendingDialGraceExpiresWithoutBeingCleared(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	base := time.Now()
+	setSyslogHealthNowForTest(func() time.Time { return base })
+	t.Cleanup(func() { setSyslogHealthNowForTest(nil) })
+
+	noteSyslogIntent("tcp://collector.example:601")
+	if syslogFeedState().Degraded {
+		t.Fatal("precondition: the intent must be pending at the instant it is recorded")
+	}
+
+	// The dial could not possibly still be running, and nobody told the plane.
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(syslogDialVerdictGrace + time.Second) })
+	snap := syslogFeedState()
+	if !snap.Degraded || !snap.IntentUnmet {
+		t.Fatalf("an intent still unserved past the dial grace reported degraded=%v intentUnmet=%v; a missed resolver must cost delay, never silence", snap.Degraded, snap.IntentUnmet)
+	}
+}
+
+// A dial that has RETURNED without a writer is unmet NOW. Waiting the grace
+// out would leave the read surfaces reporting a not-yet-degraded feed for the
+// rest of it — which is exactly when an operator looks at a boot that failed.
+func TestChaos72_ResolvedFailedDialIsReportedWithoutWaitingTheGraceOut(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	base := time.Now()
+	setSyslogHealthNowForTest(func() time.Time { return base })
+	t.Cleanup(func() { setSyslogHealthNowForTest(nil) })
+
+	// The boot failure branch, verbatim.
+	noteSyslogIntent("tcp://collector.example:601")
+	noteSyslogDialResolved()
+
+	snap := syslogFeedState()
+	if !snap.Degraded || !snap.IntentUnmet {
+		t.Fatalf("a failed dial reported degraded=%v intentUnmet=%v at the instant it failed; want the verdict immediately", snap.Degraded, snap.IntentUnmet)
+	}
+}
+
+// The superseded-target shape has the same window: a boot that connected A and
+// then records intent B spends up to a dial reporting the feed DOWN although
+// nothing has failed and A is still delivering.
+func TestChaos72_PendingDialForASecondTargetDoesNotPageTheServingOne(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	// The persisted-settings apply records its own target and starts dialing.
+	noteSyslogIntent("tcp://collector-b.example:601")
+
+	if snap := syslogFeedState(); snap.Degraded {
+		t.Error("reported the feed DOWN while the dial for the second target was still in flight and the first was delivering")
+	}
+	evaluateSyslogDegradation()
+	if len(fired) != 0 {
+		t.Errorf("paged %d time(s) during a re-point's own dial: %q", len(fired), fired)
+	}
+}
+
+// CONTROL: the production sequence end to end — intent recorded, dial
+// succeeds, feed healthy — with nothing between the two halves that could
+// reset the record, and the clock driven well past the grace afterwards. No
+// other gate exercises that order: armSyslogFeed resets the health record
+// BEFORE it dials, so every gate built on it skips the pending phase
+// entirely.
+//
+// What it does NOT pin, measured rather than assumed: removing the deadline
+// clear from noteSyslogWriterInstalled leaves this green, because an install
+// forces intendedTarget == target and syslogIntentUnmet then short-circuits
+// before consulting the deadline at all. That clear is hygiene and is
+// labelled as such at its call site. The "never report an unmet intent"
+// posture is walled by twelve existing gates (verified by mutation), and the
+// bounded-suppression half by the expiry gate above; this one guards the
+// ORDER.
+func TestChaos72_SuccessfulDialResolvesThePendingIntent(t *testing.T) {
+	col := startSyslogCollector(t)
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	base := time.Now()
+	setSyslogHealthNowForTest(func() time.Time { return base })
+	t.Cleanup(func() { setSyslogHealthNowForTest(nil) })
+
+	addr := "tcp://" + col.addr
+	noteSyslogIntent(addr)
+	if err := InitSyslog(addr, "rfc3164"); err != nil {
+		t.Fatalf("InitSyslog(%q): %v", addr, err)
+	}
+	t.Cleanup(func() {
+		if installed := activeSyslog(); installed != nil {
+			_ = installed.Close() //nolint:errcheck // releasing the writer this gate installed
+		}
+	})
+
+	// Well past the grace: if the install had not cleared it, nothing here
+	// would, and a healthy feed would start reporting itself down.
+	setSyslogHealthNowForTest(func() time.Time { return base.Add(syslogDialVerdictGrace + time.Hour) })
+	snap := syslogFeedState()
+	if snap.IntentUnmet || snap.Degraded {
+		t.Fatalf("a connected collector reported intentUnmet=%v degraded=%v", snap.IntentUnmet, snap.Degraded)
+	}
+}
+
+// The grace is DERIVED from the engine's own dial budget, not chosen. One
+// fact, one source: an engine that raises its dial timeout would otherwise
+// silently reopen the window this round closed, and a grace at or above the
+// watchdog's tick would postpone a real page by a whole tick.
+func TestChaos72_DialGraceIsDerivedFromTheEngineBudget(t *testing.T) {
+	if syslogDialVerdictGrace <= syslog.DialTimeout {
+		t.Errorf("dial grace %s does not cover the engine's dial budget %s — a dial can outlast its own grace and be paged mid-flight",
+			syslogDialVerdictGrace, syslog.DialTimeout)
+	}
+	if syslogDialVerdictGrace >= syslogWatchdogInterval {
+		t.Errorf("dial grace %s is not below the watchdog tick %s — suppressing a verdict for that long postpones a REAL page by a tick",
+			syslogDialVerdictGrace, syslogWatchdogInterval)
+	}
+}
+
+// A recorded intent with no dial behind it would be suppressed for the grace
+// and report nothing. Behavioural coverage cannot reach a future caller that
+// forgets to dial, so the pairing is pinned structurally: every production
+// file that records an intent must also be the one that dials.
+func TestChaos72_EveryIntentRecordedIsFollowedByItsDial(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	callers := map[string]bool{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		src := string(b)
+		if !strings.Contains(src, "noteSyslogIntent(") {
+			continue
+		}
+		// syslog_health.go DEFINES it; every other mention is a call.
+		if filepath.Base(f) == "syslog_health.go" {
+			continue
+		}
+		callers[filepath.Base(f)] = true
+		if !strings.Contains(src, "InitSyslog(") {
+			t.Errorf("%s records a syslog intent but never dials: the intent would stay PENDING for the whole grace and then be reported unmet by a timeout rather than by a verdict", filepath.Base(f))
+		}
+	}
+	if len(callers) == 0 {
+		t.Fatal("found no production caller of noteSyslogIntent — the scan is vacuous")
+	}
+}
+
+// ── One response, one target per field ───────────────────────────────────────
+//
+// GET /api/syslog read the serving address through syslogConfiguredSnapshot (a
+// DIFFERENT lock, therefore a different generation) and the verdict through
+// syslogFeedState, and reported the serving address as `addr`. Two shapes
+// followed (Codex P2, PR #1494):
+//
+//   - a failed boot dial answered `addr:""` beside `degraded:true`, and the
+//     legacy panel keys its whole syslog section off `addr` — so it cleared
+//     the operator's own address out of the form, hid the status line and ran
+//     hideSyslogDrops() on the one feed that is losing every event;
+//   - a boot that connected A and then failed to connect the persisted B
+//     answered A beside B's degraded verdict, while `format`,
+//     `lastSuccessUnix` and `deliveryProvable` all described A.
+
+// The configured collector must survive its own dial failing. This is the
+// half with a visible product consequence: the loss row is hidden by an empty
+// address, on the worst outage this plane can report.
+func TestChaos72_FailedDialStillNamesTheConfiguredCollector(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	const target = "tcp://collector.invalid:601"
+	noteSyslogConfiguredIntent(target)
+	noteSyslogFailedDial(target)
+
+	body := readSyslogAdminAPI(t)
+	if got := body["addr"]; got != target {
+		t.Errorf("addr = %q, want the configured collector %q — an empty address is what the panel reads as \"not configured\"", got, target)
+	}
+	if got := body["servingAddr"]; got != "" {
+		t.Errorf("servingAddr = %q, want empty: nothing is serving this feed", got)
+	}
+	if met, _ := body["targetMet"].(bool); met {
+		t.Error("targetMet is true for a collector that was never connected")
+	}
+	if deg, _ := body["degraded"].(bool); !deg {
+		t.Error("degraded is false for a configured collector with nothing serving it")
+	}
+}
+
+// The superseded shape: the two targets are named separately, and the verdict
+// is never attached to the one it is not about.
+func TestChaos72_SupersededTargetIsNamedBesideTheServingOne(t *testing.T) {
+	col := startSyslogCollector(t)
+	serving := "tcp://" + col.addr
+	armSyslogFeed(t, serving)
+
+	const wanted = "tcp://collector-b.invalid:601"
+	noteSyslogConfiguredIntent(wanted)
+	noteSyslogFailedDial(wanted)
+
+	body := readSyslogAdminAPI(t)
+	if got := body["addr"]; got != wanted {
+		t.Errorf("addr = %q, want the CONFIGURED collector %q", got, wanted)
+	}
+	if got := body["servingAddr"]; got != serving {
+		t.Errorf("servingAddr = %q, want the one actually being served %q", got, serving)
+	}
+	if met, _ := body["targetMet"].(bool); met {
+		t.Error("targetMet is true while the configured collector is not the one being served")
+	}
+	if deg, _ := body["degraded"].(bool); !deg {
+		t.Error("degraded is false while the configured collector is unserved")
+	}
+}
+
+// CONTROL: an ordinary healthy feed names ONE collector in both fields and
+// reports the target met. The cheapest way to pass the two gates above is to
+// report `targetMet:false` always, or to stop reporting a serving address at
+// all — either of which makes the panel permanently warn on a working feed.
+func TestChaos72_HealthyFeedReportsItsTargetAsMet(t *testing.T) {
+	col := startSyslogCollector(t)
+	addr := "tcp://" + col.addr
+	armSyslogFeed(t, addr)
+
+	body := readSyslogAdminAPI(t)
+	if got := body["addr"]; got != addr {
+		t.Errorf("addr = %q, want %q", got, addr)
+	}
+	if got := body["servingAddr"]; got != addr {
+		t.Errorf("servingAddr = %q, want %q", got, addr)
+	}
+	if met, _ := body["targetMet"].(bool); !met {
+		t.Error("targetMet is false for a collector that is connected and serving")
+	}
+}
+
+// The response is assembled from ONE snapshot, so every field belongs to one
+// generation by construction rather than by timing. Walled structurally: the
+// window between two reads is a few instructions wide and cannot be scheduled
+// through the handler, which is the same reason round 9's wall on
+// syslogFeedState and the config-metadata wall above are structural.
+func TestChaos72_TheSyslogAPIReadsOneGeneration(t *testing.T) {
+	fset, fd := syslogFuncDecl(t, "ui_config.go", "apiSyslogConfig")
+	if fd == nil {
+		t.Fatal("apiSyslogConfig is gone; this wall names a function that no longer exists")
+	}
+	// The GET branch must not reach for the config-metadata pair: that is a
+	// second critical section, and pairing its address with this snapshot's
+	// verdict is the defect.
+	var offenders []string
+	ast.Inspect(fd, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if id.Name == "syslogConfiguredSnapshot" || id.Name == "activeSyslog" {
+			offenders = append(offenders, id.Name+" at "+fset.Position(call.Pos()).String())
+		}
+		return true
+	})
+	for _, o := range offenders {
+		t.Errorf("apiSyslogConfig calls %s — the reported targets, the format beside them and the verdict must all come from the single syslogFeedState() snapshot, or the response describes two generations (Codex P2, PR #1494)", o)
+	}
+	// CONTROL: the matcher must be able to SEE what it forbids. apiSyslogTest
+	// in the same file legitimately loads the writer on its own (it pairs it
+	// with no target), so it is the honest positive sample.
+	fsetP, probe := syslogFuncDecl(t, "ui_config.go", "apiSyslogTest")
+	if probe == nil {
+		t.Fatal("control: apiSyslogTest is gone; the wall above proves nothing")
+	}
+	if len(activeSyslogCallSites(fsetP, probe)) == 0 {
+		t.Fatal("control: the AST walk found no activeSyslog() call in apiSyslogTest, so it would pass this wall however apiSyslogConfig were written")
+	}
+}
+
+// TestChaos72_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed is the UI
+// CONTRACT half of the finding above.
+//
+// The panel keys its whole syslog section off `addr`, and `addr` used to be
+// the SERVING collector — so a failed boot dial answered `addr:""` and the
+// panel cleared the operator's own address out of the form, hid the status
+// line and called hideSyslogDrops() on the one feed that is losing every
+// event. The API half is fixed by naming the configured collector in `addr`;
+// this gate pins that the panel reads the right fields and so can never go
+// quiet on an unserved feed again.
+//
+// Walled structurally for the same reason as the gate above: the defect is in
+// a browser handler, no Go test can drive it, and the failure is silence
+// rather than an error.
+func TestChaos72_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed(t *testing.T) {
+	src, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("reading the admin UI: %v", err)
+	}
+	ui := string(src)
+
+	target := jsFunctionBody(t, ui, "function renderSyslogTarget(sl)")
+	if !strings.Contains(target, "sl.targetMet") {
+		t.Error("renderSyslogTarget does not consult targetMet; the green ✓ would claim the configured collector is being served whenever an address is merely set")
+	}
+	if !strings.Contains(target, "sl.servingAddr") {
+		t.Error("renderSyslogTarget never names the serving collector, so an operator cannot tell which one is still receiving events")
+	}
+	// CONTROL: it must still make the affirmative claim when the target IS
+	// met. The cheapest way to pass the two assertions above is to warn
+	// unconditionally, which is a permanent false alarm on a working feed.
+	if !strings.Contains(target, "Forwarding to") {
+		t.Error("renderSyslogTarget no longer reports a healthy feed as forwarding; a working collector would warn forever")
 	}
 }

@@ -136,6 +136,28 @@ for anything produced after the re-point.
 `lastSuccessUnix`, `secondsSinceEvent`, `lastFailureReason`, `queueDepth`,
 `queueCap` and `deliveryProvable` alongside the existing `drops` and `panics`.
 
+**Two targets, named separately.** A failed dial leaves the collector you
+configured unserved while a previous one may still be delivering, so the
+response names both and never attaches one's verdict to the other:
+
+| Field | Which collector it is about |
+| --- | --- |
+| `addr` | the one you **configured**. It stays populated when the dial for it failed — this is the field the settings form and `admin_settings.json` are about |
+| `servingAddr` | the one actually being **served**; empty when nothing is |
+| `targetMet` | whether those are the same collector |
+| `format`, `lastSuccessUnix`, `queueDepth`, `queueCap` | the **serving** writer. They describe `addr` only when `targetMet` is true |
+| `deliveryProvable` | the serving writer's transport when there is one, otherwise the scheme of `addr`. It is a statement about whether `tcp://` *can* prove delivery, never that anything has been delivered |
+| `degraded`, `neverDelivered`, `secondsSinceEvent` | the verdict on the **configured** collector |
+| `drops`, `delivered`, `panics` | process-lifetime totals across every collector this process has served |
+
+The admin panel reads them the same way: a green tick only when `targetMet`,
+otherwise a warning naming the configured collector and — when there is one —
+the previous collector still receiving events. Before this, `addr` carried the
+*serving* address, so a boot dial that failed answered an empty `addr` beside
+`degraded: true`; the panel read that as "not configured", cleared your own
+address out of the form and hid the drop row on the one feed that was losing
+every event.
+
 ---
 
 ## How degradation is decided
@@ -165,6 +187,22 @@ The transition is evaluated both when an event is lost and on an independent
 30-second timer, so a collector that dies and is then followed by a quiet
 period still pages: the alert does not depend on there being more traffic to
 lose.
+
+**A dial that has not returned yet is not a verdict.** Both boot paths (YAML
+or flags, then the persisted admin settings) record the collector you asked
+for and *then* dial it, synchronously, for up to 5 seconds. The 30-second
+watchdog is already running by that point, so a tick landing inside that dial
+used to page `syslog_feed_down` — and log that the collector "could not be
+connected 0s ago and nothing retries" — for a collector that connected a
+moment later. Installing the writer clears the fire-once latch, but it cannot
+retract a webhook that has already been delivered.
+
+An intent is therefore **pending** rather than unmet for the length of one
+dial, and the window is a deadline rather than a flag: it expires on its own,
+so a path that fails to report back costs at most that much delay and can
+never leave the feed permanently unpageable. A dial that *returns* without a
+writer is reported immediately, without waiting the window out — that is the
+boot failure you want to see as soon as you look.
 
 **Concurrent losses are evaluated once, not once each.** During a real outage
 the losing events arrive at the full request rate, and each one is charged on
@@ -354,6 +392,25 @@ refused (`lastFailureReason: "queue_full"`). Check the collector's ingest
 capacity. Reducing what is forwarded — for example by turning off per-rule
 traffic logging on high-volume allow rules — lowers the event rate at the
 source.
+
+---
+
+## Related fix: a re-point no longer loses events on the collector it replaced
+
+Re-pointing names the replacement **before** it closes the collector being
+replaced, and that close is asynchronous — so for a moment the displaced
+writer is still open while a successor exists. A request goroutine that had
+already loaded the old handle lands there, and if the displaced writer's queue
+has backed up — which is the ordinary *reason* for a re-point — the event used
+to be destroyed on that collector and charged as a compliance drop, with the
+healthy replacement sitting idle.
+
+A full queue is now terminal backpressure only on the writer that is still in
+service. A writer that has been **replaced** passes the line along the
+successor chain exactly as a closed one does, and nothing is charged when the
+replacement accepts it. A full queue on the live writer is still a counted
+drop under `queue_full` — that is the signal telling you the collector cannot
+keep up, and it is unchanged.
 
 ---
 

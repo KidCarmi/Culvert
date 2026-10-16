@@ -9951,3 +9951,171 @@ record is the canonical one. The preserved archive was checked for statements
 this round falsifies and contains none — its baseline predates the probe
 acknowledgement and the hop bound entirely — so no `errata.md` entry is
 required.
+
+### Round 17 — a verdict in flight, a replaced writer, and one response per target
+
+Three P2s. Two of them are the same shape from opposite directions — **a
+statement attached to the wrong moment, and a statement attached to the wrong
+target** — and the third is this file's own asymmetry argument reaching one
+more caller.
+
+#### (a) A displaced writer's full queue is not a loss
+
+`releaseReplacedSyslogWriter` names the successor **before** it closes the
+predecessor, and that close is `go old.Close()` — asynchronous. So
+`successor != nil && !closed` is not a narrow window: it is the ordinary state
+of a just-displaced writer. And its queue being full is the ordinary *reason*
+for the re-point.
+
+`send` advanced along the successor chain only on `enqClosed`. A full queue
+answered `enqDropped`, which `send` treated as terminal: the event was
+destroyed on the collector the operator had already moved off, **charged as a
+compliance drop**, with the healthy replacement sitting idle. Measured against
+the pre-fix tree: the successor's queue empty, `old.Drops() == 1`.
+
+`handOffQueued` was right to treat `enqDropped` as terminal, and that is not
+an inconsistency — it starts at `s.successor`, so the writer it is enqueueing
+to is a *live* one, whose full queue is genuine backpressure. The two cases
+are **one rule**: a loss is only a loss once nobody better is available.
+
+So `tryEnqueue` now distinguishes them. `enqDisplaced` is uncounted and both
+walkers advance on it, exactly as they do for a closed writer. Three details
+are load-bearing:
+
+- **The enqueue is attempted first, and only a REFUSAL consults the
+  successor.** A displaced writer with room keeps taking the line — its own
+  drain hands it on — so skipping a displaced writer wholesale would change
+  the ordinary re-point path and make the drain's handoff unreachable from
+  `send`. Pinned as a control; that mutation fails it and nothing else.
+- **Nothing is charged when the replacement accepts.** Following the successor
+  without this is still a false accusation on the one series that means
+  *events that did not reach the SIEM*, so it has its own gate.
+- **A full queue on the live writer is still a counted `queue_full` drop.**
+  The control for that asserted only the COUNT at first and was **vacuous**:
+  reporting every full queue as displaced still charges one drop, at the end
+  of the walk, under `closed` — so an operator chasing a collector that cannot
+  keep up is told the writer was replaced instead. It now asserts the class.
+
+`handOffQueued` gets the same rule for free, and it is reachable there too: a
+run of rapid re-points can leave an *intermediate* writer both replaced and
+backed up.
+
+Four mutations, each caught by a different subset: revert `tryEnqueue` (3
+gates), never charge a queue-full drop (the strengthened control), `send`
+ignores `enqDisplaced` (1 gate), skip displaced writers wholesale (2 gates).
+
+#### (b) A dial that has not returned is not a verdict
+
+Both boot paths record the intent and *then* dial, synchronously, for up to
+`syslog.DialTimeout` (5s). `initBackgroundServices` starts the 30s watchdog one
+init slice **before** `initPersistentAdminState` reaches `applyAdminServices`,
+and the webhook store is already loaded — so a tick landing inside that dial
+dispatched `syslog_feed_down` and logged that the collector *"could not be
+connected 0s ago and nothing retries"*. Both claims were false; nothing had
+failed yet. Installing the writer clears the fire-once latch but cannot retract
+a delivered webhook.
+
+That log line is this sweep's headline defect in miniature: **a health surface
+asserting a false statement.**
+
+An intent is now PENDING for the length of one dial. Four decisions:
+
+- **A deadline, not a flag.** A flag a caller forgets to clear is a latch that
+  makes the feed permanently unpageable — the fail-OPEN failure this plane
+  keeps recording. A deadline expires on its own, so a missed resolver costs
+  bounded delay, and freshness stays EVALUATED rather than latched (CHAOS-61's
+  rule, which this file applies everywhere else). Pinned by a gate that
+  advances the clock past the grace **without anything clearing it**.
+- **Folded into the ONE definition.** `syslogIntentUnmet` is deliberately the
+  single definition shared by the snapshot and the recovery path; spelling the
+  conjunction at each consumer is how one answer becomes two.
+- **Derived, not chosen.** The grace is `syslog.DialTimeout + 1s`, with the
+  engine's budget newly exported so there is one source for it, and a gate
+  requiring the grace to cover the dial AND stay below the watchdog tick — a
+  grace at or above the tick would postpone a *real* page by a whole tick.
+- **A resolved failure is immediate.** `noteSyslogDialResolved` closes the
+  grace early on the failure branch, because the read surfaces are exactly
+  what an operator looks at after a boot that failed.
+
+Two findings about my own work are recorded rather than smoothed over:
+
+- **The deadline clear in `noteSyslogWriterInstalled` is HYGIENE, not a fix.**
+  An install forces `intendedTarget == target`, so `syslogIntentUnmet`
+  short-circuits before ever consulting the deadline. Removing the line changes
+  no surface today — measured, not reasoned — and the call site now says so.
+  The control that appeared to pin it was vacuous twice over: first because
+  `armSyslogFeed` resets the record *before* it dials (so the grace was cleared
+  by the reset), and then because of the short-circuit. It is kept, rewritten
+  to pin the production ORDER, which no other gate exercises, and explicitly
+  labelled with what it does not pin.
+- **19 existing gates called `noteSyslogIntent` to mean "the dial failed".**
+  That is now only half of the boot sequence, so they went red. They were not
+  loosened: a `noteSyslogFailedDial` helper names the *whole* failed-boot
+  sequence once, every one of them uses it, and all 19 pass unchanged — so the
+  semantics each pinned before this round is the semantics it pins now. The
+  gates that are about the pending window call the two halves themselves and
+  drive the injected clock.
+
+> **When a change makes a previously-instantaneous transition take time, every
+> gate that treated it as instantaneous was encoding a sequence, not a state.
+> Name the sequence once and let them all say it.**
+
+#### (c) One response, one target per field
+
+`GET /api/syslog` read the serving address through `syslogConfiguredSnapshot`
+— a *different lock*, therefore a different generation — and the verdict
+through `syslogFeedState`, and reported the serving address as `addr`. Two
+shapes followed:
+
+- A failed boot dial answered `addr:""` beside `degraded:true`. The legacy
+  panel keys its **whole** syslog section off `addr`, so it cleared the
+  operator's own address out of the form, hid the status line and ran
+  `hideSyslogDrops()` — on the one feed that is losing every event. Measured:
+  `{"addr":"","degraded":true,...}`.
+- A boot that connected A and then failed to connect the persisted B answered A
+  beside B's degraded verdict, while `format`, `lastSuccessUnix` and
+  `deliveryProvable` all described A.
+
+The health record already held both strings, read under one lock — it simply
+did not expose them. So the fix **removes** a read rather than adding one:
+`Target` and `IntendedTarget` go on the snapshot, the handler drops
+`syslogConfiguredSnapshot` entirely, and `addr`/`servingAddr`/`targetMet` name
+the two collectors separately. Every field now comes from one critical section,
+so the response is one generation by construction rather than by timing —
+round 9a's rule at a fourth reader.
+
+`syslogConfiguredSnapshot` keeps two real callers (the persistence path and
+diagnostics), so round 16's dead-duplicate rule does not bite; the
+config-metadata wall's claim was widened to name both acceptable one-generation
+sources, because it no longer describes this reader.
+
+The product half is where the harm was, so it is gated too:
+`renderSyslogTarget` claims a green tick only on `targetMet` and otherwise
+names the configured collector and the previous one still receiving events.
+Both mutations — green unconditionally, warn unconditionally — fail it. The
+save path now renders the target through the same renderer on its re-read,
+removing a second copy of the sentence.
+
+Adding two response fields regenerated **both** artifacts, which is the lesson
+`conventions.md` records from this very PR: `make api-bundle` for
+`openapi.json`, then `npm run generate` under the pinned Node for
+`types.gen.ts`. The pinned toolchain was not installed in this environment and
+was obtained rather than bypassed — forcing past a toolchain gate is how
+generated output stops being reproducible.
+
+#### Gates and mutations
+
+Added: 6 in `internal/syslog/syslog_handoff_format_test.go` (A), 7 in
+`syslog_health_chaos_test.go` (B), 5 more (C). Mutation evidence is recorded
+per finding above; every defect gate was verified failing against the shape it
+targets, and every control was verified failing against the cheapest wrong fix
+it is named for — with the two vacuous controls found by measurement, not by
+review, and fixed or relabelled.
+
+#### Environment note
+
+Nine root-package tests fail in this sandbox and are unrelated to this PR:
+`example.com` does not resolve here (only hosts the agent proxy needs do), and
+`validateExternalURL`'s DNS check is fail-closed, so every IdP-registry fixture
+using the IANA-reserved domain is refused. CI resolves it normally. The
+determinism verdict for this round is read with those nine excluded.

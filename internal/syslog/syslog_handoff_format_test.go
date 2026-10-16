@@ -559,3 +559,138 @@ func TestProbeOnAnOpenWriterWithASuccessorStaysPut(t *testing.T) {
 	default:
 	}
 }
+
+// ── A displaced writer's full queue is not a loss ────────────────────────────
+//
+// releaseReplacedSyslogWriter names the successor BEFORE it closes the
+// predecessor, and that close is ASYNCHRONOUS, so `successor != nil &&
+// !closed` is the ordinary state of a just-displaced writer. Its queue being
+// full is the ordinary REASON for the re-point. Treating that as terminal
+// destroyed the event on a collector the operator had already moved off, with
+// a healthy replacement sitting idle — and charged a compliance drop for it
+// (Codex P2, PR #1494).
+
+// A new line reaching a displaced, backed-up writer must follow the successor.
+func TestSend_DisplacedWriterWithAFullQueueFollowsItsSuccessor(t *testing.T) {
+	old := &Writer{network: "udp", format: "rfc3164", host: "h1", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	next := &Writer{network: "udp", format: "rfc3164", host: "h2", tag: "culvert", pid: "2", queue: make(chan queuedLine, 4)}
+	old.queue <- old.formatLine(14, "backlog", time.Now())
+	old.MarkRetired()
+	old.HandOffTo(next)
+	if old.closed.Load() {
+		t.Fatal("precondition: the displaced writer must still be open — the close is asynchronous")
+	}
+
+	old.send(14, "late-audit-event")
+
+	select {
+	case got := <-next.queue:
+		if !strings.Contains(got.line, "late-audit-event") {
+			t.Fatalf("successor received %q, want the late event", got.line)
+		}
+	default:
+		t.Fatal("the line was lost on the displaced writer instead of being offered to its replacement")
+	}
+}
+
+// ...and it must not be ACCUSED as a drop. The counter means "events that did
+// not reach the SIEM"; charging one for an event the replacement accepted
+// inflates the only series that measures compliance loss. Both halves of the
+// finding need their own assertion: following the successor without this is
+// still a false accusation, and this without the one above is still a loss.
+func TestSend_FollowingTheSuccessorChargesNoDrop(t *testing.T) {
+	old := &Writer{network: "udp", format: "rfc3164", host: "h1", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	next := &Writer{network: "udp", format: "rfc3164", host: "h2", tag: "culvert", pid: "2", queue: make(chan queuedLine, 4)}
+	old.queue <- old.formatLine(14, "backlog", time.Now())
+	old.HandOffTo(next)
+
+	old.send(14, "late-audit-event")
+
+	if got := old.Drops(); got != 0 {
+		t.Fatalf("displaced writer charged %d drop(s) for a line its replacement accepted, want 0", got)
+	}
+	if got := next.Drops(); got != 0 {
+		t.Fatalf("replacement charged %d drop(s) for a line it accepted, want 0", got)
+	}
+	if got := LateDrops(); got != 0 {
+		t.Fatalf("late-drop total moved by %d for a delivered line, want 0", got)
+	}
+}
+
+// CONTROL: a full queue on the writer that is still IN SERVICE stays a counted
+// drop. The cheapest way to pass the two gates above is to stop charging
+// queue-full drops at all, which would delete the backpressure signal that
+// tells an operator their collector cannot keep up.
+func TestSend_FullQueueOnTheLiveWriterIsStillACountedDrop(t *testing.T) {
+	live := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	live.queue <- live.formatLine(14, "backlog", time.Now())
+	if live.successor.Load() != nil {
+		t.Fatal("precondition: the live writer names no successor")
+	}
+
+	live.send(14, "shed-me")
+
+	if got := live.Drops(); got != 1 {
+		t.Fatalf("live writer charged %d drop(s) for a shed line, want 1", got)
+	}
+	// The CLASS matters as much as the count, and asserting only the count
+	// made this control vacuous against the cheapest wrong fix: reporting
+	// every full queue as displaced still charges one drop, at the end of the
+	// walk, under `closed` — so an operator chasing a collector that cannot
+	// keep up is told the writer was replaced instead (verified by mutation).
+	if got := live.Stats().LastFailureReason; got != reasonQueueFull {
+		t.Fatalf("live writer charged the shed line as %q, want %q", got, reasonQueueFull)
+	}
+}
+
+// CONTROL: a displaced writer whose queue still has ROOM keeps taking the
+// line. The drain loop hands it on from there, so skipping a displaced writer
+// wholesale would both change the ordinary re-point path and make the drain's
+// own handoff — which four gates above pin — unreachable from `send`.
+func TestSend_DisplacedWriterWithRoomStillTakesTheLine(t *testing.T) {
+	old := &Writer{network: "udp", format: "rfc3164", host: "h1", tag: "culvert", pid: "1", queue: make(chan queuedLine, 4)}
+	next := &Writer{network: "udp", format: "rfc3164", host: "h2", tag: "culvert", pid: "2", queue: make(chan queuedLine, 4)}
+	old.HandOffTo(next)
+
+	old.send(14, "still-mine")
+
+	select {
+	case got := <-old.queue:
+		if !strings.Contains(got.line, "still-mine") {
+			t.Fatalf("displaced writer queued %q, want the line", got.line)
+		}
+	default:
+		t.Fatal("a displaced writer with room must still accept the line; its own drain hands it on")
+	}
+	if l := len(next.queue); l != 0 {
+		t.Fatalf("successor received %d line(s) it should not have been offered", l)
+	}
+}
+
+// The same rule inside handOffQueued: a run of rapid re-points can leave an
+// INTERMEDIATE writer both replaced and backed up, and that writer is no more
+// the one to use than a closed one. Walking past it is what delivers the line.
+func TestHandOffQueued_WalksPastADisplacedBackedUpIntermediate(t *testing.T) {
+	head := &Writer{network: "udp", format: "rfc3164", host: "h0", tag: "culvert", pid: "0", queue: make(chan queuedLine, 4)}
+	mid := &Writer{network: "udp", format: "rfc3164", host: "h1", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	live := &Writer{network: "udp", format: "rfc3164", host: "h2", tag: "culvert", pid: "2", queue: make(chan queuedLine, 4)}
+	mid.queue <- mid.formatLine(14, "backlog", time.Now())
+	head.HandOffTo(mid)
+	mid.HandOffTo(live)
+
+	item := head.formatLine(14, "queued-at-the-re-point", time.Now())
+	if !head.handOffQueued(item) {
+		t.Fatal("handOffQueued reported the line as still the caller's")
+	}
+	select {
+	case got := <-live.queue:
+		if !strings.Contains(got.line, "queued-at-the-re-point") {
+			t.Fatalf("live writer received %q, want the queued line", got.line)
+		}
+	default:
+		t.Fatal("the line stopped at a displaced, backed-up intermediate instead of reaching the live writer")
+	}
+	if got := mid.Drops(); got != 0 {
+		t.Fatalf("intermediate charged %d drop(s) for a line the live writer accepted, want 0", got)
+	}
+}

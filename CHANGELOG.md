@@ -9,6 +9,39 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- A SIEM event is no longer destroyed on the collector a re-point just replaced.
+  The replacement is named before the displaced writer is closed, and that close
+  is asynchronous, so a request goroutine holding the old handle could find a
+  writer that was already superseded but still open. If its queue had backed up
+  — the ordinary *reason* for re-pointing — the event was dropped there and
+  charged as a compliance loss while the healthy replacement sat idle. A full
+  queue is now terminal only on the writer still in service; a replaced one
+  passes the line along the successor chain, and nothing is charged when the
+  replacement accepts it. A full queue on the live writer is still a counted
+  `queue_full` drop.
+
+- `syslog_feed_down` is no longer paged for a collector that is about to
+  connect. Both startup paths record the configured collector and then dial it
+  synchronously for up to 5 seconds, by which time the 30-second health
+  watchdog is already running — so a tick landing inside that dial dispatched
+  the outage webhook, and logged that the collector "could not be connected 0s
+  ago and nothing retries", for a dial that had not returned. A recorded intent
+  is now *pending* for the length of one dial; the window is a deadline that
+  expires on its own, so it can never leave a feed unpageable, and a dial that
+  returns without a writer is still reported immediately.
+
+- `GET /api/syslog` now describes one collector per field. `addr` was the
+  *serving* address while `degraded` was the verdict on the *configured* one,
+  so a boot dial that failed answered an empty `addr` beside `degraded: true` —
+  which the admin panel reads as "not configured", clearing the operator's own
+  address out of the form and hiding the drop row on the one feed losing every
+  event. `addr` is now the collector you configured, `servingAddr` the one
+  actually being served and `targetMet` whether they are the same; the panel
+  shows a green tick only when the configured collector really is the one
+  receiving events, and names the previous collector when it is still
+  delivering. The whole response is assembled from one snapshot, so no two
+  fields can describe different generations.
+
 - `POST /api/syslog/test` no longer reports `dropped` for a collector that is
   working. The probe used a single-writer enqueue path that the ordinary send
   path had outgrown, so a probe submitted at the instant an admin re-points the

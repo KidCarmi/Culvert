@@ -1816,16 +1816,6 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		// Target and writer in ONE read, so the reported address and the
-		// format beside it always belong to the same generation: a re-point
-		// between two reads described target A with writer B's format
-		// (Codex P2, PR #1494). Loading the handle once also avoids the
-		// check-then-act nil-deref a concurrent disable used to allow.
-		connectedTarget, _, sw := syslogConfiguredSnapshot()
-		format := "rfc3164"
-		if sw != nil {
-			format = sw.Format()
-		}
 		// CHAOS-72: drops alone is cumulative and unreadable — it cannot
 		// distinguish a feed that is dark now from one that healed last week.
 		// The delivery snapshot carries the time axis the counter lacks.
@@ -1847,8 +1837,45 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		// `degraded:true` for a target whose boot dial failed, i.e. it denied
 		// the one fact that verdict rests on (Codex P2, PR #1494).
 		present := snap.Configured || snap.Intended
+		// EVERY field comes from the one snapshot, so every one of them
+		// belongs to the same generation. The previous shape read the serving
+		// address (and its format) through syslogConfiguredSnapshot — a
+		// DIFFERENT lock, therefore a different generation — and the verdict
+		// from the delivery snapshot, so the two could describe different
+		// targets; and because `addr` carried the SERVING address, a failed
+		// boot dial answered `addr:""` beside `degraded:true`, which the
+		// legacy panel reads as "not configured": it cleared the operator's
+		// own address out of the form and hid the loss row on the one feed
+		// that is losing everything (Codex P2, PR #1494).
+		//
+		// The two targets are now named separately and never conflated:
+		//   addr        — what the operator ASKED for (the intent; the serving
+		//                 address when there is no separate intent on record).
+		//                 This is the field the form and admin_settings.json
+		//                 are about, so it must not vanish when a dial fails.
+		//   servingAddr — what is actually being served, "" when nothing is.
+		//   targetMet   — whether those two are the same collector, i.e.
+		//                 whether `format`, `lastSuccessUnix`,
+		//                 `deliveryProvable` and the queue fields (all
+		//                 properties of the SERVING writer) describe `addr`.
+		// `degraded`/`neverDelivered`/`secondsSinceEvent` are the verdict on
+		// the INTENT, which is what makes naming both mandatory rather than
+		// cosmetic.
+		configuredAddr := snap.IntendedTarget
+		if configuredAddr == "" {
+			configuredAddr = snap.Target
+		}
+		// snap.writer was captured under the health record's lock, so reading
+		// the format off it is both one-generation AND free of the
+		// check-then-act nil-deref a concurrent disable used to allow here.
+		format := "rfc3164"
+		if snap.writer != nil {
+			format = snap.writer.Format()
+		}
 		jsonOK(w, map[string]any{
-			"addr": connectedTarget, "format": format, "drops": snap.Drops, "panics": snap.Panics,
+			"addr": configuredAddr, "format": format, "drops": snap.Drops, "panics": snap.Panics,
+			"servingAddr":       snap.Target,
+			"targetMet":         snap.Target != "" && snap.Target == configuredAddr,
 			"delivered":         snap.Delivered,
 			"degraded":          snap.Degraded,
 			"neverDelivered":    present && snap.NeverDelivered,

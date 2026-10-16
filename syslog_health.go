@@ -184,6 +184,25 @@ type syslogHealthRecord struct {
 	// intentAt anchors the age of an UNMET intent, which has no install and no
 	// delivery to measure from.
 	intentAt time.Time
+	// dialVerdictBy is the instant by which the dial that is DECIDING the
+	// recorded intent must have returned. While it is in the future the intent
+	// is pending, not unmet.
+	//
+	// Both boot paths record the intent and then dial SYNCHRONOUSLY, and the
+	// dial takes up to syslog.DialTimeout. The watchdog is already running by
+	// then, so a tick landing inside that dial used to page `syslog_feed_down`
+	// — and log that "the collector could not be connected 0s ago and nothing
+	// retries" — for a collector that connects a moment later. Installing the
+	// writer clears the latch but cannot retract the webhook (Codex P2, PR
+	// #1494).
+	//
+	// It is a DEADLINE rather than a flag on purpose. A flag a caller forgets
+	// to clear is a latch that makes the feed permanently unpageable — the
+	// fail-OPEN failure this plane keeps recording. A deadline expires on its
+	// own, so the worst a missed resolver can cost is one grace period of
+	// delay, and freshness stays EVALUATED rather than latched (CHAOS-61's
+	// rule, which this file applies everywhere else).
+	dialVerdictBy time.Time
 
 	// retiredDelivered/retiredDrops/retiredPanics carry the totals of every
 	// Writer this process has displaced, so the exported counters are
@@ -340,6 +359,17 @@ func noteSyslogWriterInstalled(sw *syslogWriter, target string) {
 	syslogHealth.target = target
 	syslogHealth.writer = sw
 	syslogHealth.gen++
+	// The dial returned, successfully: whatever grace was open belongs to a
+	// question this install has just answered.
+	//
+	// HYGIENE, not a fix for an observable defect, and worth saying so rather
+	// than leaving a reader to assume otherwise: the block below forces
+	// intendedTarget == target, so after ANY install syslogIntentUnmet
+	// short-circuits before it ever consults this deadline. Removing this line
+	// changes no surface today (measured by mutation). It is kept so a stale
+	// deadline cannot survive into a state where the predicate's order makes
+	// it matter again.
+	syslogHealth.dialVerdictBy = time.Time{}
 	// An installed Writer IS a satisfied intent, whatever was recorded before.
 	// Without this the admin re-point path — which never calls
 	// noteSyslogIntent, because it refuses a failed dial with a 400 — would
@@ -512,18 +542,47 @@ func noteSyslogEventSkipped(armed bool) {
 // A repeat of the same target does not re-anchor intentAt: re-applying the
 // same unreachable collector on the next boot is the same unmet intent, and
 // restarting the clock would make an outage look newer than it is.
+//
+// It also opens the PENDING-DIAL grace, because both callers dial immediately
+// and synchronously: until that dial returns there is no verdict to report,
+// and reporting one anyway paged an outage for a collector that connected a
+// moment later (see dialVerdictBy). The grace is a deadline derived from the
+// engine's own dial budget, so a caller that never reports back costs at most
+// one grace period of delay rather than a permanent unpageable feed.
+//
+// It does NOT re-anchor intentAt, and that interacts with the grace exactly as
+// it should: re-applying the same unreachable target on the next boot keeps the
+// outage's age while still allowing the fresh dial to decide it.
 func noteSyslogIntent(target string) {
 	if target == "" {
 		return
 	}
+	now := syslogHealthNow()
 	syslogHealth.mu.Lock()
 	if syslogHealth.intendedTarget != target {
 		syslogHealth.intendedTarget = target
-		syslogHealth.intentAt = syslogHealthNow()
+		syslogHealth.intentAt = now
 	}
+	syslogHealth.dialVerdictBy = now.Add(syslogDialVerdictGrace)
 	unmet := syslogHealth.writer == nil
 	syslogHealth.mu.Unlock()
 	syslogIntentArmedWithoutWriter.Store(unmet)
+}
+
+// noteSyslogDialResolved closes the pending-dial grace: the dial that
+// noteSyslogIntent opened has returned without producing a Writer, so the
+// intent is unmet NOW and every surface may say so.
+//
+// Correctness does not depend on it being called — the grace expires on its
+// own — but promptness does: without it a boot dial that fails keeps the read
+// surfaces (/healthz, GET /api/syslog, the contract row) reporting a
+// not-yet-degraded feed for the rest of the grace, which is exactly when an
+// operator looks. A successful dial needs no call: installing the Writer
+// resolves the intent and clears the deadline itself.
+func noteSyslogDialResolved() {
+	syslogHealth.mu.Lock()
+	syslogHealth.dialVerdictBy = time.Time{}
+	syslogHealth.mu.Unlock()
 }
 
 // noteSyslogForwardingDisabled records that the operator turned forwarding off,
@@ -537,6 +596,8 @@ func noteSyslogIntent(target string) {
 // statement this whole file exists to remove, just in the other direction.
 func noteSyslogForwardingDisabled() {
 	syslogHealth.mu.Lock()
+	// The operator withdrew the intent, so there is no dial left to wait for.
+	syslogHealth.dialVerdictBy = time.Time{}
 	retireSyslogWriterLocked(syslogHealth.writer)
 	syslogHealth.configured = false
 	syslogHealth.installedAt = time.Time{}
@@ -742,6 +803,19 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 	}
 }
 
+// syslogDialVerdictGrace is how long a recorded intent may stay PENDING while
+// the synchronous dial that decides it is in flight.
+//
+// Derived from the engine's own dial budget rather than chosen: syslog.NewWriter
+// blocks on exactly one thing, the connect, and syslog.DialTimeout bounds it.
+// The extra second covers the hostname lookup and scheduling around it. One
+// fact, one source — TestChaos72_DialGraceIsDerivedFromTheEngineBudget pins
+// the derivation so an engine change cannot silently leave a window open.
+//
+// It is deliberately far BELOW the watchdog's 30s tick, so suppressing a
+// verdict for the duration of a dial never postpones a real page by a tick.
+const syslogDialVerdictGrace = syslog.DialTimeout + time.Second
+
 // syslogIntentUnmet reports whether an operator-configured collector is not
 // the one being served: either nothing is serving at all, or what is serving
 // is a target the operator has since moved on from.
@@ -749,15 +823,29 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 // It is the ONE definition, shared by the snapshot and by the recovery path.
 // Writing it twice is how the two came to disagree about whether a superseded
 // writer's delivery ends an unmet intent's outage — two answers to one
-// question, which this sweep records as the defect elsewhere.
-func syslogIntentUnmet(described *syslogWriter, target, intended string) bool {
-	return intended != "" && (described == nil || target != intended)
+// question, which this sweep records as the defect elsewhere. The pending-dial
+// grace is folded in HERE for the same reason: spelling the conjunction at
+// each consumer is how one answer becomes two.
+//
+// A VERDICT IN FLIGHT IS NOT A VERDICT. While `verdictBy` is in the future a
+// dial recorded by noteSyslogIntent is still deciding this intent, so it is
+// pending rather than unmet — see the dialVerdictBy field comment for the
+// false page that cost.
+func syslogIntentUnmet(described *syslogWriter, target, intended string, verdictBy, now time.Time) bool {
+	if intended == "" {
+		return false
+	}
+	if described != nil && target == intended {
+		return false
+	}
+	return !now.Before(verdictBy)
 }
 
 // syslogIntentUnmetLocked is syslogIntentUnmet over the live record. Caller
 // holds syslogHealth.mu.
 func syslogIntentUnmetLocked() bool {
-	return syslogIntentUnmet(syslogHealth.writer, syslogHealth.target, syslogHealth.intendedTarget)
+	return syslogIntentUnmet(syslogHealth.writer, syslogHealth.target, syslogHealth.intendedTarget,
+		syslogHealth.dialVerdictBy, syslogHealthNow())
 }
 
 // noteSyslogDeliveryRecovered clears the episode on OBSERVED evidence — one
@@ -891,6 +979,25 @@ type syslogFeedSnapshot struct {
 	FailingFor time.Duration
 	// UDP records that this feed cannot prove delivery; see the header.
 	UDP bool
+	// Target is the collector actually being SERVED — the address of the
+	// installed Writer — and "" when none is. IntendedTarget is the one the
+	// operator asked for.
+	//
+	// Both are exposed so a reader can describe the two generations
+	// SEPARATELY instead of pairing one of them with a verdict about the
+	// other. GET /api/syslog used to read the serving address from
+	// syslogConfiguredSnapshot (a different lock, therefore a different
+	// generation) and the verdict from here, so a failed boot dial answered
+	// `addr:""` beside `degraded:true` — which the legacy panel reads as "not
+	// configured", clearing the operator's address out of the form and HIDING
+	// the loss row on the one feed that is losing everything; and a boot that
+	// connected A while intending B answered A beside B's verdict (Codex P2,
+	// PR #1494).
+	//
+	// Read under the same lock as everything else here, so the pair and the
+	// verdict are one generation by construction (round 9a's rule).
+	Target         string
+	IntendedTarget string
 
 	// writer is the Writer this snapshot describes. Read by the wording branch
 	// in commitSyslogDegradation, which makes a claim about whether anything
@@ -951,6 +1058,10 @@ func syslogFeedState() syslogFeedSnapshot {
 	gen := syslogHealth.gen
 	intendedTarget := syslogHealth.intendedTarget
 	intentAt := syslogHealth.intentAt
+	// Captured with the rest of the record: the deadline and the intent it
+	// governs must come from ONE generation, or a re-point between two reads
+	// pairs a fresh intent with an expired grace (round 9a's rule).
+	dialVerdictBy := syslogHealth.dialVerdictBy
 	retiredDelivered := syslogHealth.retiredDelivered
 	retiredDrops := syslogHealth.retiredDrops
 	retiredPanics := syslogHealth.retiredPanics
@@ -965,13 +1076,15 @@ func syslogFeedState() syslogFeedSnapshot {
 	udp := syslogFeedIsUDP(described, caveatTarget)
 	now := syslogHealthNow()
 	snap := syslogFeedSnapshot{
-		writer:     described,
-		gen:        gen,
-		Configured: configured,
-		Intended:   intendedTarget != "",
-		UDP:        udp,
+		writer:         described,
+		gen:            gen,
+		Configured:     configured,
+		Intended:       intendedTarget != "",
+		UDP:            udp,
+		Target:         target,
+		IntendedTarget: intendedTarget,
 	}
-	snap.IntentUnmet = syslogIntentUnmet(described, target, intendedTarget)
+	snap.IntentUnmet = syslogIntentUnmet(described, target, intendedTarget, dialVerdictBy, now)
 	// Retired totals are carried even when no Writer is live, so a disabled or
 	// failed-to-reconnect feed still reports the events it has already lost.
 	snap.Delivered = retiredDelivered
@@ -1398,6 +1511,7 @@ func resetSyslogHealthForTest() {
 	syslogHealth.target = ""
 	syslogHealth.intendedTarget = ""
 	syslogHealth.intentAt = time.Time{}
+	syslogHealth.dialVerdictBy = time.Time{}
 
 	syslogHealth.writer = nil
 	syslogHealth.gen++

@@ -498,7 +498,16 @@ func applyAdminServices(s *AdminSettings) {
 		noteSyslogIntent(s.SyslogAddr)
 		// syslogConfigured is published by InitSyslog with the writer itself
 		// (one critical section); the intent above survives a failed dial.
-		_ = InitSyslog(s.SyslogAddr, s.SyslogFormat) //nolint:errcheck // a failed dial is reported by the health plane via the recorded intent
+		//
+		// The error is not discarded any more: noteSyslogIntent opened a
+		// PENDING-DIAL grace so a watchdog tick landing inside this dial
+		// cannot page an outage for a collector that is about to connect, and
+		// the failure branch is what closes that grace early. The log line
+		// stays with loadObservability, which owns the YAML/flag path; here
+		// the health plane is the reporter (see dialVerdictBy).
+		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err != nil {
+			noteSyslogDialResolved()
+		}
 	}
 	if s.OTLPEndpoint != "" {
 		globalOTLP.Configure(s.OTLPEndpoint, s.OTLPHeaders)

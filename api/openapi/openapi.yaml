@@ -2298,7 +2298,28 @@ components:
       required: [addr, format]
       additionalProperties: false
       properties:
-        addr: { type: string }
+        addr:
+          type: string
+          description: >-
+            The collector the operator CONFIGURED. It is what the settings form
+            and the persisted admin settings are about, so it stays populated
+            when the dial for it failed — `degraded` beside an empty `addr`
+            used to read as "not configured" and hide the loss row on the one
+            feed losing every event.
+        servingAddr:
+          type: string
+          description: >-
+            The collector actually being served, empty when none is. Differs
+            from addr when a re-point's dial failed and the previous collector
+            is still delivering.
+        targetMet:
+          type: boolean
+          description: >-
+            True when servingAddr is addr, i.e. when format, lastSuccessUnix,
+            deliveryProvable and the queue fields — all properties of the
+            SERVING writer — describe the configured collector. degraded,
+            neverDelivered and secondsSinceEvent are always the verdict on the
+            CONFIGURED one.
         format: { type: string }
         drops:
           type: integer

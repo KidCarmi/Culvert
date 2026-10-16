@@ -47,6 +47,10 @@ func loadObservability(cfg observabilityStartupConfig) {
 		// one critical section; the intent recorded above is what survives a
 		// dial that never produces one.
 		if err := InitSyslog(cfg.SyslogAddr, cfg.SyslogFormat); err != nil {
+			// The dial that noteSyslogIntent opened a grace for has returned:
+			// the intent is unmet NOW, so every read surface may say so
+			// without waiting the grace out.
+			noteSyslogDialResolved()
 			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
 		}
 	}

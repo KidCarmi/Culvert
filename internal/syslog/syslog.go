@@ -125,6 +125,15 @@ type Writer struct {
 	successor atomic.Pointer[Writer]
 }
 
+// DialTimeout bounds the ONE blocking step in NewWriter: the connect. It is
+// exported because the health plane has to know how long a caller's
+// synchronous NewWriter/InitSyslog can take before it has a verdict — a
+// recorded intent whose dial is still in flight is not yet an unmet one, and
+// deriving that window from this constant is what stops the two drifting
+// (Codex P2, PR #1494). Everything else NewWriter does is a hostname lookup
+// and a channel allocation.
+const DialTimeout = 5 * time.Second
+
 // maxHandoffHops bounds how far a line follows successor links (a run of
 // back-to-back re-points). Past it the line is dropped and counted.
 const maxHandoffHops = 8
@@ -133,9 +142,10 @@ const maxHandoffHops = 8
 type enqueueResult int
 
 const (
-	enqAccepted enqueueResult = iota // queued for the drain goroutine
-	enqDropped                       // queue full; already counted as a drop
-	enqClosed                        // writer closed; NOT counted — caller decides
+	enqAccepted  enqueueResult = iota // queued for the drain goroutine
+	enqDropped                        // queue full on the writer in service; already counted as a drop
+	enqClosed                         // writer closed; NOT counted — caller decides
+	enqDisplaced                      // queue full on a REPLACED writer; NOT counted — caller follows the successor
 )
 
 // queuedLine is one formatted line awaiting delivery.
@@ -442,7 +452,12 @@ func (s *Writer) send(pri int, msg string) {
 	}
 	w := s
 	for hop := 0; ; hop++ {
-		if w.tryEnqueue(w.formatLine(pri, msg, time.Now())) != enqClosed {
+		switch w.tryEnqueue(w.formatLine(pri, msg, time.Now())) {
+		case enqClosed, enqDisplaced:
+			// Both mean "this writer is not the one to use": sealed, or
+			// replaced and already backed up. Neither is counted here, so
+			// the walk below charges the loss exactly once if nobody takes it.
+		default:
 			return
 		}
 		nx := w.successor.Load()
@@ -480,6 +495,26 @@ func (s *Writer) send(pri int, msg string) {
 // tryEnqueue hands one formatted line to the drain goroutine without
 // blocking. A full queue is counted here; a closed writer is NOT, so the
 // caller can hand the line off instead.
+//
+// A full queue is terminal backpressure only on a writer that is still the one
+// in SERVICE. A writer that has been REPLACED answers enqDisplaced instead:
+// uncounted, so the caller follows the successor chain exactly as it does for
+// a closed writer. The two cases are one rule — a loss is only a loss once
+// nobody better is available — and separating them is what stops a line dying
+// on a wedged collector the operator has already moved off.
+//
+// The window is not narrow: releaseReplacedSyslogWriter names the successor
+// BEFORE it closes the predecessor, and that close is ASYNCHRONOUS, so
+// `successor != nil && !closed` is the ordinary state of a just-displaced
+// writer — and its queue being full is the ordinary REASON for the re-point.
+// Charging the drop there also accused the plane of a compliance loss that a
+// healthy replacement was sitting idle to prevent (Codex P2, PR #1494).
+//
+// Order matters: the enqueue is attempted FIRST, so a displaced writer whose
+// queue still has room keeps taking the line (its drain hands it on). Only a
+// REFUSAL consults the successor. A successor published between the failed
+// send and this load is simply not seen, which charges the drop as before —
+// fail-safe, because the line was lost either way.
 func (s *Writer) tryEnqueue(item queuedLine) enqueueResult {
 	s.sendMu.RLock()
 	defer s.sendMu.RUnlock()
@@ -490,9 +525,12 @@ func (s *Writer) tryEnqueue(item queuedLine) enqueueResult {
 	case s.queue <- item:
 		return enqAccepted
 	default:
-		s.noteDrop(&reasonQueueFull)
-		return enqDropped
 	}
+	if s.successor.Load() != nil {
+		return enqDisplaced
+	}
+	s.noteDrop(&reasonQueueFull)
+	return enqDropped
 }
 
 // handOffQueued re-routes one line still queued on a displaced Writer to its
@@ -525,6 +563,10 @@ func (s *Writer) handOffQueued(item queuedLine) bool {
 			ackQueued(item, w, false, &reasonQueueFull)
 			return true // counted on the live writer by tryEnqueue
 		}
+		// enqClosed or enqDisplaced: this writer is not the one to use, so
+		// keep walking. enqDisplaced reaches here when a run of rapid
+		// re-points leaves an intermediate both replaced and backed up; its
+		// full queue is no more terminal than its being closed would be.
 		nx := w.successor.Load()
 		if nx == nil {
 			if w.chargeTerminalDrop(&reasonClosed) {
@@ -643,7 +685,9 @@ func (s *Writer) WriteProbe(msg string) (<-chan ProbeOutcome, bool) {
 	case enqDropped:
 		return nil, false // queue full: already counted on s by tryEnqueue
 	}
-	// enqClosed: s was displaced by a re-point after the caller captured it.
+	// enqClosed or enqDisplaced: s is not the writer to probe. It was sealed
+	// by a re-point after the caller captured it, or it has been replaced and
+	// its own queue has backed up behind the collector the operator moved off.
 	//
 	// This used to call a single-writer `enqueue` helper that dropped straight
 	// onto s. That helper is now gone rather than left unused: it was a second
@@ -675,9 +719,9 @@ func (s *Writer) connect() error {
 		s.conn = conn
 		return nil
 	}
-	// Background context + 5s Timeout is equivalent to the prior DialTimeout,
+	// Background context + DialTimeout is equivalent to the prior DialTimeout,
 	// in the DialContext form the house lint rules require (CLAUDE.md).
-	d := net.Dialer{Timeout: 5 * time.Second}
+	d := net.Dialer{Timeout: DialTimeout}
 	conn, err := d.DialContext(context.Background(), s.network, s.addr)
 	if err != nil {
 		return err
