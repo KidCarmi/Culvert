@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/shutdown"
 )
 
 // Tests for P2.2 / S5 — shutdown sequence wired through two shutdownRegistry
@@ -72,16 +74,16 @@ func TestRegisterEarlyShutdownHooks_OrderMatchesCanonical(t *testing.T) {
 	var reg shutdownRegistry
 	registerEarlyShutdownHooks(&reg, &startupState{})
 
-	hooks := reg.hooksSnapshot()
+	hooks := reg.Hooks()
 	if len(hooks) != len(canonicalEarlyShutdownHooks) {
 		t.Fatalf("got %d early hooks; want %d", len(hooks), len(canonicalEarlyShutdownHooks))
 	}
 	for i, want := range canonicalEarlyShutdownHooks {
-		if hooks[i].name != want.name {
-			t.Errorf("early hook[%d] name = %q; want %q", i, hooks[i].name, want.name)
+		if hooks[i].Name != want.name {
+			t.Errorf("early hook[%d] name = %q; want %q", i, hooks[i].Name, want.name)
 		}
-		if hooks[i].order != want.order {
-			t.Errorf("early hook[%d] (%s) order = %d; want %d", i, hooks[i].name, hooks[i].order, want.order)
+		if hooks[i].Order != want.order {
+			t.Errorf("early hook[%d] (%s) order = %d; want %d", i, hooks[i].Name, hooks[i].Order, want.order)
 		}
 	}
 }
@@ -92,16 +94,16 @@ func TestRegisterLateShutdownHooks_OrderMatchesCanonical(t *testing.T) {
 	var reg shutdownRegistry
 	registerLateShutdownHooks(&reg, &startupState{}, testInertHTTPServer())
 
-	hooks := reg.hooksSnapshot()
+	hooks := reg.Hooks()
 	if len(hooks) != len(canonicalLateShutdownHooks) {
 		t.Fatalf("got %d late hooks; want %d", len(hooks), len(canonicalLateShutdownHooks))
 	}
 	for i, want := range canonicalLateShutdownHooks {
-		if hooks[i].name != want.name {
-			t.Errorf("late hook[%d] name = %q; want %q", i, hooks[i].name, want.name)
+		if hooks[i].Name != want.name {
+			t.Errorf("late hook[%d] name = %q; want %q", i, hooks[i].Name, want.name)
 		}
-		if hooks[i].order != want.order {
-			t.Errorf("late hook[%d] (%s) order = %d; want %d", i, hooks[i].name, hooks[i].order, want.order)
+		if hooks[i].Order != want.order {
+			t.Errorf("late hook[%d] (%s) order = %d; want %d", i, hooks[i].Name, hooks[i].Order, want.order)
 		}
 	}
 }
@@ -116,14 +118,14 @@ func TestEarlyAndLateShutdownHooks_OrdersDoNotOverlap(t *testing.T) {
 	registerEarlyShutdownHooks(&early, &startupState{})
 	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 
-	for _, h := range early.hooksSnapshot() {
-		if h.order > shutdownEarlyLateBoundary {
-			t.Errorf("early hook %q has order %d > boundary %d (must be in late phase)", h.name, h.order, shutdownEarlyLateBoundary)
+	for _, h := range early.Hooks() {
+		if h.Order > shutdownEarlyLateBoundary {
+			t.Errorf("early hook %q has order %d > boundary %d (must be in late phase)", h.Name, h.Order, shutdownEarlyLateBoundary)
 		}
 	}
-	for _, h := range late.hooksSnapshot() {
-		if h.order <= shutdownEarlyLateBoundary {
-			t.Errorf("late hook %q has order %d ≤ boundary %d (must be in early phase)", h.name, h.order, shutdownEarlyLateBoundary)
+	for _, h := range late.Hooks() {
+		if h.Order <= shutdownEarlyLateBoundary {
+			t.Errorf("late hook %q has order %d ≤ boundary %d (must be in early phase)", h.Name, h.Order, shutdownEarlyLateBoundary)
 		}
 	}
 }
@@ -137,16 +139,16 @@ func TestRegisterShutdownHooks_OrdersAreStrictlyAscending(t *testing.T) {
 
 	for _, phase := range []struct {
 		label string
-		hooks []shutdownHook
+		hooks []shutdown.HookInfo
 	}{
-		{"early", early.hooksSnapshot()},
-		{"late", late.hooksSnapshot()},
+		{"early", early.Hooks()},
+		{"late", late.Hooks()},
 	} {
 		for i := 1; i < len(phase.hooks); i++ {
-			if phase.hooks[i].order <= phase.hooks[i-1].order {
+			if phase.hooks[i].Order <= phase.hooks[i-1].Order {
 				t.Errorf("%s hook[%d] (%s, order=%d) is not strictly greater than hook[%d] (%s, order=%d)",
-					phase.label, i, phase.hooks[i].name, phase.hooks[i].order,
-					i-1, phase.hooks[i-1].name, phase.hooks[i-1].order)
+					phase.label, i, phase.hooks[i].Name, phase.hooks[i].Order,
+					i-1, phase.hooks[i-1].Name, phase.hooks[i-1].Order)
 			}
 		}
 	}
@@ -160,15 +162,10 @@ func TestRegisterShutdownHooks_NoNilStops(t *testing.T) {
 	registerEarlyShutdownHooks(&early, &startupState{})
 	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 
-	for _, h := range early.hooksSnapshot() {
-		if h.stop == nil {
-			t.Errorf("early hook %q has nil stop function", h.name)
-		}
-	}
-	for _, h := range late.hooksSnapshot() {
-		if h.stop == nil {
-			t.Errorf("late hook %q has nil stop function", h.name)
-		}
+	// Register panics on a nil stop (pinned in the engine contract suite).
+	// Reaching here proves both production registration paths satisfy it.
+	if len(early.Hooks()) == 0 || len(late.Hooks()) == 0 {
+		t.Fatal("production registration was empty")
 	}
 }
 
@@ -183,16 +180,16 @@ func TestRegisterShutdownHooks_NamesAreUniqueAcrossPhases(t *testing.T) {
 	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
 
 	seen := make(map[string]string) // name → phase
-	check := func(phase string, hooks []shutdownHook) {
+	check := func(phase string, hooks []shutdown.HookInfo) {
 		for _, h := range hooks {
-			if other, dup := seen[h.name]; dup {
-				t.Errorf("duplicate hook name %q (in %s and %s)", h.name, other, phase)
+			if other, dup := seen[h.Name]; dup {
+				t.Errorf("duplicate hook name %q (in %s and %s)", h.Name, other, phase)
 			}
-			seen[h.name] = phase
+			seen[h.Name] = phase
 		}
 	}
-	check("early", early.hooksSnapshot())
-	check("late", late.hooksSnapshot())
+	check("early", early.Hooks())
+	check("late", late.Hooks())
 }
 
 // TestRunShutdownSequence_EveryPhaseCarriesADeadline is the budget-scoping

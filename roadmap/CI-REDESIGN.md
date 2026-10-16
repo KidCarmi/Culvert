@@ -3457,3 +3457,13 @@ does not make a latency claim; §18's rule applies.
 * The runtime base (`alpine:3.24`) and the GeoIP download stay unpinned, so a
   rebuild is still not reproducible — which is exactly why the version binds a
   digest rather than a build.
+
+## Package-isolation follow-up (2026-09-30)
+
+The new [package-isolation program](PACKAGE-ISOLATION.md) revisits current root
+ownership with a fresh ADR-0037, beginning with the shutdown execution engine.
+The earlier extraction and runtime phases remain complete; this is not a restart.
+The pilot preserves phase/service ordering and the existing race, determinism,
+coverage and release gates. Its local-test benefit is measured separately from
+whole-gate/PR latency. The next focused PR owns distributed rate-limit state
+before moving that engine; see the ordered acceptance criteria in the new roadmap.
