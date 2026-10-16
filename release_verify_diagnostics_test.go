@@ -1,48 +1,64 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCheckReleaseVerifyPosture(t *testing.T) {
 	prev := currentReleaseManager()
 	t.Cleanup(func() { setReleaseManager(prev) })
 
 	setReleaseManager(nil)
-	if c := checkReleaseVerifyPosture(); c.Code != "release_catalog_verify" || c.Status != diagOK {
-		t.Fatalf("no manager: want ok, got %+v", c)
+	if got := checkReleaseVerifyPosture(); len(got) != 0 {
+		t.Fatalf("no manager: want no rows, got %+v", got)
 	}
-	cases := []struct {
-		mode VerifyMode
-		want string
-		act  bool
-	}{
-		{VerifyEnforce, diagOK, false},
-		{VerifyPermissive, diagWarn, true},
-		{VerifyDisabled, diagWarn, true},
+	rm := newReleaseManager(nil, nil)
+	rm.verifyMode = VerifyEnforce
+	setReleaseManager(rm)
+	if got := checkReleaseVerifyPosture(); len(got) != 0 {
+		t.Fatalf("enforce: want no rows, got %+v", got)
 	}
-	for _, tc := range cases {
+	for _, mode := range []VerifyMode{VerifyPermissive, VerifyDisabled} {
 		rm := newReleaseManager(nil, nil)
-		rm.verifyMode = tc.mode
+		rm.verifyMode = mode
 		setReleaseManager(rm)
-		c := checkReleaseVerifyPosture()
-		if c.Status != tc.want || (c.OperatorAction != "") != tc.act {
-			t.Errorf("mode %s: got %+v", tc.mode, c)
+		got := checkReleaseVerifyPosture()
+		if len(got) != 1 {
+			t.Fatalf("mode %s: want 1 row, got %d", mode, len(got))
+		}
+		c := got[0]
+		if c.Code != "release_catalog_verify" || c.Status != diagWarn || c.OperatorAction == "" {
+			t.Errorf("mode %s: unexpected row %+v", mode, c)
+		}
+		if !strings.Contains(c.OperatorAction, envReleaseCatalogTrustKeys) ||
+			!strings.Contains(c.OperatorAction, envReleaseCatalogVerify) {
+			t.Errorf("mode %s: remediation must name %s and %s, got %q",
+				mode, envReleaseCatalogTrustKeys, envReleaseCatalogVerify, c.OperatorAction)
 		}
 	}
 }
 
-func TestOperatorContract_IncludesReleaseVerifyRow(t *testing.T) {
+func TestOperatorContract_ReleaseVerifyRowOnlyInBreakGlass(t *testing.T) {
+	resetDiagVerdictGlobals(t)
 	prev := currentReleaseManager()
 	t.Cleanup(func() { setReleaseManager(prev) })
+
 	rm := newReleaseManager(nil, nil)
 	rm.verifyMode = VerifyDisabled
 	setReleaseManager(rm)
-	for _, c := range buildOperatorContract().Checks {
-		if c.Code == "release_catalog_verify" {
-			if c.Status != diagWarn {
-				t.Fatalf("want warn, got %+v", c)
-			}
-			return
-		}
+	c := findDiagnosticCheck(buildOperatorContract(), "release_catalog_verify")
+	if c == nil {
+		t.Fatal("release_catalog_verify row missing from operator contract in break-glass")
 	}
-	t.Fatal("release_catalog_verify row missing from operator contract")
+	if c.Status != diagWarn {
+		t.Fatalf("want warn, got %+v", *c)
+	}
+
+	rm = newReleaseManager(nil, nil)
+	rm.verifyMode = VerifyEnforce
+	setReleaseManager(rm)
+	if c := findDiagnosticCheck(buildOperatorContract(), "release_catalog_verify"); c != nil {
+		t.Fatalf("enforce mode must not add a row, got %+v", *c)
+	}
 }
