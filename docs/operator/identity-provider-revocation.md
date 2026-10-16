@@ -35,11 +35,22 @@ session lifetime — up to 8 hours by default, up to 7 days if the session TTL w
 raised. Those groups feed policy evaluation directly, so group-scoped **allow**
 rules kept matching for a federation that had just been removed.
 
+**An unreachable IdP is not a revocation.** Item 3 keys on whether the profile
+is still **stored and enabled**, not on whether its provider is currently
+working. If the IdP's metadata or discovery endpoint is unreachable — the
+profile failed to compile at boot, or its cached document was retired at the
+7-day / `validUntil` staleness ceiling (see
+`docs/operator/idp-metadata-availability.md`) — sessions it already minted keep
+authenticating; only **new** logins through it are unavailable until the IdP
+answers again. Restarting a node during an IdP outage therefore does not log
+anybody out. Only deleting the profile, disabling it, or removing it through a
+configuration replacement (import, rollback, Control Plane snapshot) revokes.
+
 ## 2. What it does *not* do
 
 | Lever | Cuts proxy sessions? | Cuts admin-UI sessions? | Survives restart? | Reaches other cluster nodes? |
 |---|---|---|---|---|
-| Delete / disable an IdP | **Yes** (immediately) | n/a — the admin UI never issues an SSO cookie | **Yes** — derived from the stored profile set | **Yes** — via the `IdPProfiles` config snapshot |
+| Delete / disable an IdP | **Yes** (immediately; an *unreachable* IdP does not) | n/a — the admin UI never issues an SSO cookie | **Yes** — derived from the stored profile set | **Yes** — via the `IdPProfiles` config snapshot |
 | Delete a local admin account | n/a — a local login never mints a proxy cookie | Yes | **No** — the user revocation list is in memory only | **No** |
 | Admin logout | Yes (that one token) | Yes (that one token) | Yes — the token revocation list is persisted | Yes — gossiped between nodes |
 
@@ -102,7 +113,7 @@ Recorded here because it governs what you can rely on.
 The revocation could have been implemented as an *event*: a `RevokeProvider`
 entry pushed onto the session revocation list when an admin presses Delete.
 It is implemented instead as a *state* check — on every request, "is this
-provider still in the live set?" — for four operational reasons:
+provider's profile still stored and enabled?" — for four operational reasons:
 
 1. **The admin handler is not the only writer.** Config import, config-version
    rollback and the Control Plane's configuration snapshot all replace the

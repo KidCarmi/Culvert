@@ -75,6 +75,13 @@ to this checkout, not to an unmerged branch.
   providers, and the recovery loop revalidates cache-serving providers. An
   unreachable IdP is degraded availability, never revocation: only an
   explicit delete or disable revokes sessions.
+- Proxy-session provider bounds (CHAOS-72):
+  [session_provider_bounds.go](../../session_provider_bounds.go) and the
+  [revocation runbook](../operator/identity-provider-revocation.md). A verified
+  `ps_session` is an identity only while its `pvd` profile is stored and
+  enabled (`IdPRegistry.ProfileEnabled`, never `LiveProvider`); `""` and
+  `"local"` are always admitted. Delete, disable and `ReplaceAll` removal
+  revoke; a compile failure or staleness retirement does not.
 
 ## Proxy, policy and scanning
 

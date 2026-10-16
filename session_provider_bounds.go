@@ -34,7 +34,9 @@ import (
 // DELETE handler is only ONE of those writers. `IdPRegistry.ReplaceAll` is
 // also reached from config import, config-version rollback and the CP→DP
 // `syncSnapshotIdPProfiles` path, none of which run that handler. Probing the
-// live set instead is correct for all of them at once, needs no persistence
+// stored, enabled profile set (`IdPRegistry.ProfileEnabled` — NOT the compiled
+// live set, see sessionProviderLive) instead is correct for all of them at
+// once, needs no persistence
 // (the registry file already is), needs no gossip (`ConfigSnapshot.IdPProfiles`
 // already carries it fleet-wide), cannot be evicted, and cannot go stale:
 // freshness is EVALUATED on every request rather than latched at the moment of
@@ -82,9 +84,21 @@ const sessionProviderLocal = "local"
 //
 //   - "local" — the admin-UI cookie. Not a registry id.
 //
-//   - a profile id that is currently ENABLED AND COMPILED (`r.live`). Delete,
-//     disable and a failed compile all remove it from that map, and in all
-//     three the operator's intent is that this federation authenticates nobody.
+//   - a profile id that is currently STORED AND ENABLED
+//     (`IdPRegistry.ProfileEnabled`), whether or not it has a live compiled
+//     provider. Delete, disable and removal by `ReplaceAll` (config import,
+//     rollback, the CP→DP snapshot) change that answer, and in all three the
+//     operator's intent is that this federation authenticates nobody.
+//
+//     It is deliberately NOT `LiveProvider` (enabled AND compiled). A profile
+//     also drops out of `r.live` when its metadata/discovery fetch fails at
+//     compile time, or when its cached document is retired at the CHAOS-71
+//     staleness ceiling — and neither is a revocation. Keyed on `r.live`,
+//     restarting a node while an IdP is unreachable logged out every session
+//     of that IdP and sent users to an IdP that was down, contradicting the
+//     registry's own rule that a compile failure must not silently flip the
+//     operator's configuration (owner decision on #1485/#1564: an unreachable
+//     IdP is degraded availability, not revocation).
 //
 // BOTH the bare id and the prefixed `Name()` form are probed, and that is not
 // defensive clutter: this codebase carries two representations of one provider
@@ -94,21 +108,19 @@ const sessionProviderLocal = "local"
 // `saml:<id>`, which is why `stripIdPPrefix` exists at all. A fail-closed
 // bound applied to the wrong representation is a customer-visible outage, not
 // a tightening (CHAOS-69's round-1 IDN regression, learned the expensive way),
-// and probing both cannot WIDEN anything: each form must still resolve to a
-// live provider.
+// and probing both cannot WIDEN anything: each form must still resolve to an
+// enabled profile.
 func sessionProviderLive(provider string) bool {
 	// Raw, untrimmed — see the emptiness note above. A whitespace-only value
 	// is a provider name that resolves to nothing, not an absent field.
 	if provider == "" || provider == sessionProviderLocal {
 		return true
 	}
-	if _, ok := idpRegistry.LiveProvider(provider); ok {
+	if idpRegistry.ProfileEnabled(provider) {
 		return true
 	}
 	if bare := stripIdPPrefix(provider); bare != provider {
-		if _, ok := idpRegistry.LiveProvider(bare); ok {
-			return true
-		}
+		return idpRegistry.ProfileEnabled(bare)
 	}
 	return false
 }

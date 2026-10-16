@@ -10033,6 +10033,28 @@ folded into a fixture other tests re-reset underneath. **Rule: a shared setup
 helper may reset state; adding state to one is only safe once you know no test
 on it re-resets the globals mid-run.**
 
+### 42.6c Owner decision (2026-10-13) — the predicate is "stored and enabled", not "compiled"
+
+The first shape keyed `sessionProviderLive` on `IdPRegistry.LiveProvider`
+(enabled AND compiled). That was wider than the operator's intent: a profile
+also leaves `r.live` when its metadata/discovery fetch fails at compile time
+(`auth_oidc_flow.go` / `auth_saml.go`, on boot, admin save and every CP→DP
+sync) and, with #1485 (CHAOS-71) merged first, when its cached document is
+retired at the `min(7 days, validUntil)` staleness ceiling. So restarting a
+node while an IdP was unreachable logged out every session of that IdP and sent
+those users to an IdP that was down — contradicting the registry's own rule
+that a compile failure must not silently flip the operator's configuration.
+
+The decision: **an unreachable IdP is degraded availability, not revocation;
+only an explicit delete, disable or `ReplaceAll` removal revokes.** The
+predicate is now `IdPRegistry.ProfileEnabled(id)` (the profile is stored and
+`Enabled`, allocation-free on the request path). Gates in
+`session_provider_availability_test.go`: a dark enabled profile, a real boot
+compile failure (`Load` with the IdP returning 503 and nothing cached) and a
+real staleness-ceiling retirement do NOT revoke; delete, disable and
+`ReplaceAll(nil)` on that same dark provider DO. All four were verified failing
+against the `LiveProvider` shape.
+
 ### 42.7 Deliberately NOT done
 
 - **No `/readyz` or `/healthz` row, and no alert.** A node re-challenging

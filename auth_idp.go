@@ -1049,6 +1049,29 @@ func (r *IdPRegistry) LiveProvider(id string) (IdentityProvider, bool) {
 	return p, ok
 }
 
+// ProfileEnabled reports whether a profile with this id is STORED and ENABLED,
+// whether or not it currently has a live compiled provider. Allocation-free:
+// it runs on the proxy request path (sessionProviderLive).
+//
+// It deliberately differs from LiveProvider. A profile drops out of r.live when
+// its metadata/discovery fetch fails at compile time or when its cached
+// document is retired at the staleness ceiling, and neither is the operator
+// revoking the IdP: an unreachable IdP is degraded AVAILABILITY. Only an
+// explicit delete, disable or removal by ReplaceAll changes this answer.
+func (r *IdPRegistry) ProfileEnabled(id string) bool {
+	if id == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.ID == id {
+			return p.Enabled
+		}
+	}
+	return false
+}
+
 // EnabledProviders returns all live (enabled+compiled) providers in profile order.
 func (r *IdPRegistry) EnabledProviders() []IdentityProvider {
 	r.mu.RLock()

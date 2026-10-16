@@ -23,14 +23,14 @@ import (
 // gateway and locking the admin UI out of its own cookie.
 // ---------------------------------------------------------------------------
 
-// c71Setup installs a registry in one of three postures and a local admin
+// c72Setup installs a registry in one of three postures and a local admin
 // account, so credCapable keeps authRequired true after the provider is gone.
 // That is the realistic shape: an appliance always has a local admin, so
 // removing one federation never drops the whole Stage-1 gate.
 //
 // It also isolates the process-global refusal counter and log gate — a leaked
 // gate suppresses the line for every later test in the package.
-func c71Setup(t *testing.T, posture string) {
+func c72Setup(t *testing.T, posture string) {
 	t.Helper()
 	prevReg := idpRegistry
 	prof := &IdPProfile{ID: "corp", Type: IdPTypeSAML, Enabled: true, Name: "Corp SSO"}
@@ -47,6 +47,11 @@ func c71Setup(t *testing.T, posture string) {
 		disabled := *prof
 		disabled.Enabled = false
 		reg.profiles = []*IdPProfile{&disabled}
+	case "dark":
+		// STORED and ENABLED, but no live provider: what a failed compile (IdP
+		// unreachable at boot, nothing cached) or a CHAOS-71 staleness-ceiling
+		// retirement leaves behind. Degraded availability, not revocation.
+		reg.profiles = []*IdPProfile{prof}
 	case "deleted":
 		// Nothing stored, nothing live.
 	default:
@@ -56,7 +61,7 @@ func c71Setup(t *testing.T, posture string) {
 
 	cfg.mu.Lock()
 	oldUser, oldHash, oldRev := cfg.user, cfg.passHash, cfg.authRevision
-	cfg.user, cfg.passHash = "c71-admin", []byte("$2a$10$c71PlaceholderHashNotUsedByAnyAssertionInThisFile0000000")
+	cfg.user, cfg.passHash = "c72-admin", []byte("$2a$10$c72PlaceholderHashNotUsedByAnyAssertionInThisFile0000000")
 	cfg.authRevision++
 	cfg.mu.Unlock()
 
@@ -71,10 +76,10 @@ func c71Setup(t *testing.T, posture string) {
 	})
 }
 
-// c71Request mints a cookie this appliance would really have issued: signed
+// c72Request mints a cookie this appliance would really have issued: signed
 // with the live key, carrying the asserting profile's id in `pvd` and the
 // groups that provider asserted.
-func c71Request(t *testing.T, provider string) *http.Request {
+func c72Request(t *testing.T, provider string) *http.Request {
 	t.Helper()
 	r := httptest.NewRequestWithContext(context.Background(), "GET", "http://example.com/", http.NoBody)
 	if provider == "<none>" {
@@ -95,10 +100,10 @@ func c71Request(t *testing.T, provider string) *http.Request {
 	return r
 }
 
-func c71Resolve(t *testing.T, provider string) (outcome authOutcome, proceed bool, status int) {
+func c72Resolve(t *testing.T, provider string) (outcome authOutcome, proceed bool, status int) {
 	t.Helper()
 	w := httptest.NewRecorder()
-	outcome, proceed = resolveRequestAuth(w, c71Request(t, provider), "192.0.2.10", "chaos-71")
+	outcome, proceed = resolveRequestAuth(w, c72Request(t, provider), "192.0.2.10", "chaos-72")
 	return outcome, proceed, w.Code
 }
 
@@ -107,8 +112,8 @@ func c71Resolve(t *testing.T, provider string) (outcome authOutcome, proceed boo
 // A deleted provider's session must stop being an identity. Pre-fix this
 // returned proceed=true with identity "alice@corp.example".
 func TestChaos72_DefectDeletedProviderSessionIsNotAnIdentity(t *testing.T) {
-	c71Setup(t, "deleted")
-	outcome, proceed, code := c71Resolve(t, "corp")
+	c72Setup(t, "deleted")
+	outcome, proceed, code := c72Resolve(t, "corp")
 	if proceed || outcome.identity != "" {
 		t.Fatalf("deleted provider still authenticated: proceed=%v identity=%q status=%d",
 			proceed, outcome.identity, code)
@@ -117,8 +122,8 @@ func TestChaos72_DefectDeletedProviderSessionIsNotAnIdentity(t *testing.T) {
 
 // Disabling is the same revocation intent with the profile left in place.
 func TestChaos72_DefectDisabledProviderSessionIsNotAnIdentity(t *testing.T) {
-	c71Setup(t, "disabled")
-	outcome, proceed, code := c71Resolve(t, "corp")
+	c72Setup(t, "disabled")
+	outcome, proceed, code := c72Resolve(t, "corp")
 	if proceed || outcome.identity != "" {
 		t.Fatalf("disabled provider still authenticated: proceed=%v identity=%q status=%d",
 			proceed, outcome.identity, code)
@@ -134,8 +139,8 @@ func TestChaos72_DefectDisabledProviderSessionIsNotAnIdentity(t *testing.T) {
 func TestChaos72_DefectRemovedProviderGroupsNeverReachPolicy(t *testing.T) {
 	for _, posture := range []string{"deleted", "disabled"} {
 		t.Run(posture, func(t *testing.T) {
-			c71Setup(t, posture)
-			outcome, _, _ := c71Resolve(t, "corp")
+			c72Setup(t, posture)
+			outcome, _, _ := c72Resolve(t, "corp")
 			if len(outcome.groups) != 0 {
 				t.Fatalf("groups from a %s provider reached policy evaluation: %v",
 					posture, outcome.groups)
@@ -154,8 +159,8 @@ func TestChaos72_DefectRemovedProviderGroupsNeverReachPolicy(t *testing.T) {
 // `RevokeProvider` entry emitted from the handler would cover none of them;
 // probing the live set covers all of them with one predicate.
 func TestChaos72_DefectProviderRemovedByReplaceAllIsAlsoRevoked(t *testing.T) {
-	c71Setup(t, "live")
-	if _, proceed, _ := c71Resolve(t, "corp"); !proceed {
+	c72Setup(t, "live")
+	if _, proceed, _ := c72Resolve(t, "corp"); !proceed {
 		t.Fatal("precondition: the live provider's session must authenticate first")
 	}
 	// The shape a CP snapshot / config import / rollback produces: the whole
@@ -163,7 +168,7 @@ func TestChaos72_DefectProviderRemovedByReplaceAllIsAlsoRevoked(t *testing.T) {
 	if err := idpRegistry.ReplaceAll(nil); err != nil {
 		t.Fatalf("ReplaceAll: %v", err)
 	}
-	outcome, proceed, code := c71Resolve(t, "corp")
+	outcome, proceed, code := c72Resolve(t, "corp")
 	if proceed || outcome.identity != "" {
 		t.Fatalf("provider removed by ReplaceAll still authenticated: proceed=%v identity=%q status=%d",
 			proceed, outcome.identity, code)
@@ -175,12 +180,12 @@ func TestChaos72_DefectProviderRemovedByReplaceAllIsAlsoRevoked(t *testing.T) {
 // counter. An operator with no metrics scraper has no other way to tell
 // whether the revocation reached live traffic.
 func TestChaos72_DefectRefusalIsCounted(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	if got := sessionProviderRevokedCount(); got != 0 {
 		t.Fatalf("counter = %d before any request, want 0", got)
 	}
 	for i := 0; i < 3; i++ {
-		c71Resolve(t, "corp")
+		c72Resolve(t, "corp")
 	}
 	if got := sessionProviderRevokedCount(); got != 3 {
 		t.Fatalf("counter = %d after 3 refused requests, want 3", got)
@@ -191,9 +196,9 @@ func TestChaos72_DefectRefusalIsCounted(t *testing.T) {
 // its own: the client is re-challenged through the existing no-credential
 // dispatch, so there is no second code path to keep in step with arm 3.
 func TestChaos72_DefectRefusalIsIndistinguishableFromNoCookie(t *testing.T) {
-	c71Setup(t, "deleted")
-	revoked, revokedProceed, revokedCode := c71Resolve(t, "corp")
-	none, noneProceed, noneCode := c71Resolve(t, "<none>")
+	c72Setup(t, "deleted")
+	revoked, revokedProceed, revokedCode := c72Resolve(t, "corp")
+	none, noneProceed, noneCode := c72Resolve(t, "<none>")
 	if revokedProceed != noneProceed || revokedCode != noneCode {
 		t.Fatalf("refused session (proceed=%v status=%d) differs from no cookie (proceed=%v status=%d)",
 			revokedProceed, revokedCode, noneProceed, noneCode)
@@ -212,8 +217,8 @@ func TestChaos72_DefectRefusalIsIndistinguishableFromNoCookie(t *testing.T) {
 
 // Browser SSO through the gateway must keep working, groups included.
 func TestChaos72_ControlLiveProviderStillAuthenticatesWithGroups(t *testing.T) {
-	c71Setup(t, "live")
-	outcome, proceed, code := c71Resolve(t, "corp")
+	c72Setup(t, "live")
+	outcome, proceed, code := c72Resolve(t, "corp")
 	if !proceed || outcome.identity != "alice@corp.example" {
 		t.Fatalf("live provider session rejected: proceed=%v identity=%q status=%d",
 			proceed, outcome.identity, code)
@@ -231,7 +236,7 @@ func TestChaos72_ControlLiveProviderStillAuthenticatesWithGroups(t *testing.T) {
 // refusing "local" here would lock every administrator out of the appliance
 // the moment no IdP is configured, which is the default posture.
 func TestChaos72_ControlLocalProviderIsNeverRefused(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	if !sessionProviderLive(sessionProviderLocal) {
 		t.Fatal("the local admin-UI provider must never be refused")
 	}
@@ -245,11 +250,11 @@ func TestChaos72_ControlLocalProviderIsNeverRefused(t *testing.T) {
 // for no security gain: such a cookie names no federation, so there is no
 // federation to have been cut off.
 func TestChaos72_ControlLegacyEmptyProviderIsNeverRefused(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	if !sessionProviderLive("") {
 		t.Fatal("a pre-pvd legacy session must not be refused")
 	}
-	c71Resolve(t, "")
+	c72Resolve(t, "")
 	if got := sessionProviderRevokedCount(); got != 0 {
 		t.Fatalf("counter = %d for a legacy session, want 0", got)
 	}
@@ -259,9 +264,9 @@ func TestChaos72_ControlLegacyEmptyProviderIsNeverRefused(t *testing.T) {
 // stops meaning "a removed provider's session was cut" and starts meaning
 // "somebody browsed".
 func TestChaos72_ControlAbsentCookieChargesNothing(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	for i := 0; i < 5; i++ {
-		c71Resolve(t, "<none>")
+		c72Resolve(t, "<none>")
 	}
 	if got := sessionProviderRevokedCount(); got != 0 {
 		t.Fatalf("counter = %d for anonymous traffic, want 0", got)
@@ -279,13 +284,13 @@ func TestChaos72_ControlAbsentCookieChargesNothing(t *testing.T) {
 // regression), so both forms must resolve while a removed provider is refused
 // in EITHER spelling.
 func TestChaos72_BothProviderRepresentationsResolve(t *testing.T) {
-	c71Setup(t, "live")
+	c72Setup(t, "live")
 	for _, spelling := range []string{"corp", "saml:corp", "oidc:corp", "ldap:corp"} {
 		if !sessionProviderLive(spelling) {
 			t.Errorf("live provider spelled %q was refused", spelling)
 		}
 	}
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	for _, spelling := range []string{"corp", "saml:corp", "oidc:corp"} {
 		if sessionProviderLive(spelling) {
 			t.Errorf("removed provider spelled %q was admitted", spelling)
@@ -296,7 +301,7 @@ func TestChaos72_BothProviderRepresentationsResolve(t *testing.T) {
 // Probing both spellings must never WIDEN: a bare id that names nothing live
 // stays refused however it is prefixed, and a prefix alone is not a provider.
 func TestChaos72_ControlPrefixAloneIsNotAProvider(t *testing.T) {
-	c71Setup(t, "live")
+	c72Setup(t, "live")
 	for _, spelling := range []string{"saml:", "oidc:", "other", "saml:other", "  ", "CORP"} {
 		if sessionProviderLive(spelling) {
 			t.Errorf("%q was admitted as a live provider", spelling)
@@ -361,7 +366,7 @@ func TestChaos72_WallSessionCookieMintersAreEnumerated(t *testing.T) {
 // measured unreachable behaviourally, so the claim mechanism is asserted
 // structurally below instead.
 func TestChaos72_ControlLogIsSuppressedButTheCountNeverIs(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	frozen := time.Now()
 	prev := timeNowSessionProvider
 	timeNowSessionProvider = func() time.Time { return frozen }
@@ -378,7 +383,7 @@ func TestChaos72_ControlLogIsSuppressedButTheCountNeverIs(t *testing.T) {
 // A clock rollback must RE-ARM the gate rather than silence the line until
 // wall-clock catches up (CHAOS-61: a negative age is STALE, not fresh).
 func TestChaos72_LogGateReArmsOnClockRollback(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	now := time.Now()
 	prev := timeNowSessionProvider
 	timeNowSessionProvider = func() time.Time { return now }
@@ -417,7 +422,7 @@ func TestChaos72_WallLogGateIsClaimedNotRead(t *testing.T) {
 // with: a whole fleet's browsers re-send their dead cookies at once when a
 // provider is removed.
 func TestChaos72_RefusalAccountingIsExactUnderConcurrency(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	const workers, each = 16, 25
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
@@ -426,8 +431,8 @@ func TestChaos72_RefusalAccountingIsExactUnderConcurrency(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
 				rec := httptest.NewRecorder()
-				resolveRequestAuth(rec, c71Request(t, "corp"),
-					fmt.Sprintf("192.0.2.%d", id+1), "chaos-71-conc")
+				resolveRequestAuth(rec, c72Request(t, "corp"),
+					fmt.Sprintf("192.0.2.%d", id+1), "chaos-72-conc")
 			}
 		}(w)
 	}
@@ -462,7 +467,7 @@ func readSourceForC71Wall(t *testing.T, name string) string {
 // precedent). Verified failing against the trimming shape this sweep shipped
 // first.
 func TestChaos72_ProviderEmptinessAgreesWithIdentityAuthSource(t *testing.T) {
-	c71Setup(t, "deleted")
+	c72Setup(t, "deleted")
 	for _, pvd := range []string{"", " ", "  ", "\t", "\n", " corp ", "corp", "local", " local"} {
 		// What identityAuthSource considers "no provider at all".
 		namesNoFederation := identityAuthSource(&Identity{Provider: pvd}, "sentinel") == "sentinel"
