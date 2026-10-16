@@ -8773,6 +8773,27 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Sixth review round.** (a) **A self-fenced standby kept serving config.**
+  ADR-0005 keeps a demoted leader's CP gRPC server running and fences its
+  WRITES (S3 issuance gating) — `enterStandbyResync` says so — but its READS
+  were ungated, and standby resync replaces the snapshot without advancing
+  `ConfigStore.version`, so a DP at the old version got "unchanged" forever
+  and never failed over. Keeping the ADR's choice (the server stays up), every
+  ConfigService method is now registered through `gatedUnary` with an explicit
+  entry in `cpRPCPolicies`; on a non-leader (HA on) it refuses with a
+  RETRIABLE `Unavailable`, which the DP counts as a poll failure, so its
+  address failover runs. All nine methods are leader-gated (the three
+  issuance sinks additionally keep `haIssuanceAllowed`); an unclassified
+  method fails closed. Wall: `TestChaos71_Wall_EveryCPRPCHasAnHAServingPolicy`.
+  Self-fencing does not stop the supervisor, so it adds no edge to the exit
+  table. (b) **Pre-flush pages were lost.** The supervisor starts in
+  `initCluster`, before the webhooks load, and its latches are fire-once;
+  `fireCPGRPCListenerAlert` now queues through `deferStartupAlert` until the
+  startup flush. It is the only new alert producer in this PR that can fire
+  that early (`ha_self_fenced` via withholding needs 30 s of darkness plus the
+  confirmed window). (c) CodeRabbit: a full publish that loses the owned-list
+  race `cpAddrMergeAttempts` times now rejects through `rejectPublish` instead
+  of committing an unvalidated list.
 * **CodeRabbit (HA config at bind time).** The boot resume closed over the HA
   config read at boot; with the retrying supervisor it can run minutes later
   and restore a leader the operator had since disabled or flipped to standby.

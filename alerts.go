@@ -143,6 +143,15 @@ func deferStartupAlert(event string, payload AlertPayload) {
 	startupAlertFire(event, payload)
 }
 
+// startupAlertsFlushed reports whether the startup flush has happened (the
+// webhook store is loaded). Before it, a fire-once producer must queue through
+// deferStartupAlert or its single page is lost to an empty webhook list.
+func startupAlertsFlushed() bool {
+	startupAlertMu.Lock()
+	defer startupAlertMu.Unlock()
+	return startupAlertFlushed
+}
+
 // flushStartupAlerts delivers every queued startup alert. Called once from
 // loadPersistentAdminState after globalAlertStore.Init has loaded the
 // persisted webhooks.

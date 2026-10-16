@@ -358,6 +358,50 @@ func TestChaos71_TerminalEscalationPagesAgain(t *testing.T) {
 	}
 }
 
+// TestChaos71_FullPublishRejectsWhenTheRetryBudgetRunsOut — CodeRabbit
+// (4294902254). If the owned CP address list changes after EVERY validation,
+// the full publish must give up through the rejection path — never fall
+// through and commit a list it did not validate. Deterministic: the seam
+// commits a different address list inside each validate→commit window.
+func TestChaos71_FullPublishRejectsWhenTheRetryBudgetRunsOut(t *testing.T) {
+	s := &ConfigStore{}
+	var n atomic.Int32
+	src := func() []string { return []string{fmt.Sprintf("10.0.0.%d:50051", n.Load())} }
+	s.setCPAddressSource(src)
+	if err := s.Update(ConfigSnapshot{CPAddresses: src()}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before := s.Version()
+
+	var windows atomic.Int32
+	configPublishBeforeCommit = func() {
+		windows.Add(1)
+		n.Add(1)
+		if _, err := s.UpdateCPAddressesFrom(src); err != nil {
+			t.Errorf("competing address publish: %v", err)
+		}
+	}
+	t.Cleanup(func() { configPublishBeforeCommit = nil })
+
+	err := s.Update(ConfigSnapshot{BlockedHosts: []string{"never-validated-with-this-list.example"}})
+	if err == nil {
+		t.Fatal("the full publish committed after exhausting its retry budget — with a CP address list it never validated")
+	}
+	if got := int(windows.Load()); got != cpAddrMergeAttempts {
+		t.Errorf("the publish retried %d time(s), want exactly the budget (%d)", got, cpAddrMergeAttempts)
+	}
+	if cpListNames(s.Get().BlockedHosts, "never-validated-with-this-list.example") {
+		t.Error("the unvalidated full publish was committed")
+	}
+	if msg, _ := s.LastPublishError(); msg == "" {
+		t.Error("the exhausted publish did not go through the rejection path (no LastPublishError)")
+	}
+	// Only the competing address publishes committed.
+	if got := s.Version() - before; got != int64(cpAddrMergeAttempts) {
+		t.Errorf("%d commit(s) after the seed, want %d (the competing address publishes only)", got, cpAddrMergeAttempts)
+	}
+}
+
 // TestChaos71_FullPublishValidatesTheListItCommits — Codex P1 (4294641541).
 // The owned-list substitution used to run AFTER validation, so a near-limit
 // snapshot validated with its own short list could be committed with a longer

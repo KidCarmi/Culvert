@@ -136,6 +136,11 @@ back (`HA: auto-promotion refused â€” "Control Plane gRPC listener unavailable â
 which would only re-acquire the lease to withhold it again. Manual promotion is
 unchanged (break-glass).
 
+A self-fenced node keeps its Control Plane listener (ADR-0005), but with HA
+enabled **only the leader answers Control Plane RPCs**: a standby refuses Data
+Planes with a retriable `Unavailable`, so they fail over to the new leader
+rather than staying on the standby's non-advancing config.
+
 On the **promote** path the listener is started synchronously: if it cannot
 bind, the promotion fails and the node stays a retryable standby rather than
 becoming a leader nobody can reach. Once the role is committed the config is

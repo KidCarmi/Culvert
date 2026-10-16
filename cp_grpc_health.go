@@ -257,14 +257,22 @@ type cpGRPCListenerSnapshot struct {
 // documented on fireStorageWriteAlert: with no webhook configured — the default
 // posture, and the state of every test binary — this must not spawn a goroutine
 // at all.
+//
+// STARTUP ORDERING (Codex review of #1556): the supervisor starts in
+// initCluster, BEFORE initPersistentAdminState loads the webhooks, and its
+// latches are fire-once — a threshold or terminal page raised before the load
+// would latch and be lost. Until the startup flush it queues through
+// deferStartupAlert, like every other startup-capable producer.
 var fireCPGRPCListenerAlert = func(detail string) {
+	payload := AlertPayload{Detail: detail, Source: "control_plane"}
+	if !startupAlertsFlushed() {
+		deferStartupAlert("cp_grpc_listener_down", payload)
+		return
+	}
 	if !globalAlertStore.HasSubscriber("cp_grpc_listener_down") {
 		return
 	}
-	go fireAlert("cp_grpc_listener_down", AlertPayload{
-		Detail: detail,
-		Source: "control_plane",
-	})
+	go fireAlert("cp_grpc_listener_down", payload)
 }
 
 // noteCPGRPCConfigured records that a Control Plane listener was requested.

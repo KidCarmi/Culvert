@@ -603,6 +603,12 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 		c   configCommit
 	)
 	for attempt := 0; ; attempt++ {
+		if attempt == cpAddrMergeAttempts {
+			// Never commit a payload that was not validated (CodeRabbit review of
+			// #1556): losing the race this many times in a row is reported
+			// through the ordinary rejection path, as UpdateCPAddressesFrom does.
+			return s.rejectPublish(fmt.Errorf("config publish lost the commit race against CP address list updates %d times in a row", cpAddrMergeAttempts))
+		}
 		s.mu.RLock()
 		src = s.cpAddrSource
 		owned := src != nil && s.published
@@ -615,16 +621,16 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 		if err := validateSnapshotForPublish(cand); err != nil {
 			return s.rejectPublish(err)
 		}
+		if hook := configPublishBeforeCommit; hook != nil {
+			hook()
+		}
 		s.mu.Lock()
-		if owned && !slicesEqual(s.snap.CPAddresses, committed) && attempt < cpAddrMergeAttempts {
+		if owned && !slicesEqual(s.snap.CPAddresses, committed) {
 			s.mu.Unlock()
 			continue // the owned list changed after validation: re-substitute, re-validate
 		}
-		if owned {
-			cand.CPAddresses = s.snap.CPAddresses // identical unless the retry budget ran out
-		}
 		recordPublishedSnapshotSizes(cand) // for the utilization metrics (cheap; no per-scrape rebuild)
-		c = s.commitLocked(cand)
+		c = s.commitLocked(cand)           // exactly the payload validated above
 		s.mu.Unlock()
 		break
 	}
@@ -638,6 +644,11 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	}
 	return nil
 }
+
+// configPublishBeforeCommit, when non-nil, runs between Update's validation and
+// its commit. Test seam only (nil in production): it opens the "owned list
+// changed after validation" window deterministically.
+var configPublishBeforeCommit func()
 
 // setCPAddressSource hands ownership of the CP address list to build (see
 // cpAddrSource). Called once at Control Plane activation.

@@ -99,7 +99,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   including a panic between bind and serve — now releases the server, the
   socket and the role claim it holds; a terminal listener failure pages even
   after a recoverable episode already paged; and a full publish validates the
-  snapshot with the CP address list it actually commits. A refused admin/promote
+  snapshot with the CP address list it actually commits. With HA on, every
+  Control Plane RPC is now leader-gated: a self-fenced standby whose listener
+  rebinds refuses Data Planes with a retriable error, so they fail over to the
+  new leader instead of staying on its stale config; and a listener alert
+  raised before the webhooks load at boot is queued, not lost. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long
