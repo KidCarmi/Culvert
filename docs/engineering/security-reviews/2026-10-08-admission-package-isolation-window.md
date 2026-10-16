@@ -133,11 +133,58 @@ deterministic on any hardware, at any load, with or without `-race`.
 
 ### Mutation proof (each verified failing)
 
+Re-verified against the wall as it now stands (all five run on the real files,
+tree restored after each):
+
 | Mutation | Gate | Result |
 |---|---|---|
 | `Run` passes `newRateLimiter()` | GossipLoopIsFedTheEnforcingLimiter | FAIL (as required) |
-| `proxy.go` uses `rl.Allow` | RequestPathUsesClusterAwareEntryPoint | FAIL (as required) |
+| `Run` shadows `rl := newRateLimiter()` | GossipLoopIsFedTheEnforcingLimiter | FAIL — **green before round 1** |
+| `rateLimitGossipLoop` reassigns its `limiter` | GossipLoopIsFedTheEnforcingLimiter | FAIL — **green before round 2** |
+| `proxy.go` shadows `rl := newRateLimiter()` | RequestPathUsesClusterAwareEntryPoint | FAIL — **green before round 1** |
 | `socks5.go` uses `rl.Allow` | RequestPathUsesClusterAwareEntryPoint | FAIL (as required) |
+
+### Review rounds — the wall checked the SPELLING, not the BINDING
+
+Two independent reviewers (Codex P2, CodeRabbit) found the same hole in the
+wall this review introduced, and they were right: it compared the limiter
+argument's identifier NAME against `"rl"` and nothing more. A local
+`rl := newRateLimiter()` inside `DataPlaneClient.Run` is spelled `rl`, so it
+passed — while gossip fed an independent limiter, the enforcing one was never
+armed, and fleet-wide limiting silently became per-node. **Reproduced against
+the shipped wall: the mutation left the gate GREEN**, which is the one outcome
+this review's own standard calls worse than having no gate. The same hole sat
+in the request-path wall, which no reviewer mentioned — the right method on the
+wrong object consults no remote count.
+
+A second round then found that resolving the CALLER was not enough: the wall
+stopped at `Run`, so `rateLimitGossipLoop` reassigning its own `limiter`
+parameter would pass while `SetClusterEnabled` and `ApplyRemoteCounts` updated
+an independent object.
+
+**The contract the wall now pins is two syntactic hops** — `Run` must pass the
+package-level `rl`, and the loop must keep the parameter it was handed — plus
+the request path's own binding. What a helper does with a limiter it is handed
+belongs to that helper's tests, not to this wall; the scope is stated in the
+wall itself, so the boundary is a decision rather than an omission.
+
+**This is the repo's own recorded lesson arriving a second time, which is the
+part worth keeping.** CHAOS-69 round 5 rejected a wall that "compared the
+argument's identifier NAME against a blessed set" precisely because it passed
+against the shape re-spelled `lookupHost := host`, and replaced it with a check
+on the ASSIGNMENT. A name is not a binding: a structural wall that reads
+identifiers must resolve what they refer to, or it proves only that somebody
+typed the right word. The resolution is deliberately CONSERVATIVE — a rebinding
+anywhere in the function counts, even on a branch the call cannot reach —
+because for a security wall the safe direction is refusing a shape it cannot
+prove.
+
+Known and deliberately NOT closed here: the request-path wall is scoped per
+FILE, so it requires one `AllowAuto` somewhere in `proxy.go`/`socks5.go` rather
+than inside each named handler, and a future handler could lose its call while
+an unrelated helper satisfies the check. That is a coverage gap in a regression
+test, not a production bypass — both handlers call it today — and it is
+recorded here rather than left silent.
 
 ## 3. Reviewed and found safe
 
