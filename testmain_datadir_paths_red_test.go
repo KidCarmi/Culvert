@@ -1,0 +1,68 @@
+package main
+
+// testmain_datadir_paths_red_test.go — the test binary's persisted-state root
+// must bind EVERY /data-rooted default, not only dataDir.
+//
+// TestMain gives the binary a writable temp dataDir, but the defaults that
+// rebindDataDirPaths derives (config-version store, registry settings, CDR
+// certs root and runtime marker, alert retry queue) stayed at the literal
+// production "/data/...". On a CI runner there is no /data, so every write to
+// them fails, and fileutil's write-failure observer feeds any OPEN
+// storage-write scope — which is time-based, not goroutine-based. A webhook
+// delivery that an earlier test left in flight (cdr_alert_bound_test.go, then
+// undrained, to https://example.invalid) failed a few ms later, saved its retry
+// queue to /data/alert_retry_queue.json inside the rollback scope of
+// TestDCFin5_HistoricalRollbackIdentitySurvivesRestart, and turned that
+// rollback into a 500 "rolled_back_not_durable" (Deep · determinism, seed
+// -test.shuffle 1792171671618181963).
+//
+// RED without the rebind in TestMain (the retry queue, registry settings and
+// both CDR paths stay at /data), and RED without initConfigVersioning there
+// (the rebound version store has no directory). The assertions are order-independent:
+// TestDataDirOverride_RebindsHardcodedDefaults restores the pre-test values,
+// so whatever ran first, they read what TestMain bound.
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/alerts"
+)
+
+func TestTestMain_BindsPersistedStateDefaultsToTestDataDir(t *testing.T) {
+	inside := dataDir + string(filepath.Separator)
+	if dataDir == defaultDataDir {
+		t.Fatalf("test binary runs against the production data root %q", dataDir)
+	}
+	for name, p := range map[string]string{
+		"alert retry queue":          alerts.RetryQueuePath(),
+		"config-version store":       configVersions.Dir(),
+		"registry settings file":     registrySettingsFile,
+		"CDR certs root":             cdrCertsRoot,
+		"CDR runtime-enabled marker": cdrRuntimeEnabledPath,
+	} {
+		if !strings.HasPrefix(p, inside) {
+			t.Errorf("%s persists at %q, outside the test binary's data root %q: "+
+				"writes there fail on a runner without /data and pollute a host that has one",
+				name, p, dataDir)
+		}
+	}
+
+	// Pointed under the root is not enough: configver.New does not create its
+	// directory, only Init does, so an un-Init'd store failed every unisolated
+	// saveConfigVersion with ENOENT. Production startup Inits it
+	// (loadPersistentAdminState); TestMain must too. Probe writability with a
+	// non-version file name, so List() and the sequence never see it.
+	dir := configVersions.Dir()
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("config-version store directory %q is not usable (stat: %v): TestMain did not Init the rebound store", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".writable-probe-*")
+	if err != nil {
+		t.Fatalf("config-version store directory %q is not writable: %v", dir, err)
+	}
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+}
