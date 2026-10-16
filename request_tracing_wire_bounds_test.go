@@ -41,8 +41,8 @@ import (
 // parser; the inspected-H2 server dispatches to h2InspectStream instead, and
 // the SSL-inspect inner loop's http.ReadRequest goes through the same textproto
 // validation). The claim is corrected in that file, and THIS wall is what keeps
-// the corrected version true: a future Go release that began carrying a C0 byte
-// into a header value fails TestSecReqID2Wire_DeliverableByteSpaceIsPinned
+// the corrected version true: a future Go release that began carrying another C0
+// byte (beyond TAB, which is already delivered) into a header value fails TestSecReqID2Wire_DeliverableByteSpaceIsPinned
 // rather than quietly widening what reaches the forensic log.
 //
 // These gates deliberately assert on the ADOPTED id and on the rejection
@@ -207,7 +207,7 @@ func assertParserRefusedPartition(t *testing.T, refusedByParser []byte) {
 // refused by the bound rather than adopted.
 //
 // The partition itself is asserted, not just the refusals, so this fails in
-// BOTH directions: a Go release that starts delivering a C0 byte fails it (the
+// BOTH directions: a Go release that starts delivering another C0 byte fails it (the
 // forensic log's exposure would have widened), and one that starts refusing a
 // byte the bound relies on also fails it (a gate would have gone vacuous).
 func TestSecReqID2Wire_DeliverableByteSpaceIsPinned(t *testing.T) {

@@ -62,7 +62,8 @@ third is defence in depth against something net/http already refuses:
 * **Every byte `0x80`–`0xFF`.** net/http does not restrict non-ASCII in a header
   value at all, so without this bound a correlation id could carry arbitrary
   bytes into the log, the response header and the upstream.
-* **Control characters** (`0x00`–`0x1F`, `0x7F`) are excluded too, as
+* **The other control characters** (`0x00`–`0x08`, `0x0A`–`0x1F` and `0x7F`;
+  `TAB`, `0x09`, is wire-reachable and covered by the first bullet) are excluded too, as
   defence in depth — but **they are not reachable over the wire**, and an
   earlier version of this page said otherwise. Measured against a real
   net/http server (`request_tracing_wire_bounds_test.go`): of 256 byte values,
@@ -73,7 +74,7 @@ third is defence in depth against something net/http already refuses:
   reached the forensic log; the earlier claim came from a test that set the
   header on a hand-built request rather than sending it over a socket. The
   partition is now pinned by a wall, so a future Go release that began
-  carrying a control byte would fail the build rather than quietly widen what
+  carrying another control byte would fail the build rather than quietly widen what
   reaches the log.
 
 ## Why the length bound matters

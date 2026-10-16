@@ -117,8 +117,9 @@ func TestAcceptableTracingHeaderValue_EveryByteIsClassified(t *testing.T) {
 // pre-fix shape returned the payload byte-identical.
 //
 // It is DEFENCE IN DEPTH, not a reachable exposure, and the distinction is
-// recorded rather than left implicit: net/http refuses every C0 byte and DEL in
-// a header value with a 400 before this handler runs, so an ESC sequence never
+// recorded rather than left implicit: net/http refuses every C0 byte except TAB,
+// and DEL, in a header value with a 400 before this handler runs (TAB is
+// delivered and stopped only by the bound), so an ESC sequence never
 // reached a POLICY_* line over the wire. Measured and pinned in
 // request_tracing_wire_bounds_test.go (SEC-REQID-2), which also shows what IS
 // reachable and therefore what the charset gate really earns: TAB, SPACE and

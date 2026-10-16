@@ -188,7 +188,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
   `0x20` and `0x7F`. A space or a `TAB` could therefore inject extra `key=value`
   tokens into the decision line's brace block, and any byte `0x80`–`0xFF` reached
-  the log unchecked. (Control characters were *not* among the reachable cases —
+  the log unchecked. (No other control character was among the reachable cases —
   see the SEC-REQID-2 entry above, which corrects an earlier version of this
   paragraph.) Nothing bounded the length at all: the proxy
   listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
