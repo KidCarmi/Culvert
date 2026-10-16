@@ -60,18 +60,25 @@ new IDs → 25 / 24.
 - **Why better:** one noun, "operation ID", on every surface a human or integrator reads, with the
   existing spellings kept as aliases so nothing breaks.
 
-**Inventory.** This is the inventory produced by the commands below at `fbf6a37`. The implementing PR
-must re-run them against its base and reconcile. The first version of this table used a
-case-sensitive pattern keyed on "id" and missed the untagged `OpID` field, the `op=` alert key and the
-"op id"/"op record" prose (Codex, PR #1602).
+The inventory is split by kind, because the two kinds carry different risk:
+
+- **(a) Wire identifiers** (JSON keys, query parameters, accepted request fields, audit and webhook
+  detail keys, and the client code and generated types that read them). Renaming one can break an
+  integrator, so they are inventoried exhaustively below.
+- **(b) Human-readable prose** (error strings, OpenAPI descriptions, UI copy, comments). These carry no
+  compatibility risk and cannot be enumerated to a fixed point. They are governed by a copy rule plus a
+  search the implementing PR must run (see "Prose" below), not by a table.
+
+**(a) Wire-identifier inventory.** This is the inventory produced by the commands below at `fbf6a37`.
+The implementing PR must re-run them against its base and reconcile. The first version of this table
+used a case-sensitive pattern keyed on "id" and missed the untagged `OpID` field and the `op=` alert
+key (Codex, PR #1602).
 
 ```sh
 # (a) every spelling, case-insensitive, all non-test Go INCLUDING cmd/
 git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' fbf6a37 -- '*.go' ':!*_test.go'
 # (a) the same over the contract and both GUIs
 git grep -n -i -E '\bop_?id\b|\bopid\b|operation_?id|\bop=' fbf6a37 -- api/openapi/openapi.yaml frontend/src static/
-# (a) prose forms, everywhere above
-git grep -n -i -E '\bop (id|record)\b' fbf6a37 -- '*.go' ':!*_test.go' api/openapi/openapi.yaml frontend/src static/
 # (b) exported, UNTAGGED operation-ID-like struct fields (Go serializes them under the Go name)
 git grep -n -E '^\s+(Op|OpID|OpId|OperationID|OperationId|Operation)\s+[][*A-Za-z0-9_.]+\s*(//.*)?$' fbf6a37 -- '*.go' ':!*_test.go'
 ```
@@ -80,9 +87,9 @@ Each hit was classified by surface, and each untagged struct from (b) was traced
 reaches a JSON response, a request body or a webhook payload. Not this concept, and omitted: OpenAPI
 route `operationId:` keys and `internal/apicontract`; MCP `Operation` fields (an operation *class*);
 `mcperr` `Op` (a kernel step name); and `op=` JavaScript variables in `static/index.html` MCP panels.
-User- or integrator-visible sites found:
+Wire identifiers found:
 
-| # | Site (`fbf6a37`) | Surface | Current key or wording |
+| # | Site (`fbf6a37`) | Surface | Current key |
 |---|---|---|---|
 | 1 | `backups_api.go:345` — `POST /api/backups` (`BackupCreateResult`, `openapi.yaml:1203`) | API response | `opId` |
 | 2 | `backups_api.go:447` — `GET /api/backups/operations/{id}` (`BackupOperationStatus`, `openapi.yaml:1212-1215`) | API response (agent record, verbatim; snake_case surface: `op_id`, `kind`, `state`, `progress`) | `op_id` |
@@ -91,23 +98,18 @@ User- or integrator-visible sites found:
 | 4 | `release_api.go:711` — `POST /api/releases/dispatch` 202 body | API response | `op_id` |
 | 5 | `release_api.go:845` — `POST /api/releases/dispatch/resume` 202 body | API response | `op_id` |
 | 5a | `release_api.go:784-787` — `POST /api/releases/dispatch/resume` request `resumeRequest.ResumeContext` (`*DispatchResumeContext`), used verbatim at `release_api.go:851-853` | Accepted request field | `resume_context.OpID` |
-| 6 | `release_api.go:823` — resume 400 text "resume needs an op_id" | API error text | `op_id` |
-| 6a | `backups_api.go:330-332` — `POST /api/backups` 502 text "malformed operation record (no valid op_id or kind)" | API error text | `op_id` |
-| 6b | `release_dispatch_exec.go:574-581` — error "dispatch: agent apply returned no op_id". It reaches the dispatch 502 detail, the `release.dispatch.outcome` audit detail and the `release_dispatch_attention` webhook detail | Error text (API, audit, webhook) | `op_id` |
 | 7 | `backups_api.go:335` — `backup.trigger` | Audit detail | `op_id=` |
 | 8 | `release_dispatch_service.go:423` — `release.dispatch` | Audit detail | `op_id=` |
 | 9 | `release_dispatch_service.go:438` — `release.dispatch.outcome` | Audit detail | `op_id=` |
 | 9a | `release_dispatch_service.go:450-453` — `release_dispatch_attention` alert (`AlertPayload.Detail`, delivered to alert/webhook subscribers) | Alert/webhook detail | `op=` |
 | 10 | `pac_lifecycle_api.go:650,1092,1256` — `pac.*` audit details | Audit detail — recorded exception (see constraints) | `operationId=` |
 | 11 | `static/index.html:16091-16166` — Backup Now polling | GUI (JS only) | `opId` |
-| 12 | `static/index.html:17679,17741,17783` — release dispatch panel row and toasts | GUI (visible) | `op_id` row label, "op …" toasts |
+| 12 | `static/index.html:17679,17689,17741,17783` — release dispatch panel reads the response key | GUI (client code) | `op_id` |
 | 13 | `frontend/src/api/types.gen.ts:5459,5472` | Generated client types | `opId`, `op_id` |
-| 13a | `api/openapi/openapi.yaml:6780` (`POST /api/backups` description: "Returns an op id") and `:6831` (`GET /api/backups/operations/{id}` description: "The op record's params"), propagated to `frontend/src/api/types.gen.ts:329,349` | API documentation prose | "op id", "op record" |
 | 14 | `decryption_redaction.go:135,379,418` — key rotation request/receipts (`openapi.yaml:1014,1896`) | API request/response — already canonical | `operation_id` |
 | 15 | `cdr_ui.go:537`, `cdr_enroll_receipts.go:87,128,558,595`, `cdr_lineage.go:75` — CDR enrollment/receipts (`openapi.yaml:2186-2257`) | API request/response — already canonical | `operationId` |
 | 16 | `pac_lifecycle_api.go` responses (`:185,293,535,570,612,651,847,870,910,920,927,1169,1248`; `openapi.yaml:552-561`) | API request/response — already canonical | `operationId` |
 | 17 | Maintenance agent (`cmd/culvert-maint`): its operation record `op_id` (`internal/ops/ops.go:52`), error and start bodies (`internal/server/handlers_d16b.go:363,420`), its own audit events (`internal/audit/audit.go:39`), its on-disk journal (`internal/journal/journal.go:72`) and its op-log note `op_id=` (`internal/ops/orchestrator.go:223`) | Agent API, agent audit, agent storage — recorded exception (see constraints) | `op_id` |
-| 18 | Value-only prose mentions, with no key name: log lines (`cdr_health.go:261,265,270,283,388,408`, `cdr_lineage.go:507`, `cdr_ui.go:464,487,610,621`, `cdr_enroll_receipts.go:446,611`, `pac_lifecycle_api.go:887,976,996,1019,1037,1162-1187`); error text (`cdr_ui.go:452,474,572,580`, `cdr_enroll_receipts.go:635,639`); audit detail prose and objects (`cdr_health.go:412`, `cdr_ui.go:571`, `decryption_redaction.go:402`, `cdr_enroll_receipts.go:620,737,759`) | Logs, error text, audit prose — no key spelling; no change needed | "operation &lt;id&gt;" |
 
 Internal, not visible: `backups_api.go:328` and `release_dispatch_exec.go:575,581` read the maintenance
 agent's own `op_id` wire field. The untagged `OpID` fields of `DispatchReport`
@@ -116,9 +118,24 @@ agent's own `op_id` wire field. The untagged `OpID` fields of `DispatchReport`
 `InterruptedOp` `OpID` (`cmd/culvert-maint/internal/ops/ops.go:189,617`) are in memory only.
 `decryption_redaction.go:42` stores the receipt as `op_id` on disk and renders it as `operation_id`.
 Also internal: the Go error strings at `release_dispatch_exec.go:338` and
-`release_dispatch_service.go:317`, the route note at `ui_routes_meta.go:810`, and code comments that
-say "op id"/"op record" (`backups_api.go:365,434,447`, `release_dispatch_exec.go:131`,
-`static/index.html:16140`, and `cmd/culvert-maint` comments).
+`release_dispatch_service.go:317` and the route note at `ui_routes_meta.go:810`.
+
+**(b) Prose.** Copy rule: user-facing prose says "operation ID", never a bare "op", "op id",
+"op_id" or "op record". This is not enumerated. The implementing PR must run this search against its
+base and resolve every user-facing hit:
+
+```sh
+git grep -n -i -E 'operation id|\bop\b|op id|op record' -- '*.go' ':!*_test.go' api/openapi/openapi.yaml frontend/src
+```
+
+Examples found at `fbf6a37`, **not exhaustive**: the resume 400 text "resume needs an op_id"
+(`release_api.go:823`); "no valid op_id or kind" (`backups_api.go:330-332`); "agent apply returned no
+op_id" (`release_dispatch_exec.go:574-581`), which reaches the dispatch 502 detail, the outcome audit
+and the attention webhook; the OpenAPI descriptions "Returns an op id" and "The op record"
+(`openapi.yaml:6780,6831`, copied into `types.gen.ts:329,349`); the release panel's `op_id` row label
+and "op …" toasts (`static/index.html:17679,17741,17783`); and lowercase or bare forms such as
+`backups_api.go:396`, `cdr_ui.go:441-442`, `openapi.yaml:1898` and `release_api.go:860`. Value-only
+mentions in logs and audit prose ("operation <id>") already follow the rule.
 
 **Constraints the implementing PR must satisfy.** The migration design belongs to that PR.
 
@@ -132,6 +149,8 @@ say "op id"/"op record" (`backups_api.go:365,434,447`, `release_dispatch_exec.go
 - The pre-existing dispatch/resume drift (spec documents `200`, handlers return `202`;
   `openapi.yaml:10087-10110,10965-10993` vs `release_api.go:704-714,841-848`) is a separate
   versioning decision, not part of this change.
+- All user-facing prose hits of the (b) search are converted or explicitly exempted in the
+  implementing PR.
 - Contract MINOR bump (`info.version` and `x-culvert-api-contract-version`) with regenerated contract
   artifacts.
 - Recorded exceptions, left as they are: the `pac.*` `operationId=` audit key (row 10) and the
