@@ -42,7 +42,7 @@ func (p *testProxyIdentityProvider) DisplayName() string { return "test-idp" }
 func setupProxyTest(t *testing.T) {
 	t.Helper()
 	bl = blocklist.New()
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	rl = newRateLimiter()
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 	pluginReplace(nil)
