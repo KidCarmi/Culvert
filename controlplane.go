@@ -162,21 +162,46 @@ var (
 
 // auditClusterPushDropsTotal is the CHAOS-61 counter an admin should actually
 // look at: this node's own drops (non-zero only when this process is itself a
-// Data Plane) plus the drops most recently reported by every Data Plane node
-// heartbeating to it (non-zero only on a Control Plane). A standalone or DP
-// node has no entries in nodeMetrics and this degrades to auditPendingDrops()
-// alone; a Control Plane node's own auditPendingDrops() is always zero, so
-// this degrades to the fleet sum. Either way, GET /api/stats reports the
-// number that actually answers "is our centralized audit trail complete?"
+// Data Plane) plus the drops most recently reported by every OTHER Data Plane
+// node heartbeating to it (non-zero only on a Control Plane). A standalone or
+// DP node has no entries in nodeMetrics and this degrades to
+// auditPendingDrops() alone; a Control Plane node's own auditPendingDrops() is
+// always zero, so this degrades to the fleet sum. Either way, GET /api/stats
+// reports the number that answers "is our centralized audit trail complete?"
 // from whichever node the admin happens to be looking at.
+//
+// A process that runs both roles also heartbeats to itself, so its own
+// nodeMetrics entry carries the same process-lifetime counter as
+// auditPendingDrops(); that entry is skipped (the local read is fresher) so
+// the drops are not counted twice.
 func auditClusterPushDropsTotal() int64 {
 	total := auditPendingDrops()
+	self := clusterRole.nodeID
 	nodeMetricsMu.RLock()
-	for _, m := range nodeMetrics {
+	for id, m := range nodeMetrics {
+		if self != "" && id == self {
+			continue
+		}
 		total += m.AuditClusterPushDrops
 	}
 	nodeMetricsMu.RUnlock()
 	return total
+}
+
+// auditClusterPushUnreportingNodes counts enrolled nodes the Control Plane has
+// marked disconnected (heartbeat timeout). Such a node cannot deliver its drop
+// count — and losing the CP link is exactly when its push queue drops — so
+// its last report is stale and a zero total is not evidence the centralized
+// trail is complete. Reported beside the total so the dashboard can say
+// "unknown" instead of "complete". Zero on a standalone or DP-only node.
+func auditClusterPushUnreportingNodes() int {
+	n := 0
+	for _, node := range globalClusterStore.ListNodes() {
+		if node.Status == "disconnected" {
+			n++
+		}
+	}
+	return n
 }
 
 // ─── Distributed rate limit aggregation ──────────────────────────────────────

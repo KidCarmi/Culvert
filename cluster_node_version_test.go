@@ -232,3 +232,59 @@ func TestAuditClusterPushDropsTotal_AggregatesFleetWide(t *testing.T) {
 		t.Fatalf("auditClusterPushDropsTotal() = %d, want 7 (this node's own 0 + dp-1's 3 + dp-2's 4)", got)
 	}
 }
+
+// TestAuditClusterPushDropsTotal_SkipsOwnHeartbeat pins the combined CP/DP
+// case: a process running both roles heartbeats to itself, so its own
+// nodeMetrics entry repeats auditPendingDrops(); counting both would inflate
+// the compliance-loss total.
+func TestAuditClusterPushDropsTotal_SkipsOwnHeartbeat(t *testing.T) {
+	restore := audit.ResetPendingForTest()
+	defer restore()
+	for i := 0; i < audit.MaxPendingForTest()+2; i++ {
+		audit.QueueForClusterForTest(audit.Entry{Action: "policy.add"})
+	}
+	local := auditPendingDrops()
+	if local < 2 {
+		t.Fatalf("precondition: local drops = %d, want >= 2", local)
+	}
+
+	origID := clusterRole.nodeID
+	clusterRole.nodeID = "combined-node"
+	t.Cleanup(func() { clusterRole.nodeID = origID })
+
+	nodeMetricsMu.Lock()
+	origMetrics := nodeMetrics
+	nodeMetrics = map[string]MetricsReport{
+		"combined-node": {NodeID: "combined-node", AuditClusterPushDrops: local},
+		"dp-2":          {NodeID: "dp-2", AuditClusterPushDrops: 4},
+	}
+	nodeMetricsMu.Unlock()
+	t.Cleanup(func() {
+		nodeMetricsMu.Lock()
+		nodeMetrics = origMetrics
+		nodeMetricsMu.Unlock()
+	})
+
+	if got, want := auditClusterPushDropsTotal(), local+4; got != want {
+		t.Fatalf("auditClusterPushDropsTotal() = %d, want %d (local %d once + dp-2's 4)", got, want, local)
+	}
+}
+
+// TestAuditClusterPushUnreportingNodes pins that a disconnected Data Plane is
+// counted as unreporting: it cannot deliver drops while its CP link is down,
+// so a zero total must not read as a complete centralized trail.
+func TestAuditClusterPushUnreportingNodes(t *testing.T) {
+	origStore := globalClusterStore
+	globalClusterStore = newTestClusterStore(t)
+	t.Cleanup(func() { globalClusterStore = origStore })
+
+	if got := auditClusterPushUnreportingNodes(); got != 0 {
+		t.Fatalf("empty cluster: unreporting = %d, want 0", got)
+	}
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-up", Status: "connected"})
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-down", Status: "disconnected"})
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-revoked", Status: "revoked"})
+	if got := auditClusterPushUnreportingNodes(); got != 1 {
+		t.Fatalf("unreporting = %d, want 1 (only the disconnected node)", got)
+	}
+}

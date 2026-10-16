@@ -159,6 +159,11 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// whole fleet rather than reading zero forever on the node an admin
 		// actually looks at (a DP's own /api/stats still reports its own count).
 		"auditClusterPushDrops": auditClusterPushDropsTotal(),
+		// Enrolled Data Plane nodes currently disconnected from this Control
+		// Plane: their drop counts cannot arrive until they reconnect, so the
+		// dashboard reports centralized-audit completeness as unknown rather
+		// than reading a stale zero as complete.
+		"auditClusterPushUnreportingNodes": auditClusterPushUnreportingNodes(),
 		// SEC-RBAC-ROLE-1. Non-zero means ui_users.json carries a role this
 		// build does not enroll; the account was clamped to viewer at load, so
 		// its effective authority is deliberately lower than the file states.

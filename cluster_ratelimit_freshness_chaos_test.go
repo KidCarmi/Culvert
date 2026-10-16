@@ -292,6 +292,9 @@ func TestAPIStats_SurfacesAuditClusterPushDrops(t *testing.T) {
 	if !ok {
 		t.Fatalf("auditClusterPushDrops = %#v; want a number", raw)
 	}
+	if _, ok := body["auditClusterPushUnreportingNodes"]; !ok {
+		t.Error("/api/stats has no auditClusterPushUnreportingNodes field — a disconnected DP's stale zero would read as a complete trail")
+	}
 	if int64(n) < 7 {
 		t.Errorf("auditClusterPushDrops = %v; want >= 7 (the drops we injected)", n)
 	}
