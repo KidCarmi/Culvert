@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "upstream_revision": "9dbdbcfd3f809d6f2d30b0e047690f6b51fd190f",
+  "upstream_revision": "9420ace186ce6b871a41a3cc9d7ee4f4a22ecf8f",
   "normalization": "LF bytes; controller freeze records runtime raw hashes",
   "files": {
     "test/e2e/appliance/lab/appliance-lab.sh": {

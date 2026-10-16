@@ -16,7 +16,7 @@ import subprocess
 import time
 
 SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
-SOURCES = (SOURCE, '7c7b29ee3be40af6a0809c73ad04d4337303263d', '91e05872dfe5f96c94ec725b8b2dc2b1002116ab', '72c827b7f59f4e43ff2a813241be9029f58f23a9', 'bad788e54ffef2a2f8490ba27ebfe027a2a6eb11', '9e34452677d77f574f5c3c08ba23ea897d8e17cb', 'a80be4b61ff7f2f069cf81ede1eebe6945d65306')
+SOURCES = (SOURCE, '7c7b29ee3be40af6a0809c73ad04d4337303263d', '91e05872dfe5f96c94ec725b8b2dc2b1002116ab', '72c827b7f59f4e43ff2a813241be9029f58f23a9', 'bad788e54ffef2a2f8490ba27ebfe027a2a6eb11', '9e34452677d77f574f5c3c08ba23ea897d8e17cb', 'a80be4b61ff7f2f069cf81ede1eebe6945d65306', '6248daf72a5312e75062e2c2823438911604af7f')
 
 
 def command(argv, timeout=8):
@@ -70,6 +70,14 @@ def main():
                                       'culvert-kernel-log-vt.service', '-p', 'Id', '-p', 'Result', '-p', 'ActiveState',
                                       '-p', 'ConditionResult', '-p', 'ExecMainStatus']),
              'kernel_log_tail': command(['journalctl', '-b', '-k', '-n', '300', '--no-pager', '-o', 'short-monotonic'])}
+    if args.source == '6248daf72a5312e75062e2c2823438911604af7f':
+        value['status_unit'] = command(['systemctl','show','culvert-splash-status.service','-p','LoadState','-p','ActiveState','-p','Result','-p','ExecMainStatus','-p','TimeoutStopUSec'])
+        value['status_payloads'] = {}
+        actual = hashlib.sha256(Path('/opt/culvert-appliance/bin/culvert-splash-status').read_bytes()).hexdigest()
+        value['status_payloads']['culvert-splash-status'] = {'sha256':actual,'matches_source':actual=='1714d9e8cf8bd5c343596a07559b1ce88dfccd58b3a28b4b7b5c5f7d148b3e5b'}
+        actual = hashlib.sha256(Path('/etc/systemd/system/culvert-splash-status.service').read_bytes()).hexdigest()
+        value['status_payloads']['culvert-splash-status.service'] = {'sha256':actual,'matches_source':actual=='62c62ae1bb775269b4fe73eb2f935aecacadbe32e0a306550e064aa11649893e'}
+        value['status_unit_enabled'] = command(['systemctl','is-enabled','culvert-splash-status.service'])
     cfg = Path('/etc/default/grub.d/99-culvert-splash.cfg')
     value['splash_cfg_sha256'] = hashlib.sha256(cfg.read_bytes()).hexdigest()
     value['efi_ubuntu_directory_exists'] = Path('/boot/efi/EFI/ubuntu').is_dir()

@@ -15,6 +15,13 @@ lab_before_reboot() {
   local suffix=''
   [[ ${ESXI_CONTINUE_UNDISPATCHED:-0} != 1 ]] || suffix='-continuation'
   esxi_p1_stage network-before > "$EV/p1-${ESXI_P1_CAMPAIGN:-initial}-network-before-controller$suffix.txt" 2>&1
+  if [[ ${ESXI_ENGINE_SOURCE:-} == 6248daf72a5312e75062e2c2823438911604af7f ]]; then
+    # Observe the actual authenticated ancestor chain. Do not replace the
+    # shared lifecycle's nested sudo/bash maintenance command with execv.
+    ( set -o noclobber
+      python3 "$ADAPTER_HERE/lifecycle-shutdown.py" before | gpriv --timeout 60 > "$SEC/lifecycle-shutdown-before.json"
+    )
+  fi
   python3 "$ADAPTER_HERE/timing-diagnostic.py" observe --scope "$ESXI_SCOPE" \
     --label maintenance --host "$LAB_HOST" --seconds 1800 --interval 5 \
     > "$EV/timing-observer-controller.txt" 2>&1 &
@@ -39,6 +46,19 @@ assert any(r['event']=='all_services_returned_after_failure' for r in rows)
 PY
   then check ESXi independent-reboot-timing pass 'TCP, proxy health and ready operator status returned after independently observed failures; timestamped samples retained.'
   else check ESXi independent-reboot-timing fail 'Independent readiness timing incomplete; preserve all observations.'; fi
+  if [[ ${ESXI_ENGINE_SOURCE:-} == 6248daf72a5312e75062e2c2823438911604af7f ]]; then
+    if ! ( set -o noclobber
+      python3 "$ADAPTER_HERE/lifecycle-shutdown.py" after --before "$SEC/lifecycle-shutdown-before.json" \
+        | gpriv --timeout 60 > "$SEC/lifecycle-shutdown-after.json"
+    ) || ! python3 "$ADAPTER_HERE/lifecycle-shutdown.py" verify \
+      --before "$SEC/lifecycle-shutdown-before.json" --after "$SEC/lifecycle-shutdown-after.json" \
+      --timing "$EV/timing-maintenance.jsonl" --output "$EV/lifecycle-shutdown-verdict.json"; then
+      check ESXi original-console-shutdown fail 'Original local session teardown or120s observed recovery unproven; no retry.'
+      STOP=1
+      return 90
+    fi
+    check ESXi original-console-shutdown pass 'Original PAM/console session stopped within10s without timeout/SIGKILL; observed recovery within120s. Separate traffic readiness gate still required.'
+  fi
   if [[ $STOP == 0 ]]; then
     esxi_p1_stage network-after > "$EV/p1-${ESXI_P1_CAMPAIGN:-initial}-network-after-controller.txt" 2>&1
   fi

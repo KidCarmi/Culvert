@@ -211,7 +211,7 @@ PY
   before_denied=$(through_proxy http://example.org/)
   esxi_restore_record_traffic before "$before_allowed" "$before_denied"
   esxi_restore_record_allowlist before
-  if [[ ${ESXI_ENGINE_SOURCE:-} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 ]] && ! esxi_restore_assert_allowlist before; then
+  if [[ ${ESXI_ENGINE_SOURCE:-} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 || ${ESXI_ENGINE_SOURCE:-} == 6248daf72a5312e75062e2c2823438911604af7f ]] && ! esxi_restore_assert_allowlist before; then
     check "$step" restore-allowlist-baseline fail 'source custom allowlist fixture unproven; private snapshot retained'
     return 1
   fi
@@ -293,7 +293,7 @@ assert any(r.get("name")=="lab-allow-example" and r.get("enabled") is True for r
   before_denied=$(through_proxy http://example.org/)
   esxi_restore_record_traffic after "$before_allowed" "$before_denied"
   esxi_restore_record_allowlist after
-  if [[ ${ESXI_ENGINE_SOURCE:-} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 ]] && ! esxi_restore_assert_allowlist after; then
+  if [[ ${ESXI_ENGINE_SOURCE:-} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 || ${ESXI_ENGINE_SOURCE:-} == 6248daf72a5312e75062e2c2823438911604af7f ]] && ! esxi_restore_assert_allowlist after; then
     check "$step" restore-allowlist fail 'restored domain allowlist differs; exact private before/after retained; no repair'
     return 1
   fi

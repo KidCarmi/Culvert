@@ -70,6 +70,9 @@ class CandidateReconciliationTests(unittest.TestCase):
     def test_9e344_exact_profile_helpers_and_engine_controls(self):
         self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').E9E344)
 
+    def test_6248_exact_profile_helpers_and_engine_controls(self):
+        self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').E6248)
+
     def test_a80be_exact_profile_helpers_and_engine_controls(self):
         self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').EA80BE)
 
@@ -100,7 +103,7 @@ class CandidateReconciliationTests(unittest.TestCase):
         self.assertNotEqual(load('import-observer-continuation').SOURCE,ids.E91)
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -114,7 +117,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)
@@ -123,7 +126,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], '9dbdbcfd3f809d6f2d30b0e047690f6b51fd190f')
+        self.assertEqual(record['upstream_revision'], '9420ace186ce6b871a41a3cc9d7ee4f4a22ecf8f')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')
