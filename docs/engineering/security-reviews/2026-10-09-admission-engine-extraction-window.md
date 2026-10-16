@@ -2,8 +2,9 @@
 
 **Date:** 2026-10-09
 **Reviewer role:** Security Regression Engineer (scheduled run)
-**Scope reviewed:** `origin/main` at `3fcc07e`, review window `1f7f42c..3fcc07e`
-(the package-isolation epic). Principally:
+**Window:** `origin/main` at `3fcc07e`, commits `1f7f42c..3fcc07e` (the
+package-isolation epic). Not every commit in the window was reviewed; see
+"Reviewed" and "Not reviewed" below the table. Commits in the window:
 
 | Commit | Change |
 |---|---|
@@ -11,15 +12,27 @@
 | `fb2cf33` | ADR-0038 — move distributed admission state from package globals to per-limiter fields |
 | `228be80` | split `applySnapshotAdmission` out of `applySnapshotTrafficExceptBlocklist` |
 | `4df4397` | ADR-0037 — extract ordered shutdown execution into `internal/shutdown` |
+| `5d7df004` | ADR namespace for the shutdown ownership decision |
 | `ddd031c` | refresh vulnerable frontend transitive dependency locks |
+| `e681ad9` | CI: surface failing checks in annotations (`frontend-verify.yml`, `pr-deep-gate.yml`) |
+| `6bd4621` | package-isolation validation, inventory and timing records (`roadmap/`) |
 | `6a83a2b`, `dac3dde` | stabilise relocated timing gates |
 
-**Reviewed:** the admission extraction (`0c7c950`, `fb2cf33`, `228be80`) and the
-relocated admission timing gates (`6a83a2b`, `dac3dde`).
+**Reviewed:** the Go admission code in `0c7c950`, `fb2cf33` and `228be80`, and the
+relocated admission timing gates (`6a83a2b`, `dac3dde`). Nothing else.
 
-**Not reviewed: ADR-0037 shutdown extraction (`4df4397`).** `./internal/shutdown`
-and the `TestChaos56` gates were not run, and this review makes no claim about
-that commit. `ddd031c` (frontend dependency locks) was not reviewed either.
+**Not reviewed, and this review makes no claim about any of them:**
+
+* **ADR-0037 shutdown extraction (`4df4397`, `5d7df004`).** `./internal/shutdown`
+  and the `TestChaos56` gates were not run.
+* **Dependency locks (`ddd031c`).** The lockfile security assessment needs its
+  own review. An earlier revision of this report gave it a verdict in §2.9; that
+  verdict is withdrawn.
+* **CI workflow and script edits:** `e681ad9` (`frontend-verify.yml`,
+  `pr-deep-gate.yml`), and the `.github/` part of `0c7c950`
+  (`coverage-floor.sh`, `codeql.yml`, `pr-deep-gate.yml`, `pr-fast-gate.yml`,
+  `proxy-weekly-stress.yml`, `qa-gate.yml`).
+* **Roadmap records (`6bd4621`).**
 
 The branch `claude/epic-bardeen-4tfkby` is identical to `origin/main`
 (0 ahead / 0 behind), so there was no pending diff; the reviewable surface is
@@ -29,9 +42,10 @@ what recently landed.
 
 ## 1. Executive summary
 
-**No security regressions were found in the admission extraction** (the
-commits listed as reviewed above; the ADR-0037 shutdown extraction is out of
-scope and was not reviewed).
+**No security regressions were found in the admission extraction** (the Go
+admission code in the commits listed as reviewed above). The shutdown
+extraction, the dependency locks, the CI workflow edits and the roadmap records
+are out of scope and were not reviewed.
 
 The window is dominated by a refactor of the two gates that run on *every*
 proxied request on *every* protocol — the IP filter and the per-IP rate
@@ -193,12 +207,11 @@ moved intact.
 * `TestAdmissionBoundary_NoApplicationDependenciesOrSharedState` and
   `TestAdmissionBoundary_RejectsRegressions` wall the boundary.
 
-### 2.9 Dependency locks moved forward
+### 2.9 Dependency locks — not reviewed
 
-`ddd031c` upgrades only: `brace-expansion` 5.0.9→5.0.12 and 2.1.4→2.1.7 (ReDoS
-class), `undici` 6.28.0→6.28.1 and 8.10.0→8.10.2. No downgrades, no `resolved`
-host changes. These are frontend build-chain dependencies — `frontend/dist` is
-what is embedded — so runtime exposure is nil and this is build hygiene.
+`ddd031c` is out of scope (see "Not reviewed" above). An earlier revision gave
+it a verdict here; that verdict is withdrawn. The lockfile security assessment
+needs its own review.
 
 ### 2.10 Suites executed
 
@@ -440,7 +453,8 @@ this docs-only PR's race gate red.
 |---|---|
 | **RISK-030** — unsynchronised `ipf` publication can transiently disable the IP filter (§3) | OPEN, **confirmed by `-race` on amd64** (§4 *Verification*); fix required, gates specified in §4 |
 | `applySnapshotAdmission` discards DP-local admin-settings IP entries on every CP sync | **By design** — `semAlwaysReplace`, CP is authoritative. Verified consistent with `config_surfaces.go` and its parity tests. Not a finding. |
-| RISK-021 — fresh/unconfigured proxy runs default-allow + no-auth | Unchanged by this window; it is the posture that escalates RISK-030's impact |
+| RISK-021 — fresh/unconfigured proxy runs default-allow + no-auth | Unchanged by the reviewed commits; it is the posture that escalates RISK-030's impact |
+| Not reviewed: `4df4397`/`5d7df004` (shutdown), `ddd031c` (dependency locks), `e681ad9` and the `.github/` part of `0c7c950` (CI), `6bd4621` (records) | No claim made; each needs its own review |
 | Timing-ratio gates relocated into `internal/admission` (`6a83a2b`, `dac3dde`) | Re-stabilised by pairing samples under load. Timing gates remain flake-prone by nature; the repo's own preference for *structural* gates applies |
 
 ---
