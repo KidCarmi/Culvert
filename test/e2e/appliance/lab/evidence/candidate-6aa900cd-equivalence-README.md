@@ -52,3 +52,15 @@ external content — GeoLite, apt — at build time). "Only the embedded commit
 stamp changes" is NOT proof a future rebuild is byte-identical. The qualified
 OVA is evidence for its own sha256 only; a release must ship those exact bytes
 or requalify the rebuild.
+
+## Trigger note (lab mechanics)
+
+The guest-boot build runs only when the push's HEAD COMMIT MESSAGE contains
+no bracketed job tag — the workflow's `contains()` matches a tag anywhere in
+the message, body included. A first attempt put the words cache-bypass and
+fp2-isolated (in brackets) in the body; that matched the fp2-isolated job's
+gate and disabled guest-boot, so run 38878259116 re-ran the 1.4.6 isolated
+control instead of building the candidate. The build is re-triggered with a
+bracket-free message. The Phase 2 scanner legs are launched by their own
+single-tag pushes once this build records the new OVA artifact id + baked
+sidecar digest.
