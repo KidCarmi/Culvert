@@ -9,6 +9,87 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The **rendered audit `Actor` is now bounded** (`boundAuditActor`, applied to
+  every `AuditEntry` at the single audit write chokepoint `addAuditEntry` behind
+  `auditAdd`, `store.go`).
+  `truncateForAudit` was being applied by call sites to the audit **Object**,
+  which made each one look bounded, while `auditEvent` derives the **Actor**
+  independently and rebuilt `name + "@" + ip` from the session with no bound —
+  so a CONFIGURED account name longer than the 64-byte cap (which
+  `-user`/`auth.user` and `--reset-password` can persist, and which is
+  deliberately never refused for its length) was retained full-length in the
+  audit ring. Measured: a 300-byte name produced a 314-byte Actor. Low severity
+  (the name is configured, not attacker-chosen: a retention bound, not an
+  unauthenticated amplifier). Found by Codex review of the
+  `auth.password_change.fail` entry added in this same window, whose first
+  version claimed in its comment that the actor was "still truncated" and whose
+  gate was named `AuditActorIsBounded` while asserting only on `Object`. The
+  bound (`boundAuditIdentity`) keeps a 64-byte prefix plus the original length
+  AND a short SHA-256 digest of the full name, so two distinct oversize accounts
+  stay distinguishable in the trail. **`auditActor` itself stays the full,
+  unbounded principal**: a first version of this fix bounded it, and Codex
+  review showed that is not display-only — the MCP publication and approval
+  handlers cast it to `approval.PrincipalID`, so two distinct admins sharing the
+  bounded prefix and length compared equal and the second one's legitimate
+  four-eyes approval was refused as self-approval. Non-audit consumers (MCP
+  four-eyes and tool-trust, policy learning, CDR receipts, release dispatch,
+  support recipients) therefore keep main's behaviour, and so does the PAC
+  intent's `AuditActor`, which is bounded when its entry is rendered. A second
+  Codex round found that a bound living only in `auditEventDiffID` was bypassed
+  by every producer that builds an `AuditEntry` itself — the release
+  `DispatchService` handed the full `auditActor` straight to `auditAdd` — so the
+  bound moved to the one write chokepoint every producer reaches, the two direct
+  `audit.Add` callers were routed through it, and `TestAuditActorBoundWall`
+  fails if any non-test file in main or `internal/` reaches `audit.Add` another
+  way or `auditAdd` stops pointing at the chokepoint. Gates: `auth_change_password_reauth_audit_test.go` asserts both rendered
+  fields and that `auditActor` is unbounded, with a control requiring an
+  ordinary name to pass through verbatim; `audit_actor_principal_test.go` drives
+  the four-eyes publication flow with two colliding names (verified failing
+  against the bound-at-`auditActor` tree) plus a self-approval control. **The
+  rules: a gate must assert the property it is named for, and a length bound
+  belongs to the rendering, never to a value something compares for identity.**
+
+- The **cluster CA private key** backup completed SEC-SECRETWRITE-1. That sweep
+  was scoped to the four key writers introduced in its own review window, so
+  `backupCAFiles` (`enrollment.go`) — which predates it — still wrote
+  `cluster-ca.key.bak` and `cluster-ca.crt.bak` with `os.WriteFile` on a fully
+  predictable path, with both halves of the same defect reachable: the open
+  follows a symlink planted at the path, and `perm` applies only on *creation*,
+  so a `0666` file pre-created at `cluster-ca.key.bak` receives the key and
+  stays world-readable. The asset is larger than any of the four already fixed —
+  the cluster CA signs every Data Plane node certificate, so disclosure lets an
+  attacker mint a node cert, impersonate a DP to the Control Plane and receive
+  the full `ConfigSnapshot`, which carries `SessionHMAC` and the IdP secrets.
+  Both writes now use `fileutil.AtomicWrite` (random `O_EXCL` temp beside the
+  target, chmod + fsync, rename over it). The POSTURE is unchanged: the
+  plaintext branch is still plaintext (the recorded CA-3 trade) and the
+  encrypted branch already routed through `secret.SealToFile` → `AtomicWrite`;
+  only the primitive changed. Gates: `enrollment_ca_backup_secretwrite_test.go`
+  — 3 defect gates verified failing against the reintroduced `os.WriteFile`
+  shape, plus 4 controls verified failing against a `backupCAFiles` that writes
+  nothing, because deleting the dual-CA overlap recovery copy is the cheapest
+  way to pass every defect gate.
+
+- A **failed re-authentication on the admin plane is now audited**
+  (SEC-REAUTH-AUDIT-1). `POST /api/auth/change-password` re-verifies the
+  caller's current password, and by SEC-BASIC-1's own analysis it is the only
+  credential check in the admin API that consults no lockout — a deliberate
+  trade, since charging `loginLimiter` there would let a session holder lock
+  themselves out of the login flow. But it audited only on SUCCESS, so the one
+  unlocked password oracle was also the only silent one: a caller holding a
+  stolen or hijacked session could guess the account's password at the mutating
+  `apiLimiter`'s rate, indefinitely, with no trace in the compliance record —
+  and the password is durable persistence that outlives the session being
+  revoked (CWE-778 / OWASP A09:2021). The rejection now emits
+  `auth.password_change.fail` with a bounded actor and object, deliberately
+  NOT reusing `auth.password_change.refused` (which `refuseRosterChange` already
+  uses for the persistence refusal — an operator must be able to tell "wrong
+  password" from "the disk failed"). The lockout trade-off is unchanged; this
+  adds the missing EVIDENCE and alters no authentication decision. Gates:
+  `auth_change_password_reauth_audit_test.go` — 4 defect gates verified failing
+  against the pre-fix branch, plus 3 controls, two of them verified failing
+  against the obvious wrong fix of auditing unconditionally on entry.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
