@@ -196,6 +196,9 @@ func buildOperatorContract() OperatorContract {
 	// LDAP profile hygiene diagnostics (ADR-0027). Report-only; contribute
 	// nothing when no LDAP profiles exist.
 	checks = append(checks, authLDAPProfileDiagnostics()...)
+	// Dangling file-profile references (fail-closed blocks). Report-only; contributes
+	// nothing when every reference resolves.
+	checks = append(checks, fileProfileUnresolvedDiagnostics(policyStore.List())...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
 	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.
 	checks = append(checks, authSSORequiredDiagnostics(policyStore.List())...)
