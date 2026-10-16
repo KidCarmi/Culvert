@@ -8576,7 +8576,9 @@ async function fetchStats() {
         document.getElementById('roster-role-clamp-text').textContent =
           fmt(rc) + ' account' + (rc === 1 ? ' is' : 's are') +
           ' held at the viewer role: the saved user file names a role this version does not recognise ' +
-          '(for example after restoring a backup from a newer version). Edit the account and choose a role to restore its access.';
+          '(for example after restoring a backup from a newer version). Edit the account and choose a role to restore its access. ' +
+          'If no administrator can still sign in, recover from the host shell with --reset-password username:newpassword, ' +
+          'which restores the admin role (and removes that account\'s two-factor enrolment).';
         rcHint.style.display = '';
       } else {
         rcHint.style.display = 'none';

@@ -19,6 +19,10 @@ func TestAdminUsersPanel_SurfacesRosterRoleClamp(t *testing.T) {
 		`id="roster-role-clamp-hint"`,
 		`id="roster-role-clamp-text"`,
 		`s.uiRosterRoleClamped`,
+		// A clamped sole administrator cannot edit roles from this panel;
+		// the hint must name the host-shell break-glass (main.go
+		// runResetPasswordCommand sets RoleAdmin).
+		`--reset-password username:newpassword`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("static/index.html missing %q", want)
