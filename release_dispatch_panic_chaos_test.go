@@ -391,9 +391,11 @@ func TestCHAOS75_AuditPanicAfterApply_StillRecordsTheOp(t *testing.T) {
 	}
 }
 
-// On the normal path the durable release.dispatch audit (op_id + key) must be
-// written BEFORE the observer that releases the API's 202 records the op: a CP
-// stop right after the 202 must still leave the resume handle on disk. Checked
+// On the normal path the release.dispatch audit (op_id + key) must be handed to
+// the audit sink BEFORE the observer that releases the API's 202 records the op,
+// so a CP stop right after the 202 leaves the resume handle wherever the audit
+// sink persists it (an ordering guarantee; the sink's own durability is
+// best-effort and depends on the audit log file being configured). Checked
 // deterministically from inside the audit sink — at that moment the observer
 // must not yet have written the status slot.
 func TestCHAOS75_DispatchAuditPrecedesThe202(t *testing.T) {

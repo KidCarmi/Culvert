@@ -270,10 +270,13 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		rc := resumeContextFor(ep.Key, plan, opID)
 		// Order is load-bearing (CHAOS-75 review, two findings that pull in
 		// opposite directions):
-		//   1. The audit is ATTEMPTED FIRST, so on the normal path the durable
-		//      release.dispatch record (op_id + key) exists before any observer
-		//      can release the API's 202 — a CP stop right after the 202 still
-		//      leaves the resume handle on disk.
+		//   1. The audit is ATTEMPTED FIRST, so on the normal path the
+		//      release.dispatch record (op_id + key) has been handed to the audit
+		//      sink before any observer can release the API's 202. That is an
+		//      ORDERING guarantee, not a durability one: the sink is in-memory
+		//      plus best-effort file persistence and reports no write error, so
+		//      the record survives a CP restart only when the audit log file is
+		//      configured and the write succeeded.
 		//   2. The observers ALWAYS run, even when the audit write panics, so a
 		//      fault in the audit sink cannot leave a live agent op with no status
 		//      record and a reply that claims no op started. The audit panic is
