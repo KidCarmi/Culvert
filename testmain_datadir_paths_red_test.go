@@ -17,11 +17,13 @@ package main
 // -test.shuffle 1792171671618181963).
 //
 // RED without the rebind in TestMain (the retry queue, registry settings and
-// both CDR paths stay at /data). The assertions are order-independent:
+// both CDR paths stay at /data), and RED without initConfigVersioning there
+// (the rebound version store has no directory). The assertions are order-independent:
 // TestDataDirOverride_RebindsHardcodedDefaults restores the pre-test values,
 // so whatever ran first, they read what TestMain bound.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,4 +49,20 @@ func TestTestMain_BindsPersistedStateDefaultsToTestDataDir(t *testing.T) {
 				name, p, dataDir)
 		}
 	}
+
+	// Pointed under the root is not enough: configver.New does not create its
+	// directory, only Init does, so an un-Init'd store failed every unisolated
+	// saveConfigVersion with ENOENT. Production startup Inits it
+	// (loadPersistentAdminState); TestMain must too. Probe writability with a
+	// non-version file name, so List() and the sequence never see it.
+	dir := configVersions.Dir()
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("config-version store directory %q is not usable (stat: %v): TestMain did not Init the rebound store", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".writable-probe-*")
+	if err != nil {
+		t.Fatalf("config-version store directory %q is not writable: %v", dir, err)
+	}
+	_ = f.Close()
+	_ = os.Remove(f.Name())
 }
