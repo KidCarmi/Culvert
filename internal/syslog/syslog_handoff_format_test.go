@@ -599,6 +599,17 @@ func TestSend_DisplacedWriterWithAFullQueueFollowsItsSuccessor(t *testing.T) {
 // finding need their own assertion: following the successor without this is
 // still a false accusation, and this without the one above is still a loss.
 func TestSend_FollowingTheSuccessorChargesNoDrop(t *testing.T) {
+	// A DELTA, never the absolute total: lateDrops is process-lifetime by
+	// design, so any earlier gate that charges one shifts it for every gate
+	// after. Asserting `== 0` passed only because another test in this file
+	// happens to reset the counter just above this one in source order — under
+	// -shuffle=on it fails the moment the exhausted-walk gate lands in
+	// between (reproduced deterministically with a two-test -run).
+	//
+	// This is the trap round 11's postscript already recorded, in the gate
+	// added one round later: when a counter survives what used to reset it,
+	// every assertion about it has to be relative (CodeRabbit, PR #1494).
+	beforeLate := LateDrops()
 	old := &Writer{network: "udp", format: "rfc3164", host: "h1", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
 	next := &Writer{network: "udp", format: "rfc3164", host: "h2", tag: "culvert", pid: "2", queue: make(chan queuedLine, 4)}
 	old.queue <- old.formatLine(14, "backlog", time.Now())
@@ -612,7 +623,7 @@ func TestSend_FollowingTheSuccessorChargesNoDrop(t *testing.T) {
 	if got := next.Drops(); got != 0 {
 		t.Fatalf("replacement charged %d drop(s) for a line it accepted, want 0", got)
 	}
-	if got := LateDrops(); got != 0 {
+	if got := LateDrops() - beforeLate; got != 0 {
 		t.Fatalf("late-drop total moved by %d for a delivered line, want 0", got)
 	}
 }

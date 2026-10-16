@@ -10179,3 +10179,20 @@ Fixed by moving the paragraph below the table, which also made room for the new
 Mutations: probe loads the writer on its own (2 gates, including the repointed
 config-metadata wall now live for `apiSyslogTest`); refuse every probe (the
 control); snapshot stops restoring the health plane (the fixture gate).
+
+**(g) And one of round 17(a)'s own gates read an absolute process-lifetime
+counter.** `TestSend_FollowingTheSuccessorChargesNoDrop` asserted
+`LateDrops() == 0` where every other gate in that file takes a delta. It passed
+only because another test resets the counter a hundred lines above it in source
+order; under `-shuffle=on` it fails the moment the exhausted-walk gate lands in
+between (reproduced deterministically with a two-test `-run`, which is the
+inverse of this file's other lesson — there a filter *hid* an ordering fault,
+here a filter *exposed* one the full run hid).
+
+This is round 11's postscript verbatim — *the counter had to be handed back,
+because it is process-lifetime by design and one gate's late drop shifted the
+total for every gate after it* — committed in a gate added one round later.
+
+> **When a counter survives what used to reset it, every assertion about it is
+> relative. A gate that reads it absolutely passes on the ordering it happened
+> to be written under.**
