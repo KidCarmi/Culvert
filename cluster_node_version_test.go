@@ -273,13 +273,24 @@ func TestAuditClusterPushDropsTotal_SkipsOwnHeartbeat(t *testing.T) {
 	}
 }
 
-// TestAuditClusterPushUnreportingNodes pins that a disconnected Data Plane is
-// counted as unreporting: it cannot deliver drops while its CP link is down,
-// so a zero total must not read as a complete centralized trail.
+// TestAuditClusterPushUnreportingNodes pins that a disconnected Data Plane,
+// and a connected one the Control Plane cannot yet or cannot ever trust for
+// a drop count, are both counted as unreporting — a zero total must not read
+// as a complete centralized trail.
 func TestAuditClusterPushUnreportingNodes(t *testing.T) {
 	origStore := globalClusterStore
 	globalClusterStore = newTestClusterStore(t)
 	t.Cleanup(func() { globalClusterStore = origStore })
+
+	nodeMetricsMu.Lock()
+	origMetrics := nodeMetrics
+	nodeMetrics = map[string]MetricsReport{}
+	nodeMetricsMu.Unlock()
+	t.Cleanup(func() {
+		nodeMetricsMu.Lock()
+		nodeMetrics = origMetrics
+		nodeMetricsMu.Unlock()
+	})
 
 	if got := auditClusterPushUnreportingNodes(); got != 0 {
 		t.Fatalf("empty cluster: unreporting = %d, want 0", got)
@@ -287,8 +298,21 @@ func TestAuditClusterPushUnreportingNodes(t *testing.T) {
 	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-up", Status: "connected"})
 	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-down", Status: "disconnected"})
 	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-revoked", Status: "revoked"})
+
+	// dp-up is enrolled and connected but has no nodeMetrics entry at all yet
+	// (CP restart, HA promotion, or the ~60s metricsLoop startup window
+	// before its first heartbeat lands). That is indistinguishable from a
+	// node that never reports, so it counts as unreporting alongside the
+	// disconnected node.
+	if got := auditClusterPushUnreportingNodes(); got != 2 {
+		t.Fatalf("unreporting = %d, want 2 (disconnected + connected-but-no-heartbeat-yet)", got)
+	}
+
+	nodeMetricsMu.Lock()
+	nodeMetrics["dp-up"] = MetricsReport{NodeID: "dp-up", AuditDropsReported: true}
+	nodeMetricsMu.Unlock()
 	if got := auditClusterPushUnreportingNodes(); got != 1 {
-		t.Fatalf("unreporting = %d, want 1 (only the disconnected node)", got)
+		t.Fatalf("unreporting = %d, want 1 (only the disconnected node, once dp-up has reported)", got)
 	}
 
 	// Rolling upgrade: a connected node heartbeating from a build without the
@@ -296,17 +320,8 @@ func TestAuditClusterPushUnreportingNodes(t *testing.T) {
 	// not "zero drops". A current build reporting zero is trusted.
 	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-legacy", Status: "connected"})
 	nodeMetricsMu.Lock()
-	origMetrics := nodeMetrics
-	nodeMetrics = map[string]MetricsReport{
-		"dp-up":     {NodeID: "dp-up", AuditDropsReported: true},
-		"dp-legacy": {NodeID: "dp-legacy"},
-	}
+	nodeMetrics["dp-legacy"] = MetricsReport{NodeID: "dp-legacy"}
 	nodeMetricsMu.Unlock()
-	t.Cleanup(func() {
-		nodeMetricsMu.Lock()
-		nodeMetrics = origMetrics
-		nodeMetricsMu.Unlock()
-	})
 	if got := auditClusterPushUnreportingNodes(); got != 2 {
 		t.Fatalf("unreporting = %d, want 2 (disconnected + legacy connected)", got)
 	}

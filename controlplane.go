@@ -203,8 +203,10 @@ func auditClusterPushDropsTotal() int64 {
 // centralized trail is complete:
 //   - disconnected (heartbeat timeout): the node cannot deliver its count, and
 //     losing the CP link is exactly when its push queue drops;
-//   - connected but heartbeating from a build without AuditDropsReported (a
-//     rolling upgrade): its report has no drop field at all.
+//   - connected with no heartbeat on file yet (CP restart, HA promotion, or
+//     the ~60s metricsLoop startup window) or heartbeating from a build
+//     without AuditDropsReported (a rolling upgrade): either way there is no
+//     trustworthy drop field to read.
 //
 // Reported beside the total so the dashboard can say "unknown" instead of
 // "complete". Zero on a standalone or DP-only node.
@@ -218,7 +220,7 @@ func auditClusterPushUnreportingNodes() int {
 		case "disconnected":
 			n++
 		case "connected":
-			if m, ok := nodeMetrics[nodes[i].NodeID]; ok && !m.AuditDropsReported {
+			if m, ok := nodeMetrics[nodes[i].NodeID]; !ok || !m.AuditDropsReported {
 				n++
 			}
 		}
