@@ -617,8 +617,8 @@ func (r *RateLimiter) publishExemptViewLocked() {
 // the accept/reject decision is identical to the filter-and-copy form, pinned
 // against a verbatim copy of it by TestRateLimitWindow_DifferentialAgainstLegacy
 // over 300 randomized (limit, window, gap) shapes. The one case that is not
-// verdict-identical is a concurrent OUT-OF-ORDER arrival, and it is bounded and
-// fail-closed by construction — see the clamp on add.
+// verdict-identical is a concurrent OUT-OF-ORDER arrival: clamping can delay
+// expiration of an admitted sample — see the fixed-history guarantee on add.
 type clientBucket struct {
 	// stamps is the ring storage; its LENGTH is the capacity. head indexes the
 	// oldest in-window stamp and n counts them, so the live entries are
@@ -659,16 +659,19 @@ func (b *clientBucket) expire(cutoff time.Time) {
 // Clamping the new stamp up to the newest one present restores the ordering
 // invariant BY CONSTRUCTION, and it is the cheap half of the two available
 // fixes: the alternative — moving the clock read inside the shard lock — was
-// built and measured, and it costs ~45% of the end-to-end gate at 4 cores
+// built and measured for #1265, costing ~45% of the end-to-end gate at 4 cores
 // (153 -> 230 ns/op) because it lengthens a critical section that 1/64 of all
 // traffic serialises on. The clamp is one comparison on a value already in
 // cache.
 //
-// What the clamp gives up is bounded and lands FAIL-CLOSED: an inverted stamp
-// is recorded as its predecessor's time, so it can only expire EARLIER than
-// its true arrival, never later — the window can never admit more than the
-// limit. The inversion is bounded by the gap between the clock read and the
-// lock acquisition (microseconds) against a window measured in seconds.
+// The recorded stamp is never earlier than its original pre-lock sample, so
+// clamping can DELAY expiration, never advance it. For the SAME admitted
+// samples and cutoff, expiry therefore retains at least as many entries as
+// filtering the original samples: it cannot release capacity early. This is
+// not a claim of identical verdicts for independently evolving histories;
+// conservative rejections can change which later requests occupy a slot.
+// The sample is not the lock-acquisition time. Scheduling and lock contention
+// can delay appending without a guaranteed microsecond bound.
 func (b *clientBucket) add(t time.Time, limit int) {
 	if b.n == len(b.stamps) {
 		b.grow(limit)
