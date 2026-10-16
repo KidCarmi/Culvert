@@ -79,8 +79,30 @@ func TestSaveRevocations_LocksBeforeSnapshotting(t *testing.T) {
 }
 
 // Concurrent writers must leave the file matching memory, not an older
-// snapshot. Run under -race; the assertion is on the final state, which holds
-// deterministically once the whole save is serialized.
+// snapshot. Run under -race.
+//
+// The real assertion is the one INSIDE the goroutines: once a writer's own
+// save has returned, the file must contain that writer's token, and must
+// still contain it no matter who writes next. That holds deterministically
+// once the whole save is serialized — every later snapshot is taken after
+// this writer's insert, because the snapshot happens under the same lock the
+// write does — and it is exactly what an out-of-order publish breaks: an
+// older snapshot, taken before this token existed, landing after this
+// writer already saw its own save succeed.
+//
+// Asserting only the state after a final quiescent save would prove nothing
+// about the concurrent phase: that save rewrites the file from the complete
+// in-memory list and repairs whatever the writers lost (CodeRabbit,
+// PR #1591). It is kept below as a separate, weaker check on the quiescent
+// state.
+//
+// Honest limit: this is a strengthened CONTROL, not a defect gate. Reverting
+// SaveRevocations to the pre-fix shape (snapshot taken outside saveMu) did
+// not make it fail — 0 failures in 5 runs at n=60 and 6 at n=400 — because
+// the inverted write has to land in the window between one writer's save
+// returning and its read. TestSaveRevocations_LocksBeforeSnapshotting is the
+// gate that actually holds the ordering; this one guards against a
+// regression it happens to catch and gives the race detector real work.
 func TestSaveRevocations_ConcurrentWritersLeaveTheNewestState(t *testing.T) {
 	withFreshSigningKey(t)
 	withFreshRevocationList(t)
@@ -98,12 +120,35 @@ func TestSaveRevocations_ConcurrentWritersLeaveTheNewestState(t *testing.T) {
 			Revoked.mu.Unlock()
 			if err := Revoked.SaveRevocations(); err != nil {
 				t.Errorf("save: %v", err)
+				return
 			}
+			// This writer's save has returned, so the file holds either its
+			// own snapshot or a later one; both contain this token.
+			raw, err := os.ReadFile(path) // #nosec G304 -- temp path created by this test
+			if err != nil {
+				t.Errorf("read after save %d: %v", i, err)
+				return
+			}
+			var seen []RevocationEntry
+			if err := json.Unmarshal(raw, &seen); err != nil {
+				t.Errorf("unmarshal after save %d: %v", i, err)
+				return
+			}
+			tok := fmt.Sprintf("tok-%03d", i)
+			for j := range seen {
+				if seen[j].Token == tok {
+					return
+				}
+			}
+			t.Errorf("file lacks %s though its own save already returned: a snapshot "+
+				"taken before this token existed was published over a newer one", tok)
 		}(i)
 	}
 	wg.Wait()
 
-	// One more save with everything present: the file must now hold them all.
+	// Weaker, separate check: after a quiescent save the file holds them all.
+	// This one cannot witness a lost update — it rewrites from the complete
+	// in-memory list — so it is here to pin the steady state, not the race.
 	if err := Revoked.SaveRevocations(); err != nil {
 		t.Fatalf("final save: %v", err)
 	}

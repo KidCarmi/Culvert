@@ -1090,32 +1090,39 @@ func TestChaos73_WallSavesGoThroughTheCoordinator(t *testing.T) {
 			continue // not this gate's job to police parse errors
 		}
 		checked++
+		// The coordinator's body is the one place allowed to make the call,
+		// so take its byte range and walk EVERYTHING else.
+		//
+		// Descending only into *ast.FuncDecl would miss a call inside a
+		// package-level function literal (`var save = func() { ... }`): that
+		// is a production writer, it bypasses the coordinator exactly as a
+		// named function would, and the wall was blind to it (CodeRabbit,
+		// PR #1591). The not-vacuous probe below keeps that honest.
+		var skipLo, skipHi token.Pos
+		for _, decl := range file.Decls {
+			d, ok := decl.(*ast.FuncDecl)
+			if ok && d.Name.Name == "persistRevocations" && d.Body != nil {
+				skipLo, skipHi = d.Body.Pos(), d.Body.End()
+			}
+		}
 		ast.Inspect(file, func(n ast.Node) bool {
-			fn, ok := n.(*ast.FuncDecl)
+			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			// The coordinator is the one function allowed to call it.
-			if fn.Name.Name == "persistRevocations" {
-				return false
-			}
-			ast.Inspect(fn, func(inner ast.Node) bool {
-				call, ok := inner.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "SaveRevocations" {
-					return true
-				}
-				recv, ok := sel.X.(*ast.Ident)
-				if !ok || recv.Name != "sessionRevoked" {
-					return true
-				}
-				offenders = append(offenders, fmt.Sprintf("%s:%s", name, fn.Name.Name))
+			if skipLo.IsValid() && call.Pos() >= skipLo && call.Pos() < skipHi {
 				return true
-			})
-			return false
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "SaveRevocations" {
+				return true
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok || recv.Name != "sessionRevoked" {
+				return true
+			}
+			offenders = append(offenders, fmt.Sprintf("%s:%d", name, fset.Position(call.Pos()).Line))
+			return true
 		})
 	}
 	if checked < 50 {
