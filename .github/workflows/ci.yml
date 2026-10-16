@@ -678,6 +678,25 @@ jobs:
               "${IMAGE}@${DIGEST}"
           done
 
+      - name: Candidate full-severity advisory (same promoted digest, both platforms)
+        if: always() && steps.what.outputs.digest != ''
+        env:
+          IMAGE: ${{ steps.what.outputs.image }}
+          DIGEST: ${{ steps.what.outputs.digest }}
+        run: |
+          for p in linux/amd64 linux/arm64; do
+            bash .github/scripts/trivy-suppression-report.sh "${IMAGE}@${DIGEST}" "$p" candidate-security-evidence remote
+          done
+
+      - name: Upload candidate package and vulnerability evidence
+        if: always() && steps.what.outputs.digest != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-security-evidence
+          path: candidate-security-evidence/
+          retention-days: 30
+          if-no-files-found: error
+
       # ── The qualification record (main push only) ──────────────────────────
       # Signed under the main producer identity, over the digest. The tag run
       # refuses a main candidate that lacks it (candidate-plan-tag.sh).

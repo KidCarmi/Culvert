@@ -104,6 +104,8 @@ jobs:
               # .trivyignore: a suppression edit must re-run the scan that
               # consumes it (CI review P1-5).
               Dockerfile*|docker-compose*.yml|.dockerignore|.trivyignore) docker=true ;;
+              .github/scripts/assert-static-binary.sh|.github/scripts/trivy-suppression-report.sh|.github/scripts/security-exceptions.py|.github/scripts/test/security-evidence-test.py|.github/scripts/candidate-verify-contents.sh)
+                docker=true ;;
             esac
             case "$f" in
               go.mod|go.sum) deps=true ;;
@@ -187,12 +189,34 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - uses: ./.github/actions/setup-go-cache
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: deep-gate-image
 
       - name: Load image
         run: docker load -i culvert-image.tar
+
+      - name: Inspect final image bytes (application and bundled host agent)
+        run: |
+          mkdir -p image-evidence
+          docker image inspect culvert:ci-smoke > image-evidence/image-config.json
+          IMAGE_ID=$(docker image inspect culvert:ci-smoke --format '{{.Id}}')
+          printf 'commit=%s\nplatform=linux/amd64\nimage_id=%s\n' "$GITHUB_SHA" "$IMAGE_ID" > image-evidence/scope.txt
+          CID=$(docker create "$IMAGE_ID")
+          trap 'docker rm "$CID" >/dev/null' EXIT
+          docker cp "$CID:/app/culvert" image-evidence/culvert
+          docker cp "$CID:/app/deploy/bin/culvert-maint" image-evidence/culvert-maint
+          docker cp "$CID:/lib/apk/db/installed" image-evidence/apk-installed.txt
+          # Inventory the actual packaged executable files/aliases without
+          # extracting or executing the image's filesystem.
+          docker export "$CID" | python3 -c 'import sys,tarfile; t=tarfile.open(fileobj=sys.stdin.buffer,mode="r|"); [print(m.name, oct(m.mode), m.linkname) for m in t if (m.isfile() and m.mode & 0o111) or (m.issym() and m.name.startswith(("bin/","sbin/","usr/bin/","usr/sbin/")))]' > image-evidence/executables.txt
+          for binary in culvert culvert-maint; do
+            bash .github/scripts/assert-static-binary.sh "image-evidence/$binary" | tee "image-evidence/$binary-linkage.txt"
+            go version -m "image-evidence/$binary" > "image-evidence/$binary-buildinfo.txt"
+            rm "image-evidence/$binary"
+          done
 
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
         with:
@@ -211,6 +235,21 @@ jobs:
             --ignorefile .trivyignore \
             --exit-code 1 \
             culvert:ci-smoke
+
+      - name: Full image advisory and package inventory (same artifact)
+        if: always()
+        run: |
+          IMAGE_ID=$(docker image inspect culvert:ci-smoke --format '{{.Id}}')
+          bash .github/scripts/trivy-suppression-report.sh "$IMAGE_ID" linux/amd64 image-evidence
+
+      - name: Upload exact image evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-suppression-evidence
+          path: image-evidence/
+          retention-days: 30
+          if-no-files-found: error
 
   # ─── 3. Dockerfile lint ────────────────────────────────────────────────────
   hadolint:
