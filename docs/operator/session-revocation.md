@@ -377,9 +377,16 @@ meantime is memory-only (counted by
 `culvert_session_revocation_persist_refused_total`).
 
 1. Copy the revocations file somewhere safe **first**.
-2. Free its path — shorten the configured filename, or fix the directory's
+2. **Record every revocation applied since this boot** — each logout and each
+   account deletion — because they exist only in memory. A restart discards
+   them and their cookies become valid again.
+3. Free its path — shorten the configured filename, or fix the directory's
    permissions.
-3. Restart. Until then nothing is written and nothing is lost.
+4. Restart, then **reapply the revocations from step 2**: delete or disable
+   the affected accounts again, or force those users to re-authenticate
+   (rotating the session signing key revokes every session at once). Until the
+   restart nothing is written, so the on-disk copy is preserved, but the
+   memory-only revocations are lost at the restart unless reapplied.
 
 ---
 

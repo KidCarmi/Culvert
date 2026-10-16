@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/session"
@@ -373,17 +374,26 @@ func revocationBackingFileIsGone() bool {
 // Only a definitively absent parent counts (os.IsNotExist). EACCES or EIO are
 // not evidence the directory is gone, which is the rule LoadRevocations
 // already applies to an unreadable file and AU-35 to a vanished one.
+//
+// ENOTDIR is the other definitive case: a path component that should be the
+// parent DIRECTORY is a regular file, so no write can succeed there either.
+// os.IsNotExist is false for it, so without this check the target read as
+// usable while every save failed (Codex P2, PR #1437).
 func revocationTargetParentMissing() bool {
 	path := session.RevocationsPath()
 	if path == "" {
 		return false
 	}
-	if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
+	_, err := os.Stat(path)
+	if err != nil && errors.Is(err, syscall.ENOTDIR) {
+		return true
+	}
+	if err == nil || !os.IsNotExist(err) {
 		// The target itself is present (or its absence is unproven), so the
 		// parent necessarily is too. Costs one stat in the common case.
 		return false
 	}
-	_, err := os.Stat(filepath.Dir(path))
+	_, err = os.Stat(filepath.Dir(path))
 	return err != nil && os.IsNotExist(err)
 }
 
@@ -572,9 +582,17 @@ func checkSessionRevocation() OperatorContractCheck {
 // It is ONE definition because two callers now ask this question — the cluster
 // merge path and, since AU-45, the repeat-logout repair — and two answers to
 // one question is the drift this sweep has corrected three times already.
+//
+// A WRITE-FENCED list reports no `vanished` doubt: saves are refused, so a
+// missing file cannot be repaired by retrying, and the runbook itself tells the
+// operator to move the original aside before restarting. Reporting it anyway
+// logged "the revocations file is missing" every sync tick and turned every
+// repeat logout into a refused "repair" (CodeRabbit review, PR #1437). The
+// fence is already surfaced by the session_revocation row and the
+// persist_refused counter.
 func revocationDurabilityDoubt() (failing, vanished bool) {
 	failing = sessionRevocationPersistDegraded.Load()
-	vanished = !failing && revocationBackingFileIsGone()
+	vanished = !failing && !sessionRevoked.WriteFenced() && revocationBackingFileIsGone()
 	return failing, vanished
 }
 

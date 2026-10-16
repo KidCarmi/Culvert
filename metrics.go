@@ -1165,7 +1165,7 @@ culvert_session_revocation_persist_failures_total %d
 # TYPE culvert_session_revocation_persist_degraded gauge
 culvert_session_revocation_persist_degraded %d
 
-# HELP culvert_session_revocation_persist_refused_total Revocations not written because this boot could not read the revocations file, so overwriting it was refused
+# HELP culvert_session_revocation_persist_refused_total Revocations not written because saving was refused to protect the only copy of the revocations file: either this boot could not read it, or it was corrupt and could not be quarantined (moved aside). The session_revocation diagnostics row names which
 # TYPE culvert_session_revocation_persist_refused_total counter
 culvert_session_revocation_persist_refused_total %d
 

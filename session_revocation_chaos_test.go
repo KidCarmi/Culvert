@@ -42,12 +42,14 @@ func withChaos68Revocations(t *testing.T) {
 	// gate writes is registered with the isolation primitive in the same
 	// change.
 	resetStateCorruption()
+	resetStorageWriteHealthForTest()
 	prevPath := session.RevocationsPath()
 	t.Cleanup(func() {
 		restore()
 		session.SetRevocationsPath(prevPath)
 		resetSessionRevocationHealthForTest()
 		resetStateCorruption()
+		resetStorageWriteHealthForTest()
 	})
 }
 
@@ -315,7 +317,7 @@ func TestChaos68_ContractRowIsRegistered(t *testing.T) {
 // logout performed on a Data Plane.
 func TestChaos68_SyncRevocationsWiresBothDirections(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "controlplane_server.go", nil, 0)
+	f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "controlplane_server.go"), nil, 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -530,7 +532,7 @@ func TestChaos68_HAWiresRevocationsInBothDirections(t *testing.T) {
 		{"ha.go", "applyHABundle", "MergeRevocations"},
 	} {
 		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, tc.file, nil, 0)
+		f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), tc.file), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", tc.file, err)
 		}
@@ -1718,5 +1720,59 @@ func TestChaos68_AU39_UnconfiguredNodeNeedsNoParentCheck(t *testing.T) {
 	}
 	if revocationsAreDurable() {
 		t.Error("an unconfigured node must not read durable")
+	}
+}
+
+// A parent path component that is a regular FILE (ENOTDIR) is as definitive as
+// a missing directory: no save can succeed, so the target must not read as
+// durable (Codex P2, PR #1437). os.IsNotExist is false for ENOTDIR.
+func TestChaos68_ParentIsAFileIsNotDurable(t *testing.T) {
+	withChaos68Revocations(t)
+	parent := filepath.Join(t.TempDir(), "mount")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(parent, "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("baseline save: %v", err)
+	}
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatalf("remove parent: %v", err)
+	}
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("replace parent with a file: %v", err)
+	}
+	if !revocationTargetParentMissing() {
+		t.Fatal("a parent replaced by a regular file (ENOTDIR) was reported as a usable target")
+	}
+	if revocationsAreDurable() {
+		t.Error("durable is true although every save into a non-directory parent fails")
+	}
+}
+
+// While saves are write-fenced, a missing backing file is expected (the
+// runbook moves the original aside) and cannot be repaired by retrying, so it
+// must not be reported as a `vanished` doubt that drives per-tick logs and
+// refused repairs (CodeRabbit review, PR #1437).
+func TestChaos68_FencedListReportsNoVanishedDoubt(t *testing.T) {
+	withChaos68Revocations(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("baseline save: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove file: %v", err)
+	}
+	if _, vanished := revocationDurabilityDoubt(); !vanished {
+		t.Fatal("control: an unfenced list with its file removed must report the vanished doubt")
+	}
+	sessionRevoked.FenceWritesUnquarantined() // reset by withChaos68Revocations' SwapForTest restore
+	if failing, vanished := revocationDurabilityDoubt(); failing || vanished {
+		t.Errorf("fenced list reported failing=%v vanished=%v; want neither — no save can repair it", failing, vanished)
 	}
 }

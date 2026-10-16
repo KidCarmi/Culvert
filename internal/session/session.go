@@ -510,6 +510,15 @@ func IsWriteFenced(err error) bool {
 	return errors.Is(err, ErrRevocationsUnread) || errors.Is(err, ErrRevocationsUnquarantined)
 }
 
+// WriteFenced reports whether saves are currently refused (either reason; see
+// SaveRevocations). While fenced, a missing backing file is EXPECTED — the
+// operator may have moved the unreadable or corrupt original aside — and no
+// save can recreate it, so callers must not treat its absence as a repairable
+// durability doubt.
+func (r *RevocationList) WriteFenced() bool {
+	return r.writeFence.Load() != fenceNone
+}
+
 // FenceWritesUnquarantined refuses every later save because a corrupt file
 // could not be moved aside. Called by the boot path when
 // quarantineCorruptStateFile reports that its rename failed.
