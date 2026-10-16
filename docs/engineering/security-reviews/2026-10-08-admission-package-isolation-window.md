@@ -251,6 +251,14 @@ complete — not a weakening of the wall.
 
 - `admission_owner_wall_test.go` — new, test-only: two structural walls with
   controls, plus the documented-residual behavioural test.
+- `docs/agent-context/domains/admission.md` — the one-owner invariant in prose:
+  what the contract is, why a split owner is silent, and why detection is
+  deliberately NOT the control. This is the only prose home of the rule, so a
+  reader who finds the walls and wants the reasoning is sent here. It was first
+  written on CLAUDE.md's "Admission engine" bullet and moved when main's
+  agent-context decomposition (#1592) reduced CLAUDE.md to a pointer stub;
+  `internal/admission/AGENTS.md` names this file as the current contract.
+- `docs/engineering/TECHNICAL-RISK-REGISTER.md` — RISK-030 (MEDIUM, CLOSED).
 - `policy.go` — comment-only: two references to `prefixFromIPNet` /
   `ipFilterView.contains` in `security.go` repointed to their new home; a stale
   pointer in a security-relevant comment sends the next reviewer to the wrong
