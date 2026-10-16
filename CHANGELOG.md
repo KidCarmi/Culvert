@@ -591,6 +591,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- Policy evaluation no longer re-walks the whole rule set before it starts.
+  `PolicyStore.evaluationSnapshot` — taken on every request, and *twice* on
+  the no-credential path, because Stage-1's `resolveAuthOutcome` takes the
+  same snapshot — ran an O(number of rules) loop over every published rule
+  purely to answer a compatibility question: could this slice contain a rule
+  with no accounting cell? Only a slice installed around the store's mutators
+  (internal callers, tests) can. Every production mutator funnels through
+  `sortLocked`, which rebuilds the slice from
+  `clonePolicyRuleForPublication` and therefore cannot leave one.
+
+  The cost is not the loop body — a nil check — but the pointer chase: one
+  dereference per rule across as many separate heap objects, so it leaves cache
+  as the ruleset grows, and it ran *regardless of how early the scan that
+  follows it matched*. That is the case a well-ordered enterprise ruleset is
+  built to produce, and it was the case the existing benchmarks could not see:
+  `BenchmarkPolicyEvaluate_NoMatch` and `_MatchLast` both traverse every rule,
+  so their own O(n) scan hid the O(n) in front of it. Measured on a 4-core Xeon
+  (benchstat medians, n=5) for a request matching the highest-priority rule, the
+  walk was **62% of `Evaluate` at 1 001 rules and 96% of it at 10 001**.
+
+  `sortLocked` now names the revision it publishes and `evaluationSnapshot`
+  recognises it in O(1): **1 131 ns/op → 467 ns/op** at 1 001 rules and
+  **32.03 µs/op → 409 ns/op** at 10 001, with the snapshot itself going
+  546 ns → 14 ns and 30.8 µs → 13 ns — flat in the rule count rather than
+  growing with it, and allocation-free as before. The walk also held the
+  store's *reader* lock for its whole duration, queueing the config plane
+  behind the data plane; under `-cpu=4` the same snapshot goes
+  **7.67 µs/op → 94 ns/op** at 10 001 rules.
+
+  A revision is named by its first element's address plus its length, which
+  together identify the exact element range an evaluator will read; holding
+  that pointer keeps the backing array alive, so the address can never be
+  handed to a different revision. The compatibility contract is unchanged: a
+  slice the marker does not name takes the original walk, and the marker may
+  only ever narrow what that walk inspects, never claim a slice nothing
+  verified. `TestBenchGate_PolicyEvaluationSnapshotIsConstantCost` pins the
+  result structurally rather than by timing — it proves which branch the hot
+  path took by a verdict, and it fails on the pre-change code.
+
+
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
   `hostutil.NormalizeHostStrict` already had an already-canonical fast path

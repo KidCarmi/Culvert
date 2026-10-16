@@ -275,6 +275,61 @@ type PolicyStore struct {
 	// false (the GUI warning stays up) until a later write succeeds. Only a
 	// successful SaveErr, or a later Load, clears it.
 	adoptUnsaved atomic.Bool
+	// published names the rules slice that sortLocked — the ONE publication
+	// point every mutator funnels through — most recently installed. It lets
+	// evaluationSnapshot recognise a published revision in O(1) instead of
+	// re-walking every definition on every request. See publishedRules.
+	published atomic.Pointer[publishedRules]
+}
+
+// publishedRules identifies one rules slice by the BACKING ARRAY it spans:
+// the address of its slot 0 plus its length. Those two together name exactly
+// the memory the evaluator will read, so two slices agreeing on both are
+// literally the same slots and therefore the same definitions. Holding an
+// interior pointer into that array keeps the whole allocation alive, so the
+// allocator can never hand the same address to a different revision.
+//
+// slot0 is `&rules[0]`, the address OF the first slot, NOT `rules[0]`, the
+// rule pointer stored IN it. The distinction is the whole contract: a caller
+// can install a same-length slice that reuses the published slice's first
+// rule and replaces a later one, and the stored rule pointer would compare
+// equal across two genuinely different revisions. The walk would then be
+// skipped over a definition that may carry no accounting cell, and the
+// Evaluate that matched it would dereference a nil `counters`. The slot
+// address cannot be shared that way, because a fresh slice is a fresh array.
+// TestEvaluationSnapshot_SameFirstRuleDifferentSliceIsNotPublished is the
+// control (Codex review, PR #1643).
+//
+// The marker is written ONLY by markPublishedLocked, from sortLocked, under the
+// writer lock, on a slice freshly built by clonePolicyRuleForPublication. That
+// is what the marker asserts: every definition in this range carries an
+// initialized accounting cell. Nothing published this way can hold a nil cell,
+// because copyPolicyRuleForPublication mints one when the source lacks it.
+type publishedRules struct {
+	slot0 **PolicyRule
+	n     int
+}
+
+// markPublishedLocked records ps.rules as a sortLocked-published revision. The
+// caller holds ps.mu for writing.
+func (ps *PolicyStore) markPublishedLocked() {
+	m := &publishedRules{n: len(ps.rules)}
+	if m.n > 0 {
+		m.slot0 = &ps.rules[0]
+	}
+	ps.published.Store(m)
+}
+
+// isPublished reports whether rules spans the exact backing-array range
+// markPublishedLocked last recorded. Callers read it with ps.mu held so the
+// slice and the marker come from the same instant (every mutator holds the
+// writer lock across sortLocked, which sets both).
+func (ps *PolicyStore) isPublished(rules []*PolicyRule) bool {
+	m := ps.published.Load()
+	if m == nil || m.n != len(rules) {
+		return false
+	}
+	return m.n == 0 || m.slot0 == &rules[0]
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -791,14 +846,31 @@ func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 	return false
 }
 
+// deleteAtLocked drops rule i and bumps the version. Unlike the other
+// mutators it does NOT re-sort: removing one entry cannot disturb the priority
+// order, and every surviving entry is the definition the caller was already
+// serving. For the same reason the publication marker CARRIES OVER when the
+// current revision had one — a subset of wholly published definitions is still
+// wholly published — so a delete does not quietly push the hot path back onto
+// evaluationSnapshot's compatibility walk. It is not set when the revision was
+// never published: the marker may only ever narrow what the walk must inspect,
+// never claim a slice nothing verified. The caller holds ps.mu for writing.
+func (ps *PolicyStore) deleteAtLocked(i int) {
+	published := ps.isPublished(ps.rules)
+	ps.rules = append(append(make([]*PolicyRule, 0, len(ps.rules)-1), ps.rules[:i]...), ps.rules[i+1:]...)
+	if published {
+		ps.markPublishedLocked()
+	}
+	ps.bumpVersion()
+}
+
 // Delete removes the rule with the given priority. Returns false if not found.
 func (ps *PolicyStore) Delete(priority int) bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	for i, rule := range ps.rules {
 		if rule.Priority == priority {
-			ps.rules = append(append(make([]*PolicyRule, 0, len(ps.rules)-1), ps.rules[:i]...), ps.rules[i+1:]...)
-			ps.bumpVersion()
+			ps.deleteAtLocked(i)
 			return true
 		}
 	}
@@ -1016,8 +1088,7 @@ func (ps *PolicyStore) DeleteByID(id string) bool {
 	defer ps.mu.Unlock()
 	for i, rule := range ps.rules {
 		if rule.ID == id {
-			ps.rules = append(append(make([]*PolicyRule, 0, len(ps.rules)-1), ps.rules[:i]...), ps.rules[i+1:]...)
-			ps.bumpVersion()
+			ps.deleteAtLocked(i)
 			return true
 		}
 	}
@@ -1250,6 +1321,10 @@ func (ps *PolicyStore) sortLocked() {
 		precomputeSubjectNets(r.SubjectMatch)
 	}
 	ps.rules = next
+	// Name the revision so evaluationSnapshot can skip its compatibility walk.
+	// This is the only PRODUCER of a published slice; deleteAtLocked only
+	// carries an existing mark onto a subset of one.
+	ps.markPublishedLocked()
 }
 
 // copyPolicyRuleForPublication detaches every mutable nested value that the
@@ -1352,11 +1427,30 @@ type PolicyMatch struct {
 func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 	ps.mu.RLock()
 	rules := ps.rules
-	needsPublication := false
-	for _, rule := range rules {
-		if rule.counters == nil {
-			needsPublication = true
-			break
+	// A revision sortLocked published cannot hold a nil accounting cell, so
+	// recognising it by identity answers the question in O(1). The walk below
+	// is O(len(rules)) of pointer-chasing across as many separate heap objects,
+	// and it ran on EVERY request — twice, since Stage-1's resolveAuthOutcome
+	// takes the same snapshot — however early the scan that follows it matched.
+	// Measured on a 4-core Xeon (benchstat medians, n=5, benchmarks in
+	// policy_snapshot_bench_test.go), a request matching the highest-priority
+	// rule: 1 001 rules 1 131 ns/op → 467 ns/op (-58.7%), 10 001 rules
+	// 32.03 µs/op → 409 ns/op (-98.7%); the snapshot alone 546 ns → 14 ns and
+	// 30.8 µs → 13 ns, now flat in the rule count. Allocations are unchanged
+	// (0 here, 1 for the PolicyMatch). It also held the READER LOCK for that
+	// whole walk, so a config-plane writer queued behind it: the same snapshot
+	// under -cpu=4 went 7.67 µs/op → 94 ns/op at 10 001 rules.
+	needsPublication := !ps.isPublished(rules)
+	if needsPublication {
+		// Not a published revision: an internal caller or test installed the
+		// slice directly. Keep the original walk — the marker says nothing
+		// about such a slice, not that it is defective.
+		needsPublication = false
+		for _, rule := range rules {
+			if rule.counters == nil {
+				needsPublication = true
+				break
+			}
 		}
 	}
 	ps.mu.RUnlock()
