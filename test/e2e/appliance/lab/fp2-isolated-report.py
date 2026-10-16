@@ -17,6 +17,11 @@ for line in open(sys.argv[1]):
     d = json.loads(line)
     (events if "event" in d else rows).append(d)
 
+# --count: print ONLY the number of wrong-cleans (EICAR answered a bare
+# "stream: OK") and exit, for a machine-readable qualification verdict. Uses
+# the same classification as the table below, so the two cannot disagree.
+_count_mode = "--count" in sys.argv[1:]
+
 
 def cls(r):
     if r["client_error"]:
@@ -36,6 +41,11 @@ def cls(r):
 def fault(c):
     return c.startswith("ERROR") or c in ("empty", "client_error", "other")
 
+
+if _count_mode:
+    n = sum(1 for r in rows if r.get("eicar") and cls(r) == "OK")
+    print(n)
+    sys.exit(0)
 
 out = []
 w = out.append

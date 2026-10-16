@@ -551,7 +551,11 @@ jobs:
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
           export LAB_HISTORY="${{ matrix.history || '1' }}"
           export LAB_ENGINE_SURFACE="${{ matrix.engine_surface || '0' }}"
-          export LAB_PRESSURE="${{ matrix.pressure || '0' }}" LAB_FP2="${{ matrix.fp2 || '0' }}" LAB_CACHEBYPASS="${{ matrix.cachebypass || '0' }}" LAB_LDAP="${{ matrix.ldap || '0' }}"
+          export LAB_PRESSURE="${{ matrix.pressure || '0' }}" LAB_FP2="${{ matrix.fp2 || '0' }}" LAB_LDAP="${{ matrix.ldap || '0' }}"
+          # A [cache-bypass] push runs the cache-bypass regression on THIS
+          # candidate's 1.5.4 engine (the all-dispatch short-circuits to it
+          # after qualify); a normal push runs the full qualify + recovery.
+          export LAB_CACHEBYPASS="${{ (matrix.cachebypass == '1' || contains(github.event.head_commit.message, '[cache-bypass]')) && '1' || '0' }}"
           # [fail-fast] in the commit message: an ITERATION run stops at the
           # first phase with a failed check (evidence still collected). Never
           # use it for the run whose evidence is handed off.
@@ -884,15 +888,37 @@ jobs:
   # separate the explanations: no-pressure control, serial at a full temp,
   # serial headroom sweep (the appliance runs' shape), 8-way concurrency.
   fp2-isolated:
-    name: "Lab · F-P2 isolated: exact sidecar, temp-dir exhaustion, scripted client"
+    name: "Lab · F-P2 isolated: exact sidecar, temp-dir exhaustion, scripted client · ${{ matrix.label }}"
     if: ${{ contains(github.event.head_commit.message, '[fp2-isolated]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CONTROL: the shipped 1.4.6 sidecar must REPRODUCE F-P2 (wrong-cleans
+          # > 0) — the bug the fix closes. appliance-lab-ova-candidate-bad788e54ffe.
+          - label: control-1.4.6-bad788e5
+            ova_artifact: "11666266481"
+            ova_sha256: "87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c"
+            sidecar_archive_sha256: "b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445"
+            sidecar_index: "sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251"
+            expect: nonzero
+          # CANDIDATE: the 1.5.4 sidecar baked into THIS candidate OVA must show
+          # ZERO wrong-cleans — F-P2 closed on the shipped engine. OVA
+          # appliance-lab-ova-candidate-9e34452677d7 (run 38881775755); sidecar
+          # archive + image id from the build-info the OVA carries.
+          - label: candidate-1.5.4-9e344526
+            ova_artifact: "12038600454"
+            ova_sha256: "47cb50f08d09efac5b6a970cc71517598a8edbb75805cb4b55cc2271e81a5313"
+            sidecar_archive_sha256: "39a0f7c83bc05f313fd374895bdfe8840c40a418834301de9f8d5a7cb12979ef"
+            sidecar_index: "sha256:dc96d2f249d20a8a899fd1f965af18cd4cd54fe9f66d7a278199fd29195a4280"
+            expect: zero
     env:
-      OVA_ARTIFACT_ID: "11666266481"   # appliance-lab-ova-candidate-bad788e54ffe, run 38040972664
-      OVA_SHA256: 87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c
-      SIDECAR_ARCHIVE_SHA256: b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445
-      SIDECAR_INDEX: sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251
+      OVA_ARTIFACT_ID: ${{ matrix.ova_artifact }}
+      OVA_SHA256: ${{ matrix.ova_sha256 }}
+      SIDECAR_ARCHIVE_SHA256: ${{ matrix.sidecar_archive_sha256 }}
+      SIDECAR_INDEX: ${{ matrix.sidecar_index }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -986,10 +1012,27 @@ jobs:
           python3 -I "$L/fp2-isolated-report.py" "$R" "$W/evidence/REPORT.md" | tee -a "$GITHUB_STEP_SUMMARY"
           docker logs clamd-iso > "$W/evidence/clamd-container.log" 2>&1 || true
           df -B1 "$W/tmpfs" >> "$W/evidence/tmpfs-df.txt"
+      - name: "Verdict — wrong-cleans must match this engine's expectation (${{ matrix.expect }})"
+        run: |
+          set -euo pipefail
+          L=test/e2e/appliance/lab
+          n="$(python3 -I "$L/fp2-isolated-report.py" "$W/evidence/requests.jsonl" --count)"
+          echo "wrong-cleans (EICAR -> bare OK): $n; expect=${{ matrix.expect }}" | tee "$W/evidence/verdict.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          case "${{ matrix.expect }}" in
+            zero)
+              # F-P2 closed on the 1.5.4 engine: NO EICAR may be answered a bare clean.
+              [ "$n" -eq 0 ] || { echo "::error::F-P2 NOT closed: $n EICAR stream(s) answered a bare clean on the 1.5.4 sidecar"; exit 1; } ;;
+            nonzero)
+              # Control: the 1.4.6 engine must reproduce the bypass, or the harness
+              # is not exercising the defect and the candidate's zero is meaningless.
+              [ "$n" -gt 0 ] || { echo "::error::control did not reproduce F-P2 on the 1.4.6 sidecar ($n wrong-cleans) — harness not exercising the edge; candidate result is unproven"; exit 1; } ;;
+            *) echo "::error::unknown expect '${{ matrix.expect }}'"; exit 1 ;;
+          esac
+          echo "verdict: PASS ($n wrong-cleans matches expect=${{ matrix.expect }})"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-fp2-isolated-bad788e54ffe
+          name: appliance-lab-fp2-isolated-${{ matrix.label }}
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
@@ -1103,18 +1146,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Candidate bad788e5 OVA (lab run 38040972664). The archive and index pins
-      # are the OVA's own build record (build-info.json clamav_baked_tar_sha256
-      # and clamav_sidecar_image_id; on 2e3bcc2a these equalled the measured
-      # pins). The amd64 manifest and config are DERIVED from the re-hashed
-      # index (not pinned: derived and exported through GITHUB_ENV), so every link stays hash-bound.
-      # This sidecar is NOT the one the 72c827b7 scan covered (index 50bb8aa0…):
-      # same tag and pinned base, different bytes, so that 0-findings result
-      # cannot be reused (bad788e5 build-info: image id d62dd495…).
-      OVA_ARTIFACT_ID: "11666266481"   # appliance-lab-ova-candidate-bad788e54ffe, run 38040972664
-      OVA_SHA256: 87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c
-      SIDECAR_ARCHIVE_SHA256: b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445
-      SIDECAR_INDEX: sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251
+      # Candidate 1.5.4 OVA (appliance-lab-ova-candidate-9e34452677d7, lab run
+      # 38881775755 — the F-P2 sidecar bump 1.4.6 -> 1.5.4). Archive + index
+      # pins are the OVA's own build record (build-info.json
+      # clamav_baked_tar_sha256 and clamav_sidecar_image_id). The amd64 manifest
+      # and config are DERIVED from the re-hashed index (exported via
+      # GITHUB_ENV), so every link stays hash-bound. This scans the EXACT 1.5.4
+      # sidecar baked into the candidate OVA; the 1.4.6 scans are not reusable
+      # (different engine, different bytes).
+      OVA_ARTIFACT_ID: "12038600454"   # appliance-lab-ova-candidate-9e34452677d7, run 38881775755
+      OVA_SHA256: 47cb50f08d09efac5b6a970cc71517598a8edbb75805cb4b55cc2271e81a5313
+      SIDECAR_ARCHIVE_SHA256: 39a0f7c83bc05f313fd374895bdfe8840c40a418834301de9f8d5a7cb12979ef
+      SIDECAR_INDEX: sha256:dc96d2f249d20a8a899fd1f965af18cd4cd54fe9f66d7a278199fd29195a4280
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
