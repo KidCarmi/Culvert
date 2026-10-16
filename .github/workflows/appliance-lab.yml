@@ -96,19 +96,22 @@ jobs:
           # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
           # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
           # sidecar delivered > 0).
-          - variant: candidate-a80be4b6
+          - variant: candidate-6248daf7
             provisioning: source
-            # The allowlist-preservation fix candidate: PR #1528 MERGE commit
-            # a80be4b6 (head 99e25cec merged into base main dec66e1b), the commit
-            # the deep-gate image (run 38898100091) was built + stamped from.
-            # BUILDS a fresh OVA and runs the FULL qualify, so steps 6b (restore)
-            # and H (fresh-volume recovery) exercise the admin-allowlist SURVIVAL
-            # assertions (owner P1: the marker set before backup must return
-            # WITHOUT re-adding).
-            source_sha: "a80be4b61ff7f2f069cf81ede1eebe6945d65306"
-            image_run: "38898100091"
-            image_tar_sha256: "fcbaaa89dfd73502a121a4ef546f3afcb95cfb08729df94dbcc11c39ff4fa502"
-            expect_image_id: "sha256:ae009528da2c7c17f76be8177cb81d88b4641bbcd25d76b065071de9201f6d92"
+            # The console-shutdown P1 + boot-UX candidate (ASTRA findings on
+            # a80be4b6): PR #1528 MERGE commit 6248daf7 (head e7535ed9 merged
+            # into base main; binary stamp 1.0.263-candidate.g6248daf72a53), the
+            # commit the deep-gate image (run 38961525689) was built + stamped
+            # from. BUILDS a fresh OVA and runs the FULL qualify: the recovery/
+            # reboot path exercises the culvert-console shutdown fix (no 90s
+            # session-scope stall), and steps 6b/H re-exercise the admin-allowlist
+            # SURVIVAL assertions. Boot-console frame capture (boot-UX hint) and
+            # the sidecar re-proofs run as a SECOND phase against this build's
+            # retained OVA (see [boot-console]/[fp2-isolated]/[sidecar-scan]).
+            source_sha: "6248daf72a5312e75062e2c2823438911604af7f"
+            image_run: "38961525689"
+            image_tar_sha256: "d05f2c1d39db4223b9549fb312ba3c4ae0ac5761f7175218926e7f021bb65dfd"
+            expect_image_id: "sha256:20a547edd3e9db83cd1fa65f734bdeec5fc8f6d077f6f73344a38798a5d9692d"
             recovery_reboots: "0"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
