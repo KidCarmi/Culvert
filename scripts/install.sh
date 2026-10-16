@@ -1630,7 +1630,7 @@ persist_host_env_session_secret() {
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -f "$envfile" ]]; then
-    grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null
+    grep -Eq '^CULVERT_SESSION_SECRET=.*[^[:space:]]' "$envfile" 2>/dev/null
     local rc=$?
     if [[ $rc -eq 0 ]]; then
       return 0 # already configured — never overwrite
@@ -1676,7 +1676,7 @@ setup_at_rest_encryption() {
   # host-env value is equally operator-supplied, and warn-and-continue here
   # would run the install with the operator's encryption intent silently
   # dropped.
-  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.*[^[:space:]]' "$envfile" 2>/dev/null; then
     validate_passphrase_for_env_file "CULVERT_LOG_PASSPHRASE" "$CULVERT_LOG_PASSPHRASE"
     env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
   fi
@@ -1705,7 +1705,7 @@ setup_at_rest_encryption() {
     # operator's explicit encryption intent is never silently dropped into an
     # unencrypted-CA install (the earlier warn-and-skip posture contradicted
     # the interactive path's error on the identical input).
-    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.*[^[:space:]]' "$envfile" 2>/dev/null; then
       validate_passphrase_for_env_file "CULVERT_CA_PASSPHRASE" "$CULVERT_CA_PASSPHRASE"
       env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
     fi

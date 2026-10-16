@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,5 +45,46 @@ func TestSecretAlreadySet_CRLFEmptyValueIsNotSet(t *testing.T) {
 				t.Fatalf("secret_already_set on %q = %v, want %v", tc.content, got, tc.want)
 			}
 		})
+	}
+}
+
+// The disk-only "persist the host secret" guards in setup_at_rest_encryption()
+// and persist_host_env_session_secret() used the same `^VAR=.+` predicate, so a
+// CRLF-empty placeholder in .env made them skip env_put for a real host-exported
+// value (compose then reads the empty .env value).
+func TestHostEnvPersist_CRLFEmptyPlaceholderIsOverwrittenByHostValue(t *testing.T) {
+	t.Run("log passphrase", func(t *testing.T) {
+		dir := t.TempDir()
+		seedCRLFEnv(t, dir, "CULVERT_LOG_PASSPHRASE=\r\n")
+		out, code, env := runSetupAtRestEncryptionWithHostEnv(t, dir,
+			`export CULVERT_LOG_PASSPHRASE="host-supplied-passphrase-1234"`)
+		if code != 0 || !strings.Contains(env, "CULVERT_LOG_PASSPHRASE=host-supplied-passphrase-1234") {
+			t.Fatalf("host log passphrase not persisted over CRLF-empty placeholder (exit %d)\n%s\n.env: %q", code, out, env)
+		}
+	})
+	t.Run("ca passphrase", func(t *testing.T) {
+		dir := t.TempDir()
+		seedCRLFEnv(t, dir, "CULVERT_CA_PASSPHRASE=\r\n")
+		out, code, env := runSetupAtRestEncryptionWithHostEnv(t, dir,
+			`export CULVERT_CA_PASSPHRASE="host-supplied-passphrase-1234"`)
+		if code != 0 || !strings.Contains(env, "CULVERT_CA_PASSPHRASE=host-supplied-passphrase-1234") {
+			t.Fatalf("host CA passphrase not persisted over CRLF-empty placeholder (exit %d)\n%s\n.env: %q", code, out, env)
+		}
+	})
+	t.Run("session secret", func(t *testing.T) {
+		dir := t.TempDir()
+		seedCRLFEnv(t, dir, "CULVERT_SESSION_SECRET=\r\n")
+		secret := strings.Repeat("ab", 32)
+		out, code, env := runPersistHostEnvSessionSecret(t, dir, `export CULVERT_SESSION_SECRET="`+secret+`"`)
+		if code != 0 || !strings.Contains(env, "CULVERT_SESSION_SECRET="+secret) {
+			t.Fatalf("host session secret not persisted over CRLF-empty placeholder (exit %d)\n%s\n.env: %q", code, out, env)
+		}
+	})
+}
+
+func seedCRLFEnv(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
