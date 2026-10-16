@@ -10196,3 +10196,17 @@ total for every gate after it* — committed in a gate added one round later.
 > **When a counter survives what used to reset it, every assertion about it is
 > relative. A gate that reads it absolutely passes on the ordering it happened
 > to be written under.**
+
+#### Round 17 — recorded residual
+
+During the pending-dial grace the API reports `targetMet:false` with an empty
+`servingAddr`, so the panel's warning sentence — which ends *"Nothing retries;
+re-save to try again"* — is not strictly true for those few seconds: a dial
+*is* in flight. It is recorded rather than fixed because the window is
+unreachable in practice: both callers run inside `initObservability` /
+`initPersistentAdminState`, before `startAdminUI` has a listener, so no
+operator can load the Settings panel during it. Closing it would mean a third
+state on the response for a boot condition nobody can observe. If a future
+change makes an intent pending on a path the admin UI is already serving — a
+re-point that dials asynchronously, say — this becomes reachable and the
+response needs a `dialPending` field.
