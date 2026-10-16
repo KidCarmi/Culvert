@@ -145,12 +145,24 @@ func normalizeHostStrictMemo(host string) (norm string, ok bool) {
 	}
 
 	norm, ok = normalizeHostStrictUncached(host)
-	// An in-limit input can in principle grow past the limit through punycode
-	// encoding. Punycode shrinks the shapes that matter in practice (a 252-byte
-	// CJK host measures 98 bytes as an A-label), so this branch is not expected
-	// to be reached — it is here so the ceiling holds by construction rather
-	// than by that expectation, and TestIDNMemo_StoredEntriesRespectTheBound
-	// asserts the invariant over every entry rather than over this branch.
+	// An in-limit input CAN grow past the limit through punycode encoding, and
+	// this branch is live rather than theoretical. Punycode shrinks the shapes
+	// the first revision of this comment reasoned about — a dense non-ASCII
+	// script amortizes the per-label ACE overhead, so a 252-byte CJK host
+	// measures 98 bytes as an A-label — but the overhead is per LABEL, and the
+	// worst case is the opposite shape: one non-ASCII rune in each of many
+	// short labels. "é.é.é…" at 251 bytes normalizes to 671, and "aé.aé.aé…"
+	// at 251 bytes to 629 (measured), i.e. up to ~2.7x the bound. Both are
+	// ordinary authorities a client may send, and the HTTP raw pre-cap (1 KiB)
+	// admits them with room to spare.
+	//
+	// So this check carries the same weight as the len(host) check above, and
+	// without it the ceiling breaches by the same kind of margin that one did:
+	// 969 KB retained against the 554 KB documented ceiling, with entries
+	// holding a 668-byte norm. TestIDNMemo_PunycodeExpansionIsNotRetained is
+	// its gate (verified failing with this branch deleted);
+	// TestIDNMemo_StoredEntriesRespectTheBound asserts the resulting invariant
+	// over every live entry.
 	if len(norm) > maxMemoHostLen {
 		return norm, ok
 	}

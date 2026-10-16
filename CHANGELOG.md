@@ -9,6 +9,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The IDNA memo's footprint ceiling had one of its two enforcement branches
+  ungated. The table may retain no string longer than `maxMemoHostLen` (253,
+  the DNS name maximum), and a host can breach that from either side: by
+  arriving oversize, or by arriving within the limit and **expanding** past it
+  through punycode encoding. Only the first had a regression test — the one
+  added after CodeRabbit found that bound did not hold. With the `len(norm)`
+  branch deleted, the entire `internal/hostutil` suite stayed green while the
+  table retained **969 KB against its 554 KB ceiling**, holding a 668-byte
+  canonical form in a slot.
+
+  The guard itself is present and correct, so no release was affected and no
+  behavior changes here; what was missing was the gate that keeps it. The code
+  also described the branch as "not expected to be reached", which would invite
+  a future reader to delete it as dead code: the ACE overhead (`xn--`, the
+  delimiter, the encoded deltas) is paid per **label**, so while a dense script
+  compresses — a 252-byte CJK host measures 98 bytes as an A-label — one
+  non-ASCII rune in each of many short labels expands instead. `é.é.é…` at 251
+  bytes normalizes to 671 and `aé.aé.aé…` at 251 bytes to 629, up to ~2.7x the
+  bound, from ordinary authorities well inside the 1 KiB HTTP raw pre-cap.
+
+  The same gap explains why the invariant test did not catch it:
+  `TestIDNMemo_StoredEntriesRespectTheBound` deliberately fed "inputs whose
+  punycode form is longer than their ASCII byte count suggests" but reached for
+  CJK, so it held vacuously on that axis. It now carries the expanding shapes,
+  alongside `TestIDNMemo_PunycodeExpansionIsNotRetained` (per-shape retention,
+  with both preconditions asserted so a future `x/net` encoding change fails
+  loudly rather than passing vacuously) and
+  `TestIDNMemo_ExpansionCannotBreachTheCeiling` (the bound under a stream of
+  nothing but expanding hosts). All three were verified failing against the
+  verbatim unguarded body. Verdicts were never at issue — an expanding host is
+  still normalized, just not retained.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
