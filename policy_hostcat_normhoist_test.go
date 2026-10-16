@@ -23,7 +23,10 @@ import (
 //
 // Measured on the shipped taxonomy against a 3-label uncategorized
 // destination: NormalizeHost was 45.97 ns of MatchesHost's 105.8 ns total
-// (43%), and the DestCategory policy scan went 4675 ns → 2869 ns at 50 rules.
+// (43%). The DestCategory policy scan, timed as an ADJACENT pair (it cannot be
+// timed same-run), went 2809 ns → 2519 ns at 50 rules — roughly 10–18% across
+// rule counts. An earlier cross-run reading overstated this 3–4x; see the
+// CHANGELOG entry for the retraction and the per-count figures.
 //
 // Nothing about the DECISION may change, and these tests are what makes that
 // checkable. The oracle below is a VERBATIM copy of the pre-hoist
