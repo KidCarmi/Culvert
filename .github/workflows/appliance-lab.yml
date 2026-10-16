@@ -1356,17 +1356,22 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
-      # A = the 91e05872 candidate OVA (run 37966305990: recovery 124-139 s,
-      # over budget). B = the dc57bd76 OVA (built in run 37948667525: 115-116 s;
-      # requalified in run 37957097250: 107.7 s). The only product difference is
-      # the ClamAV readiness probe; one runner, A B B A, attributes the change.
-      OVA_A_ARTIFACT: "11634023092"
-      OVA_A_SHA256: 060a3dc6c79164265a241af5d91b4d6b2464a52340b3a42c461f72ee2889c07e
-      OVA_A_IMAGE_ID: sha256:d2a3377400f07ac0a6ceac54df729773b2983d6a4a5f871219ff891cb1e65fb4
-      OVA_B_ARTIFACT: "11625975699"
-      OVA_B_SHA256: 855b4a09d46e80b3325d529d58436ea2c0cb145814add50e4a5c2e66eecccac9
-      OVA_B_IMAGE_ID: sha256:4db3e5c9d492fe9056a4a607aa0c861daeaec30e3a6657532743e16bde34610b
-      AB_ORDER: "A B B A"
+      # BASELINE MEASUREMENT of candidate 6248daf7 under the esxi12 latency
+      # profile (ASTRA reported 141.218s original-path recovery on real ESXi,
+      # over the 120s budget). A and B are the SAME 6248daf7 OVA (artifact
+      # 12074562532, run 38964077956) run twice for variance; the per-reboot
+      # firmware_gap_s (pre-kernel) / kernel_to_ready_s (post-kernel) split is
+      # the diagnostic for the focused provisioning fix. docs/appliance/
+      # recovery-time.md: shipped readahead+cloud-init-disabled reached 103.1s
+      # on the OLD b579 OVA; this measures how much the newer payload (HWE
+      # 7.0.0-38 kernel, Docker 29.9.0, ClamAV 1.5.4) regressed it.
+      OVA_A_ARTIFACT: "12074562532"
+      OVA_A_SHA256: 59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61
+      OVA_A_IMAGE_ID: sha256:20a547edd3e9db83cd1fa65f734bdeec5fc8f6d077f6f73344a38798a5d9692d
+      OVA_B_ARTIFACT: "12074562532"
+      OVA_B_SHA256: 59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61
+      OVA_B_IMAGE_ID: sha256:20a547edd3e9db83cd1fa65f734bdeec5fc8f6d077f6f73344a38798a5d9692d
+      AB_ORDER: "A B"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Host preflight (KVM, RAM, disk) and lab directory
@@ -1482,7 +1487,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-recovery-ab-91e05872-vs-dc57bd76
+          name: appliance-lab-recovery-ab-6248daf7-baseline
           path: ${{ env.LAB_ROOT }}/ab-evidence/
           retention-days: 30
           if-no-files-found: warn
