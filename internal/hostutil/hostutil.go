@@ -96,6 +96,23 @@ func NormalizeHostStrict(host string) (norm string, ok bool) {
 	// would reject ':' and '[' and silently push IPv6 literals into idna).
 	// TestNormalizeHostStrict_IPLiteralsAcceptedByConstruction pins the guarantee
 	// independently of which branch delivers it.
+	//
+	// ── Memoized from here down ───────────────────────────────────────────────
+	// What remains is the idna.ToASCII branch (plus the IP-literal guard above
+	// it), which costs ~5-7 allocations and ~700 ns for an A-label or U-label
+	// host — paid ~10x per proxied request by engines that each normalize the
+	// same destination independently. IDNA normalization is a pure function, so
+	// the repeat is memoized rather than recomputed; the table is bounded and
+	// the rationale is in idnamemo.go. A memo MISS runs normalizeHostStrictUncached
+	// just below, which is this branch and the idna call, moved verbatim — so the
+	// IP-literal reasoning above is the reasoning for that function's first line.
+	return normalizeHostStrictMemo(host)
+}
+
+// normalizeHostStrictUncached is NormalizeHostStrict's slow path, verbatim: the
+// IP-literal guard and idna.ToASCII. It is what a memo miss computes, and the
+// differential tests compare the memoized results against it.
+func normalizeHostStrictUncached(host string) (norm string, ok bool) {
 	if net.ParseIP(host) != nil || net.ParseIP(stripIPv6Brackets(host)) != nil {
 		return host, true
 	}
