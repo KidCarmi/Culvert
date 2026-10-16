@@ -126,10 +126,13 @@ re-sends its dead cookie on every request until it re-authenticates. So:
 ## 4. Recovery
 
 There is nothing to undo. If a provider was removed by mistake, re-create or
-re-enable it; new logins resume as soon as it is both enabled **and reachable**
-— re-enabling a profile whose IdP is still down does not restore them, for the
-reason in §1. No state is written by the refusal, so there is no file to repair
-and no cache to clear.
+re-enable it; new logins resume as soon as the profile is enabled **and its
+provider compiles**. Reachability is neither sufficient nor strictly necessary
+for that: an IdP that answers with a `4xx` or an invalid document fails to
+compile and serves no logins, while one that is unreachable still compiles from
+its last-known-good cached document if that document is inside the staleness
+ceiling (see §1 and `docs/operator/idp-metadata-availability.md`). No state is
+written by the refusal, so there is no file to repair and no cache to clear.
 
 **Re-enabling a provider under the same id REVIVES the sessions it minted, and
 that matters for incident response.** The check is pure derived state — "is
