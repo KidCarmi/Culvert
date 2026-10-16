@@ -130,3 +130,81 @@ func TestLookup_OrdinaryMissIsNotAFault(t *testing.T) {
 		t.Fatalf("ordinary misses were counted as store trouble: faults=%d mem=%d degraded=%v", faults, mem, degraded)
 	}
 }
+
+// TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen closes CHAOS-74's
+// fault-to-restart path. Containing the fault keeps the process alive, but the
+// diagnostics row tells the operator to restart, and the restart is the only
+// point at which this derived store can be rebuilt. Measured before the fault
+// was persisted: the reopen returned badger's unclassified
+// `mmapping ... size: 0` error with Trigger="" and Quarantined=false, so every
+// later start stayed Layer-1-only and never rebuilt the store.
+func TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "catfeeddb")
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	entries := make(map[string]string, 20000)
+	for i := 0; i < 20000; i++ {
+		entries[fmt.Sprintf("evil%d.example", i)] = "Malware"
+	}
+	if err := db.BulkWrite(entries); err != nil {
+		t.Fatalf("bulkwrite: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	ssts, _ := filepath.Glob(filepath.Join(dir, "*.sst"))
+	if len(ssts) == 0 {
+		t.Fatal("expected flushed .sst tables on disk")
+	}
+
+	live, rec, err := OpenResilient(dir)
+	if err != nil || rec.Trigger != TriggerNone {
+		t.Fatalf("healthy open: err=%v rec=%+v", err, rec)
+	}
+	for _, f := range ssts {
+		if err := os.Truncate(f, 0); err != nil {
+			t.Fatalf("truncate %s: %v", f, err)
+		}
+	}
+	live.Lookup("evil19999.example")
+	if _, mem, degraded := live.LookupFaults(); mem == 0 || !degraded {
+		t.Fatalf("store did not latch degraded: mem=%d degraded=%v", mem, degraded)
+	}
+	_ = live.Close() // the operator's restart; a damaged store may refuse a clean close
+
+	next, rec, err := OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("restart after a contained fault must rebuild the store, got err=%v rec=%+v", err, rec)
+	}
+	t.Cleanup(func() { _ = next.Close() })
+	if rec.Trigger != TriggerRuntimeFault || !rec.Quarantined || rec.QuarantinePath == "" {
+		t.Fatalf("restart did not quarantine the faulted store: %+v", rec)
+	}
+	if _, err := os.Stat(rec.QuarantinePath); err != nil {
+		t.Fatalf("quarantined evidence missing: %v", err)
+	}
+	// The rebuilt store is empty and serving; the policy outcome stays
+	// "uncategorised" until the feed repopulates it.
+	if cat, ok := next.Lookup("evil7.example"); ok || cat != "" {
+		t.Fatalf("rebuilt store answered from quarantined data: cat=%q ok=%v", cat, ok)
+	}
+	if err := next.BulkWrite(map[string]string{"evil.example": "Malware"}); err != nil {
+		t.Fatalf("rebuilt store not writable: %v", err)
+	}
+	if cat, ok := next.Lookup("evil.example"); !ok || cat != "Malware" {
+		t.Fatalf("rebuilt store not serving: cat=%q ok=%v", cat, ok)
+	}
+
+	// The signal is consumed: a third start is a plain healthy open.
+	_ = next.Close()
+	third, rec, err := OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("third open: %v", err)
+	}
+	_ = third.Close()
+	if rec.Trigger != TriggerNone || rec.Quarantined {
+		t.Fatalf("fault signal was not cleared after quarantine: %+v", rec)
+	}
+}

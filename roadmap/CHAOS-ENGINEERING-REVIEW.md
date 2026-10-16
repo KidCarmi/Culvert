@@ -8513,15 +8513,20 @@ recorded under Security impact below rather than left implicit.
   action. Layer 2 is a derived cache of a downloadable feed, so nothing
   authoritative is lost.
 - **Manual:** a restart is what re-opens the store, and on restart
-  `storeguard.Open` does the rest — a directory a process died inside of, or one
-  badger reports as corrupt, is quarantined and re-created, and the feed
+  `storeguard.Open` does the rest — a directory a process died inside of, one
+  badger reports as corrupt, or one whose previous run **recorded a contained
+  fault** (trigger `runtime_fault`) is quarantined and re-created, and the feed
   re-syncs. So the two halves now compose: §41 keeps the process alive to be
-  restarted, §19 heals the store when it is.
+  restarted, §19 heals the store when it is. The recorded fault is what makes
+  that true — see "Codex round 1" below for why the restart did not heal the
+  store without it.
 - **Degraded-mode duration:** for the life of the process, by design (latched).
   The diagnostics row says so explicitly rather than implying the store might
   recover on its own.
-- **Data integrity:** unaffected. No authoritative state lives here, and the fix
-  adds no write path.
+- **Data integrity:** unaffected. No authoritative state lives here. The only
+  write the fix adds is the one-shot `<store>.faulted` sibling marker (atomic
+  temp + fsync + rename), written on the latch transition and never inside the
+  store directory.
 
 ### Operational impact
 
@@ -8569,6 +8574,12 @@ behavior and not on badger's internals:
   reclassified.
 - `TestContainFault_RestoresPanicOnFault` — no per-goroutine state leaks into a
   caller with its own setting.
+- `TestOpen_RecordedFaultQuarantinesBeforeOpening` — a recorded fault
+  quarantines before the opener runs and is consumed, so the next start is
+  plain. Negative controls: `TestOpen_RecordedFaultRespectsALiveLockHolder`
+  (the store lock vetoes the move and the marker survives),
+  `TestOpen_RecordedFaultForAMissingStoreIsCleared` and
+  `TestOpen_DirectoryAtFaultMarkerPathIsIgnored`.
 
 `internal/catdb/catdb_fault_test.go` — the end-to-end realism gate:
 
@@ -8580,6 +8591,9 @@ behavior and not on badger's internals:
 - `TestLookup_OrdinaryMissIsNotAFault` — misses and the subdomain walk stay
   clean and uncounted. Without this, counting every uncategorised host would
   make the new signal worthless.
+- `TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen` — the fault-to-restart
+  path: real fault → close → `OpenResilient` quarantines (`runtime_fault`),
+  re-creates an empty serving store, and a third open is plain.
 
 `catfeeddb_runtime_fault_chaos_test.go` — the surfaces, against a store that has
 taken a **real** contained fault rather than a flag a test set:
@@ -8619,6 +8633,31 @@ taken a **real** contained fault rather than a flag a test set:
   reachability argument. Recorded; `ContainFault` applies there too.
 - **The policy-outcome posture on a store fault** is unchanged and is an owner
   decision, as set out under Security impact.
+
+### Codex round 1 — the restart did not heal the store
+
+The first cut latched the fault in memory only, and the Recovery assessment
+above claimed the restart would quarantine the store. Measured, it did not: after
+a contained fault on a truncated `.sst`, close and `OpenResilient` returned
+badger's `Opening file ... err: invalid argument while mmapping ... with size: 0`
+with `Trigger=""` and `Quarantined=false`. That message is not in the corruption
+table, and `openGuarded` clears its attempt marker on a returned error, so every
+later start stayed Layer-1-only and never rebuilt the store.
+
+The fix persists the evidence rather than widening the classifier. On the latch
+transition `catdb` calls `storeguard.RecordFault`, which atomically writes a
+`<store>.faulted` sibling; `storeguard.Open` honours it before badger runs, as
+trigger `runtime_fault`, through the same lock-gated `ApplyQuarantine`, and
+clears it only once the directory has been moved aside (or is already gone).
+Adding `invalid argument … mmapping … size: 0` to the corruption table was
+rejected as the primary fix: it names one shape of the damage (a table
+truncated to exactly zero), while the fault the process actually contained —
+partial truncation, an EIO page, a vanished volume — may surface on reopen as
+something else again, or not at all until a later read. The process that took
+the fault is the only one holding the evidence, so it is the one that records
+it, whatever the reopen happens to report. The marker is
+opt-in — only a rebuildable store calls `RecordFault` — so `internal/logstore`
+is unaffected.
 
 ---
 

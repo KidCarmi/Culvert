@@ -169,6 +169,10 @@ const (
 	// TriggerOpenError means badger.Open returned an error identified as
 	// corruption of the on-disk store.
 	TriggerOpenError RecoveryTrigger = "open_error"
+	// TriggerRuntimeFault means a previous run contained a memory fault on the
+	// store's mapped tables after a healthy open and recorded it with
+	// RecordFault (CHAOS-74).
+	TriggerRuntimeFault RecoveryTrigger = "runtime_fault"
 )
 
 // Recovery reports what Open had to do. It is data, not logging: the caller
@@ -195,7 +199,8 @@ type Recovery struct {
 }
 
 // Open opens a store through open, recovering from a directory the previous run
-// could not survive. It never panics on behalf of badger — the panic case is
+// could not survive, or one whose previous run contained a memory fault on it
+// and recorded that with RecordFault. It never panics on behalf of badger — the panic case is
 // handled by refusing to hand badger a directory a previous process died inside
 // of — and it never destroys data it has not first moved aside.
 //
@@ -207,20 +212,7 @@ func Open[T any](dir string, policy Policy, open func(string) (T, error)) (T, Re
 	var zero T
 	var rec Recovery
 
-	if poison := AbandonedMarkers(dir); len(poison) > 0 {
-		rec.Trigger = TriggerPoisonMarker
-		rec.Cause = "a previous start entered the store open and never returned (corrupt table, kill, or out-of-memory)"
-		ApplyQuarantine(dir, &rec)
-		if rec.Quarantined {
-			// Clear only markers this call acted on. A skipped quarantine
-			// leaves the condition unresolved, so the breadcrumbs must survive
-			// for the next start — and markers belonging to a LIVE opener are
-			// never in this list to begin with.
-			for _, m := range poison {
-				_ = os.Remove(m)
-			}
-		}
-	}
+	recoverBeforeOpen(dir, &rec)
 
 	store, err := openGuarded(dir, open)
 	if err == nil {
@@ -252,6 +244,48 @@ func Open[T any](dir string, policy Policy, open func(string) (T, error)) (T, Re
 		return zero, rec, err
 	}
 	return store, rec, nil
+}
+
+// recoverBeforeOpen acts on the signals a PREVIOUS process left for this store
+// before badger is allowed near it: an abandoned open-attempt marker (it died
+// inside badger.Open) or a fault marker (it contained a memory fault on the
+// store's mapped tables after a healthy open — see RecordFault). Either one
+// quarantines through ApplyQuarantine, so the store lock still vetoes a move of
+// a directory a live process holds.
+func recoverBeforeOpen(dir string, rec *Recovery) {
+	poison := AbandonedMarkers(dir)
+	faulted := faultRecorded(dir)
+	switch {
+	case len(poison) > 0:
+		rec.Trigger = TriggerPoisonMarker
+		rec.Cause = "a previous start entered the store open and never returned (corrupt table, kill, or out-of-memory)"
+	case faulted:
+		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+			// The faulted store is already gone (an operator removed it), so
+			// the condition the marker records is resolved. Keeping it would
+			// report a phantom recovery on every start from here on.
+			clearFault(dir)
+			return
+		}
+		rec.Trigger = TriggerRuntimeFault
+		rec.Cause = "a previous run contained a memory fault reading the store's mapped tables after a healthy open (damaged or vanished data volume)"
+	default:
+		return
+	}
+	ApplyQuarantine(dir, rec)
+	if !rec.Quarantined {
+		// A skipped quarantine leaves the condition unresolved, so every
+		// breadcrumb must survive for the next start.
+		return
+	}
+	// Clear only markers this call acted on — markers belonging to a LIVE
+	// opener are never in the poison list to begin with.
+	for _, m := range poison {
+		_ = os.Remove(m)
+	}
+	if faulted {
+		clearFault(dir)
+	}
 }
 
 // ApplyQuarantine moves dir aside, recording the outcome on rec. It refuses

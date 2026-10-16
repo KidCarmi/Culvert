@@ -112,3 +112,100 @@ func TestContainFault_RestoresPanicOnFault(t *testing.T) {
 		}
 	}
 }
+
+// ── fault marker: the contained fault survives the restart ───────────────────
+
+// A recorded fault quarantines the store BEFORE the opener runs, and the marker
+// is consumed so the following start is a plain open.
+func TestOpen_RecordedFaultQuarantinesBeforeOpening(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	if err := RecordFault(dir, "test fault"); err != nil {
+		t.Fatalf("RecordFault: %v", err)
+	}
+	if !faultRecorded(dir) {
+		t.Fatal("marker not visible after RecordFault")
+	}
+	if tmps := siblings(dir, FaultMarkerTempSuffix); len(tmps) != 0 {
+		t.Fatalf("atomic write left temp files: %v", tmps)
+	}
+
+	o := &opener{}
+	st, rec, err := Open(dir, Policy{}, o.open)
+	if err != nil || st == nil {
+		t.Fatalf("Open = (%v, %v)", st, err)
+	}
+	if rec.Trigger != TriggerRuntimeFault || !rec.Quarantined || rec.QuarantinePath == "" {
+		t.Fatalf("recovery = %+v, want a runtime-fault quarantine", rec)
+	}
+	if o.calls != 1 {
+		t.Errorf("open calls = %d, want 1", o.calls)
+	}
+	if faultRecorded(dir) {
+		t.Error("the acted-on fault marker was not cleared; every start would quarantine again")
+	}
+
+	_, rec, err = Open(dir, Policy{}, o.open)
+	if err != nil || rec.Trigger != TriggerNone || rec.Quarantined {
+		t.Fatalf("second Open = (%+v, %v), want a plain open", rec, err)
+	}
+}
+
+// Negative control: a LIVE holder of the store lock vetoes the quarantine, and
+// the marker must survive so the next start can still act on it.
+func TestOpen_RecordedFaultRespectsALiveLockHolder(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	if err := RecordFault(dir, "test fault"); err != nil {
+		t.Fatalf("RecordFault: %v", err)
+	}
+	held, err := LockStore(dir)
+	if err != nil || held == nil {
+		t.Fatalf("LockStore = (%v, %v)", held, err)
+	}
+	defer held.Release()
+
+	_, rec, _ := Open(dir, Policy{}, (&opener{}).open)
+	if rec.Quarantined {
+		t.Fatalf("quarantined a store another process holds: %+v", rec)
+	}
+	if rec.Trigger != TriggerRuntimeFault || rec.Skipped == "" {
+		t.Fatalf("recovery = %+v, want a triggered-but-skipped runtime fault", rec)
+	}
+	if _, serr := os.Stat(dir); serr != nil {
+		t.Fatalf("store moved despite the live lock: %v", serr)
+	}
+	if !faultRecorded(dir) {
+		t.Error("an unresolved fault marker was cleared")
+	}
+}
+
+// A store an operator already removed has nothing to quarantine: the marker is
+// resolved and cleared rather than reported as a phantom recovery forever.
+func TestOpen_RecordedFaultForAMissingStoreIsCleared(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	if err := RecordFault(dir, "test fault"); err != nil {
+		t.Fatalf("RecordFault: %v", err)
+	}
+	_, rec, err := Open(dir, Policy{}, (&opener{}).open)
+	if err != nil || rec.Trigger != TriggerNone || rec.Quarantined {
+		t.Fatalf("Open = (%+v, %v), want a plain open", rec, err)
+	}
+	if faultRecorded(dir) {
+		t.Error("marker for an absent store was not cleared")
+	}
+}
+
+// Only a regular file is a signal. A directory at the marker path could never
+// be cleared, so honouring it would quarantine a healthy store on every start.
+func TestOpen_DirectoryAtFaultMarkerPathIsIgnored(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	if err := os.MkdirAll(dir+FaultMarkerSuffix, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	_, rec, err := Open(dir, Policy{}, (&opener{}).open)
+	if err != nil || rec.Trigger != TriggerNone || rec.Quarantined {
+		t.Fatalf("Open = (%+v, %v), want a plain open", rec, err)
+	}
+}

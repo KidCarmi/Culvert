@@ -54,7 +54,10 @@ package storeguard
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime/debug"
+	"time"
 )
 
 // ErrStoreFault reports that a memory fault raised by the store's mapped file
@@ -106,3 +109,95 @@ func ContainFault(op func() error) (err error) {
 
 // IsStoreFault reports whether err came from a contained memory fault.
 func IsStoreFault(err error) bool { return errors.Is(err, ErrStoreFault) }
+
+// ── persisting a contained fault for the next open ───────────────────────────
+//
+// Containment keeps the process alive, but the in-memory latch dies with it —
+// and a restart is exactly what the operator is told to do. Without a durable
+// record that restart cannot tell a faulted store from a healthy one: for the
+// truncation case badger's reopen returns `invalid argument ... while mmapping
+// ... with size: 0`, which is not in the corruption table, and openGuarded
+// clears its attempt marker on any returned error. Every later start would then
+// stay degraded rather than rebuild. Widening the table would only cover that
+// one shape (a table truncated to exactly zero); a partial truncation, an EIO
+// page or a vanished volume reports differently on reopen, or not at all until
+// a later read. The process that contained the fault is the only one holding the
+// evidence, so it records it. The fault marker is that record: written once, at
+// the moment the fault is contained, and honoured by Open as a quarantine
+// trigger.
+
+// FaultMarkerSuffix names the fault marker beside the store directory. Like the
+// open-attempt markers it is a sibling, not a file inside the store, so moving
+// the store aside never moves the evidence that justified it.
+const (
+	FaultMarkerSuffix     = ".faulted"
+	FaultMarkerTempSuffix = ".faultedtmp."
+)
+
+// RecordFault durably records that the store at dir took a contained memory
+// fault, so the next Open quarantines it instead of handing badger the same
+// damaged tables. The write is atomic (temp file, fsync, rename, directory
+// fsync), so a crash mid-write leaves either no marker or a complete one.
+//
+// Only a store whose contents are rebuildable should call this: Open treats the
+// marker as sufficient grounds to move the directory aside (still gated by the
+// store lock, and never a deletion). Best-effort by contract — the error is for
+// the caller's log line; a volume damaged enough to fault may refuse the write.
+func RecordFault(dir, cause string) error {
+	base := trimSep(dir)
+	if base == "" {
+		return errors.New("storeguard: empty store path")
+	}
+	parent := filepath.Dir(base)
+	tmp, err := os.CreateTemp(parent, filepath.Base(base)+FaultMarkerTempSuffix+"*")
+	if err != nil {
+		return fmt.Errorf("create fault marker: %w", err)
+	}
+	tmpName := tmp.Name()
+	_, werr := fmt.Fprintf(tmp, "pid=%d ts=%s cause=%q\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano), cause)
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmpName, base+FaultMarkerSuffix)
+	}
+	if werr != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write fault marker: %w", werr)
+	}
+	syncDir(parent)
+	return nil
+}
+
+// faultRecorded reports whether a fault marker is present. Only a regular file
+// counts: a directory at that path could never be cleared by os.Remove, and
+// honouring it would quarantine a healthy store on every start.
+func faultRecorded(dir string) bool {
+	base := trimSep(dir)
+	if base == "" {
+		return false
+	}
+	fi, err := os.Lstat(base + FaultMarkerSuffix)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// clearFault removes the fault marker once the condition it records has been
+// resolved, together with any temp file a death mid-write left behind (litter,
+// not a signal). Called only after the damaged directory is gone, so no live
+// writer can still be producing either file.
+func clearFault(dir string) {
+	base := trimSep(dir)
+	if base == "" {
+		return
+	}
+	_ = os.Remove(base + FaultMarkerSuffix)
+	for _, tmp := range siblings(base, FaultMarkerTempSuffix) {
+		if fi, err := os.Lstat(tmp); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(tmp)
+		}
+	}
+	syncDir(filepath.Dir(base))
+}

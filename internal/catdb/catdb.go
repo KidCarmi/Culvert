@@ -33,6 +33,9 @@ import (
 // All exported methods are safe for concurrent use.
 type CommunityDB struct {
 	db *badger.DB
+	// dir is where the store was opened, kept so a contained memory fault can
+	// be recorded beside it for the next OpenResilient (storeguard.RecordFault).
+	dir string
 
 	// CHAOS-74 runtime health. The boot outcome is recorded by the caller
 	// (catfeeddb_health.go); these are the counters for everything that goes
@@ -86,7 +89,7 @@ func Open(dir string) (*CommunityDB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CommunityDB{db: db}, nil
+	return &CommunityDB{db: db, dir: dir}, nil
 }
 
 // Close flushes and closes the underlying BadgerDB.
@@ -135,6 +138,7 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 			// path, so it goes through the recognized sanitizer and %q
 			// rather than %v (CWE-117).
 			obs.Printf("CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: %q", obs.Sanitize(err.Error()))
+			c.recordFault(err)
 		}
 		return "", false
 	default:
@@ -144,6 +148,24 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 			obs.Printf("CatFeedDB: community category lookup failed (host treated as uncategorised): %q", obs.Sanitize(err.Error()))
 		}
 		return "", false
+	}
+}
+
+// recordFault persists the latch for the next start. The in-memory latch dies
+// with the process, and the restart the diagnostics row prescribes would
+// otherwise reopen the same damaged tables: for a truncated table badger's
+// reopen error (`mmapping ... size: 0`) is not a recognised corruption signal,
+// so without this record every later start stays Layer-1-only instead of
+// quarantining and rebuilding the store. This store is a derived cache of a
+// downloadable feed, which is what makes "move it aside on the next open" the
+// right answer. Runs once per process (on the latch transition), so the file
+// write never sits on the request path more than once.
+func (c *CommunityDB) recordFault(cause error) {
+	if c.dir == "" {
+		return
+	}
+	if err := storeguard.RecordFault(c.dir, cause.Error()); err != nil {
+		obs.Printf("CatFeedDB: could not record the memory fault for the next start; the store will not be quarantined automatically on restart: %q", obs.Sanitize(err.Error()))
 	}
 }
 

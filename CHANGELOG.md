@@ -37,7 +37,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   counters — `culvert_catfeeddb_lookup_errors_total` and
   `culvert_catfeeddb_memory_faults_total` — and a `category_feed_db` diagnostics
   row that names the Layer-1-only impact and the restart that re-opens (and
-  quarantines) the store. `culvert_catfeeddb_memory_faults_total > 0` is the
+  quarantines) the store. The fault is recorded durably beside the store
+  (`<store>.faulted`), so that restart quarantines it with trigger
+  `runtime_fault` and re-creates it empty for the feed to re-sync — badger's
+  reopen error for a truncated table is not a recognised corruption signal, and
+  without the record every later start stayed Layer-1-only.
+  `culvert_catfeeddb_memory_faults_total > 0` is the
   alerting rule to add: it means a node's data volume is damaging a live store.
 
   Known limit: `SetPanicOnFault` is per-goroutine, so badger's own compaction

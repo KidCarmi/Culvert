@@ -43,6 +43,9 @@ const (
 	TriggerPoisonMarker = storeguard.TriggerPoisonMarker
 	// TriggerOpenError means badger.Open returned an identified corruption error.
 	TriggerOpenError = storeguard.TriggerOpenError
+	// TriggerRuntimeFault means a previous run contained a memory fault on the
+	// store's mapped tables after a healthy open (CHAOS-74).
+	TriggerRuntimeFault = storeguard.TriggerRuntimeFault
 )
 
 // communityStorePolicy is deliberately EMPTY: this store is never opened with an
