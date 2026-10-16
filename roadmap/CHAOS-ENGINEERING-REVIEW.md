@@ -8755,6 +8755,24 @@ required before merge; each is now in the tree.
   `handleMetrics`' CP block moved to `writeCPGRPCMetrics` and
   `apiClusterTokenCreate`'s validation to `validateEnrollmentTokenRequest` to
   stay within the lint budgets of the functions this PR touches.
+* **Fifth review round: the exit edges as ONE table.** Codex's round on
+  `d4917d9` found three more exit edges of the same lifecycle (a panic between
+  adopt and Serve left the server, the socket and the role claimed; a terminal
+  failure after a paged recoverable episode was swallowed by the shared alert
+  latch; the owned-list substitution ran after the wire-size validation). Four
+  rounds of one-edge-at-a-time patches is the finding: the supervisor's state
+  machine is now written down on `cpListenerSupervisor.run` — every exit edge
+  with what it must RELEASE and what it must SIGNAL — and encoded as one
+  table-driven gate, `TestChaos71_SupervisorExitEdgeTable`, that drives each
+  edge deterministically and asserts both columns. The fixes are structural,
+  not per-edge: a per-attempt record (`cpAttempt`) released by ONE
+  `releaseAttempt` on every edge (stop+close before Serve, retire after a serve
+  ended, leave to Stop's drain while stopping), a panic edge
+  (`abandonAfterPanic`) that also restores the role this supervisor first
+  replaced and republishes the address list when the fleet was told this node
+  is a CP, a TERMINAL alert latch separate from the recoverable one (the
+  SOCKS5 plane's escalation rule), and a full publish that substitutes the
+  owned list BEFORE validating and commits only what it validated.
 * **CodeRabbit (HA config at bind time).** The boot resume closed over the HA
   config read at boot; with the retrying supervisor it can run minutes later
   and restore a leader the operator had since disabled or flipped to standby.

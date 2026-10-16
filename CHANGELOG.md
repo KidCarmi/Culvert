@@ -95,7 +95,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   threshold clamp and alert latch, and a full config publish can no longer
   overwrite the CP address list the activation published. A self-fenced
   ex-leader whose CP listener is still dark is no longer AUTO-promoted
-  (manual promotion unchanged). A refused admin/promote
+  (manual promotion unchanged). Every exit of the listener supervisor —
+  including a panic between bind and serve — now releases the server, the
+  socket and the role claim it holds; a terminal listener failure pages even
+  after a recoverable episode already paged; and a full publish validates the
+  snapshot with the CP address list it actually commits. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

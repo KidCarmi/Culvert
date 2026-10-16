@@ -251,7 +251,11 @@ restarted. Either way it is reported distinctly:
 * the alert says the same.
 
 The two states are kept separate precisely because they point at opposite
-actions. Do not restart a node whose row says the listener is rebinding.
+actions. Do not restart a node whose row says the listener is rebinding. If a
+listener that was already paged as *retrying* then turns terminal, you are
+paged **again** with the restart instruction — the terminal alert has its own
+latch. On a terminal exit the node also gives up the Control Plane role and
+the fleet's address list stops naming it.
 
 ## Runbook
 

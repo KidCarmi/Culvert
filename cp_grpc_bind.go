@@ -222,9 +222,26 @@ type cpListenerSupervisor struct {
 
 	// committed is true once this supervisor has claimed the CP role (and not
 	// rolled it back), so a rebind after a serve-death may re-assert its OWN
-	// claim while a role somebody else established is never replaced. Written
-	// under clusterRoleMu by claimRole/rollbackRole; read only there.
+	// claim while a role somebody else established is never replaced. Touched
+	// only by the supervisor goroutine.
 	committed bool
+
+	// cur is what the in-flight attempt holds; original is the role tuple this
+	// supervisor replaced on its FIRST claim; everPublished records that the
+	// fleet was told this node is a Control Plane. Together they let EVERY exit
+	// edge — including a panic at any stage — release exactly what was
+	// acquired (see the exit-edge table on run). Supervisor goroutine only.
+	cur           *cpAttempt
+	original      cpRoleFields
+	haveOriginal  bool
+	everPublished bool
+}
+
+// cpAttempt is everything ONE bind attempt holds.
+type cpAttempt struct {
+	srv     *grpc.Server
+	ln      net.Listener
+	serving bool // Serve was entered: from then on Serve owns closing ln
 }
 
 // cpSupervisor is the process-wide handle. Guarded by cpActivationMu.
@@ -395,6 +412,26 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 
 // run is the bind/serve/rebind loop.
 //
+// THE STATE MACHINE. Stages: bind → adopt → claim → publish → onActivated →
+// serve. Every exit edge releases exactly what its stage acquired (via
+// releaseAttempt / commitActivation's rollback / abandonAfterPanic) and emits
+// exactly one signal. TestChaos71_SupervisorExitEdgeTable drives every row.
+//
+//	edge                         | released                                   | signal
+//	-----------------------------+--------------------------------------------+-----------------------------
+//	bind / TLS-reload failure    | nothing held (build cleans up)             | recoverable failure, backoff
+//	Stop during a backoff sleep  | nothing held                               | stopped
+//	Stop wins the adopt race     | server + listener                          | stopped
+//	Stop / shutdown at the claim | server + listener + handle                 | stopped
+//	role_conflict                | server + listener + handle (role is not ours) | TERMINAL + alert (bypasses latch)
+//	shutdown after the claim     | server + listener + handle + role rollback, no publish | stopped
+//	address publish rejected     | server + listener + handle + role rollback | recoverable failure, backoff
+//	panic after the claim        | server + listener + handle + role restored | TERMINAL + alert (bypasses latch)
+//	panic in onActivated         | as above + address list republished        | TERMINAL + alert (bypasses latch)
+//	Stop while serving           | handle (Stop owns the graceful drain)      | stopped
+//	serve ends on its own        | server RETIRED (DP transports) + handle    | recoverable failure, backoff
+//	panic after a serve ended    | role restored + address list republished   | TERMINAL + alert (bypasses latch)
+//
 // The panic guard mirrors the SOCKS5 supervisor's rather than using the bare
 // recoverGoroutine: a panic here would otherwise leave the Control Plane
 // permanently gone with every surface still green, which is the CHAOS-24
@@ -410,6 +447,11 @@ func (s *cpListenerSupervisor) run() {
 	defer func() {
 		if v := recover(); v != nil {
 			recordCrash("control-plane-grpc-bind", "", v)
+			// Release everything the interrupted stage held BEFORE reporting
+			// the terminal state: a panic between adopt and Serve otherwise
+			// left the server, the bound socket and the CP role claimed with
+			// nothing serving (Codex review of #1556).
+			s.abandonAfterPanic()
 			noteCPGRPCSupervisorDown("bind loop panicked")
 		}
 	}()
@@ -441,11 +483,11 @@ func (s *cpListenerSupervisor) run() {
 			continue
 		}
 
+		s.cur = &cpAttempt{srv: srv, ln: ln}
 		if !s.adopt(srv) {
 			// Stop won the race: tear down what we just built rather than
 			// serving on a socket nobody will ever stop.
-			srv.Stop()
-			_ = ln.Close()
+			s.releaseAttempt()
 			noteCPGRPCListenerStopped()
 			return
 		}
@@ -459,7 +501,7 @@ func (s *cpListenerSupervisor) run() {
 		// Activation is ASYNCHRONOUS relative to boot, so commitActivation
 		// re-decides against everything that may have changed since: Stop,
 		// process shutdown, another established role, a rejected publish.
-		serve, exit := s.commitAfterAdopt(srv, ln, mode, backoff)
+		serve, exit := s.commitAfterAdopt(mode, backoff)
 		if exit {
 			return
 		}
@@ -495,13 +537,14 @@ func (s *cpListenerSupervisor) run() {
 		s.markFirstAttempt()
 
 		servedFrom := cpGRPCHealthNow()
+		s.cur.serving = true
 		serveErr := srv.Serve(ln)
 		backoff = cpGRPCBackoffAfterServe(backoff, cpGRPCHealthNow().Sub(servedFrom))
 
 		if s.stopRequested() {
 			// Stop owns this server's teardown (graceful drain, then force):
 			// stopping it here would cut that drain short.
-			s.release(srv)
+			s.releaseAttempt()
 			noteCPGRPCListenerStopped()
 			return
 		}
@@ -514,13 +557,62 @@ func (s *cpListenerSupervisor) run() {
 		// only Server.Stop closes those. Dropping the handle without it would
 		// leave an orphaned server generation per listener fault, unreachable
 		// by stopControlPlaneListener (Codex review of #1556).
-		retireCPGRPCServer(srv)
-		s.release(srv)
+		s.releaseAttempt() // retires the server: see releaseAttempt
 		if !s.handleServeEnded(serveErr, backoff) {
 			noteCPGRPCListenerStopped()
 			return
 		}
 		backoff = nextCPGRPCBindBackoff(backoff)
+	}
+}
+
+// releaseAttempt releases what the in-flight attempt holds, by stage:
+//
+//   - not yet serving: stop the server and close the bound listener;
+//   - serving, Serve returned on its own: RETIRE the server — on a fatal
+//     Accept error grpc-go closes the listener but not the transports Data
+//     Planes hold, and only Server.Stop closes those;
+//   - serving, Stop requested: Stop owns the teardown (graceful drain, then
+//     force) — stopping here would cut the drain short.
+//
+// Always clears the published handle. Idempotent; supervisor goroutine only.
+func (s *cpListenerSupervisor) releaseAttempt() {
+	a := s.cur
+	s.cur = nil
+	if a == nil || a.srv == nil {
+		return
+	}
+	switch {
+	case !a.serving:
+		a.srv.Stop()
+		_ = a.ln.Close()
+	case !s.stopRequested():
+		retireCPGRPCServer(a.srv)
+	}
+	s.release(a.srv)
+}
+
+// abandonAfterPanic is the panic edge's release: whatever the interrupted
+// stage held (releaseAttempt), then the CP role — a claim that is only true
+// while a socket is real, and nothing will rebind now — restored to what this
+// supervisor first replaced, and, if the fleet was told this node is a Control
+// Plane, the address list republished without it. Each step is contained:
+// the panic being handled may have come from the very code a step reuses.
+func (s *cpListenerSupervisor) abandonAfterPanic() {
+	contained := func(f func()) {
+		defer func() { _ = recover() }()
+		f()
+	}
+	contained(s.releaseAttempt)
+	if s.committed && s.haveOriginal {
+		contained(func() {
+			if restoreControlPlaneRole(s.original, s.cfg.addr) {
+				s.committed = false
+			}
+		})
+	}
+	if s.everPublished {
+		contained(func() { _, _ = cpPublishCPAddresses() })
 	}
 }
 

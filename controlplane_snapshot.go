@@ -266,6 +266,11 @@ const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
 // caught at commit with a named error, exactly like the count gate.
 const maxSnapshotWireBytes = 120 << 20 // 120 MiB
 
+// snapshotWireBudget is the budget validateSnapshotForPublish enforces —
+// maxSnapshotWireBytes in production. A variable only so a gate can exercise
+// the near-limit edge without marshalling a 120 MiB snapshot.
+var snapshotWireBudget = maxSnapshotWireBytes
+
 // maxSnapURLCategoryHosts bounds the AGGREGATE hosts across all url_categories
 // entries. The entry count is small (maxSnapURLCategories), but each entry
 // carries a Hosts list; without this a handful of categories could smuggle
@@ -581,27 +586,48 @@ var dpControlPlanePollFailing atomic.Bool
 // clear signal (fail-open on new threats). The CP's own local proxying is
 // unaffected (its stores already hold the data); only distribution is gated.
 func (s *ConfigStore) Update(snap ConfigSnapshot) error {
-	if err := validateSnapshotForPublish(snap); err != nil {
-		return s.rejectPublish(err)
+	// CHAOS-71 (CodeRabbit review of #1556): a full publish built its snapshot
+	// — CPAddresses included — BEFORE reaching here, so it can predate a delayed
+	// CP activation that has since published the new address list. Once a
+	// source owns the list, a full publish carries the COMMITTED list instead;
+	// a legitimate change is applied by the reconcile below.
+	//
+	// The substitution happens BEFORE validation, and the commit happens only
+	// if the committed list is still the one substituted (Codex review of
+	// #1556): what is committed is exactly what passed the wire-size gate, so a
+	// near-limit snapshot can never be pushed past maxSnapshotWireBytes by a
+	// longer committed list. Validation runs outside the lock (a full marshal
+	// must not stall DP pollers); a lost race re-substitutes and re-validates.
+	var (
+		src func() []string
+		c   configCommit
+	)
+	for attempt := 0; ; attempt++ {
+		s.mu.RLock()
+		src = s.cpAddrSource
+		owned := src != nil && s.published
+		committed := s.snap.CPAddresses
+		s.mu.RUnlock()
+		cand := snap
+		if owned {
+			cand.CPAddresses = committed
+		}
+		if err := validateSnapshotForPublish(cand); err != nil {
+			return s.rejectPublish(err)
+		}
+		s.mu.Lock()
+		if owned && !slicesEqual(s.snap.CPAddresses, committed) && attempt < cpAddrMergeAttempts {
+			s.mu.Unlock()
+			continue // the owned list changed after validation: re-substitute, re-validate
+		}
+		if owned {
+			cand.CPAddresses = s.snap.CPAddresses // identical unless the retry budget ran out
+		}
+		recordPublishedSnapshotSizes(cand) // for the utilization metrics (cheap; no per-scrape rebuild)
+		c = s.commitLocked(cand)
+		s.mu.Unlock()
+		break
 	}
-
-	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
-
-	s.mu.Lock()
-	src := s.cpAddrSource
-	if src != nil && s.published {
-		// CHAOS-71 (CodeRabbit review of #1556): a full publish built its
-		// snapshot — CPAddresses included — BEFORE taking this lock, so it can
-		// predate a delayed CP activation that has since published the new
-		// address list. Committing the captured list would hand every DP a
-		// list without the new Control Plane. Once a source owns the list, a
-		// full publish keeps the COMMITTED one; any legitimate change is
-		// applied by the reconcile below, which recomputes it after this
-		// commit.
-		snap.CPAddresses = s.snap.CPAddresses
-	}
-	c := s.commitLocked(snap)
-	s.mu.Unlock()
 	s.afterCommit(c)
 	if src != nil {
 		// Propagate an address change this publish was carrying (an HA
@@ -646,8 +672,8 @@ func validateSnapshotForPublish(snap ConfigSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("config snapshot marshal failed: %w", err)
 	}
-	if len(b) > maxSnapshotWireBytes {
-		return fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), maxSnapshotWireBytes)
+	if len(b) > snapshotWireBudget {
+		return fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), snapshotWireBudget)
 	}
 	return nil
 }

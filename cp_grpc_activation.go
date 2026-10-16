@@ -44,12 +44,9 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"google.golang.org/grpc"
 )
 
 // cpActivationShutdown is set — under cpActivationGateMu — by the shutdown
@@ -170,6 +167,10 @@ func (s *cpListenerSupervisor) claimRole() (prev cpRoleFields, outcome cpCommitO
 		func(cur string) bool { return cur == "control-plane" && s.committed },
 		func() bool { return s.stopRequested() || cpActivationShutdown.Load() })
 	if outcome == cpCommitted {
+		if prev.role != "control-plane" {
+			// First claim of a fresh role: what a terminal exit restores.
+			s.original, s.haveOriginal = prev, true
+		}
 		s.committed = true
 	}
 	return prev, outcome, conflictRole
@@ -203,6 +204,7 @@ func (s *cpListenerSupervisor) publishAndActivate() (cpCommitOutcome, error) {
 		return cpCommitPublishFailed, fmt.Errorf("%w: %w", errCPGRPCAddressPublish, perr)
 	}
 	if changed {
+		s.everPublished = true
 		// Operator- and peer-supplied addresses: format, sanitize (CWE-117), %q.
 		logger.Printf("ControlPlane: published the committed CP address list %q",
 			sanitizeLog(fmt.Sprint(globalConfigStore.Get().CPAddresses)))
@@ -215,7 +217,7 @@ func (s *cpListenerSupervisor) publishAndActivate() (cpCommitOutcome, error) {
 // verdict into the loop's next move: serve it, retry with backoff, or exit.
 // Every non-serve path tears the built server down; nothing it bound outlives
 // the decision.
-func (s *cpListenerSupervisor) commitAfterAdopt(srv *grpc.Server, ln net.Listener, mode string, backoff time.Duration) (serve, exit bool) {
+func (s *cpListenerSupervisor) commitAfterAdopt(mode string, backoff time.Duration) (serve, exit bool) {
 	outcome, conflictRole, err := s.commitActivation()
 	if outcome == cpCommitted {
 		// The success line is emitted AFTER the bind AND the commit, never
@@ -234,9 +236,7 @@ func (s *cpListenerSupervisor) commitAfterAdopt(srv *grpc.Server, ln net.Listene
 		return true, false
 	}
 
-	s.release(srv)
-	srv.Stop()
-	_ = ln.Close()
+	s.releaseAttempt()
 	switch outcome {
 	case cpCommitStopped:
 		noteCPGRPCListenerStopped()

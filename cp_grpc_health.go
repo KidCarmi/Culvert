@@ -213,6 +213,13 @@ type cpGRPCListenerHealth struct {
 	// restart is the only remedy. One field for both would send the operator
 	// the wrong way half the time.
 	supervisorDown bool
+
+	// terminalAlerted is the TERMINAL state's own fire-once latch, separate
+	// from `alerted`: a recoverable episode that already paged ("the listener
+	// keeps retrying") and then ESCALATES to terminal must page again, because
+	// the one alert subscribers hold carries the opposite operator action —
+	// the sibling SOCKS5 plane's escalation rule (noteSOCKS5DownWithRecovery).
+	terminalAlerted bool
 }
 
 var cpGRPCListener cpGRPCListenerHealth
@@ -268,6 +275,7 @@ func noteCPGRPCConfigured(addr string) {
 	cpGRPCListener.addr = addr
 	cpGRPCListener.stopped = false
 	cpGRPCListener.supervisorDown = false
+	cpGRPCListener.terminalAlerted = false
 	cpGRPCListener.mu.Unlock()
 }
 
@@ -502,6 +510,7 @@ func noteCPGRPCBound() (suppressed int64, recovered bool) {
 	cpGRPCListener.logAt = time.Time{}
 	cpGRPCListener.alerted = false
 	cpGRPCListener.supervisorDown = false
+	cpGRPCListener.terminalAlerted = false
 	cpGRPCListener.mu.Unlock()
 	return suppressed, recovered
 }
@@ -534,10 +543,10 @@ func noteCPGRPCSupervisorDown(reason string) {
 	if cpGRPCListener.firstFailure.IsZero() {
 		cpGRPCListener.firstFailure = cpGRPCHealthNow()
 	}
-	alertNow := !cpGRPCListener.alerted
-	if alertNow {
-		cpGRPCListener.alerted = true
-	}
+	// Terminal escalation BYPASSES the recoverable latch (see terminalAlerted).
+	alertNow := !cpGRPCListener.terminalAlerted
+	cpGRPCListener.terminalAlerted = true
+	cpGRPCListener.alerted = true
 	cpGRPCListener.mu.Unlock()
 
 	if alertNow {
@@ -566,6 +575,7 @@ func noteCPGRPCActivationRejected() {
 	cpGRPCListener.serving = false
 	cpGRPCListener.stopped = false
 	cpGRPCListener.supervisorDown = false
+	cpGRPCListener.terminalAlerted = false
 	cpGRPCListener.firstFailure = time.Time{}
 	cpGRPCListener.lastFailure = time.Time{}
 	cpGRPCListener.lastReason = ""
@@ -796,6 +806,7 @@ func resetCPGRPCListenerHealthForTest() {
 	cpGRPCListener.suppressed = 0
 	cpGRPCListener.alerted = false
 	cpGRPCListener.supervisorDown = false
+	cpGRPCListener.terminalAlerted = false
 }
 
 // cpGRPCListenerStatus is the /health posture value. Empty on a node that is
