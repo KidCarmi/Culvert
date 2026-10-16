@@ -218,6 +218,13 @@ func (sc *refScope) site(ref *ast.SelectorExpr, enclosing string, inParamClosure
 //
 // Production satisfies it: the arguments are d (receiver) plus rec, resp and observedAt, all
 // locals assigned from the authenticated dial, under catalog.* type qualifiers.
+//
+// A LOCAL IS ACCEPTED BY ITS DECLARATION, NOT BY ITS ORIGIN (Codex round 14, P1, PR #1439,
+// reproduced through referencesInSource before it was recorded). `raw := fabricatedRaw` inside an
+// escaping closure, followed by IngestObserved(…{Raw: raw}…), is attributed to the allowlisted
+// declaration, while passing fabricatedRaw directly is refused. Where a local's value comes from is
+// a dataflow question; it is recorded in the ledger (§25f, Round 14) under round 13's rule rather
+// than chased with another syntactic case. Nothing in this tree does it.
 func (sc *refScope) argsEscapeDecl(args []ast.Expr) bool {
 	escapes := false
 	for _, a := range args {

@@ -3565,7 +3565,7 @@ otherwise carry the shape of the peer's identity, fingerprint or endpoint out to
 fingerprint, endpoint or raw identity is exposed. The fine class stays where it is safe: the
 activation surface and the log.
 
-### The race/time matrix (10 cases, no sleeps)
+### The race/time matrix (11 cases, no sleeps)
 
 Driven against the REAL live-execution path and a REAL local HTTPS peer, with the boundary clock
 and the peer observation under test control. There is not a single `time.Sleep`: expiry is placed
@@ -4115,6 +4115,57 @@ resolution recorded above remains the real fix.
 availability defect beside it. Blockers 1, 2, 3, 8, 10, 12 and 15 are untouched, and the §26 verdict
 is unchanged.
 
+### Round 14: one wall closed by rule, one evasion recorded, one contract question raised (Codex, PR #1439)
+
+A review of `ad350fb` (the owner's merge of main) returned three findings. All three were reproduced
+before any was agreed with.
+
+**P1 — an alternate client-return path past the retry-free wall. Real, and FIXED by a closed rule.**
+`newCallLimitsExpr` checked that the ONE `upstreamclient.New` call was returned, and stopped there.
+A constructor with a second return — `if lerr != nil { return tunedUpstreamClient() }`, or a separate
+`return helperClient(upstreamclient.DefaultLimits())` branch — still showed one `New` call, one
+retry-free binding and one returned call, so the wall accepted a constructor that hands the live tier
+a retry-ON client on that branch. Both shapes were measured as accepted by the previous version.
+
+This one is NOT a dataflow question, and that is why it is fixed rather than recorded: the set of
+values a function can return is exactly its return statements, all of them syntactically visible.
+`alternateClientReturn` therefore closes the class instead of naming a shape — every return in the
+constructor's own body must be the checked call or return a literal `nil` client. Both shapes are now
+rows in `TestCanaryPath_RetryFreeWallIsNotVacuous`, the production constructor (one `nil, lerr` error
+return plus the checked call) still passes, and disabling the new check makes the not-vacuous test
+fail on the first new row.
+
+**P1 — caller-mutable data laundered through a local. Real, and RECORDED under round 13's rule.**
+`argsEscapeDecl` accepts an argument root that the declaration declared locally, by name. An escaping
+zero-argument closure inside `Discovery.Discover` that executes `raw := fabricatedRaw` and passes
+`raw` to `IngestObserved` is therefore attributed to the allowlisted declaration, where passing
+`fabricatedRaw` directly is refused as `<caller-mutable input>`. Reproduced through
+`referencesInSource` with every other argument held local, so the local is the only variable.
+
+Closing it means tracing where a local's VALUE comes from, which is the dataflow question round 13
+named and declined to answer with a hand-written syntactic predicate; this is the fourteenth shape
+of that sequence. Nothing in the production tree does it — the one real reference is a direct call
+whose arguments are assigned from the authenticated dial — and the behavioural guarantees listed
+under round 13 are unchanged. The comment on `argsEscapeDecl`, which said every root must be
+something the declaration "controls", now says that a local is accepted by its declaration and not
+by its origin. The `types.Object`/SSA resolution recorded above remains the real fix.
+
+**P2 — an empty `nextCursor` is treated as a complete result. Verified, and RAISED, not changed
+here.** `catalog.discoveryComplete` (from PR #1243, not this PR) returns true for an absent cursor
+OR an explicitly empty string, and `TestIngestPaginatedPageDoesNotWithdraw` pins the empty-string
+case as complete, so a peer returning `"nextCursor":""` on a first page has tools absent from that
+page withdrawn, and this PR's refresh reports `complete:true`. The MCP 2025-06-18 schema types the
+cursor as an opaque string with no non-empty constraint and documents a present cursor as meaning
+more results MAY exist, so the reading Codex gives is the schema's. The refresh endpoint makes the
+path operator-reachable on demand, but the contract itself is main-owned and also governs startup
+discovery; reversing it inverts a test from another PR and changes WHEN withdrawal fires, which the
+`Complete` field's own comment already says belongs in its own review. The proposed change is one
+line — `return !ok` in `discoveryComplete` — plus inverting the empty-cursor half of
+`TestIngestPaginatedPageDoesNotWithdraw`, and is put to the owner rather than pushed.
+
+**Nothing else moves.** Blocker 11 stays CLOSED. Blockers 1, 2, 3, 8, 10, 12 and 15 are untouched,
+and the §26 verdict is unchanged.
+
 ### Status — blocker 11 is CLOSED, and nothing else moves
 
 The closure bar was stated before the work: the ledger may change `#11 OPEN -> CLOSED` only once
@@ -4416,10 +4467,11 @@ implements the MCP session lifecycle.
    `CallOptions.PreSend` after the pool wait and after the TLS handshake. A request cannot spend
    execution authority on an observation that has expired.
 
-   *Proven.* A 10-case race/time matrix with no sleeps, driving the real live path against a real
+   *Proven.* An 11-case race/time matrix with no sleeps, driving the real live path against a real
    local HTTPS peer, expiry placed by counting boundary clock reads; a byte-level proof that an
    expiry after connect yields **zero MCP request bytes** (not merely an uncalled handler); measured
-   anti-vacuity (delete the check and 7 of 10 fail); and a 14-class runtime mutation campaign at
+   anti-vacuity per site (deleting the boundary call fails RT02-RT04, deleting the admission call
+   fails RT11, deleting both fails eight of eleven); and a 14-class runtime mutation campaign at
    **14 CAUGHT, 0 SURVIVED**, re-measured end to end against the fixed tree.
 
    *Recorded limitations, both fail-closed.* A target on the second or later page of a paginated

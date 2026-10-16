@@ -212,6 +212,22 @@ func TestCanaryPath_RetryFreeWallIsNotVacuous(t *testing.T) {
 		var lim = upstreamclient.DefaultLimits()
 		return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())
 	}`},
+		// Codex round 14, P1 — a second client-bearing return path. Both were ACCEPTED by the
+		// previous version: the checked call is returned on one branch, so every other check is
+		// satisfied, while the other branch hands back a client built elsewhere.
+		{"an alternate return path on the error branch", `lim, lerr := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	if lerr != nil {
+		return tunedUpstreamClient()
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
+		{"an alternate return path on a separate branch", `lim, lerr := upstreamclient.RetryFreeLimits(upstreamclient.LimitConfig{})
+	if lerr != nil {
+		return nil, lerr
+	}
+	if fastPath() {
+		return helperClient(upstreamclient.DefaultLimits())
+	}
+	return upstreamclient.New(upstreamclient.Config{Limits: lim}, limits.DefaultGateway())`},
 	} {
 		if why := retryFreeLimitsViolation(synthProductionDeps(bad.body)); why == "" {
 			t.Fatalf("the retry-free wall must reject %q; it accepted it", bad.name)
@@ -517,6 +533,16 @@ func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (limitsExpr ast.Expr, why s
 		return nil, "the " + pkg + ".New call's result is not returned, so the client this " +
 			"constructor actually hands back is built somewhere this gate cannot see"
 	}
+	// AND IT MUST BE THE ONLY CLIENT-BEARING RETURN. Finding the checked call in one return says
+	// nothing about the others: `if lerr != nil { return tunedUpstreamClient() }` beside the
+	// checked return hands back a retry-ON client on that branch while every other check still
+	// sees one New call and one retry-free binding (Codex round 14, P1 — verified as a real
+	// bypass before it was agreed with). Rather than chase branch shapes, the rule is closed:
+	// every return in the constructor's own body is either the checked call or returns a
+	// literal nil client.
+	if why := alternateClientReturn(fn, calls[0]); why != "" {
+		return nil, why
+	}
 	if len(calls[0].Args) == 0 {
 		return nil, pkg + ".New is called with no arguments"
 	}
@@ -687,6 +713,32 @@ func isReturnedCall(fn *ast.FuncDecl, call *ast.CallExpr) bool {
 		return true
 	})
 	return returned
+}
+
+// alternateClientReturn returns "" when every return statement in fn's own body either returns
+// call itself or returns a literal nil client (the error path). Any other return — a helper, a
+// second constructor, a variable, a bare return through named results — is a path whose client
+// this gate cannot follow, and is refused.
+func alternateClientReturn(fn *ast.FuncDecl, call *ast.CallExpr) string {
+	why := ""
+	inspectOwnBody(fn, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok || why != "" {
+			return why == ""
+		}
+		if len(ret.Results) == 1 && ret.Results[0] == call {
+			return true
+		}
+		if len(ret.Results) >= 1 {
+			if id, ok := ret.Results[0].(*ast.Ident); ok && id.Name == "nil" {
+				return true
+			}
+		}
+		why = "a return path hands back a client that is neither the checked New call nor nil, " +
+			"so the live tier can receive a client this gate never inspected"
+		return false
+	})
+	return why
 }
 
 func isCallTo(e ast.Expr, pkg, fn string) bool {
