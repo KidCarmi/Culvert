@@ -201,7 +201,7 @@ Each claim below was verified mechanically, not by reading intent.
 | Allocation gates | `pr-fast-gate.yml`, `qa-gate.yml`, `proxy-weekly-stress.yml` | all three extended to `./internal/admission` — without this the relocated `TestBenchGate_*` would have silently stopped running |
 | Engine isolation (ADR-0039) | `boundary_test.go`: stdlib-only import allowlist, no `init()`, no package state, not-vacuous check + regression control | enforced structurally |
 | Dependency locks (#1525) | 4 entries | forward-only bumps, **dev-only**, canonical registry, integrity hashes intact; no runtime exposure change (`frontend/dist` unaffected) |
-| CI workflow edits | reviewed for `continue-on-error`, dropped `needs`, softened conditions | **none**; annotation steps are `if: failure()` only, and `set -o pipefail` was added so `… | tee` still propagates failure |
+| CI workflow edits | reviewed for `continue-on-error`, dropped `needs`, softened conditions | **none**; annotation steps are `if: failure()` only, and `set -o pipefail` was added so `… \| tee` still propagates failure |
 
 Two incidental improvements worth recording: the extraction **deleted** `resetForTest` /
 `applyAtForTest` from production files (instance-owned state removed the need for an exported
