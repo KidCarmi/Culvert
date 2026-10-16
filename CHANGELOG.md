@@ -130,7 +130,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   reads 0 while the listener serves. A restarted leader that is still waiting
   out its fencing lease when shutdown begins now stops at once instead of
   outliving the shutdown watchdog. A `role_conflict` listener alert now
-  describes a local CP/DP configuration conflict rather than a fleet outage. A refused admin/promote
+  describes a local CP/DP configuration conflict rather than a fleet outage. A
+  Control Plane address list that keeps being rejected at commit now pages
+  once per episode instead of every 30 s. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

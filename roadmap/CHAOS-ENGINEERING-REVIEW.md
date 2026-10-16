@@ -8773,6 +8773,27 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Fourteenth review round — one page per address-rejection episode.** A
+  persistently oversized owned address republish is retried every ≤30 s by
+  the pending-republish loop. Every rejection went through `rejectPublish`
+  and fired `config_snapshot_rejected` again, and with the webhook dedupe
+  window also at 30 s that paged roughly every 30 s forever. The listener
+  supervisor's activation re-runs the same address publish on every rebind,
+  which is the same class.
+
+  The address-kind rejection now pages once per episode
+  (`ConfigStore.addrRejectPaged`): the first rejection pages, so fail-closed
+  visibility stays, and later ones in the same episode only log. The pending
+  state still counts every attempt. The episode ends when an address publish
+  succeeds or finds the list current, or when ownership is released or
+  replaced, and the next failure pages again. Full publishes are operator
+  actions, never retried in a loop, and still page on each rejection.
+
+  Gates: `TestChaos71_AddressRejectionPagesOncePerEpisode` (N retries plus
+  repeated activation publishes give one page; success then a new failure
+  gives one more; a superseding owner and a release each open a new episode)
+  and `TestChaos71_FullPublishRejectionsStillPageEach`. Four mutations each
+  fail a gate, including the negative control that suppresses the first page.
 * **Thirteenth review round.**
 
   (a) **The HA resume no longer runs under the activation gate.** The

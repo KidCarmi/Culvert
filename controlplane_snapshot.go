@@ -453,6 +453,15 @@ type ConfigStore struct {
 	// (publishKind).
 	addrPublishErr string
 	addrPublishTS  string
+	// addrRejectPaged latches the config_snapshot_rejected page for the
+	// current ADDRESS-publish rejection episode (Codex review of #1556): a
+	// persistently oversized owned republish is retried every ≤30 s by the
+	// pending-republish loop (and by the listener supervisor's activation),
+	// and the webhook dedupe window is 30 s, so paging per attempt would page
+	// forever. The episode's FIRST rejection pages; it is cleared, so the next
+	// failure pages again, when an address publish succeeds (or finds the list
+	// already current) and when ownership is released or replaced.
+	addrRejectPaged bool
 	// published is true once a VALID snapshot has been published at least once.
 	// It stays false if the CP's initial publish was rejected at commit — in
 	// which case s.snap is still the zero ConfigSnapshot and the cluster RPCs
@@ -666,6 +675,7 @@ func (s *ConfigStore) releaseCPAddressSource() {
 	s.mu.Lock()
 	s.cpAddrSource = nil
 	s.addrPublishErr, s.addrPublishTS = "", ""
+	s.addrRejectPaged = false
 	s.mu.Unlock()
 	s.addrPubMu.Lock()
 	s.addrPub = cpAddrPublishState{retrying: s.addrPub.retrying, gen: s.addrPub.gen + 1}
@@ -677,6 +687,7 @@ func (s *ConfigStore) releaseCPAddressSource() {
 func (s *ConfigStore) setCPAddressSource(build func() []string) {
 	s.mu.Lock()
 	s.cpAddrSource = build
+	s.addrRejectPaged = false // a new owner starts a new episode
 	s.mu.Unlock()
 }
 
@@ -874,6 +885,7 @@ func (s *ConfigStore) clearPublishErrLocked(kind publishKind) {
 		return
 	}
 	s.addrPublishErr, s.addrPublishTS = "", ""
+	s.addrRejectPaged = false // the episode ended: the next rejection pages again
 }
 
 // afterCommit records the blocklist delta and notifies subscribers OUTSIDE the
@@ -957,14 +969,22 @@ func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool
 func (s *ConfigStore) rejectPublish(kind publishKind, err error) error {
 	s.mu.Lock()
 	ts := time.Now().UTC().Format(time.RFC3339)
+	page := true
 	if kind == publishFull {
 		s.lastPublishErr, s.lastPublishTS = err.Error(), ts
 	} else {
 		s.addrPublishErr, s.addrPublishTS = err.Error(), ts
+		page = !s.addrRejectPaged // one page per address-rejection episode
+		s.addrRejectPaged = true
 	}
 	curVer := s.version
 	s.mu.Unlock()
+	// The log line still records EVERY rejection (and the pending state counts
+	// each attempt); only the page is latched.
 	logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
+	if !page {
+		return err
+	}
 	fireAlert("config_snapshot_rejected", AlertPayload{
 		Event:  "config_snapshot_rejected",
 		Actor:  "culvert",
