@@ -2,8 +2,11 @@
 # Copy to config.yaml and edit as needed.
 # A non-empty CLI flag overrides the matching value in this file (an empty, zero or false flag
 # falls through to it). Exceptions are noted per key: list keys such as ui_sans are MERGED with
-# their flag, and for keys the admin UI also manages (e.g. ui_sans, log_level) a value saved there
-# (admin_settings.json in the data dir) is re-applied at boot after this file and the CLI, and wins.
+# their flag, and for keys the admin UI also manages (e.g. ui_sans, log_level, syslog_addr,
+# otlp_endpoint) a NON-EMPTY value saved there (admin_settings.json in the data dir) is re-applied at
+# boot after this file and the CLI, and wins. A value cleared in the UI does NOT win: after a restart
+# the value set here or on the CLI applies again (e.g. a syslog or OTLP exporter the UI disabled
+# resumes), so remove it here and from the CLI as well.
 #
 # Usage:
 #   ./culvert -config config.yaml
@@ -135,15 +138,20 @@ cdr:
   enabled: false
   endpoint: ""            # Sluice "host:port" (e.g. "sluice:8443"); required when enabled
   fail_mode: "open"       # A live Sanitize call that fails (unreachable mid-call / timeout / ERROR): "open" = deliver the
-                          # original (CDR_ERROR request-log event + cdr_unavailable alert) | "closed" = 403 block page.
+                          # original (CDR_ERROR request-log event) | "closed" = 403 block page. The cdr_unavailable
+                          # alert fires only for transport/RPC failures, NOT for an ERROR result Sluice returns.
                           # NOT consulted when there is no client to call (initial dial failed at startup, nothing
                           # enrolled, every breaker open): files then pass through unsanitized in either mode.
   default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
   default_mode: "ENFORCE" # "ENFORCE" | "REPORT_ONLY" | "BYPASS_WITH_REPORT"
   timeout_sec: 35         # Per-Sanitize deadline in seconds (must be >= 30)
-  max_file_size_mb: 0     # Per-file CDR cap (0 = default 50 MiB). Larger files are NOT rejected: they skip
-                          # sanitization and pass through unmodified (SKIPPED_OVERSIZE), whatever fail_mode
-                          # says. Keep equal to Sluice's own cap.
+  max_file_size_mb: 0     # Per-file CDR cap (0 = default 50 MiB), compared against the bytes CDR receives. CDR
+                          # receives only the scan window (security_scan.max_scan_mb): a response larger than the
+                          # window is sent to Sluice TRUNCATED and the remainder is appended UNSANITIZED, so the
+                          # delivered file can be corrupt and keep active content past the window. CDR covers a
+                          # file completely only when it fits within max_scan_mb. A body that fits the window but
+                          # exceeds this cap is NOT rejected: it skips sanitization and passes through unmodified
+                          # (SKIPPED_OVERSIZE), whatever fail_mode says. Keep equal to Sluice's own cap.
   chunk_size_kb: 0        # gRPC stream chunk in KiB, 16-3072 (0 = default 64 KiB)
   server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix). REQUIRED
                           # for the config-only bootstrap path (no enrolled instance): without it the client is never
@@ -194,7 +202,10 @@ default_action: ""      # "allow" (passthrough) | "deny" (zero-trust); auto-dete
 audit_log_file: ""      # Persistent JSONL audit log path (e.g. "/data/audit.jsonl")
 syslog_addr: ""         # Syslog forwarding: "udp://host:514" or "tcp://host:601"
 syslog_format: ""       # "rfc3164" (default) | "rfc5424" (preferred by Splunk HEC / Elastic / QRadar)
-otlp_endpoint: ""       # OTLP collector base URL, e.g. "http://otel-collector:4318" (metrics + traces)
+otlp_endpoint: ""       # OTLP/HTTP collector base URL (metrics + traces), e.g. "https://otlp.example.com:4318".
+                        # The exporters dial through the SSRF guard, which refuses loopback, RFC 1918, link-local
+                        # and other internal addresses, so a collector reached at a private address (for example
+                        # a Docker/Kubernetes service name such as "otel-collector") is refused.
 request_log_file: ""    # Persistent JSONL request log path; empty = in-memory only (lost on restart)
 request_log_max_mb: 100 # Request-log rotation size in MB
 
