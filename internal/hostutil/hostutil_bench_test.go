@@ -24,6 +24,13 @@ import (
 //	  ACELabel             833 ns/op 256 B  7     unchanged (slow path)
 //	  UnicodeIDN           674 ns/op 192 B  5     unchanged (slow path)
 //
+// The two IDN rows are no longer the shipped cost of a REPEAT lookup: the slow
+// path is memoized (idnamemo.go), so a host already seen answers in ~54-90 ns
+// with no allocation, and the ~10x per-request fan-out noted below costs ONE
+// idna.ToASCII instead of ten. The rows above remain the honest cost of the
+// FIRST lookup of a given host, which is what this file measures. The memo's
+// own before/after, bound and adversarial cases are in idnamemo_test.go.
+//
 // IP literals are NOT unchanged: they now take the fast path too (every IP
 // literal is pure ASCII and ACE-free), which skips the net.ParseIP probe that
 // allocated on the bracketed-IPv6 shape.
@@ -65,7 +72,11 @@ var hostShapes = []struct {
 	// IDN/ACE hosts legitimately take the slow path: idna.ToASCII genuinely has
 	// work to do. Bounded generously — this gate is here to catch an ORDER-of-
 	// magnitude regression in the slow path, not to pin an x/net implementation
-	// detail that may shift between releases.
+	// detail that may shift between releases. The ceilings stay where they are
+	// deliberately: allocCount warms before measuring, so with the memo in place
+	// these shapes now measure 0, and TestIDNMemo_AllocRegression is the test
+	// that asserts that exactly. Keeping this gate loose means it still catches
+	// an x/net blow-up on a memo MISS, which is the thing it was written for.
 	{"ACELabel", "xn--bcher-kva.example.com", 24, "idna.ToASCII decodes and validates the ACE label"},
 	{"UnicodeIDN", "bücher.example.com", 24, "idna.ToASCII punycode-encodes the non-ASCII label"},
 }
