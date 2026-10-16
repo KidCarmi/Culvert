@@ -27,6 +27,11 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPTS="${REPO_ROOT}/.github/scripts"
+# The compiler every fixture claims: the root go.mod pin, read the way the
+# plan script reads it, so a toolchain bump never leaves these cases asserting
+# a candidate built by yesterday's compiler against today's pin.
+TC="$(sed -n 's/^toolchain //p' "${REPO_ROOT}/go.mod")"
+[ -n "$TC" ] || { echo "candidate-promotion cases: go.mod carries no toolchain line" >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -226,11 +231,11 @@ statement() { # statement <file> <type> <digest> <predicate-json>
     '{_type:"https://in-toto.io/Statement/v1", subject:[{name:"ghcr.io/kidcarmi/culvert", digest:{sha256:$d}}], predicateType:$t, predicate:$p}' > "$1"
 }
 record_pred() { # record_pred <digest> <sha> <version> [platforms-json]
-  jq -n --arg d "$1" --arg s "$2" --arg v "$3" --argjson pl "${4:-$(live_json "$1")}" --arg img "$IMG" \
+  jq -n --arg d "$1" --arg s "$2" --arg v "$3" --argjson pl "${4:-$(live_json "$1")}" --arg img "$IMG" --arg tc "$TC" \
     '{schema:"culvert.release-candidate/v1", repository:"KidCarmi/Culvert", workflow:".github/workflows/ci.yml",
       ref:"refs/heads/main", event:"push", source_sha:$s, version:$v, image:$img, index_digest:$d,
       platforms:$pl, producer:{run_id:"111", run_attempt:"1", job:"docker"},
-      build_inputs:{go_toolchain:"go1.26.8", builder_image:"golang:1.26.8-alpine@sha256:x"}}'
+      build_inputs:{go_toolchain:$tc, builder_image:("golang:" + ($tc|ltrimstr("go")) + "-alpine@sha256:x")}}'
 }
 qual_pred() { # qual_pred <digest> <sha> <version> [result]
   jq -n --arg d "$1" --arg s "$2" --arg v "$3" --arg r "${4:-pass}" --argjson pl "$(live_json "$1")" \
@@ -433,18 +438,18 @@ contents() { # contents <amd64 compiler> <arm64 compiler> <arm64 goarch> <versio
   printf '%s\n' "$4" > "$WORK/files/amd64/VERSION"; printf '%s\n' "$4" > "$WORK/files/arm64/VERSION"
   export DOCKER_FILES="$WORK/files"
 }
-verify() { bash "$SCRIPTS/candidate-verify-contents.sh" "$IMG" "$D1" "$SHA" v1.0.5 go1.26.8 >"$WORK/log" 2>&1; }
-reset; index "$D1"; printf '%s|%s\n' "$D1" "$SHA" >> "$WORK/labels"; contents go1.26.8 go1.26.8 arm64 v1.0.5
+verify() { bash "$SCRIPTS/candidate-verify-contents.sh" "$IMG" "$D1" "$SHA" v1.0.5 "$TC" >"$WORK/log" 2>&1; }
+reset; index "$D1"; printf '%s|%s\n' "$D1" "$SHA" >> "$WORK/labels"; contents "$TC" "$TC" arm64 v1.0.5
 if verify; then ok "a correct candidate verifies on both platforms"; else bad "a correct candidate verifies on both platforms" "$(cat "$WORK/log")"; fi
-contents go1.26.8 go1.27.1 arm64 v1.0.5
+contents "$TC" go1.27.1 arm64 v1.0.5
 if verify; then bad "an arm64 binary from another compiler fails qualification" "passed"
 elif log_has "go1.27.1"; then ok "an arm64 binary from another compiler fails qualification"
 else bad "an arm64 binary from another compiler fails qualification" "$(cat "$WORK/log")"; fi
-contents go1.26.8 go1.26.8 amd64 v1.0.5
+contents "$TC" "$TC" amd64 v1.0.5
 refused "an amd64 binary inside the arm64 image fails qualification" "GOARCH=amd64" verify
-contents go1.26.8 go1.26.8 arm64 v1.0.4
+contents "$TC" "$TC" arm64 v1.0.4
 refused "a wrong embedded version file fails qualification" "/app/VERSION says" verify
-contents go1.26.8 go1.26.8 arm64 v1.0.5; : > "$WORK/labels"; printf '%s|%s\n' "$D1" "$OTHER" >> "$WORK/labels"
+contents "$TC" "$TC" arm64 v1.0.5; : > "$WORK/labels"; printf '%s|%s\n' "$D1" "$OTHER" >> "$WORK/labels"
 refused "a candidate built from another commit fails qualification" "names revision" verify
 : > "$WORK/labels"; printf '%s|%s\n' "$D1" "$SHA" >> "$WORK/labels"; : > "$WORK/index"; index "$D1" linux/amd64
 refused "a candidate missing a platform fails qualification" "want exactly 1" verify
@@ -472,13 +477,13 @@ echo "── the qualification sequence on one image store ──"
 # Against a store that keeps one image per digest reference this sequence
 # failed on main run 36111817278 ("cannot overwrite digest").
 qualify_sequence() {
-  bash "$SCRIPTS/candidate-verify-contents.sh" "$IMG" "$D1" "$SHA" v1.0.5 go1.26.8 &&
+  bash "$SCRIPTS/candidate-verify-contents.sh" "$IMG" "$D1" "$SHA" v1.0.5 "$TC" &&
   RUN_CHECK_TRIES=2 RUN_CHECK_DELAY=0 bash "$SCRIPTS/candidate-run-check.sh" "$IMG" "$D1" v1.0.5 linux/amd64 &&
   RUN_CHECK_TRIES=2 RUN_CHECK_DELAY=0 bash "$SCRIPTS/candidate-run-check.sh" "$IMG" "$D1" v1.0.5 linux/arm64 &&
   ref="$(bash "$SCRIPTS/candidate-platform-ref.sh" "$IMG" "$D1" linux/amd64)" &&
   [ "$ref" = "${IMG}@${A1}" ] && "$BIN/docker" pull --platform linux/amd64 "$ref"
 }
-reset; index "$D1"; printf '%s|%s\n' "$D1" "$SHA" >> "$WORK/labels"; contents go1.26.8 go1.26.8 arm64 v1.0.5
+reset; index "$D1"; printf '%s|%s\n' "$D1" "$SHA" >> "$WORK/labels"; contents "$TC" "$TC" arm64 v1.0.5
 export RUN_AGENT_VERSION=v1.0.5 RUN_PROXY_VERSION=v1.0.5
 if qualify_sequence >"$WORK/log" 2>&1 && ! grep -q "@${D1}|" "$WORK/store"; then
   ok "every platform is pulled by its own manifest digest, so one store holds them all"

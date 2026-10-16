@@ -1,4 +1,4 @@
-package main
+package admission
 
 import (
 	"fmt"
@@ -374,7 +374,7 @@ func TestIPFilterView_EveryMutatorRepublishes(t *testing.T) {
 //
 // Filing a case under a mutator must mean the mutator really ran and really
 // republished. That is proved at RUNTIME, not by matching the case's source:
-// publishView reports every publish through ipFilterPublishHook, the hook
+// publishView reports every publish through its publishHook, the hook
 // attributes it to the nearest exported *IPFilter method on the call stack,
 // and only publishes of the case's own filter are recorded. A case that calls
 // a different method, calls the right one on another receiver, or never
@@ -392,27 +392,17 @@ type ipFilterPublishRecorder struct {
 	events []ipFilterPublishEvent
 }
 
-var (
-	ipFilterRecorders       sync.Map // *IPFilter -> *ipFilterPublishRecorder
-	ipFilterPublishHookOnce sync.Once
-)
-
-func installIPFilterPublishHook() {
-	ipFilterPublishHookOnce.Do(func() {
-		h := func(f *IPFilter) {
-			r, ok := ipFilterRecorders.Load(f)
-			if !ok {
-				return
-			}
-			rec := r.(*ipFilterPublishRecorder)
-			rec.mu.Lock()
-			rec.events = append(rec.events, ipFilterPublishEvent{
-				method: publishingIPFilterMethod(), view: f.view.Load(),
-			})
-			rec.mu.Unlock()
-		}
-		ipFilterPublishHook.Store(&h)
-	})
+func recordIPFilterPublishes(f *IPFilter) *ipFilterPublishRecorder {
+	rec := &ipFilterPublishRecorder{}
+	h := func(published *IPFilter) {
+		rec.mu.Lock()
+		rec.events = append(rec.events, ipFilterPublishEvent{
+			method: publishingIPFilterMethod(), view: published.view.Load(),
+		})
+		rec.mu.Unlock()
+	}
+	f.publishHook.Store(&h)
+	return rec
 }
 
 // publishingIPFilterMethod walks the stack to the nearest EXPORTED *IPFilter
@@ -438,11 +428,8 @@ func publishingIPFilterMethod() string {
 // unless the named mutator published a NEW view of that filter during it.
 func proveRepublish(t *testing.T, mutator string, run func(*testing.T, *IPFilter)) error {
 	t.Helper()
-	installIPFilterPublishHook()
 	f := &IPFilter{single: map[string]bool{}}
-	rec := &ipFilterPublishRecorder{}
-	ipFilterRecorders.Store(f, rec)
-	defer ipFilterRecorders.Delete(f)
+	rec := recordIPFilterPublishes(f)
 
 	run(t, f)
 
@@ -726,18 +713,22 @@ func TestBenchGate_IPFilterBulkLoadIsLinear(t *testing.T) {
 		return time.Since(start)
 	}
 
-	// Best-of-three: a scheduler hiccup inflates a sample, never deflates it.
-	best := func(n int) time.Duration {
-		d := measure(n)
-		for i := 0; i < 2; i++ {
-			if e := measure(n); e < d {
-				d = e
-			}
+	// Pair the sizes and alternate their order so they sample the same load
+	// phases while this package runs alongside the root suite. Grouped samples
+	// produced 10.81x in CI for the unchanged linear implementation. As in the
+	// exemption bulk-load gate, take each size's best of nine; retain the sizes,
+	// GC settling, measured operation and 8x bound against per-entry publishing.
+	dSmall, dLarge := measure(small), measure(large)
+	for i := 1; i < 9; i++ {
+		var nextSmall, nextLarge time.Duration
+		if i%2 == 0 {
+			nextSmall, nextLarge = measure(small), measure(large)
+		} else {
+			nextLarge, nextSmall = measure(large), measure(small)
 		}
-		return d
+		dSmall, dLarge = min(dSmall, nextSmall), min(dLarge, nextLarge)
 	}
 
-	dSmall, dLarge := best(small), best(large)
 	ratio := float64(dLarge) / float64(dSmall)
 	t.Logf("entries=%d: %v, entries=%d: %v, ratio=%.2fx (linear ~4x, quadratic ~16x, bound %.1fx)",
 		small, dSmall, large, dLarge, ratio, bound)

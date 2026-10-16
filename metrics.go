@@ -1267,7 +1267,7 @@ culvert_socks5_bind_backoff_seconds %g
 	// stops a frozen broadcast from denying a client forever — but it is a
 	// degradation of the distributed limit and should be visible for as long as
 	// it lasts.
-	if crl := clusterRateLimitFreshness(); crl.Armed {
+	if crl := rl.ClusterFreshness(); crl.Armed {
 		stale := 0
 		if crl.Stale {
 			stale = 1
