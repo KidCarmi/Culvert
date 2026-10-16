@@ -34,9 +34,11 @@ import (
 // owners afterwards. Both are required: applySnapshotAdmission now mutates the
 // installed owners in place, so saving the old pointer and applying over it
 // would "restore" an object that already carries this test's allowlist, and
-// a snapshot without a rate limit calls rl.Configure(0, ...) on whichever
-// limiter is installed. Either leak makes later root tests order-dependent
-// under -shuffle / -count=2.
+// the apply's rl side effects land on whichever limiter is installed: it calls
+// rl.Configure only when the snapshot RPM differs from rl.Limit() (so a
+// snapshot without a rate limit zeroes a configured limiter) and
+// rl.ReplaceExemptions only when RateLimitExempt is non-nil. Either leak makes
+// later root tests order-dependent under -shuffle / -count=2.
 func snapshotIPFixture(t *testing.T) *IPFilter {
 	t.Helper()
 	oldIPF, oldRL := ipf, rl
