@@ -300,44 +300,63 @@ func isContractValued(e ast.Expr, typed map[string]bool) bool {
 	return false
 }
 
-// contractTypedIdents collects the names declared in fd as an OperatorContract.
+// contractTypedIdents collects the names declared in fd as an OperatorContract:
+// parameters of that type, `var` specs, and `:=`/`=` assignments from a
+// contract-valued expression.
 func contractTypedIdents(fd *ast.FuncDecl) map[string]bool {
 	typed := map[string]bool{}
-	isContractType := func(e ast.Expr) bool {
-		if s, ok := e.(*ast.StarExpr); ok {
-			e = s.X
-		}
-		id, ok := e.(*ast.Ident)
-		return ok && id.Name == "OperatorContract"
-	}
-	if fd.Type.Params != nil {
-		for _, p := range fd.Type.Params.List {
-			if isContractType(p.Type) {
-				for _, n := range p.Names {
-					typed[n.Name] = true
-				}
-			}
-		}
-	}
+	markContractParams(fd.Type.Params, typed)
 	ast.Inspect(fd.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.ValueSpec:
-			for i, name := range x.Names {
-				if (x.Type != nil && isContractType(x.Type)) || (i < len(x.Values) && isContractValued(x.Values[i], typed)) {
-					typed[name.Name] = true
-				}
-			}
+			markContractValueSpec(x, typed)
 		case *ast.AssignStmt:
-			for i, lhs := range x.Lhs {
-				id, ok := lhs.(*ast.Ident)
-				if ok && i < len(x.Rhs) && isContractValued(x.Rhs[i], typed) {
-					typed[id.Name] = true
-				}
-			}
+			markContractAssign(x, typed)
 		}
 		return true
 	})
 	return typed
+}
+
+// isOperatorContractType matches OperatorContract and *OperatorContract.
+func isOperatorContractType(e ast.Expr) bool {
+	if s, ok := e.(*ast.StarExpr); ok {
+		e = s.X
+	}
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "OperatorContract"
+}
+
+func markContractParams(params *ast.FieldList, typed map[string]bool) {
+	if params == nil {
+		return
+	}
+	for _, p := range params.List {
+		if !isOperatorContractType(p.Type) {
+			continue
+		}
+		for _, n := range p.Names {
+			typed[n.Name] = true
+		}
+	}
+}
+
+func markContractValueSpec(spec *ast.ValueSpec, typed map[string]bool) {
+	declared := spec.Type != nil && isOperatorContractType(spec.Type)
+	for i, name := range spec.Names {
+		if declared || (i < len(spec.Values) && isContractValued(spec.Values[i], typed)) {
+			typed[name.Name] = true
+		}
+	}
+}
+
+func markContractAssign(as *ast.AssignStmt, typed map[string]bool) {
+	for i, lhs := range as.Lhs {
+		id, ok := lhs.(*ast.Ident)
+		if ok && i < len(as.Rhs) && isContractValued(as.Rhs[i], typed) {
+			typed[id.Name] = true
+		}
+	}
 }
 
 // TestWall_EveryOperatorContractRendererIsClassified: writeOperatorContract
@@ -529,5 +548,95 @@ func TestWall_RosterDerivedDiagnostics_NegativeControl(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("a roster-derived row in a new *_health.go file passed the wall; violations=%q", violations)
+	}
+}
+
+// ─── wall 3: roster-row producers only feed the contract ─────────────────────
+
+// rosterRowProducers are the functions that BUILD a roster-derived row (or its
+// inputs). Their output is redacted only because it travels inside the
+// OperatorContract through writeOperatorContract, so a production caller
+// outside the contract path — say, a new handler that serializes
+// []OperatorContractCheck{checkOversizeConfiguredUsernames()} — would bypass
+// redactContractForRole entirely (CodeRabbit, PR #1545). Boolean probes such
+// as hasCredentialCapableProvider are deliberately NOT producers: they render
+// no roster value and have legitimate callers on the proxy path.
+var rosterRowProducers = map[string]bool{
+	"checkOversizeConfiguredUsernames": true,
+	"collectAdminUsernames":            true,
+}
+
+// rosterProducerCallerExceptions are callers outside the contract walk that
+// may reference a producer, with the reason.
+var rosterProducerCallerExceptions = map[string]string{}
+
+// contractReachableKeys is contractReachable keyed by function key.
+func contractReachableKeys(idx *contractIndex) map[string]bool {
+	keys := map[string]bool{}
+	for fn := range contractReachable(idx) {
+		keys[fn.Key] = true
+	}
+	return keys
+}
+
+// rosterProducerViolations reports production functions that reference a
+// roster-row producer without being reachable from buildOperatorContract.
+func rosterProducerViolations(idx *contractIndex) []string {
+	reachable := contractReachableKeys(idx)
+	var violations []string
+	for _, fn := range idx.funcs {
+		if reachable[fn.Key] || rosterRowProducers[fn.Key] {
+			continue
+		}
+		if _, ok := rosterProducerCallerExceptions[fn.Key]; ok {
+			continue
+		}
+		violations = append(violations, producerUsesIn(fn)...)
+	}
+	sort.Strings(violations)
+	return violations
+}
+
+func producerUsesIn(fn *contractFunc) []string {
+	var out []string
+	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && rosterRowProducers[id.Name] {
+			out = append(out, fn.File+": "+fn.Key+" uses roster-row producer "+id.Name+
+				" outside the operator-contract path, so its output bypasses redactContractForRole")
+		}
+		return true
+	})
+	return out
+}
+
+// TestWall_RosterRowProducersOnlyReachedViaContract pins that roster-derived
+// rows reach a response only inside the redacted contract.
+func TestWall_RosterRowProducersOnlyReachedViaContract(t *testing.T) {
+	idx := parseContractSources(t, loadContractSources(t))
+	for _, v := range rosterProducerViolations(idx) {
+		t.Error(v)
+	}
+	// Not vacuous: every producer must exist and be reachable.
+	reachable := contractReachableKeys(idx)
+	for p := range rosterRowProducers {
+		if !reachable[p] {
+			t.Errorf("roster-row producer %s is not reachable from buildOperatorContract — renamed or "+
+				"removed without updating rosterRowProducers", p)
+		}
+	}
+
+	// Negative control: a new handler serializing a producer's row directly.
+	srcs := loadContractSources(t).clone()
+	srcs["zz_fixture_roster_rows.go"] = []byte("package main\n\nimport \"net/http\"\n\n" +
+		"func apiFixtureRosterRows(w http.ResponseWriter, _ *http.Request) {\n" +
+		"\tjsonOK(w, []OperatorContractCheck{checkOversizeConfiguredUsernames()})\n}\n")
+	found := false
+	for _, v := range rosterProducerViolations(parseContractSources(t, srcs)) {
+		if strings.Contains(v, "apiFixtureRosterRows") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a handler serializing checkOversizeConfiguredUsernames() directly passed the wall")
 	}
 }
