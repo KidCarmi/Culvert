@@ -206,6 +206,64 @@ func currentReleaseManager() *releaseManager {
 	return globalReleaseMgr
 }
 
+// ─── CHAOS-75: panic containment for the detached executor goroutines ────────
+//
+// Both dispatch entry points hand the actual upgrade to a goroutine that
+// outlives its request (the 202 ships as soon as the op is durably recorded, and
+// the watch must then run to terminal even if the client disconnects). Neither
+// goroutine had a panic tap, so a fault anywhere under DispatchService — the
+// planner, the agent HTTP client, the digest classifier — took the WHOLE process
+// down: the proxy data plane, the admin plane and /healthz, from one
+// authenticated admin POST. Every other detached go-site in the tree has carried
+// a guard since CHAOS-24, and this domain's own periodic loops carry one
+// (refreshLoopTick / staleWatchdogTick, CHAOS-R1); the two goroutines that run
+// the highest-consequence operation in the product were the ones left open.
+//
+// Containment alone is NOT the fix, and this is the part worth reading. The
+// goroutine's only defer was `close(done)`, which fires DURING unwinding, before
+// `rep, derr = …` lands — so the handler woke on a zero pair and
+// respondPreApply's `default` branch answered `200 {"status":"ok"}`. Today the
+// runtime kills the process a moment later, so that 200 is a race the client
+// usually loses. Add the guard and nothing else, and the race resolves the wrong
+// way EVERY time: the process survives to deliver a permanent, deterministic
+// false success for an upgrade that never started. So the panic is converted
+// into an explicit FAILED outcome (errDispatchWorkerFailed → 500) and, when an
+// op had already been accepted by the agent, into a terminal status record —
+// never into a silent one. See roadmap/CHAOS-ENGINEERING-REVIEW.md §41.
+const (
+	crashComponentReleaseDispatch = "release_dispatch"
+	crashComponentReleaseResume   = "release_resume"
+
+	// detailDispatchWorkerPanicAfterApply marks the status record when the watch
+	// goroutine died after the agent accepted the apply. The op is LIVE on the
+	// agent and nobody is watching it any more, so the operator must re-poll it
+	// (POST /api/releases/dispatch/resume) rather than re-dispatch: the recorded
+	// op_id and idempotency key make the re-poll safe and a second apply not.
+	detailDispatchWorkerPanicAfterApply = "dispatch_worker_panicked_after_apply: the agent op is live and unwatched — resume it, do not re-dispatch"
+	detailResumeWorkerPanic             = "resume_worker_panicked: the re-poll was abandoned; the agent op state is unobserved"
+)
+
+// errDispatchWorkerFailed is the pre-apply outcome of a recovered panic in the
+// detached dispatch goroutine. It is a server-side fault with NO op started, so
+// it maps to a 500 and is safe to retry — unlike errDispatchInFlight (409) or a
+// planner refusal, which are client-correctable.
+var errDispatchWorkerFailed = errors.New("dispatch worker failed; no op was recorded for this dispatch")
+
+// dispatchWorkerFailure is errDispatchWorkerFailed carrying the apply
+// idempotency key the failed attempt used. A panic WITHOUT appliedFlag does not
+// prove that no apply reached the agent: the agent can accept the apply and the
+// worker die before the onApplied observer runs (inside the agent client, or in
+// the executor between Apply returning and the record hook). The key is the one
+// thing that makes a retry safe in every one of those cases, because the agent
+// dedupes a repeated key to the same op — so the service reports it through
+// DispatchOptions.OnIdempotencyKey before any apply is attempted, and the
+// handler hands it back to the caller (Codex/CodeRabbit review).
+type dispatchWorkerFailure struct{ idempotencyKey string }
+
+func (e *dispatchWorkerFailure) Error() string { return errDispatchWorkerFailed.Error() }
+
+func (e *dispatchWorkerFailure) Is(target error) bool { return target == errDispatchWorkerFailed }
+
 // ─── bounded per-agent status store ──────────────────────────────────────────
 
 type dispatchPhase string
@@ -648,11 +706,17 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := auditActor(r)
+	// attemptKey is written by the worker goroutine (OnIdempotencyKey, before any
+	// apply) and read only by that same goroutine's panic conversion below.
+	var attemptKey string
 	opts := DispatchOptions{
 		PreBackup:      body.PreBackup,
 		NoRollback:     body.NoRollback,
 		PassphraseRef:  body.PassphraseRef,
 		IdempotencyKey: body.IdempotencyKey, // honored when set; else the service mints a stable key
+		// Learn the key BEFORE any apply, so a worker panic can still hand it back
+		// for a safe retry (dispatchWorkerFailure).
+		OnIdempotencyKey: func(k string) { attemptKey = k },
 	}
 	dispatchID := rm.newID()
 
@@ -662,26 +726,32 @@ func apiReleaseDispatch(w http.ResponseWriter, r *http.Request) {
 	var rep *DispatchReport
 	var derr error
 	go func() {
+		// Registered FIRST so it runs LAST (defers are LIFO): runGuarded's recover
+		// and the outcome assignment below both complete before the handler can be
+		// woken. That ordering is load-bearing — see the CHAOS-75 note above.
 		defer close(done)
 		// DETACHED context (context.Background, NOT r.Context()): once the agent
 		// has accepted the apply we MUST drive the op to terminal even if the
 		// client disconnects or cancels the request after the 202. Inheriting the
 		// request context would cancel an already-accepted upgrade mid-flight. The
 		// executor caps a deadline-less ctx at its maxWatch so it cannot run forever.
-		rep, derr = rm.svc.Dispatch(context.Background(), actor, ep, target, opts,
-			func(opID string, rc DispatchResumeContext) {
-				rm.store.markDispatched(ep.Key, dispatchID, rc)
-				appliedFlag.Store(true)
-				select {
-				case applied <- struct{}{}:
-				default:
-				}
-			})
-		// Only claim the per-agent status slot if THIS dispatch actually owned the
-		// agent (acquired single-flight): an in-flight rejection or a planner
-		// refusal never ran an op, so it must NOT overwrite the record of the op
-		// that is actually running (P2: status-clobber).
-		if ownedAgent(rep, derr) {
+		panicked := runGuarded(crashComponentReleaseDispatch, func() {
+			rep, derr = rm.svc.Dispatch(context.Background(), actor, ep, target, opts,
+				func(opID string, rc DispatchResumeContext) {
+					rm.store.markDispatched(ep.Key, dispatchID, rc)
+					appliedFlag.Store(true)
+					select {
+					case applied <- struct{}{}:
+					default:
+					}
+				})
+		})
+		// ownedAgent / recordDispatchPanic make the same call: claim the per-agent
+		// status slot only if THIS dispatch owned the agent (P2: status-clobber).
+		if panicked {
+			rm.recordDispatchPanic(ep.Key, dispatchID, appliedFlag.Load())
+			rep, derr = nil, &dispatchWorkerFailure{idempotencyKey: attemptKey}
+		} else if ownedAgent(rep, derr) {
 			rm.store.markTerminal(ep.Key, dispatchID, rep)
 		}
 	}()
@@ -715,7 +785,22 @@ func (rm *releaseManager) write202(w http.ResponseWriter, agentKey, dispatchID s
 }
 
 // respondPreApply maps a pre-apply outcome (no op started) to an HTTP status.
+//
+// CHAOS-75: the NO-OUTCOME case is rejected explicitly, ahead of the switch,
+// instead of falling through to the `default` 200. DispatchService.Dispatch
+// returns a report OR an error on every path, so (nil, nil) is unreachable by
+// its contract — which is exactly why it must not be answered "ok". The only way
+// to reach it is a detached writer that died before assigning either, and the
+// pre-fix panic path did precisely that: the recovered-panic defer closed `done`
+// while `rep, derr = …` was still unwinding, so the handler woke on a zero pair
+// and answered `200 {"status":"ok"}` for an upgrade that never started
+// (empirically reproduced; see roadmap/CHAOS-ENGINEERING-REVIEW.md §41). The
+// guard below is deliberately independent of that fix: it holds for ANY future
+// writer that forgets, which the panic-containment change alone would not.
 func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchReport, err error) {
+	if respondWorkerFailure(w, rep, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, errDispatchInFlight):
 		writeJSONStatus(w, http.StatusConflict, map[string]any{"status": "in_flight", "detail": "a dispatch is already in flight on this agent"})
@@ -746,6 +831,122 @@ func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchRe
 	default:
 		writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 	}
+}
+
+// respondWorkerFailure answers the two outcomes that mean the detached worker
+// died before producing a normal report, and reports whether it wrote a reply.
+//
+//   - (nil, nil): unreachable by the DispatchService contract, so never "ok"
+//     (see respondPreApply).
+//   - errDispatchWorkerFailed: a recovered panic with appliedFlag false. That is
+//     NOT proof that no apply reached the agent — the agent can accept it and
+//     the worker die before the onApplied observer records it — so the reply
+//     says the outcome is uncertain and returns the idempotency key the attempt
+//     used: a retry with that key is safe whether or not the apply landed,
+//     because the agent dedupes a repeated key to the same op. Still a 500,
+//     never a success.
+func respondWorkerFailure(w http.ResponseWriter, rep *DispatchReport, err error) bool {
+	if rep == nil && err == nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+			"status": "internal_error",
+			"detail": "dispatch produced no outcome; no op was recorded for this dispatch",
+		})
+		return true
+	}
+	if !errors.Is(err, errDispatchWorkerFailed) {
+		return false
+	}
+	var wf *dispatchWorkerFailure
+	if !errors.As(err, &wf) || wf.idempotencyKey == "" {
+		// No key was ever reported, so the worker died before any apply was
+		// attempted (OnIdempotencyKey runs ahead of the executor): a definite,
+		// retryable failure with no op started.
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+			"status":  "internal_error",
+			"outcome": "not_started",
+			"detail":  errDispatchWorkerFailed.Error() + "; no apply was attempted, safe to retry",
+		})
+		return true
+	}
+	writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+		"status":          "internal_error",
+		"outcome":         "uncertain",
+		"idempotency_key": wf.idempotencyKey,
+		"detail": "dispatch worker failed before an op was recorded; the apply may or may not have " +
+			"reached the agent. Retry ONLY with this idempotency_key (the agent deduplicates it to " +
+			"the same op), or check the agent's status first",
+	})
+	return true
+}
+
+// runResumeWorker re-polls an existing agent op to terminal. It runs detached
+// (the 202 ships before it starts) under the same panic containment as the
+// dispatch worker — CHAOS-75: a panic here used to take the whole gateway down
+// from one admin POST.
+//
+// The recovery is deliberately ASYMMETRIC with recordDispatchPanic: on a panic
+// this worker writes NOTHING to the status store. A resume starts no op (it only
+// re-polls an existing one) and its dispatch_id is NEWER than the running op's,
+// so the ULID ordering in dispatchStore.update would make any write WIN the slot
+// and overwrite the real owner's record — the same P2 status-clobber the success
+// path below is written to avoid. A panic cannot tell us whether single-flight
+// was acquired, so leaving the record alone is the safe move: nothing durable
+// was lost, only one observation. The crash sink (per-component counter +
+// system-actor audit entry) plus the log line below are the operator signal, and
+// the 202 already said where to look.
+func (rm *releaseManager) runResumeWorker(actor string, ep AgentEndpoint, rc DispatchResumeContext, dispatchID string) {
+	panicked := runGuarded(crashComponentReleaseResume, func() {
+		// Re-poll the EXISTING op to terminal; never calls Apply. Only claim the
+		// per-agent status slot if the resume actually acquired single-flight — an
+		// in-flight rejection must not clobber the running op's record (P2).
+		rep, rerr := rm.svc.Resume(context.Background(), actor, ep, rc)
+		if !errors.Is(rerr, errDispatchInFlight) {
+			rm.store.markDispatched(ep.Key, dispatchID, rc) // record the op being resumed
+			rm.store.markTerminal(ep.Key, dispatchID, rep)
+		}
+	})
+	if panicked && logger != nil {
+		logger.Printf("release dispatch: resume worker panicked (recovered, process continues) for agent %q op %q: %s",
+			sanitizeLog(ep.Key), sanitizeLog(rc.OpID), detailResumeWorkerPanic)
+	}
+}
+
+// recordDispatchPanic decides whether a recovered panic in the detached dispatch
+// goroutine may write the per-agent status slot, and writes it when it may. The
+// caller converts the panic into errDispatchWorkerFailed, so no handler is ever
+// handed the (nil report, nil error) pair respondPreApply rejects.
+//
+// The split on `applied` is the whole substance of the fix (CHAOS-75):
+//
+//   - applied: the agent accepted the apply, so this dispatch DID own the
+//     single-flight and markDispatched already made this dispatch_id the slot
+//     owner — writing the terminal here cannot clobber another op (P2 holds).
+//     The 202 has shipped or is about to, so the status record is the only
+//     channel left to say the watch is gone. FAILED_NEEDS_ATTN over a live
+//     op_id is the honest state: the upgrade may yet succeed on the agent, but
+//     this process is no longer observing it. Leaving the record at
+//     phase=dispatched would be the silent failure — a phantom in-flight op
+//     nobody is watching, indistinguishable from a slow but healthy one.
+//
+//   - not applied: single-flight was either never acquired (the panic can land
+//     in the pre-apply preflight read, which runs BEFORE acquire) or already
+//     released by the executor's own `defer e.release()`, so this dispatch owns
+//     NOTHING and writing the slot could clobber a concurrently running op's
+//     record. The HTTP reply is the right channel and it is still open, so the
+//     error alone carries it — respondPreApply answers 500.
+//
+// Note what the simpler shape would have cost: recovering and then letting the
+// existing `ownedAgent(rep, derr)` line run would pass (nil, nil), which reads
+// as owned, and write a terminal record with an EMPTY terminal over whatever
+// was there. That is the clobber this function exists to avoid.
+func (rm *releaseManager) recordDispatchPanic(agentKey, dispatchID string, applied bool) {
+	if !applied {
+		return
+	}
+	rm.store.markTerminal(agentKey, dispatchID, &DispatchReport{
+		Terminal: TerminalFailedNeedsAttn,
+		Detail:   detailDispatchWorkerPanicAfterApply,
+	})
 }
 
 // ownedAgent reports whether a dispatch outcome actually claimed the agent
@@ -827,16 +1028,7 @@ func apiReleaseDispatchResume(w http.ResponseWriter, r *http.Request) {
 	actor := auditActor(r)
 	dispatchID := rm.newID()
 
-	go func() {
-		// Re-poll the EXISTING op to terminal; never calls Apply. Only claim the
-		// per-agent status slot if the resume actually acquired single-flight — an
-		// in-flight rejection must not clobber the running op's record (P2).
-		rep, rerr := rm.svc.Resume(context.Background(), actor, ep, rc)
-		if !errors.Is(rerr, errDispatchInFlight) {
-			rm.store.markDispatched(ep.Key, dispatchID, rc) // record the op being resumed
-			rm.store.markTerminal(ep.Key, dispatchID, rep)
-		}
-	}()
+	go rm.runResumeWorker(actor, ep, rc, dispatchID)
 
 	w.Header().Set("Location", "/api/releases/dispatch/status?agent="+url.QueryEscape(ep.Key))
 	writeJSONStatus(w, http.StatusAccepted, map[string]any{
