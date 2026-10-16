@@ -7,16 +7,6 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
-### Changed
-
-- The audit action recorded when an admin starts an on-demand backup from the
-  Support panel is now `backup.create` (was `backup.trigger`), matching the
-  maintenance agent's operation kind and the `<noun>.create` convention used by
-  every other creating action (`support.bundle.create`, `alert.webhook.create`).
-  The action shipped two weeks earlier in #1468; a SIEM rule keyed on the old
-  name should be updated. The `POST /api/backups` contract is unchanged except
-  for its `x-culvert-audit-event`.
-
 ### Security
 
 - Node-local key material was written with `os.WriteFile` on a predictable
@@ -527,6 +517,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
 ### Changed
+
+- The audit action recorded when an admin starts an on-demand backup from the
+  Support panel is now `backup.create` (was `backup.trigger`), matching the
+  maintenance agent's operation kind and the `<noun>.create` convention used by
+  every other creating action (`support.bundle.create`, `alert.webhook.create`).
+  The old name was introduced in #1468 and shipped in releases v1.0.254
+  through v1.0.261; a SIEM rule or saved audit filter keyed on
+  `backup.trigger` must be updated to match `backup.create` (entries already
+  in the trail keep the old name). The `POST /api/backups` contract is
+  unchanged except for its `x-culvert-audit-event`.
 
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
   line and the digest-pinned `golang:1.26.9-alpine` builder images, index
