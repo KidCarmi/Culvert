@@ -161,7 +161,12 @@ gpriv() {
 # groot 'command line' — one privileged command line (convenience over gpriv).
 groot() { printf '%s\n' "$1" | gpriv --timeout "${2:-600}"; }
 UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
-ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
+# 21 random [A-Za-z0-9] + a fixed "Aa1" suffix so the 24-char password ALWAYS
+# carries an uppercase, a lowercase and a digit. The setup/admin-creation
+# endpoint enforces that complexity, and a purely random 24-char draw misses a
+# whole class a few percent of the time (a run-to-run flake: a draw with no
+# digit is a 400 "password must contain ... one digit").
+ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { printf '%sAa1' "$(head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-21)" > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
 # api METHOD PATH [BODY] — JAR may be overridden per call (JAR=… api …) for a
 # second administrator session.
 api() { curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}\n'; }
@@ -255,6 +260,33 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   rm -f "$d/exp.json"; bl "$good" 0.8 FAIL "no pre-reboot baseline"
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+# allowlist_threat_domain DOMAIN — exempt DOMAIN from DOMAIN-level threat-feed
+# blocking (urlhaus/openphish) via PUT /api/security-scan/feeds/domain-allowlist.
+# The harness's ALLOWED canary (example.com) can appear in the LIVE urlhaus feed
+# fetched at boot (observed 2026-10-16: THREAT_BLOCKED domain example.com). Threat
+# intelligence runs in preDispatchBlocked BEFORE policy, so a feed hit overrides
+# even an explicit Allow+Bypass rule and the canary is 403 regardless of policy —
+# which measures the feed's contents on the day, not the policy path the step is
+# about. Exempting the canary isolates the Allow-rule traffic checks from feed
+# noise: URL-level threat blocking, response scanning and policy are unchanged,
+# the DENIED canaries (example.org/.net) are not allowlisted, and default-deny
+# still returns 403 before the Allow rule. The allowlist persists in the
+# threat-feed DB (under /data), so it survives the restore and history-recovery
+# phases that reuse this canary.
+allowlist_threat_domain() {
+  local d="$1" cur payload
+  cur="$(api GET /api/security-scan/feeds/domain-allowlist | body)"
+  payload="$(python3 - "$cur" "$d" <<'EOF'
+import json,sys
+try: cur=json.loads(sys.argv[1]).get("domains",[]) or []
+except Exception: cur=[]
+d=sys.argv[2]
+if d not in cur: cur.append(d)
+print(json.dumps({"domains":cur}))
+EOF
+)"
+  api PUT /api/security-scan/feeds/domain-allowlist "$payload"
+}
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
 MON_SOCK="/tmp/culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
 qemu_alive() { [[ -f "$WORK/qemu.pid" ]] && kill -0 "$(cat "$WORK/qemu.pid")" 2>/dev/null; }
@@ -682,6 +714,12 @@ EOS
     [[ $c == 200 ]] && check 5 auth-exempt pass "200" || check 5 auth-exempt fail "http $c"
     api GET /api/default-action > "$EV/05-default-action.txt"
     grep -q '"deny"' "$EV/05-default-action.txt" && check 5 default-deny pass "$(body < "$EV/05-default-action.txt")" || check 5 default-deny fail "$(body < "$EV/05-default-action.txt")"
+    # example.com is the ALLOWED canary; exempt it from DOMAIN-level threat-feed
+    # blocking so this step measures policy (default-deny vs Allow), not whatever
+    # the live urlhaus feed lists today. See allowlist_threat_domain. Persists in
+    # /data, so the restore (6b), history (H) and signed-update (6c) canaries
+    # inherit it. Default-deny still gives 403 before the Allow rule.
+    allowlist_threat_domain example.com > "$EV/05-threat-allowlist.txt" 2>&1 || true
     local b a o
     b="$(through_proxy http://example.com/)"
     api POST /api/policy '{"name":"lab-allow-example","priority":10,"action":"Allow","destFQDN":"example.com","sslAction":"Bypass","enabled":true}' > "$EV/05-rule.txt"
@@ -818,6 +856,12 @@ EOS
     until curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do (( $(date +%s) < deadline )) || break; sleep 5; done
     : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | code)"
     rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
+    # A restore resets the threat-feed domain allowlist to defaults (it is a
+    # re-downloadable cache, not in the backup manifest), and the re-synced
+    # urlhaus feed can re-block the allowed canary. Re-assert the exemption so
+    # this step measures that the restore brought the POLICY back, not the
+    # feed's contents today. example.net stays a denied canary (not allowlisted).
+    allowlist_threat_domain example.com > "$EV/06b-threat-allowlist.txt" 2>&1 || true
     local ra; ra="$(through_proxy http://example.com/) $(through_proxy http://example.net/)"
     printf 'exit %s\nlogin %s\nrules %s\ntraffic example.com/example.net %s\n' "$rc" "$c" "$rules" "$ra" >> "$EV/06b-restore-offline.txt"
     if [[ $rc == 0 && $c == 200 && " $rules " == *" lab-allow-example "* && " $rules " != *" lab-post-backup "* && "$ra" == "200 403" ]]; then
@@ -1595,6 +1639,10 @@ EOS
   if [[ $rc == 0 && $c == 200 && "$same" == 1 ]]; then
     check H history-recovered pass "$(grep -m1 '^imported=' "$EV/H-09-import-offline.txt"); the $(hist_total "$after") marker records read back identical (ts, host, status, method) under the ROTATED log key"
   else check H history-recovered fail "import rc $rc, login $c, markers $(hist_total "$after") of $(hist_total "$before"), identical=$same ($(grep -E '^(imported|import-rc|up-rc)=' "$EV/H-09-import-offline.txt" | tr '\n' ' '))"; fi
+  # The history recovery destroys and restores the data volume, resetting the
+  # threat-feed domain allowlist; re-assert the allowed canary's exemption so
+  # this check measures enforcement after recovery, not the live urlhaus feed.
+  allowlist_threat_domain example.com > "$EV/H-11-threat-allowlist.txt" 2>&1 || true
   local ok; ok="$(through_proxy http://example.com/)"
   [[ "$ok" == 200 ]] && check H history-enforcement pass "example.com 200 through the proxy after the recovery" || check H history-enforcement fail "example.com $ok"
   redact_tree
@@ -2074,6 +2122,208 @@ v=json.load(sys.stdin).get("stat_clam_clean_quarantined"); print("absent" if v i
   if [[ "$3" == 0 ]]; then check F2 clamd-ok-to-eicar info "clamd never answered a plain OK to an EICAR stream in this run (absence over $1 samples is not proof the upstream defect is gone)"
   elif [[ "$2" == 0 ]]; then check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s): clamd answered a plain OK to an EICAR stream and Culvert refused every one (quarantined=$q) — upstream evidence, F2-clamd-streams.jsonl"
   else check F2 clamd-ok-to-eicar info "upstream defect seen $3 time(s) and NOT contained (see eicar-never-delivered)"; fi; }
+# cmd_cachebypass — the owner's cache-bypass regression (review 5478346473,
+# follow-up 6097484537), on a disposable guest booted from a RETAINED OVA.
+# p_enforced accepts an allowed 200 at any time, so it cannot tell the bypass
+# from health; this leg can, because it ESTABLISHES the fault state first.
+#   CB1 warm: clean body X served 200 and then from the cache (one clamd
+#       stream for X on the tap); EICAR body Y blocked and cached.
+#   CB2 fault: new TCP connections to clamd are reset from inside its network
+#       namespace (a deterministic engine fault, clamd itself untouched);
+#       a fresh body Z is refused and stat_clam_scan_error moves; the reset
+#       is lifted; a fresh clean body W reaches clamd, is answered OK, and is
+#       REFUSED with stat_clam_clean_quarantined moving: the quarantine is
+#       active (on both builds — it shipped in 72c827b7).
+#   CB3 inside the window: X must be refused as AV-unavailable. 200 FAILS:
+#       a body cached clean before the fault was delivered while the
+#       quarantine refused fresh bodies. Y must stay the ClamAV block.
+#   CB4 after the window: X must be re-scanned (a new clamd stream for X,
+#       after expiry) before it is served 200; a second request is then a
+#       cache hit with no further stream.
+# Healthy 200s outside the established fault state stay valid (CB1).
+LAB_CB_WINDOW="${LAB_CB_WINDOW:-60}"
+cb_ctr() { api GET /api/security-scan/status | body | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(" ".join(str(d.get(k,"absent")) for k in ("cache_hits","cache_misses","stat_clam_scan_error","stat_clam_clean_quarantined","stat_clam_clean_cache_stale")))' 2>/dev/null || echo "x x x x x"; }
+cb_get() { local out c; out="$(curl -sS -m 20 -x "$P" -w '\n%{http_code}' "$1" 2>/dev/null || printf '\n000')"; c="$(tail -n1 <<<"$out")"
+  if [[ "$c" == 403 ]] && grep -q 'antivirus scanning is currently unavailable' <<<"$out"; then echo 403:av_unavailable
+  elif [[ "$c" == 403 ]] && grep -q 'Blocked by CLAMAV scan' <<<"$out"; then echo 403:clamav_block
+  else echo "$c"; fi; }
+# cb_streams UP — clamd INSTREAM conversations of exactly UP bytes (body + 18:
+# 10-byte command, 4-byte chunk length, 4-byte terminator) and their replies,
+# in order. Judged by COUNT deltas, never by time: the tap stamps with the
+# guest clock and the harness runs on the host.
+cb_streams() { groot 'cat /run/culvert-cb/streams.jsonl' 60 2>/dev/null | python3 -c 'import json,sys
+up=int(sys.argv[1]); n=0; r=[]
+for l in sys.stdin:
+    try: d=json.loads(l)
+    except Exception: continue
+    if d.get("cmd")=="zINSTREAM" and d.get("up")==up:
+        n+=1; r.append(d.get("reply","").replace("\x00","|").strip("|"))
+print(n, ";".join(r) or "-")' "$1"; }
+cb_fault() { groot "p=\$(docker inspect -f '{{.State.Pid}}' culvert-clamav); nsenter -t \$p -n iptables -$1 INPUT -p tcp --dport 3310 --syn -j REJECT --reject-with tcp-reset && echo rule=$1" 60 2>&1 | grep -m1 '^rule='; }
+cmd_cachebypass() { local X Y Z W ux uy uz uw upx upy c0 c1 c2 c3 c4 c5 s r tf el v
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then check X cachebypass fail "BLOCKED: QEMU-only cache-bypass fixture cannot run on ESXi"; return 0; fi
+  ensure_admin_pass; [[ -f "$WORK/eicar-origin.pid" ]] || rec_origin_start
+  p_login > /dev/null
+  api POST /api/policy '{"name":"lab-allow-eicar-origin","priority":15,"action":"Allow","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' > "$EV/CB-eicar-rule.txt"
+  v="$(eicar_verdict)"; [[ "$v" == av ]] || { check CB clamav-baseline blocked "a fresh EICAR did not draw the ClamAV block ($v); nothing below would be meaningful"; return 0; }
+  groot "mkdir -p /run/culvert-cb; echo '$(base64 -w0 "$HERE/clamd-tap.py")' | base64 -d > /run/culvert-cb/tap.py
+i=\$(docker exec culvert-clamav cat /sys/class/net/eth0/iflink); v=\$(grep -lx \"\$i\" /sys/class/net/*/ifindex | cut -d/ -f5); echo veth=\$v
+systemctl stop culvert-cb-tap 2>/dev/null; systemd-run --quiet --unit=culvert-cb-tap python3 -I /run/culvert-cb/tap.py \"\$v\" /run/culvert-cb/streams.jsonl && echo tap=started" 120 > "$EV/CB-tap-start.txt" 2>&1 || true
+  sleep 2
+  # Distinct sizes so the tap attributes each conversation to its body.
+  X="cb-x-$RANDOM.txt"; Y="cb-y-$RANDOM.txt"
+  python3 -c 'import sys; sys.stdout.write(("culvert cache-bypass clean body "+sys.argv[1]).ljust(77,".")+"\n")' "$RUN_ID" > "$WORK/eicar-origin/$X"
+  { cat "$WORK/eicar-origin/eicar.txt"; printf '%40s' ''; } > "$WORK/eicar-origin/$Y"
+  ux="http://10.0.2.2:$LAB_EICAR_PORT/$X"; uy="http://10.0.2.2:$LAB_EICAR_PORT/$Y"
+  upx=$(( $(stat -c %s "$WORK/eicar-origin/$X") + 18 )); upy=$(( $(stat -c %s "$WORK/eicar-origin/$Y") + 18 ))
+  # ---- CB1 warm
+  c0="$(cb_ctr)"; r="$(cb_get "$ux") $(cb_get "$ux")"; c1="$(cb_ctr)"; s="$(cb_streams $upx)"
+  printf 'c0=%s\nX x2=%s\nc1=%s\nX streams=%s\n' "$c0" "$r" "$c1" "$s" > "$EV/CB1-warm.txt"
+  if [[ "$r" == "200 200" && "${s%% *}" == 1 ]]; then check CB warm-clean pass "X ($X) served 200 twice with ONE clamd stream ($s): the second answer came from the clean-verdict cache; counters hits/misses/err/quar/stale $c0 -> $c1"
+  else check CB warm-clean blocked "X not served from a warmed cache ($r; X streams $s); the scenario cannot be established"; return 0; fi
+  r="$(cb_get "$uy") $(cb_get "$uy")"; s="$(cb_streams $upy)"; echo "Y x2=$r Y streams=$s" >> "$EV/CB1-warm.txt"
+  if [[ "$r" == "403:clamav_block 403:clamav_block" && "${s%% *}" == 1 ]]; then check CB warm-block pass "Y blocked twice by ClamAV with ONE clamd stream ($s): the block is cached"
+  else check CB warm-block blocked "Y not blocked from a warmed cache ($r; Y streams $s)"; return 0; fi
+  # ---- CB2 fault, then establish the quarantine
+  Z="$(p_clean_url)"; [[ "$(cb_fault I)" == rule=I ]] || { check CB fault-inject blocked "could not install the clamd connection reset in its network namespace"; return 0; }
+  c2="$(cb_ctr)"; r="$(cb_get "$Z")"; tf="$(date +%s.%N)"; c3="$(cb_ctr)"
+  [[ "$(cb_fault D)" == rule=D ]] || { check CB fault-inject fail "the clamd connection reset could not be REMOVED; the guest is left faulted"; return 0; }
+  printf 'fault Z=%s\nc2=%s\nc3=%s\ntf=%s\n' "$r" "$c2" "$c3" "$tf" > "$EV/CB2-fault.txt"
+  if [[ "$r" == 403:av_unavailable && "$(cut -d' ' -f3 <<<"$c3")" -gt "$(cut -d' ' -f3 <<<"$c2")" ]]; then check CB fault-inject pass "fresh body refused AV-unavailable while clamd connections were reset; stat_clam_scan_error $(cut -d' ' -f3 <<<"$c2") -> $(cut -d' ' -f3 <<<"$c3") (an engine fault); reset lifted"
+  else check CB fault-inject blocked "no engine fault recorded (Z=$r; err $(cut -d' ' -f3 <<<"$c2") -> $(cut -d' ' -f3 <<<"$c3"))"; return 0; fi
+  W="$(p_clean_url)"; uw="$W"; r="$(cb_get "$uw")"; c4="$(cb_ctr)"
+  # W and Z share a size; Z never reached clamd (its connection was reset),
+  # so every stream of that size is W's.
+  s="$(cb_streams $(( $(stat -c %s "$WORK/eicar-origin/$(basename "$uw")") + 18 )))"
+  printf 'W=%s %s\nc4=%s\nW-size streams=%s\n' "$uw" "$r" "$c4" "$s" >> "$EV/CB2-fault.txt"
+  if [[ "$r" == 403:av_unavailable && "$s" == *"stream: OK"* && "$(cut -d' ' -f4 <<<"$c4")" -gt "$(cut -d' ' -f4 <<<"$c3")" ]]; then
+    check CB quarantine-active pass "a fresh clean body reached clamd (answered OK: $s) and was REFUSED; stat_clam_clean_quarantined $(cut -d' ' -f4 <<<"$c3") -> $(cut -d' ' -f4 <<<"$c4"): the closed-posture quarantine is active"
+  else check CB quarantine-active blocked "quarantine not established (W=$r; W streams $s; quarantined $(cut -d' ' -f4 <<<"$c3") -> $(cut -d' ' -f4 <<<"$c4"))"; return 0; fi
+  # ---- CB3 inside the window
+  r="$(cb_get "$ux")"; el="$(python3 -c 'import sys,time; print(round(time.time()-float(sys.argv[1]),1))' "$tf")"; c5="$(cb_ctr)"; s="$(cb_streams $upx)"
+  v="$(cb_get "$uy")"
+  printf 'X inside window=%s at +%ss\nc5=%s\nX streams (total)=%s\nY inside window=%s\n' "$r" "$el" "$c5" "$s" > "$EV/CB3-window.txt"
+  if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) < float(sys.argv[2])-10 else 1)' "$el" "$LAB_CB_WINDOW"; then :; else
+    check CB cached-clean-in-quarantine blocked "X requested at +${el}s, too close to the ${LAB_CB_WINDOW}s window to judge"; return 0; fi
+  if [[ "$r" == 403:av_unavailable ]]; then check CB cached-clean-in-quarantine pass "X, cached clean BEFORE the fault, refused AV-unavailable at +${el}s inside the window; X streams in total: $s (2 = re-scanned, answered OK, refused by the window); stale $(cut -d' ' -f5 <<<"$c4") -> $(cut -d' ' -f5 <<<"$c5")"
+  elif [[ "$r" == 200 ]]; then check CB cached-clean-in-quarantine fail "CACHE BYPASS — X, cached clean before the fault, was DELIVERED (200) at +${el}s while the quarantine refused a fresh clean body; X streams in total: $s (still 1 = never re-scanned: served from the pre-fault cache)"
+  else check CB cached-clean-in-quarantine fail "unexpected answer for X inside the window: $r"; fi
+  if [[ "$v" == 403:clamav_block ]]; then check CB cached-block-in-quarantine pass "Y (cached block) still the ClamAV block inside the window"
+  else check CB cached-block-in-quarantine fail "Y inside the window answered $v (a cached block must survive a fault)"; fi
+  # ---- CB4 after the window
+  python3 -c 'import sys,time; t=float(sys.argv[1])+float(sys.argv[2])+5-time.time(); time.sleep(max(t,0))' "$tf" "$LAB_CB_WINDOW"
+  local s0 r2 s2 n0; s0="$(cb_streams $upx)"; n0="${s0%% *}"
+  r="$(cb_get "$ux")"; s="$(cb_streams $upx)"; r2="$(cb_get "$ux")"; s2="$(cb_streams $upx)"; v="$(cb_get "$uy")"
+  printf 'X streams before=%s\nX after window=%s streams=%s\nX again=%s streams=%s\nY after window=%s\nctr=%s\n' "$s0" "$r" "$s" "$r2" "$s2" "$v" "$(cb_ctr)" > "$EV/CB4-after.txt"
+  if [[ "$r" == 200 && "${s%% *}" == $(( n0 + 1 )) && "${s##*;}" == "stream: OK" && "$r2" == 200 && "${s2%% *}" == $(( n0 + 1 )) ]]; then
+    check CB rescan-before-recache pass "after the window X was re-scanned by clamd (streams $n0 -> ${s%% *}, last reply OK) before it was served 200; the next request was a cache hit (streams unchanged)"
+  else check CB rescan-before-recache fail "after the window: X=$r (streams $n0 -> $s), again=$r2 ($s2) — expected exactly one fresh scan, then a cache hit"; fi
+  if [[ "$v" == 403:clamav_block ]]; then check CB cached-block-after pass "Y still the ClamAV block after the window"; else check CB cached-block-after fail "Y after the window: $v"; fi
+  check CB scan-spanning-fault info "not judged on the appliance: a scan that starts before a fault and answers inside the 60 s window is refused by the window on BOTH builds, so only a scan longer than the window separates them; covered by TestScanSpanningAFaultIsNotHonoured (internal/secscan, mutation-checked)"
+  groot 'systemctl stop culvert-cb-tap 2>/dev/null; cat /run/culvert-cb/streams.jsonl' 60 > "$EV/CB-clamd-streams.jsonl" 2>/dev/null || true
+  grep -E 'SecurityScan|ClamAV|av_unavailable|quarantin' <(groot "docker logs --since 15m culvert 2>&1 | tail -n 300" 120 2>/dev/null) > "$EV/CB-proxy-log.txt" || true; }
+# cmd_ldap — on-appliance LDAP/AD qualification (owner follow-up 6097484537
+# item 4) against a REAL directory: Samba provisioned as an Active Directory
+# domain controller on the runner from Ubuntu's own packages (the workflow
+# does that; the guest reaches it at 10.0.2.2). It is an AD stand-in, not
+# Microsoft AD: Kerberos/NTLM/Negotiate, channel binding, LDAP signing policy
+# and nested groups are out of scope and recorded as such.
+#   L1 transport matrix via the admin directory test: plain ldap:// (refused
+#      by the directory), LDAPS verified against its internal CA (the
+#      appliance has no CA setting), LDAPS with the unsafe skip-verify opt-in
+#   L2 the LDAP IdP profile is created through the admin API; auth becomes
+#      required; a group-scoped allow precedes a block for the same origin
+#   L3 credential matrix through the proxy (Proxy-Authorization: Basic)
+#   L4 the authenticated identity reaches the request log
+#   L6 directory outage: an uncached user fails closed; recovery on evidence
+LDAP_DOM="DC=corp,DC=example"; LDAP_USERS="CN=Users,$LDAP_DOM"
+ldap_proxy() { curl -sS -m 30 -x "$P" ${2:+--proxy-user "$2"} -o "$WORK/ldap-body" -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+cmd_ldap() { local u c r prof pid
+  if [[ "$LAB_EXTERNAL" == 1 ]]; then check X ldap fail "BLOCKED: QEMU-only LDAP fixture cannot run on ESXi"; return 0; fi
+  [[ -s "${LAB_LDAP_SECRETS:-/nonexistent}/passwords.env" ]] || { check L directory blocked "no directory provisioned on the runner (LAB_LDAP_SECRETS)"; return 0; }
+  # shellcheck disable=SC1090
+  source "$LAB_LDAP_SECRETS/passwords.env"
+  ensure_admin_pass; [[ -f "$WORK/eicar-origin.pid" ]] || rec_origin_start
+  echo "ldap qualification origin page" > "$WORK/eicar-origin/ldap-ok.txt"; u="http://10.0.2.2:$LAB_EICAR_PORT/ldap-ok.txt"
+  p_login > /dev/null
+  prof="$(python3 -c 'import json,sys
+print(json.dumps({"name":"lab-samba-ad","type":"ldap","enabled":True,"priority":1,"emailDomains":[],
+ "ldap":{"url":sys.argv[1],"bindDn":sys.argv[2],"bindPassword":sys.argv[3],"baseDn":sys.argv[4],
+         "userFilter":"(sAMAccountName=%s)","groupAttribute":"memberOf","cacheTtlSeconds":30}}))' \
+    "ldap://10.0.2.2:389" "CN=svc-culvert,$LDAP_USERS" "$LDAP_SVC_PASS" "$LDAP_DOM")"
+  # ---- L1 transport matrix through the admin directory test. The directory
+  # keeps Samba's AD default (simple binds need transport encryption), as a
+  # hardened Microsoft AD does. Expected: plain ldap:// refused by the
+  # directory; LDAPS verified against the directory's own (internal) CA fails
+  # because the appliance only trusts the image's public roots; LDAPS with
+  # the unsafe skip-verify opt-in works. The rest of the leg can only use the
+  # last one, and says so.
+  local plain verify skip
+  plain="$(api POST /api/idp/test "{\"profile\":$prof,\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-plain.txt" | body)"
+  verify="$(api POST /api/idp/test "{\"profile\":$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#' <<<"$prof"),\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-ldaps-verify.txt" | body)"
+  prof="$(sed 's#ldap://10.0.2.2:389#ldaps://10.0.2.2:636#; s#"bindDn"#"tlsSkipVerify":true,"bindDn"#' <<<"$prof")"
+  skip="$(api POST /api/idp/test "{\"profile\":$prof,\"testUsername\":\"alice\",\"testPassword\":\"$LDAP_ALICE_PASS\"}" | tee "$EV/L1-ldaps-skipverify.txt" | body)"
+  steps() { python3 -c 'import json,sys
+d=json.loads(sys.stdin.read()); print(("ok " if d.get("ok") else "FAILED ")+"; ".join(s["name"]+"="+("ok" if s.get("ok") else "FAIL:"+(s.get("error") or "")[:140]) for s in d.get("steps",[])))' 2>/dev/null || echo unreadable; }
+  check L plain-ldap info "ldap:// (no TLS): $(steps <<<"$plain") — the directory refuses a simple bind without transport encryption"
+  if grep -q '"ok":true' <<<"$verify"; then check L ldaps-verify-internal-ca info "LDAPS verified against the directory's internal CA: $(steps <<<"$verify")"
+  else check L ldaps-verify-internal-ca info "FINDING: LDAPS against a directory whose certificate comes from an internal CA cannot be verified, and the appliance offers no CA setting (ldapTLSConfig trusts the image's public roots only): $(steps <<<"$verify")"; fi
+  if grep -q '"ok":true' <<<"$skip" && body <<<"$(cat "$EV/L1-ldaps-skipverify.txt")" | python3 -c 'import json,sys
+d=json.load(sys.stdin); g=(d.get("identity") or {}).get("groups") or []
+sys.exit(0 if any("CN=ProxyUsers" in x for x in g) else 1)' 2>/dev/null; then
+    check L directory-test pass "LDAPS with tlsSkipVerify (the only transport that works with an internal-CA directory): dial, TLS, service bind, user search and alice's bind succeeded; her groups include CN=ProxyUsers. The leg below runs on this UNSAFE transport."
+  else check L directory-test fail "LDAPS with skip-verify did not succeed either: $(steps <<<"$skip")"; return 0; fi
+  # ---- L2 profile + policy
+  c="$(api POST /api/idp "$prof" | tee "$EV/L2-idp-create.txt" | code)"
+  [[ "$c" == 200 || "$c" == 201 ]] && check L idp-create pass "LDAP profile created and enabled (http $c); bind password write-only: $(body < "$EV/L2-idp-create.txt" | grep -c "$LDAP_SVC_PASS") occurrences in the response" \
+    || { check L idp-create fail "http $c $(body < "$EV/L2-idp-create.txt" | head -c 300)"; return 0; }
+  api GET /api/idp | body > "$EV/L2-idp-list.json"
+  grep -q "$LDAP_SVC_PASS" "$EV/L2-idp-list.json" && check L bind-secret-not-returned fail "the bind password is returned by GET /api/idp" || check L bind-secret-not-returned pass "GET /api/idp does not return the bind password"
+  local ra rb
+  ra="$(api POST /api/policy "{\"name\":\"lab-ldap-allow-proxyusers\",\"priority\":3,\"action\":\"Allow\",\"destFQDN\":\"10.0.2.2\",\"sourceGroup\":\"CN=ProxyUsers,$LDAP_USERS\",\"sslAction\":\"Bypass\",\"enabled\":true}" | tee "$EV/L2-rule-allow.txt" | code)"
+  rb="$(api POST /api/policy '{"name":"lab-ldap-block-others","priority":4,"action":"Block_Page","destFQDN":"10.0.2.2","sslAction":"Bypass","enabled":true}' | tee "$EV/L2-rule-block.txt" | code)"
+  [[ "$ra $rb" == "200 200" ]] && check L rules pass "group-scoped allow (priority 3) and a block for everyone else (priority 4) created" \
+    || { check L rules fail "rule creation: allow http $ra, block http $rb"; return 0; }
+  c="$(api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Default"}' | tee "$EV/L2-auth-required.txt" | code)"
+  [[ "$c" == 200 ]] && check L auth-required pass "default auth outcome = Default (authentication required)" || { check L auth-required fail "http $c"; return 0; }
+  # ---- L3 credential matrix
+  local m=() exp got name cred bad=0 row
+  while IFS='|' read -r name cred exp; do
+    got="$(ldap_proxy "$u" "$cred")"; m+=("$name=$got(want $exp)")
+    [[ "$got" == "$exp" ]] || bad=1
+  done <<EOF2
+no-credentials||407
+alice (ProxyUsers)|alice:$LDAP_ALICE_PASS|200
+alice wrong password|alice:not-the-password|407
+bob (no group)|bob:$LDAP_BOB_PASS|403
+carol (account disabled)|carol:$LDAP_CAROL_PASS|407
+unknown user|mallory:$LDAP_BOB_PASS|407
+filter metacharacter|*:$LDAP_ALICE_PASS|407
+DN as username|CN=alice,$LDAP_USERS:$LDAP_ALICE_PASS|407
+EOF2
+  printf '%s\n' "${m[@]}" > "$EV/L3-matrix.txt"
+  [[ $bad == 0 ]] && check L credential-matrix pass "$(IFS='; '; echo "${m[*]}")" || check L credential-matrix fail "$(IFS='; '; echo "${m[*]}")"
+  # ---- L4 identity in the request log
+  sleep 2; api GET "/api/logs?limit=500" | body > "$EV/L4-logs.json"
+  if python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); es=d if isinstance(d,list) else d.get("logs",d.get("entries",[]))
+s=json.dumps(es); sys.exit(0 if "alice" in s and "bob" in s else 1)' "$EV/L4-logs.json" 2>/dev/null; then
+    check L identity-logged pass "request-log entries for the origin name alice (allowed) and bob (blocked)"
+  else check L identity-logged fail "identities not found in the request log ($(head -c 300 "$EV/L4-logs.json"))"; fi
+  # ---- L6 outage
+  if [[ -n "${LAB_LDAP_STOP:-}" ]]; then
+    eval "$LAB_LDAP_STOP" > "$EV/L6-stop.txt" 2>&1 || true; sleep 3
+    got="$(ldap_proxy "$u" "dave:$LDAP_DAVE_PASS")"
+    api GET /api/diagnostics | body > "$EV/L6-diagnostics-down.json"
+    [[ "$got" == 407 ]] && check L outage-fail-closed pass "directory stopped: uncached dave (ProxyUsers) refused 407" || check L outage-fail-closed fail "directory stopped: dave answered $got"
+    eval "$LAB_LDAP_START" > "$EV/L6-start.txt" 2>&1 || true
+    r=000; for _ in $(seq 1 30); do r="$(ldap_proxy "$u" "dave:$LDAP_DAVE_PASS")"; [[ "$r" == 200 ]] && break; sleep 5; done
+    api GET /api/diagnostics | body > "$EV/L6-diagnostics-up.json"
+    [[ "$r" == 200 ]] && check L outage-recovery pass "directory restarted: dave 200 without any appliance action" || check L outage-recovery fail "directory restarted: dave still $r after 150 s"
+  else check L outage blocked "no LAB_LDAP_STOP/START provided"; fi
+  api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Exempt"}' > /dev/null; }
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -2835,12 +3085,16 @@ case "${1:-}" in
   engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
+  cachebypass) cmd_cachebypass; [[ "$(failures)" == 0 ]] ;;
+  ldap) cmd_ldap; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
     cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
     if [[ "${LAB_FP2:-0}" == 1 ]]; then cmd_fp2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
+    if [[ "${LAB_CACHEBYPASS:-0}" == 1 ]]; then cmd_cachebypass; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
+    if [[ "${LAB_LDAP:-0}" == 1 ]]; then cmd_ldap; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
     cmd_recovery; fail_fast_after recovery
     if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi

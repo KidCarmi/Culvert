@@ -33,6 +33,7 @@ MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_METADATA = 64 * 1024
 SOURCE = 'b579ca28c9d936e9141292ce5ec564a26feeae86'
 HISTORY_SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
+ALLOWLIST_SOURCE = '9e34452677d77f574f5c3c08ba23ea897d8e17cb'
 EXPORT_NAMES = ('recovery.tar.gz.enc', 'recovery-secrets.json', 'archive-metadata.json',
                 'backup-passphrase', 'admin-pass', 'source-owned.json', 'provenance.json', 'source-observation.json')
 HISTORY_NAMES = ('history.cvst', 'history-passphrase', 'rotated-log-passphrase')
@@ -214,6 +215,21 @@ def endpoint(transfer, bind, tls_dir):
         server.shutdown(); server.server_close(); thread.join(timeout=20)
 
 
+
+def verify_restored_allowlist(source, guest, admin, password, baseline, transport_dir):
+    if source != ALLOWLIST_SOURCE:
+        return  # Historical profiles keep their original observation contract.
+    expected = baseline.get('threat_domain_allowlist')
+    require(isinstance(expected, list) and 'example.com' in expected,
+            'Exact nonempty source canary domain-allowlist baseline required.')
+    checked = observation.domain_allowlist_comparison(expected,
+        observation.read_domain_allowlist(guest, admin, password))
+    # Preserve actual and expected configuration before refusing a mismatch.
+    # Never repair configuration between restore and the state oracle.
+    write_new(transport_dir / 'restored-domain-allowlist.json', json.dumps(checked).encode())
+    require(checked['result'] == 'pass', 'Restored admin-managed domain allowlist differs; no mutation or retry.')
+
+
 def run(args):
     require(ipaddress.ip_address(args.bind).version == 4 and not ipaddress.ip_address(args.bind).is_unspecified)
     lab = console.b.module.Lab(args.scope)
@@ -221,7 +237,7 @@ def run(args):
     identities = importlib.util.module_from_spec(profile_spec); profile_spec.loader.exec_module(identities)
     source = identities.scope_profile(lab.c)['source_sha']
     history = getattr(args, 'history', False)
-    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788), 'History qualification requires a reviewed history-capable candidate.')
+    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344), 'History qualification requires a reviewed history-capable candidate.')
     require(lab.c['source_sha'] == source and lab.c['max_vms'] == 1)
     console.b.module.validate_scope(lab.c)
     escrow = private_escrow(args.escrow, lab.run)
@@ -244,6 +260,9 @@ def run(args):
             provenance = {k: lab.c[k] for k in ('source_sha', 'image_id', 'ova_sha256', 'endpoint')}
             write_new(escrow / 'provenance.json', json.dumps(provenance).encode())
             observed = observation.observe(lab.guest_ip(timeout=30), 'labadmin', admin_password)
+            if source == ALLOWLIST_SOURCE:
+                observed['threat_domain_allowlist'] = observation.capture_domain_allowlist(lab.guest_ip(timeout=30), 'labadmin', admin_password,
+                    record=lambda value: write_new(escrow / 'source-domain-allowlist.json', json.dumps(value).encode()))
             write_new(escrow / 'source-observation.json', json.dumps(observed).encode())
         else:
             require(args.source_ledger and args.deletion_receipt)
@@ -306,8 +325,10 @@ def run(args):
                 receipt['history'] = True
             write_new(escrow / 'export-receipt.json', json.dumps(receipt).encode())
         else:
+            baseline = read_json(escrow / 'source-observation.json')
+            verify_restored_allowlist(source, lab.guest_ip(timeout=30), 'labadmin', read_private_text(escrow / 'admin-pass'), baseline, transport_dir)
             observed = observation.observe(lab.guest_ip(timeout=30), 'labadmin', read_private_text(escrow / 'admin-pass'),
-                                           baseline=read_json(escrow / 'source-observation.json'))
+                                           baseline=baseline)
             if history:
                 checked = observation.observe_history(lab.guest_ip(timeout=30), 'labadmin',
                     read_private_text(escrow / 'admin-pass'), metadata['history'])

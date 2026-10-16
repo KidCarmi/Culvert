@@ -73,6 +73,41 @@ class Client:
             connection.close()
 
 
+
+def domain_allowlist_comparison(expected, response):
+    """Read-only config equality; feed data itself is not a recovery oracle."""
+    actual = response.get('domains') if isinstance(response, dict) else None
+    valid = (isinstance(actual, list) and len(actual) <= 4096
+             and all(isinstance(x, str) and 0 < len(x) <= 1024 for x in actual)
+             and len(set(actual)) == len(actual))
+    expected_valid = (isinstance(expected, list) and len(expected) <= 4096
+                      and all(isinstance(x, str) and 0 < len(x) <= 1024 for x in expected)
+                      and len(set(expected)) == len(expected))
+    return {'schema': 1, 'result': 'pass' if valid and expected_valid and sorted(actual) == sorted(expected) else 'fail',
+            'expected': expected, 'actual': actual, 'actual_valid': valid,
+            'mutation_performed': False}
+
+
+def read_domain_allowlist(guest, admin, password):
+    client = Client(guest)
+    client.api('/api/auth/login', {'user': admin, 'pass': password})
+    return client.api('/api/security-scan/feeds/domain-allowlist')
+
+
+def capture_domain_allowlist(guest, admin, password, record=None):
+    response = read_domain_allowlist(guest, admin, password)
+    actual = response.get('domains') if isinstance(response, dict) else None
+    checked = domain_allowlist_comparison(actual, response)
+    checked['source_canary_present'] = isinstance(actual, list) and 'example.com' in actual
+    if not checked['source_canary_present']:
+        checked['result'] = 'blocked'
+        checked['reason'] = 'Intended source canary absent; custom-setting recovery not exercised.'
+    if record is not None:
+        record(checked)
+    require(checked['result'] == 'pass' and checked['source_canary_present'])
+    return sorted(actual)
+
+
 def normalized_rules(policy):
     require(policy.get('draft') is False and policy.get('persisted') is True and policy.get('rules'))
     return [{k: v for k, v in rule.items() if k not in ('hitCount', 'lastHit')} for rule in policy['rules']]
@@ -118,6 +153,11 @@ def observe(guest, admin, password, baseline=None):
                 raise
             time.sleep(5)
     client.api('/api/auth/login', {'user': admin, 'pass': password})
+    allowlist = None
+    if baseline is not None and 'threat_domain_allowlist' in baseline:
+        checked = domain_allowlist_comparison(baseline['threat_domain_allowlist'], client.api('/api/security-scan/feeds/domain-allowlist'))
+        require(checked['result'] == 'pass')
+        allowlist = sorted(checked['actual'])
     cert = ssl.PEM_cert_to_DER_cert(client.raw('/api/ca-cert').decode('ascii'))
     policy = normalized_rules(client.api('/api/policy'))
     require(any(r.get('name') == 'lab-allow-example' and r.get('enabled') is not False for r in policy))
@@ -142,6 +182,8 @@ def observe(guest, admin, password, baseline=None):
               'categories': categories, 'admin_login': 'pass', 'ca_decryption': 'pass',
               'traffic': {'example.com': 200, 'example.org': 403}, 'agent': 'pass', 'agent_version': agent['agent_version'],
               'historical_encrypted_log_recovery': LOG_LIMIT}
+    if allowlist is not None:
+        result['threat_domain_allowlist'] = allowlist
     if baseline is not None:
         require(result['ca_sha256'] == baseline['ca_sha256'])
         require(result['rules'] == baseline['rules'])

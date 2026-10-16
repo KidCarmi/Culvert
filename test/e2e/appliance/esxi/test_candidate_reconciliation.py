@@ -38,6 +38,15 @@ class CandidateReconciliationTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(result.stdout.strip(),want)
 
+    def test_qemu_cache_and_ldap_refuse_external_before_any_fixture_operation(self):
+        script=(HERE.parent/'lab/appliance-lab.sh').read_text(encoding='utf-8')
+        bash='C:/Program Files/Git/bin/bash.exe' if os.name=='nt' else shutil.which('bash')
+        for command,following in (('cachebypass','# cmd_ldap'),('ldap','cmd_collect()')):
+            function=script[script.index('cmd_'+command+'() {'):script.index(following,script.index('cmd_'+command+'() {'))]
+            harness='set -euo pipefail\nLAB_EXTERNAL=1\ncheck() { printf "%s\\n" "$*"; }\nensure_admin_pass() { exit 91; }\n'+function+'\ncmd_'+command+'\n'
+            result=subprocess.run([bash,'-c',harness],capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr);self.assertIn('BLOCKED: QEMU-only',result.stdout)
+
     def test_72_profile_and_engine_pins_match_product_and_build_evidence(self, source=None):
         ids=load('candidate-identities');source=source or ids.E72;profile=ids.source_profile(source)
         engine=load('engine-surface-proof').PROFILES[source]
@@ -57,6 +66,9 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_bad788_exact_profile_helpers_and_engine_controls(self):
         self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').EBAD788)
+
+    def test_9e344_exact_profile_helpers_and_engine_controls(self):
+        self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').E9E344)
 
     def test_91_profile_helpers_and_kernel_controls_match_exact_source(self):
         ids=load('candidate-identities')
@@ -85,7 +97,7 @@ class CandidateReconciliationTests(unittest.TestCase):
         self.assertNotEqual(load('import-observer-continuation').SOURCE,ids.E91)
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -99,7 +111,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)
@@ -108,7 +120,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_shared_library_contains_only_documented_delta_from_pinned_upstream(self):
         record = json.loads((HERE / 'shared-harness-provenance.json').read_bytes())
-        self.assertEqual(record['upstream_revision'], 'e0fc1bbca53e01a1d4e7c0dcd3a49631637b6ff5')
+        self.assertEqual(record['upstream_revision'], 'b3b5c8b93c5fb1dff6f19d9cca51d79977b3cd21')
         root = HERE.parents[3]
         for name, hashes in record['files'].items():
             raw = (root / name).read_bytes().replace(b'\r\n', b'\n')
@@ -126,6 +138,10 @@ class CandidateReconciliationTests(unittest.TestCase):
                 self.assertEqual(raw.count(fp2),1)
                 self.assertIn(b'cmd_fp2() { local free k h hs rc\n'+fp2,raw)
                 raw=raw.replace(fp2,b'')
+                for command,label in (('cachebypass','cache-bypass'),('ldap','LDAP')):
+                    refusal=('  if [[ "$LAB_EXTERNAL" == 1 ]]; then check X '+command+' fail "BLOCKED: QEMU-only '+label+' fixture cannot run on ESXi"; return 0; fi\n').encode()
+                    self.assertEqual(raw.count(refusal),1)
+                    raw=raw.replace(refusal,b'')
             elif name.endswith('console-session.py'):
                 raw = raw.replace(b'        if not hasattr(socket, "AF_UNIX"):\n'
                                   b'            raise OSError("Unix console transport is unavailable on this controller")\n', b'')

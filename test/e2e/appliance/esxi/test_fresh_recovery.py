@@ -30,6 +30,39 @@ with mock.patch.dict(sys.modules, {'fcntl': SimpleNamespace(LOCK_EX=2, LOCK_NB=4
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_new_source_allowlist_requires_nonempty_canary(self):
+        observe = controller.observation
+        for value in ({}, {'domains': []}, {'domains': ['other.example']}):
+            with self.subTest(value=value), mock.patch.object(observe, 'read_domain_allowlist', return_value=value):
+                recorded=[]
+                with self.assertRaises(ValueError): observe.capture_domain_allowlist('guest', 'admin', 'private', record=recorded.append)
+                self.assertEqual(recorded[0]['actual'],value.get('domains'));self.assertEqual(recorded[0]['result'],'blocked')
+        with mock.patch.object(observe, 'read_domain_allowlist', return_value={'domains': ['example.com', 'other.example']}):
+            self.assertEqual(observe.capture_domain_allowlist('guest', 'admin', 'private'), ['example.com', 'other.example'])
+
+    def test_restored_allowlist_missing_or_cleared_preserves_failure_receipt(self):
+        expected = ['example.com', 'other.example']
+        for index, response in enumerate(({}, {'domains': []}, {'domains': ['example.com']}, {'domains': ['example.com', 'other.example', 'added.example']})):
+            private = self.root / str(index); private.mkdir()
+            with self.subTest(response=response), mock.patch.object(controller.observation, 'read_domain_allowlist', return_value=response):
+                with self.assertRaisesRegex(ValueError, 'differs; no mutation'):
+                    controller.verify_restored_allowlist(controller.ALLOWLIST_SOURCE, 'guest', 'admin', 'private', {'threat_domain_allowlist': expected}, private)
+                receipt=json.loads((private/'restored-domain-allowlist.json').read_bytes())
+                self.assertEqual(receipt['result'], 'fail'); self.assertEqual(receipt['expected'], expected)
+                self.assertEqual(receipt['actual'], response.get('domains')); self.assertFalse(receipt['mutation_performed'])
+
+    def test_restored_allowlist_unchanged_and_historical_profile(self):
+        expected=['example.com', 'other.example']
+        with mock.patch.object(controller.observation, 'read_domain_allowlist', return_value={'domains':list(reversed(expected))}) as read:
+            controller.verify_restored_allowlist(controller.ALLOWLIST_SOURCE, 'guest', 'admin', 'private', {'threat_domain_allowlist':expected}, self.root)
+            self.assertEqual(json.loads((self.root/'restored-domain-allowlist.json').read_bytes())['result'], 'pass')
+            read.reset_mock()
+            controller.verify_restored_allowlist(controller.SOURCE, 'guest', 'admin', 'private', {}, self.root)
+            read.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'nonempty source'):
+                controller.verify_restored_allowlist(controller.ALLOWLIST_SOURCE, 'guest', 'admin', 'private', {'threat_domain_allowlist':[]}, self.root)
+            read.assert_not_called()
+
     def test_archive_identity_keeps_exact_backup_separate_from_history(self):
         cfg={'mode':'restore','archive_name':'fresh-'+'a'*24+'.tar.gz.enc'}
         metadata={'archive_sha256':'b'*64,'archive_bytes':11697}
