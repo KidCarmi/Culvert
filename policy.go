@@ -282,11 +282,23 @@ type PolicyStore struct {
 	published atomic.Pointer[publishedRules]
 }
 
-// publishedRules identifies one rules slice by the identity of the element
-// range it spans. A slice's first-element address plus its length name exactly
-// the memory the evaluator will read, so two slices matching on both ARE the
-// same definitions — and holding first keeps that backing array alive, so the
+// publishedRules identifies one rules slice by the BACKING ARRAY it spans:
+// the address of its slot 0 plus its length. Those two together name exactly
+// the memory the evaluator will read, so two slices agreeing on both are
+// literally the same slots and therefore the same definitions. Holding an
+// interior pointer into that array keeps the whole allocation alive, so the
 // allocator can never hand the same address to a different revision.
+//
+// slot0 is `&rules[0]`, the address OF the first slot, NOT `rules[0]`, the
+// rule pointer stored IN it. The distinction is the whole contract: a caller
+// can install a same-length slice that reuses the published slice's first
+// rule and replaces a later one, and the stored rule pointer would compare
+// equal across two genuinely different revisions. The walk would then be
+// skipped over a definition that may carry no accounting cell, and the
+// Evaluate that matched it would dereference a nil `counters`. The slot
+// address cannot be shared that way, because a fresh slice is a fresh array.
+// TestEvaluationSnapshot_SameFirstRuleDifferentSliceIsNotPublished is the
+// control (Codex review, PR #1643).
 //
 // The marker is written ONLY by markPublishedLocked, from sortLocked, under the
 // writer lock, on a slice freshly built by clonePolicyRuleForPublication. That
@@ -294,7 +306,7 @@ type PolicyStore struct {
 // initialized accounting cell. Nothing published this way can hold a nil cell,
 // because copyPolicyRuleForPublication mints one when the source lacks it.
 type publishedRules struct {
-	first *PolicyRule
+	slot0 **PolicyRule
 	n     int
 }
 
@@ -303,21 +315,21 @@ type publishedRules struct {
 func (ps *PolicyStore) markPublishedLocked() {
 	m := &publishedRules{n: len(ps.rules)}
 	if m.n > 0 {
-		m.first = ps.rules[0]
+		m.slot0 = &ps.rules[0]
 	}
 	ps.published.Store(m)
 }
 
-// isPublished reports whether rules is the exact revision markPublishedLocked
-// last recorded. Callers read it with ps.mu held so the slice and the marker
-// come from the same instant (every mutator holds the writer lock across
-// sortLocked, which sets both).
+// isPublished reports whether rules spans the exact backing-array range
+// markPublishedLocked last recorded. Callers read it with ps.mu held so the
+// slice and the marker come from the same instant (every mutator holds the
+// writer lock across sortLocked, which sets both).
 func (ps *PolicyStore) isPublished(rules []*PolicyRule) bool {
 	m := ps.published.Load()
 	if m == nil || m.n != len(rules) {
 		return false
 	}
-	return m.n == 0 || m.first == rules[0]
+	return m.n == 0 || m.slot0 == &rules[0]
 }
 
 // policyVersion returns the current version number and last-updated time.

@@ -124,6 +124,52 @@ func TestEvaluationSnapshot_DirectInstallStillNormalizes(t *testing.T) {
 	}
 }
 
+// TestEvaluationSnapshot_SameFirstRuleDifferentSliceIsNotPublished pins the
+// defect the first draft of the marker shipped with (Codex review, PR #1643):
+// it stored rules[0] — the rule POINTER in slot 0 — rather than &rules[0], the
+// address OF slot 0. A caller can install a same-length slice that reuses the
+// published slice's first rule and replaces a later one, and the stored rule
+// pointer compares equal across those two genuinely different revisions. The
+// walk was then skipped over a definition carrying no accounting cell, and the
+// Evaluate that matched it dereferenced a nil counters — a panic on the proxy
+// hot path, reached through exactly the compatibility path the marker was
+// supposed to leave untouched.
+func TestEvaluationSnapshot_SameFirstRuleDifferentSliceIsNotPublished(t *testing.T) {
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{
+		{Priority: 1, Name: "keep", DestFQDN: "keep.example.com", Action: ActionAllow},
+		{Priority: 2, Name: "replaced", DestFQDN: "replaced.example.com", Action: ActionDrop},
+	})
+
+	// Same length, SAME first rule pointer, second slot swapped for a raw
+	// definition with no accounting cell — a fresh slice, so a fresh array.
+	raw := &PolicyRule{Priority: 2, Name: "raw", DestFQDN: "*", Action: ActionAllow, ID: "RAW"}
+	ps.mu.Lock()
+	installed := []*PolicyRule{ps.rules[0], raw}
+	ps.rules = installed
+	ps.mu.Unlock()
+
+	ps.mu.RLock()
+	marked := ps.isPublished(installed)
+	ps.mu.RUnlock()
+	if marked {
+		t.Fatal("a slice that merely REUSES the published first rule must not be recognised as that revision")
+	}
+
+	snap := ps.evaluationSnapshot()
+	for i, r := range snap {
+		if r.counters == nil {
+			t.Fatalf("rule %d (%q) reached the evaluator with a nil accounting cell", i, r.Name)
+		}
+	}
+
+	// The match lands on the raw rule, and accounting it must not panic.
+	m := ps.Evaluate("203.0.113.7", "", "unauth", "anything.example.com", nil)
+	if m == nil || m.Rule.Name != "raw" {
+		t.Fatalf("expected the raw catch-all to match, got %v", m)
+	}
+}
+
 // TestEvaluationSnapshot_EmptyStoreIsSafe pins the degenerate shapes: a store
 // that never published, and a published-then-emptied one. Neither may index
 // into a zero-length slice.
