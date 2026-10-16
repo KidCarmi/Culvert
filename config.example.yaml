@@ -122,7 +122,10 @@ security_scan:
 cdr:
   enabled: false
   endpoint: ""            # Sluice "host:port" (e.g. "sluice:8443"); required when enabled
-  fail_mode: "open"       # Sluice unreachable/ERROR: "open" (pass original + audit + alert) | "closed" (503 + block page)
+  fail_mode: "open"       # A live Sanitize call that fails (unreachable mid-call / timeout / ERROR): "open" = deliver the
+                          # original (CDR_ERROR request-log event + cdr_unavailable alert) | "closed" = 403 block page.
+                          # NOT consulted when there is no client to call (initial dial failed at startup, nothing
+                          # enrolled, every breaker open): files then pass through unsanitized in either mode.
   default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
   default_mode: "ENFORCE" # "ENFORCE" | "REPORT_ONLY" | "BYPASS_WITH_REPORT"
   timeout_sec: 35         # Per-Sanitize deadline in seconds (must be >= 30)
@@ -130,7 +133,9 @@ cdr:
                           # sanitization and pass through unmodified (SKIPPED_OVERSIZE), whatever fail_mode
                           # says. Keep equal to Sluice's own cap.
   chunk_size_kb: 0        # gRPC stream chunk, 16-3072 (0 = default)
-  server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix)
+  server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix). REQUIRED
+                          # for the config-only bootstrap path (no enrolled instance): without it the client is never
+                          # built and CDR stays effectively off, although config validation passes.
   certs_dir: ""           # Pre-provisioned bootstrap bundle (ca.pem, client.pem, client.key), read only while no
                           # instance is enrolled (needs endpoint + server_fingerprint). UI enrollment ignores
                           # it and writes certificates under <data-dir>/integrations/sluice/<name>.
