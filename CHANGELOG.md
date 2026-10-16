@@ -9,6 +9,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Node-local key material was written with `os.WriteFile` on a predictable
+  path, which follows a planted symlink and inherits a planted file's mode
+  (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
+  the upstream credential KEK (`.upstream_cred_key`, which unseals every
+  parent-proxy password), the webhook KEK (`.alert_webhook_key`), the request
+  history PBKDF2 salt (`<history>.salt`), and the CDR mTLS client bundle staged
+  at `<bundle>.{crt,key}.tmp`.
+
+  Both halves were reproduced against the tree. `os.ReadFile` on a **dangling**
+  symlink reports `fs.ErrNotExist` — exactly the condition every mint treats as
+  "no key yet" — so planting a link at a key path steers control flow into the
+  mint branch and then redirects the write out of the state root entirely. And
+  `perm` applies only on *creation*, so a `0666` file planted at
+  `client.key.tmp` receives the CDR client private key and stays
+  world-readable, no symlink required. In the escape case the appliance
+  believes it persisted a key: remove the target and every sealed upstream
+  credential becomes `credentialState: unusable`, no parent is eligible, and
+  the pool fails **open to DIRECT egress** — the parent-proxy chain bypassed.
+
+  The three mints with no rendezvous requirement now use `fileutil.AtomicWrite`
+  — the repository's existing durable-write chokepoint, already used for the
+  policy-learning subject key — whose `rename(2)` *replaces* a planted link
+  rather than writing through it. `installRenewedPEMs` cannot: its `.tmp` names
+  are a deliberate rendezvous `finishStagedRenewal` looks up by path at the next
+  boot, so it uses the new `fileutil.WriteFileExclusive`, which clears any
+  pre-existing entry and creates with `O_EXCL` at the requested mode (and
+  fsyncs, which makes that function's existing "never a half-written file"
+  promise true). No path, content or mode on disk changes; only the branch that
+  *creates* a file is affected. Gates: 26 across five files, every defect gate
+  verified failing against the verbatim `os.WriteFile` shape, with controls
+  pinning that a stale rendezvous file is still superseded (refusing it would
+  wedge CDR renewals after the first crash), that SEC-WHSIGN-1's "a failed
+  decrypt never mints" and CHAOS-62's `ErrSaltUnusable` refusal are unchanged,
+  and that 120 racing writers never leave a torn file. Review:
+  `docs/engineering/security-reviews/2026-09-22-resilience-sweep-and-upstream-v2-window.md`.
+
 - A role string this build does not enroll became FULL ADMIN
   (SEC-RBAC-ROLE-1). `POST /api/auth/users` validates the role it is given,
   but `LoadUIUsersFile` — the door the same roster arrives through from disk —
@@ -482,6 +518,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
+  line and the digest-pinned `golang:1.26.9-alpine` builder images, index
+  `sha256:cdfd4fe2…`, verified against Docker Hub), and `golang.org/x/net`
+  from v0.59.0 to v0.60.0. Both are the fixes govulncheck named for twelve
+  standard-library advisories (`html/template`, among others, fixed in
+  1.26.9) and GO-2026-6617 (an HTTP/2 HPACK encoder race reachable from the
+  inspected-HTTP/2 tunnel and the control-plane gRPC server); the Fast gate's
+  `govulncheck` job was red on every code-classified PR until both moved.
+  The candidate-promotion test fixtures now read the compiler from `go.mod`
+  instead of repeating the literal. The frontend lockfile takes the semver-
+  compatible `npm audit fix` for four dev-tree advisories
+  (`http-cache-semantics`, `ip-address`, `postcss-selector-parser`,
+  `source-map-js`); the committed `frontend/dist` is byte-identical.
+- The Fast gate's agent-guidance checker (`docs/agent-context/check.py`) now
+  runs as the `docs-guidance` job on every pull request that touches a
+  guidance path, and root `CLAUDE.md` eagerly imports
+  `docs/agent-context/conventions.md`. The golangci-lint analysis budget is
+  10 minutes (it exceeded 5 with 0 issues on a cold runner).
 - The production image now cross-compiles the proxy and the bundled
   maintenance agent on the build platform instead of compiling them under QEMU
   for arm64. The shipped binaries are byte-identical to before; only the build
@@ -536,6 +590,54 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Performance
+
+- Destination-host IDNA normalization is memoized, so an internationalized
+  destination no longer re-runs `idna.ToASCII` once per engine on every request.
+  `hostutil.NormalizeHostStrict` already had an already-canonical fast path
+  covering pure-ASCII, ACE-free hosts at zero allocations, but everything else
+  fell through to `idna.ToASCII` — and the same destination is normalized ~10x
+  per proxied request by engines that each correctly canonicalize their own
+  input (the strict dispatch gate, SOCKS5, `PolicyStore.Evaluate`, auth policy,
+  category resolution, the blocklist, the threat feed, the SSL-bypass matcher,
+  autoexclude, urlcat, traffic redaction). That fan-out is deliberate and
+  correct, so the cost was ten conversions of one string per request: measured
+  **6.90 µs and 70 allocations** for a single request to an A-label host,
+  against **0.70 µs and 0 allocations** for the ASCII equivalent — an ~11x
+  asymmetry on a path every request walks.
+
+  This is not an exotic shape. Browsers put the A-label in the `Host` header
+  and the CONNECT authority, so `xn--bcher-kva.example.com` is what a request
+  to `bücher.example.com` actually carries; the seven-allocation row is the
+  live cost of every request to an internationalized domain, not a Unicode
+  edge case. It is also client-selectable at no cost to the sender.
+
+  The slow path now answers a repeat from a fixed-capacity table: **0.55 µs and
+  0 allocations** warm (−92% CPU, and the 70 allocations become none), and
+  **1.82 µs / 6 allocations** (−73% / −88%) for a destination never seen
+  before — the per-request fan-out supplies the reuse by itself, because one
+  engine misses and the other nine hit. Verdicts cannot change: IDNA
+  normalization is a pure function of its input, with no clock, configuration
+  or I/O, so there is no staleness to invalidate and a hit is indistinguishable
+  from recomputing. The existing `FuzzNormalizeHostStrict` differential against
+  the pre-optimization reference ran 598k executions with no divergence.
+
+  The key is a client-chosen authority, so the table is direct-mapped with 1024
+  fixed slots and a per-process random slot seed, and no entry retains a string
+  longer than the 253-byte DNS name maximum. That last bound is load-bearing
+  rather than decorative: `handleRequest`'s raw pre-cap admits a 1 KiB
+  authority and the 253-byte canonical refusal runs *after* `canonicalDestHost`
+  has normalized it, while the zero-option `idna.ToASCII` profile enforces no
+  length limit of its own, so an oversize A-label host would otherwise be
+  retained whole (~2.1 MB across a full table). Refusing to memoize one costs
+  nothing — no DNS server can resolve a longer name, and both dispatch gates
+  refuse it immediately, so it never reaches the fan-out the memo exists to
+  collapse. The table therefore cannot grow — 104 KB retained after 65 536
+  distinct IDN hosts, against a 554 KB absolute ceiling —
+  a collision costs a recomputation rather than a wrong answer, because every
+  hit re-verifies the full key, and an adversary who could force collisions
+  would obtain today's behaviour. Ordinary ASCII traffic is untouched: it
+  returns from the fast path above the memo and never reads or writes the
+  table, pinned by `TestIDNMemo_FastPathNeverTouchesMemo`.
 
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
