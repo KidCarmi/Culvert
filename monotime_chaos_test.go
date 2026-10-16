@@ -181,7 +181,7 @@ func TestChaos71_CPPollGraceFlipsOnMonotonicElapsedOnly(t *testing.T) {
 	// stamped" sentinel the probe reads as "cannot prove sustained".
 	var fake atomic.Int64
 	fake.Store(1)
-	swapMonoNanos(t, func() int64 { return fake.Load() })
+	swapMonoNanos(t, fake.Load)
 
 	dpControlPlanePollFailing.Store(true)
 	dpCPPollFailingSince.Store(monoNanos()) // failing as of virtual t=1
