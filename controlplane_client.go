@@ -505,6 +505,7 @@ func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
 		// CP can aggregate it (auditClusterPushDropsTotal, controlplane.go)
 		// instead of the fact only being visible on this DP's own /healthz.
 		AuditClusterPushDrops: auditPendingDrops(),
+		AuditDropsReported:    true,
 	}
 }
 

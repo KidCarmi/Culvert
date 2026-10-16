@@ -152,6 +152,11 @@ type MetricsReport struct {
 	// aggregate it across the fleet instead of requiring an admin to open every
 	// DP's admin UI individually to learn the centralized audit trail has a gap.
 	AuditClusterPushDrops int64 `json:"audit_cluster_push_drops,omitempty"`
+	// AuditDropsReported is the capability bit for the field above: true from
+	// every build that reports AuditClusterPushDrops. With omitempty a zero
+	// count and a legacy build that cannot report one decode identically, so
+	// the CP keys "is this node's count trustworthy?" on this bit instead.
+	AuditDropsReported bool `json:"audit_drops_reported,omitempty"`
 }
 
 // nodeMetrics aggregates metrics from all connected Data Plane nodes.
@@ -193,17 +198,29 @@ func auditClusterPushDropsTotal() int64 {
 	return total
 }
 
-// auditClusterPushUnreportingNodes counts enrolled nodes the Control Plane has
-// marked disconnected (heartbeat timeout). Such a node cannot deliver its drop
-// count — and losing the CP link is exactly when its push queue drops — so
-// its last report is stale and a zero total is not evidence the centralized
-// trail is complete. Reported beside the total so the dashboard can say
-// "unknown" instead of "complete". Zero on a standalone or DP-only node.
+// auditClusterPushUnreportingNodes counts enrolled nodes whose audit drop
+// count the Control Plane cannot trust, so a zero total is not evidence the
+// centralized trail is complete:
+//   - disconnected (heartbeat timeout): the node cannot deliver its count, and
+//     losing the CP link is exactly when its push queue drops;
+//   - connected but heartbeating from a build without AuditDropsReported (a
+//     rolling upgrade): its report has no drop field at all.
+//
+// Reported beside the total so the dashboard can say "unknown" instead of
+// "complete". Zero on a standalone or DP-only node.
 func auditClusterPushUnreportingNodes() int {
+	nodes := globalClusterStore.ListNodes()
 	n := 0
-	for _, node := range globalClusterStore.ListNodes() {
-		if node.Status == "disconnected" {
+	nodeMetricsMu.RLock()
+	defer nodeMetricsMu.RUnlock()
+	for i := range nodes {
+		switch nodes[i].Status {
+		case "disconnected":
 			n++
+		case "connected":
+			if m, ok := nodeMetrics[nodes[i].NodeID]; ok && !m.AuditDropsReported {
+				n++
+			}
 		}
 	}
 	return n

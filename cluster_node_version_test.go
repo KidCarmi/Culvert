@@ -190,6 +190,9 @@ func TestBuildMetricsReport_ReportsAuditClusterPushDrops(t *testing.T) {
 
 	c := &DataPlaneClient{nodeID: "dp-1"}
 	report := c.buildMetricsReport()
+	if !report.AuditDropsReported {
+		t.Fatal("a current DP heartbeat must set the AuditDropsReported capability bit")
+	}
 	if report.AuditClusterPushDrops < 5 {
 		t.Fatalf("AuditClusterPushDrops = %d, want >= 5 (the drops injected)", report.AuditClusterPushDrops)
 	}
@@ -286,5 +289,25 @@ func TestAuditClusterPushUnreportingNodes(t *testing.T) {
 	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-revoked", Status: "revoked"})
 	if got := auditClusterPushUnreportingNodes(); got != 1 {
 		t.Fatalf("unreporting = %d, want 1 (only the disconnected node)", got)
+	}
+
+	// Rolling upgrade: a connected node heartbeating from a build without the
+	// capability bit decodes AuditClusterPushDrops as 0 — that is "unknown",
+	// not "zero drops". A current build reporting zero is trusted.
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-legacy", Status: "connected"})
+	nodeMetricsMu.Lock()
+	origMetrics := nodeMetrics
+	nodeMetrics = map[string]MetricsReport{
+		"dp-up":     {NodeID: "dp-up", AuditDropsReported: true},
+		"dp-legacy": {NodeID: "dp-legacy"},
+	}
+	nodeMetricsMu.Unlock()
+	t.Cleanup(func() {
+		nodeMetricsMu.Lock()
+		nodeMetrics = origMetrics
+		nodeMetricsMu.Unlock()
+	})
+	if got := auditClusterPushUnreportingNodes(); got != 2 {
+		t.Fatalf("unreporting = %d, want 2 (disconnected + legacy connected)", got)
 	}
 }

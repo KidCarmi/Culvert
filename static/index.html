@@ -8605,9 +8605,10 @@ async function fetchStats() {
       }
       if ((s.auditClusterPushUnreportingNodes || 0) > 0) {
         // A disconnected Data Plane cannot report its drops until it
-        // reconnects, so a zero above is not proof of completeness.
+        // reconnects, and a pre-upgrade build never reports them, so a zero
+        // above is not proof of completeness.
         const un = s.auditClusterPushUnreportingNodes;
-        warns.push(fmt(un) + ' Data Plane node' + (un === 1 ? '' : 's') + ' disconnected (centralized audit completeness unknown until reconnected)');
+        warns.push(fmt(un) + ' Data Plane node' + (un === 1 ? '' : 's') + ' disconnected or not reporting audit drops (centralized audit completeness unknown)');
       }
       if ((s.logWriteErrors || 0) > 0) warns.push(fmt(s.logWriteErrors) + ' write errors');
       if ((s.processLogWriteErrors || 0) > 0) warns.push(fmt(s.processLogWriteErrors) + ' process-log lines lost');
