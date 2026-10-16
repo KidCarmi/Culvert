@@ -10,8 +10,8 @@ For the product-level overview, quick start, and feature list, start at the
 repository [`README.md`](../../README.md) instead — it links directly to the
 runbook for anything it calls out as needing operator attention. For the
 underlying design/engineering record behind a given behavior (ADRs, chaos-
-engineering sweeps, technical registers), see `CLAUDE.md`'s Architecture Notes
-and `docs/engineering/`.
+engineering sweeps, technical registers), see the
+[agent-context task index](../agent-context/README.md) and `docs/engineering/`.
 
 ## Install, upgrade, and release management
 
@@ -20,6 +20,7 @@ and `docs/engineering/`.
 - [`release-publication-gating.md`](release-publication-gating.md) — how a release becomes publishable and what blocks it.
 - [`enterprise-release-catalog-plan.md`](enterprise-release-catalog-plan.md) — the release-catalog trust design (signing, freshness, rollback); historical plan doc, superseded sections are marked inline.
 - [`catalog-hosting-r2-activation.md`](catalog-hosting-r2-activation.md) — activating Cloudflare R2 as the release-catalog origin.
+- [`dp-bootstrap-artifact-safety.md`](dp-bootstrap-artifact-safety.md) — why the Control Plane refuses to render a Data Plane bootstrap script or compose file for an unsafe request authority.
 - [`catalog-resign-runbook.md`](catalog-resign-runbook.md) — the weekly catalog re-sign pipeline (M1-4) and how to recover it.
 - [`sigstore-trusted-root-lifecycle.md`](sigstore-trusted-root-lifecycle.md) — keyless (Sigstore-identity) catalog signature verification and trusted-root rotation.
 - [`feeds-hosting-r2-activation.md`](feeds-hosting-r2-activation.md) — activating the public SaaS URL-category feed origin (`feeds.culvertlabs.com`).
@@ -41,6 +42,8 @@ and `docs/engineering/`.
 - [`ldap-directory-stalls.md`](ldap-directory-stalls.md) — what happens when a directory accepts a connection and then stops answering.
 - [`credential-verification-cost.md`](credential-verification-cost.md) — the bounded credential-verification governor and the `auth_verify_saturated` alert.
 - [`admin-login-input-bounds.md`](admin-login-input-bounds.md) — why the admin login endpoint bounds the submitted username, and what it protects.
+- [`admin-basic-auth.md`](admin-basic-auth.md) — admin-plane HTTP Basic authentication: the controls it enforces and why TOTP-enrolled accounts cannot use it (breaking change for automation).
+- [`admin-roster-durability.md`](admin-roster-durability.md) — durability of the admin roster (`ui_users.json`) and the recommended alerting rules.
 
 ## TLS inspection, certificates, and decryption
 
@@ -60,6 +63,8 @@ and `docs/engineering/`.
 - [`dns-resolution-health.md`](dns-resolution-health.md) — destination-host DNS resolution health, bounding, and recovery.
 - [`geoip-resolution-health.md`](geoip-resolution-health.md) — GeoIP policy resolution health and the warmer that backs it.
 - [`traffic-log-destination-privacy.md`](traffic-log-destination-privacy.md) — controlling how much destination detail lands in traffic logs.
+- [`destination-host-bounds.md`](destination-host-bounds.md) — the bound applied to the client-supplied destination authority on every protocol, and what you see when it fires.
+- [`request-tracing-input-bounds.md`](request-tracing-input-bounds.md) — bounds on client `X-Request-Id` / `Traceparent` headers; a rejected value is replaced, never refused.
 
 ## Security scanning and threat intelligence
 
