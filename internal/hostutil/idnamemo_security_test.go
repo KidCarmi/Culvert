@@ -143,22 +143,10 @@ func findCrossVerdictCollision(f crossVerdictFamily, budget int) (accepted, reje
 func TestIDNMemo_RejectionIsNeverUpgradedToAcceptance(t *testing.T) {
 	for _, f := range crossVerdictFamilies {
 		t.Run(f.name, func(t *testing.T) {
-			normMemoResetForTest()
-			accepted, rejected, found := findCrossVerdictCollision(f, 1<<13)
-			if !found {
-				t.Skip("no accepted/rejected pair collided within the search budget (seed-dependent)")
+			accepted, rejected, wantNorm, ok := resolveCrossVerdictPair(t, f)
+			if !ok {
+				return // resolveCrossVerdictPair already skipped this family
 			}
-			wantNorm, wantOK := normalizeHostStrictUncached(accepted)
-			if !wantOK {
-				t.Fatalf("probe host %q was expected to normalize; the case proves nothing", truncForLog(accepted))
-			}
-			if _, ok := normalizeHostStrictUncached(rejected); ok {
-				t.Fatalf("probe host %q was expected to be REJECTED; the case proves nothing", truncForLog(rejected))
-			}
-			if normMemoSlotForTest(accepted) != normMemoSlotForTest(rejected) {
-				t.Fatalf("probe hosts do not share a slot; the case proves nothing")
-			}
-
 			// Alternate so that each lookup finds the OTHER verdict resident in
 			// the slot (where the tier retains it), then repeat — a
 			// direct-mapped slot is overwritten on every retained miss, so the
@@ -167,34 +155,76 @@ func TestIDNMemo_RejectionIsNeverUpgradedToAcceptance(t *testing.T) {
 			// direction a deterministic probe rather than one that depends on
 			// which host happened to occupy the slot.
 			for round := 0; round < 4; round++ {
-				if norm, ok := NormalizeHostStrict(accepted); norm != wantNorm || !ok {
-					t.Fatalf("REGRESSION (round %d): NormalizeHostStrict(%q…) = (%q…, %v), want (%q…, true) — "+
-						"a valid host was refused from a colliding rejection entry",
-						round, truncForLog(accepted), truncForLog(norm), ok, truncForLog(wantNorm))
-				}
-				if e := normMemoSlotForTest(accepted).Load(); e == nil || e.host != accepted {
-					t.Fatalf("round %d: the accepted host is not resident after its lookup; "+
-						"the crossing below would not be exercised", round)
-				}
-				if norm, ok := NormalizeHostStrict(rejected); ok || norm != "" {
-					t.Fatalf("REGRESSION (round %d): NormalizeHostStrict(%q…) = (%q…, %v), want (\"\", false) — "+
-						"a host that cannot be canonicalized was ACCEPTED from a colliding entry, turning the "+
-						"fail-closed dispatch gate into a fail-open one (RISK-013)",
-						round, truncForLog(rejected), truncForLog(norm), ok)
-				}
+				assertCrossingHolds(t, round, accepted, rejected, wantNorm)
 			}
-
-			// And the rejection must stay a rejection on consecutive lookups
-			// with no intervening eviction: a HIT on the memoized rejection in
-			// the main tier, a recomputation beside the resident acceptance in
-			// the long tier.
-			for round := 0; round < 2; round++ {
-				if norm, ok := NormalizeHostStrict(rejected); ok || norm != "" {
-					t.Fatalf("REGRESSION: a rejection was answered as (%q…, %v) on repeat %d",
-						truncForLog(norm), ok, round)
-				}
-			}
+			assertRejectionSurvivesRepeat(t, rejected)
 		})
+	}
+}
+
+// resolveCrossVerdictPair finds the colliding pair for one family and checks
+// every precondition the crossing assertions rest on: the accepted host really
+// normalizes, the rejected one really does not, and the two really share a
+// slot. ok=false means it has already called t.Skip, so the caller returns.
+//
+// Split out of the test above to keep each function inside the repository's
+// gocognit budget (30; the combined body measured 39), and because the
+// preconditions are a separate claim from the crossing itself — if one of them
+// stops holding, the failure should name the setup rather than the invariant.
+func resolveCrossVerdictPair(t *testing.T, f crossVerdictFamily) (accepted, rejected, wantNorm string, ok bool) {
+	t.Helper()
+	normMemoResetForTest()
+	accepted, rejected, found := findCrossVerdictCollision(f, 1<<13)
+	if !found {
+		t.Skip("no accepted/rejected pair collided within the search budget (seed-dependent)")
+		return "", "", "", false
+	}
+	wantNorm, wantOK := normalizeHostStrictUncached(accepted)
+	if !wantOK {
+		t.Fatalf("probe host %q was expected to normalize; the case proves nothing", truncForLog(accepted))
+	}
+	if _, rejectedOK := normalizeHostStrictUncached(rejected); rejectedOK {
+		t.Fatalf("probe host %q was expected to be REJECTED; the case proves nothing", truncForLog(rejected))
+	}
+	if normMemoSlotForTest(accepted) != normMemoSlotForTest(rejected) {
+		t.Fatalf("probe hosts do not share a slot; the case proves nothing")
+	}
+	return accepted, rejected, wantNorm, true
+}
+
+// assertCrossingHolds is one round of the crossing: the accepted host answers
+// correctly and becomes resident, and the rejected host that shares its slot is
+// still refused with the acceptance sitting right there.
+func assertCrossingHolds(t *testing.T, round int, accepted, rejected, wantNorm string) {
+	t.Helper()
+	if norm, ok := NormalizeHostStrict(accepted); norm != wantNorm || !ok {
+		t.Fatalf("REGRESSION (round %d): NormalizeHostStrict(%q…) = (%q…, %v), want (%q…, true) — "+
+			"a valid host was refused from a colliding rejection entry",
+			round, truncForLog(accepted), truncForLog(norm), ok, truncForLog(wantNorm))
+	}
+	if e := normMemoSlotForTest(accepted).Load(); e == nil || e.host != accepted {
+		t.Fatalf("round %d: the accepted host is not resident after its lookup; "+
+			"the crossing below would not be exercised", round)
+	}
+	if norm, ok := NormalizeHostStrict(rejected); ok || norm != "" {
+		t.Fatalf("REGRESSION (round %d): NormalizeHostStrict(%q…) = (%q…, %v), want (\"\", false) — "+
+			"a host that cannot be canonicalized was ACCEPTED from a colliding entry, turning the "+
+			"fail-closed dispatch gate into a fail-open one (RISK-013)",
+			round, truncForLog(rejected), truncForLog(norm), ok)
+	}
+}
+
+// assertRejectionSurvivesRepeat requires the rejection to stay a rejection on
+// consecutive lookups with no intervening eviction: a HIT on the memoized
+// rejection in the main tier, a recomputation beside the resident acceptance in
+// the long tier (which does not retain failures).
+func assertRejectionSurvivesRepeat(t *testing.T, rejected string) {
+	t.Helper()
+	for round := 0; round < 2; round++ {
+		if norm, ok := NormalizeHostStrict(rejected); ok || norm != "" {
+			t.Fatalf("REGRESSION: a rejection was answered as (%q…, %v) on repeat %d",
+				truncForLog(norm), ok, round)
+		}
 	}
 }
 
