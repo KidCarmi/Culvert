@@ -7,13 +7,14 @@
 
 ## Executive Summary
 
-One small drift found and fixed; everything else in the window is consistent.
+One small drift found and fixed, and one recurrence of an open item (T-51) recorded; everything else in the window is consistent.
 
 - **Operator-facing additions checked:** on-demand backup (`Backup Now` / `Start Backup`), self-service
   `Change Password`, `/api/backups/operations/`, `auth.basic.fail` / `auth.basic.refused`,
   state-file quarantine diagnostics, `culvert_ui_roster_role_clamped_total`. Verb/noun usage matches
   existing vocabulary (`backup`, `auth.<mechanism>.<outcome>`, `quarantine`).
-- **Findings:** 1 (Low) — below.
+- **Findings:** 1 (Low) — below — plus one recurrence of an open item: "appliance" in two new
+  `CHANGELOG.md` release-note entries (T-51; see Other sections).
 
 **Terminology Health Score:** carried baseline from the 2026-09-24 report plus 1 new item, fixed in
 this PR for the runbook; its metric-HELP half stays open until #1630 (T-64) merges.
@@ -42,6 +43,11 @@ this PR for the runbook; its metric-HELP half stays open until #1630 (T-64) merg
 
 ## Other sections
 
+- **T-51 recurrence (open, not fixed here):** two release-note entries added in the window say
+  "the appliance" (`CHANGELOG.md`, the CDR client-key persistence entry and the SEC-RBAC-ROLE-1
+  entry), although [product terminology](../design/PRODUCT-TERMINOLOGY.md) says **Appliance** is not
+  used (say **node** or **instance**). Left for the T-51 owner because the on-prem appliance work in
+  flight may change that glossary row.
 - **Legacy / conflicting / ambiguous names:** none new. The legacy console's "Admin Users" panel title
   is a known divergence from "Administrators", tracked separately (#1531). **Migration risk:** none.
 - **Recommended plan:** none beyond R-1. If a future change surfaces "roster" in the GUI, use
