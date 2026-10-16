@@ -31,11 +31,14 @@ func checkSaaSFeed() []OperatorContractCheck {
 	var status, msg, action string
 	switch snap.State {
 	case saasFeedStateCritical:
-		if snap.Stale && snap.ActiveFeedVersion > 0 {
+		if snap.CriticalReason == recoveryStaleServed.String() && snap.Stale && snap.ActiveFeedVersion > 0 {
 			// Restart recovery of a committed generation past its expiry
 			// (recoveryStaleServed) sets Critical alongside Stale, but the feed
 			// contract never fails closed on age: it is the stale condition,
-			// and the next successful activation clears it.
+			// and the next successful activation clears it. Keyed on the
+			// recovery reason, not on Stale alone: fail-closed recovery
+			// (equivocation / embedded_degraded) can keep a stale generation
+			// and is a genuine critical state.
 			return []OperatorContractCheck{saasFeedStaleRow(snap, serving)}
 		}
 		status = diagFail

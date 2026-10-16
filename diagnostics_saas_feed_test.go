@@ -48,6 +48,12 @@ func TestSaaSFeedDiagnostics(t *testing.T) {
 			v.Stale = true
 			s.noteRecovery(recoveryResult{Class: recoveryStaleServed, ActiveVersion: 5, Stale: true, Critical: true, View: v})
 		}, diagWarn, "signed generation 5 (cached) is serving as the last-known-good"},
+		{"stale_generation_kept_by_fail_closed_recovery_stays_critical", func(s *saasFeedStatus) {
+			s.noteConfig(enabled)
+			v := viewFor(sourceCached, 5, "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z")
+			v.Stale = true
+			s.noteRecovery(recoveryResult{Class: recoveryEquivocation, ActiveVersion: 5, Stale: true, Critical: true, View: v})
+		}, diagFail, "critical state (corruption, equivocation or lost authority: equivocation) — signed generation 5 (cached) is serving"},
 		{"waiting_with_cached_generation", func(s *saasFeedStatus) {
 			s.noteConfig(enabled)
 			s.noteRecovery(recoveryResult{Class: recoveryActiveServed, ActiveVersion: 5,
