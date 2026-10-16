@@ -143,6 +143,12 @@ tree restored after each):
 | `rateLimitGossipLoop` reassigns its `limiter` | GossipLoopIsFedTheEnforcingLimiter | FAIL — **green before round 2** |
 | `proxy.go` shadows `rl := newRateLimiter()` | RequestPathUsesClusterAwareEntryPoint | FAIL — **green before round 1** |
 | `socks5.go` uses `rl.Allow` | RequestPathUsesClusterAwareEntryPoint | FAIL (as required) |
+| a helper reassigns `rl = newRateLimiter()` | NoProductionReassignmentOfTheOwner | FAIL — **green before round 3** |
+| the same reassignment in a separate file | NoProductionReassignmentOfTheOwner | FAIL — **green before round 3** |
+| §4 reinstates "Allow panics" | ZeroValueResidual_DocumentMatchesTheEngine | FAIL — **green before round 4** |
+| §4 adds a row the gate cannot run | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (no silent skip) |
+| §4 deletes a row the gate knows | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (as required) |
+| §4's table header renamed | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (parser cannot match nothing and pass) |
 
 ### Review rounds — the wall checked the SPELLING, not the BINDING
 
@@ -206,6 +212,47 @@ than inside each named handler, and a future handler could lose its call while
 an unrelated helper satisfies the check. That is a coverage gap in a regression
 test, not a production bypass — both handlers call it today — and it is
 recorded here rather than left silent.
+
+### Round 4 — the document itself carried an unmeasured claim
+
+The fourth finding was not in the wall but in **this record**. Residual 1
+stated, under the words *"Confirmed by probe"*, that
+`(&admission.RateLimiter{}).Allow(...)` panics on a zero value. It does not:
+`Allow` returns `true` at `!r.enabled.Load()` before it reaches the
+uninitialised shard maps, so only a limiter already configured with a positive
+limit can get there. Raised as Codex P2 on `026ab8d`, re-measured, and
+corrected — §4 now carries the full probe matrix, including two facts the
+original sentence hid: `IPFilter`'s zero value is safe on its **read** path and
+only panics on its **write** path, and the limiter is safe on every admission
+method until `Configure` arms it.
+
+Two things make this worth recording rather than quietly editing. First, the
+claim was **asserted as verified** — the failure was not reasoning, it was
+reporting a measurement that had not been taken in the form the sentence
+described, which is the one error a security record cannot absorb. Second, the
+overstatement had a direction: an exaggerated residual invites hardening the
+request path against a fault it cannot have, and it contradicted the contract
+recorded one file over (`internal/admission/AGENTS.md`: *"a zero limiter is
+supported for disabled admission/diagnostics, while active local admission
+requires its constructor"*), which was right all along.
+
+So the correction is pinned rather than trusted.
+`TestZeroValueResidual_DocumentMatchesTheEngine`
+(`internal/admission/zero_value_doc_test.go`) parses the §4 table out of this
+file and drives every row against the shipped engine — the CHAOS-69
+runbook-example precedent, applied to a security review instead of a log line.
+It pins the CONTRACT, not the layout: the wording and the row count stay the
+author's call, but a row the gate cannot run **fails** rather than skipping,
+because a skip is exactly how the wrong claim would return. Four mutations
+verified failing: the original wrong claim reinstated, a row naming an
+unrunnable call, a known row deleted, and a renamed table header (so a parser
+that silently matched nothing cannot pass). Two controls: the table must carry
+both outcomes, and the parsed row count must cover every call the gate knows.
+
+**The cross-round lesson extends.** Rounds 1–3 were about a wall that proved
+less than it claimed; round 4 is the same defect one layer up — *the document*
+proved less than it claimed, and nothing checked it. Where a security record
+states a behavioural fact, bind the fact to the code that decides it.
 
 ## 3. Reviewed and found safe
 
@@ -293,12 +340,39 @@ complete — not a weakening of the wall.
 
 ## 4. Residual risk (all pre-existing; none introduced by this window)
 
-1. **Constructor-dependent invariant on exported types.** Confirmed by probe:
-   `(&admission.IPFilter{}).Add(...)` and `(&admission.RateLimiter{}).Allow(...)`
-   both panic with `assignment to entry in nil map`. Production constructs both
-   through `NewIPFilter`/`NewRateLimiter` everywhere (verified across the tree),
-   so this is unreachable today, and ADR-0038 records it as a deliberately
-   preserved limitation rather than adding lazy initialisation to the hot path.
+1. **Constructor-dependent invariant on exported types.** The zero value of
+   each engine is safe until it is *used actively*, and the boundary is not the
+   type — it is the individual method. Measured against the shipped code:
+
+   | zero-value call | result |
+   |---|---|
+   | `(&admission.IPFilter{}).Allowed(ip)` | no panic |
+   | `(&admission.IPFilter{}).Add(ip)` | **panic**, `assignment to entry in nil map` |
+   | `(&admission.RateLimiter{}).Allow(ip)` | no panic |
+   | `(&admission.RateLimiter{}).AllowAuto(ip)` | no panic |
+   | `(&admission.RateLimiter{}).AllowClusterAware(ip)` | no panic |
+   | `(&admission.RateLimiter{}).AddExemption(ip)` | no panic |
+   | `Configure(10, time.Minute)` **then** `Allow(ip)` | **panic**, `assignment to entry in nil map` |
+
+   So the limiter's admission methods short-circuit on `!enabled` *before* they
+   reach the uninitialised shard maps, and only a limiter that has been
+   configured with a positive limit can reach them. **An earlier draft of this
+   section claimed `(&admission.RateLimiter{}).Allow(...)` panics as written.
+   It does not** — the claim was raised in review (Codex P2 on `026ab8d`) and
+   re-measured; the table above is the probe output. The correction matters
+   beyond accuracy: an overstated residual invites zero-value hardening on the
+   request path that the code does not need, and it contradicted the contract
+   already recorded one file over
+   (`internal/admission/AGENTS.md`: *"a zero limiter is supported for disabled
+   admission/diagnostics, while active local admission requires its
+   constructor"*), which is the authority here.
+
+   The residual that survives is narrower and still real: the two **write**
+   paths (`IPFilter.Add`, and the limiter's bucket insertion once configured)
+   depend on their constructor. Production builds both through
+   `NewIPFilter`/`NewRateLimiter` everywhere (verified across the tree), so it
+   is unreachable today, and ADR-0038 records it as a deliberately preserved
+   limitation rather than adding lazy initialisation to the hot path.
    Extraction widened *who can write the misuse* (any module-internal package)
    without changing the behaviour. Hardening options, for a separate change:
    make the zero value safe, or make the types unusable without a constructor.
@@ -319,6 +393,12 @@ complete — not a weakening of the wall.
 
 - `admission_owner_wall_test.go` — new, test-only: two structural walls with
   controls, plus the documented-residual behavioural test.
+- `admission_owner_reassign_wall_test.go` — new, test-only (round 3): the
+  package handle itself is walled against production reassignment. Kept in its
+  own file so it merges cleanly alongside concurrent edits to the other walls.
+- `internal/admission/zero_value_doc_test.go` — new, test-only (round 4): binds
+  §4's zero-value table to the engine, so this document cannot drift from the
+  behaviour it reports.
 - `docs/agent-context/domains/admission.md` — the one-owner invariant in prose:
   what the contract is, why a split owner is silent, and why detection is
   deliberately NOT the control. This is the only prose home of the rule, so a
@@ -347,4 +427,5 @@ No production behaviour is changed by this review.
 | `go test -count=1 .` (full root suite) | pass (375s) |
 | `go test -count=1 -shuffle=on .` (determinism emulation) | pass (304s) |
 | `go test -tags benchgate -run TestBenchGate_ . ./internal/admission` | pass |
-| Mutation proofs (3) | each verified failing its gate |
+| `go test ./internal/admission -run TestZeroValueResidual` | pass |
+| Mutation proofs (11 across rounds 1–4) | each verified failing its gate |
