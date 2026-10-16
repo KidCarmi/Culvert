@@ -722,13 +722,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The candidate under qualification, RETAINED (run 38040972664): the
-          # frames are bound to these bytes (ova-sha256 + .mf + the guest's
-          # own console banner), and Esc is judged against the documented
-          # contract (esc-shows-boot-messages, esc-one-way).
-          - variant: candidate-bad788e54ffe
-            retained_run: "38040972664"
-            retained_sha256: "87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c"
+          # Candidate 6248daf7 (console-shutdown P1 + boot-UX), RETAINED
+          # (run 38964077956): the frames are bound to these bytes
+          # (ova-sha256 + .mf + the guest's own console banner), and Esc is
+          # judged against the documented contract (esc-shows-boot-messages,
+          # esc-one-way). This OVA carries the culvert-splash-status unit
+          # (real-root re-assert of the Esc hint + a failure warning), so the
+          # frames prove the ~50s delayed-service interval now shows status and
+          # an Esc hint rather than brand/dots alone.
+          - variant: candidate-6248daf7
+            retained_run: "38964077956"
+            retained_sha256: "59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: KVM, lab directory, tools
@@ -906,30 +910,21 @@ jobs:
             sidecar_archive_sha256: "b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445"
             sidecar_index: "sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251"
             expect: nonzero
-          # CANDIDATE: the 1.5.4 sidecar baked into THIS candidate OVA must show
-          # ZERO wrong-cleans — F-P2 closed on the shipped engine. OVA
-          # appliance-lab-ova-candidate-9e34452677d7 (run 38881775755); sidecar
-          # archive + image id from the build-info the OVA carries.
-          - label: candidate-1.5.4-9e344526
-            ova_artifact: "12038600454"
-            ova_sha256: "47cb50f08d09efac5b6a970cc71517598a8edbb75805cb4b55cc2271e81a5313"
-            sidecar_archive_sha256: "39a0f7c83bc05f313fd374895bdfe8840c40a418834301de9f8d5a7cb12979ef"
-            sidecar_index: "sha256:dc96d2f249d20a8a899fd1f965af18cd4cd54fe9f66d7a278199fd29195a4280"
-            expect: zero
-          # CANDIDATE (SHIPPED, owner P1): the 1.5.4 sidecar baked into the
-          # allowlist-fix candidate OVA a80be4b6 — an INDEPENDENT rebuild of the
-          # same sidecar inputs on a later day. Its bytes DIFFER from 9e344526
-          # (image id b11e29c5 vs dc96d2f2, archive 9404b981 vs 39a0f7c8,
-          # upstream clamav/clamav:1.5 index 638d9020 vs 9e344526's; same
-          # pcre2-10.49-r0): the reproducible build pins byte-identity WITHIN a
-          # run, not ACROSS builds, so Alpine/upstream re-pulls drift the bytes.
-          # Proving F-P2 closed here answers "a future rebuild is not guaranteed
-          # byte-identical" — two independent 1.5.4 builds, both wrong-cleans=0.
-          - label: candidate-1.5.4-a80be4b6
-            ova_artifact: "12047875462"
-            ova_sha256: "394788af5b839c8ff895f8e36b67ad0ca89d3c4f6ed9c71d4112416d6626ebe0"
-            sidecar_archive_sha256: "9404b98152723b5edf20403e98e724a2ed5b4e72c0caf18732df6196d0317f05"
-            sidecar_index: "sha256:b11e29c503a4acb1c0196db9ad771d2cf49de8991b7c3be1a592292501ab6c0e"
+          # CANDIDATE (console P1 + boot-UX, 6248daf7): the 1.5 sidecar baked into
+          # THIS candidate OVA must show ZERO wrong-cleans — F-P2 closed on the
+          # shipped engine. Its bytes are NOT inherited from any prior candidate:
+          # image id 8af92aa4 (vs a80be4b6's b11e29c5, 9e344526's dc96d2f2),
+          # archive 7fefc79c, ref culvert/clamav:1.5.4-culvert.1 — an INDEPENDENT
+          # rebuild off the same upstream clamav/clamav:1.5 index (638d9020) and
+          # pcre2-10.49-r0, so a third all-zero build answers "a future rebuild
+          # is not byte-guaranteed". OVA/archive/image-id are this OVA's OWN build
+          # record (build-info.json clamav_baked_tar_sha256 /
+          # clamav_sidecar_image_id, run 38964077956).
+          - label: candidate-1.5-6248daf7
+            ova_artifact: "12074562532"
+            ova_sha256: "59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61"
+            sidecar_archive_sha256: "7fefc79c82e4febdd59377e3689f042d0d77a17120e0a4959d9bde63e20db95e"
+            sidecar_index: "sha256:8af92aa4da736583ede38a5565a11cc57b30fb91bdcb2b31374dd81848382413"
             expect: zero
     env:
       OVA_ARTIFACT_ID: ${{ matrix.ova_artifact }}
@@ -1163,20 +1158,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # SHIPPED candidate 1.5.4 OVA (appliance-lab-ova-candidate-a80be4b6, lab
-      # run 38903245843 — the allowlist-preservation P1 on top of the F-P2
-      # 1.4.6 -> 1.5.4 bump). Archive + index pins are the OVA's own build
+      # Candidate 1.5 OVA (appliance-lab-ova-candidate-6248daf7, lab run
+      # 38964077956 — the console-shutdown P1 + boot-UX candidate on top of the
+      # F-P2 1.4.6 -> 1.5 bump). Archive + index pins are the OVA's own build
       # record (build-info.json clamav_baked_tar_sha256 and
       # clamav_sidecar_image_id). The amd64 manifest and config are DERIVED from
       # the re-hashed index (exported via GITHUB_ENV), so every link stays
-      # hash-bound. This scans the EXACT 1.5.4 sidecar baked into THIS candidate
-      # OVA — an independent rebuild whose bytes differ from 9e344526's, so its
-      # scan is not reusable from 9e344526's (different engine pull, different
-      # bytes). The 1.4.6 scans are not reusable either.
-      OVA_ARTIFACT_ID: "12047875462"   # appliance-lab-ova-candidate-a80be4b6, run 38903245843 (allowlist P1, SHIPPED candidate)
-      OVA_SHA256: 394788af5b839c8ff895f8e36b67ad0ca89d3c4f6ed9c71d4112416d6626ebe0
-      SIDECAR_ARCHIVE_SHA256: 9404b98152723b5edf20403e98e724a2ed5b4e72c0caf18732df6196d0317f05
-      SIDECAR_INDEX: sha256:b11e29c503a4acb1c0196db9ad771d2cf49de8991b7c3be1a592292501ab6c0e
+      # hash-bound. This scans the EXACT 1.5 sidecar baked into THIS candidate
+      # OVA — an independent rebuild whose bytes differ from a80be4b6's
+      # (image id 8af92aa4 vs b11e29c5, archive 7fefc79c vs 9404b981), so its
+      # scan is not reusable from the prior candidates'. The 1.4.6 scans are not
+      # reusable either.
+      OVA_ARTIFACT_ID: "12074562532"   # appliance-lab-ova-candidate-6248daf7, run 38964077956 (console P1 + boot-UX candidate)
+      OVA_SHA256: 59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61
+      SIDECAR_ARCHIVE_SHA256: 7fefc79c82e4febdd59377e3689f042d0d77a17120e0a4959d9bde63e20db95e
+      SIDECAR_INDEX: sha256:8af92aa4da736583ede38a5565a11cc57b30fb91bdcb2b31374dd81848382413
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -1263,7 +1259,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-a80be4b6
+          name: appliance-lab-sidecar-scan-6248daf7
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
