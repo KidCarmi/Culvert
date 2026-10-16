@@ -6634,7 +6634,7 @@ function renderUsersTable(users) {
   tbody.innerHTML = tableRows(users, u => `
     <tr>
       <td><strong>${escHtml(u.username)}</strong></td>
-      <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span></td>
+      <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span>${u.roleClamped ? ' <span class="badge" data-role-clamped="1" title="The saved user file names a role this version does not recognise; held at viewer until a role is chosen" style="border-radius:99px;padding:2px 8px;font-size:.68rem;color:var(--warn,#b8860b)">held at viewer</span>' : ''}</td>
       <td>
         <button class="btn ghost sm" data-click="openUserModal" data-arg="${escHtml(u.username)}" data-arg2="${escHtml(u.role)}">Edit</button>
         ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" data-click="deleteUser" data-arg="${JSON.stringify(u.username).replace(/"/g,'&quot;')}">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
@@ -8576,7 +8576,7 @@ async function fetchStats() {
         document.getElementById('roster-role-clamp-text').textContent =
           fmt(rc) + ' account' + (rc === 1 ? ' is' : 's are') +
           ' held at the viewer role: the saved user file names a role this version does not recognise ' +
-          '(for example after restoring a backup from a newer version). Edit the account and choose a role to restore its access. ' +
+          '(for example after restoring a backup from a newer version). Those accounts are marked "held at viewer" in the list below: edit each one and choose a role to restore its access. ' +
           'If no administrator can still sign in, recover from the host shell with --reset-password username:newpassword, ' +
           'which restores the admin role (and removes that account\'s two-factor enrolment).';
         rcHint.style.display = '';
