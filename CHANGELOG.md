@@ -185,6 +185,65 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   stay recoverable only until the next logout or account deletion on that node
   replaces it.
 
+  A revocations path that cannot hold a write is reported with the action that
+  repairs it. Three conditions make every save fail — the parent directory is
+  gone, a path component is a regular file, or the path is itself a directory —
+  and they need three different remedies: restore the mount, clear what is in
+  the way, remove the directory at the target. The second and third used to read
+  as healthy (the checks for "does not exist" do not match a path component that
+  is a file, and a directory at the target stats cleanly, so neither the missing
+  file nor the missing parent check fired) while every save was lost and a
+  restart discarded the in-memory list. All three are now detected and the
+  diagnostics row names the one that applies; a condition that cannot be proved
+  (a permission or I/O error rather than a definite absence) still reports
+  nothing, because only definite evidence may move a surface whose claim is that
+  a revocation applied now would survive.
+
+  The read-failure row scopes the re-application job to the revocations actually
+  in force. It had reported the refused-save counter, which counts attempts: an
+  entry that later expires is dropped from the live set while the counter never
+  decreases, and a repeated logout of one cookie increments it again. Nothing is
+  loaded from the file in that state, so the in-force token and account counts
+  are exactly what this boot applied and what a restart would lose — the same
+  correction already applied to the persist-failure row. The runbook's metric
+  table and its two recovery procedures, the counter's own documentation and the
+  `/metrics` help text now all say the same thing, so an operator reading any of
+  them is sent to the live counts for the re-application scope and to the
+  counter only for the magnitude of the incident. The counter's unit is stated
+  correctly for the first time, too: it counts revocation *entries*, and one
+  refused save can add more than one, because the cluster merge charges every
+  entry it had added while the logout and account-deletion paths charge one.
+
+  `culvert_ha_bundle_revocations_subset` now says what it can observe. The gauge
+  is recorded while a bundle is being marshalled — before it is delivered and
+  before the standby applies it — and HA bundles are pulled with no
+  acknowledgment, so a cancelled response or a failed apply leaves the standby
+  short while the gauge reads zero. Its help text and the runbook's alert
+  guidance say so and point at the HA sync freshness signals, because an
+  operator reading it as delivery could treat a promotion as safe.
+
+  A revocations path that cannot hold a write is now diagnosed ahead of the
+  failures it causes. A directory at the configured path makes the boot read
+  fail with a code that is not corruption, so the node reported that the list
+  could not be read and told the operator to check permissions and the mount and
+  restart — which fails identically — while claiming the file was left in place
+  and its contents might still be intact, of a path holding no contents. Writes
+  are fenced in that state, so nothing was ever persisted, behind an instruction
+  that could not work. A definitively unusable path now takes the diagnostics
+  row ahead of every load or write failure, because it is the cause of them and
+  carries the only remedy that applies; a fault that cannot be proved still
+  reports nothing and leaves the row to the generic branches.
+
+  Recovering from a corrupt revocations file no longer destroys the revocations
+  made since boot. The quarantine frees the path, so writes are not fenced and
+  the next logout or sync creates a fresh file holding those entries — and the
+  documented repair was to move the repaired file back, which replaced them.
+  The procedure now records the live counts first and merges rather than
+  overwrites, keeping the later expiry where an entry appears on both sides. The corrupt-file recovery procedure also no longer suggests
+  disabling the compromised account as an interim step: administrator accounts
+  have no disabled state, so deleting the account — which the procedure already
+  covers — is the only action that answers.
+
   Revocation persistence remains opt-in (`-revocations-file`) and is not
   changed here, but it is no longer silent: a new `session_revocation`
   diagnostics row and `culvert_session_revocation_*` metrics report whether a

@@ -405,6 +405,34 @@ func TestChaos68_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
 			session.SetRevocationsPath(path)
 			noteRevocationPersistenceConfigured(path)
 		}},
+		// AU-39/AU-46/AU-51. Three MORE compositions of this row, each with its
+		// own remedy sentence, and each one a place a future reword reaches for
+		// the configured path to say which thing is in the way. The wall drove
+		// six branches while this row had nine; a wall whose claim is "every
+		// branch" has to grow with the branches, which is the lesson one layer
+		// out from AU-36's own.
+		{"parent-missing", diagFail, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "gone", "revocations.json")
+			session.SetRevocationsPath(path)
+			noteRevocationPersistenceConfigured(path)
+		}},
+		{"parent-occupied", diagFail, func(t *testing.T) {
+			parent := filepath.Join(t.TempDir(), "mount")
+			if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+				t.Fatalf("occupy the parent path: %v", err)
+			}
+			path := filepath.Join(parent, "revocations.json")
+			session.SetRevocationsPath(path)
+			noteRevocationPersistenceConfigured(path)
+		}},
+		{"target-is-a-directory", diagFail, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "revocations.json")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatalf("mkdir target: %v", err)
+			}
+			session.SetRevocationsPath(path)
+			noteRevocationPersistenceConfigured(path)
+		}},
 	}
 
 	for _, b := range branches {
@@ -1716,8 +1744,8 @@ func TestChaos68_AU39_VanishedFileWithIntactParentStaysDurable(t *testing.T) {
 	if !revocationsAreDurable() {
 		t.Error("a deleted file with an intact parent is still recreatable by the next save; durable must stay true")
 	}
-	if revocationTargetParentMissing() {
-		t.Error("revocationTargetParentMissing reported a missing parent for an intact directory")
+	if got := revocationTargetUnusableReason(); got != "" {
+		t.Errorf("an intact directory holding a deleted file reported %q", got)
 	}
 }
 
@@ -1725,8 +1753,8 @@ func TestChaos68_AU39_VanishedFileWithIntactParentStaysDurable(t *testing.T) {
 func TestChaos68_AU39_UnconfiguredNodeNeedsNoParentCheck(t *testing.T) {
 	withChaos68Revocations(t)
 	session.SetRevocationsPath("")
-	if revocationTargetParentMissing() {
-		t.Error("an unconfigured node reported a missing parent")
+	if got := revocationTargetUnusableReason(); got != "" {
+		t.Errorf("an unconfigured node reported %q", got)
 	}
 	if revocationsAreDurable() {
 		t.Error("an unconfigured node must not read durable")
@@ -1754,8 +1782,8 @@ func TestChaos68_ParentIsAFileIsNotDurable(t *testing.T) {
 	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("replace parent with a file: %v", err)
 	}
-	if !revocationTargetParentMissing() {
-		t.Fatal("a parent replaced by a regular file (ENOTDIR) was reported as a usable target")
+	if got := revocationTargetUnusableReason(); got != "not_a_directory" {
+		t.Fatalf("a parent replaced by a regular file (ENOTDIR) reported %q, want %q", got, "not_a_directory")
 	}
 	if revocationsAreDurable() {
 		t.Error("durable is true although every save into a non-directory parent fails")
@@ -1811,5 +1839,310 @@ func TestChaos68_TargetIsADirectoryIsNotDurable(t *testing.T) {
 	}
 	if row := checkSessionRevocation(); row.Status != diagFail {
 		t.Errorf("status = %q, want %q with the path a directory", row.Status, diagFail)
+	}
+}
+
+// DEFECT (AU-46, operator half). A path component replaced by a regular file
+// is definitively non-durable — the durability predicate said so — but the row
+// kept printing the MISSING-parent remedy: restore the mount or directory. The
+// directory is not gone, something is in its way, and the action is to clear
+// it. A bounded classifier is worth nothing if one remedy is printed for every
+// class (AU-36), on the row that classifier was added for.
+func TestChaos68_AU46_OccupiedParentRowNamesItsOwnRemedy(t *testing.T) {
+	withChaos68Revocations(t)
+	parent := filepath.Join(t.TempDir(), "mount")
+	path := filepath.Join(parent, "revocations.json")
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("occupy the parent path: %v", err)
+	}
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Fatalf("status = %q, want %q", row.Status, diagFail)
+	}
+	if !strings.Contains(row.Message, "not a directory") {
+		t.Errorf("row does not name the condition: %q", row.Message)
+	}
+	if strings.Contains(row.OperatorAction, "Restore the mount") {
+		t.Errorf("row printed the missing-parent remedy for an occupied path: %q", row.OperatorAction)
+	}
+	if !strings.Contains(row.OperatorAction, "Remove or rename whatever occupies") {
+		t.Errorf("row does not name the remedy for an occupied path: %q", row.OperatorAction)
+	}
+}
+
+// DEFECT (AU-51, operator half). Same shape for the third class: the target
+// itself is a directory, so the thing to remove IS the target, not a mount and
+// not an intruder beside it.
+//
+// The unusable-path branch runs FIRST, ahead of every failure branch, so the
+// row is correct whether or not a save has been attempted — which is the
+// correction Codex's EISDIR finding forced on AU-51's original ordering (see
+// TestChaos68_AU56_*). The gate therefore drives the save and re-reads, which
+// the earlier ordering could not survive.
+func TestChaos68_AU51_DirectoryTargetRowNamesItsOwnRemedy(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	if got := revocationTargetUnusableReason(); got != "target_is_a_directory" {
+		t.Fatalf("reason = %q, want %q", got, "target_is_a_directory")
+	}
+	row := checkSessionRevocation()
+	if !strings.Contains(row.Message, "is a DIRECTORY") {
+		t.Errorf("row does not name the condition: %q", row.Message)
+	}
+	if strings.Contains(row.OperatorAction, "Restore the mount") {
+		t.Errorf("row printed the missing-parent remedy: %q", row.OperatorAction)
+	}
+	if !strings.Contains(row.OperatorAction, "Remove that directory") {
+		t.Errorf("row does not name the remedy for a directory target: %q", row.OperatorAction)
+	}
+
+	// Proof the premise is real rather than assumed — and then the row must
+	// STILL name the directory, because a failed save must not mask the cause.
+	if err := sessionRevoked.SaveRevocations(); err == nil {
+		t.Error("SaveRevocations succeeded against a directory target; the gate's premise is wrong")
+	}
+	if after := checkSessionRevocation(); !strings.Contains(after.Message, "is a DIRECTORY") {
+		t.Errorf("a failed save masked the cause: %q", after.Message)
+	}
+}
+
+// CONTROL. The cheapest way to pass both gates above is to reword every branch
+// alike, which would send an operator whose mount is gone hunting for a file to
+// delete. The missing-parent class must keep its own remedy.
+func TestChaos68_AU46_ControlMissingParentKeepsItsRemedy(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "gone", "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+
+	if got := revocationTargetUnusableReason(); got != "missing" {
+		t.Fatalf("reason = %q, want %q", got, "missing")
+	}
+	row := checkSessionRevocation()
+	if !strings.Contains(row.OperatorAction, "Restore the mount") {
+		t.Errorf("a missing parent lost its own remedy: %q", row.OperatorAction)
+	}
+}
+
+// The runbook's §6c table keys an operator's three different actions on what
+// the diagnostics row SAYS, so those quoted fragments are a lookup contract: a
+// reword of one message orphans the row an operator is reading mid-incident,
+// and no behavioural assertion can see it.
+//
+// This is CHAOS-69's rule — a documented line is a contract, so pin it against
+// the emitter rather than against a regex rewritten in the test — applied to a
+// diagnostics row. It pins only the property that can break: every "Row says"
+// cell must be a substring of the message the emitter really produces for that
+// class. How the table is laid out, and how many classes it shows, stay the
+// author's call.
+func TestChaos68_AU51_RunbookTableMatchesTheRowMessages(t *testing.T) {
+	const doc = "docs/operator/session-revocation.md"
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), doc))
+	if err != nil {
+		t.Fatalf("read %s: %v", doc, err)
+	}
+	lines := strings.Split(string(raw), "\n")
+
+	start := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "## 6c.") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("%s has no §6c section; if it was renamed, update this gate deliberately", doc)
+	}
+
+	var quoted []string
+	for _, l := range lines[start:] {
+		if strings.HasPrefix(l, "## ") && !strings.HasPrefix(l, "## 6c.") {
+			break
+		}
+		if !strings.HasPrefix(l, "| ") || strings.HasPrefix(l, "| ---") || strings.HasPrefix(l, "| Row says") {
+			continue
+		}
+		// strings.Split ignores the `\|` escape that markdown honours, so a
+		// future cell containing an escaped pipe would be silently cut in half
+		// and this gate would compare a fragment. Refuse loudly instead of
+		// mis-parsing — the same trap that has already produced a malformed
+		// register row in this sweep (AU-49).
+		if strings.Contains(l, "\\|") {
+			t.Fatalf("§6c row contains an escaped pipe, which this gate's splitter cannot read: %q", l)
+		}
+		cells := strings.Split(l, "|")
+		if len(cells) < 3 {
+			continue
+		}
+		if c := strings.TrimSpace(cells[1]); c != "" {
+			quoted = append(quoted, c)
+		}
+	}
+	if len(quoted) == 0 {
+		t.Fatal("found no row-message cells in §6c; the selector no longer matches the table")
+	}
+
+	// What the emitter really produces, for every class it can report.
+	produced := make([]string, 0, 3)
+	for _, reason := range []string{"missing", "not_a_directory", "target_is_a_directory"} {
+		produced = append(produced, revocationTargetUnusableRow(reason, 0, 0).Message)
+	}
+
+	for _, q := range quoted {
+		found := false
+		for _, m := range produced {
+			if strings.Contains(m, q) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("§6c documents a row message the emitter never produces:\n  doc:       %q\n  emitter:   %q", q, produced)
+		}
+	}
+	if len(quoted) != len(produced) {
+		t.Errorf("§6c documents %d classes and the emitter has %d; a class with no row an operator can look up is a class with no remedy", len(quoted), len(produced))
+	}
+}
+
+// CONTROL. The cheapest way to pass every unusable-path gate is to report
+// every existing target unusable, which takes every node non-durable.
+func TestChaos68_AU51_ControlRegularFileTargetStaysDurable(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("baseline save: %v", err)
+	}
+	if got := revocationTargetUnusableReason(); got != "" {
+		t.Errorf("a regular-file target reported %q", got)
+	}
+	if !revocationsAreDurable() {
+		t.Error("an ordinary writable target reported non-durable")
+	}
+}
+
+// DEFECT (AU-56, Codex P2, PR #1437): a DEFINITIVE path fault was MASKED by the
+// generic failure branches that it causes.
+//
+// With `--revocations-file` naming a directory at boot, os.ReadFile returns
+// EISDIR. That is not corruption, so the load records a plain LoadDegraded and
+// the read-failure row told the operator to check permissions and the mount and
+// restart — which reproduces the fault exactly — while also claiming the file
+// "was left in place" and its "contents may still be intact", of a path that
+// holds no contents. Writes are fenced in that state, so the node persists
+// nothing, forever, behind a remedy that cannot work.
+//
+// AU-51's original ordering put the unusable-path branch AFTER the failure
+// branches on the reasoning that a save that really failed is better evidence
+// than a predictive stat. That is true of evidence of FAILURE and false of
+// DIAGNOSIS: a failed write says only THAT something is wrong, the stat says
+// WHY, and the operator acts on the why. The branch is now FIRST.
+func TestChaos68_AU56_DefinitivePathFaultOutranksTheFailuresItCauses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T) string // returns the configured path
+		want  string
+	}{
+		{"target is a directory", func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "revocations.json")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatalf("mkdir target: %v", err)
+			}
+			return path
+		}, "is a DIRECTORY"},
+		{"parent is a file", func(t *testing.T) string {
+			parent := filepath.Join(t.TempDir(), "mount")
+			if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+				t.Fatalf("occupy the parent: %v", err)
+			}
+			return filepath.Join(parent, "revocations.json")
+		}, "not a directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withChaos68Revocations(t)
+			path := tc.setup(t)
+			session.SetRevocationsPath(path)
+
+			// Exactly what session_startup.go does at boot.
+			if err := sessionRevoked.LoadRevocations(); err != nil {
+				noteRevocationLoadDegraded(err)
+			}
+			noteRevocationPersistenceConfigured(path)
+
+			row := checkSessionRevocation()
+			if !strings.Contains(row.Message, tc.want) {
+				t.Errorf("the load failure masked the cause:\n  message: %q\n  want to contain: %q", row.Message, tc.want)
+			}
+			// The masked remedies, each of which reproduces the fault.
+			for _, wrong := range []string{
+				"Check the permissions and the mount",
+				"Check free space",
+				"contents may still be intact",
+			} {
+				if strings.Contains(row.OperatorAction, wrong) || strings.Contains(row.Message, wrong) {
+					t.Errorf("row carries a remedy that reproduces the fault (%q): %q / %q", wrong, row.Message, row.OperatorAction)
+				}
+			}
+		})
+	}
+}
+
+// CONTROL. A load failure with a perfectly usable path must KEEP the
+// permissions/mount remedy. The cheapest way to pass the gate above is to stop
+// printing that remedy at all, which would delete the recovery action for the
+// ordinary unreadable-file case (§6).
+func TestChaos68_AU56_ControlUsablePathKeepsTheLoadRemedy(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		t.Fatalf("baseline save: %v", err)
+	}
+	noteRevocationPersistenceConfigured(path)
+	noteRevocationLoadDegraded(errors.New("open revocations.json: permission denied"))
+
+	row := checkSessionRevocation()
+	if !strings.Contains(row.OperatorAction, "Check the permissions and the mount") {
+		t.Errorf("an ordinary unreadable file lost its own remedy: %q", row.OperatorAction)
+	}
+}
+
+// DEFECT (AU-52, Codex P2, PR #1437). The unread-fence row reported a
+// CUMULATIVE count of refused save ATTEMPTS as the set held in memory.
+//
+// AU-42 fixed exactly this for the persist-FAILURE counter and the refused
+// counter beside it kept the defect: a fenced revocation that later expires is
+// pruned from Count but the counter never decreases, and re-revoking the same
+// subject increments it again — so the number overstated the re-apply job and
+// could name revocations that are no longer in force.
+func TestChaos68_AU52_UnreadRowScopesTheReapplyJobToLiveCounts(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	noteRevocationLoadDegraded(errors.New("open revocations.json: permission denied"))
+
+	// Three refused attempts, but only one revocation actually in force.
+	sessionRevoked.Revoke("tok-live", time.Now().Add(time.Hour))
+	for i := 0; i < 3; i++ {
+		noteRevocationPersistRefused(1)
+	}
+	row := checkSessionRevocation()
+	if !strings.Contains(row.Message, "1 token") {
+		t.Errorf("row does not scope the re-apply job to the live count: %q", row.Message)
+	}
+	if strings.Contains(row.Message, "3 applied since") {
+		t.Errorf("row still presents cumulative attempts as the live set: %q", row.Message)
 	}
 }

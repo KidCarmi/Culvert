@@ -1165,7 +1165,7 @@ culvert_session_revocation_persist_failures_total %d
 # TYPE culvert_session_revocation_persist_degraded gauge
 culvert_session_revocation_persist_degraded %d
 
-# HELP culvert_session_revocation_persist_refused_total Revocations not written because saving was refused to protect the only copy of the revocations file: either this boot could not read it, or it was corrupt and could not be quarantined (moved aside). The session_revocation diagnostics row names which
+# HELP culvert_session_revocation_persist_refused_total Cumulative revocation ENTRIES whose write was refused to protect the only copy of the revocations file: either this boot could not read it, or it was corrupt and could not be quarantined (moved aside). One refused save can add more than one (the cluster merge counts every entry it added) and the counter never decreases, so it is the magnitude of the incident and NOT the re-apply scope, which is culvert_session_revocation_tokens + _users. The session_revocation diagnostics row names which fence is up
 # TYPE culvert_session_revocation_persist_refused_total counter
 culvert_session_revocation_persist_refused_total %d
 
@@ -1173,7 +1173,7 @@ culvert_session_revocation_persist_refused_total %d
 # TYPE culvert_ha_bundle_revocations_dropped_total counter
 culvert_ha_bundle_revocations_dropped_total %d
 
-# HELP culvert_ha_bundle_revocations_subset Revocation entries left out of the MOST RECENT HA state bundle this leader PREPARED for the standby; > 0 means the standby can hold at most a subset of this leader's revocations, so a promotion would admit sessions this leader rejects. 0 means the last bundle sent was complete, not that the standby acknowledged applying it
+# HELP culvert_ha_bundle_revocations_subset Revocation entries left out of the MOST RECENT HA state bundle this leader PREPARED for the standby; > 0 means the standby can hold at most a subset of this leader's revocations, so a promotion would admit sessions this leader rejects. 0 means the last bundle this leader PREPARED was complete; it is recorded while that bundle is marshalled, before delivery and before the standby applies it, so 0 is not evidence the standby holds a complete set
 # TYPE culvert_ha_bundle_revocations_subset gauge
 culvert_ha_bundle_revocations_subset %d
 `,

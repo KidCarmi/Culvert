@@ -111,7 +111,7 @@ unconfigured and states this coupling.
 | `fail` | A revocation could not be **written** | §5 |
 | `fail` | The persisted list could not be **parsed** (corrupt; quarantined) | §6 |
 | `fail` | Corrupt **and could not be quarantined** — the damaged file is still in place | §6b |
-| `fail` | The **directory** holding the revocations file is gone | §6c |
+| `fail` | No save can land at the configured path — the **directory** is gone, a path component is a **regular file**, or the target is itself a **directory** | §6c (three different actions) |
 | `fail` | The persisted list could not be **read** (permissions, I/O, mount) | §6 |
 | `fail` | The revocations file is **missing** | §6a |
 
@@ -127,8 +127,8 @@ token — it is reachable at viewer role.
 | `culvert_session_revocation_users` | gauge | Deleted-account revocations in force on this node |
 | `culvert_session_revocation_persist_failures_total` | counter | **Failed save attempts**, not affected revocations — the boot probe attempts a save on an empty list and the sync loop retries every 3–5 s, so one fault reaches hundreds. The scope is `..._tokens` + `..._users` |
 | `culvert_session_revocation_persist_degraded` | gauge | `1` while the latest revocation save failed and none has landed since (the page signal) |
-| `culvert_session_revocation_persist_refused_total` | counter | Cumulative count of saves refused because overwriting the file was refused — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b). Magnitude only; the live memory-only scope is the diagnostics row's token/account counts |
-| `culvert_ha_bundle_revocations_subset` | gauge | Entries left out of the **most recent** HA state bundle the leader prepared — `> 0` means the standby can hold at most a subset (§6d, the page signal). `0` means the last bundle sent was complete, not that the standby acknowledged applying it |
+| `culvert_session_revocation_persist_refused_total` | counter | Cumulative count of **revocation entries** whose write was refused to protect the only copy of the file — it could not be read this boot (§6), or it is corrupt and could not be quarantined (§6b). One refused save can add more than one (the cluster merge counts every entry it added). Magnitude only; the live memory-only scope is the diagnostics row's token/account counts |
+| `culvert_ha_bundle_revocations_subset` | gauge | Entries left out of the **most recent** HA state bundle the leader prepared — `> 0` means the standby can hold at most a subset (§6d, the page signal). `0` means the last bundle the leader PREPARED was complete — the gauge is set while that bundle is being marshalled, before it is delivered and before the standby applies it, so `0` is not evidence the standby holds a complete set |
 | `culvert_ha_bundle_revocations_dropped_total` | counter | Cumulative entries left out of HA state bundles — magnitude and rate only; it never decreases, so do not alert on `> 0` (§6d) |
 
 These are emitted **unconditionally**, which is the deliberate exception to
@@ -281,12 +281,25 @@ moved it aside to `<path>.corrupt.<unixnano>`, fired `state_file_corrupt`, and
 booted with an empty list. The move is what stops the next save from
 overwriting your evidence.
 
-1. Inspect the quarantined file. If it is intact enough to repair, repair it,
-   move it back, and restart.
-2. Otherwise restore a backup and restart.
-3. If neither is possible, **re-apply every revocation you rely on** — the node
+**Writes are NOT fenced here** — the quarantine succeeded, so the path is free
+and the next logout or cluster sync creates a fresh file holding the revocations
+applied since boot. That is the right behaviour and it means **a blind restore
+destroys them**: moving the repaired file (or a backup) over the live one
+replaces the post-boot entries, and after the restart their cookies are valid
+again. Read the live counts off the `session_revocation` row, or
+`culvert_session_revocation_tokens` / `_users`, before you touch the file.
+
+1. **Record what the node is enforcing now** — the live token and account
+   counts, and the logouts and account deletions made since boot.
+2. Inspect the quarantined file. If it is intact enough to repair, repair it,
+   then **merge** it with the current file rather than overwriting: keep every
+   entry from both sides and, where a token appears in both, keep the LATER
+   expiry. Restart.
+3. Otherwise merge a backup the same way, or restore it and then re-apply the
+   entries from step 1.
+4. If neither is possible, **re-apply every revocation you rely on** — the node
    is currently honouring every cookie that was revoked before the restart.
-4. Remove the `.corrupt.*` file once reconciled. It is re-surfaced on every
+5. Remove the `.corrupt.*` file once reconciled. It is re-surfaced on every
    boot until you do, deliberately: a later save writes a fresh empty list that
    parses cleanly, so without that reminder probes go green over a lost
    revocation list.
@@ -311,8 +324,10 @@ file.
 The cost is that revocations applied in the meantime are **memory-only**: they
 are enforced by this node now and gone at the next restart.
 `culvert_session_revocation_persist_refused_total` is a CUMULATIVE count of
-refused saves: it never decreases, a refused entry that later expires stays in
-it, and extending one account revocation can count twice, so it is the incident's
+**revocation entries** whose write was refused — one refused save can add more
+than one, because the cluster merge counts every entry it had added. It never
+decreases, a refused entry that later expires stays in it, and extending one
+account revocation can count twice, so it is the incident's
 magnitude, not the re-apply job. The size of the re-apply job is the LIVE count
 the `session_revocation` row reports (tokens and accounts in force now, also on
 `culvert_session_revocation_tokens` / `_users`). Refusals are
@@ -377,9 +392,9 @@ as the only record of what this node was enforcing.
 
 **Writes are refused while this holds.** Saving would replace those bytes, so
 `SaveRevocations` returns a refusal instead and every revocation applied in the
-meantime is memory-only (the refusals are counted, cumulatively, by
-`culvert_session_revocation_persist_refused_total`; the live scope is the
-`session_revocation` row's token and account counts).
+meantime is memory-only (those entries are counted, cumulatively and without
+ever decreasing, by `culvert_session_revocation_persist_refused_total`; the live
+scope is the `session_revocation` row's token and account counts).
 
 1. Copy the revocations file somewhere safe **first**.
 2. **Record every revocation applied since this boot** — each logout and each
@@ -396,19 +411,34 @@ meantime is memory-only (the refusals are counted, cumulatively, by
 
 ---
 
-## 6c. Recovery: the directory is gone
+## 6c. Recovery: no save can land at the configured path
 
-Distinct from §6a: if the *file* is missing the next save recreates it, but if
-the **parent directory or mount** is missing nothing can. `AtomicWrite` creates
-its temporary file inside that directory and never creates the directory
-itself, so every save fails until the mount is back.
+Distinct from §6a: if the *file* is missing the next save recreates it. Three
+other conditions make every save fail and none of them can be repaired by a
+logout or a config sync, so the row fails immediately rather than waiting for a
+write to discover it (`durable = 0`). They need **three different actions**, and
+the `session_revocation` row names which one applies:
 
-The node reports `durable = 0` and the row fails immediately rather than
-waiting for a write to discover it.
+| Row says | Condition | Action |
+| --- | --- | --- |
+| the directory holding the revocations file is gone | the parent directory or mount is missing. `AtomicWrite` creates its temporary file inside that directory and never creates the directory itself | restore the mount or directory |
+| the revocations file's parent path is not a directory | a path component that should be a directory is a regular file (`ENOTDIR`) — nothing is missing, something is in the way | remove or rename whatever occupies that path, or point the setting at a valid path |
+| the revocations file's own path is a DIRECTORY | the target itself is a directory. The final step of a save renames a temporary file **over** the target, and that rename always fails against a directory | remove that directory, or point the setting at a file path |
 
-1. Restore the mount or directory.
+The second and third are the ones that used to read as healthy: a check for
+"does not exist" does not match `ENOTDIR`, and a directory at the target stats
+cleanly, so neither the missing-file nor the missing-parent check fired while
+every save was being lost.
+
+A condition that cannot be *proved* — a permission or I/O error rather than a
+definite absence — deliberately reports nothing. The content behind a transient
+fault may be intact, and only definite evidence may move a surface whose claim
+is that a revocation applied right now would survive.
+
+1. Apply the action from the table for the condition the row names.
 2. Restart.
-3. Re-apply any logout or account deletion that had to hold.
+3. Re-apply any logout or account deletion that had to hold — they were
+   memory-only for the whole period.
 
 ---
 
@@ -444,7 +474,7 @@ question they answer:
 
 | Series | Kind | Answers |
 | --- | --- | --- |
-| `culvert_ha_bundle_revocations_subset` | gauge | Did the **last bundle sent** leave revocations out? Alert on this one (it reflects what the leader sent, not a standby acknowledgment). |
+| `culvert_ha_bundle_revocations_subset` | gauge | Did the **last bundle the leader PREPARED** leave revocations out? Alert on this one. It is recorded during marshalling, so it reflects what the leader built — not what was delivered, and not a standby acknowledgment: a cancelled response or a failed apply leaves the standby short while this reads `0`. Pair it with the HA sync freshness signals. |
 | `culvert_ha_bundle_revocations_dropped_total` | counter | How much has this leader had to give up in total? Magnitude and rate only. |
 
 A non-zero **gauge** means the standby holds a subset of the leader's

@@ -84,9 +84,15 @@ import (
 // load-degraded row already names. One counter answering two questions is the
 // AU-36 defect one layer down.
 //
-// It is also the operator's only measure of HOW MUCH the refusal is holding:
-// every revocation counted here is in force on this node right now and is gone
-// at the next restart, so it is the size of the re-apply job.
+// It is the incident's MAGNITUDE and deliberately NOT the re-apply job (AU-52).
+// The unit is revocation ENTRIES — the two single-revocation call sites add one
+// each and the cluster merge adds every entry it had added, so one refused save
+// can add more than one — charged at the instant of the refusal and never
+// decremented. An entry that later expires stays in it and re-revoking one
+// subject counts again, so it over-states what is held. What a restart actually
+// loses is the LIVE list (Count/UserCount), which is what the contract row
+// reports: reading this counter as the re-apply job is the defect AU-42 fixed
+// on the sibling counter and AU-52 fixed on this one.
 var (
 	sessionRevocationPersistFailures atomic.Uint64
 	sessionRevocationPersistRefused  atomic.Uint64
@@ -357,8 +363,19 @@ func revocationBackingFileIsGone() bool {
 	return err != nil && os.IsNotExist(err)
 }
 
-// revocationTargetParentMissing reports that the revocations file's PARENT
-// DIRECTORY does not exist, so the target cannot be created at all.
+// revocationTargetUnusableReason returns a BOUNDED reason why no save can land
+// at the configured revocations path, or "" when one can (or when nothing
+// definitive is known). Three classes today: the parent directory is gone, a
+// path component is a regular file, or the TARGET is itself a directory.
+//
+// It is ONE function, and that is the point. The three conditions are answers
+// to a single question — can a write land here — and each is decided by the
+// same stat of the same path, so two predicates asking it separately stat
+// twice and, more importantly, let the two answers drift. They carry DIFFERENT
+// operator actions, so a caller that prints one must branch: a bounded
+// classifier is worth nothing if one remedy is printed for every class
+// (AU-36), and because the classes arrived in three separate rounds that trap
+// was live each time.
 //
 // AU-39. revocationBackingFileIsGone answers ENOENT identically for a deleted
 // FILE and for a deleted MOUNT, and AU-35 leaned on the difference without
@@ -375,41 +392,58 @@ func revocationBackingFileIsGone() bool {
 // not evidence the directory is gone, which is the rule LoadRevocations
 // already applies to an unreadable file and AU-35 to a vanished one.
 //
-// ENOTDIR is the other definitive case: a path component that should be the
-// parent DIRECTORY is a regular file, so no write can succeed there either.
-// os.IsNotExist is false for it, so without this check the target read as
+// AU-46. ENOTDIR is the second definitive case: a path component that should be
+// the parent DIRECTORY is a regular file, so no write can succeed there either.
+// os.IsNotExist is FALSE for it, so without this check the target read as
 // usable while every save failed (Codex P2, PR #1437).
-func revocationTargetParentMissing() bool {
+//
+// AU-51 is its mirror, and the harder one to see: the LEAF itself is a
+// directory, so the stat SUCCEEDS and every absence-shaped check — this one and
+// revocationBackingFileIsGone — answered clean, while AtomicWrite renames its
+// temp OVER the target and rename(2) onto a directory always fails. ENOTDIR is
+// caught by a stat that fails with an unexpected code; this one needs a stat
+// that succeeds to be interrogated (Codex P2, PR #1437).
+func revocationTargetUnusableReason() string {
 	path := session.RevocationsPath()
 	if path == "" {
-		return false
+		return ""
 	}
-	_, err := os.Stat(path)
+	st, err := os.Stat(path)
 	if err != nil && errors.Is(err, syscall.ENOTDIR) {
-		return true
+		// A path component is not a directory. Definitive: no write can land.
+		return "not_a_directory"
 	}
-	if err == nil || !os.IsNotExist(err) {
-		// The target itself is present (or its absence is unproven), so the
-		// parent necessarily is too. Costs one stat in the common case.
-		return false
+	if err == nil {
+		if st.IsDir() {
+			return "target_is_a_directory"
+		}
+		// The target is a regular file, so its parent is a usable directory.
+		// Costs one stat in the common case.
+		return ""
 	}
-	_, err = os.Stat(filepath.Dir(path))
-	return err != nil && os.IsNotExist(err)
+	if !os.IsNotExist(err) {
+		// The absence is unproven (EACCES, EIO); say nothing.
+		return ""
+	}
+	st, err = os.Stat(filepath.Dir(path))
+	switch {
+	case err == nil && !st.IsDir():
+		// DELIBERATELY not reachable from the gates, and kept anyway: on Linux
+		// the ENOTDIR branch above always wins, so this is reachable only in
+		// the window between the two stats. Mutation testing shows it LIVING
+		// (measured, recorded in AU-46 rather than hidden) — it is a defensive
+		// check, not a covered one.
+		return "not_a_directory"
+	case err != nil && os.IsNotExist(err):
+		return "missing"
+	default:
+		return ""
+	}
 }
 
-// revocationTargetIsDirectory reports that the configured revocations path is
-// itself a directory. os.Stat succeeds, so neither the missing-file nor the
-// missing-parent check fires, yet AtomicWrite's final rename over a directory
-// fails: every save is lost while the surfaces stayed green (Codex P2, PR
-// #1437).
-func revocationTargetIsDirectory() bool {
-	path := session.RevocationsPath()
-	if path == "" {
-		return false
-	}
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
-}
+// revocationTargetUnusable reports whether the configured path definitively
+// cannot hold a write, for callers that need the predicate and not the reason.
+func revocationTargetUnusable() bool { return revocationTargetUnusableReason() != "" }
 
 // revocationsAreDurable reports whether a revocation applied right now would
 // survive this process.
@@ -435,7 +469,7 @@ func revocationsAreDurable() bool {
 	}
 	// AU-39: the one ENOENT case that DOES falsify this predicate's claim.
 	// A missing file is recreated by the next save; a missing parent is not.
-	return !revocationTargetParentMissing() && !revocationTargetIsDirectory()
+	return !revocationTargetUnusable()
 }
 
 // resetSessionRevocationHealthForTest clears the record. Test isolation only.
@@ -456,6 +490,40 @@ func resetSessionRevocationHealthForTest() {
 	haBundleRevocationsDropped.Store(0)
 	haBundleRevocationsSubset.Store(0)
 	haBundleOverBudgetLogged.Store(0)
+}
+
+// revocationTargetUnusableRow renders the contract row for a revocations path
+// that cannot hold a write.
+//
+// It BRANCHES on the reason, because the three remedies are three different
+// actions and printing one for all of them sends an operator after the wrong
+// thing mid-incident: "restore the mount or directory" is wrong for a path a
+// regular file is occupying — the directory is not gone, something is in its
+// way — and wrong again for a path that is itself a directory, where the thing
+// to remove IS the target. A bounded classifier is worth nothing if one remedy
+// is printed for every class: this sweep's own AU-36 finding, and the row it
+// was written for.
+//
+// Extracted so checkSessionRevocation stays inside the cyclop budget and so the
+// three remedies sit together where a reviewer can see that they differ.
+func revocationTargetUnusableRow(reason string, tokens, users int) OperatorContractCheck {
+	msg := "the directory holding the revocations file is gone"
+	action := "Restore the mount or directory backing the revocations file, then restart. Unlike a deleted file, this cannot be repaired by the next logout or config sync — the parent directory has to exist before anything can be written. Re-apply any logout or account deletion that must hold."
+	switch reason {
+	case "not_a_directory":
+		msg = "the revocations file's parent path is not a directory"
+		action = "A path component of the configured revocations file is a regular file, not a directory, so no save can ever land. Remove or rename whatever occupies that path, or point the revocations file somewhere valid, then restart. This cannot be repaired by a logout or a config sync. Re-apply any logout or account deletion that must hold."
+	case "target_is_a_directory":
+		msg = "the revocations file's own path is a DIRECTORY"
+		action = "The configured revocations path is a directory, so no save can land (the final rename fails against a directory) and the boot read of it fails too — a read error here is explained by this, not by permissions or the mount. Remove that directory, or point the revocations file at a file path, then restart. This cannot be repaired by a logout or a config sync. Re-apply any logout or account deletion that must hold."
+	}
+	return OperatorContractCheck{
+		Code:   "session_revocation",
+		Status: diagFail,
+		Message: fmt.Sprintf("%s — the %d token and %d account revocation(s) in force on this node are held in memory only, and no save can land until it is repaired",
+			msg, tokens, users),
+		OperatorAction: action,
+	}
 }
 
 // checkSessionRevocation is the `session_revocation` operator-contract row.
@@ -500,6 +568,29 @@ func checkSessionRevocation() OperatorContractCheck {
 	h := sessionRevocationState()
 	tokens, users := sessionRevoked.Count(), sessionRevoked.UserCount()
 
+	// FIRST, ahead of every failure branch, because a definitively unusable
+	// path is the CAUSE of whatever those branches observed and carries the
+	// only remedy that can work. AU-51 originally put this AFTER the
+	// persist-degraded branch on the reasoning that "a save that actually
+	// failed is strictly better evidence than a predictive stat". That is true
+	// about evidence of FAILURE and false about DIAGNOSIS, and the difference
+	// is what an operator acts on: a failed write says only THAT something is
+	// wrong, while this stat says WHY — so the generic branches masked it and
+	// printed a remedy that reproduces the fault.
+	//
+	// Reproduced for a DIRECTORY at the configured path (Codex P2, PR #1437):
+	// os.ReadFile returns EISDIR, which is not corruption, so the load records
+	// a plain LoadDegraded and the read-failure row told the operator to check
+	// permissions and the mount and restart — which fails identically — while
+	// also claiming the file "was left in place" and its "contents may still be
+	// intact", of a path that holds no contents at all. The same masking
+	// applies to the persist-degraded branch, whose remedy is free space.
+	//
+	// Only DEFINITIVE conditions reach here (see revocationTargetUnusableReason):
+	// an unproven fault reports nothing and the generic branches keep the row.
+	if reason := revocationTargetUnusableReason(); h.Configured && reason != "" {
+		return revocationTargetUnusableRow(reason, tokens, users)
+	}
 	if sessionRevocationPersistDegraded.Load() {
 		// The counter is SAVE ATTEMPTS, not revocations, and the two differ by
 		// orders of magnitude: the boot probe attempts a save on an EMPTY list,
@@ -551,24 +642,6 @@ func checkSessionRevocation() OperatorContractCheck {
 			Message: fmt.Sprintf("the persisted session-revocation list could not be READ — revocations applied before this restart are NOT in force on this node, and the %d token and %d account revocation(s) in force now are held in memory only",
 				tokens, users),
 			OperatorAction: "Check the permissions and the mount backing the revocations file, then restart. The file was left in place and is NOT being written to while it cannot be read, so its contents may still be intact and a restart after the repair recovers them. Every revocation applied on this node in the meantime is in force now and gone at the next restart, so re-apply any logout or account deletion that must hold.",
-		}
-	}
-	if h.Configured && revocationTargetIsDirectory() {
-		return OperatorContractCheck{
-			Code:   "session_revocation",
-			Status: diagFail,
-			Message: fmt.Sprintf("the revocations file path is now a DIRECTORY — the %d token and %d account revocation(s) in force on this node are held in memory only, and no save can replace it",
-				tokens, users),
-			OperatorAction: "Move the directory away from the configured revocations path (or point the setting at a file path), then trigger a save with a logout or restart. Re-apply any logout or account deletion that must hold.",
-		}
-	}
-	if h.Configured && revocationTargetParentMissing() {
-		return OperatorContractCheck{
-			Code:   "session_revocation",
-			Status: diagFail,
-			Message: fmt.Sprintf("the directory holding the revocations file is gone — the %d token and %d account revocation(s) in force on this node are held in memory only, and no save can recreate them",
-				tokens, users),
-			OperatorAction: "Restore the mount or directory backing the revocations file, then restart. Unlike a deleted file, this cannot be repaired by the next logout or config sync — the parent directory has to exist before anything can be written. Re-apply any logout or account deletion that must hold.",
 		}
 	}
 	if h.Configured && revocationBackingFileIsGone() {
@@ -704,8 +777,9 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 		// already names the repair. The sync loops run every 3-5s, so logging
 		// here would emit hundreds of lines an hour for a condition reported
 		// once at boot — this function's own rule, two paragraphs up. The
-		// magnitude goes to the counter, which is also the size of the
-		// operator's re-apply job.
+		// magnitude goes to the counter, and magnitude is ALL it is: this site
+		// charges one per ENTRY it had added, the counter never decrements, and
+		// the re-apply scope is the live list the contract row reports (AU-52).
 		if session.IsWriteFenced(err) {
 			noteRevocationPersistRefused(added)
 			return added
