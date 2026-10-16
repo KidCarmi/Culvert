@@ -104,6 +104,8 @@ for BOOT_SPLASH_MODULE in lib usr/lib; do
     cmp "$SOURCE/culvert-splash-message" "$BOOT_SPLASH_ROOT/etc/initramfs-tools/scripts/init-premount/culvert-splash-message"
     cmp "$SOURCE/culvert-kernel-log-vt" "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-kernel-log-vt"
     cmp "$SOURCE/culvert-kernel-log-vt.service" "$BOOT_SPLASH_ROOT/etc/systemd/system/culvert-kernel-log-vt.service"
+    cmp "$SOURCE/culvert-splash-status" "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-splash-status"
+    cmp "$SOURCE/culvert-splash-status.service" "$BOOT_SPLASH_ROOT/etc/systemd/system/culvert-splash-status.service"
     cmp "$SOURCE/plymouthd.conf" "$BOOT_SPLASH_ROOT/etc/plymouth/plymouthd.conf"
     cmp "$SOURCE/culvert-has-display" "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-has-display"
     [[ -x "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-has-display" ]]
@@ -111,7 +113,9 @@ for BOOT_SPLASH_MODULE in lib usr/lib; do
         cmp "$SOURCE/plymouth-headless.conf" "$BOOT_SPLASH_ROOT/etc/systemd/system/$unit.service.d/culvert-headless.conf"
     done
     [[ -x "$BOOT_SPLASH_ROOT/etc/initramfs-tools/scripts/init-premount/culvert-splash-message" && -x "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-kernel-log-vt" ]]
+    [[ -x "$BOOT_SPLASH_ROOT/opt/culvert-appliance/bin/culvert-splash-status" ]]
     [[ $(readlink "$BOOT_SPLASH_ROOT/etc/systemd/system/sysinit.target.wants/culvert-kernel-log-vt.service") == ../culvert-kernel-log-vt.service ]]
+    [[ $(readlink "$BOOT_SPLASH_ROOT/etc/systemd/system/sysinit.target.wants/culvert-splash-status.service") == ../culvert-splash-status.service ]]
     {
         for alternative in default.plymouth text.plymouth; do
             printf 'update-alternatives <--install> <%s> <%s> <%s> <200>\n' \
@@ -184,7 +188,7 @@ sh -euc '
 # Execute only the actual overlay copy loop against a fixture repository, with
 # decoy docs/tests present. The guest installer and build are never executed.
 mkdir -p "$TEST_DIR/repo/appliance/boot-splash" "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash"
-for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-headless.conf; do
+for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-headless.conf culvert-splash-status culvert-splash-status.service; do
     cp "$SOURCE/$asset" "$TEST_DIR/repo/appliance/boot-splash/$asset"
 done
 touch "$TEST_DIR/repo/appliance/boot-splash/README.md" "$TEST_DIR/repo/appliance/boot-splash/private_test.sh"
@@ -192,9 +196,9 @@ copy_loop=$(sed -n '/^for splash_file in /,/^done$/p' "$HERE/build-ova.sh")
 [[ -n $copy_loop ]]
 REPO="$TEST_DIR/repo" OV="$TEST_DIR/overlay" bash -euo pipefail -c "$copy_loop"
 actual=$(find "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash" -type f -printf '%f\n' | sort)
-expected=$(printf '%s\n' install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-headless.conf | sort)
+expected=$(printf '%s\n' install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-headless.conf culvert-splash-status culvert-splash-status.service | sort)
 [[ $actual == "$expected" ]]
-for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-headless.conf; do
+for asset in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf culvert-has-display plymouth-headless.conf culvert-splash-status culvert-splash-status.service; do
     cmp "$SOURCE/$asset" "$TEST_DIR/overlay/opt/culvert-appliance/boot-splash/$asset"
 done
 
@@ -215,6 +219,16 @@ grep -qx '\[Daemon\]' "$SOURCE/plymouthd.conf"
 ! grep -Eq '^(Theme|ThemeDir|ShowDelay)=' "$SOURCE/plymouthd.conf" || fail 'plymouthd.conf must not choose a theme or delay'
 ! grep -q 'keys:' <(grep -v '^#' "$SOURCE/culvert-splash-message") || fail 'splash message uses a keys: prefix'
 grep -q -- '--text="Starting system services' "$SOURCE/culvert-splash-message"
+# The real-root status loop re-asserts the same hint, gates on plymouth, shows a
+# failure warning on a degraded system, and ends when plymouth quits (so it
+# never holds up shutdown). It must not re-run the PCI display test — the unit's
+# ExecCondition owns that — so it carries no /sys/bus/pci read.
+grep -q 'Esc: boot messages' "$SOURCE/culvert-splash-status" || fail 'status loop lost the Esc hint'
+grep -q 'plymouth --ping' "$SOURCE/culvert-splash-status" || fail 'status loop does not gate on a running plymouth'
+grep -q 'is-system-running' "$SOURCE/culvert-splash-status" || fail 'status loop has no failure-warning check'
+! grep -q '/sys/bus/pci' "$SOURCE/culvert-splash-status" || fail 'status loop duplicates the display test instead of the unit ExecCondition'
+grep -qx 'ExecCondition=/opt/culvert-appliance/bin/culvert-has-display' "$SOURCE/culvert-splash-status.service" || fail 'status unit lost its display condition'
+grep -qx 'ExecStart=/opt/culvert-appliance/bin/culvert-splash-status' "$SOURCE/culvert-splash-status.service" || fail 'status unit does not run the status loop'
 grep -qx 'install_boot_splash "$HERE" /' "$SOURCE/install.sh"
 # The kernel-log VT script under the shell that runs it (/bin/sh is dash on
 # Ubuntu): routes to tty12 when the VT opens, and degrades to exit 0 without

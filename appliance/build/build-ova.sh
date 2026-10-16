@@ -340,7 +340,7 @@ done
 mkdir -p "$OV/opt/culvert-appliance/boot-splash"
 for splash_file in install.sh install-lib.sh culvert.plymouth 99-culvert-splash.cfg \
   culvert-splash-message culvert-kernel-log-vt culvert-kernel-log-vt.service plymouthd.conf \
-  culvert-has-display plymouth-headless.conf; do
+  culvert-has-display plymouth-headless.conf culvert-splash-status culvert-splash-status.service; do
   cp "$REPO/appliance/boot-splash/$splash_file" "$OV/opt/culvert-appliance/boot-splash/$splash_file"
 done
 build_console_bundle "$REPO" "$OV/opt/culvert-appliance/console"
@@ -570,6 +570,8 @@ installed_splash_sha="$(virt-cat -a "$DISK" /etc/default/grub.d/99-culvert-splas
 for splash_pair in culvert-splash-message:/etc/initramfs-tools/scripts/init-premount/culvert-splash-message \
   culvert-kernel-log-vt:/opt/culvert-appliance/bin/culvert-kernel-log-vt \
   culvert-kernel-log-vt.service:/etc/systemd/system/culvert-kernel-log-vt.service \
+  culvert-splash-status:/opt/culvert-appliance/bin/culvert-splash-status \
+  culvert-splash-status.service:/etc/systemd/system/culvert-splash-status.service \
   plymouthd.conf:/etc/plymouth/plymouthd.conf \
   culvert-has-display:/opt/culvert-appliance/bin/culvert-has-display \
   plymouth-headless.conf:/etc/systemd/system/plymouth-start.service.d/culvert-headless.conf \

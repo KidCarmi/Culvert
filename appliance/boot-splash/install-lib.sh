@@ -19,6 +19,9 @@ install_boot_splash() (
     install -m 0644 "$source/plymouthd.conf" "$root/etc/plymouth/plymouthd.conf"
     install -m 0755 "$source/culvert-splash-message" "$root/etc/initramfs-tools/scripts/init-premount/culvert-splash-message"
     install -m 0755 "$source/culvert-kernel-log-vt" "$root/opt/culvert-appliance/bin/culvert-kernel-log-vt"
+    # The real-root status line (re-asserts the Esc hint lost when plymouth-start
+    # takes the splash over; see culvert-splash-status).
+    install -m 0755 "$source/culvert-splash-status" "$root/opt/culvert-appliance/bin/culvert-splash-status"
     # No splash on a machine with no display controller (serial-only): the
     # initramfs ends Plymouth (culvert-splash-message) and these drop-ins keep
     # the real root's boot and shutdown units from starting it again.
@@ -30,6 +33,8 @@ install_boot_splash() (
     done
     install -m 0644 "$source/culvert-kernel-log-vt.service" "$root/etc/systemd/system/culvert-kernel-log-vt.service"
     ln -sfn ../culvert-kernel-log-vt.service "$root/etc/systemd/system/sysinit.target.wants/culvert-kernel-log-vt.service"
+    install -m 0644 "$source/culvert-splash-status.service" "$root/etc/systemd/system/culvert-splash-status.service"
+    ln -sfn ../culvert-splash-status.service "$root/etc/systemd/system/sysinit.target.wants/culvert-splash-status.service"
     # Ubuntu's initramfs hook follows BOTH alternatives. Explicit --set also
     # replaces a base image's manual choice; package-owned themes remain intact.
     local name
