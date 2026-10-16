@@ -301,9 +301,9 @@ func apiHealthExplain(w http.ResponseWriter, r *http.Request) {
 	// /api/diagnostics, so it carries the same admin-only roster-derived row and
 	// needs the same role redaction. Redacting only the other renderer left this
 	// one as a complete bypass of that fix (Codex P1, PR #1545) — see
-	// redactContractForRole, and TestWall_EveryOperatorContractRendererIsClassified
-	// which fails the build if a THIRD renderer appears unclassified.
-	jsonOK(w, redactContractForRole(buildOperatorContract(), uiRole(r).HasRole(RoleAdmin)))
+	// writeOperatorContract, and TestWall_EveryOperatorContractRendererIsClassified
+	// which fails the build if any other code serializes the contract.
+	writeOperatorContract(w, r, buildOperatorContract())
 }
 
 // supportCollectorInfo is the read-only view of one registered collector.
