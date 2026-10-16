@@ -16,7 +16,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +31,7 @@ import (
 // gets muted.
 func TestSaveRevocations_LocksBeforeSnapshotting(t *testing.T) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join("session.go"), nil, 0)
+	file, err := parser.ParseFile(fset, "session.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

@@ -341,7 +341,6 @@ func RevocationsPath() string {
 	return revocationsPath
 }
 
-// SaveRevocations writes all non-expired revocations to disk as JSON.
 // saveMu serializes the WHOLE save — snapshot, marshal and write — for every
 // caller.
 //
@@ -358,6 +357,8 @@ func RevocationsPath() string {
 // it is NOT r.mu — IsRevoked, and therefore authentication, never waits on it.
 var saveMu sync.Mutex
 
+// SaveRevocations writes all non-expired revocations to disk as JSON.
+// The whole save is serialized by saveMu; see its comment for why.
 func (r *RevocationList) SaveRevocations() error {
 	path := RevocationsPath()
 	if path == "" {
