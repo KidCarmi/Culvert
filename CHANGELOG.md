@@ -41,6 +41,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   synced fleet-wide, so the absence *is* the revocation and needs no
   persistence, no gossip, and no expiry.
 
+  **That "already synced fleet-wide" claim was itself false for the one case an
+  operator reaches for, and is fixed here too** (register row **AU-21**,
+  §42.6d). `ConfigSnapshot.IdPProfiles` carried `omitempty`, so a Control Plane
+  whose registry had just become empty serialised no `idp_profiles` key at all;
+  the Data Plane read that as "absent — keep what I have" and skipped. Deleting
+  the **last** identity provider therefore left it stored, enabled and live on
+  every Data Plane node: its sessions kept authenticating with their asserted
+  groups for the full TTL, **and new logins through the removed federation kept
+  working**. Removing a provider while another remained always propagated, which
+  is why it was invisible outside a single-provider deployment. The field now
+  omits `omitempty` and its `config_surfaces` row is `semNilSkipEmptyWipe` +
+  `WireWipeCapable`, which also brings it under
+  `TestConfigSurfaces_SnapshotWireWipe` — the wall that exists for exactly this
+  bug class and had skipped it because the row was labelled `semValidatedSkip`.
+  The apply path already distinguished the two cases, so no logic changed: an
+  empty list is an explicit clear, while a **missing** `idp_profiles` key still
+  means "absent, keep what I have" — which is what an older Control Plane sends
+  and what an unenrolled caller receives, since the field is redacted to nothing
+  and a node polls `GetConfig` before enrollment completes.
+
   Sessions naming `"local"` (the admin-UI cookie, which has its own roster
   backstop) and pre-`pvd` legacy sessions are never refused. Both provider
   spellings — the bare profile id and the prefixed `oidc:`/`saml:` form — are

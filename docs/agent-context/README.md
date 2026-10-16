@@ -81,7 +81,11 @@ to this checkout, not to an unmerged branch.
   `ps_session` is an identity only while its `pvd` profile is stored and
   enabled (`IdPRegistry.ProfileEnabled`, never `LiveProvider`); `""` and
   `"local"` are always admitted. Delete, disable and `ReplaceAll` removal
-  revoke; a compile failure or staleness retirement does not.
+  revoke; a compile failure or staleness retirement does not. The lever reaches
+  the fleet through `ConfigSnapshot.IdPProfiles`, which carries NO `omitempty`
+  (`WireWipeCapable`): an emptied registry must serialise as `[]` so deleting
+  the LAST profile wipes DP copies, while a missing key still means absent —
+  redaction nils the field and a DP polls `GetConfig` before enrollment.
 
 ## Proxy, policy and scanning
 

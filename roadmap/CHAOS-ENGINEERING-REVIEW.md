@@ -1205,8 +1205,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
 | AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP | H | `auth_oidc_flow.go:344-363,608-627` (no cache field); loop `proxy.go:209-220`; contrast `auth_oidc.go:210-238` |
-| AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. **§42 re-measured this and found it lands harder than recorded: the cookie carries the GROUPS the deleted provider asserted, and those go straight into `policyStore.Evaluate`, so group-scoped ALLOW rules kept matching for a removed federation — while arm 2 of the SAME function consults the live provider set on every request.** | GAP → **CLOSED** (CHAOS-72, §42: `sessionProviderLive` probes the live set per request in `resolveRequestAuth` arm 1; a refusal degrades to exactly "no cookie" and re-challenges through the existing no-credential dispatch; `culvert_session_provider_revoked_total`). Fixed as DERIVED STATE, not a `RevokeProvider` event — the admin handler is only one writer of the registry (`ReplaceAll` is also reached from config import, config-version rollback and the CP→DP snapshot), and the absence is already durable and already synced. | **H** | was: `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245`; now `session_provider_bounds.go` `sessionProviderLive`, gate `proxy.go` arm 1, tests `session_provider_bounds_chaos_test.go` |
+| AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. **§42 re-measured this and found it lands harder than recorded: the cookie carries the GROUPS the deleted provider asserted, and those go straight into `policyStore.Evaluate`, so group-scoped ALLOW rules kept matching for a removed federation — while arm 2 of the SAME function consults the live provider set on every request.** | GAP → **CLOSED** (CHAOS-72, §42: `sessionProviderLive` probes the live set per request in `resolveRequestAuth` arm 1; a refusal degrades to exactly "no cookie" and re-challenges through the existing no-credential dispatch; `culvert_session_provider_revoked_total`). Fixed as DERIVED STATE, not a `RevokeProvider` event — the admin handler is only one writer of the registry (`ReplaceAll` is also reached from config import, config-version rollback and the CP→DP snapshot), and the absence is already durable and already synced. **The "already synced" half was itself false for the LAST profile removed and is closed by AU-21/§42.6d — the row is CLOSED only with that fix.** | **H** | was: `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245`; now `session_provider_bounds.go` `sessionProviderLive`, gate `proxy.go` arm 1, tests `session_provider_bounds_chaos_test.go` + `session_provider_cluster_test.go` |
 | AU-20 | **There is no "revoke one federated subject" lever at all.** `RevokeUser` has exactly one caller — the LOCAL account-delete handler — so for an SSO subject the only options are cutting the whole federation (now effective, AU-2) or waiting out the session TTL. An operator responding to one compromised SSO account must therefore either terminate the federation for everyone or accept up to 8 h (7 d at a raised TTL) of continued access. | **NEW** (recorded, needs a product surface — a revocation primitive with no admin route is not a control) | M | `internal/session/session.go:155` `RevokeUser` (sole caller `ui_auth.go` user DELETE); no route in `uiRoutes`; see §42.7 |
+| AU-21 | **Deleting the LAST IdP profile on the CP reached no Data Plane node.** `idpRegistry.All()` returns a non-nil EMPTY slice for an empty registry; `ConfigSnapshot.IdPProfiles` carried `omitempty`, so the key never reached the wire; the DP decoded nil and `syncSnapshotIdPProfiles` skipped. The removed federation stayed stored, enabled and LIVE on every DP — AU-2's lever answered "enabled", its sessions kept their asserted groups for the full TTL, and NEW logins through it kept working; with `-idp-profiles-file` it survived restarts. All three DP intake paths (full snapshot, delta, last-known-good replay) share the one nil-skip. Removing a non-last profile always propagated, which is why it was invisible. **`TestConfigSurfaces_SnapshotWireWipe` exists for exactly this bug class and never looked: it iterates only `semNilSkipEmptyWipe` bindings, and the row was labelled `semValidatedSkip`.** | GAP → **CLOSED** (§42.6d: drop `omitempty`, relabel the row `semNilSkipEmptyWipe` + `WireWipeCapable`; the apply side was already nil-skip/empty-wipe, so no logic changed. `nil` still means ABSENT — redaction nils the field and a DP polls `GetConfig` before enrollment, so reading `null` as a clear would let an unauthenticated caller wipe every enrolling node's registry; pinned by two controls.) | **H** | `controlplane_snapshot.go` `IdPProfiles`, `config_surfaces.go` row `idp_profiles`, `syncSnapshotIdPProfiles`; tests `session_provider_cluster_test.go` (4) |
 | AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. **Understated: the WRONG-username branch is worse (AU-3a) and needs no valid username at all.** | GAP → **CLOSED** (CHAOS-57, §25: `internal/authcost` bounds concurrency globally + per client, fail-closed) | M → **C** | `store.go` `verifyAuthFrom`, `internal/authcost`, `auth_cost_health.go` |
 | AU-3a | The wrong-username branch runs an unconditional bcrypt against the dummy hash (RISK-008 timing equaliser), is reached BEFORE the result cache, and never populates it — so a flood of DISTINCT usernames is a guaranteed miss every time. Measured **79.6 ms of exclusive CPU per ~200-byte request (51,631x a cached auth)**; **66 req/s (~13 KB/s) consumed 100% of a 4-core box** and degraded other CPU work **15.6x**. Unauthenticated, remotely triggerable, and in the DEFAULT posture nothing stands in front of it — the connection limiter, rate limiter and IP filter all ship disabled. | GAP → **CLOSED** (CHAOS-57) | **C** | `store.go:521` (pre-fix), gates `TestChaos57_WrongUsernamePathIsGoverned`, `..._ConcurrentVerificationsAreBounded` |
 | AU-3c | The auth result cache evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic) | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
@@ -9876,7 +9877,10 @@ reasons are the load-bearing part of this sweep:
    mould would have inherited exactly the volatility that makes the old one
    unreliable.
 3. **It needs no gossip.** `ConfigSnapshot.IdPProfiles` already carries the set
-   fleet-wide, so a CP deletion reaches every DP on the next sync.
+   fleet-wide, so a CP deletion reaches every DP on the next sync. **This
+   reason was true for every deletion except the one that mattered most** —
+   removing the LAST profile was wire-dead, and the claim is what sent the
+   search; see §42.6d, which closes it.
 4. **It cannot go stale or be evicted.** Freshness is **evaluated** per
    request, never latched at the instant of an admin action — the
    `ca_health.go` / CHAOS-61 discipline, which also means there is no clearing
@@ -10054,6 +10058,111 @@ compile failure (`Load` with the IdP returning 503 and nothing cached) and a
 real staleness-ceiling retirement do NOT revoke; delete, disable and
 `ReplaceAll(nil)` on that same dark provider DO. All four were verified failing
 against the `LiveProvider` shape.
+
+### 42.6d SELF-FOUND — the lever did not reach the fleet when the profile removed was the LAST one, and the wall that exists for this bug class never looked
+
+§42.4 reason 3 justified building the revocation as DERIVED STATE rather than a
+`RevokeProvider` event partly on this claim: *"`ConfigSnapshot.IdPProfiles`
+already carries the set fleet-wide, so a CP deletion reaches every DP on the
+next sync."* **The claim was false in exactly the case an operator reaches
+for**, and the runbook asserted it twice (§2's table, §5's reason 3) — so an
+operator cutting a federation off mid-incident was told the job was done when
+it was not. The CHAOS-70 round-2 class: *a runbook that names something the
+code does not do is a defect, not a typo.*
+
+`idpRegistry.All()` is `cloneIdPProfiles(r.profiles)`, which returns
+`make([]*IdPProfile, 0, 0)` — **non-nil but EMPTY** — for an empty registry.
+`ConfigSnapshot.IdPProfiles` carried `json:"idp_profiles,omitempty"`, and
+`omitempty` drops an empty slice, so the key never reached the wire.
+`syncSnapshotIdPProfiles` opens `if snap.IdPProfiles == nil { return nil }`, so
+the DP **skipped**. Measured through the real encoder/decoder pair: `All()` on
+an empty registry → `nil=false len=0`; on the wire → `idp_profiles present:
+false`; decoded on the DP → `nil=true`. The control, with one profile
+surviving, decodes `len=1` and applies normally.
+
+So deleting the **only** IdP on the Control Plane left it **stored, enabled and
+LIVE on every Data Plane node**: `ProfileEnabled` answered true, every session
+it minted kept authenticating with its asserted groups for the full TTL (8h
+default, up to 7d), and — this is wider than the session plane — **new logins
+through the removed federation kept working**, since the DP still offered it on
+the captive portal. With `-idp-profiles-file` configured the DP persists the
+synced registry, so it survived restarts too. All three DP intake paths funnel
+through the one nil-skip: the full snapshot (`fetchAndApply`), the delta
+(`controlplane_delta.go`) and the last-known-good replay.
+
+**Removing a NON-last profile always propagated correctly, and that is why
+nothing noticed** — the surviving list is non-empty, so `omitempty` keeps it.
+The gap is reachable only by the single-provider deployment, which is the
+common case and precisely the one where "cut this federation off" means
+deleting the only profile.
+
+**The apply side was already correct.** `syncSnapshotIdPProfiles` is
+nil-skip / empty-wipe by construction: nil skips, and any non-nil value
+(including `[]`) reaches `ReplaceAll`, which clears. Only the struct tag erased
+the distinction before the DP could see it. So the production fix is two lines:
+drop `omitempty`, and relabel the binding.
+
+**The relabel is the governance half, and it is the sharper lesson.**
+`TestConfigSurfaces_SnapshotWireWipe` exists for *precisely* this bug class —
+its own comment calls it "the RateLimitExempt bug class" and spells out that
+`omitempty` makes a `[]`-wipe unreachable. It never looked at this field,
+because it iterates only bindings whose `Apply == semNilSkipEmptyWipe`, and the
+`idp_profiles` row was labelled `semValidatedSkip`. Both labels describe
+something true of `ReplaceAll` (it *is* validation-rejecting), but a binding
+carries one, and the one it carried excluded it from the wall. The directly
+adjacent `threat_domain_allowlist` row had already been made `WireWipeCapable`
+on the identical argument — *"a DP left holding a stale allowlist would keep
+masking domains the CP no longer exempts (fail-open)"* — as had
+`decryption_profiles`, whose comment reads *"deleting the last profile clears
+stale copies on data-plane nodes."* The same call simply was never made for the
+registry, because nothing asked.
+
+**Standing rule: a wall scoped by a CLASSIFICATION only covers the rows that
+carry it, so a mislabelled row is an unexamined row, and the label is the thing
+to audit — not the wall.** This is CHAOS-70's *"the claim was broader than the
+wall"* and CHAOS-69's *"enumerate every branch"* arriving from a third
+direction: here the wall and the claim were both right, and the row was filed
+under the wrong heading.
+
+**`nil` must keep meaning ABSENT, and that is a security property, not a
+nicety.** `redactUnenrolledSnapshot` sets `IdPProfiles = nil` for an unenrolled
+caller, and `GetConfig` is polled by a DP **before enrollment completes** — so
+a redacted snapshot reaches a real node that applies it. Without `omitempty`
+that nil now serialises as `null`; if `null` were ever read as an explicit
+clear, every enrolling node would wipe its own IdP registry, drivable by an
+unauthenticated caller. The cheapest wrong fix (delete the nil early-return) is
+therefore strictly worse than the defect, and is pinned by two controls.
+
+**Compatibility, both directions.** New CP → old DP: the CP now sends
+`"idp_profiles": []`, the old DP decodes a non-nil empty slice and wipes — the
+desired behaviour, with no DP upgrade needed. Old CP → new DP: the field is
+still omitted when empty, the new DP reads nil and skips — unchanged, never
+worse.
+
+**Gates** (`session_provider_cluster_test.go`, 4), every one driving the REAL
+`json.Marshal`/`json.Unmarshal` pair, because the defect lives in the tag and a
+test that hands a struct straight to the sync cannot see it:
+
+- `DefectLastProfileRemovalReachesTheDataPlane` — CP registry emptied via the
+  real `All()`, round-tripped, synced; the DP must no longer report the profile
+  enabled and the session must be revoked. **Verified failing** against the
+  reintroduced `omitempty`. It asserts the `All()` precondition explicitly, so
+  if that accessor ever returns nil for an empty registry the gate says it
+  proves nothing rather than passing vacuously.
+- `ControlAbsentProfileSetDoesNotWipe` — a snapshot with no `idp_profiles` key
+  must leave the registry intact. **Verified failing** against the nil-wipes
+  mutation.
+- `ControlRedactedSnapshotDoesNotWipeAnEnrollingNode` — the unenrolled
+  redaction path, end to end. **Verified failing** against the same mutation.
+- `ControlNonLastRemovalStillPropagates` — the case that already worked must
+  keep working; its survivor is a valid-but-DISABLED profile, since `ReplaceAll`
+  validates every profile and skips compilation only for disabled ones, which is
+  what keeps the gate off the network.
+
+Both controls pass against the pre-fix tree as well as the fixed one, which is
+what makes them controls. The reclassification also brings the field under
+`TestConfigSurfaces_SnapshotWireWipe`, so re-adding `omitempty` now fails the
+build with a message naming the consequence — verified.
 
 ### 42.7 Deliberately NOT done
 

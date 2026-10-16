@@ -50,7 +50,7 @@ configuration replacement (import, rollback, Control Plane snapshot) revokes.
 
 | Lever | Cuts proxy sessions? | Cuts admin-UI sessions? | Survives restart? | Reaches other cluster nodes? |
 |---|---|---|---|---|
-| Delete / disable an IdP | **Yes** (immediately; an *unreachable* IdP does not) | n/a — the admin UI never issues an SSO cookie | **Yes** — derived from the stored profile set | **Yes** — via the `IdPProfiles` config snapshot |
+| Delete / disable an IdP | **Yes** (immediately; an *unreachable* IdP does not) | n/a — the admin UI never issues an SSO cookie | **Yes** — derived from the stored profile set | **Yes** — via the `IdPProfiles` config snapshot, including when you remove the last profile |
 | Delete a local admin account | n/a — a local login never mints a proxy cookie | Yes | **No** — the user revocation list is in memory only | **No** |
 | Admin logout | Yes (that one token) | Yes (that one token) | Yes — the token revocation list is persisted | Yes — gossiped between nodes |
 
@@ -63,6 +63,36 @@ Two consequences worth knowing before an incident:
   The account itself is durably gone and the admin UI refuses its sessions via
   the roster check, so this is not an exposure today — but do not rely on the
   user-level revocation list outliving a process.
+
+### 2.1 Removing the *last* provider on a cluster (fixed — check your build)
+
+Until this change, deleting the **last** identity provider on the Control Plane
+did not reach any Data Plane node.
+
+`ConfigSnapshot.IdPProfiles` carried `omitempty`, so a Control Plane whose
+registry had just become empty serialised **no** `idp_profiles` key at all. The
+Data Plane read that as "the field is absent — keep what I have" and skipped the
+sync. The removed federation therefore stayed stored, enabled and live on every
+Data Plane node: its sessions kept authenticating with their asserted groups for
+the full session TTL, **and new logins through it kept working**. With
+`-idp-profiles-file` configured on the node it also survived restarts.
+
+Removing a provider while **another one remained** always propagated correctly,
+which is why the gap was not visible in a multi-IdP estate. It bit exactly the
+single-provider deployment, and exactly the moment an operator cuts a federation
+off.
+
+**If you are running a build without this fix**, the workaround is to never let
+the Control Plane registry reach zero in one step: disable or delete the
+provider, then confirm on each Data Plane node (**Identity Providers** panel, or
+`GET /api/idp`) that it is gone. Where it is not, remove it on that node.
+
+**With the fix**, an emptied registry serialises as `"idp_profiles": []` and the
+Data Plane applies it as an explicit clear. A snapshot that carries *no*
+`idp_profiles` key still means "absent, keep what I have" — that is what an
+older or rolled-back Control Plane sends, and it is also what an unenrolled
+caller receives, since the field is redacted to nothing before enrollment
+completes. Absent and empty are deliberately different answers.
 
 ## 3. Confirming the revocation reached live traffic
 
@@ -124,7 +154,9 @@ provider's profile still stored and enabled?" — for four operational reasons:
    *absence* does.
 3. **It needs no gossip.** `ConfigSnapshot.IdPProfiles` already carries the
    provider set to every Data Plane node, so a Control Plane deletion reaches
-   the fleet on the next sync with nothing new to replicate.
+   the fleet on the next sync with nothing new to replicate. This held for
+   *most* deletions and not for the one that matters most — see the note
+   below, which is now fixed.
 4. **It cannot go stale or be evicted.** A revocation-list entry has an expiry
    and a cap; a derived check is re-evaluated on every request and is correct
    for as long as the provider is absent.
