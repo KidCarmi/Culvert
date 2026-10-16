@@ -890,52 +890,88 @@ func TestChaos71_StructuralValidatorDecidesWithoutAResolver(t *testing.T) {
 // admission gates and the endpoint validator were the other two). A wall
 // scoped to one of two symmetric paths is how that asymmetry keeps surviving,
 // so the fix is to wall the PAIR rather than the instance.
+// chaos71FetcherBody slices one fetcher out of its source file.
+//
+// By hand rather than with a bare strings.Index: Index returns -1 when the
+// anchor is absent, which slices from the END of the file and silently makes
+// every assertion vacuous — a wall that passes because it stopped looking is
+// worse than no wall (gocritic offBy1 flags exactly this).
+func chaos71FetcherBody(t *testing.T, file, fn string) string {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), file))
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func "+fn)
+	if start < 0 {
+		t.Fatalf("%s not found — this wall is pinning nothing", fn)
+	}
+	out := body[start:]
+	end := strings.Index(out, "\n}\n")
+	if end < 0 {
+		t.Fatalf("could not find the end of %s", fn)
+	}
+	return out[:end]
+}
+
+// chaos71AssertPreflightBounded is ROUND 5's half: the guard may not outlive
+// the operation it guards.
+func chaos71AssertPreflightBounded(t *testing.T, fn string) {
+	t.Helper()
+	if strings.Contains(fn, "isPrivateHost(") && !strings.Contains(fn, "isPrivateHostContext(") {
+		t.Fatal("the pre-flight must use the ctx-bounded form, not the Background() one")
+	}
+	if !strings.Contains(fn, "isPrivateHostContext(ctx,") {
+		t.Fatal("the pre-flight must be bounded by the SAME ctx the request uses")
+	}
+	if strings.Count(fn, "context.WithTimeout") != 1 {
+		t.Fatal("guard and request must share ONE deadline, not one each")
+	}
+	// validateExternalURL RESOLVES under Background(). Reaching it here is the
+	// defect in its original form, whatever else the function also does.
+	if strings.Contains(fn, "validateExternalURL(") {
+		t.Fatal("the resolving validator must not be the pre-flight: it " +
+			"resolves under context.Background(), outside this function's budget")
+	}
+}
+
+// chaos71AssertForgeryBarrier is the OWNER-DECISION ROUND's half: the two
+// properties that actually clear CodeQL go/request-forgery.
+//
+// The regexp must gate the RAW value BEFORE url.Parse — CodeQL recognises
+// Regexp.MatchString as a sanitiser and does not demonstrably model the
+// isPrivateHostContext wrapper, and BOTH halves of this pair were flagged
+// critical with the wrapper alone, SAML first and OIDC on this round. And the
+// request must be built from the PARSED url, so the URL fetched is the one the
+// guard checked rather than a sibling of it.
+func chaos71AssertForgeryBarrier(t *testing.T, fn, raw, barrier, parsed string) {
+	t.Helper()
+	guard := strings.Index(fn, barrier+".MatchString("+raw+")")
+	parse := strings.Index(fn, "url.Parse("+raw+")")
+	if guard < 0 || parse < 0 || guard > parse {
+		t.Fatalf("%s must gate %s BEFORE url.Parse, in the same function as the request", barrier, raw)
+	}
+	if !strings.Contains(fn, "http.MethodGet, "+parsed+".String(),") {
+		t.Fatalf("the request must be built from %s.String(), not from the raw %s", parsed, raw)
+	}
+	if strings.Contains(fn, "http.MethodGet, "+raw+",") {
+		t.Fatalf("the request is built from the raw %s: the guard checked the parsed URL", raw)
+	}
+}
+
 func TestChaos71_MetadataPreflightsAreBoundedByTheRequestBudget(t *testing.T) {
 	if samlMetadataFetchBudget <= 0 || oidcDiscoveryFetchBudget <= 0 {
 		t.Fatal("both shared budgets must be positive")
 	}
-	for _, tc := range []struct{ file, fn string }{
-		{"auth_saml.go", "fetchSAMLMetadataOverNetwork"},
-		{"auth_oidc_flow.go", "fetchOIDCDiscoveryOverNetwork"},
+	for _, tc := range []struct{ file, fn, raw, barrier, parsed string }{
+		{"auth_saml.go", "fetchSAMLMetadataOverNetwork", "raw", "samlMetadataURLShape", "metaURL"},
+		{"auth_oidc_flow.go", "fetchOIDCDiscoveryOverNetwork", "wellKnown", "oidcDiscoveryURLShape", "u"},
 	} {
 		t.Run(tc.fn, func(t *testing.T) {
-			src, err := os.ReadFile(filepath.Join(pkgSourceDir(), tc.file))
-			if err != nil {
-				t.Fatalf("read source: %v", err)
-			}
-			// Slice the function out by hand rather than with a bare
-			// strings.Index: Index returns -1 when the anchor is absent, which
-			// slices from the END of the file and silently makes every
-			// assertion below vacuous — a wall that passes because it stopped
-			// looking is worse than no wall (gocritic offBy1 flags exactly this).
-			body := string(src)
-			start := strings.Index(body, "func "+tc.fn)
-			if start < 0 {
-				t.Fatalf("%s not found — this wall is pinning nothing", tc.fn)
-			}
-			fn := body[start:]
-			end := strings.Index(fn, "\n}\n")
-			if end < 0 {
-				t.Fatalf("could not find the end of %s", tc.fn)
-			}
-			fn = fn[:end]
-
-			if strings.Contains(fn, "isPrivateHost(") && !strings.Contains(fn, "isPrivateHostContext(") {
-				t.Fatal("the pre-flight must use the ctx-bounded form, not the Background() one")
-			}
-			if !strings.Contains(fn, "isPrivateHostContext(ctx,") {
-				t.Fatal("the pre-flight must be bounded by the SAME ctx the request uses")
-			}
-			if strings.Count(fn, "context.WithTimeout") != 1 {
-				t.Fatal("guard and request must share ONE deadline, not one each")
-			}
-			// validateExternalURL RESOLVES under Background(). Reaching it here
-			// is the defect in its original form, whatever else the function
-			// also does.
-			if strings.Contains(fn, "validateExternalURL(") {
-				t.Fatal("the resolving validator must not be the pre-flight: it " +
-					"resolves under context.Background(), outside this function's budget")
-			}
+			fn := chaos71FetcherBody(t, tc.file, tc.fn)
+			chaos71AssertPreflightBounded(t, fn)
+			chaos71AssertForgeryBarrier(t, fn, tc.raw, tc.barrier, tc.parsed)
 		})
 	}
 }
@@ -1292,6 +1328,45 @@ func TestChaos71_SAMLMetadataURLShapeBarrier(t *testing.T) {
 	parse := strings.Index(fn, "url.Parse(raw)")
 	if guard < 0 || parse < 0 || guard > parse {
 		t.Fatal("the regexp barrier must run on raw BEFORE url.Parse, in the same function as the request")
+	}
+}
+
+// CodeQL go/request-forgery, owner-decision round: the OIDC half of the same
+// barrier. The SAML gate above shipped earlier in this PR and this path was
+// left with the isPrivateHostContext wrapper alone, which CodeQL flagged
+// critical on auth_oidc_flow.go — the same alert, on the sibling of the
+// function that had already been fixed for it.
+//
+// The CONTROL matters as much as the barrier: the cheapest way to pass a
+// "nothing unvalidated is fetched" assertion is a barrier that refuses
+// everything, which would take every OIDC discovery fetch down, so the
+// positive cases are asserted too.
+func TestChaos71_OIDCDiscoveryURLShapeBarrier(t *testing.T) {
+	for _, ok := range []string{
+		"https://idp.example.com/.well-known/openid-configuration",
+		"http://idp.example.com:8080/.well-known/openid-configuration",
+		"HTTPS://IDP.example.com/.well-known/openid-configuration",
+	} {
+		if !oidcDiscoveryURLShape.MatchString(ok) {
+			t.Errorf("barrier refused a valid discovery URL %q", ok)
+		}
+	}
+	for _, bad := range []string{
+		"", "ftp://idp.example.com/c", "file:///etc/passwd", "https:///path-only",
+		"//idp.example.com/c", "idp.example.com/c", "gopher://x",
+	} {
+		if oidcDiscoveryURLShape.MatchString(bad) {
+			t.Errorf("barrier admitted %q", bad)
+		}
+		if _, err := fetchOIDCDiscoveryOverNetwork(bad); err == nil {
+			t.Errorf("fetch accepted %q", bad)
+		}
+	}
+	// The pair must agree: one barrier, two call sites, so a future narrowing
+	// of one cannot silently diverge from the other.
+	if oidcDiscoveryURLShape.String() != samlMetadataURLShape.String() {
+		t.Errorf("the two fetchers' barriers diverged: oidc %q vs saml %q",
+			oidcDiscoveryURLShape.String(), samlMetadataURLShape.String())
 	}
 }
 

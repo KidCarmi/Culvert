@@ -8642,6 +8642,65 @@ Ceiling retirement leaves the profile enabled and stored and is NOT a
 revocation; #1564's session-validity predicate keys on "profile exists and is
 enabled" so the seven-day retirement cannot become a mass logout.
 
+**The round shipped a CRITICAL CodeQL alert, and it is the FIFTH instance of
+one asymmetry.** `CodeQL` failed on the head with *"1 new alert including 1
+critical severity security vulnerability"* — `go/request-forgery`,
+*"uncontrolled data used in network request"*, at the `client.Do(req)` in
+`fetchOIDCDiscoveryOverNetwork`. The guard was not missing: `url.Parse`, the
+scheme check and `isPrivateHostContext` were all present, inline, in the same
+function as the request, exactly as the repo convention requires. **The defect
+was that the request was built from the RAW `wellKnown` string while the guard
+had validated the PARSED `u`** — so CodeQL's dataflow saw the tainted value
+reach the sink with no barrier on *it*, and, separately, the function was
+validating one URL and fetching another.
+
+The SAML sibling had already been fixed for this exact alert **earlier in this
+same PR**, and its own comment records the evidence that settles the diagnosis:
+CodeQL recognises `Regexp.MatchString` on the tainted value as a sanitiser,
+*"whereas whether it models the `isPrivateHostContext` wrapper is not
+established — the PR's CodeQL run flagged this request with that wrapper in
+place."* The OIDC half kept the wrapper alone, which is precisely the state
+that had been observed to be flagged. So the fix is the sibling's, mirrored:
+`oidcDiscoveryURLShape` — the SAME minimal regexp, pinned equal to
+`samlMetadataURLShape` by test — gating the raw value ahead of `url.Parse`, and
+the request built from `u.String()`. Neither narrows what is fetched: the
+regexp admits exactly what the scheme check admits, and the one shape it
+refuses that the check would have passed is an empty authority (`http:///x`),
+which could never be fetched and would have reached `isPrivateHostContext` with
+an empty host — fail-closed, earlier. The bound is untouched; the guard is not
+un-bounded for CodeQL.
+
+**The wall that should have caught it was scoped to the bound, not to the
+barrier.** Round 5 had already made this a TABLE over both fetchers for exactly
+this reason, with the lesson written on it — *"a wall scoped to one of two
+symmetric paths is how that asymmetry keeps surviving, so wall the PAIR"* — and
+it asserted the ctx-bounded pre-flight, the single deadline and the absence of
+`validateExternalURL`. It said nothing about where the request's URL comes
+from, so the pair was walled for one property and not for the one that was
+broken: **the wall's claim was narrower than the property that mattered**, the
+same shape as a note broader than its wall (round 7) and a register row broader
+than the code (IDP-7, this round). The table now carries both halves —
+barrier-before-parse and request-from-the-parsed-URL — per fetcher, with
+`TestChaos71_OIDCDiscoveryURLShapeBarrier` mirroring the SAML gate and
+additionally pinning the two barriers EQUAL, so a future narrowing of one
+cannot silently diverge from the other.
+
+Five mutations were each verified failing the gate they target (barrier
+removed, request rebuilt from the raw string, barrier refusing everything,
+barriers diverged, and a table row pointed at a missing function to prove the
+slicer's non-vacuity guard fires). The refuse-everything CONTROL earns its
+keep: the cheapest way to pass *"nothing unvalidated is fetched"* is a barrier
+that admits nothing, which would take every OIDC discovery fetch down. **And
+the complexity gate found a stronger property, as it did in round 7**: the
+additions pushed the table past `gocognit`'s 30, so the slicing and the two
+assertion groups were extracted into helpers — and every mutation was re-run
+against the refactor, which is what round 7 recorded to do.
+
+*The standing rule, now earned five times on one pair of functions: when a
+finding is fixed on one of two symmetric paths, fix BOTH in the same change and
+wall the PAIR on the property that was actually broken — not on the one that
+was convenient to assert.*
+
 ### Codex review round (2026-09-25) — three findings, one of them the sweep's own headline defect left half-closed
 
 **P1 — a RESOLUTION failure was still reported as a CONFIGURATION error on the

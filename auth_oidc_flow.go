@@ -27,6 +27,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,27 @@ func oidcWellKnownURL(issuer string) string {
 	return issuer + "/.well-known/openid-configuration"
 }
 
+// oidcDiscoveryURLShape is the go/request-forgery barrier for
+// fetchOIDCDiscoveryOverNetwork, and it is the SAME regexp as
+// samlMetadataURLShape on purpose: CodeQL recognises Regexp.MatchString on the
+// tainted value as a sanitiser, whereas whether it models the
+// isPrivateHostContext wrapper is NOT established.
+//
+// That is not a guess. The SAML half carried the wrapper and no regexp and was
+// flagged critical by this PR's own CodeQL run; the barrier was added there and
+// cleared it. This half kept the wrapper alone and was flagged identically on
+// the owner-decision round — the FIFTH finding this sweep has produced from the
+// same SAML/OIDC asymmetry (the admission gates, the endpoint validator, the
+// pre-flight bound and the fetcher wall were the others). A fix applied to one
+// of two symmetric paths is how that asymmetry keeps surviving.
+//
+// It admits only what the scheme check below admits anyway (case-insensitive
+// http/https followed by an authority), so it narrows nothing a valid discovery
+// URL uses. The one shape it refuses that the check below would have admitted
+// is an EMPTY authority ("http:///x"), which could never be fetched and would
+// have reached isPrivateHostContext with an empty host — fail-closed, earlier.
+var oidcDiscoveryURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
+
 // fetchOIDCDiscoveryOverNetwork performs exactly the request the
 // pre-CHAOS-71 code performed: same 10 s budget, same SSRF-safe dialer, same
 // 64 KiB read limit, same HTTP-status rule. Split out only so
@@ -116,6 +138,9 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 	// (fetchSAMLMetadataOverNetwork) and did not carry across — the third time
 	// the SAML/OIDC asymmetry has produced a finding here. A bounded operation
 	// is only as bounded as its first step. Do not un-bound this for CodeQL.
+	if !oidcDiscoveryURLShape.MatchString(wellKnown) {
+		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
+	}
 	u, err := url.Parse(wellKnown)
 	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
@@ -131,7 +156,10 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 		Timeout:   oidcDiscoveryFetchBudget,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, http.NoBody)
+	// The request is built from the PARSED url, as the SAML sibling is: the
+	// guard above checked u, so fetching the raw string would be validating
+	// one URL and requesting another. For a URL this shape it round-trips.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}
