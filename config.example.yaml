@@ -1,13 +1,16 @@
 # Culvert Configuration
 # Copy to config.yaml and edit as needed.
-# A non-empty CLI flag overrides the matching value in this file (an empty, zero or false flag
-# falls through to it). Exceptions are noted per key: list keys such as ui_sans are MERGED with
-# their flag, and for keys the admin UI also manages (e.g. ui_sans, log_level, syslog_addr,
-# otlp_endpoint) a NON-EMPTY value saved there (admin_settings.json in the data dir) is re-applied at
-# boot after this file and the CLI and normally wins (a saved syslog target that cannot connect at boot
-# leaves the earlier one active). A value cleared in the UI does NOT win: after a restart
-# the value set here or on the CLI applies again (e.g. a syslog or OTLP exporter the UI disabled
-# resumes), so remove it here and from the CLI as well.
+# Precedence is per key. In general a non-empty CLI flag overrides the matching value in this file
+# (an empty, zero or false flag falls through to it). The list keys ui_sans, ui_allow_ips and
+# proxy.trusted_proxy_cidrs are instead MERGED with their flag, so the CLI cannot remove an entry
+# listed here.
+# Settings saved from the admin UI (admin_settings.json in the data dir) are re-applied at boot after
+# this file and the CLI. For most keys only a NON-EMPTY saved value wins: a value cleared in the UI is
+# replaced again by the one set here or on the CLI after a restart (a syslog or OTLP exporter the UI
+# disabled resumes, so remove it here too), and a saved syslog target that cannot connect at boot
+# leaves the earlier one active. Some keys are saved with an explicit marker and are authoritative
+# instead (e.g. trusted_proxy_cidrs: a list saved in the UI, including an EMPTY one, replaces the
+# value here and on the CLI on every boot).
 #
 # Usage:
 #   ./culvert -config config.yaml
@@ -30,7 +33,7 @@ proxy:
   policy_file: ""     # JSON file for PBAC policy rules
   base_url: ""        # Full external UI URL for OIDC/SAML callbacks and SAML SP metadata (e.g. "https://proxy.corp.com:9090" or "https://proxy.corp.com/culvert"). REQUIRED for SAML (its SP metadata is built at startup with no request to derive a URL from). For OIDC, takes priority over trust_forwarded_headers when set. Does not affect the CP/DP bootstrap-script/enrollment-address URLs below — see docs/OPERATIONS.md item 6 for the full picture (including gRPC-address precedence and why disabling trust_forwarded_headers alone does not secure an unset base_url).
   trust_forwarded_headers: false  # Trust X-Forwarded-Host/-Proto — on top of the request's own Host header, which is used either way whenever base_url is unset — to derive the OIDC redirect URL (only if base_url is unset; never for SAML) and the CP/DP bootstrap-script URL (always). UNSCOPED: honored from any direct peer, unlike trusted_proxy_cidrs below. See docs/OPERATIONS.md item 6 before relying on this for security.
-  trusted_proxy_cidrs: []  # Reverse-proxy IPs/CIDRs whose X-Forwarded-For is trusted for the admin-UI client IP (login lockout, admin-API rate limit, admin-IP allowlist, audit). Empty = always use the direct peer (spoofing-safe). Set when the admin UI is fronted by an L7 proxy (RISK-019).
+  trusted_proxy_cidrs: []  # Reverse-proxy IPs/CIDRs whose X-Forwarded-For is trusted for the admin-UI client IP (login lockout, admin-API rate limit, admin-IP allowlist, audit). Empty = always use the direct peer (spoofing-safe). Set when the admin UI is fronted by an L7 proxy (RISK-019). MERGED with -trusted-proxy-cidrs (the CLI cannot remove an entry listed here); a list saved in the admin UI, even an empty one, replaces both at boot.
   geoip_db: "/app/GeoLite2-Country.mmdb"  # GeoIP database (db-ip.com CC BY 4.0)
   idp_profiles_file: "/data/idp_profiles.json" # JSON file persisting IdP profiles (OIDC/SAML SSO). Empty = in-memory only — profiles are LOST on restart. CLI -idp-profiles-file overrides.
   url_categories_file: "" # JSON file for dynamic URL categories
@@ -329,7 +332,8 @@ mcp:
 
 # ── Admin UI ──────────────────────────────────────────────────────────────
 
-ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)
+ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all). MERGED with -ui-allow-ip, so the CLI
+                        # cannot remove an entry listed here; a non-empty list saved in the admin UI replaces both.
   # - "10.0.0.0/8"
   # - "192.168.1.100"
 session_timeout_hours: 8  # Admin session lifetime (1–168 hours)
