@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -104,6 +105,21 @@ type identityCacheEntry[T any] struct {
 	client string
 	added  time.Time
 	expiry time.Time
+
+	// pos is the index, in the owning bucket's keys slice, of the slot this
+	// record was written for. It is the generation marker that lets
+	// frontLocked tell a STALE slot from the live one (Codex review, PR
+	// #1633).
+	//
+	// Why it is needed: set on an existing key removes the old record and
+	// appends the key again, so a bucket can read [A, B, A] while live counts
+	// two. A presence test alone cannot reject the leading A, because the NEW
+	// record answers "present" for every historical position of that key — so
+	// frontLocked returned the FRESHLY REFRESHED entry as the client's oldest,
+	// and eviction then took it in preference to the genuinely older B.
+	// Compaction deduplicates, but it is skipped for buckets of eight keys or
+	// fewer, so small buckets stayed wrong indefinitely.
+	pos int
 }
 
 type identityCacheBucket struct {
@@ -163,13 +179,16 @@ func (c *identityResultCache[T]) set(key, client string, val T, ok bool, ttl tim
 		}
 	}
 
-	c.entries[key] = &identityCacheEntry[T]{val: val, ok: ok, client: client, added: now, expiry: now.Add(ttl)}
 	b := c.buckets[client]
 	if b == nil {
 		b = &identityCacheBucket{}
 		c.buckets[client] = b
 	}
 	b.keys = append(b.keys, key)
+	c.entries[key] = &identityCacheEntry[T]{
+		val: val, ok: ok, client: client, added: now, expiry: now.Add(ttl),
+		pos: len(b.keys) - 1,
+	}
 	b.live++
 	c.compactLocked(client, b)
 }
@@ -193,7 +212,7 @@ func (c *identityResultCache[T]) evictOneLocked(now time.Time) bool {
 		// An expired entry is free to drop and is always the better victim.
 		if !now.Before(e.expiry) {
 			c.removeLocked(k)
-			c.evictions++
+			c.countEvictionLocked()
 			return true
 		}
 		if !found || betterAuthCacheVictim(b.live, e.added, client, victimLive, victimAdded, victimClient) {
@@ -204,16 +223,35 @@ func (c *identityResultCache[T]) evictOneLocked(now time.Time) bool {
 		return false
 	}
 	c.removeLocked(victimKey)
-	c.evictions++
+	c.countEvictionLocked()
 	return true
 }
 
+// countEvictionLocked records one displacement on this cache AND on the
+// process-wide total.
+//
+// Both are needed. The per-cache number is what a test or a diagnostic asks an
+// instance for; the process-wide one is what /metrics exports, because an
+// instance does not outlive an operator editing its IdP profile. Editing,
+// disabling, deleting or reloading a profile has IdPRegistry compile a NEW
+// provider with a fresh, zero cache (Upsert and ReplaceAll both rebuild
+// r.live), so a metric summed over the LIVE instances falls — to zero if every
+// provider is replaced. A Prometheus counter that decreases reads as a process
+// restart, which erases the flood evidence the counter exists to carry and
+// corrupts every rate() over the window (Codex review, PR #1633).
+func (c *identityResultCache[T]) countEvictionLocked() {
+	c.evictions++
+	identityCacheEvictions.Add(1)
+}
+
 // frontLocked returns the client's oldest still-present entry, advancing head
-// past keys that have already been removed.
+// past slots that have been removed, re-attributed to another client, or
+// superseded by a later refresh of the same key — e.pos names the one slot a
+// record is authoritative for.
 func (c *identityResultCache[T]) frontLocked(client string, b *identityCacheBucket) (string, *identityCacheEntry[T], bool) {
 	for b.head < len(b.keys) {
 		k := b.keys[b.head]
-		if e, present := c.entries[k]; present && e.client == client {
+		if e, present := c.entries[k]; present && e.client == client && e.pos == b.head {
 			return k, e, true
 		}
 		b.head++
@@ -291,6 +329,13 @@ func (c *identityResultCache[T]) compactLocked(client string, b *identityCacheBu
 	}
 	b.keys = kept
 	b.head = 0
+	// Positions moved, so every surviving record's generation marker has to
+	// follow, or frontLocked would reject the slots compaction just kept.
+	for i, k := range b.keys {
+		if e, present := c.entries[k]; present {
+			e.pos = i
+		}
+	}
 	if len(b.keys) == 0 {
 		delete(c.buckets, client)
 	}
@@ -323,30 +368,24 @@ func (c *identityResultCache[T]) entryForTest(key string) *identityCacheEntry[T]
 	return c.entries[key]
 }
 
-// identityCacheEvictionsTotal sums the displacement counters of every
-// identity backend that keeps a result cache: the legacy single provider on
-// Config AND the live registry credential providers.
+// identityCacheEvictions is the process-wide displacement total across every
+// identityResultCache instance, live or long since replaced. It is what
+// /metrics exports; see countEvictionLocked for why a sum over live instances
+// is not a usable counter.
+var identityCacheEvictions atomic.Uint64
+
+// identityCacheEvictionsTotal reports displacement across every identity
+// backend that keeps a result cache — the legacy provider on Config and the
+// registry credential providers alike, including instances the registry has
+// since retired.
 //
-// Both halves are needed. In a registry deployment the registry providers ARE
-// the caches this sweep changed — proxy.go tries them before the legacy
-// fallback — and an LDAP registry cutover unwires Config.provider entirely, so
-// a counter reading only the legacy slot would report zero while the real
-// caches evicted (Codex review, PR #1633).
-//
-// A provider that keeps no cache contributes nothing, so a backend added later
-// is counted the moment it grows one.
-func identityCacheEvictionsTotal(cfg *Config) uint64 {
-	total := uint64(0)
-	if cfg != nil {
-		total += cfg.IdentityCacheEvictions()
-	}
-	for _, prov := range idpRegistry.EnabledCredentialProviders() {
-		if ev, ok := prov.(interface{ CacheEvictions() uint64 }); ok {
-			total += ev.CacheEvictions()
-		}
-	}
-	return total
-}
+// It deliberately does NOT walk idpRegistry. In a registry deployment those
+// providers ARE the caches this sweep changed (proxy.go tries them before the
+// legacy fallback) and an LDAP registry cutover unwires Config.provider
+// entirely, so the counter must cover them — but reading them live made the
+// total fall whenever a profile was edited. Accumulating at the point of
+// eviction covers both deployments and cannot regress.
+func identityCacheEvictionsTotal() uint64 { return identityCacheEvictions.Load() }
 
 // keysRetainedForTest reports how many key slots a client's bucket still holds,
 // consumed positions included. It is the only way to observe the compaction

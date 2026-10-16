@@ -569,9 +569,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   backend keeping no result cache (SAML, which is browser-mediated) is
   unaffected and a new call site inherits the behaviour instead of re-deciding
   it. Displacement is counted per backend and exposed as
-  `culvert_identity_cache_evictions_total`, summed over both the legacy
-  provider and the live registry providers, beside the existing
-  `culvert_auth_cache_evictions_total` for the local cache. Gates: fifteen,
+  `culvert_identity_cache_evictions_total`, accumulated at the point of
+  eviction into a process-owned total so it covers both the legacy provider and
+  the registry providers and cannot fall when an operator edits an IdP profile
+  (editing one has the registry compile a fresh provider, and a Prometheus
+  counter that decreases reads as a restart). It sits beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache. Gates: sixteen,
   with every gate that pins a defect verified failing against the behaviour
   that defect describes.
 

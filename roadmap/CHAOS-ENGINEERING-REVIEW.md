@@ -8491,7 +8491,7 @@ write-up claimed the signal before it existed.
 
 ### 41.6 Gates
 
-`auth_identity_cache_chaos_test.go`, fifteen gates (the last three from
+`auth_identity_cache_chaos_test.go`, sixteen gates (the last five from
 §41.9). **Every gate that pins a
 defect was verified to FAIL against the pre-fix behaviour**, by restoring it (arbitrary map-range victim, a lookup
 that leaves expired entries, and a dispatch that drops the key) and re-running:
@@ -8562,11 +8562,16 @@ own section, and does not walk back to the summary table the next sweep
 actually reads first. An open High row is not free — it is the most expensive
 kind of stale, because it is exactly what draws the next sweep in.
 
-### 41.9 Review follow-up — three defects in the fix itself
+### 41.9 Review follow-up — five defects in the fix itself
 
-Codex review on PR #1633 raised three findings against this sweep's own change.
-All three were traced to a real path and confirmed; all three are fixed, each
+Codex review on PR #1633 raised three findings against this sweep's own change,
+and a second, manually requested pass on the corrected head raised two more.
+All five were traced to a real path and confirmed; all five are fixed, each
 with a gate verified failing against the state the finding described.
+
+That the second pass found more is worth recording plainly: findings (4) and
+(5) are both consequences of the fix for (2), and neither was visible from the
+code the first pass changed. A review round is not a filter you pass once.
 
 **(1) P1 — the fix reached the wrong dispatch.** `proxy.go`'s credential path
 tries the IdP-REGISTRY providers first and only then the legacy fallback:
@@ -8616,3 +8621,43 @@ Findings (1) and (3) share one cause, and it is worth naming plainly: this
 sweep read the register and the cache implementations closely, and did not
 trace the production call graph that reaches them. Two of the three findings
 follow from that single omission.
+
+**(4) P2 — a refresh made an entry look like its client's OLDEST.** The fix for
+(2) deduplicated during compaction and left the ORDERING wrong between
+compactions. `set` on a key the bucket already lists removes the old record and
+appends a new slot, so a bucket reads `[A, B, A]` while `live` counts two — and
+`frontLocked`'s presence test cannot reject the leading `A`, because the new
+record answers "present" for every historical position of that key. So the
+front, which the policy defines as the client's OLDEST entry, was the one just
+refreshed. Eviction then took a verdict written moments earlier in preference
+to a genuinely older one; with the backend in its cooldown, that client is
+denied despite having just been verified.
+
+Compaction deduplicates, but it is skipped for buckets of eight keys or fewer,
+so a small bucket — the ordinary case for one client — stayed wrong
+indefinitely. Measured by probe before the fix: `keys=[A B A]`, `front=A`, with
+`A.added` newer than `B.added`. The fix gives each record a generation marker
+(`pos`, the index of the slot it was written for) that `frontLocked` checks, so
+a stale slot is skipped in O(1) and compaction rewrites the markers it moves.
+
+Note what this says about §41.6's claim that the compaction fix was gated: it
+was — against GROWTH, which was the finding. The gate measured the bucket's
+LENGTH and never asserted its ORDER, so it could not see this. A gate written
+from the finding tests the finding.
+
+**(5) P2 — the eviction counter could fall.** Summing the LIVE registry
+instances, which is exactly what finding (3) asked for, made
+`culvert_identity_cache_evictions_total` **decrease** whenever an operator
+edited, disabled, deleted or reloaded an IdP profile: `IdPRegistry.Upsert` and
+`ReplaceAll` both compile a NEW provider with a fresh, zero cache and swap
+`r.live`, so the accumulated count simply vanishes — to zero if every provider
+is replaced. A Prometheus counter that decreases reads as a process restart,
+which erases the flood evidence the counter exists to carry and corrupts every
+`rate()` over the window.
+
+The fix accumulates at the point of eviction into a process-owned total, so it
+covers both deployment shapes, survives any number of provider swaps, and
+cannot regress. It also removes the registry walk (3) introduced — the right
+answer to (3) turned out not to be "read more places" but "count once, where
+the event happens". Verified by reverting: the gate reports the total falling
+from 48 to 0 on a provider replacement.

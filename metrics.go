@@ -1648,7 +1648,7 @@ culvert_identity_cache_evictions_total %d
 		acSnap.Queued,
 		acSaturated,
 		cfg.AuthCacheEvictions(),
-		identityCacheEvictionsTotal(cfg),
+		identityCacheEvictionsTotal(),
 	)
 
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated

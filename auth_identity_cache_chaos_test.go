@@ -611,18 +611,27 @@ func (p *bareOnlyProvider) ResolveIdentity(user, _ string) (*Identity, bool) {
 // Config.provider, but a registry deployment's caches live in idpRegistry and
 // an LDAP registry cutover unwires the legacy provider — so the metric would
 // report zero while the real caches evicted.
-func TestChaos76_EvictionCounterIncludesRegistryProviders(t *testing.T) {
-	engine, err := NewLDAPAuth(LDAPConfig{
-		URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com", CacheTTL: honestEntryTTL,
-	})
-	if err != nil {
-		t.Fatalf("NewLDAPAuth: %v", err)
+//
+// Second Codex review, also confirmed: summing the LIVE instances made the
+// counter FALL when a profile was edited, because Upsert and ReplaceAll
+// compile a new provider with a fresh, zero cache. A Prometheus counter that
+// decreases reads as a process restart. The total is now accumulated at the
+// point of eviction, so both properties hold at once.
+func TestChaos76_EvictionCounterCoversEveryCacheAndNeverFalls(t *testing.T) {
+	newEngine := func() *LDAPAuth {
+		e, err := NewLDAPAuth(LDAPConfig{
+			URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com", CacheTTL: honestEntryTTL,
+		})
+		if err != nil {
+			t.Fatalf("NewLDAPAuth: %v", err)
+		}
+		return e
 	}
+	engine := newEngine()
 
 	// A registry-only deployment: no legacy provider on Config at all. The
 	// global is restored on cleanup, per the shared-global rule in
 	// docs/agent-context/conventions.md.
-	cfg := &Config{}
 	profile := ldapTestProfile("corp-ad", "AD")
 	prevRegistry := idpRegistry
 	t.Cleanup(func() { idpRegistry = prevRegistry })
@@ -633,15 +642,80 @@ func TestChaos76_EvictionCounterIncludesRegistryProviders(t *testing.T) {
 		},
 	}
 
-	if got := identityCacheEvictionsTotal(cfg); got != 0 {
-		t.Fatalf("precondition: total = %d, want 0", got)
-	}
+	// The counter is process-wide, so measure deltas rather than absolutes.
+	before := identityCacheEvictionsTotal()
 	for i := 0; i < maxAuthCacheSize+48; i++ {
 		engine.cacheSet(cacheKey(fmt.Sprintf("mallory-%d", i), "nope"), "flooding-client", false, nil)
 	}
-	if got := identityCacheEvictionsTotal(cfg); got < 48 {
-		t.Fatalf("identityCacheEvictionsTotal = %d after %d insertions past the cap in a "+
+	afterFlood := identityCacheEvictionsTotal()
+	if afterFlood-before < 48 {
+		t.Fatalf("identityCacheEvictionsTotal rose by %d after %d insertions past the cap in a "+
 			"REGISTRY-only deployment, want >= 48 — the operator signal misses the caches that "+
-			"actually serve the credential path (CHAOS-76)", got, 48)
+			"actually serve the credential path (CHAOS-76)", afterFlood-before, 48)
+	}
+
+	// The operator now edits the profile: the registry compiles a NEW provider
+	// with a fresh cache, so the old instance's count is gone from the live
+	// set. The exported total must not fall.
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{profile},
+		live: map[string]IdentityProvider{
+			profile.ID: &LDAPIdPProvider{profile: profile, engine: newEngine()},
+		},
+	}
+	if got := identityCacheEvictionsTotal(); got < afterFlood {
+		t.Fatalf("identityCacheEvictionsTotal fell from %d to %d when the registry replaced the "+
+			"provider — a Prometheus counter that decreases reads as a process restart, erasing "+
+			"the flood evidence it exists to carry (CHAOS-76)", afterFlood, got)
+	}
+
+	// A Config with no external backend must not be credited with any of it.
+	if got := (&Config{}).IdentityCacheEvictions(); got != 0 {
+		t.Errorf("Config.IdentityCacheEvictions = %d with no external backend, want 0", got)
+	}
+}
+
+// Codex review finding on PR #1633 (second pass), confirmed by probe: set on a
+// key the bucket already lists leaves the old slot in place and appends a new
+// one, so a bucket reads [A, B, A] while live counts two. A presence test
+// cannot reject the leading A, because the NEW record answers "present" for
+// every historical position of that key — so frontLocked returned the FRESHLY
+// REFRESHED entry as the client's oldest, and eviction preferred it to the
+// genuinely older B. Compaction deduplicates but is skipped at eight keys or
+// fewer, so small buckets stayed wrong indefinitely.
+//
+// Measured before the fix: keys=[A B A], front=A, with A.added NEWER than
+// B.added.
+func TestChaos76_RefreshDoesNotMakeAnEntryLookLikeItsClientsOldest(t *testing.T) {
+	var c identityResultCache[*Identity]
+	const client = "198.51.100.7"
+
+	c.set("A", client, &Identity{Sub: "a"}, true, honestEntryTTL)
+	time.Sleep(2 * time.Millisecond)
+	c.set("B", client, &Identity{Sub: "b"}, true, honestEntryTTL)
+	time.Sleep(2 * time.Millisecond)
+	// Refresh A. B keeps the bucket alive, which is the state the stale slot
+	// survives in, and the bucket is far too small for compaction to fire.
+	c.set("A", client, &Identity{Sub: "a"}, true, honestEntryTTL)
+
+	c.mu.Lock()
+	k, front, ok := c.frontLocked(client, c.buckets[client])
+	addedA, addedB := c.entries["A"].added, c.entries["B"].added
+	c.mu.Unlock()
+
+	if !ok {
+		t.Fatal("frontLocked found no entry for a client holding two")
+	}
+	if addedB.After(addedA) {
+		t.Fatalf("precondition: B should be the older entry (A=%s B=%s)", addedA, addedB)
+	}
+	if k != "B" {
+		t.Fatalf("frontLocked = %q, want \"B\" — the client's genuinely oldest entry. Returning the "+
+			"just-refreshed entry makes eviction take a verdict written moments ago in preference "+
+			"to an older one, and if the backend then enters its cooldown that client is denied "+
+			"despite having just been verified (CHAOS-76)", k)
+	}
+	if !front.added.Equal(addedB) {
+		t.Errorf("front entry's added = %s, want B's %s", front.added, addedB)
 	}
 }
