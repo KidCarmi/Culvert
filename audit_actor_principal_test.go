@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +42,29 @@ func mcpReqAs(t *testing.T, method, target, user, clientIP, body string) *httpte
 // collidingAdminNames returns two distinct names that share the first
 // loginAuditActorMax bytes AND the total byte length — exactly the pair a
 // prefix-plus-length bound cannot tell apart.
-func collidingAdminNames() (string, string) {
+func collidingAdminNames() (requester, approver string) {
 	prefix := strings.Repeat("a", loginAuditActorMax)
 	return prefix + "-requester-0001", prefix + "-approver-00002"
+}
+
+// activeMCPPolicyRevision reads the capability's CURRENT active revision through
+// GET /api/mcp/policy, the same store the publication handler compares
+// expected_base against. The policy stores are process-wide and other tests
+// (shadow, rollout) publish to them, so a hard-coded base of 0 is stale under
+// -shuffle; a unique tenant isolates pending requests, not the base revision.
+func activeMCPPolicyRevision(t *testing.T, capability, user, clientIP string) uint64 {
+	t.Helper()
+	w := mcpReqAs(t, http.MethodGet, "/api/mcp/policy?capability="+capability, user, clientIP, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("read active %s policy: %d %s", capability, w.Code, w.Body.String())
+	}
+	var got struct {
+		Revision uint64 `json:"revision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode active %s policy: %v %s", capability, err, w.Body.String())
+	}
+	return got.Revision
 }
 
 func TestAuditActor_PrincipalKeepsDistinctLongAdminsDistinct(t *testing.T) {
@@ -83,10 +104,13 @@ func TestMCPPublication_DistinctLongAdminApprovalIsNotSelfApproval(t *testing.T)
 	// A unique tenant keeps this request apart from any other test's pending
 	// publications in the process-wide MCP admin singleton.
 	tenant := "tenant-auditactor-" + time.Now().Format("150405.000000000")
-	candidate := `{"schema_version":1,"capability":"gateway","policy_revision":1,"default_action":"DENY","rules":[]}`
-
+	// The candidate names the revision AFTER the active one, against the base the
+	// store holds now (both are process-wide; see activeMCPPolicyRevision).
+	base := activeMCPPolicyRevision(t, "gateway", requester, clientIP)
+	candidate := `{"schema_version":1,"capability":"gateway","policy_revision":` + strconv.FormatUint(base+1, 10) +
+		`,"default_action":"DENY","rules":[]}`
 	create := mcpReqAs(t, http.MethodPost, "/api/mcp/publications", requester, clientIP,
-		`{"capability":"gateway","tenant":"`+tenant+`","candidate":`+candidate+`,"expected_base":0}`)
+		`{"capability":"gateway","tenant":"`+tenant+`","candidate":`+candidate+`,"expected_base":`+strconv.FormatUint(base, 10)+`}`)
 	if create.Code != http.StatusOK {
 		t.Fatalf("create publication: %d %s", create.Code, create.Body.String())
 	}
