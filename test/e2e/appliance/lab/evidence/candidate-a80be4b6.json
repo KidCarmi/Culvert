@@ -1,0 +1,19 @@
+{
+ "candidate": "Admin threat-domain allowlist preserved across fresh recovery (owner P1, PR #1528) — on top of the F-P2 1.5.4 sidecar bump",
+ "supersedes": "9e34452677d7 (F-P2 sidecar bump; continues in parallel for F-P2 scope)",
+ "source": "a80be4b61ff7f2f069cf81ede1eebe6945d65306",
+ "source_note": "PR #1528 MERGE commit (head 99e25cec merged into base main dec66e1b) — the commit the deep-gate image was built + version-stamped from, and what ships when #1528 merges",
+ "pr_head": "99e25cece1e0bd2ad6afe1d2745a1584af48d48c",
+ "ova_artifact": "12047875462",
+ "ova_run": "38903245843",
+ "ova_sha256": "394788af5b839c8ff895f8e36b67ad0ca89d3c4f6ed9c71d4112416d6626ebe0",
+ "ova_name": "culvert-appliance-1.0.263-candidate.ga80be4b61ff7-ubuntu-24.04.ova",
+ "image_id": "sha256:ae009528da2c7c17f76be8177cb81d88b4641bbcd25d76b065071de9201f6d92",
+ "image_tar": "fcbaaa89dfd73502a121a4ef546f3afcb95cfb08729df94dbcc11c39ff4fa502",
+ "image_run": "38898100091",
+ "qualify_run": "38903245843",
+ "qualify_note": "full QEMU guest-boot qualify PASS (failures 0), incl. the admin-allowlist SURVIVAL assertions: [6b] allowlist-survived-restore (same-volume) and [H] allowlist-survived-recovery (fresh-volume) — the marker set before backup is present after restore WITHOUT re-adding. F-DISK-1 PASS. image-identity, [5] traffic, [5] clamav-real all PASS.",
+ "sidecar": "`culvert/clamav:1.5.4-culvert.1`, image id `sha256:b11e29c503a4acb1c0196db9ad771d2cf49de8991b7c3be1a592292501ab6c0e`, baked archive sha256 `9404b98152723b5edf20403e98e724a2ed5b4e72c0caf18732df6196d0317f05`; pcre2-10.49-r0 (1.5.4 engine, F-P2 closed — see candidate-9e34452677d7-fp2-closure.md; the sidecar engine is unchanged from 9e344526, only the app bytes carry the allowlist fix).",
+ "fix": "backup.go + internal/threatfeed (standalone threat_domain_allowlist.json, absent-vs-empty, legacy migration, both-store persistence) + scanning startup wiring; 6 engine survival tests in internal/threatfeed/allowlist_backup_survival_test.go.",
+ "gates": "Fast/Deep/QA/Security PR gates all APPROVED on head 99e25cec; Snyk 0 issues."
+}
