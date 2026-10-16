@@ -7954,6 +7954,19 @@ That is also why the round-6 gates are deliberately the same *shapes* as that
 file's rather than better ones: the tree should carry one dialect for this class,
 so the next entry point has something to copy.
 
+**Where this record lives, after the guidance decomposition.** The CHAOS-69
+architecture note is no longer in `CLAUDE.md`: it is a preserved block
+(`docs/agent-context/history/proxy-tls-and-certificates.md`, anchor
+`claude-main-l198-l198`) whose bytes are hash-verified by
+`docs/agent-context/check.py`, and its text ends at the fifth round. Editing it
+is refused by that gate, so the two round-6 contracts are reconciled the way the
+guidance contract prescribes for a preserved block that conflicts with source —
+an entry in `docs/agent-context/errata.md` ("Oversize-host refusal reporting"),
+which names the atomic claim and the deferred resolution and links both to their
+owner. A history label is a warning to reconcile, not permission to ignore; this
+section is the narrative and that entry is what an agent routed to the proxy
+bounds actually reads.
+
 ---
 
 ## 40. CHAOS-70 — The admin-roster mutations that report success on a write that never landed

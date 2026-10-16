@@ -88,3 +88,28 @@ PR [#1528](https://github.com/KidCarmi/Culvert/pull/1528), observed head
 `72c827b7f59f4e43ff2a813241be9029f58f23a9`, contains additional instructions
 and a different toolchain pin. Its guide was inspected but is not imported as
 main behavior. See [rebase instructions](migration.md#branch-reconciliation).
+
+## Oversize-host refusal reporting
+
+[Original L198](history/proxy-tls-and-certificates.md#claude-main-l198-l198)
+credits the `OVERSIZE_HOST` line as rate-limited to one per minute and ends its
+review-round sequence at the fifth round. Two later source-backed contracts are
+absent from that text; both live in the
+[destination-bounds owner](../../proxy_host_bounds.go). The window is claimed
+with an atomic compare-and-swap (`noteOversizeHostLog`), never a mutex: this gate
+is reached ahead of connection limiting, the IP filter and the per-IP limiter, so
+a process-wide lock there would serialize every refusal during the flood it
+bounds, including the suppressed ones. A negative age re-arms instead of
+suppressing, so a clock rollback still reports. The client address is resolved
+only after the window is won (`noteOversizeHostRejectionReq` takes the request;
+both admin entry points in [the admin handlers](../../ui_policy.go) use it):
+passing `realClientIP` as an argument resolves it per refusal and joins and
+splits the whole `X-Forwarded-For` header on the suppressed path.
+[The gates](../../proxy_host_bounds_test.go) pin the no-lock property
+structurally, because a mutex and an atomic stamp share one observable, and
+measure allocated bytes rather than allocation count, because one `strings.Split`
+slice makes the count flat in hop count. The equivalent corrections in
+[request tracing](../../request_tracing_bounds.go) predate these and were not
+inherited; treat both client-supplied-input bounds as one dialect rather than
+re-deriving either. Narrative and measurements:
+[register](../../roadmap/CHAOS-ENGINEERING-REVIEW.md).
