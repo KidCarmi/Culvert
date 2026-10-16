@@ -382,7 +382,7 @@ func packageVarDeclared(t *testing.T, filename, name string) bool {
 
 // Every protocol's front door must consult the CLUSTER-AWARE entry point.
 // AllowAuto is the only one that reaches a remote count; rl.Allow is
-// local-only and rl.AllowClusterAware bypasses the enable check, so either
+// local-only and rl.AllowClusterAware skips AllowAuto's ClusterEnabled() dispatch, so either
 // substitution silently drops this node out of fleet-wide limiting while
 // local limiting — and therefore every behavioural rate-limit test — keeps
 // passing.
@@ -402,10 +402,10 @@ func TestAdmissionOwner_Wall_RequestPathUsesClusterAwareEntryPoint(t *testing.T)
 		}
 	}
 
-	// CONTROLS: the local-only and enable-bypassing shapes must be rejected.
+	// CONTROLS: the local-only and dispatch-bypassing shapes must be rejected.
 	for name, src := range map[string]string{
 		"local only":      "package main\nfunc h(ip string) { if !rl.Allow(ip) { return } }",
-		"enable bypass":   "package main\nfunc h(ip string) { if !rl.AllowClusterAware(ip) { return } }",
+		"dispatch bypass": "package main\nfunc h(ip string) { if !rl.AllowClusterAware(ip) { return } }",
 		"shadowed owner":  "package main\nfunc h(ip string) { rl := newRateLimiter(); if !rl.AllowAuto(ip) { return } }",
 		"parameter owner": "package main\nfunc h(rl *RateLimiter, ip string) { if !rl.AllowAuto(ip) { return } }",
 	} {

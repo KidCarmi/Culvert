@@ -118,7 +118,7 @@ exercises `Run`'s limiter argument.
   gossip loop on the identifier `rl`.
 - `TestAdmissionOwner_Wall_RequestPathUsesClusterAwareEntryPoint` requires
   every `rl.Allow*` call in `proxy.go` and `socks5.go` to be `AllowAuto`
-  (`Allow` is local-only; `AllowClusterAware` bypasses the enable check).
+  (`Allow` is local-only; `AllowClusterAware` skips the cluster-enabled dispatch).
 - `TestAdmissionOwner_SplitOwnerDegradesSilently` pins the invisibility as a
   **documented residual**, so the reason the wall exists is recorded. If a
   future change ever makes a split owner observable, that assertion is the one
@@ -126,7 +126,7 @@ exercises `Run`'s limiter argument.
 
 Both walls assert the mechanism and carry their own CONTROLS — the same
 predicate run against the broken shapes they exist to reject (fresh limiter,
-other identifier, client field; local-only and enable-bypassing calls) — so a
+other identifier, client field; local-only and dispatch-bypassing calls) — so a
 selector that matches nothing cannot pass forever. This follows the
 `sanitizeLog` scan-count and CHAOS-70 rate-gate precedent, and the walls are
 deterministic on any hardware, at any load, with or without `-race`.
