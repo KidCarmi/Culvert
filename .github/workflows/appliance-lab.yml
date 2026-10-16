@@ -101,7 +101,15 @@ jobs:
             source_sha: "9e34452677d77f574f5c3c08ba23ea897d8e17cb"
             image_run: "38873584208"
             image_tar_sha256: "ede6e067d6ec89d0084e1caf4346ee48794a8addeb2b176b55e106605731118d"
-            expect_image_id: "sha256:11fc13cd07ac4f54032e31877cd383f0d4297ec6671f0a68ebb29f2b24cad39f"
+            # The running container reports its OCI MANIFEST digest (index.json
+            # manifests[0].digest), not the config digest — the deep-gate tar's
+            # config digest is sha256:11fc13cd..., its manifest digest is this.
+            expect_image_id: "sha256:8c306a51083f13c680de4b679884b90f51923b7b50c47192bcb2adb68161e9b3"
+            # Re-qualify the EXACT OVA this candidate already built (run
+            # 38881775755, step 15 succeeded; sidecar reproduced) rather than
+            # rebuilding — same bytes, faster iteration on the harness fix.
+            retained_run: "38881775755"
+            retained_sha256: "47cb50f08d09efac5b6a970cc71517598a8edbb75805cb4b55cc2271e81a5313"
             recovery_reboots: "0"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}

@@ -255,6 +255,33 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   rm -f "$d/exp.json"; bl "$good" 0.8 FAIL "no pre-reboot baseline"
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+# allowlist_threat_domain DOMAIN — exempt DOMAIN from DOMAIN-level threat-feed
+# blocking (urlhaus/openphish) via PUT /api/security-scan/feeds/domain-allowlist.
+# The harness's ALLOWED canary (example.com) can appear in the LIVE urlhaus feed
+# fetched at boot (observed 2026-10-16: THREAT_BLOCKED domain example.com). Threat
+# intelligence runs in preDispatchBlocked BEFORE policy, so a feed hit overrides
+# even an explicit Allow+Bypass rule and the canary is 403 regardless of policy —
+# which measures the feed's contents on the day, not the policy path the step is
+# about. Exempting the canary isolates the Allow-rule traffic checks from feed
+# noise: URL-level threat blocking, response scanning and policy are unchanged,
+# the DENIED canaries (example.org/.net) are not allowlisted, and default-deny
+# still returns 403 before the Allow rule. The allowlist persists in the
+# threat-feed DB (under /data), so it survives the restore and history-recovery
+# phases that reuse this canary.
+allowlist_threat_domain() {
+  local d="$1" cur payload
+  cur="$(api GET /api/security-scan/feeds/domain-allowlist | body)"
+  payload="$(python3 - "$cur" "$d" <<'EOF'
+import json,sys
+try: cur=json.loads(sys.argv[1]).get("domains",[]) or []
+except Exception: cur=[]
+d=sys.argv[2]
+if d not in cur: cur.append(d)
+print(json.dumps({"domains":cur}))
+EOF
+)"
+  api PUT /api/security-scan/feeds/domain-allowlist "$payload"
+}
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
 MON_SOCK="/tmp/culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
 qemu_alive() { [[ -f "$WORK/qemu.pid" ]] && kill -0 "$(cat "$WORK/qemu.pid")" 2>/dev/null; }
@@ -682,6 +709,12 @@ EOS
     [[ $c == 200 ]] && check 5 auth-exempt pass "200" || check 5 auth-exempt fail "http $c"
     api GET /api/default-action > "$EV/05-default-action.txt"
     grep -q '"deny"' "$EV/05-default-action.txt" && check 5 default-deny pass "$(body < "$EV/05-default-action.txt")" || check 5 default-deny fail "$(body < "$EV/05-default-action.txt")"
+    # example.com is the ALLOWED canary; exempt it from DOMAIN-level threat-feed
+    # blocking so this step measures policy (default-deny vs Allow), not whatever
+    # the live urlhaus feed lists today. See allowlist_threat_domain. Persists in
+    # /data, so the restore (6b), history (H) and signed-update (6c) canaries
+    # inherit it. Default-deny still gives 403 before the Allow rule.
+    allowlist_threat_domain example.com > "$EV/05-threat-allowlist.txt" 2>&1 || true
     local b a o
     b="$(through_proxy http://example.com/)"
     api POST /api/policy '{"name":"lab-allow-example","priority":10,"action":"Allow","destFQDN":"example.com","sslAction":"Bypass","enabled":true}' > "$EV/05-rule.txt"
