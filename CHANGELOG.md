@@ -127,7 +127,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   is no longer overwritten by the restart's resume. A node whose Control Plane
   listener ends terminally (a Data Plane role won, or the loop crashed) no
   longer reports itself as an active Control Plane. The rebind-backoff gauge
-  reads 0 while the listener serves. A refused admin/promote
+  reads 0 while the listener serves. A restarted leader that is still waiting
+  out its fencing lease when shutdown begins now stops at once instead of
+  outliving the shutdown watchdog. A `role_conflict` listener alert now
+  describes a local CP/DP configuration conflict rather than a fleet outage. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

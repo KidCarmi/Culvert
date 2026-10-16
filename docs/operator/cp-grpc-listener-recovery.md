@@ -277,6 +277,15 @@ dying right after each bind, the cycles count as one outage: it crosses the
 30 s threshold, pages once and, in lease mode, stops renewing the fencing lease
 so the standby takes over.
 
+### `role_conflict`: a local configuration conflict, not an outage
+
+If this node has both Control Plane and Data Plane wiring and its Data Plane
+claimed the cluster role first, the Control Plane listener does not start
+(reason `role_conflict`). The `cp_grpc_listener_down` alert and the
+diagnostics row say so. The node keeps running as a Data Plane, and
+restarting does not change anything. Remove one of the two wirings from this
+node's configuration.
+
 ## The one state that does *not* recover on its own
 
 If the supervisor goroutine itself panics, nothing rebinds. The same terminal

@@ -650,12 +650,33 @@ func noteCPGRPCSupervisorDown(reason string) {
 	cpGRPCListener.mu.Unlock()
 
 	if alertNow {
-		fireCPGRPCListenerAlert(fmt.Sprintf(
-			"Control Plane gRPC listener supervisor stopped (reason: %s) and will NOT rebind on its own. "+
-				"Config distribution, node enrollment and certificate renewal are unavailable fleet-wide until this node is restarted. "+
-				"Enrolled Data Planes continue serving their last-good config. "+
-				"This node's own proxy data plane and admin UI are unaffected.", reason), episode)
+		fireCPGRPCListenerAlert(cpGRPCTerminalAlertDetail(reason), episode)
 	}
+}
+
+// cpGRPCRoleConflictReason is the terminal reason for a CP listener refused
+// because this node already holds another cluster role.
+const cpGRPCRoleConflictReason = "role_conflict"
+
+// cpGRPCTerminalAlertDetail is the cp_grpc_listener_down text for a terminal
+// exit. role_conflict is NOT a fleet outage (Codex review of #1556): this node
+// has both Control Plane and Data Plane wiring, the Data Plane claimed the
+// role first and may be serving fine from a remote Control Plane, and a
+// restart does not fix a contradictory local configuration. Same event — a
+// dedicated event type is still an open owner question.
+func cpGRPCTerminalAlertDetail(reason string) string {
+	if reason == cpGRPCRoleConflictReason {
+		return "This node has both Control Plane and Data Plane wiring configured, and its Data Plane claimed " +
+			"the cluster role first, so its Control Plane gRPC listener will NOT start (reason: role_conflict). " +
+			"This is a local configuration conflict on this node, not a fleet outage: the node keeps running as a " +
+			"Data Plane, and a restart does not change it. Remove the Control Plane or the Data Plane wiring from " +
+			"this node's configuration."
+	}
+	return fmt.Sprintf(
+		"Control Plane gRPC listener supervisor stopped (reason: %s) and will NOT rebind on its own. "+
+			"Config distribution, node enrollment and certificate renewal are unavailable fleet-wide until this node is restarted. "+
+			"Enrolled Data Planes continue serving their last-good config. "+
+			"This node's own proxy data plane and admin UI are unaffected.", reason)
 }
 
 // noteCPGRPCActivationRejected restores the UNCONFIGURED state after a
@@ -801,6 +822,14 @@ func checkCPGRPCListener() OperatorContractCheck {
 			Code:    "cp_grpc_listener",
 			Status:  diagOK,
 			Message: "Control Plane gRPC listener stopped (node shutting down)",
+		}
+	}
+	if snap.SupervisorDown && snap.LastReason == cpGRPCRoleConflictReason {
+		return OperatorContractCheck{
+			Code:           "cp_grpc_listener",
+			Status:         diagFail,
+			Message:        "Control Plane gRPC listener will not start: this node has both Control Plane and Data Plane wiring, and its Data Plane claimed the cluster role first (reason: role_conflict)",
+			OperatorAction: "Fix this node's configuration: remove either the Control Plane or the Data Plane wiring. This is a local conflict, not a fleet outage, and restarting does not resolve it.",
 		}
 	}
 	if snap.SupervisorDown {

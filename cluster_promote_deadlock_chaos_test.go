@@ -67,6 +67,17 @@ func cpIsolateActivation(t *testing.T) string {
 	t.Helper()
 	prevDir := dataDir
 	dataDir = t.TempDir()
+	// Join a CA auto-rotation loop an earlier test may have left finishing its
+	// immediate first round (loadRootCA with t.Context(), cancelled but not
+	// joined): that round reads globalClusterCA, which is swapped just below.
+	// The done channel's close orders its reads before this write (-race).
+	if done := caRotationLoopDone; done != nil {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a CA auto-rotation loop left running by an earlier test did not exit")
+		}
+	}
 	prevCA := globalClusterCA
 	globalClusterCA = &clusterCA{}
 	prevStore := globalConfigStore

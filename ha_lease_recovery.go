@@ -218,7 +218,7 @@ func (h *HAState) leaseRecoveryActive() bool {
 // stopLoops already missed, deadlocking the join).
 func (h *HAState) startLeaseRecovery() {
 	h.mu.Lock()
-	if h.lease == nil || h.leaseEpoch != 0 || h.role != "leader" || h.leaseRecoveryCh != nil || h.stopping {
+	if h.lease == nil || h.leaseEpoch != 0 || h.role != "leader" || h.leaseRecoveryCh != nil || h.stopping || h.shutdown {
 		h.mu.Unlock()
 		return
 	}

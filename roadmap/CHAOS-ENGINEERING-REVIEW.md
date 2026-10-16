@@ -8773,6 +8773,48 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Thirteenth review round.**
+
+  (a) **The HA resume no longer runs under the activation gate.** The
+  delayed-bind `onActivated` (the leadership resume) ran under
+  `cpActivationGateMu`. Its lease acquisition can wait up to
+  `haResumeGhostWait` (45 s), and the `ha-stop` hook that takes the gate is
+  abandoned by the shutdown watchdog after about 11 s. The resume could then
+  acquire a lease and start HA work after the listener had stopped. This was
+  the second shutdown race on this path, so the class is fixed:
+  - **Outside the gate.** The gate now covers only the address publish, and
+    `commitActivation` runs `onActivated` after releasing it.
+  - **A permanent HA shutdown latch.** `HAState.BeginShutdown`, set by
+    `ha-stop` before `Stop`, gives the resume its own shutdown safety.
+    - No new acquire round starts after it.
+    - The ghost and unreachable-backend waits select on its channel.
+    - Under `HAState.mu`, the resume re-checks it before taking any role, for
+      the unguarded resume too.
+    - Keepalive, recovery and standby entry refuse to start after it.
+  - **No lease release.** A grant whose resume then aborts is left to its TTL:
+    ADR-0005 S1 gives the Provider no Release primitive, and adding one is a
+    policy decision this PR does not make.
+
+  Gates:
+  - `TestChaos71_ShutdownInsideTheGhostWaitAbortsTheResume`: SIGTERM inside a
+    real own-ghost wait; returns within 1 s, takes no role, starts no
+    keepalive, and leaves the ghost key untouched;
+  - `TestChaos71_ShutdownAfterTheGrantTakesNoRole`;
+  - `TestChaos71_NoLeaseIsAcquiredOnceShutdownBegan`;
+  - the walls `TestChaos71_Wall_NoHALeaseAcquisitionUnderTheActivationGate`
+    (by-name call graph from every gate holder) and
+    `TestChaos71_WallTheHAStopHookLatchesShutdownBeforeStop`.
+
+  The earlier "onActivated holds the gate" subtest is inverted to "runs
+  outside the gate".
+
+  (b) **role_conflict pages as a local configuration conflict.** It no longer
+  reuses the fleet-outage text. Its `cp_grpc_listener_down` text and its
+  contract row name the CP and DP wiring, say the Data Plane claimed the role
+  first, deny a fleet outage and send the operator to fix the local config,
+  not to restart. It keeps the same event type; a dedicated one is still an
+  open owner question. Gate: `TestChaos71_RoleConflictPagesAsALocalConfigConflict`.
+  Seven mutations each fail a gate.
 * **Twelfth review round.**
 
   (a) **The boot resume is revalidated.** A delayed bind's resume ran

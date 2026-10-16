@@ -200,6 +200,10 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 	unreachableDeadline := time.Now().Add(unreachableWait)
 	unreachable := 0
 	for {
+		if h.shuttingDown() {
+			logger.Printf("HA: process shutdown began — abandoning the leadership-resume lease acquire")
+			return false, false
+		}
 		outcome, st := h.resumeAcquireRound()
 		switch outcome {
 		case resumeGranted:
@@ -212,7 +216,9 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 				return false, false
 			}
 			logger.Printf("HA: waiting out our own ghost lease from the previous process (valid_for=%s)", st.ValidFor)
-			time.Sleep(ghostRetryWait(st.ValidFor))
+			if !h.sleepUnlessShutdown(ghostRetryWait(st.ValidFor)) {
+				return false, false // shutdown: the loop head logs and the resume aborts
+			}
 		default: // resumeUnknown, resumeRaceRetryable
 			if time.Now().After(unreachableDeadline) {
 				logger.Printf("HA: fencing backend still unreachable after %s — taking the leader role "+
@@ -225,7 +231,9 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 				logger.Printf("HA: fencing backend unreachable during leader resume — retrying for up to %s "+
 					"before falling back to a read-only leader role", unreachableWait)
 			}
-			time.Sleep(retryBackoff)
+			if !h.sleepUnlessShutdown(retryBackoff) {
+				return false, false
+			}
 		}
 	}
 }

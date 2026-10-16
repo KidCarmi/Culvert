@@ -140,7 +140,7 @@ func (h *HAState) startLeaseKeepalive() {
 	// h.stopping: Stop() is joining — a fresh keepalive spawned now (e.g. a
 	// tracked standby loop promoting mid-shutdown) would hold a channel the
 	// in-flight stopLoops already missed, deadlocking the join.
-	if h.lease == nil || h.leaseEpoch == 0 || h.leaseStopCh != nil || h.stopping {
+	if h.lease == nil || h.leaseEpoch == 0 || h.leaseStopCh != nil || h.stopping || h.shutdown {
 		h.mu.Unlock()
 		return
 	}

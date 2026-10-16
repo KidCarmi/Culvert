@@ -87,6 +87,13 @@ type HAState struct {
 	lease            halease.Provider
 	leaseCandidateID string
 	leaseEpoch       int64 // epoch of our current grant; 0 = not held
+	// shutdown is the PROCESS shutdown latch (BeginShutdown, set by the ha-stop
+	// hook before Stop). Unlike stopping it is permanent: a resume still
+	// waiting on the fencing backend when shutdown begins must never take a
+	// role or start HA work afterwards (Codex review of #1556). shutdownCh is
+	// closed with it so waits abort at once.
+	shutdown   bool
+	shutdownCh chan struct{}
 	// fenceEpoch mirrors CurrentEpoch (lease == nil ? 0 : leaseEpoch) for
 	// LOCK-FREE readers: a config publish stamps it at commit, and the HA
 	// topology writer publishes while holding h.mu, so the stamp must not
@@ -363,10 +370,15 @@ func resumePersistedStill(guard func() bool) bool {
 	return true
 }
 
-// resumeClaimedLocked is a guarded resume's second check, under h.mu and so
-// atomic with every HA transition: an HA role set meanwhile wins. Caller holds
+// resumeClaimedLocked is a resume's second check, under h.mu and so atomic with
+// every HA transition and with BeginShutdown: shutdown wins for EVERY resume,
+// and for a guarded resume an HA role set meanwhile wins too. Caller holds
 // h.mu (write).
 func (h *HAState) resumeClaimedLocked(guard func() bool) bool {
+	if h.shutdown {
+		logger.Printf("HA: process shutdown began during the leadership resume — not taking the leader role")
+		return true
+	}
 	if guard == nil || h.role == "" {
 		return false
 	}
@@ -398,6 +410,9 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	if !resumePersistedStill(guard) {
 		return false
 	}
+	// A grant taken by a resume that then aborts (shutdown, or a live HA
+	// transition) is left unkept and expires after its TTL — the bounded stall
+	// ADR-0005 documents; the Provider deliberately has no Release primitive.
 	if !leaseGranted && h.leaseConfigured() && foreignHolder {
 		h.mu.Lock()
 		if h.resumeClaimedLocked(guard) {
@@ -464,7 +479,7 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
 	onPromote func() error) {
 	h.mu.Lock()
-	if h.stopping {
+	if h.stopping || h.shutdown {
 		// Stop() is joining our goroutines — spawning a new sync loop here
 		// would hand it a channel the in-flight stopLoops already missed.
 		h.mu.Unlock()
@@ -1101,6 +1116,54 @@ func (h *HAState) Stop() {
 	h.mu.Lock()
 	h.stopping = false
 	h.mu.Unlock()
+}
+
+// BeginShutdown latches process shutdown for HA: from here on no resume takes
+// a role, no keepalive, recovery or standby loop starts, and every resume wait
+// returns at once. Called by the ha-stop hook BEFORE Stop. Idempotent.
+func (h *HAState) BeginShutdown() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.shutdown {
+		return
+	}
+	h.shutdown = true
+	close(h.shutdownChLocked())
+}
+
+// shutdownChLocked returns the shutdown channel, creating it on first use (the
+// zero HAState is valid). Caller holds h.mu (write).
+func (h *HAState) shutdownChLocked() chan struct{} {
+	if h.shutdownCh == nil {
+		h.shutdownCh = make(chan struct{})
+	}
+	return h.shutdownCh
+}
+
+// shutdownSignal is the channel BeginShutdown closes.
+func (h *HAState) shutdownSignal() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.shutdownChLocked()
+}
+
+// shuttingDown reports the shutdown latch.
+func (h *HAState) shuttingDown() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.shutdown
+}
+
+// sleepUnlessShutdown waits d, or returns false as soon as shutdown begins.
+func (h *HAState) sleepUnlessShutdown(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-h.shutdownSignal():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // ── HA Config Persistence ───────────────────────────────────────────────────

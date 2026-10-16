@@ -34,7 +34,15 @@ func TestMain(m *testing.M) {
 		// queue inside an unrelated rollback's storage-write scope (time-based, see
 		// storage_health.go) and turned that rollback into rolled_back_not_durable.
 		// Pinned by TestTestMain_BindsPersistedStateDefaultsToTestDataDir.
+		//
+		// Then Init the rebound config-version store, as production startup
+		// does (loadPersistentAdminState → initConfigVersioning, after
+		// applyDataDirFromEnv). configver.New does not create its directory,
+		// so without Init every unisolated saveConfigVersion still failed with
+		// ENOENT and fed the same storage-failure observer (Codex review on
+		// #1634).
 		rebindDataDirPaths()
+		initConfigVersioning()
 		code := m.Run()
 		os.RemoveAll(td)
 		os.Exit(code)

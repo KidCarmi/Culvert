@@ -226,26 +226,31 @@ func TestChaos71_ShutdownBeforeActivationAbortsTheClaim(t *testing.T) {
 		cpRequirePortReleased(t, addr)
 	})
 
-	t.Run("in_flight_onActivated_holds_the_gate", func(t *testing.T) {
+	t.Run("in_flight_onActivated_runs_outside_the_gate", func(t *testing.T) {
 		cpChaosSetup(t)
 		cpInsecure(t)
 		addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
-		var gateHeld atomic.Bool
-		// While onActivated runs, shutdown cannot close the gate past it: the
-		// gate mutex is held, so beginCPActivationShutdown waits and the
-		// subsequent globalHA.Stop joins whatever the resume started.
+		var gateFree, ran atomic.Bool
+		// The reverse of the earlier contract (Codex review of #1556): the boot
+		// onActivated is the HA resume, whose lease wait can outlast the
+		// shutdown watchdog, so it must NOT hold the gate the ha-stop hook
+		// takes. Its shutdown safety is the HA shutdown latch instead
+		// (TestChaos71_ShutdownInsideTheGhostWaitAbortsTheResume).
 		onActivated := func() {
+			ran.Store(true)
 			if cpActivationGateMu.TryLock() {
 				cpActivationGateMu.Unlock()
-				return
+				gateFree.Store(true)
 			}
-			gateHeld.Store(true)
 		}
 		if _, err := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, onActivated); err != nil {
 			t.Fatalf("boot path: %v", err)
 		}
-		if !gateHeld.Load() {
-			t.Error("onActivated ran without holding the activation gate — a shutdown could close it mid-resume")
+		if !ran.Load() {
+			t.Fatal("onActivated did not run on the first bind")
+		}
+		if !gateFree.Load() {
+			t.Error("onActivated ran HOLDING the activation gate — a resume waiting on the fencing backend would block the ha-stop hook past its watchdog")
 		}
 	})
 }

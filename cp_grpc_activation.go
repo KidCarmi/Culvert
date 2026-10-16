@@ -121,11 +121,22 @@ func (s *cpListenerSupervisor) commitActivation() (outcome cpCommitOutcome, conf
 		hook()
 	}
 
-	// (3)–(5) behind the shutdown gate, so neither the address publish nor
-	// onActivated can start once shutdown has begun.
+	// (3)–(4) behind the shutdown gate, so the address publish cannot start
+	// once shutdown has begun.
 	if outcome, err = s.publishAndActivate(); outcome != cpCommitted {
 		s.rollbackRole(prev)
 		return outcome, "", err
+	}
+	// (5) onActivated runs OUTSIDE the gate (Codex review of #1556): the boot
+	// callback is the HA leadership resume, whose lease acquisition can wait
+	// up to haResumeGhostWait (45 s) — longer than the shutdown watchdog gives
+	// the ha-stop hook, which takes the gate. The gate records activation; the
+	// resume's own shutdown safety is the HA shutdown latch (HAState.BeginShutdown,
+	// set by ha-stop before Stop): its waits abort on it, and it is re-checked
+	// under HAState.mu before any role is taken.
+	// TestChaos71_Wall_NoHALeaseAcquisitionUnderTheActivationGate.
+	if !s.stopRequested() && !cpActivationShutdown.Load() {
+		s.runOnActivated()
 	}
 
 	if prev.role != "control-plane" {
@@ -184,11 +195,12 @@ func (s *cpListenerSupervisor) rollbackRole(prev cpRoleFields) {
 	}
 }
 
-// publishAndActivate is steps (3)–(5), all behind the shutdown gate
-// (cpActivationGateMu, re-checked first): publish the CP address list, then run
-// the one-time onActivated callback. Keeping the PUBLISH inside the gate too
-// means a node whose shutdown has begun never tells the fleet it is a Control
-// Plane (CodeRabbit review of #1556).
+// publishAndActivate is steps (3)–(4), behind the shutdown gate
+// (cpActivationGateMu, re-checked first): publish the CP address list. Keeping
+// the PUBLISH inside the gate means a node whose shutdown has begun never tells
+// the fleet it is a Control Plane (CodeRabbit review of #1556). Nothing that
+// can wait on the fencing backend runs under the gate — onActivated is step
+// (5), run by commitActivation after the gate is released.
 //
 // The publish runs outside clusterRoleMu: buildCPAddressList reads it, and
 // RWMutex is not reentrant (the CHAOS-71 promote-deadlock rider).
@@ -197,7 +209,8 @@ func (s *cpListenerSupervisor) rollbackRole(prev cpRoleFields) {
 // onActivated's leadership resume included (Codex review of #1556) — is
 // republished by the HA topology writer itself (setTopologyLocked,
 // ha_topology.go), so no caller here has to order anything after the resume.
-// Lock order: cpActivationGateMu → HAState.mu → clusterRoleMu → ConfigStore.mu.
+// Lock order: cpActivationGateMu → HAState.mu (read, via Status) → clusterRoleMu
+// → ConfigStore.mu.
 func (s *cpListenerSupervisor) publishAndActivate() (cpCommitOutcome, error) {
 	cpActivationGateMu.Lock()
 	defer cpActivationGateMu.Unlock()
@@ -215,7 +228,6 @@ func (s *cpListenerSupervisor) publishAndActivate() (cpCommitOutcome, error) {
 		logger.Printf("ControlPlane: published the committed CP address list %q",
 			sanitizeLog(fmt.Sprint(globalConfigStore.Get().CPAddresses)))
 	}
-	s.runOnActivated()
 	return cpCommitted, nil
 }
 
@@ -251,7 +263,7 @@ func (s *cpListenerSupervisor) commitAfterAdopt(mode string, backoff time.Durati
 		logErrorf("ControlPlane gRPC listener bound on %s, but this node already holds the %q cluster role — "+
 			"refusing to replace it; the Control Plane listener is STOPPED and will not rebind (fix the "+
 			"Control Plane / Data Plane configuration and restart this node)", s.cfg.addr, conflictRole)
-		s.exitTerminal("role_conflict")
+		s.exitTerminal(cpGRPCRoleConflictReason)
 		return false, true
 	default: // cpCommitPublishFailed: a failure in this episode, retried with backoff
 		if !s.handleBindFailure(err, backoff) {

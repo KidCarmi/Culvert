@@ -22,6 +22,7 @@ package main
 // /data/config_versions whatever ran first.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,4 +48,20 @@ func TestTestMain_BindsPersistedStateDefaultsToTestDataDir(t *testing.T) {
 				name, p, dataDir)
 		}
 	}
+
+	// Pointed under the root is not enough: configver.New does not create its
+	// directory, only Init does, so an un-Init'd store failed every unisolated
+	// saveConfigVersion with ENOENT. Production startup Inits it
+	// (loadPersistentAdminState); TestMain must too. Probe writability with a
+	// non-version file name, so List() and the sequence never see it.
+	dir := configVersions.Dir()
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("config-version store directory %q is not usable (stat: %v): TestMain did not Init the rebound store", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".writable-probe-*")
+	if err != nil {
+		t.Fatalf("config-version store directory %q is not writable: %v", dir, err)
+	}
+	_ = f.Close()
+	_ = os.Remove(f.Name())
 }

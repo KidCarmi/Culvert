@@ -394,7 +394,7 @@ func TestChaos71_TerminalEscalationPagesAgain(t *testing.T) {
 		t.Fatalf("precondition: the recoverable episode paged %d time(s), want 1", n)
 	}
 
-	noteCPGRPCSupervisorDown("role_conflict")
+	noteCPGRPCSupervisorDown("bind loop panicked") // a generic terminal exit; role_conflict has its own text
 	got := alerts()
 	if len(got) != 2 {
 		t.Fatalf("the terminal escalation paged %d time(s) in total, want 2 — subscribers keep the 'keeps retrying' instruction", len(got))
@@ -403,7 +403,7 @@ func TestChaos71_TerminalEscalationPagesAgain(t *testing.T) {
 		t.Errorf("the escalation alert does not carry the terminal instruction: %q", got[1])
 	}
 	// And the terminal latch is fire-once per episode.
-	noteCPGRPCSupervisorDown("role_conflict")
+	noteCPGRPCSupervisorDown("bind loop panicked") // a generic terminal exit; role_conflict has its own text
 	if n := len(alerts()); n != 2 {
 		t.Errorf("a repeated terminal record paged again (%d alerts)", n)
 	}
