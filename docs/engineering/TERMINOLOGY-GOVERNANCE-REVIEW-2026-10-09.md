@@ -34,8 +34,8 @@ One new drift item (T-64) found and **fixed in this change**. Everything else sa
 - **Fix:** `backups_api.go`, `backups_api_test.go`, `openapi.yaml`/`openapi.json` (regenerated via
   `make api-bundle`; `make api-verify` green), CHANGELOG entry. No GUI string changes (the buttons
   describe the user action and are already consistent with each other).
-- **Migration:** the action was introduced in #1468 on 2026-09-26 and shipped in published releases
-  v1.0.254 through v1.0.261 (corrected 2026-10-16 when main was merged in; the original text said it had
+- **Migration:** the action was introduced in #1468 on 2026-09-26 and has shipped in every published
+  release since v1.0.254 (latest v1.0.261 at the 2026-10-16 correction; the original text said it had
   not shipped in a tagged release). Compatibility risk is limited to SIEM rules or saved audit filters
   keyed on the old name; entries already in the trail keep `backup.trigger` (called out in the
   CHANGELOG). Complexity: trivial. PR size: XS (6 lines + docs).
