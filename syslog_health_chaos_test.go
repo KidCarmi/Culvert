@@ -2905,7 +2905,25 @@ var configMetadataReaders = map[string]string{
 	"snapshotAdminEndpoints": "admin_settings.go",
 	"checkSyslogFeed":        "diagnostics.go",
 	"apiSyslogConfig":        "ui_config.go",
+	// apiSyslogTest JOINED this list: it used to load the writer on its own
+	// and pair it with nothing, which is why it was the control sample below.
+	// It now has to know whether the writer being probed is serving the
+	// CONFIGURED collector, so it reads the writer and that verdict from one
+	// snapshot and is a config-metadata reader like the rest (CodeRabbit,
+	// PR #1494).
+	"apiSyslogTest": "ui_config.go",
 }
+
+// syslogWriterOnlyReader is the control sample for the two walls below: a
+// function that legitimately loads the writer on its own because it pairs it
+// with NO target. The AST matcher must be able to see its call, or a broken
+// walk would pass the walls however their subjects were written.
+//
+// It is the request-path fan-out rather than an admin handler on purpose:
+// loading the live writer and handing it a line is the whole of its job, so
+// it cannot stop doing so the way apiSyslogTest did — which is exactly how
+// the previous control sample evaporated.
+var syslogWriterOnlyReader = struct{ fn, file string }{"persistLogEntry", "store.go"}
 
 // TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot is the
 // STRUCTURAL wall for Codex P2-17.
@@ -2976,12 +2994,10 @@ func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 	}
 
 	// CONTROL: the matcher must be able to SEE the call it forbids, or a
-	// broken AST walk would pass forever. apiSyslogTest reads only the writer
-	// — it pairs it with nothing — so it is deliberately NOT on the list, and
-	// it is the honest positive sample.
-	fset, probe := syslogFuncDecl(t, "ui_config.go", "apiSyslogTest")
+	// broken AST walk would pass forever. See syslogWriterOnlyReader.
+	fset, probe := syslogFuncDecl(t, syslogWriterOnlyReader.file, syslogWriterOnlyReader.fn)
 	if probe == nil {
-		t.Fatal("control: apiSyslogTest is gone; the wall above proves nothing")
+		t.Fatalf("control: %s is gone; the wall above proves nothing", syslogWriterOnlyReader.fn)
 	}
 	if len(activeSyslogCallSites(fset, probe)) == 0 {
 		t.Fatal("control: the walk cannot find a known activeSyslog() call, so the wall above proves nothing")
@@ -3708,15 +3724,14 @@ func TestChaos72_TheSyslogAPIReadsOneGeneration(t *testing.T) {
 	for _, o := range offenders {
 		t.Errorf("apiSyslogConfig calls %s — the reported targets, the format beside them and the verdict must all come from the single syslogFeedState() snapshot, or the response describes two generations (Codex P2, PR #1494)", o)
 	}
-	// CONTROL: the matcher must be able to SEE what it forbids. apiSyslogTest
-	// in the same file legitimately loads the writer on its own (it pairs it
-	// with no target), so it is the honest positive sample.
-	fsetP, probe := syslogFuncDecl(t, "ui_config.go", "apiSyslogTest")
+	// CONTROL: the matcher must be able to SEE what it forbids. See
+	// syslogWriterOnlyReader.
+	fsetP, probe := syslogFuncDecl(t, syslogWriterOnlyReader.file, syslogWriterOnlyReader.fn)
 	if probe == nil {
-		t.Fatal("control: apiSyslogTest is gone; the wall above proves nothing")
+		t.Fatalf("control: %s is gone; the wall above proves nothing", syslogWriterOnlyReader.fn)
 	}
 	if len(activeSyslogCallSites(fsetP, probe)) == 0 {
-		t.Fatal("control: the AST walk found no activeSyslog() call in apiSyslogTest, so it would pass this wall however apiSyslogConfig were written")
+		t.Fatalf("control: the AST walk found no activeSyslog() call in %s, so it would pass this wall however apiSyslogConfig were written", syslogWriterOnlyReader.fn)
 	}
 }
 
@@ -3753,5 +3768,111 @@ func TestChaos72_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed(t *testing.T)
 	// unconditionally, which is a permanent false alarm on a working feed.
 	if !strings.Contains(target, "Forwarding to") {
 		t.Error("renderSyslogTarget no longer reports a healthy feed as forwarding; a working collector would warn forever")
+	}
+}
+
+// TestChaos72_ProbeRefusesToTestACollectorThatWasReplaced closes the
+// superseded-target finding at its THIRD surface.
+//
+// The alert wording got it in round 9b and the recovery clear in round 12b.
+// The probe still loaded the writer on its own, so after a re-point whose dial
+// failed it reached the PREVIOUS collector and answered `delivered` —
+// "the collector accepted the test event", ok:true — while syslog_feed_down
+// was firing and the `syslog_feed` row's OperatorAction was pointing the
+// operator at this very endpoint to confirm the fix. noteSyslogDeliveryRecovered
+// correctly refuses to clear that episode for a superseded writer's delivery,
+// so the alert stayed up while the test said it had worked: two contradictory
+// statements on one operator surface (CodeRabbit, PR #1494).
+func TestChaos72_ProbeRefusesToTestACollectorThatWasReplaced(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	col.waitForConnection(t)
+
+	// The persisted-settings apply re-points to a collector that will not
+	// connect. Forwarding keeps serving the first one.
+	noteSyslogConfiguredIntent("tcp://collector-b.invalid:601")
+	noteSyslogFailedDial("tcp://collector-b.invalid:601")
+
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/syslog/test", http.NoBody)
+	w := httptest.NewRecorder()
+	apiSyslogTest(w, adminCtx(r))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/syslog/test = %d, body %q", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the response: %v (%q)", err, w.Body.String())
+	}
+	if ok, _ := body["ok"].(bool); ok {
+		t.Errorf("the probe reported success for a collector the operator has replaced: %q", w.Body.String())
+	}
+	if got := body["outcome"]; got != "superseded" {
+		t.Errorf("outcome = %v, want \"superseded\": the previous collector would answer, and that answer is about the wrong target", got)
+	}
+	// The verdict must still be the one the rest of the plane reports, or the
+	// endpoint and the alert disagree in the other direction.
+	if !syslogFeedState().IntentUnmet {
+		t.Error("fixture did not reach the superseded state; the assertions above prove nothing")
+	}
+}
+
+// CONTROL: an ordinary healthy feed is still probed and still answers. The
+// cheapest way to pass the gate above is to refuse every probe, which deletes
+// the one tool an operator has for producing the delivery evidence recovery
+// requires.
+func TestChaos72_ProbeStillTestsACollectorThatIsBeingServed(t *testing.T) {
+	col := startSyslogCollector(t)
+	armSyslogFeed(t, "tcp://"+col.addr)
+	col.waitForConnection(t)
+
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/syslog/test", http.NoBody)
+	w := httptest.NewRecorder()
+	apiSyslogTest(w, adminCtx(r))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/syslog/test = %d, body %q", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the response: %v (%q)", err, w.Body.String())
+	}
+	if got := body["outcome"]; got == "superseded" {
+		t.Errorf("a connected collector was refused as superseded: %q", w.Body.String())
+	}
+	if ok, _ := body["ok"].(bool); !ok {
+		t.Errorf("a connected collector did not answer the probe: %q", w.Body.String())
+	}
+}
+
+// TestChaos72_ObservabilitySnapshotRestoresTheHealthPlane walls the fixture
+// leak behind the gate above.
+//
+// snapshotObservabilityGlobals restores the writer POINTER and the config
+// strings, but the health record is not part of that snapshot and
+// loadObservability writes it on both paths. A test driving a collector that
+// cannot be connected therefore left `intendedTarget` set and the
+// skipped-event counter ARMED, so every later test's audit and request events
+// were charged to culvert_syslog_drops_total as SIEM losses (CodeRabbit,
+// PR #1494). That is the swapAutoExclude fence-pollution rule: a global a test
+// installs is a global the test must take back, not merely stop pointing at.
+func TestChaos72_ObservabilitySnapshotRestoresTheHealthPlane(t *testing.T) {
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	t.Run("a nested test leaves an unmet intent behind", func(t *testing.T) {
+		ensureObservabilityStartupTestLogger(t)
+		snapshotObservabilityGlobals(t)
+		// loadObservability's failed-dial path, verbatim.
+		noteSyslogConfiguredIntent("tcp://collector.invalid:601")
+		noteSyslogFailedDial("tcp://collector.invalid:601")
+		if !syslogSkipArmed() {
+			t.Fatal("precondition: the failed-dial path must arm the skip counter, or this gate proves nothing")
+		}
+	})
+
+	if syslogSkipArmed() {
+		t.Error("the skipped-event counter is still armed after the snapshot cleanup; every later audit and request event is charged as a SIEM loss")
+	}
+	if snap := syslogFeedState(); snap.IntendedTarget != "" {
+		t.Errorf("the health record still names %q after the snapshot cleanup; later gates read a feed nobody configured", snap.IntendedTarget)
 	}
 }

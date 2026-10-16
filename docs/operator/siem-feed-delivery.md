@@ -250,14 +250,23 @@ POST /api/syslog/test        (admin)
 | `delivered` | the collector accepted **this** event (TCP only) |
 | `sent` | the datagram left this host; UDP cannot confirm receipt |
 | `dropped` | the event was lost before reaching the collector, with the bounded reason **from the writer that actually handled it** — after a re-point a queued probe can be handed to the replacement, and the answer names that collector, not the one the probe was submitted to |
+| `unknown` | still queued after the 3-second probe window — retry |
+| `unconfigured` | no collector is configured |
+| `superseded` | the collector you configured has no writer and forwarding is still serving a previous one, so a probe would exercise the wrong collector. Answered with `ok: false` and nothing is sent |
 
 A probe submitted at the instant you re-point the collector is **not** reported
 as dropped: it follows the same successor chain an ordinary audit line follows,
 so the replacement you just configured receives the test event and answers it.
 Only a probe that no writer in that chain will take is `dropped`, and the reason
 then names the writer that actually refused it.
-| `unknown` | still queued after the 3-second probe window — retry |
-| `unconfigured` | no collector is configured |
+
+**The probe refuses to answer for a collector you have replaced.** When the
+configured collector could not be connected and a previous one is still
+delivering, probing would reach that previous collector and report success —
+while `syslog_feed_down` is active and the diagnostics row is pointing you at
+this very endpoint to confirm the fix. Two contradictory statements on one
+operator surface is the defect this plane exists to remove, so the endpoint
+answers `superseded` instead and sends nothing.
 
 > Before CHAOS-72 this endpoint answered `{"ok": true, "message": "test message
 > sent"}` unconditionally. Once delivery became asynchronous that confirmed

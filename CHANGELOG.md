@@ -42,6 +42,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   delivering. The whole response is assembled from one snapshot, so no two
   fields can describe different generations.
 
+- `POST /api/syslog/test` no longer confirms a collector you have replaced. It
+  probed whichever writer was live, so after a re-point whose dial failed it
+  reached the **previous** collector and answered `delivered` / `ok: true` —
+  while `syslog_feed_down` was active and the diagnostics row was pointing you
+  at that very endpoint to confirm the fix. The endpoint now answers a distinct
+  `superseded` outcome with `ok: false` and sends nothing, and it takes the
+  verdict from the same definition the alert and the recovery path use rather
+  than comparing target strings of its own.
+
 - `POST /api/syslog/test` no longer reports `dropped` for a collector that is
   working. The probe used a single-writer enqueue path that the ordinary send
   path had outgrown, so a probe submitted at the instant an admin re-points the

@@ -10119,3 +10119,63 @@ Nine root-package tests fail in this sandbox and are unrelated to this PR:
 `validateExternalURL`'s DNS check is fail-closed, so every IdP-registry fixture
 using the IANA-reserved domain is refused. CI resolves it normally. The
 determinism verdict for this round is read with those nine excluded.
+
+#### Round 17 addendum — the CodeRabbit batch
+
+Three findings arrived on the same head, all labelled Minor; one of them is in
+this plane's headline class and the label understates it.
+
+**(d) The probe confirmed a collector the operator had replaced.**
+`apiSyslogTest` loaded the writer on its own, so in the superseded state
+(writer A live, intended B's dial failed) it reached A and answered
+`delivered` — *"the collector accepted the test event"*, `ok: true`. Meanwhile
+`syslog_feed_down` is firing, and the `syslog_feed` row's own OperatorAction
+points the operator **at this endpoint** to confirm the fix; round 12b's
+recovery rule correctly refuses to clear that episode for A's delivery, so the
+alert stays up while the test says it worked. Two contradictory statements on
+one operator surface — the superseded-target finding at a **third** surface,
+after the alert wording (9b) and the recovery clear (12b).
+
+The verdict is asked through `snap.IntentUnmet`, **not** by comparing the two
+target strings at the call site. A string comparison would be a second
+definition of a question that already has one — and it would also miss round
+17(b)'s pending-dial grace, reporting `superseded` for an intent a boot dial is
+still deciding. The writer probed is `snap.writer`, from the same snapshot, so
+the writer and the verdict are one generation (round 10b's rule: the probe may
+not infer its transport or its outcome from separately-read state, and that now
+extends to *which collector it is even testing*).
+
+**That fix consumed the control sample of two structural walls**, which is
+worth recording because it is the second time this round that a control turned
+out to rest on something that could move. Both walls used `apiSyslogTest` as
+their positive sample — "it reads only the writer, it pairs it with nothing" —
+and it is now a config-metadata reader itself, so it JOINED the list it used to
+be the counterexample to. The sample is now `persistLogEntry`: the request-path
+fan-out, chosen because loading the live writer and handing it a line is the
+whole of its job, so it cannot stop doing so the way an admin handler did.
+
+> **A control's positive sample must be something that cannot stop having the
+> property. Pick the function whose job IS the property, not the one that
+> happens to have it today.**
+
+**(e) The observability snapshot did not restore the health plane.**
+`snapshotObservabilityGlobals` restores the writer pointer and the config
+strings; the health record is not part of it, and `loadObservability` writes it
+on both paths. A test driving a collector that cannot be connected therefore
+left `intendedTarget` set and the skipped-event counter ARMED, so every later
+test's audit and request events were charged to `culvert_syslog_drops_total` as
+SIEM losses. Verified by a throwaway gate before fixing. That is the
+`swapAutoExclude` fence-pollution rule — a global a test installs is a global
+the test must take back, not merely stop pointing at — and round 17(b) made it
+sharper by adding `dialVerdictBy` to the same unrestored record.
+
+**(f) A paragraph split the probe-outcome table.** Round 16's explanation
+landed *inside* the Markdown table, so `unknown` and `unconfigured` rendered as
+literal text with pipes: two of five probe outcomes were invisible to anyone
+reading the runbook. My own defect, from the round that added the paragraph.
+Fixed by moving the paragraph below the table, which also made room for the new
+`superseded` row.
+
+Mutations: probe loads the writer on its own (2 gates, including the repointed
+config-metadata wall now live for `apiSyslogTest`); refuse every probe (the
+control); snapshot stops restoring the health plane (the fixture gate).

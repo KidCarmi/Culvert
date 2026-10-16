@@ -1951,11 +1951,38 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	sw := activeSyslog()
-	if sw == nil {
+	// The verdict and the writer to probe come from ONE snapshot. Loading the
+	// writer on its own and probing it meant that, after a re-point whose dial
+	// failed, this endpoint probed the PREVIOUS collector and answered
+	// `delivered` — "the collector accepted the test event", ok:true — while
+	// `syslog_feed_down` was firing and the `syslog_feed` row's own
+	// OperatorAction was pointing the operator at this very endpoint to
+	// confirm the fix. noteSyslogDeliveryRecovered correctly refuses to clear
+	// that episode for a superseded writer's delivery, so the alert stayed up
+	// while the test said it had worked: two contradictory statements on one
+	// operator surface, which is the defect this plane exists to remove
+	// (CodeRabbit, PR #1494). It is the superseded-target finding at a THIRD
+	// surface, after the alert wording and the recovery clear.
+	//
+	// The question is asked through snap.IntentUnmet — the ONE definition,
+	// shared with the snapshot and the recovery path — and never by comparing
+	// the two target strings here. A second definition would also miss the
+	// pending-dial grace and report `superseded` for an intent a boot dial is
+	// still deciding.
+	snap := syslogFeedState()
+	if snap.writer == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
+	if snap.IntentUnmet {
+		jsonOK(w, map[string]any{
+			"ok":      false,
+			"outcome": "superseded",
+			"message": "the configured collector has no connection; forwarding is still serving the previous target, so a test would exercise the wrong collector and nothing was sent",
+		})
+		return
+	}
+	sw := snap.writer
 	// CHAOS-66: this used to Write and answer {"ok": true} unconditionally.
 	// Once delivery became asynchronous that confirmed only that a channel
 	// send succeeded — it returned ok for a collector that had been dead for a

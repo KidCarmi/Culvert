@@ -93,6 +93,19 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		if sw := activeSyslog(); sw != nil {
 			_ = sw.Close()
 		}
+		// The writer POINTER is restored below, but the health record is not
+		// part of this snapshot — and loadObservability writes it on both
+		// paths. A test that drives a collector which cannot be connected
+		// therefore left `intendedTarget` set and the skipped-event counter
+		// ARMED, so every later test's audit and request events were charged
+		// to culvert_syslog_drops_total as SIEM losses (verified: the counter
+		// is still armed after this cleanup without the line below).
+		//
+		// That is the swapAutoExclude fence-pollution rule: a global a test
+		// installs is a global the test must take back, not merely stop
+		// pointing at. Cleared AFTER the Close above, because closing a
+		// writer can reach the delivery observer, which writes this record.
+		resetSyslogHealthForTest()
 		globalOTLP.Stop()
 		globalOTLPTraces.Stop()
 		_ = audit.Close() // close any handle the test-under-test opened
