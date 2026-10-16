@@ -1,4 +1,4 @@
-# Security review — the admission engine extraction window (ADR-0037/0038/0039)
+# Security review — the admission engine extraction (ADR-0038/0039)
 
 **Date:** 2026-10-09
 **Reviewer role:** Security Regression Engineer (scheduled run)
@@ -14,6 +14,13 @@
 | `ddd031c` | refresh vulnerable frontend transitive dependency locks |
 | `6a83a2b`, `dac3dde` | stabilise relocated timing gates |
 
+**Reviewed:** the admission extraction (`0c7c950`, `fb2cf33`, `228be80`) and the
+relocated admission timing gates (`6a83a2b`, `dac3dde`).
+
+**Not reviewed: ADR-0037 shutdown extraction (`4df4397`).** `./internal/shutdown`
+and the `TestChaos56` gates were not run, and this review makes no claim about
+that commit. `ddd031c` (frontend dependency locks) was not reviewed either.
+
 The branch `claude/epic-bardeen-4tfkby` is identical to `origin/main`
 (0 ahead / 0 behind), so there was no pending diff; the reviewable surface is
 what recently landed.
@@ -22,7 +29,9 @@ what recently landed.
 
 ## 1. Executive summary
 
-**No security regressions were found in this window.**
+**No security regressions were found in the admission extraction** (the
+commits listed as reviewed above; the ADR-0037 shutdown extraction is out of
+scope and was not reviewed).
 
 The window is dominated by a refactor of the two gates that run on *every*
 proxied request on *every* protocol — the IP filter and the per-IP rate
@@ -382,8 +391,13 @@ was **wrong**. A scratch root test, not committed with this docs-only review,
 was run on amd64 with the pinned `go1.26.9` against `main` at `dec66e1` (the
 `ipf = newIPF` line is unchanged at `controlplane_snapshot.go:873`):
 
+Historical evidence, not a runnable command in this repository. The test
+was a scratch file and is **not committed**. Running the command below against
+this tree matches no test and passes vacuously. Appendix A has the full source
+and the steps to re-run it.
+
 ```
-TestRISK030_SnapshotIPFilterSwapRacesRequestPath
+TestRISK030_SnapshotIPFilterSwapRacesRequestPath   (scratch file; source in Appendix A)
   - applySnapshotAdmission({IPFilterMode: "allow", IPList: ["10.0.0.1"]}) x2000
   - concurrently, 4 goroutines: ipf.Allowed("192.0.2.77") in a loop
   - restores ipf in t.Cleanup
@@ -413,7 +427,10 @@ committed gate with the fail-open counter as an assertion, is gate 6. The fix is
 not made in this commit for one reason only: **one concern per change**. This is
 a docs-only review record, and the fix adds an engine method, re-points two
 snapshot paths and adds two gates, so it needs its own PR and review. The fix is
-not deferred for verifiability.
+not deferred for verifiability. The committed regression test belongs with that
+RISK-030 fix PR, which is pending the owner's decision. It is not added here
+because on the current tree it fails under `-race` by design, which would turn
+this docs-only PR's race gate red.
 
 ---
 
@@ -443,3 +460,73 @@ closed. It is registered as RISK-030, confirmed by the race detector on amd64,
 with a required fix that removes the race rather than guarding it, and with
 gates that do not depend on reproducing a memory reordering (the concurrency gate
 relies on `-race` for that reason).
+
+---
+
+## Appendix A — RISK-030 race reproduction (scratch test, not committed)
+
+This is the exact source run for §4 *Verification*. The run used it under the
+file name `zz_risk030_race_scratch_test.go`, which is why that name appears in
+the recorded output. To re-run it:
+
+1. Check out `main` at `dec66e1` (or any tree where
+   `controlplane_snapshot.go` still contains `ipf = newIPF`).
+2. Save the block below as `risk030_race_scratch_test.go` at the repository root
+   (package `main`).
+3. Run `go test -race -count=1 -run TestRISK030_SnapshotIPFilterSwapRacesRequestPath -v .`
+   with the pinned toolchain (`go1.26.9`).
+4. Expect `WARNING: DATA RACE`: a read in `ipf.Allowed` against the write at
+   `controlplane_snapshot.go:873`, then `--- FAIL`. On amd64 the
+   `fail-open admissions observed` count is expected to be 0. Without `-race`
+   the test passes, which is why the gate must run under `-race`.
+5. Delete the file afterwards. Do not commit it as-is: it fails by design
+   until the RISK-030 fix lands, and the committed gate belongs with that fix.
+
+```go
+package main
+
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+)
+
+// TestRISK030_SnapshotIPFilterSwapRacesRequestPath drives the CP->DP snapshot
+// apply (applySnapshotAdmission, which reassigns the package-global ipf) while
+// request-path readers call ipf.Allowed concurrently, the way proxy.go and
+// socks5.go do. Run with -race: the detector should report the unsynchronised
+// write of ipf against the read.
+//
+// It also counts any read that admits an address the allowlist does not
+// contain (the fail-OPEN window RISK-030 describes). On amd64 that window is
+// not expected to be observable; the race report is the deterministic signal.
+func TestRISK030_SnapshotIPFilterSwapRacesRequestPath(t *testing.T) {
+	saved := ipf
+	t.Cleanup(func() { ipf = saved })
+
+	snap := ConfigSnapshot{IPFilterMode: "allow", IPList: []string{"10.0.0.1"}}
+	applySnapshotAdmission(snap)
+
+	outside := "192.0.2.77" // never on the allowlist
+	var stop atomic.Bool
+	var wrongAllow atomic.Int64
+	var wg sync.WaitGroup
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for !stop.Load() {
+				if ipf.Allowed(outside) {
+					wrongAllow.Add(1)
+				}
+			}
+		}()
+	}
+	for i := 0; i < 2000; i++ {
+		applySnapshotAdmission(snap)
+	}
+	stop.Store(true)
+	wg.Wait()
+	t.Logf("fail-open admissions observed: %d", wrongAllow.Load())
+}
+```
