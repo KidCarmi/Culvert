@@ -54,7 +54,11 @@ func swapCPPollState(t *testing.T, failing bool, since time.Time) {
 	if since.IsZero() {
 		dpCPPollFailingSince.Store(0)
 	} else {
-		dpCPPollFailingSince.Store(since.UnixNano())
+		// dpCPPollFailingSince is a MONOTONIC stamp (monoNanos), not UnixNano
+		// (CHAOS-71), so translate the caller's "failing since this wall
+		// instant" into the same age on the monotonic clock. Callers keep
+		// expressing intent as a wall time; only the stored domain changed.
+		dpCPPollFailingSince.Store(monoNanos() - int64(time.Since(since)))
 	}
 }
 
