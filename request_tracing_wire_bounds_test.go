@@ -115,13 +115,19 @@ func (p *tracingWireProbe) send(t *testing.T, header, value string) (reached boo
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	raw := "GET /probe HTTP/1.1\r\nHost: probe.invalid\r\n" + header + ": " + value + "\r\nConnection: close\r\n\r\n"
+	// A transport error is NOT a parser refusal, and conflating the two is how
+	// this wall would come to prove less than it claims: the byte-space sweep
+	// records every `reached == false` as "net/http refused this byte", so a
+	// dead connection — a runner hiccup, an RST, exhausted ephemeral ports —
+	// would satisfy the expected refused set without a 400 ever being
+	// observed. `reached == false` therefore means exactly one thing: the
+	// parser answered 400. Everything else fails loudly, naming the error.
 	if _, err := io.WriteString(conn, raw); err != nil {
-		// A value large enough to be refused mid-write is still a refusal.
-		return false, "", nil
+		t.Fatalf("write a %d-byte %s value: %v", len(value), header, err)
 	}
 	status, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		return false, "", nil
+		t.Fatalf("read the status line for a %d-byte %s value: %v", len(value), header, err)
 	}
 	if strings.HasPrefix(status, "HTTP/1.1 400") {
 		return false, "", nil
