@@ -28,6 +28,7 @@ import (
 // synchronously.
 func cpAddrPublishHarness(t *testing.T) (spawned chan struct{}, alerts func() []string) {
 	t.Helper()
+	cpStartupAlertsLoaded(t, true) // steady state: pages fire, they do not queue
 	spawned = make(chan struct{}, 16)
 	prevSleep := cpAddrRetrySleep
 	cpAddrRetrySleep = func(context.Context, time.Duration) bool {

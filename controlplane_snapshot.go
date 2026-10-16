@@ -462,6 +462,10 @@ type ConfigStore struct {
 	// failure pages again, when an address publish succeeds (or finds the list
 	// already current) and when ownership is released or replaced.
 	addrRejectPaged bool
+	// addrRejectEpisode numbers address-rejection episodes (bumped when the
+	// latch arms), so a page queued before the webhooks load can check at the
+	// startup flush that its episode is still open.
+	addrRejectEpisode uint64
 	// published is true once a VALID snapshot has been published at least once.
 	// It stays false if the CP's initial publish was rejected at commit — in
 	// which case s.snap is still the zero ConfigSnapshot and the cluster RPCs
@@ -975,8 +979,12 @@ func (s *ConfigStore) rejectPublish(kind publishKind, err error) error {
 	} else {
 		s.addrPublishErr, s.addrPublishTS = err.Error(), ts
 		page = !s.addrRejectPaged // one page per address-rejection episode
-		s.addrRejectPaged = true
+		if page {
+			s.addrRejectPaged = true
+			s.addrRejectEpisode++
+		}
 	}
+	episode := s.addrRejectEpisode
 	curVer := s.version
 	s.mu.Unlock()
 	// The log line still records EVERY rejection (and the pending state counts
@@ -985,13 +993,34 @@ func (s *ConfigStore) rejectPublish(kind publishKind, err error) error {
 	if !page {
 		return err
 	}
-	fireAlert("config_snapshot_rejected", AlertPayload{
+	payload := AlertPayload{
 		Event:  "config_snapshot_rejected",
 		Actor:  "culvert",
 		Source: "cluster",
 		Detail: "config publish rejected at commit: " + err.Error() + " — the cluster stays on the last valid config; reduce the oversized collection to resume sync",
-	})
+	}
+	if kind == publishAddresses && !startupAlertsFlushed() {
+		// The address latch above is armed only together with a page that is
+		// DELIVERED or QUEUED (Codex review of #1556): a persisted leader's
+		// boot-time rejection runs in initCluster, before the webhooks load,
+		// and a page fired then reaches an empty store while the latch keeps
+		// every later retry silent. Before the startup flush the page queues,
+		// and it is delivered at the flush only if its episode is still open;
+		// after it, the page fires at once (a flush racing this check makes
+		// deferStartupAlertWhile fire it directly — delivered either way).
+		deferStartupAlertWhile("config_snapshot_rejected", payload, func() bool { return s.addrRejectEpisodeOpen(episode) })
+		return err
+	}
+	fireAlert("config_snapshot_rejected", payload)
 	return err
+}
+
+// addrRejectEpisodeOpen reports whether address-rejection episode ep is still
+// the current, unresolved one — the validity test for a queued page.
+func (s *ConfigStore) addrRejectEpisodeOpen(ep uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.addrRejectPaged && s.addrRejectEpisode == ep
 }
 
 // publishedSnapshotSizes is the per-slice utilization of the last published

@@ -15,6 +15,7 @@ import (
 // cpRejectedPages counts config_snapshot_rejected pages.
 func cpRejectedPages(t *testing.T) func() int {
 	t.Helper()
+	cpStartupAlertsLoaded(t, true) // steady state: the webhooks are loaded
 	var mu sync.Mutex
 	n := 0
 	prev := fireAlert
@@ -163,5 +164,133 @@ func TestChaos71_FullPublishRejectionsStillPageEach(t *testing.T) {
 	_ = s.Update(cpCommitSnapshot(2001))
 	if got := pages(); got != 2 {
 		t.Errorf("two rejected full publishes paged %d time(s), want 2", got)
+	}
+}
+
+// cpStartupAlertsLoaded sets whether the startup alert flush has happened (the
+// webhooks are loaded) for the test's duration, with an empty queue. The test
+// binary otherwise inherits whatever an earlier test left.
+func cpStartupAlertsLoaded(t *testing.T, loaded bool) {
+	t.Helper()
+	startupAlertMu.Lock()
+	prevQueue, prevFlushed := startupAlertQueue, startupAlertFlushed
+	startupAlertQueue, startupAlertFlushed = nil, loaded
+	startupAlertMu.Unlock()
+	t.Cleanup(func() {
+		startupAlertMu.Lock()
+		startupAlertQueue, startupAlertFlushed = prevQueue, prevFlushed
+		startupAlertMu.Unlock()
+	})
+}
+
+// cpBootPages captures config_snapshot_rejected on BOTH delivery paths: direct
+// fires (fireAlert, which before the startup flush would reach an empty webhook
+// list — lost) and deliveries made by the startup flush (startupAlertFire).
+// The startup queue starts unflushed and empty, as at boot.
+func cpBootPages(t *testing.T) (direct, flushed func() int) {
+	t.Helper()
+	cpStartupAlertsLoaded(t, false)
+	var mu sync.Mutex
+	nDirect, nFlushed := 0, 0
+	prevFire := fireAlert
+	fireAlert = func(event string, _ AlertPayload) {
+		if event == "config_snapshot_rejected" {
+			mu.Lock()
+			nDirect++
+			mu.Unlock()
+		}
+	}
+	prevStartup := startupAlertFire
+	startupAlertFire = func(event string, _ AlertPayload) {
+		if event == "config_snapshot_rejected" {
+			mu.Lock()
+			nFlushed++
+			mu.Unlock()
+		}
+	}
+	t.Cleanup(func() { fireAlert, startupAlertFire = prevFire, prevStartup })
+	return func() int { mu.Lock(); defer mu.Unlock(); return nDirect },
+		func() int { mu.Lock(); defer mu.Unlock(); return nFlushed }
+}
+
+// cpOwnedRejectingStore is an owned store whose address publish is rejected,
+// with the retry loop driven by the test (no background loop is spawned).
+func cpOwnedRejectingStore(t *testing.T) (s *ConfigStore, src func() []string, runRetries func(int)) {
+	t.Helper()
+	long := cpLongList("boot", 40)
+	s = cpOversizedListStore(t, long)
+	src = func() []string { return long }
+	s.setCPAddressSource(src)
+	own := func() {
+		s.addrPubMu.Lock()
+		s.addrPub.retrying = true
+		s.addrPubMu.Unlock()
+	}
+	own()
+	rounds, limit := 0, 0
+	prev := cpAddrRetrySleep
+	cpAddrRetrySleep = func(context.Context, time.Duration) bool { rounds++; return rounds <= limit }
+	t.Cleanup(func() { cpAddrRetrySleep = prev })
+	return s, src, func(n int) {
+		rounds, limit = 0, n
+		s.retryCPAddrPublish(context.Background())
+		own()
+	}
+}
+
+// TestChaos71_BootAddressRejectionIsPagedOnceAfterTheWebhooksLoad — Codex P2
+// 4299279051. A persisted leader's address rejection lands in initCluster,
+// before initPersistentAdminState loads the webhooks. It must not be fired
+// into the empty store (and then latched silent): it queues, and the startup
+// flush delivers it exactly ONCE. Retries in the same episode, before or after
+// the flush, stay silent.
+func TestChaos71_BootAddressRejectionIsPagedOnceAfterTheWebhooksLoad(t *testing.T) {
+	direct, flushed := cpBootPages(t)
+	s, src, runRetries := cpOwnedRejectingStore(t)
+
+	if err := s.reconcileCPAddressesFrom(haTransitionResume, src); err == nil {
+		t.Fatal("precondition: the boot republish was accepted")
+	}
+	runRetries(4) // the retry loop keeps failing before the webhooks load
+	if d := direct(); d != 0 {
+		t.Fatalf("%d page(s) fired before the webhooks loaded — lost to an empty webhook list while the latch silences every retry", d)
+	}
+
+	flushStartupAlerts() // initPersistentAdminState: the webhooks are loaded
+	if f := flushed(); f != 1 {
+		t.Fatalf("the startup flush delivered %d config_snapshot_rejected page(s), want exactly 1", f)
+	}
+	runRetries(4)
+	_, _ = s.UpdateCPAddressesFrom(src) // an activation retry, same episode
+	if d, f := direct(), flushed(); d != 0 || f != 1 {
+		t.Errorf("retries in the same episode paged again after the flush (direct=%d flushed=%d)", d, f)
+	}
+}
+
+// TestChaos71_BootAddressRejectionResolvedBeforeTheFlushIsDropped is the
+// control in the other direction: an episode that ended before the webhooks
+// loaded (the list published) is not paged late. And after the flush, a new
+// episode's first rejection pages at once — nothing is held back.
+func TestChaos71_BootAddressRejectionResolvedBeforeTheFlushIsDropped(t *testing.T) {
+	direct, flushed := cpBootPages(t)
+	s, src, runRetries := cpOwnedRejectingStore(t)
+
+	_ = s.reconcileCPAddressesFrom(haTransitionResume, src)
+	snapshotWireBudget = maxSnapshotWireBytes
+	runRetries(2) // the list publishes: the episode ends before the flush
+	if st := s.cpAddrPublishSnapshot(); st.pending {
+		t.Fatalf("precondition: still pending %+v", st)
+	}
+	flushStartupAlerts()
+	if f := flushed(); f != 0 {
+		t.Errorf("a rejection whose episode ended before the webhooks loaded was paged late (%d)", f)
+	}
+
+	longer := cpLongList("boot-b", 60)
+	b, _ := json.Marshal(func() ConfigSnapshot { x := s.Get(); x.CPAddresses = longer; return x }())
+	snapshotWireBudget = len(b) - 1
+	_ = s.reconcileCPAddressesFrom(haTransitionEnable, func() []string { return longer })
+	if d := direct(); d != 1 {
+		t.Errorf("a new episode's first rejection after the flush paged %d time(s), want 1", d)
 	}
 }

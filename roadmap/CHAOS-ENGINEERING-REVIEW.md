@@ -8773,6 +8773,30 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Fifteenth review round — the address latch arms only with a deliverable
+  page.** A persisted leader's boot-time address rejection runs in
+  `initCluster`, before `initPersistentAdminState` loads the webhooks. The
+  round-14 latch armed while the page went into an empty store, so every
+  later retry stayed silent.
+
+  Before the startup flush the page now queues through
+  `deferStartupAlertWhile`, the predicate this PR already uses for
+  `cp_grpc_listener_down`. Its predicate is `addrRejectEpisodeOpen(episode)`,
+  so the flush delivers it once and only if the episode is still open. After
+  the flush it fires at once. The latch arms together with a queued or
+  dispatched page.
+
+  The PR's other alert, `cp_grpc_listener_down` (recoverable, terminal and
+  role_conflict), already queued before the flush. The full-kind rejection
+  page predates this PR and is unchanged; a boot-time full rejection still
+  reaches an empty store, as on main, and remains a follow-up.
+
+  Gates: `TestChaos71_BootAddressRejectionIsPagedOnceAfterTheWebhooksLoad`
+  (no page before the load, exactly one delivered at the flush, retries
+  silent before and after) and
+  `TestChaos71_BootAddressRejectionResolvedBeforeTheFlushIsDropped` (no late
+  page; a new episode after the flush pages at once). Three mutations each
+  fail a gate.
 * **Fourteenth review round — one page per address-rejection episode.** A
   persistently oversized owned address republish is retried every ≤30 s by
   the pending-republish loop. Every rejection went through `rejectPublish`
