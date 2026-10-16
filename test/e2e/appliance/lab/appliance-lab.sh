@@ -161,7 +161,12 @@ gpriv() {
 # groot 'command line' — one privileged command line (convenience over gpriv).
 groot() { printf '%s\n' "$1" | gpriv --timeout "${2:-600}"; }
 UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
-ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-24 > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
+# 21 random [A-Za-z0-9] + a fixed "Aa1" suffix so the 24-char password ALWAYS
+# carries an uppercase, a lowercase and a digit. The setup/admin-creation
+# endpoint enforces that complexity, and a purely random 24-char draw misses a
+# whole class a few percent of the time (a run-to-run flake: a draw with no
+# digit is a 400 "password must contain ... one digit").
+ensure_admin_pass() { [[ -s "$SEC/admin-pass" ]] || { printf '%sAa1' "$(head -c 4096 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c1-21)" > "$SEC/admin-pass"; chmod 0600 "$SEC/admin-pass"; }; }
 # api METHOD PATH [BODY] — JAR may be overridden per call (JAR=… api …) for a
 # second administrator session.
 api() { curl -ksS -m 30 -X "$1" "$UI$2" -H "Origin: $UI" -H 'Content-Type: application/json' -b "$JAR" -c "$JAR" ${3:+-d "$3"} -w '\n%{http_code}\n'; }
