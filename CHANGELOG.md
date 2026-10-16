@@ -115,7 +115,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   fencing epoch, so Data Planes accept the new list after HA is enabled, and
   they no longer clear the "config publish rejected" banner left by an
   earlier rejected config change. A listener-down alert raised before the
-  webhooks loaded is dropped if the listener recovered first. A refused admin/promote
+  webhooks loaded is dropped if the listener recovered first. Concurrent config
+  publishes now commit only onto the exact version they validated against, so a
+  publish racing an HA promotion can no longer ship a stale fencing epoch. A
+  re-promoted former leader no longer republishes below the version it
+  replicated from the new leader. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

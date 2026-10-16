@@ -432,6 +432,13 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 //	serve ends on its own        | server RETIRED (DP transports) + handle    | recoverable failure, backoff
 //	panic after a serve ended    | role restored + address list republished   | TERMINAL + alert (bypasses latch)
 //
+// Two more rows are the ENTRY's (activateControlPlane), not the loop's, and
+// the same table test drives them:
+//
+//	sync activation refused      | CP address-list ownership released         | rejected: plane unconfigured (409)
+//	(admin activate / promote)   | (releaseCPAddressSource)                   |
+//	boot bind failure (resilient)| nothing; address ownership KEPT for retries | recoverable failure, backoff
+//
 // The panic guard mirrors the SOCKS5 supervisor's rather than using the bare
 // recoverGoroutine: a panic here would otherwise leave the Control Plane
 // permanently gone with every surface still green, which is the CHAOS-24

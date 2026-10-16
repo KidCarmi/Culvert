@@ -7,6 +7,8 @@ package main
 // invariants against BOTH paths.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -14,6 +16,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -333,4 +337,315 @@ func cpCount(m map[string]map[string]int, field, owner string) {
 		m[field] = map[string]int{}
 	}
 	m[field][owner]++
+}
+
+// cpCommitPath is one publish path under test, with the seam that opens its
+// validation→commit window and a competing commit of the OTHER kind.
+type cpCommitPath struct {
+	name    string
+	commit  func(s *ConfigStore, n int) error
+	window  *func()
+	compete func(t *testing.T, s *ConfigStore)
+}
+
+func cpCommitPaths() []cpCommitPath {
+	return []cpCommitPath{
+		{"full_update", func(s *ConfigStore, n int) error { return s.Update(cpCommitSnapshot(n)) },
+			&configPublishBeforeCommit, func(t *testing.T, s *ConfigStore) {
+				if _, err := s.UpdateCPAddressesFrom(func() []string { return []string{"10.9.9.9:50051"} }); err != nil {
+					t.Fatalf("competitor: %v", err)
+				}
+			}},
+		{"address_publish", func(s *ConfigStore, n int) error {
+			_, err := s.UpdateCPAddressesFrom(func() []string { return []string{fmt.Sprintf("10.0.0.%d:50051", n)} })
+			return err
+		}, &cpAddrMergeBeforeCommit, func(t *testing.T, s *ConfigStore) {
+			if err := s.Update(cpCommitSnapshot(77)); err != nil {
+				t.Fatalf("competitor: %v", err)
+			}
+		}},
+	}
+}
+
+// TestChaos71_EveryCommitIsBasedOnTheVersionItValidated — Codex P1s 4296608932
+// and 4296608940, against BOTH paths:
+//   - a commit that lands between an attempt's validation and its commit makes
+//     the attempt REBUILD and revalidate (it commits onto the competitor, not
+//     over it);
+//   - the committed version is never lower than any version served or seeded
+//     (a replicated snapshot seeded above the counter included).
+func TestChaos71_EveryCommitIsBasedOnTheVersionItValidated(t *testing.T) {
+	for _, p := range cpCommitPaths() {
+		t.Run(p.name+"/rebuilds_onto_a_competing_commit", func(t *testing.T) {
+			epoch := int64(0)
+			s := cpCommitFixture(t, &epoch)
+			calls, competitorVersion := 0, int64(0)
+			prev := *p.window
+			*p.window = func() {
+				calls++
+				if calls == 1 {
+					p.compete(t, s)
+					competitorVersion = s.Get().Version
+				}
+			}
+			t.Cleanup(func() { *p.window = prev })
+
+			if err := p.commit(s, 60); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if calls != 2 {
+				t.Errorf("the attempt validated %d time(s), want 2 — a commit between validation and commit must force a rebuild", calls)
+			}
+			if got := s.Get().Version; got != competitorVersion+1 {
+				t.Errorf("committed v%d, want v%d (directly onto the competitor's commit)", got, competitorVersion+1)
+			}
+			if p.name == "address_publish" && len(s.Get().BlockedHosts) != 77 {
+				t.Errorf("the address publish was merged onto a stale base (%d hosts, competitor committed 77)", len(s.Get().BlockedHosts))
+			}
+		})
+		t.Run(p.name+"/never_below_a_seeded_version", func(t *testing.T) {
+			epoch := int64(0)
+			s := cpCommitFixture(t, &epoch)
+			seeded := s.Get()
+			seeded.Version = s.Version() + 100
+			s.seedReplicatedSnapshot(seeded)
+			if got := s.Version(); got != seeded.Version {
+				t.Errorf("after the seed the store reports v%d, want the seeded v%d — DPs at it would read \"unchanged\"", got, seeded.Version)
+			}
+			if err := p.commit(s, 61); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if got := s.Get().Version; got <= seeded.Version || s.Version() != got {
+				t.Errorf("committed v%d (store v%d) after a seed at v%d — must be strictly above it", got, s.Version(), seeded.Version)
+			}
+		})
+	}
+}
+
+// TestChaos71_FullPublishCannotOverwriteAPromotionRestamp — Codex P1
+// 4296608932, deterministically: a full publish validated at epoch 0 loses the
+// window to a promotion that restamps the committed list at epoch E. It must
+// rebuild and commit at E, so a DP that learned E on heartbeat accepts it.
+func TestChaos71_FullPublishCannotOverwriteAPromotionRestamp(t *testing.T) {
+	epoch := int64(0)
+	s := cpCommitFixture(t, &epoch)
+	const promoted = int64(41)
+	calls := 0
+	prev := configPublishBeforeCommit
+	configPublishBeforeCommit = func() {
+		calls++
+		if calls == 1 { // the promotion lands inside the full publish's window
+			epoch = promoted
+			if _, err := s.UpdateCPAddressesFrom(func() []string { return s.Get().CPAddresses }); err != nil {
+				t.Fatalf("restamp: %v", err)
+			}
+			if got := s.Get().Epoch; got != promoted {
+				t.Fatalf("precondition: the promotion restamp committed epoch %d", got)
+			}
+		}
+	}
+	t.Cleanup(func() { configPublishBeforeCommit = prev })
+
+	if err := s.Update(cpCommitSnapshot(70)); err != nil {
+		t.Fatalf("full publish: %v", err)
+	}
+	got := s.Get()
+	if got.Epoch != promoted || len(got.BlockedHosts) != 70 {
+		t.Fatalf("committed epoch %d with %d hosts, want epoch %d with the full publish's 70", got.Epoch, len(got.BlockedHosts), promoted)
+	}
+	t.Cleanup(resetDPLastSeenEpochForTest())
+	if !dpObserveEpoch("heartbeat", promoted) || !dpObserveEpoch("config snapshot", got.Epoch) {
+		t.Fatal("a DP that saw the promotion's epoch on heartbeat rejected the full publish")
+	}
+}
+
+// TestChaos71_ConcurrentPublishesAndRestampsEndOnTheCurrentEpoch is the -race
+// version: full publishes race epoch changes and their restamps. Whatever the
+// interleaving, the final commit carries the final epoch and versions only
+// ever rise.
+func TestChaos71_ConcurrentPublishesAndRestampsEndOnTheCurrentEpoch(t *testing.T) {
+	var epoch atomic.Int64
+	prevEpoch := publishFenceEpoch
+	publishFenceEpoch = epoch.Load
+	t.Cleanup(func() { publishFenceEpoch = prevEpoch })
+	s := &ConfigStore{}
+	if err := s.Update(cpCommitSnapshot(5)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var lastSeen atomic.Int64
+	observe := func() {
+		v := s.Version()
+		for {
+			prev := lastSeen.Load()
+			if v <= prev || lastSeen.CompareAndSwap(prev, v) {
+				return
+			}
+		}
+	}
+	for w := 0; w < 3; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 25; i++ {
+				_ = s.Update(cpCommitSnapshot(10 + w))
+				observe()
+			}
+		}(w)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for e := int64(1); e <= 25; e++ {
+			epoch.Store(e)
+			_, _ = s.UpdateCPAddressesFrom(func() []string { return s.Get().CPAddresses })
+			observe()
+		}
+	}()
+	wg.Wait()
+	// One last restamp settles a final epoch change that raced a publish.
+	_, _ = s.UpdateCPAddressesFrom(func() []string { return s.Get().CPAddresses })
+	if got, want := s.Get().Epoch, epoch.Load(); got != want {
+		t.Errorf("final committed epoch %d, want the current fence epoch %d", got, want)
+	}
+	if v := s.Version(); v < lastSeen.Load() {
+		t.Errorf("version went backwards: final v%d below an observed v%d", v, lastSeen.Load())
+	}
+}
+
+// TestChaos71_ResyncThenRepromoteNeverRewindsTheVersion — Codex P1 4296608940
+// end to end. A long-lived leader's counter is at v100; it self-fences,
+// resyncs as a standby and seeds the new leader's snapshot at v200; then it is
+// promoted again (the no-op onPromote: armVersionPersistence does not re-run).
+// The re-promotion republish must commit above v200, never v101.
+func TestChaos71_ResyncThenRepromoteNeverRewindsTheVersion(t *testing.T) {
+	const (
+		myAddr    = "10.0.0.2:50051"
+		peer      = "10.0.0.9:50051"
+		newLeader = "10.0.0.7:50051"
+	)
+	h := cpAddrTopologyFixture(t)
+	cpAddrActiveCP(t, myAddr)
+	if _, err := h.EnableAsLeader(peer, false); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	s := globalConfigStore
+	s.mu.Lock()
+	s.version, s.snap.Version = 100, 100 // a long-lived leader's counter
+	s.mu.Unlock()
+
+	h.selfFence("test: lease lost")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.StartAsStandby(ctx, newLeader, "tok", myAddr, "", "", "", false, func() error { return nil })
+
+	leaderSnap := cpCommitSnapshot(90)
+	leaderSnap.Version = 200
+	leaderSnap.CPAddresses = []string{"new-leader-view.example:50051"}
+	s.seedReplicatedSnapshot(leaderSnap) // what applyHABundle installs on resync
+	if got := s.Version(); got < 200 {
+		t.Fatalf("after the resync seed the store serves v%d — DPs at v200 would read \"unchanged\"", got)
+	}
+
+	if err := h.PromoteManually(); err != nil {
+		t.Fatalf("re-promote: %v", err)
+	}
+	got := s.Get()
+	if got.Version <= 200 || s.Version() != got.Version {
+		t.Fatalf("re-promotion committed v%d (store v%d) — must be above the seeded v200", got.Version, s.Version())
+	}
+	if !slicesEqual(got.CPAddresses, buildCPAddressList()) {
+		t.Errorf("re-promotion list %v != derived %v", got.CPAddresses, buildCPAddressList())
+	}
+}
+
+// TestChaos71_CommitCarriesTheEpochCurrentAtCommit: a new grant that lands
+// inside the validation→commit window with NO competing commit still makes
+// the attempt restamp — the epoch is the one current at commit, not at plan.
+func TestChaos71_CommitCarriesTheEpochCurrentAtCommit(t *testing.T) {
+	for _, p := range cpCommitPaths() {
+		t.Run(p.name, func(t *testing.T) {
+			epoch := int64(3)
+			s := cpCommitFixture(t, &epoch)
+			calls := 0
+			prev := *p.window
+			*p.window = func() {
+				calls++
+				if calls == 1 {
+					epoch = 9 // a grant, and nothing else, inside the window
+				}
+			}
+			t.Cleanup(func() { *p.window = prev })
+			if err := p.commit(s, 62); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			if got := s.Get().Epoch; got != 9 {
+				t.Errorf("committed epoch %d, want 9 — the epoch current at commit", got)
+			}
+		})
+	}
+}
+
+// TestChaos71_AddressPublishRebuildsOntoASeedBelowTheCounter: a replicated
+// snapshot seeded inside the window at a version BELOW this store's counter
+// changes the committed content without moving the counter. The base check
+// covers the whole committed state, so the address publish rebuilds onto the
+// seeded snapshot instead of merging onto the content it replaced.
+func TestChaos71_AddressPublishRebuildsOntoASeedBelowTheCounter(t *testing.T) {
+	epoch := int64(0)
+	s := cpCommitFixture(t, &epoch)
+	s.mu.Lock()
+	s.version = 500 // this store's own counter is ahead of the leader's
+	s.mu.Unlock()
+	calls := 0
+	prev := cpAddrMergeBeforeCommit
+	cpAddrMergeBeforeCommit = func() {
+		calls++
+		if calls == 1 {
+			seeded := cpCommitSnapshot(33)
+			seeded.Version = 200
+			s.seedReplicatedSnapshot(seeded)
+		}
+	}
+	t.Cleanup(func() { cpAddrMergeBeforeCommit = prev })
+
+	if _, err := s.UpdateCPAddressesFrom(func() []string { return []string{"10.0.0.4:50051"} }); err != nil {
+		t.Fatalf("address publish: %v", err)
+	}
+	got := s.Get()
+	if calls != 2 || len(got.BlockedHosts) != 33 {
+		t.Errorf("validated %d time(s), committed %d hosts — want a rebuild onto the seeded 33-host snapshot", calls, len(got.BlockedHosts))
+	}
+	if got.Version <= 500 {
+		t.Errorf("committed v%d, want above the counter's v500", got.Version)
+	}
+}
+
+// TestChaos71_ReleaseCPAddressSourceClearsOwnershipState: releasing ownership
+// (a refused synchronous activation) takes the pending-republish state and the
+// address rejection latch with it, so nothing reports a Control Plane list.
+func TestChaos71_ReleaseCPAddressSourceClearsOwnershipState(t *testing.T) {
+	_ = cpIsolateActivation(t)
+	s := globalConfigStore
+	s.setCPAddressSource(buildCPAddressList)
+	if err := s.Update(ConfigSnapshot{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	_ = s.rejectPublish(publishAddresses, errors.New("injected address rejection"))
+	_ = s.noteCPAddrPublish("test", errors.New("injected address rejection"))
+	if row := checkCPAddressList(); row.Status != diagFail {
+		t.Fatalf("precondition: row %+v", row)
+	}
+
+	s.releaseCPAddressSource()
+	if st := s.cpAddrPublishSnapshot(); st.pending {
+		t.Errorf("pending state survived the release: %+v", st)
+	}
+	if got := cpLatch(s, publishAddresses); got != "" {
+		t.Errorf("address rejection latch survived the release: %q", got)
+	}
+	if row := checkCPAddressList(); row.Status != diagOK || !strings.Contains(row.Message, "Not an active Control Plane") {
+		t.Errorf("cp_address_list after release = %+v", row)
+	}
 }

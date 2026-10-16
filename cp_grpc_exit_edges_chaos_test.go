@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ const (
 	cpEdgeStopped cpEdgeSignal = iota
 	cpEdgeRecoverable
 	cpEdgeTerminal
+	cpEdgeRejected // a refused synchronous activation: the plane is unconfigured again
 )
 
 // cpEdgeObservation is what the probe captured when the loop went to sleep.
@@ -64,6 +66,11 @@ type cpEdgeRow struct {
 	wantReason string // recoverable/terminal reason class
 	// extra per-row assertions
 	check func(t *testing.T, sup *cpListenerSupervisor, obs *cpEdgeObservation)
+	// activate, when set, enters through activateControlPlane instead of the
+	// bare supervisor: "sync" (admin activate / HA promote) or "resilient"
+	// (boot). wantAddrOwned is its released column for CP address ownership.
+	activate      string
+	wantAddrOwned bool
 }
 
 // TestChaos71_SupervisorExitEdgeTable drives every exit edge of the CP
@@ -212,6 +219,29 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				}
 			},
 		},
+		{
+			// Codex P2 4296608949: a refused synchronous activation leaves no
+			// Control Plane, so it must leave no address-list owner either.
+			name: "sync_activation_refused_releases_address_ownership",
+			setup: func(e *cpEdgeEnv) {
+				port, release := occupyPort(e.t)
+				e.t.Cleanup(release)
+				e.cfg.addr = fmt.Sprintf("127.0.0.1:%d", port)
+			},
+			activate: "sync", wantAddrOwned: false,
+			wantRole: "standalone", signal: cpEdgeRejected,
+		},
+		{
+			// ...while the resilient boot path keeps it: its retries publish.
+			name: "boot_bind_failure_keeps_address_ownership",
+			setup: func(e *cpEdgeEnv) {
+				port, release := occupyPort(e.t)
+				e.t.Cleanup(release)
+				e.cfg.addr = fmt.Sprintf("127.0.0.1:%d", port)
+			},
+			activate: "resilient", wantAddrOwned: true,
+			wantRole: "standalone", signal: cpEdgeRecoverable, wantReason: "port_in_use",
+		},
 	}
 
 	for _, row := range rows {
@@ -220,6 +250,10 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 			lnMu.Lock()
 			lns = nil
 			lnMu.Unlock()
+			if row.activate != "" {
+				cpRunActivationEdgeRow(t, row)
+				return
+			}
 			cpRunEdgeRow(t, row)
 		})
 	}
@@ -443,5 +477,69 @@ func TestChaos71_FullPublishValidatesTheListItCommits(t *testing.T) {
 	}
 	if got := s.Get(); len(got.BlockedHosts) != 0 {
 		t.Errorf("the oversized snapshot was committed (%d blocked hosts) — every DP would reject it", len(got.BlockedHosts))
+	}
+}
+
+// cpRunActivationEdgeRow runs a row that enters through activateControlPlane
+// (the admin/promote or boot entry) and checks the same columns plus CP
+// address-list ownership.
+func cpRunActivationEdgeRow(t *testing.T, row cpEdgeRow) {
+	t.Helper()
+	_ = cpIsolateActivation(t)
+	_ = cpChaosSetup(t)
+	cpInsecure(t)
+	clusterRoleMu.Lock()
+	clusterRole.role = "standalone"
+	clusterRoleMu.Unlock()
+	e := &cpEdgeEnv{t: t, cfg: cpListenerConfig{addr: fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))}}
+	row.setup(e)
+
+	prevSleep := cpGRPCSleep
+	var parked atomic.Bool
+	cpGRPCSleep = func(stop <-chan struct{}, _ time.Duration) bool { // park in the backoff until stopped
+		parked.Store(true)
+		<-stop
+		return false
+	}
+	t.Cleanup(func() { cpGRPCSleep = prevSleep })
+
+	err := activateControlPlane(e.cfg.addr, "", "", "", filepath.Join(t.TempDir(), "cluster.json"), row.activate == "resilient", nil)
+	if (row.activate == "sync") != (err != nil) {
+		t.Fatalf("%s activation returned %v", row.activate, err)
+	}
+	if row.signal == cpEdgeRecoverable {
+		cpWaitFor(t, 10*time.Second, "the boot supervisor to back off", parked.Load)
+	}
+
+	// ---- released column
+	globalConfigStore.mu.RLock()
+	owned := globalConfigStore.cpAddrSource != nil
+	globalConfigStore.mu.RUnlock()
+	if owned != row.wantAddrOwned {
+		t.Errorf("CP address ownership after the %s edge = %v, want %v", row.activate, owned, row.wantAddrOwned)
+	}
+	if !row.wantAddrOwned {
+		if c := checkCPAddressList(); c.Status != diagOK || !strings.Contains(c.Message, "Not an active Control Plane") {
+			t.Errorf("cp_address_list after a refused activation = %+v — the node is not a Control Plane", c)
+		}
+	}
+	if got := cpRoleNow(); got != row.wantRole {
+		t.Errorf("role after the edge = %q, want %q", got, row.wantRole)
+	}
+
+	// ---- signalled column
+	snap := cpGRPCListenerState()
+	switch row.signal {
+	case cpEdgeRejected:
+		if snap.Configured {
+			t.Error("signal: a refused synchronous activation left the listener plane configured")
+		}
+	case cpEdgeRecoverable:
+		if !snap.Failing || snap.SupervisorDown || snap.LastReason != row.wantReason {
+			t.Errorf("signal: want recoverable %q, got failing=%v supervisorDown=%v reason=%q",
+				row.wantReason, snap.Failing, snap.SupervisorDown, snap.LastReason)
+		}
+	default:
+		t.Fatalf("activation rows support rejected/recoverable signals, not %d", row.signal)
 	}
 }

@@ -8773,6 +8773,43 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Tenth review round — standard optimistic concurrency.** The single
+  commit path still had two partial guards.
+  - **Full-publish validity check.** It compared only `CPAddresses`, so a full
+    publish validated at epoch 0 could commit over a concurrent promotion's
+    restamp at epoch E. DPs that saw E rejected it.
+  - **Private version counter.** It was not folded with replicated snapshots.
+    A self-fenced ex-leader at v100 that resynced the new leader's v200 would
+    republish at v101 on re-promotion (the no-op `onPromote` never re-runs
+    `armVersionPersistence`), and DPs at v200 read "unchanged".
+
+  Fix:
+  - Every attempt records the committed base it built from: counter, snapshot
+    version, published, owned. Under the lock it commits only if the committed
+    state is still exactly that base, and only if the fence epoch is the one it
+    stamped. Otherwise it rebuilds and revalidates within the bounded retry,
+    then `rejectPublish`.
+  - `seedReplicatedSnapshot` folds the seeded version into the counter, and
+    `commitLocked` takes `max(counter, committed version) + 1`.
+  - A refused **synchronous** activation (admin activate, HA promote) now
+    releases CP address-list ownership (`releaseCPAddressSource`: the source,
+    the pending state and the address latch). The resilient boot path keeps
+    ownership for its retries. Both are new rows in the exit-edge table and on
+    `cpListenerSupervisor.run`.
+
+  Gates:
+  - `TestChaos71_EveryCommitIsBasedOnTheVersionItValidated` (both paths:
+    rebuild onto a competing commit, never below a seeded version);
+  - `TestChaos71_CommitCarriesTheEpochCurrentAtCommit`;
+  - `TestChaos71_FullPublishCannotOverwriteAPromotionRestamp` (through the
+    real DP ratchet);
+  - `TestChaos71_ConcurrentPublishesAndRestampsEndOnTheCurrentEpoch` (-race);
+  - `TestChaos71_AddressPublishRebuildsOntoASeedBelowTheCounter`;
+  - `TestChaos71_ResyncThenRepromoteNeverRewindsTheVersion` (v200 vs v100);
+  - `TestChaos71_ReleaseCPAddressSourceClearsOwnershipState`.
+
+  Six mutations each fail a gate. One of them is the old counter-only CAS,
+  which misses a seed below the counter.
 * **Ninth review round — one commit path.** Rounds 4, 5, 7 and now 8 each
   found the address-only publish (`UpdateCPAddressesFrom`) skipping an
   invariant the full path kept. Codex's latest two:

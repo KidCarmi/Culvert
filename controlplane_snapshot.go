@@ -602,8 +602,9 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	// CP activation that has since published the new address list. Once a
 	// source owns the list, a full publish carries the COMMITTED list instead;
 	// a legitimate change is applied by the reconcile below. The substitution
-	// precedes validation and the commit re-checks the list, so what commits is
-	// exactly what passed the wire-size gate (Codex review of #1556).
+	// precedes validation, and commitPublish commits only onto the version it
+	// built from, so what commits is exactly what passed the wire-size gate
+	// (Codex review of #1556).
 	_, err := s.commitPublish(publishPlan{
 		kind: publishFull,
 		build: func(cur committedView) (ConfigSnapshot, publishAct) {
@@ -613,15 +614,12 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 			}
 			return cand, publishCommit
 		},
-		stillValid: func(s *ConfigStore, cur committedView) bool {
-			return !cur.ownsList() || slicesEqual(s.snap.CPAddresses, cur.snap.CPAddresses)
-		},
 		beforeCommit: func() {
 			if hook := configPublishBeforeCommit; hook != nil {
 				hook()
 			}
 		},
-		exhausted: fmt.Errorf("config publish lost the commit race against CP address list updates %d times in a row", cpAddrMergeAttempts),
+		exhausted: fmt.Errorf("config publish lost the commit race against concurrent publishes %d times in a row", cpAddrMergeAttempts),
 	})
 	if err != nil {
 		return err
@@ -657,6 +655,21 @@ func (s *ConfigStore) reconcileCPAddressesFrom(trigger string, build func() []st
 	}
 	_, err := s.publishOwnedCPAddresses(trigger, build)
 	return err
+}
+
+// releaseCPAddressSource gives up ownership of the CP address list: a
+// SYNCHRONOUS activation (admin or promote) that was refused leaves no Control
+// Plane behind, so nothing may keep reporting or reconciling one (Codex review
+// of #1556). The pending-republish state and the address rejection latch go
+// with it; a running retry loop sees no source and exits clean.
+func (s *ConfigStore) releaseCPAddressSource() {
+	s.mu.Lock()
+	s.cpAddrSource = nil
+	s.addrPublishErr, s.addrPublishTS = "", ""
+	s.mu.Unlock()
+	s.addrPubMu.Lock()
+	s.addrPub = cpAddrPublishState{retrying: s.addrPub.retrying}
+	s.addrPubMu.Unlock()
 }
 
 // setCPAddressSource hands ownership of the CP address list to build (see
@@ -717,7 +730,10 @@ func (s *ConfigStore) commitLocked(kind publishKind, snap ConfigSnapshot) config
 	// still references the outgoing snapshot's slice (safe — s.snap is replaced,
 	// not mutated in place).
 	c := configCommit{oldHosts: s.snap.BlockedHosts, base: s.version}
-	s.version++
+	// Strictly above everything this store has served or been seeded with: the
+	// counter and the committed snapshot's own version (a replicated leader
+	// snapshot is folded in by seedReplicatedSnapshot; the max is the backstop).
+	s.version = max(s.version, s.snap.Version) + 1
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	c.newHosts = snap.BlockedHosts
@@ -766,10 +782,7 @@ type publishPlan struct {
 	kind publishKind
 	// build derives the candidate from the committed view. Re-run on every
 	// attempt, after the view it builds from was read.
-	build func(cur committedView) (ConfigSnapshot, publishAct)
-	// stillValid runs under s.mu (write) right before the commit: false means
-	// the candidate was built from state that has since changed — rebuild.
-	stillValid   func(s *ConfigStore, cur committedView) bool
+	build        func(cur committedView) (ConfigSnapshot, publishAct)
 	beforeCommit func() // test seam window between validation and commit
 	exhausted    error  // reported when every attempt lost the race
 }
@@ -786,14 +799,21 @@ var publishFenceEpoch = func() int64 { return haTopologySource().PublishedFenceE
 // path skipping an invariant the full path kept; both now share this, so each
 // invariant holds for every commit by construction:
 //
-//   - Epoch is the CURRENT fencing epoch, stamped here — a DP that learned a
-//     new epoch from its heartbeat must never be handed a snapshot carrying the
-//     previous one (dpObserveEpoch would reject it).
-//   - The candidate is validated with the commit-time gates OUTSIDE the lock
-//     (a full marshal must not stall DP pollers) and committed only if
-//     plan.stillValid holds under it, so what commits is what was validated.
-//   - Version strictly increases (commitLocked), sizes are recorded under the
-//     same lock as the commit, and the rejection latch is keyed by kind.
+//   - Optimistic concurrency, one rule for every kind: an attempt records the
+//     committed version it built from (base) and commits ONLY if, under the
+//     lock, the committed state is still exactly that base. Anything else —
+//     another publish, a replicated snapshot seeded in — means the candidate is
+//     stale: rebuild, revalidate, within the bounded retry; then reject via
+//     rejectPublish. (A partial check let a full publish built before a
+//     promotion's restamp commit over it — Codex review of #1556.)
+//   - Epoch is the fencing epoch CURRENT AT COMMIT: stamped before validation
+//     and re-read under the lock, and a change since is the same stale-base
+//     outcome. A DP that learned a new epoch on heartbeat is never handed a
+//     snapshot carrying the previous one (dpObserveEpoch would reject it).
+//   - What commits is what was validated (outside the lock: a full marshal
+//     must not stall DP pollers), the version strictly exceeds every version
+//     served or seeded (commitLocked), sizes are recorded under the commit
+//     lock, and the rejection latch is keyed by kind.
 func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
 		s.mu.RLock()
@@ -825,9 +845,9 @@ func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 		}
 
 		s.mu.Lock()
-		if !p.stillValid(s, cur) {
+		if !s.committedIsLocked(cur) || publishFenceEpoch() != epoch {
 			s.mu.Unlock()
-			continue // built from state that changed after validation: rebuild, revalidate
+			continue // stale base or stale stamp: rebuild, revalidate
 		}
 		c := s.commitLocked(p.kind, cand)
 		recordPublishedSnapshotSizes(cand) // under the commit lock: the record matches the last commit
@@ -837,6 +857,13 @@ func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 	}
 	// Reported through the ordinary rejection path (logged, alerted, latched).
 	return false, s.rejectPublish(p.kind, p.exhausted)
+}
+
+// committedIsLocked reports whether the committed state is still exactly the
+// base an attempt built from. Caller holds s.mu.
+func (s *ConfigStore) committedIsLocked(base committedView) bool {
+	return s.version == base.version && s.snap.Version == base.snap.Version &&
+		s.published == base.published && (s.cpAddrSource != nil) == base.owned
 }
 
 // clearPublishErrLocked clears the rejection latch of one kind. Caller holds
@@ -914,9 +941,6 @@ func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool
 			merged := cur.snap // shallow copy: published snapshots are never mutated in place
 			merged.CPAddresses = append([]string(nil), addrs...)
 			return merged, publishCommit
-		},
-		stillValid: func(s *ConfigStore, cur committedView) bool {
-			return s.version == cur.version // another publish committed in between: merge onto it instead
 		},
 		beforeCommit: func() {
 			if hook := cpAddrMergeBeforeCommit; hook != nil {
@@ -1028,14 +1052,22 @@ func publishCurrentConfigSnapshot() error {
 }
 
 // seedReplicatedSnapshot sets the in-memory snapshot from a replicated HA bundle
-// WITHOUT advancing the version, marking published, or notifying subscribers. Its
-// sole purpose is to give the delta ring a correct oldHosts baseline for the
-// first post-promotion Update (Dur-F4). A promoted standby's version is still
-// established by armVersionPersistence (seeded above the replicated leader
-// version), and distribution is still gated by ServableConfig/published.
+// WITHOUT marking published or notifying subscribers. It gives the delta ring a
+// correct oldHosts baseline for the first post-promotion Update (Dur-F4).
+//
+// It FOLDS the replicated version into the store's counter (never lowering
+// it): the counter is the one source of truth for the next version, and a
+// self-fenced ex-leader that resynced v200 from the new leader while its own
+// counter said v100 would otherwise republish at v101 on re-promotion — the
+// no-op onPromote path never re-runs armVersionPersistence — and DPs at v200
+// would read "unchanged" (Codex review of #1556). Distribution is still gated
+// by ServableConfig/published and, with HA on, by the leader gate.
 func (s *ConfigStore) seedReplicatedSnapshot(snap ConfigSnapshot) {
 	s.mu.Lock()
 	s.snap = snap
+	if snap.Version > s.version {
+		s.version = snap.Version
+	}
 	s.mu.Unlock()
 }
 

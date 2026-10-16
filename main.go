@@ -1541,6 +1541,10 @@ func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath str
 	cfg := cpListenerConfig{addr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile}
 	sup, err := startControlPlaneListener(cfg, tolerateFirstFailure, onActivated)
 	if err != nil {
+		// Refused: no supervisor, no role — so no address-list owner either
+		// (Codex review of #1556). The resilient boot path does not return
+		// here on a bind failure; it keeps the ownership its retries need.
+		globalConfigStore.releaseCPAddressSource()
 		return err
 	}
 	cpSupervisor = sup
