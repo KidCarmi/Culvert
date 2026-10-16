@@ -52,59 +52,66 @@ new IDs → 25 / 24.
 ### T-64 — Operation identifier has four spellings (Medium)
 
 - **Business concept:** the opaque ID a caller keeps to poll or reconcile one long-running operation.
-- **Current names:**
-  - `opId` — `POST /api/backups` response (`BackupCreateResult`, `openapi.yaml:1203`; emitted at
-    `backups_api.go:345`; read by `static/index.html:16091,16129,16145`).
-  - `op_id` — `GET /api/backups/operations/{id}` response (`BackupOperationStatus`, `openapi.yaml:1212-1215`,
-    maintenance-agent record passed through verbatim), the `backup.trigger` audit detail
-    (`backups_api.go`, `op_id=%s`), and `release.dispatch` audit details (`release_dispatch_service.go:423,438`).
-  - `operation_id` — traffic-redaction key rotation request/receipts (`openapi.yaml:1014,1896`).
-  - `operationId` — PAC lifecycle and CDR responses (`openapi.yaml:552-558,2191,2232,2254`).
-- **Recommended canonical name:** `operationId` on the camelCase `/api/backups` resource (its create
-  request already uses camelCase, e.g. `passphraseEnvVar`); `operation_id` where the surface is
-  snake_case; prose "operation ID". **Recorded exception:** `op_id` stays in `BackupOperationStatus`
-  because that schema is the maintenance agent's operation record passed through verbatim
-  (`additionalProperties: true`); it is the agent's wire format, not a Culvert-chosen name. To close the
-  create-versus-poll mismatch the poll response should *also* carry `operationId` (copied from the
-  agent's `op_id`), so a client can read one field name from both responses while `op_id` remains for
-  existing readers.
-- **Why problematic:** the *same operation* is created with `opId` and polled as `op_id`; a client
-  written against one response cannot reuse the field name against the other. Support correlating a
-  `backup.trigger` audit line (`op_id=`) with the API response (`opId`) has to know both. "op" is an
-  implementation abbreviation, not a business term.
-- **Why better:** one noun, "operation ID", on every surface a human or integrator reads; the abbreviation
-  disappears from the public contract.
-- **Affected code:** `backups_api.go:328-345`; `static/index.html` 16080-16177; audit detail strings.
-- **Affected API:** `BackupCreateResult.opId` (additive: emit `operationId` beside it and keep `opId`
-  **permanently**). `opId` may be marked `deprecated: true` with the deprecation metadata
-  `docs/api/API-DEPRECATION-POLICY.md` requires, but *removing* it is a breaking change for any external
-  client of `POST /api/backups` (removing a field is breaking under `API-VERSIONING-POLICY.md`) and would
-  need the MAJOR-version exception process (`api-breaking-approved`, rationale, migration instructions,
-  version impact). This report does not recommend that removal. The bundled GUI is the only *known*
-  consumer, but that does not make the field private.
-  `BackupOperationStatus`: add `operationId` beside the verbatim `op_id` (additive; the schema already
-  allows extra properties); do not rename or drop `op_id`, which is the agent's own record field.
-- **Affected GUI:** `backupNowPendingOp.opId` JS naming only; no visible label.
-- **Affected documentation:** OpenAPI description at line 1203; any backup runbook that quotes the field.
-- **Affected configuration:** none.
-- **Migration complexity:** Low. **Compatibility risk:** None for the recommended change (additive on
-  both responses; `opId` and `op_id` both stay). Removing `opId` later would be breaking (MAJOR). **Contract version:** new optional response fields
-  are a **MINOR** contract change (`docs/api/API-VERSIONING-POLICY.md`, SemVer rules). The change must bump
-  both `info.version` and `x-culvert-api-contract-version` in `api/openapi/openapi.yaml` (2.1.0 → 2.2.0
-  at the time of writing), regenerate the committed contract artifacts (`make api-bundle`:
-  `openapi.json`, the HTML docs, `docs/api/API-INVENTORY.md`) and pass `make api-verify` and
-  `make api-breaking-check`.
-- **Audit details (additive, like the API fix):** the `op_id=` key appears in three audit details:
-  `backup.trigger` (`backups_api.go:335`), `release.dispatch` (`release_dispatch_service.go:423`) and
-  `release.dispatch.outcome` (`release_dispatch_service.go:438`). Each should **dual-emit**
-  `operation_id=<same value>` beside the existing `op_id=`, so audit-to-API correlation can use the
-  canonical key while SIEM parsers that already match `op_id=` keep working. Never rename or drop `op_id=`
-  in an audit detail; it stays as a permanent alias. Record the new key in the CHANGELOG. Existing tests
-  match on `op_id=` substrings (`release_dispatch_service_test.go`), so they keep passing, and new
-  assertions should pin `operation_id=`.
-- **Estimated PR size:** M (~60 lines of handler, spec, GUI and contract-test change, ~15 lines of
-  audit-detail and test change for the three `operation_id=` keys, plus the version bump and
-  regenerated artifacts).
+- **Canonical name:** `operationId` on camelCase surfaces, `operation_id` on snake_case surfaces and in
+  `key=value` audit details, and "operation ID" in prose.
+- **Why problematic:** the *same operation* is created with `opId` and polled as `op_id` on the backup
+  resource. Supporting staff correlating an audit line (`op_id=`) with an API response (`opId`) have to
+  know both names. "op" is an implementation abbreviation, not a business term.
+- **Why better:** one noun, "operation ID", on every surface a human or integrator reads, with the
+  existing spellings kept as aliases so nothing breaks.
+
+**Complete inventory at `fbf6a37`.** Exhaustive sweep for
+`op_?[iI][dD]|opId|operation_?[iI]d|operationId|OpID` over non-test Go (excluding `cmd/`, the
+maintenance agent's own module), `api/openapi/openapi.yaml`, `frontend/src` and `static/index.html`.
+Hits that are OpenAPI route `operationId:` keys are not this concept and are omitted. No application
+log line (`logger.Printf`/`logWarnf`) carries the identifier. Every user- or integrator-visible site:
+
+| # | Site (`fbf6a37`) | Surface | Current key | Planned action |
+|---|---|---|---|---|
+| 1 | `backups_api.go:345` — `POST /api/backups` (`BackupCreateResult`, `openapi.yaml:1203`) | API response | `opId` | **Dual-emit** `operationId`; keep `opId` permanently |
+| 2 | `backups_api.go:447` — `GET /api/backups/operations/{id}` (`BackupOperationStatus`, `openapi.yaml:1212-1215`) | API response (agent record, verbatim) | `op_id` | **Dual-emit** `operationId` beside it; keep `op_id` (it is the agent's record field) |
+| 3 | `release_api.go:224` (`dispatchRecord`, served by `GET /api/releases/dispatch/status` at `release_api.go:588`; spec `DispatchStatus`, an open object) | API response | `op_id` | **Dual-emit** `operation_id` (snake surface: `dispatch_id`, `release_id`); keep `op_id`. The store is in memory, so this adds a field and does not change persistence |
+| 4 | `release_api.go:711` — `POST /api/releases/dispatch` 202 body | API response | `op_id` | **Dual-emit** `operation_id`; keep `op_id` |
+| 5 | `release_api.go:845` — `POST /api/releases/dispatch/resume` 202 body | API response | `op_id` | **Dual-emit** `operation_id`; keep `op_id` |
+| 6 | `release_api.go:823` — resume 400 text "resume needs an op_id" | API error text | `op_id` | Reword to "operation ID" (copy only; no field) |
+| 7 | `backups_api.go:335` — `backup.trigger` | Audit detail | `op_id=` | **Dual-emit** `operation_id=`; keep `op_id=` |
+| 8 | `release_dispatch_service.go:423` — `release.dispatch` | Audit detail | `op_id=` | **Dual-emit** `operation_id=`; keep `op_id=` |
+| 9 | `release_dispatch_service.go:438` — `release.dispatch.outcome` | Audit detail | `op_id=` | **Dual-emit** `operation_id=`; keep `op_id=` |
+| 10 | `pac_lifecycle_api.go:650,1092,1256` — `pac.*` audit details | Audit detail | `operationId=` | **Exception.** It matches the PAC API's own `operationId` field exactly, so audit-to-API correlation already uses one name. It is also behaviour-bearing: `pac_lifecycle_api.go:1088` finds an already-audited operation by matching `operationId=<id> ` in the ring, and `:1073` keys config versions on `operationId=`. Leave it |
+| 11 | `static/index.html:16091-16166` — Backup Now polling | GUI (JS only) | `opId` | Read `operationId`, falling back to `opId`; no visible label |
+| 12 | `static/index.html:17679,17741,17783` — release dispatch panel row and toasts | GUI (visible) | `op_id` row label, "op …" toasts | Label "Operation ID"; read `operation_id`, falling back to `op_id` |
+| 13 | `frontend/src/api/types.gen.ts:5459,5472` | Generated client types | `opId`, `op_id` | Regenerated from the spec by the contract bump |
+| 14 | `decryption_redaction.go:135,379,418` — key rotation request/receipts (`openapi.yaml:1014,1896`) | API request/response | `operation_id` | Canonical; no action |
+| 15 | `cdr_ui.go:537`, `cdr_enroll_receipts.go:87,128,558,595`, `cdr_lineage.go:75` — CDR enrollment/receipts (`openapi.yaml:2186-2257`) | API request/response | `operationId` | Canonical; no action |
+| 16 | `pac_lifecycle_api.go` responses (`:185,293,535,570,612,651,847,870,910,920,927,1169,1248`; `openapi.yaml:552-561`) | API request/response | `operationId` | Canonical; no action |
+
+Internal, not visible and no action: `backups_api.go:328` and `release_dispatch_exec.go:575,581` read the
+maintenance agent's own `op_id` wire field, which belongs to the agent protocol. `decryption_redaction.go:42`
+stores the receipt as `op_id` on disk and renders it as `operation_id` (row 14). Also internal are the Go
+error strings at `release_dispatch_exec.go:338` and `release_dispatch_service.go:317`, and the route note
+at `ui_routes_meta.go:810`.
+
+- **Compatibility:** every change in the table is additive. No existing key is renamed or removed in
+  an API response or an audit detail. `opId` may be marked `deprecated: true` with the metadata
+  `docs/api/API-DEPRECATION-POLICY.md` requires, but *removing* it, or any `op_id`, is a breaking change
+  under `API-VERSIONING-POLICY.md` and would need the MAJOR exception process. This report does not
+  recommend removal. The bundled GUI is the only *known* consumer, but that does not make the fields
+  private. The audit aliases stay because SIEM parsers may key on `op_id=`. Existing tests match
+  `op_id=` substrings (`release_dispatch_service_test.go`), so they keep passing. New assertions should
+  pin the canonical keys. Record the new keys in the CHANGELOG.
+- **Contract version:** new optional response fields (rows 1-5) are a **MINOR** contract change
+  (`docs/api/API-VERSIONING-POLICY.md`, SemVer rules). The change must bump both `info.version` and
+  `x-culvert-api-contract-version` in `api/openapi/openapi.yaml` (2.1.0 → 2.2.0 at the time of writing).
+  It must document the new fields on `BackupCreateResult` and `BackupOperationStatus`, and add
+  `operation_id` (with the `op_id` alias) to `DispatchStatus` and the two dispatch 202 bodies, which are
+  undocumented open objects today. It must also regenerate the committed contract artifacts (`make
+  api-bundle`: `openapi.json`, the HTML docs, `docs/api/API-INVENTORY.md`; and the frontend
+  `types.gen.ts`, row 13), then pass `make api-verify` and `make api-breaking-check`.
+- **Migration complexity:** Low. **Compatibility risk:** None for the recommended change. Removing any
+  alias later would be breaking (MAJOR).
+- **Estimated PR size:** M (~130 lines): five response sites (rows 1-5), one error string (row 6), three
+  audit details (rows 7-9), two GUI reads and one label (rows 11-12), the spec additions and the
+  contract and audit tests. Add the version bump and the regenerated artifacts on top.
 
 ### T-65 — "restore a config version" vs "roll back" (Low)
 
@@ -141,7 +148,7 @@ No new entries. Carried (not re-verified): the 2026-09-24 report's backlog, nota
 
 ## Migration Risk
 
-Only T-64 touches a wire contract, and only additively (a new field on each backup response and a new key in three audit details; nothing renamed or removed). That is a MINOR API contract bump, not a no-version change. T-65 is copy.
+Only T-64 touches a wire contract, and only additively (a new field on five API responses and a new key in three audit details; nothing renamed or removed). That is a MINOR API contract bump, not a no-version change. T-65 is copy.
 
 ## Recommended Refactoring Plan (by priority)
 
@@ -149,7 +156,7 @@ Only T-64 touches a wire contract, and only additively (a new field on each back
 | --- | --- | --- |
 | Critical | — | none |
 | High | — | none |
-| Medium | T-64 | Add `operationId` on `POST /api/backups` beside a permanently kept `opId` (optionally marked deprecated, never removed without a MAJOR exception) and add `operationId` beside the agent's `op_id` on `GET /api/backups/operations/{id}`; update GUI + spec + contract test; MINOR contract bump (`info.version` + `x-culvert-api-contract-version`) with regenerated artifacts (`make api-bundle`, `make api-verify`); dual-emit `operation_id=` beside `op_id=` in the `backup.trigger`, `release.dispatch` and `release.dispatch.outcome` audit details (CHANGELOG note; `op_id=` kept) |
+| Medium | T-64 | Implement the T-64 inventory table: dual-emit `operationId`/`operation_id` beside the retained aliases on the five API responses (backup create and poll; release dispatch status, dispatch and resume) and the three `op_id=` audit details; reword the resume error text; GUI reads with fallback and the release panel label; keep the `pac.*` `operationId=` audit key as recorded; MINOR contract bump (`info.version` + `x-culvert-api-contract-version`) with regenerated artifacts (`make api-bundle`, `types.gen.ts`, `make api-verify`, `make api-breaking-check`); CHANGELOG entry for the new keys |
 | Low | T-65 | Reword the React hint (`AuthRulesPage.tsx:738`) to "roll back to a config version" |
 | Low | T-65 CDR note | Remove the false "restore via Config Versions" recovery claim from the legacy CDR deletion dialog (`static/index.html:11971`); CDR policies are not versioned |
 
