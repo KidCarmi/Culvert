@@ -195,7 +195,7 @@ func cpGRPCOpenEpisodeForTest(t *testing.T) uint64 {
 	noteCPGRPCConfigured("127.0.0.1:50051")
 	cpGRPCEverFailed.Store(true) // as both production failure recorders do
 	cpGRPCListener.mu.Lock()
-	cpGRPCBeginEpisodeLocked(time.Now())
+	cpGRPCBeginEpisodeLocked(cpGRPCHealthNow())
 	ep := cpGRPCListener.episode
 	cpGRPCListener.mu.Unlock()
 	return ep
@@ -223,30 +223,46 @@ func cpIsolateStartupAlerts(t *testing.T) *[]string {
 
 // TestChaos71_QueuedListenerDownIsDroppedOnceTheEpisodeRecovered — Codex P2
 // 4296091792. A listener-down page queued before the webhooks load is
-// delivered only if its episode is still open at the flush: a bind in between
+// delivered only if its episode is still open at the flush. With flap damping
+// an episode closes on a STABLE serve, not on a bind: a bind that has not yet
+// served for cpGRPCServeStableAfter leaves the page standing, a stable serve
 // (or the node leaving the CP role) drops it, and an old episode's page is not
-// revived by a NEW episode, which pages for itself.
+// revived by a new one, which pages for itself.
 func TestChaos71_QueuedListenerDownIsDroppedOnceTheEpisodeRecovered(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		between func()
+		between func(advance func(time.Duration))
 		want    int
 	}{
-		{"still_down_is_delivered", func() {}, 1},
-		{"recovered_by_a_bind_is_dropped", func() { noteCPGRPCBound() }, 0},
-		{"node_left_the_cp_role_is_dropped", noteCPGRPCActivationRejected, 0},
-		{"recovered_then_failed_again_is_dropped", func() {
-			noteCPGRPCBound() // the queued page's episode ended
-			cpGRPCListener.mu.Lock()
-			cpGRPCBeginEpisodeLocked(time.Now()) // a NEW episode
-			cpGRPCListener.mu.Unlock()
+		{"still_down_is_delivered", func(func(time.Duration)) {}, 1},
+		{"bound_but_not_yet_stable_is_delivered", func(advance func(time.Duration)) {
+			noteCPGRPCBound()
+			advance(cpGRPCServeStableAfter - time.Second)
+		}, 1},
+		{"stable_serve_is_dropped", func(advance func(time.Duration)) {
+			noteCPGRPCBound()
+			advance(cpGRPCServeStableAfter)
+		}, 0},
+		{"node_left_the_cp_role_is_dropped", func(func(time.Duration)) { noteCPGRPCActivationRejected() }, 0},
+		{"stable_then_failed_again_is_dropped", func(advance func(time.Duration)) {
+			noteCPGRPCBound()
+			advance(cpGRPCServeStableAfter)                                        // the queued page's episode ended
+			noteCPGRPCListenFailure("port_in_use", time.Second, cpGRPCHealthNow()) // a NEW episode
 		}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			delivered := cpIsolateStartupAlerts(t)
+			now := time.Now()
+			prevNow := cpGRPCHealthNow
+			cpGRPCHealthNow = func() time.Time { return now }
+			t.Cleanup(func() { cpGRPCHealthNow = prevNow })
+			prevFire := fireCPGRPCListenerAlert
+			fireCPGRPCListenerAlert = func(string, uint64) {} // the new episode's own page is not under test
+			t.Cleanup(func() { fireCPGRPCListenerAlert = prevFire })
+
 			ep := cpGRPCOpenEpisodeForTest(t)
 			cpGRPCProductionAlert("listener down", ep)
-			tc.between()
+			tc.between(func(d time.Duration) { now = now.Add(d) })
 			flushStartupAlerts()
 			if len(*delivered) != tc.want {
 				t.Errorf("delivered %d queued listener-down pages, want %d (%v)", len(*delivered), tc.want, *delivered)

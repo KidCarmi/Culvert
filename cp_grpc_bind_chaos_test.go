@@ -41,6 +41,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -295,6 +296,13 @@ func TestChaos71_DefectRoleIsNotClaimedWithoutASocket(t *testing.T) {
 func TestChaos71_DefectUnbindableListenerSelfHealsWithoutARestart(t *testing.T) {
 	cpChaosSetup(t)
 	cpInsecure(t)
+	// A clock the test can advance while the supervisor goroutine reads it:
+	// installed BEFORE the supervisor starts, moved only through the atomic.
+	base := cpGRPCHealthNow()
+	var offset atomic.Int64
+	prevNow := cpGRPCHealthNow
+	cpGRPCHealthNow = func() time.Time { return base.Add(time.Duration(offset.Load())) }
+	t.Cleanup(func() { cpGRPCHealthNow = prevNow })
 
 	port, release := occupyPort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -323,8 +331,17 @@ func TestChaos71_DefectUnbindableListenerSelfHealsWithoutARestart(t *testing.T) 
 	if snap.Binds == 0 {
 		t.Error("a successful bind was not counted")
 	}
-	if snap.Consecutive != 0 {
-		t.Errorf("consecutive failures = %d after recovery, want 0 — recovery must clear the episode", snap.Consecutive)
+	// Flap damping: the bind alone does not close the episode; a serve that
+	// stays up for the stability window does.
+	if !snap.Stabilizing || snap.Consecutive == 0 {
+		t.Errorf("right after the bind: stabilizing=%v consecutive=%d — the episode must stay open until the serve is stable",
+			snap.Stabilizing, snap.Consecutive)
+	}
+	offset.Add(int64(cpGRPCServeStableAfter))
+	snap = cpGRPCListenerState()
+	if snap.Consecutive != 0 || snap.Stabilizing {
+		t.Errorf("after a stable serve: consecutive=%d stabilizing=%v, want 0/false — a stable serve must close the episode",
+			snap.Consecutive, snap.Stabilizing)
 	}
 	if snap.Unavailable {
 		t.Error("a recovered listener must not still report unavailable")

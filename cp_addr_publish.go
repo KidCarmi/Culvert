@@ -48,6 +48,12 @@ type cpAddrPublishState struct {
 	reason   string // bounded class: publish_rejected | commit_race
 	attempts int    // failed attempts in the current episode
 	retrying bool   // a retry loop owns the episode
+	// gen is bumped by EVERY failure latch. A publish captures it before it
+	// starts and may clear the pending state only if it is unchanged when it
+	// finishes: a success computed before a newer failure (topology A
+	// committed while topology B's publish failed) must not erase B's latch
+	// (Codex review of #1556). Never reset.
+	gen uint64
 }
 
 // cpAddrRetryBackoffMin and cpAddrRetryBackoffMax bound the retry cadence. A
@@ -81,20 +87,35 @@ var cpAddrPublishNow = time.Now
 // build() and record the outcome (pending latch + retry on failure, clear on
 // success). trigger is a bounded label naming the caller.
 func (s *ConfigStore) publishOwnedCPAddresses(trigger string, build func() []string) (bool, error) {
+	gen := s.cpAddrPublishGen()
 	changed, err := s.UpdateCPAddressesFrom(build)
-	if s.noteCPAddrPublish(trigger, err) {
+	if s.noteCPAddrPublish(trigger, err, gen) {
 		go s.retryCPAddrPublish(cpAddrRetryCtx())
 	}
 	return changed, err
 }
 
+// cpAddrPublishGen is the current pending-state generation, captured by a
+// publish before it starts.
+func (s *ConfigStore) cpAddrPublishGen() uint64 {
+	s.addrPubMu.Lock()
+	defer s.addrPubMu.Unlock()
+	return s.addrPub.gen
+}
+
 // noteCPAddrPublish records one owned-publish outcome and reports whether the
-// caller must start the retry loop (a failure with no loop running).
-func (s *ConfigStore) noteCPAddrPublish(trigger string, err error) (startRetry bool) {
+// caller must start the retry loop (a failure with no loop running). startGen
+// is the generation the publish captured before it began: a success clears
+// the pending state only if no failure has latched since (gen unchanged);
+// otherwise the newer failure's retry still owns it.
+func (s *ConfigStore) noteCPAddrPublish(trigger string, err error, startGen uint64) (startRetry bool) {
 	s.addrPubMu.Lock()
 	defer s.addrPubMu.Unlock()
 	st := &s.addrPub
 	if err == nil {
+		if st.pending && st.gen != startGen {
+			return false // a newer failure latched while this publish ran: not ours to clear
+		}
 		if st.pending {
 			logger.Printf("ControlPlane: CP address list republished after %d failed attempts (pending since %s, first failed on %q)",
 				st.attempts, st.since.UTC().Format(time.RFC3339), st.trigger)
@@ -102,6 +123,7 @@ func (s *ConfigStore) noteCPAddrPublish(trigger string, err error) (startRetry b
 		st.pending, st.attempts, st.trigger, st.reason = false, 0, "", ""
 		return false
 	}
+	st.gen++
 	if !st.pending {
 		st.pending, st.since, st.trigger = true, cpAddrPublishNow(), trigger
 		logWarnf("ControlPlane: CP address list publish FAILED on %q — Data Planes keep the last committed list until a retry succeeds: %v", trigger, err)
@@ -142,11 +164,14 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 		s.mu.RLock()
 		src := s.cpAddrSource
 		s.mu.RUnlock()
+		gen := s.cpAddrPublishGen()
 		var err error
 		if src != nil {
 			_, err = s.UpdateCPAddressesFrom(src)
-		} // no source: nothing is owned any more, so nothing is pending
-		s.noteCPAddrPublish("retry", err)
+		} else {
+			gen = s.cpAddrPublishGen() // no source: nothing is owned any more, so nothing is pending
+		}
+		s.noteCPAddrPublish("retry", err, gen)
 
 		s.addrPubMu.Lock()
 		if !s.addrPub.pending {
@@ -154,7 +179,12 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 			s.addrPubMu.Unlock()
 			return
 		}
+		stale := err == nil // this attempt published, but a newer failure latched meanwhile
 		s.addrPubMu.Unlock()
+		if stale {
+			backoff = cpAddrRetryBackoffMin // re-derive from the live source promptly
+			continue
+		}
 		backoff = min(backoff*2, cpAddrRetryBackoffMax)
 	}
 }

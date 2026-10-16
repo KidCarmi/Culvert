@@ -91,10 +91,12 @@ const (
 	cpGRPCBindBackoffMax     = 30 * time.Second
 
 	// cpGRPCServeStableAfter is how long a serve must stay up before it counts
-	// as SUCCESSFUL and resets the rebind backoff to its floor. Twice the
-	// backoff ceiling, so a socket that dies within one ceiling period of every
-	// bind — the pathological flap — can never earn a reset and stays bounded
-	// at one attempt per 30 s.
+	// as SUCCESSFUL: it resets the rebind backoff to its floor AND ends the
+	// failure episode (cpGRPCEndEpisodeIfStableLocked) — one definition of
+	// "recovered" for both. Twice the backoff ceiling, so a socket that dies
+	// within one ceiling period of every bind — the pathological flap — can
+	// never earn a reset, and it outlasts cpGRPCUnavailableAfter, so a flap
+	// always crosses the unavailability threshold inside one episode.
 	cpGRPCServeStableAfter = 2 * cpGRPCBindBackoffMax
 
 	// cpGRPCBindJitter spreads the backoff by ±20%. A fleet restarts together —
@@ -169,6 +171,14 @@ type cpGRPCListenerHealth struct {
 	// and fell over (an environmental fault).
 	serving    bool
 	everServed bool
+
+	// boundAt is when the current serve began (the last observed bind). A
+	// bind does NOT end a failure episode (flap damping, Codex review of
+	// #1556): the episode ends only once the listener has been serving for
+	// cpGRPCServeStableAfter, so a socket whose Serve dies right after every
+	// bind accumulates ONE episode toward the 30 s threshold, the page and the
+	// lease withholding instead of starting a fresh one each cycle.
+	boundAt time.Time
 
 	// stopped records the supervisor exiting for shutdown rather than for a
 	// fault, so a node in the middle of a clean teardown never reports a CP
@@ -248,12 +258,15 @@ type cpGRPCListenerSnapshot struct {
 	Unavailable    bool
 	Failing        bool
 	SupervisorDown bool
-	LastReason     string
-	Backoff        time.Duration
-	Consecutive    int64
-	Total          int64
-	Binds          int64
-	FailingFor     time.Duration
+	// Stabilizing: serving again, but the serve has not yet lasted
+	// cpGRPCServeStableAfter, so the failure episode is still open.
+	Stabilizing bool
+	LastReason  string
+	Backoff     time.Duration
+	Consecutive int64
+	Total       int64
+	Binds       int64
+	FailingFor  time.Duration
 }
 
 // fireCPGRPCListenerAlert delivers the `cp_grpc_listener_down` alert.
@@ -299,8 +312,10 @@ func cpGRPCBeginEpisodeLocked(now time.Time) {
 // unrecovered one on a node that is still a configured, running Control
 // Plane — the validity test for a queued listener-down page.
 func cpGRPCEpisodeOpen(ep uint64) bool {
+	now := cpGRPCHealthNow()
 	cpGRPCListener.mu.Lock()
 	defer cpGRPCListener.mu.Unlock()
+	cpGRPCEndEpisodeIfStableLocked(now)
 	l := &cpGRPCListener
 	return l.configured && !l.stopped && l.episode == ep && !l.firstFailure.IsZero()
 }
@@ -507,6 +522,9 @@ func noteCPGRPCListenFailure(reason string, backoff time.Duration, now time.Time
 	cpGRPCEverFailed.Store(true)
 
 	cpGRPCListener.mu.Lock()
+	// A serve that outlived the stability window ended its episode; this
+	// failure starts a new one. A shorter serve continues the SAME episode.
+	cpGRPCEndEpisodeIfStableLocked(now)
 
 	cpGRPCListener.serving = false
 	cpGRPCListener.total++
@@ -553,38 +571,48 @@ func noteCPGRPCListenFailure(reason string, backoff time.Duration, now time.Time
 }
 
 // noteCPGRPCBound records an OBSERVED successful bind and reports the number of
-// suppressed log lines plus whether this bind ENDED a failure episode (so the
-// caller can emit a recovery line instead of an ordinary startup line).
+// suppressed log lines plus whether the bind came INSIDE an open failure
+// episode (so the caller logs a rebind line instead of an ordinary start).
 //
-// This is the only function that clears the failure state. Recovery on observed
-// evidence, never on elapsed time.
-func noteCPGRPCBound() (suppressed int64, recovered bool) {
-	if !cpGRPCEverFailed.Load() {
-		cpGRPCListener.mu.Lock()
-		cpGRPCListener.serving = true
-		cpGRPCListener.everServed = true
-		cpGRPCListener.binds++
-		cpGRPCListener.mu.Unlock()
-		return 0, false
-	}
-
+// A bind does NOT end the episode — flap damping (Codex review of #1556). It
+// marks the listener serving and stamps boundAt; the episode ends only once
+// that serve has lasted cpGRPCServeStableAfter (cpGRPCEndEpisodeIfStableLocked),
+// so a Serve that fails at once keeps firstFailure, the alert latch and the
+// consecutive count of the SAME episode. Recovery is still established by
+// evidence — a serve that stayed up — never by elapsed time alone.
+func noteCPGRPCBound() (suppressed int64, rebound bool) {
+	now := cpGRPCHealthNow()
 	cpGRPCListener.mu.Lock()
-	recovered = cpGRPCListener.consecutive > 0
-	suppressed = cpGRPCListener.suppressed
+	defer cpGRPCListener.mu.Unlock()
 	cpGRPCListener.serving = true
 	cpGRPCListener.everServed = true
 	cpGRPCListener.binds++
-	cpGRPCListener.consecutive = 0
-	cpGRPCListener.suppressed = 0
-	cpGRPCListener.firstFailure = time.Time{}
-	cpGRPCListener.lastFailure = time.Time{}
-	cpGRPCListener.backoff = 0
-	cpGRPCListener.logAt = time.Time{}
-	cpGRPCListener.alerted = false
-	cpGRPCListener.supervisorDown = false
-	cpGRPCListener.terminalAlerted = false
-	cpGRPCListener.mu.Unlock()
-	return suppressed, recovered
+	cpGRPCListener.boundAt = now
+	if !cpGRPCEverFailed.Load() {
+		return 0, false
+	}
+	return cpGRPCListener.suppressed, !cpGRPCListener.firstFailure.IsZero()
+}
+
+// cpGRPCEndEpisodeIfStableLocked ends the open failure episode once the
+// current serve has lasted cpGRPCServeStableAfter. Every recorder and reader
+// calls it first (under cpGRPCListener.mu), so the episode's end is evaluated
+// on the injected clock — no timer, no extra goroutine. Caller holds
+// cpGRPCListener.mu.
+func cpGRPCEndEpisodeIfStableLocked(now time.Time) {
+	l := &cpGRPCListener
+	if !l.serving || l.firstFailure.IsZero() || now.Sub(l.boundAt) < cpGRPCServeStableAfter {
+		return
+	}
+	l.consecutive = 0
+	l.suppressed = 0
+	l.firstFailure = time.Time{}
+	l.lastFailure = time.Time{}
+	l.backoff = 0
+	l.logAt = time.Time{}
+	l.alerted = false
+	l.supervisorDown = false
+	l.terminalAlerted = false
 }
 
 // noteCPGRPCServeEnded records that the gRPC Serve call returned while the node
@@ -609,6 +637,7 @@ func noteCPGRPCServeEnded(reason string, backoff time.Duration) (shouldLog bool,
 func noteCPGRPCSupervisorDown(reason string) {
 	cpGRPCEverFailed.Store(true)
 	cpGRPCListener.mu.Lock()
+	cpGRPCEndEpisodeIfStableLocked(cpGRPCHealthNow())
 	cpGRPCListener.serving = false
 	cpGRPCListener.supervisorDown = true
 	cpGRPCListener.lastReason = reason
@@ -644,6 +673,7 @@ func noteCPGRPCActivationRejected() {
 	cpGRPCListener.configured = false
 	cpGRPCListener.addr = ""
 	cpGRPCListener.serving = false
+	cpGRPCListener.boundAt = time.Time{}
 	cpGRPCListener.stopped = false
 	cpGRPCListener.supervisorDown = false
 	cpGRPCListener.terminalAlerted = false
@@ -671,6 +701,7 @@ func cpGRPCListenerState() cpGRPCListenerSnapshot {
 	now := cpGRPCHealthNow()
 	cpGRPCListener.mu.Lock()
 	defer cpGRPCListener.mu.Unlock()
+	cpGRPCEndEpisodeIfStableLocked(now)
 
 	snap := cpGRPCListenerSnapshot{
 		Configured:     cpGRPCListener.configured,
@@ -689,6 +720,7 @@ func cpGRPCListenerState() cpGRPCListenerSnapshot {
 		snap.FailingFor = cpGRPCElapsedSince(cpGRPCListener.firstFailure, cpGRPCListener.lastFailure, now)
 	}
 	snap.Failing = !snap.Serving && !snap.Stopped && snap.Configured
+	snap.Stabilizing = snap.Serving && !cpGRPCListener.firstFailure.IsZero()
 	snap.Unavailable = snap.Failing && (snap.SupervisorDown || snap.FailingFor >= cpGRPCUnavailableAfter)
 	return snap
 }
@@ -794,6 +826,18 @@ func checkCPGRPCListener() OperatorContractCheck {
 			Message: fmt.Sprintf("Control Plane gRPC listener is not currently serving (%d consecutive attempts, reason: %s); retrying with backoff",
 				snap.Consecutive, snap.LastReason),
 			OperatorAction: "No action yet — the listener retries automatically and this usually clears within seconds of a restart or a certificate rotation. If it persists it is raised to a failure.",
+		}
+	}
+	if snap.Stabilizing {
+		// OK, like any serving listener: an ordinary rollout that failed a
+		// bind or two must not read as degraded for the window. A real flap
+		// is not hidden by this — it spends its time NOT serving and is raised
+		// through the unavailable branch above.
+		return OperatorContractCheck{
+			Code:   "cp_grpc_listener",
+			Status: diagOK,
+			Message: fmt.Sprintf("Control Plane gRPC listener bound and serving again, stabilizing (%d consecutive failures in this episode, last: %s); the episode closes once it has served for %s",
+				snap.Consecutive, snap.LastReason, cpGRPCServeStableAfter),
 		}
 	}
 	if snap.Total > 0 {

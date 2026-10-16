@@ -268,6 +268,15 @@ listener rebinds by itself (so a restart costs an outage to achieve what is
 already in progress), and this node's proxy data plane and admin UI are
 unaffected.
 
+### Recovery means a stable serve, not a bind
+
+A bind after a failure does **not** close the outage. The listener reports
+"bound and serving again, stabilizing" (diagnostics row ok, `/health` `ready`),
+and the outage closes only once it has served for 60 s. If its socket keeps
+dying right after each bind, the cycles count as one outage: it crosses the
+30 s threshold, pages once and, in lease mode, stops renewing the fencing lease
+so the standby takes over.
+
 ## The one state that does *not* recover on its own
 
 If the supervisor goroutine itself panics, nothing rebinds. The same terminal

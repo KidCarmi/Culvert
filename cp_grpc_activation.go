@@ -230,14 +230,14 @@ func (s *cpListenerSupervisor) commitAfterAdopt(mode string, backoff time.Durati
 		// before — §33's rule, learned from an admin UI that announced a
 		// listener that did not exist. Recording "bound" only now also keeps an
 		// open failure episode (and its alert) raised across a rejected commit.
-		suppressed, recovered := noteCPGRPCBound()
+		suppressed, rebound := noteCPGRPCBound()
 		if !s.firstResolved() {
 			s.noteFirstBound()
 		}
 		logControlPlaneTransport(s.cfg.addr, mode)
-		if recovered {
-			logger.Printf("ControlPlane: gRPC listener bound and serving again on %s (%d suppressed bind-failure log line(s))",
-				sanitizeLog(s.cfg.addr), suppressed)
+		if rebound {
+			logger.Printf("ControlPlane: gRPC listener bound and serving again on %s — stabilizing: the outage episode stays open until it has served for %s (%d suppressed bind-failure log line(s))",
+				sanitizeLog(s.cfg.addr), cpGRPCServeStableAfter, suppressed)
 		}
 		return true, false
 	}

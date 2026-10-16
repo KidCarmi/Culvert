@@ -668,7 +668,7 @@ func (s *ConfigStore) releaseCPAddressSource() {
 	s.addrPublishErr, s.addrPublishTS = "", ""
 	s.mu.Unlock()
 	s.addrPubMu.Lock()
-	s.addrPub = cpAddrPublishState{retrying: s.addrPub.retrying}
+	s.addrPub = cpAddrPublishState{retrying: s.addrPub.retrying, gen: s.addrPub.gen + 1}
 	s.addrPubMu.Unlock()
 }
 

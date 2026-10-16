@@ -119,7 +119,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   publishes now commit only onto the exact version they validated against, so a
   publish racing an HA promotion can no longer ship a stale fencing epoch. A
   re-promoted former leader no longer republishes below the version it
-  replicated from the new leader. A refused admin/promote
+  replicated from the new leader. A Control Plane listener whose socket dies
+  right after every bind is now treated as one continuous outage, so it pages
+  and (in lease mode) gives up the fencing lease instead of resetting each
+  cycle. An outage closes only after 60 s of stable serving. A refused admin/promote
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long

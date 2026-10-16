@@ -633,7 +633,7 @@ func TestChaos71_ReleaseCPAddressSourceClearsOwnershipState(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	_ = s.rejectPublish(publishAddresses, errors.New("injected address rejection"))
-	_ = s.noteCPAddrPublish("test", errors.New("injected address rejection"))
+	_ = s.noteCPAddrPublish("test", errors.New("injected address rejection"), s.cpAddrPublishGen())
 	if row := checkCPAddressList(); row.Status != diagFail {
 		t.Fatalf("precondition: row %+v", row)
 	}
@@ -647,5 +647,57 @@ func TestChaos71_ReleaseCPAddressSourceClearsOwnershipState(t *testing.T) {
 	}
 	if row := checkCPAddressList(); row.Status != diagOK || !strings.Contains(row.Message, "Not an active Control Plane") {
 		t.Errorf("cp_address_list after release = %+v", row)
+	}
+}
+
+// TestChaos71_StaleRetrySuccessDoesNotClearANewerFailure — Codex P1
+// 4297020949, the exact interleaving: the retry loop publishes topology A;
+// before it records that success, an HA transition to topology B fails its
+// own publish and latches. A's success must NOT clear B's pending state — the
+// loop goes round again from the live source and publishes B.
+func TestChaos71_StaleRetrySuccessDoesNotClearANewerFailure(t *testing.T) {
+	_ = cpIsolateActivation(t)
+	s := globalConfigStore
+	topoA := []string{"10.0.0.9:50051", "10.0.0.2:50051"}
+	topoB := []string{"10.0.0.7:50051", "10.0.0.2:50051"}
+	var mu sync.Mutex
+	live := topoA
+	s.setCPAddressSource(func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), live...) })
+	if err := s.Update(ConfigSnapshot{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// An earlier failure left the list pending (the loop now owns it).
+	s.mu.Lock()
+	s.snap.CPAddresses = nil
+	s.mu.Unlock()
+	_ = s.noteCPAddrPublish("ha_enable", errors.New("injected: rejected at commit"), s.cpAddrPublishGen())
+
+	hookCalls := 0
+	prevHook := cpAddrMergeBeforeCommit
+	cpAddrMergeBeforeCommit = func() {
+		hookCalls++
+		if hookCalls == 1 { // A is validated and about to commit; B's publish fails NOW
+			mu.Lock()
+			live = topoB
+			mu.Unlock()
+			_ = s.noteCPAddrPublish(haTransitionPromote, errors.New("injected: B rejected at commit"), s.cpAddrPublishGen())
+		}
+	}
+	t.Cleanup(func() { cpAddrMergeBeforeCommit = prevHook })
+	rounds := 0
+	prevSleep := cpAddrRetrySleep
+	cpAddrRetrySleep = func(context.Context, time.Duration) bool { rounds++; return rounds <= 5 }
+	t.Cleanup(func() { cpAddrRetrySleep = prevSleep })
+
+	s.retryCPAddrPublish(context.Background())
+
+	if st := s.cpAddrPublishSnapshot(); st.pending {
+		t.Fatalf("the loop ended with the publish still pending: %+v", st)
+	}
+	if got := s.Get().CPAddresses; !slicesEqual(got, topoB) {
+		t.Fatalf("committed %v, want topology B %v — A's stale success cleared B's failure and nothing retried B", got, topoB)
+	}
+	if rounds < 2 {
+		t.Errorf("the loop ran %d round(s), want a second round for B", rounds)
 	}
 }

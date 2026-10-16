@@ -8773,6 +8773,42 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Eleventh review round.**
+
+  (a) **Flap damping.** Every bind marked the episode recovered before `Serve`
+  ran. A Serve that died at once (a fatal accept loop) therefore started a fresh
+  episode each cycle, so the 30 s threshold, the page and the lease withholding
+  never accumulated, and a lease-mode leader kept renewing while serving
+  nothing.
+
+  A bind no longer ends the episode. It marks the listener serving and stamps
+  `boundAt`. The episode ends only once that serve has lasted
+  `cpGRPCServeStableAfter`, the window that already defines a successful serve
+  for the backoff reset, so "recovered" keeps one meaning. The window is 60 s:
+  twice the backoff ceiling, and longer than the 30 s unavailability threshold.
+
+  The end is evaluated on the injected health clock by every recorder and
+  reader, under the plane's lock (`cpGRPCEndEpisodeIfStableLocked`). There is
+  no timer and no goroutine. Until then a serve-end continues the SAME
+  episode: `firstFailure`, the alert latch and the consecutive count are kept.
+  The snapshot reports `Stabilizing`, and the row stays OK with that message.
+  `/health` keeps its five values.
+
+  Gates: `TestChaos71_FlappingListenerAccumulatesOneEpisode` (the flap crosses
+  the threshold, pages once and withholds the lease; a stable serve closes the
+  episode) and `TestChaos71_FailureAfterAStableServeStartsANewEpisode`.
+
+  (b) **Generation on the pending republish.** A retry that published
+  topology A cleared the pending state even if topology B's publish had failed
+  in between, so B was never retried. Every failure latch now bumps
+  `cpAddrPublishState.gen`. A publish captures `gen` before it starts and
+  clears only if `gen` is unchanged; otherwise the retry loop goes round again
+  from the live source. Gate:
+  `TestChaos71_StaleRetrySuccessDoesNotClearANewerFailure`, the exact
+  interleaving.
+
+  Neither fix adds a publish or commit path, or a lifecycle exit. Five
+  mutations each fail a gate.
 * **Tenth review round — standard optimistic concurrency.** The single
   commit path still had two partial guards.
   - **Full-publish validity check.** It compared only `CPAddresses`, so a full
