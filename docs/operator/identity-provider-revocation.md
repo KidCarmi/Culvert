@@ -149,9 +149,12 @@ tracked as register row **AU-22** in
 
 If you removed the **only** interactive provider and no local admin account
 exists, the proxy falls back to the global default authentication outcome. On a
-`Default` posture that is a deny for unauthenticated traffic; see
-`docs/operator/` on `defaultAuthOutcome` before removing the last provider on a
-gateway that depends on SSO.
+`Default` posture that is a deny for unauthenticated traffic. Read
+`roadmap/AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md` — the frozen contract for that
+setting, and the authority on what each posture does — before removing the last
+provider on a gateway that depends on SSO.
+`docs/operator/admin-roster-durability.md` covers the related case of running
+credential-free (`defaultAuthOutcome=Exempt`) with no local admin account.
 
 ## 5. Why this is a state check and not a revocation list
 

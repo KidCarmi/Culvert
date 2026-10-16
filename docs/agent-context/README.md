@@ -74,7 +74,8 @@ to this checkout, not to an unmerged branch.
   capped at min(7 days, SAML `validUntil`) on the compile path and on live
   providers, and the recovery loop revalidates cache-serving providers. An
   unreachable IdP is degraded availability, never revocation: only an
-  explicit delete or disable revokes sessions.
+  explicit delete, a disable, or removal by `ReplaceAll` (config import,
+  config-version rollback, the CP→DP snapshot) revokes sessions.
 - Proxy-session provider bounds (CHAOS-72):
   [session_provider_bounds.go](../../session_provider_bounds.go) and the
   [revocation runbook](../operator/identity-provider-revocation.md). A verified
