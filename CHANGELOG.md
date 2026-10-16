@@ -74,6 +74,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   that keeps climbing means clients are not re-authenticating. Runbook:
   `docs/operator/identity-provider-revocation.md`.
 
+  **Request-forgery barrier on the OIDC discovery fetch.**
+  `fetchOIDCDiscoveryOverNetwork` passed its raw, caller-supplied URL to
+  `http.NewRequestWithContext` while every check in the function measured the
+  *parsed* url beside it — functionally equivalent, since the parsed value came
+  from that same string, but it left the fetched value outside the checks and
+  raised a critical CodeQL `go/request-forgery` alert. It now mirrors the SAML
+  fetcher exactly: a `MatchString` shape barrier on the raw value, and the
+  request built from the parsed url. A structural wall
+  (`idp_fetch_barrier_test.go`) now pins both properties on *both* fetchers, so
+  the SAML/OIDC pair cannot drift apart again — it had produced four findings
+  that way.
+
   **Recorded, not fixed:** there is still no lever to revoke a single federated
   subject — `RevokeUser` has one caller, the local account-delete handler, and
   no admin route (new register row **AU-20**).

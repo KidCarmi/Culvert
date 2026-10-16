@@ -10164,6 +10164,45 @@ what makes them controls. The reclassification also brings the field under
 `TestConfigSurfaces_SnapshotWireWipe`, so re-adding `omitempty` now fails the
 build with a message naming the consequence — verified.
 
+### 42.6e The OIDC discovery fetch raised a CRITICAL go/request-forgery, and it is the SAML/OIDC asymmetry a FOURTH time
+
+CodeQL failed on this PR's head with one **critical** alert —
+*"uncontrolled data used in network request"*, `auth_oidc_flow.go`,
+`fetchOIDCDiscoveryOverNetwork`. Nothing was exploitable: `u` is parsed FROM
+`wellKnown`, so the scheme and `isPrivateHostContext` checks did govern the URL
+actually fetched. What was wrong is that **the value handed to
+`http.NewRequestWithContext` was the raw parameter, not the parsed url every
+check had just measured** — CHAOS-69 round 5's measure-vs-use rule, in a
+function whose guard is otherwise exemplary.
+
+The sibling had already been fixed. `fetchSAMLMetadataOverNetwork` carries BOTH
+halves: a `samlMetadataURLShape` regexp barrier (`Regexp.MatchString` is a
+sanitiser CodeQL recognises, which `isPrivateHostContext` is not established to
+be) and `metaURL.String()` at the request. Neither half was carried across.
+`fetchOIDCDiscoveryOverNetwork` now mirrors both.
+
+**This is the fourth finding produced by fixing one of these two fetchers and
+not the other** — the function's own comment already counts three (the inline
+guard, the fetch-result adjudication, the bounded private-host check) and says
+so in the comment immediately above the line that then shipped the fourth.
+Writing the lesson down next to the code did not prevent the recurrence, so the
+property is now pinned mechanically instead:
+`TestWall_IdPMetadataFetchersCarryTheRequestForgeryBarrier`
+(`idp_fetch_barrier_test.go`) walks the AST of **both** fetchers and requires
+each to apply a `MatchString` barrier to its raw parameter, to do so BEFORE
+building the request, and never to pass that raw parameter to
+`http.NewRequestWithContext`. A fetcher it cannot find is a FAILURE, not a
+skip, so renaming one does not quietly drop it from the wall. Both mutations
+were verified failing: the raw string restored at the request, and the barrier
+removed.
+
+**Why structural and not behavioural:** the pre-fix OIDC shape was functionally
+sound, so no behavioural test could ever have failed on it. The defect lived in
+which value flowed where — visible to static analysis and to the shape of the
+code, and to nothing else. *A guard that is correct and a guard that is
+VERIFIABLE are different properties, and on this path the repo's convention
+requires both.*
+
 ### 42.7 Deliberately NOT done
 
 - **No `/readyz` or `/healthz` row, and no alert.** A node re-challenging

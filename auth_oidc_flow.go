@@ -27,6 +27,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -93,7 +94,27 @@ func oidcWellKnownURL(issuer string) string {
 // same function as the outbound request so CodeQL can verify it; a check in a
 // calling function is what raised a critical go/request-forgery alert when
 // this helper was first split out.
+// oidcDiscoveryURLShape is the go/request-forgery barrier for
+// fetchOIDCDiscoveryOverNetwork, mirroring samlMetadataURLShape in
+// auth_saml.go. CodeQL recognises Regexp.MatchString on the tainted value as a
+// sanitiser; whether it models the isPrivateHostContext wrapper is NOT
+// established — moving the guard inline was not enough on its own, and this
+// request was still flagged critical (go/request-forgery) on the CI run of
+// 85f685f. It admits only what the scheme check below admits anyway
+// (case-insensitive http/https followed by an authority), so it narrows
+// nothing a valid discovery URL uses.
+//
+// THE SAML/OIDC ASYMMETRY, A FOURTH TIME. The comment on the function below
+// already records three findings produced by fixing one half of this pair and
+// not the other, and the barrier itself was then added to the SAML half alone.
+// When you change one of these two fetchers, change the other in the same
+// commit or say why not.
+var oidcDiscoveryURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
+
 func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
+	if !oidcDiscoveryURLShape.MatchString(wellKnown) {
+		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
+	}
 	// Inline url.Parse + scheme check + private-host check, in the SAME
 	// function as the request, per the repo's SSRF convention.
 	//
@@ -131,7 +152,12 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 		Timeout:   oidcDiscoveryFetchBudget,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, http.NoBody)
+	// Built from the PARSED url, never from the raw string beside it: the
+	// barrier and the scheme/host checks above all measure `u`, so handing the
+	// request `wellKnown` would leave the value actually fetched outside every
+	// check that was just performed (CHAOS-69 round 5's measure-vs-use rule, and
+	// what auth_saml.go already does with metaURL.String()).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}
