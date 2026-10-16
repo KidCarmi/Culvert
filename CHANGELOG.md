@@ -26,7 +26,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `session_revocation` contract row and the runbook no longer assert that a
   refusal is an attack — a cookie signed under a previous session secret is
   genuine and unverifiable, and a key rotation makes ordinary browsers
-  produce one.
+  produce one. Concurrent revocation saves are serialized end to end: the
+  snapshot and the write under the owner's lock, and the save together with
+  the flag that records whether it landed under the coordinator's, so a
+  writer whose save succeeded can no longer clear the retry a writer whose
+  save failed had just recorded and leave the file behind memory with nothing
+  owed.
 
 - `/api/auth/logout` is on the admin-UI auth middleware's **public** allowlist
   — correctly, since an expired or already-revoked session cannot authenticate

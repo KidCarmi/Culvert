@@ -64,6 +64,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -147,8 +148,29 @@ func noteSessionRevokeRefusal(r *http.Request, reason session.RevokeReason, cook
 // resurrects the revoked session (Codex P1, PR #1591).
 var sessionRevocationsDirty atomic.Bool
 
+// persistMu serializes the whole persist — the save AND the dirty-flag update
+// that records whether it landed.
+//
+// internal/session's saveMu already orders snapshot-and-write, so the file
+// that lands last is the newest one. What it cannot order is anything AFTER
+// SaveRevocations returns, and the flag lives out here in main: a goroutine
+// whose write SUCCEEDED can be descheduled before its Store(false) and land
+// it after a later goroutine whose write FAILED stored true. The flag then
+// reads "in step" while the file is behind memory, nothing retries, and a
+// restart inside that window resurrects the revoked session — the exact P1
+// the flag exists to prevent (CodeRabbit, PR #1591).
+//
+// With the save and the store under one lock, Store(false) is only ever
+// reached by the goroutine that just wrote the newest snapshot, so the
+// invariant holds: not dirty means the file is current as of the last
+// completed persist. That is what lets persistRevocationsIfDirty read the
+// flag without the lock.
+var persistMu sync.Mutex
+
 // persistRevocations saves and tracks whether the file is in step with memory.
 func persistRevocations() {
+	persistMu.Lock()
+	defer persistMu.Unlock()
 	if err := sessionRevoked.SaveRevocations(); err != nil {
 		sessionRevocationsDirty.Store(true)
 		logger.Printf("Session: failed to persist revocations: %v", err)

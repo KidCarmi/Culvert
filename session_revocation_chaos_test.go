@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1125,5 +1126,176 @@ func TestChaos73_WallSavesGoThroughTheCoordinator(t *testing.T) {
 		t.Errorf("direct sessionRevoked.SaveRevocations() outside persistRevocations: %v — "+
 			"a save that bypasses the coordinator does not record that a retry is owed when "+
 			"it fails", offenders)
+	}
+}
+
+// TestChaos73_WallPersistHoldsOneLockOverSaveAndFlag pins that
+// persistRevocations takes persistMu BEFORE it writes and before either
+// dirty-flag store, so the save and the record of whether it landed are one
+// critical section.
+//
+// Routing every writer through the coordinator (the wall above) orders the
+// FILE: saveMu is held across snapshot-and-write, so the rename that lands
+// last carries the newest snapshot. It says nothing about the flag, which
+// lives out here in main and is stored after SaveRevocations has returned and
+// released saveMu. A goroutine whose write succeeded can be descheduled right
+// there and land its Store(false) after a later goroutine whose write FAILED
+// stored true: the flag then reads "in step" while the file is behind memory,
+// persistRevocationsIfDirty returns early, nothing ever repairs the file, and
+// a restart resurrects the revoked session (CodeRabbit, PR #1591).
+//
+// Structural because the window is a deschedule between two statements:
+// there is no deterministic way to drive it from a test, and a probabilistic
+// one would pass against the defect most runs. Removing the Lock line — the
+// cheapest wrong fix, and exactly the pre-fix shape — fails this gate.
+func TestChaos73_WallPersistHoldsOneLockOverSaveAndFlag(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "session_revocation_bounds.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse session_revocation_bounds.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "persistRevocations" {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("persistRevocations not found; this wall is watching a function that no " +
+			"longer exists and proves nothing")
+	}
+
+	lockAt := -1
+	saves, stores := []int{}, []int{}
+	// Unlocks that run at return, and every unlock however it is spelled. An
+	// unlock that is NOT deferred releases the lock part-way through the body,
+	// which is the defect wearing a lock.
+	deferredUnlocks, allUnlocks := map[int]bool{}, []int{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if d, ok := n.(*ast.DeferStmt); ok {
+			if sel, ok := d.Call.Fun.(*ast.SelectorExpr); ok {
+				if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "persistMu" && sel.Sel.Name == "Unlock" {
+					deferredUnlocks[fset.Position(d.Call.Pos()).Offset] = true
+				}
+			}
+			return true
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		off := fset.Position(call.Pos()).Offset
+		switch {
+		case recv.Name == "persistMu" && sel.Sel.Name == "Lock":
+			if lockAt < 0 || off < lockAt {
+				lockAt = off
+			}
+		case recv.Name == "sessionRevoked" && sel.Sel.Name == "SaveRevocations":
+			saves = append(saves, off)
+		case recv.Name == "sessionRevocationsDirty" && sel.Sel.Name == "Store":
+			stores = append(stores, off)
+		case recv.Name == "persistMu" && sel.Sel.Name == "Unlock":
+			allUnlocks = append(allUnlocks, off)
+		}
+		return true
+	})
+
+	// Not vacuous: the body must still contain the write and BOTH flag stores
+	// this gate claims to be ordering.
+	if len(saves) != 1 {
+		t.Fatalf("found %d SaveRevocations calls in persistRevocations, want 1; the "+
+			"coordinator no longer has the shape this wall asserts", len(saves))
+	}
+	if len(stores) != 2 {
+		t.Fatalf("found %d sessionRevocationsDirty.Store calls, want 2 (the failure and "+
+			"success arms); this wall is not ordering what it claims", len(stores))
+	}
+
+	if lockAt < 0 {
+		t.Fatalf("persistRevocations never calls persistMu.Lock: the save and the " +
+			"dirty-flag store are not one critical section, so a succeeded-then-" +
+			"descheduled writer can clear the flag a failed writer set, and the file " +
+			"stays behind memory with no retry owed")
+	}
+	for _, off := range append(append([]int{}, saves...), stores...) {
+		if off < lockAt {
+			t.Errorf("a save or dirty-flag store at offset %d precedes persistMu.Lock at %d; "+
+				"everything the coordinator does must be under the one lock", off, lockAt)
+		}
+	}
+
+	// Taking the lock is not enough: it has to still be HELD at the stores.
+	// Locking only around the write and unlocking before the flag update is
+	// the cheapest wrong fix, and it leaves the defect exactly intact.
+	if len(deferredUnlocks) == 0 {
+		t.Errorf("persistRevocations takes persistMu but never defers the Unlock; the " +
+			"lock must be released at return, not part-way through the body")
+	}
+	for _, off := range allUnlocks {
+		if !deferredUnlocks[off] {
+			t.Errorf("persistMu.Unlock at offset %d is not deferred: the lock is dropped "+
+				"before the dirty-flag store, so a succeeded-then-descheduled writer can "+
+				"still clear the flag a failed writer set", off)
+		}
+	}
+}
+
+// TestChaos73_ControlConcurrentPersistsLeaveTheFileAndFlagAgreeing drives the
+// coordinator from many goroutines at once and asserts the end state is
+// honest: either the flag is dirty, or the file on disk carries every
+// revocation still in memory.
+//
+// This is a CONTROL, not a defect gate. The race above is a deschedule window
+// too narrow to hit reliably, so this passes on the pre-fix tree too; its job
+// is to prove the lock did not introduce a deadlock or a lost write, and to
+// give the race detector something real to inspect.
+func TestChaos73_ControlConcurrentPersistsLeaveTheFileAndFlagAgreeing(t *testing.T) {
+	chaos73Setup(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "revocations.json")
+	session.SetRevocationsPath(path)
+
+	const writers = 24
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			session.Revoked.Revoke(fmt.Sprintf("tok-%d", i), time.Now().Add(time.Hour))
+			persistRevocations()
+			persistRevocationsIfDirty()
+		}(i)
+	}
+	wg.Wait()
+
+	// A final persist from the quiescent state: whatever the concurrent phase
+	// left behind, the file must now match memory.
+	persistRevocations()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read revocations file: %v", err)
+	}
+	var onDisk []session.RevocationEntry
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatalf("unmarshal revocations file: %v", err)
+	}
+	if len(onDisk) != writers {
+		t.Errorf("file holds %d revocations, memory holds %d; a concurrent save lost a "+
+			"revocation that a restart would then resurrect", len(onDisk), writers)
+	}
+	if sessionRevocationsDirty.Load() {
+		t.Error("dirty after a successful quiescent persist: the flag would force an " +
+			"endless retry of a write that already landed")
 	}
 }
