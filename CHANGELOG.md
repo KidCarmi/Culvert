@@ -9,6 +9,87 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Deleting or disabling an identity provider revoked nothing it had already
+  minted (**CHAOS-72**, register row **AU-2**). A `ps_session` cookie carries
+  the asserting profile's id and **the groups that provider asserted**, and
+  `resolveRequestAuth`'s session arm read all of it straight out of the
+  verified cookie without consulting the provider — so a browser holding such a
+  cookie kept its subject and groups for the rest of the session lifetime
+  (8 hours by default, up to 7 days at a raised TTL) after the operator removed
+  the federation. Those groups feed `policyStore.Evaluate` directly, so
+  group-scoped **allow** rules kept matching for a provider that was gone, while
+  `idpRegistry.Delete` answered `204` and the change was audited as a successful
+  `idp.delete`.
+
+  The asymmetry was inside one function: the `Proxy-Authorization: Basic` arm
+  twenty lines below consults `EnabledCredentialProviders()` on every request,
+  as does every other registry consumer — the session arm was the single
+  outlier.
+
+  Fixed as **derived state, not a revocation event**: `sessionProviderLive`
+  (`session_provider_bounds.go`) asks the registry per request whether the
+  session's profile still EXISTS and is ENABLED (`IdPRegistry.ProfileEnabled`),
+  and a refusal degrades to exactly "no cookie" — the client is re-challenged
+  through the existing no-credential dispatch. Only an explicit delete,
+  disable, or removal by a registry replacement revokes: an IdP that is
+  unreachable — a provider that failed to compile, or one retired at the
+  metadata staleness ceiling — is degraded availability, not revocation, so a
+  node restarted during an IdP outage does not log out that IdP's sessions. A `RevokeProvider` entry was deliberately
+  not added: the admin handler is only one writer of the registry
+  (`ReplaceAll` is also reached from config import, config-version rollback and
+  the CP→DP snapshot), whereas the provider set is already durable and already
+  synced fleet-wide, so the absence *is* the revocation and needs no
+  persistence, no gossip, and no expiry.
+
+  **That "already synced fleet-wide" claim was itself false for the one case an
+  operator reaches for, and is fixed here too** (register row **AU-21**,
+  §42.6d). `ConfigSnapshot.IdPProfiles` carried `omitempty`, so a Control Plane
+  whose registry had just become empty serialised no `idp_profiles` key at all;
+  the Data Plane read that as "absent — keep what I have" and skipped. Deleting
+  the **last** identity provider therefore left it stored, enabled and live on
+  every Data Plane node: its sessions kept authenticating with their asserted
+  groups for the full TTL, **and new logins through the removed federation kept
+  working**. Removing a provider while another remained always propagated, which
+  is why it was invisible outside a single-provider deployment. The field now
+  omits `omitempty` and its `config_surfaces` row is `semNilSkipEmptyWipe` +
+  `WireWipeCapable`, which also brings it under
+  `TestConfigSurfaces_SnapshotWireWipe` — the wall that exists for exactly this
+  bug class and had skipped it because the row was labelled `semValidatedSkip`.
+  The apply path already distinguished the two cases, so no logic changed: an
+  empty list is an explicit clear, while a **missing** `idp_profiles` key still
+  means "absent, keep what I have" — which is what an older Control Plane sends
+  and what an unenrolled caller receives, since the field is redacted to nothing
+  and a node polls `GetConfig` before enrollment completes.
+
+  Sessions naming `"local"` (the admin-UI cookie, which has its own roster
+  backstop) and pre-`pvd` legacy sessions are never refused. Both provider
+  spellings — the bare profile id and the prefixed `oidc:`/`saml:` form — are
+  accepted for an enabled provider.
+
+  **Operator-visible:** `culvert_session_provider_revoked_total` (always
+  emitted; counts *requests*, not sessions), `sessionProviderRevoked` on
+  `GET /api/stats`, a banner on the Identity Providers panel, and a
+  rate-limited `AUTH_SESSION_PROVIDER_REVOKED` log line carrying the cumulative
+  count. A step that settles after removing a provider is expected; a count
+  that keeps climbing means clients are not re-authenticating. Runbook:
+  `docs/operator/identity-provider-revocation.md`.
+
+  **Request-forgery barrier on the OIDC discovery fetch.**
+  `fetchOIDCDiscoveryOverNetwork` passed its raw, caller-supplied URL to
+  `http.NewRequestWithContext` while every check in the function measured the
+  *parsed* url beside it — functionally equivalent, since the parsed value came
+  from that same string, but it left the fetched value outside the checks and
+  raised a critical CodeQL `go/request-forgery` alert. It now mirrors the SAML
+  fetcher exactly: a `MatchString` shape barrier on the raw value, and the
+  request built from the parsed url. A structural wall
+  (`idp_fetch_barrier_test.go`) now pins both properties on *both* fetchers, so
+  the SAML/OIDC pair cannot drift apart again — it had produced four findings
+  that way.
+
+  **Recorded, not fixed:** there is still no lever to revoke a single federated
+  subject — `RevokeUser` has one caller, the local account-delete handler, and
+  no admin route (new register row **AU-20**).
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
@@ -515,6 +596,64 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
+
+- An enabled SAML or OIDC identity provider no longer depends on being able to
+  reach the identity provider in order to EXIST. Compiling a profile performs a
+  synchronous outbound fetch — SAML metadata, OIDC discovery — and it had no
+  cache, no fallback and no retry, on three paths: appliance boot, the admin
+  save, and every Control Plane → Data Plane config sync. Three consequences.
+  An IdP that was briefly unreachable at boot left the profile enabled, stored
+  and listed in the admin UI but with **no live provider**, permanently for the
+  life of the process and with no metric, health row or alert to say so —
+  browser SSO simply stopped, and a scoped `SSORequired` rule returned 403 for
+  every user, against a green dashboard. An ordinary IdP maintenance window
+  **aborted the whole config snapshot**, stopping policy, blocklist and
+  threat-feed distribution to every data plane in the fleet. And because the
+  config version could not advance, every data plane retried the fetch every
+  30 seconds for the duration of the outage, aiming the fleet's full poll rate
+  at the identity provider that was already down.
+
+  The appliance now keeps the last document it successfully fetched and
+  degrades to it, bounded by a 7-day staleness ceiling — withdrawing a key from
+  published metadata is your IdP's revocation lever, so the fallback is a
+  bounded degradation rather than an open-ended one. The network always wins
+  when it answers, so an IdP-side key rotation is still picked up at the next
+  compile; cached bytes are parsed and validated by exactly the same code as
+  network bytes; and a cached document is bound to its source URL, so
+  re-pointing a profile gets no cache. A profile that still cannot be compiled
+  now retries on its own at a bounded, jittered rate and goes live on the first
+  successful fetch — no restart. New: the `idp_metadata` diagnostics row,
+  `culvert_idp_enabled_not_live` (page on `> 0`) and `culvert_idp_metadata_*`,
+  and the existing `identity_backend_unreachable` alert with source
+  `idp_metadata`. Nothing is added to `/readyz`: an IdP outage is fleet-wide,
+  and failing readiness would eject a fleet that is still proxying fine. An
+  unresolvable IdP hostname now falls back to the cached document instead of
+  being reported as a configuration error (an OIDC discovery URL is admitted on
+  structure; the DNS-backed check runs on the fetch, where its failure routes to
+  the cache), the SAML pre-flight host check shares the fetch's deadline instead
+  of resolving unbounded ahead of it, and switching a profile to inline
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. The
+  fallback is **stale-if-error** (RFC 5861): only a transport failure or an
+  HTTP 5xx is answered from the cache. A 4xx, any other non-200, an empty body,
+  or a document the appliance cannot accept (malformed metadata, or a discovery
+  document naming an `authorization_endpoint` that resolves into a private
+  range) fails the compile as before and never replaces the cached copy.
+  Re-pointing a profile from one remote source to another retires the old
+  source's failure episode on commit, so a repoint away from a broken IdP stops
+  alerting instead of paging indefinitely for a URL that is no longer
+  configured. The staleness ceiling is the EARLIER of 7 days and the SAML
+  metadata's own `validUntil`, and it is enforced on a **running** appliance
+  rather than only when a profile is next compiled: a provider whose cached
+  document has expired is retired (logged as `IDP_METADATA_EXPIRED`), so new
+  browser SSO through it fails closed instead of continuing to trust a signing
+  certificate your IdP may have withdrawn, and the retry loop brings it back
+  automatically on the first successful fetch. A provider that is live but
+  serving from cache is also revalidated by the retry loop and replaced the
+  moment the IdP answers again (`IDP_METADATA_REVALIDATED`), so a key rotated
+  during the outage is adopted within minutes of recovery. None of this revokes
+  sessions: the profile stays enabled and stored throughout, and a provider
+  serving a freshly fetched document is never retired however old the cached
+  copy beside it is. See `docs/operator/idp-metadata-availability.md`.
 
 ### Changed
 

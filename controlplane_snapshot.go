@@ -93,7 +93,19 @@ type ConfigSnapshot struct {
 
 	// IdP profile sync: full OIDC/SAML provider config for DP-local auth.
 	// Redacted from unauthenticated GetConfig callers alongside SessionHMAC.
-	IdPProfiles []*IdPProfile `json:"idp_profiles,omitempty"`
+	// NO omitempty (WireWipeCapable): since CHAOS-72 the stored+enabled
+	// profile set IS the revocation lever for a federation, so deleting the
+	// LAST profile must reach every DP. With omitempty an empty registry
+	// serialized to nothing, the DP read nil and syncSnapshotIdPProfiles
+	// SKIPPED — leaving the removed federation stored, enabled and live on
+	// every DP, still minting policy groups and still accepting new logins
+	// (§42.6d). Same security argument as decryption_profiles below.
+	//
+	// nil still means ABSENT and must keep skipping: redactUnenrolledSnapshot
+	// sets this field to nil for an unenrolled caller, and GetConfig is polled
+	// by a DP BEFORE enrollment completes, so treating a null as a wipe would
+	// clear the registry of every enrolling node.
+	IdPProfiles []*IdPProfile `json:"idp_profiles"`
 
 	// Bandwidth / QoS policies synced from CP to DP.
 	BandwidthPolicies []BandwidthPolicy `json:"bandwidth_policies,omitempty"`
