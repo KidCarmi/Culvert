@@ -49,11 +49,14 @@ problem?
   deletion cost grow with key length. The first revision seeded short keys
   (`k0`, `k1`, …) and so measured a cheaper map: on the same host, 64-byte keys
   alone raised `AllExpired_10k` from ~0.67 ms to ~0.84 ms (Codex, PR #1604).
-  Fixtures and reader keyspaces now use real `SHA256Hex` digests, built once
-  and memoized. Retention is bounded by the largest fixture (1 000 000 keys,
-  ~80 MB), not by `b.N`. Keys minted inside a timed loop (churn inserts, the
-  contention writer) are 64-hex keys built from a counter, so the timed loop
-  pays no SHA-256.
+  Fixtures and reader keyspaces now use real `SHA256Hex` digests. Each
+  benchmark builds its own keys once, outside the `b.N` loop, and they die
+  when it returns. An intermediate revision memoized them in a package-level
+  table, which kept ~80 MB live across later benchmarks and skewed their GC
+  pacing (Codex, PR #1604). `TestBenchFiles_NoPackageLevelVars` now forbids
+  package-level vars in this package's test files. Keys minted inside a timed
+  loop (churn inserts, the contention writer) are 64-hex keys built from a
+  counter, so the timed loop pays no SHA-256.
 - **Fixture lifetime:** an already-evicted cache is no longer at capacity, so
   each iteration rebuilds one with the timer stopped, and exactly one fixture is
   live at a time. The first revision built all `b.N` up front. That retains
@@ -74,8 +77,8 @@ problem?
 - **Harness changes after the 2026-10-16 run (not re-measured).** The
   benchmarks now finish any setup-triggered GC cycle before timing
   (`runtime.GC()` per eviction fixture, and `startTimedAfterGC` everywhere
-  else). The contention benchmarks also guarantee and count in-window
-  evictions. The figures below predate both changes. The next idle-host run
+  else), share no fixture state across benchmarks, and the contention
+  benchmarks guarantee and count in-window evictions. The figures below predate both changes. The next idle-host run
   must re-measure them.
 
 ## Results — the cost that exists (historical, pre-harness-fix; re-measure on an idle host)

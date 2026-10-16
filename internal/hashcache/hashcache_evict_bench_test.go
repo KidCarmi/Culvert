@@ -31,35 +31,45 @@ import (
 // gateway holds (Codex, PR #1604). Every key these benchmarks insert or look
 // up is therefore 64 hex characters.
 //
-// Fixture and reader keys are real SHA256Hex digests, built once per namespace
-// and memoized. The table only ever grows to the largest fixture size (1 000 000
-// entries, ~80 MB), so what is retained is bounded by the benchmark matrix,
-// never by b.N. Keys minted INSIDE a timed loop (churn inserts, the contention
-// writer) cannot afford a SHA-256 each, so seqKey builds a 64-hex key of the
-// same length and alphabet from a counter. The counter goes in the leading
-// characters so that keys differ early, as digests do.
+// Fixture and reader keys are real SHA256Hex digests. Keys minted INSIDE a
+// timed loop (churn inserts, the contention writer) cannot afford a SHA-256
+// each, so seqKey builds a 64-hex key of the same length and alphabet from a
+// counter. The counter goes in the leading characters so that keys differ
+// early, as digests do.
+//
+// No package-level fixture state (Codex, PR #1604). An earlier revision
+// memoized key tables in a package-level map. That kept ~80 MB of 1 000 000-
+// entry keys live for the rest of `-bench .` and skewed GC pacing for every
+// later benchmark, including the pointer-versus-value A/B. Each benchmark now
+// builds its own keys once, outside the b.N loop. They die when it returns,
+// and startTimedAfterGC collects setup garbage before timing.
+// TestBenchFiles_NoPackageLevelVars walls this: no _test.go file in this
+// package may declare a package-level var.
 
-var (
-	keyTablesMu sync.Mutex
-	keyTables   = map[string][]string{}
-)
-
-// keyTable returns SHA256Hex(ns + i) for i in [0, n), memoized per namespace.
+// keyTable returns SHA256Hex(ns + i) for i in [0, n), freshly allocated.
 func keyTable(ns string, n int) []string {
-	keyTablesMu.Lock()
-	defer keyTablesMu.Unlock()
-	t := keyTables[ns]
-	for i := len(t); i < n; i++ {
-		t = append(t, SHA256Hex([]byte(ns+strconv.Itoa(i))))
+	t := make([]string, n)
+	for i := range t {
+		t[i] = SHA256Hex([]byte(ns + strconv.Itoa(i)))
 	}
-	keyTables[ns] = t
-	return t[:n]
+	return t
 }
 
-// seqKey returns a 64-hex-character key for counter i in namespace ns: the 16
-// hex digits of i, then 48 characters of SHA256Hex(ns). One allocation, no
-// hashing, so it is cheap enough for a timed loop.
-func seqKey(ns string, i int) string {
+// Namespaces for seqKey: one hex digit each, written into the key so the
+// churn, writer and top-up keyspaces never collide.
+const (
+	nsChurn  = 'a'
+	nsWriter = 'b'
+	nsTopUp  = 'c'
+
+	// seqKeyTail fills the rest of a seqKey after its 16 counter digits and
+	// one namespace digit: 47 fixed hex characters, so every key is 64 long.
+	seqKeyTail = "5f0e9c2d7b4a8613e2c9d05b7a1f6e3c8d2b9a4f7e1c605"
+)
+
+// seqKey returns a 64-hex-character key for counter i in namespace ns. One
+// allocation, no hashing, so it is cheap enough for a timed loop.
+func seqKey(ns byte, i int) string {
 	var buf [64]byte
 	var n [8]byte
 	u := uint64(i)
@@ -67,30 +77,21 @@ func seqKey(ns string, i int) string {
 		n[b] = byte(u >> (8 * b)) // little-endian: the fastest-changing byte first
 	}
 	hex.Encode(buf[:16], n[:])
-	copy(buf[16:], seqKeySuffix(ns))
+	buf[16] = ns
+	copy(buf[17:], seqKeyTail)
 	return string(buf[:])
 }
 
-var seqSuffixes sync.Map // ns -> string (48 hex chars)
-
-func seqKeySuffix(ns string) string {
-	if v, ok := seqSuffixes.Load(ns); ok {
-		return v.(string)
-	}
-	v, _ := seqSuffixes.LoadOrStore(ns, SHA256Hex([]byte("seq:" + ns))[:48])
-	return v.(string)
-}
-
-// fillCache seeds a cache to exactly maxSize entries, the first expiredFrac of
-// them already expired, keyed by keyTable("k", maxSize). It writes c.entries
-// directly: going through Set would trip eviction partway and leave the map in
-// a shape the benchmark did not ask for.
-func fillCache(maxSize int, expiredFrac float64) *HashCache {
+// fillCache seeds a cache to exactly len(keys) entries, the first expiredFrac
+// of them already expired. It writes c.entries directly: going through Set
+// would trip eviction partway and leave the map in a shape the benchmark did
+// not ask for.
+func fillCache(keys []string, expiredFrac float64) *HashCache {
+	maxSize := len(keys)
 	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
 	c := New(maxSize, time.Hour)
 	now := time.Now()
 	nExpired := int(float64(maxSize) * expiredFrac)
-	keys := keyTable("k", maxSize)
 	for j := 0; j < maxSize; j++ {
 		expiresAt := now.Add(time.Hour)
 		if j < nExpired {
@@ -132,8 +133,9 @@ func startTimedAfterGC(b *testing.B) {
 // finishes that cycle before timing starts.
 func benchEvictLocked(b *testing.B, maxSize int, expiredFrac float64) {
 	b.StopTimer()
+	keys := keyTable("k", maxSize) // once per benchmark run, outside the b.N loop
 	for i := 0; i < b.N; i++ {
-		c := fillCache(maxSize, expiredFrac)
+		c := fillCache(keys, expiredFrac)
 		runtime.GC()
 		b.StartTimer()
 		c.evictLocked()
@@ -203,7 +205,7 @@ func benchChurn(b *testing.B, maxSize int) {
 	b.ReportAllocs()
 	startTimedAfterGC(b)
 	for i := 0; i < b.N; i++ {
-		c.Set(seqKey("n", i), res)
+		c.Set(seqKey(nsChurn, i), res)
 	}
 }
 
@@ -213,8 +215,9 @@ func BenchmarkSetChurn_AtCapacity_100k(b *testing.B) { benchChurn(b, 100_000) }
 // Get on a hit: the path every scanned object takes before the scanners are
 // consulted at all, and the path the eviction stall blocks.
 func BenchmarkGet_Hit(b *testing.B) {
-	c := fillCache(10_000, 0)
-	hit := keyTable("k", 10_000)[512]
+	keys := keyTable("k", 10_000)
+	c := fillCache(keys, 0)
+	hit := keys[512]
 	b.ReportAllocs()
 	startTimedAfterGC(b)
 	for i := 0; i < b.N; i++ {
@@ -225,7 +228,7 @@ func BenchmarkGet_Hit(b *testing.B) {
 }
 
 func BenchmarkGet_Miss(b *testing.B) {
-	c := fillCache(10_000, 0)
+	c := fillCache(keyTable("k", 10_000), 0)
 	absent := keyTable("absent", 1)[0] // 64 hex chars, never inserted
 	b.ReportAllocs()
 	startTimedAfterGC(b)
@@ -282,8 +285,8 @@ func reportHitRate(b *testing.B, hits, total int64) {
 // writer present: the ceiling the eviction stall interrupts. Nothing evicts
 // here, so this one reads a fully populated keyspace (%hit = 100).
 func BenchmarkGet_Parallel(b *testing.B) {
-	c := fillCache(10_000, 0)
 	keys := keyTable("k", 10_000) // built before the timer starts
+	c := fillCache(keys, 0)
 	b.ReportAllocs()
 	startTimedAfterGC(b)
 	hits, total := readParallel(b, c, keys)
@@ -341,9 +344,9 @@ func startEvictingWriter(c *HashCache, maxSize int, res ScanCacheResult) *evicti
 		// Land a write before the readers are timed. Without the handshake
 		// the calibration call (b.N=1) can return and stop the writer before
 		// it is ever scheduled.
-		set(seqKey("w", 0))
+		set(seqKey(nsWriter, 0))
 		for j := 0; w.size < maxSize; j++ {
-			set(seqKey("f", j)) // top up: the next Set evicts
+			set(seqKey(nsTopUp, j)) // top up: the next Set evicts
 		}
 		close(ready)
 		for i := 1; ; i++ {
@@ -352,7 +355,7 @@ func startEvictingWriter(c *HashCache, maxSize int, res ScanCacheResult) *evicti
 				return
 			default:
 			}
-			set(seqKey("w", i))
+			set(seqKey(nsWriter, i))
 		}
 	}()
 	<-ready
@@ -402,8 +405,8 @@ func assertContended(b *testing.B, writes, evictions int64) {
 // this is the benchmark to re-read if that follow-up is attempted.
 func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 	const maxSize = 10_000
-	c := fillCache(maxSize, 0)
 	keys := keyTable("k", maxSize) // built before the timer starts
+	c := fillCache(keys, 0)
 	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
 	w := startEvictingWriter(c, maxSize, res)
 
@@ -447,7 +450,7 @@ func BenchmarkGet_ParallelDuringEviction(b *testing.B) {
 // eviction-tripping writer when withWriter is set. %hit must be 0 in both.
 func benchMissOnlyParallel(b *testing.B, withWriter bool) {
 	const maxSize = 10_000
-	c := fillCache(maxSize, 0)
+	c := fillCache(keyTable("k", maxSize), 0)
 	keys := keyTable("m", maxSize) // never inserted; built before the timer starts
 	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
 
