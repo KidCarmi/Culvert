@@ -23,6 +23,7 @@ package main
 // and prove the wall fails, without touching the tree.
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -162,10 +163,14 @@ var contractRenderExceptions = map[string]string{
 // contractRenderViolations reports every way production code could put an
 // OperatorContract on a response other than through writeOperatorContract.
 func contractRenderViolations(idx *contractIndex) (violations []string, writerCalls int) {
-	writerOK := false
+	// The writer itself is NOT exempt: its whole body is validated by
+	// writerViolations, so a second write, a conditional write, or any other
+	// use of the unredacted value inside it fails the wall (Codex P2, #1545).
+	writerSeen := false
 	for _, fn := range idx.funcs {
 		if fn.Key == operatorContractWriter {
-			writerOK = writerRedactsForAdmin(fn.Decl)
+			writerSeen = true
+			violations = append(violations, writerViolations(fn)...)
 			continue
 		}
 		if _, ok := contractRenderExceptions[fn.Key]; ok {
@@ -175,40 +180,124 @@ func contractRenderViolations(idx *contractIndex) (violations []string, writerCa
 		violations = append(violations, v...)
 		writerCalls += n
 	}
-	if !writerOK {
-		violations = append(violations, operatorContractWriter+": missing, or does not serialize "+
-			"jsonOK(w, redactContractForRole(full, <role>.HasRole(RoleAdmin)))")
+	if !writerSeen {
+		violations = append(violations, operatorContractWriter+": missing")
 	}
 	return violations, writerCalls
 }
 
-// writerRedactsForAdmin checks the helper's own body structurally.
-func writerRedactsForAdmin(fd *ast.FuncDecl) bool {
-	found := false
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) != 2 {
-			return true
-		}
-		if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "jsonOK" {
-			return true
-		}
-		red, ok := isCallTo(call.Args[1], "redactContractForRole")
-		if !ok || len(red.Args) != 2 {
-			return true
-		}
-		gate, ok := red.Args[1].(*ast.CallExpr)
-		if !ok || len(gate.Args) != 1 {
-			return true
-		}
-		sel, ok := gate.Fun.(*ast.SelectorExpr)
-		arg, ok2 := gate.Args[0].(*ast.Ident)
-		if ok && ok2 && sel.Sel.Name == "HasRole" && arg.Name == "RoleAdmin" {
-			found = true
+// writerViolations validates writeOperatorContract's COMPLETE body:
+//   - exactly one write to the response of any kind (jsonOK, json.Marshal /
+//     MarshalIndent, any .Encode / .Write / .WriteString, fmt.Fprint*);
+//   - that write is an unconditional top-level statement of the form
+//     jsonOK(w, redactContractForRole(full, <role>.HasRole(RoleAdmin)));
+//   - the contract parameter is referenced exactly once — as that call's
+//     first argument — so the unredacted value cannot be used anywhere else.
+func writerViolations(fn *contractFunc) []string {
+	where := fn.File + ": " + operatorContractWriter
+	var out []string
+	if writes := responseWritesIn(fn.Decl.Body); len(writes) != 1 {
+		out = append(out, fmt.Sprintf("%s performs %d response writes, want exactly 1", where, len(writes)))
+	}
+	param := contractParamName(fn.Decl)
+	if param == "" {
+		return append(out, where+" has no OperatorContract parameter")
+	}
+	if !hasTopLevelRedactedWrite(fn.Decl.Body, param) {
+		out = append(out, where+" does not unconditionally serialize "+
+			"jsonOK(w, redactContractForRole("+param+", <role>.HasRole(RoleAdmin)))")
+	}
+	if n := identUses(fn.Decl.Body, param); n != 1 {
+		out = append(out, fmt.Sprintf("%s references the unredacted %q %d times, want exactly 1 "+
+			"(as redactContractForRole's argument)", where, param, n))
+	}
+	return out
+}
+
+// responseWritesIn collects every call in body that writes a response or
+// serializes a value.
+func responseWritesIn(body *ast.BlockStmt) []*ast.CallExpr {
+	var writes []*ast.CallExpr
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && (isSerializerCall(call) || isRawWriteCall(call)) {
+			writes = append(writes, call)
 		}
 		return true
 	})
-	return found
+	return writes
+}
+
+// isRawWriteCall matches .Write / .WriteString on anything and fmt.Fprint*.
+func isRawWriteCall(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	switch sel.Sel.Name {
+	case "Write", "WriteString":
+		return true
+	case "Fprint", "Fprintf", "Fprintln":
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && pkg.Name == "fmt"
+	}
+	return false
+}
+
+// hasTopLevelRedactedWrite reports whether body has, as a direct statement,
+// jsonOK(w, redactContractForRole(param, <x>.HasRole(RoleAdmin))).
+func hasTopLevelRedactedWrite(body *ast.BlockStmt, param string) bool {
+	for _, st := range body.List {
+		es, ok := st.(*ast.ExprStmt)
+		if !ok {
+			continue
+		}
+		if call, ok := isCallTo(es.X, "jsonOK"); ok && len(call.Args) == 2 && isAdminGatedRedaction(call.Args[1], param) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAdminGatedRedaction(e ast.Expr, param string) bool {
+	red, ok := isCallTo(e, "redactContractForRole")
+	if !ok || len(red.Args) != 2 {
+		return false
+	}
+	if id, ok := red.Args[0].(*ast.Ident); !ok || id.Name != param {
+		return false
+	}
+	gate, ok := red.Args[1].(*ast.CallExpr)
+	if !ok || len(gate.Args) != 1 {
+		return false
+	}
+	sel, ok := gate.Fun.(*ast.SelectorExpr)
+	arg, ok2 := gate.Args[0].(*ast.Ident)
+	return ok && ok2 && sel.Sel.Name == "HasRole" && arg.Name == "RoleAdmin"
+}
+
+// contractParamName is the name of fd's OperatorContract parameter, or "".
+func contractParamName(fd *ast.FuncDecl) string {
+	if fd.Type.Params == nil {
+		return ""
+	}
+	for _, p := range fd.Type.Params.List {
+		if isOperatorContractType(p.Type) && len(p.Names) == 1 {
+			return p.Names[0].Name
+		}
+	}
+	return ""
+}
+
+// identUses counts references to name in body.
+func identUses(body *ast.BlockStmt, name string) int {
+	n := 0
+	ast.Inspect(body, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok && id.Name == name {
+			n++
+		}
+		return true
+	})
+	return n
 }
 
 func contractRenderViolationsIn(fn *contractFunc) (violations []string, writerCalls int) {
@@ -403,6 +492,22 @@ func TestWall_OperatorContractRenderer_NegativeControls(t *testing.T) {
 		"jsonOK(w, redactContractForRole(full, uiRole(r).HasRole(RoleViewer)))")
 	if v, _ := contractRenderViolations(parseContractSources(t, widened)); len(v) == 0 {
 		t.Error("a writeOperatorContract gated on RoleViewer passed the wall")
+	}
+
+	// (d)–(f) The writer's body is validated in full, not just searched for
+	// one compliant call (Codex P2, PR #1545).
+	const redacted = "jsonOK(w, redactContractForRole(full, uiRole(r).HasRole(RoleAdmin)))"
+	for name, repl := range map[string]string{
+		"extra write of full after the redacted write": redacted + "\n\tjsonOK(w, full)",
+		"conditional write of full":                    "if r.URL.Query().Get(\"raw\") != \"\" {\n\t\tjsonOK(w, full)\n\t}\n\t" + redacted,
+		"writes full directly":                         "jsonOK(w, full)",
+		"raw write of a marshalled full":               redacted + "\n\tb, _ := json.Marshal(full)\n\t_, _ = w.Write(b)",
+	} {
+		mutated := base.clone()
+		mutated.replaceOnce(t, "diagnostics.go", redacted, repl)
+		if v, _ := contractRenderViolations(parseContractSources(t, mutated)); len(v) == 0 {
+			t.Errorf("writer mutation %q passed the wall", name)
+		}
 	}
 }
 
