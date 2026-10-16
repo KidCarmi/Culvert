@@ -8,6 +8,7 @@ package main
 // changes no parsing, enforcement or fallback behavior.
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -46,12 +47,25 @@ func checkAccessCIDRLists() OperatorContractCheck {
 			Message: "Admin UI allowlist and trusted-proxy lists loaded without rejected entries",
 		}
 	}
+	// A rejected update never mutates the live set (both setters validate the
+	// whole list before swapping), so the consequence is described from the
+	// list actually in force, not assumed from the rejection.
 	msg := ""
 	if uiBad {
-		msg += "Admin UI IP allowlist was rejected (" + ui + "); the previous list stays in force, so if none was set the admin UI accepts every client IP. "
+		msg += "Admin UI IP allowlist was rejected (" + ui + "); the previous list stays in force"
+		if n := len(ListUIAllowedCIDRs()); n == 0 {
+			msg += ", which is empty, so the admin UI accepts every client IP. "
+		} else {
+			msg += " (" + accessCIDREntries(n) + "). "
+		}
 	}
 	if tpBad {
-		msg += "Trusted-proxy list was rejected (" + tp + "); X-Forwarded-For is not trusted, so lockouts, rate limits and audit entries key on the reverse proxy's address. "
+		msg += "Trusted-proxy list was rejected (" + tp + "); the previous list stays in force"
+		if n := len(ListTrustedProxyCIDRs()); n == 0 {
+			msg += ", which is empty, so X-Forwarded-For is not trusted and lockouts, rate limits and audit entries key on the reverse proxy's address. "
+		} else {
+			msg += " (" + accessCIDREntries(n) + "), so X-Forwarded-For is still trusted only from those proxies. "
+		}
 	}
 	return OperatorContractCheck{
 		Code:           "access_cidr_lists",
@@ -59,4 +73,11 @@ func checkAccessCIDRLists() OperatorContractCheck {
 		Message:        msg,
 		OperatorAction: "Correct the entry under Settings (Admin UI allowed IPs / Trusted proxies) or in config.yaml; a valid save clears this warning.",
 	}
+}
+
+func accessCIDREntries(n int) string {
+	if n == 1 {
+		return "1 entry"
+	}
+	return fmt.Sprintf("%d entries", n)
 }

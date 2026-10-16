@@ -2110,6 +2110,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid trusted_proxy_cidrs: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		noteAccessCIDRResult(accessCIDRTrustedProxy, nil)
 		SetProxyBaseURL(body.BaseURL)
 		uiExtraSANs = body.UISANs
 		trustForwardedHeaders = body.TrustForwardedHeaders
