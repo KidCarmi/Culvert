@@ -266,8 +266,11 @@ safe at any time; it costs only the fallback.
   page exists to prevent. So the trade is deliberate and it is visible:
   `culvert_idp_authz_endpoint_unverified_total` rising, plus at most one
   `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line per 5 minutes — ONE process-global
-  rate gate shared by every profile, naming whichever profile triggered it, so
-  the counter is what tells you how many are affected.
+  rate gate shared by every profile, naming whichever profile triggered it.
+  The counter counts EVENTS and includes the ones suppressed from the log (the
+  line prints the running total); it is NOT a count of distinct affected
+  profiles, because one profile recompiling — a recovery pass, or a CP->DP
+  snapshot — increments it each time.
   **If you see it: fix this node's DNS.** A provider compiled while the
   resolver was healthy carries a verified endpoint.
 
