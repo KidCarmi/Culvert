@@ -567,11 +567,17 @@ func TestWall_RosterDerivedDiagnostics_NegativeControl(t *testing.T) {
 var rosterRowProducers = map[string]bool{
 	"checkOversizeConfiguredUsernames": true,
 	"collectAdminUsernames":            true,
+	"checkAdminRosterDurability":       true,
+	"readRosterDurabilityFacts":        true,
 }
 
 // rosterProducerCallerExceptions are callers outside the contract walk that
 // may reference a producer, with the reason.
-var rosterProducerCallerExceptions = map[string]string{}
+var rosterProducerCallerExceptions = map[string]string{
+	// The redactor re-derives admin_roster_durability's VIEWER row from the
+	// facts below admin; it runs only inside writeOperatorContract.
+	"redactContractForRole": "renders the viewer twin inside writeOperatorContract",
+}
 
 // contractReachableKeys is contractReachable keyed by function key.
 func contractReachableKeys(idx *contractIndex) map[string]bool {
