@@ -42,13 +42,16 @@ verify the affected behavior in the linked implementation/tests at the task SHA.
 - The operator contract (`/api/diagnostics`, `/api/health/explain`) is
   viewer-readable, but rows derived from the admin roster or its durability
   counters are admin-only detail (SEC-DIAG-ROSTER-1). Classify every such row
-  in `redactContractForRole`: below admin it keeps code and status with a fixed
-  message, no action, no counts and no TOTP/backup posture. Un-redact only for a
-  proven admin, and wrap every new `buildOperatorContract` renderer; the walls in
-  [diagnostics_username_role_test.go](../../../diagnostics_username_role_test.go) enforce both.
-  Exception, intended least privilege: `admin_roster_durability` recomputes
-  status and verdict below admin, so a degraded login write alone reads `ok`
-  to viewers; status itself would be a replay-window oracle.
+  in `redactContractForRole`: below admin it gets a fixed message with no
+  action, no counts and no TOTP/backup posture. It keeps code and status unless
+  the status itself is admin-only; then status and verdict are recomputed from
+  viewer-safe facts. That is intended least privilege: when a degraded
+  login write is the only fault, `admin_roster_durability` reads `ok` to
+  viewers, so the TOTP/backup replay window is not revealed. Un-redact only
+  for a proven admin. Serialize the contract
+  only through `writeOperatorContract`. The AST walls in
+  [operator_contract_wall_test.go](../../../operator_contract_wall_test.go)
+  enforce both across every root production file.
 - Configuration versioning has explicit exclusions. Follow the current surface
   registry and regression tests in [conventions](../conventions.md#ui-configuration-and-api-changes),
   not a blanket snapshot-after-every-mutation rule. Password changes must not

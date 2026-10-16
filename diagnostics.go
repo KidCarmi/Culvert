@@ -2153,8 +2153,20 @@ func apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 	// The contract is viewer-readable, but one row is derived from the
 	// admin-only roster (GET /api/auth/users is RoleAdmin). Redact that row's
-	// detail for anything below admin — see redactContractForRole.
-	jsonOK(w, redactContractForRole(buildOperatorContract(), uiRole(r).HasRole(RoleAdmin)))
+	// detail for anything below admin — see writeOperatorContract.
+	writeOperatorContract(w, r, buildOperatorContract())
+}
+
+// writeOperatorContract is the ONLY place an OperatorContract is role-redacted
+// and serialized onto an HTTP response (SEC-DIAG-ROSTER-1). A renderer hands
+// it the FULL contract and never touches the redaction itself, so it cannot
+// compute the redacted value and then send the full one by mistake.
+// TestWall_EveryOperatorContractRendererIsClassified enforces this
+// structurally: buildOperatorContract() may only appear as this helper's
+// argument (or in the stated support-bundle exception), and no other
+// production code may pass an OperatorContract to jsonOK or a JSON encoder.
+func writeOperatorContract(w http.ResponseWriter, r *http.Request, full OperatorContract) {
+	jsonOK(w, redactContractForRole(full, uiRole(r).HasRole(RoleAdmin)))
 }
 
 // registerObservabilityRoutes wires the operator-facing observability
