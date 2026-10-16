@@ -325,4 +325,13 @@ func TestAuditClusterPushUnreportingNodes(t *testing.T) {
 	if got := auditClusterPushUnreportingNodes(); got != 2 {
 		t.Fatalf("unreporting = %d, want 2 (disconnected + legacy connected)", got)
 	}
+
+	// Draining (operator-initiated maintenance): checkNodeLiveness only ever
+	// flips "connected" to "disconnected", so a draining node whose DP
+	// actually goes down for maintenance never becomes "disconnected" either
+	// — it must be counted as unreporting on its own.
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-draining", Status: "draining"})
+	if got := auditClusterPushUnreportingNodes(); got != 3 {
+		t.Fatalf("unreporting = %d, want 3 (disconnected + legacy connected + draining)", got)
+	}
 }

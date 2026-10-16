@@ -201,8 +201,12 @@ func auditClusterPushDropsTotal() int64 {
 // auditClusterPushUnreportingNodes counts enrolled nodes whose audit drop
 // count the Control Plane cannot trust, so a zero total is not evidence the
 // centralized trail is complete:
-//   - disconnected (heartbeat timeout): the node cannot deliver its count, and
-//     losing the CP link is exactly when its push queue drops;
+//   - disconnected (heartbeat timeout) or draining (SetNodeDraining, for
+//     maintenance): the node cannot deliver its count, and losing the CP
+//     link — or going down for maintenance — is exactly when its push queue
+//     drops. checkNodeLiveness only ever flips "connected" to "disconnected",
+//     so a draining DP that actually stops heartbeating never becomes
+//     "disconnected" either; it would otherwise go unnoticed indefinitely;
 //   - connected with no heartbeat on file yet (CP restart, HA promotion, or
 //     the ~60s metricsLoop startup window) or heartbeating from a build
 //     without AuditDropsReported (a rolling upgrade): either way there is no
@@ -217,7 +221,7 @@ func auditClusterPushUnreportingNodes() int {
 	defer nodeMetricsMu.RUnlock()
 	for i := range nodes {
 		switch nodes[i].Status {
-		case "disconnected":
+		case "disconnected", "draining":
 			n++
 		case "connected":
 			if m, ok := nodeMetrics[nodes[i].NodeID]; !ok || !m.AuditDropsReported {
