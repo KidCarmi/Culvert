@@ -152,7 +152,12 @@ func noteRosterPersistBestEffort(what string, err error) {
 		return
 	}
 	n := rosterPersistBestEffort.Add(1)
-	now := time.Now()
+	// CHAOS-71: the gate's stamps are MONOTONIC (monoNanos), never UnixNano. On
+	// the wall clock a backwards step left the stamp in the future, so the age
+	// went NEGATIVE, which is always < the interval — latching this line into
+	// the suppressed branch for however far the step went. That silences the
+	// only operator-visible signal that admin roster writes are not surviving a
+	// restart, while rosterPersistSuppress keeps counting where nobody reads it.
 	// CHAOS-70 (Codex P2): CLAIM the interval atomically. A plain load/compare/
 	// store lets every caller that finishes concurrently read the same expired
 	// stamp and all emit a line — which is the log amplification this gate
@@ -161,11 +166,11 @@ func noteRosterPersistBestEffort(what string, err error) {
 	// the CAS; the losers re-read and land in the suppressed branch.
 	for {
 		last := rosterPersistLogLast.Load()
-		if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
+		if last != 0 && monoSince(last) < rosterPersistLogInterval {
 			rosterPersistSuppress.Add(1)
 			return
 		}
-		if rosterPersistLogLast.CompareAndSwap(last, now.UnixNano()) {
+		if rosterPersistLogLast.CompareAndSwap(last, monoNanos()) {
 			break
 		}
 	}
@@ -186,16 +191,16 @@ func noteRosterPersistBestEffort(what string, err error) {
 // must not share a rate gate).
 func noteRosterNotDurable() {
 	n := rosterNotDurable.Add(1)
-	now := time.Now()
+	// Monotonic stamps, for the reason noted on the gate above (CHAOS-71).
 	for {
 		last := rosterNotDurableLogLast.Load()
-		if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
+		if last != 0 && monoSince(last) < rosterPersistLogInterval {
 			rosterNotDurableSuppress.Add(1)
 			return
 		}
 		// CompareAndSwap, not load-compare-store: concurrent admin mutations
 		// would otherwise all observe the same expired stamp and all emit.
-		if rosterNotDurableLogLast.CompareAndSwap(last, now.UnixNano()) {
+		if rosterNotDurableLogLast.CompareAndSwap(last, monoNanos()) {
 			break
 		}
 	}

@@ -66,9 +66,17 @@ import (
 // never marks the whole DP fleet degraded.
 const dpCPPollFailGrace = 5 * time.Minute
 
-// dpCPPollFailingSince is the UnixNano timestamp of the healthy→failing
-// transition of dpControlPlanePollFailing (0 = healthy). Written only via
-// dpMarkCPPollFailing / dpMarkCPPollHealthy, the poll loop's entry points.
+// dpCPPollFailingSince is the MONOTONIC stamp (monoNanos) of the
+// healthy→failing transition of dpControlPlanePollFailing (0 = healthy).
+// Written only via dpMarkCPPollFailing / dpMarkCPPollHealthy, the poll loop's
+// entry points, and only ever read back as an elapsed duration.
+//
+// Monotonic, not UnixNano: the grace window below is the only thing that turns
+// a sustained CP outage into a probe-visible failure, and on the wall clock a
+// backwards step left the stamp in the future, so time.Since went NEGATIVE and
+// the row stayed "ok" for however far the step went — a DP node held in the
+// load-balancer rotation, serving policy it could no longer refresh, with the
+// probe asserting it was fine (CHAOS-71).
 var dpCPPollFailingSince atomic.Int64
 
 // dpMarkCPPollFailing flags CP polling as failing, stamping the transition
@@ -76,7 +84,7 @@ var dpCPPollFailingSince atomic.Int64
 // "last failure").
 func dpMarkCPPollFailing() {
 	if dpControlPlanePollFailing.CompareAndSwap(false, true) {
-		dpCPPollFailingSince.Store(time.Now().UnixNano())
+		dpCPPollFailingSince.Store(monoNanos())
 	}
 }
 
@@ -140,7 +148,7 @@ func appendDPHealthChecks(checks map[string]*readinessCheck) {
 		// (dp_last_known_good_config) and in the log.
 		cp.Detail = "control plane connectivity is degraded — see server logs"
 		since := dpCPPollFailingSince.Load()
-		if since != 0 && time.Since(time.Unix(0, since)) >= dpCPPollFailGrace {
+		if since != 0 && monoSince(since) >= dpCPPollFailGrace {
 			cp.Status = "fail"
 		}
 		// Otherwise: failing but inside the grace window (or a bare flag with no
