@@ -123,7 +123,14 @@ func menu(ctx context.Context, collector applianceconsole.Collector, admin bool)
 		// Never hand the terminal to PAM/sudo if restoration or draining failed.
 		restoreErr := unix.IoctlSetTermios(0, unix.TCSETS, original)
 		var displayErr error
-		if ansi {
+		// The termios restore + input flush above are ioctls and never block on
+		// output drain, so they always run. The cosmetic ANSI reset is a write(2)
+		// to tty1; once we are stopping, the VT may no longer be drained (plymouth
+		// takes the console during shutdown) and that write can block past
+		// systemd's 90s scope timeout. We are tearing down, not handing the
+		// terminal to PAM/sudo, so skip it when cancelled — armShutdownExit
+		// backstops a write already in flight.
+		if ansi && ctx.Err() == nil {
 			_, displayErr = fmt.Fprint(os.Stdout, "\x1b[0m\x1b[?25h\x1b[?2004l\x1b[2J\x1b[H")
 		}
 		result = errors.Join(result, restoreErr, displayErr, unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH))
@@ -318,6 +325,12 @@ func (d *menuDisplay) handle(key string) string {
 func confirm(ctx context.Context, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	// Already stopping: do not issue the prompt write(2) to a VT that may no
+	// longer drain during shutdown (the 90s-stall syscall). The caller treats a
+	// non-nil error as "return to exit", which is exactly right here.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH); err != nil {
 		return "", fmt.Errorf("clear confirmation input: %w", err)
 	}

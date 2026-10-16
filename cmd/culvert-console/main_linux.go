@@ -12,12 +12,47 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/applianceconsole"
 )
 
 func main() {
 	os.Exit(run())
+}
+
+// consoleShutdownGrace bounds how long culvert-console may take to exit after it
+// is asked to stop (SIGTERM/SIGHUP/SIGINT). The interactive boot console blocks
+// on terminal I/O, and a write to tty1 is NOT interruptible once plymouth takes
+// the VT during shutdown — ctx cancellation cannot unblock an in-progress
+// write(2) (ASTRA bound PID 6427 to session-2.scope on tty1, SIGTERM→SIGKILL 90s
+// apart). systemd's session scope would otherwise wait its DefaultTimeoutStopSec
+// (90s) and SIGKILL us, stalling the whole shutdown/reboot. A console carries no
+// durable state — exiting promptly on a terminating signal IS correct shutdown
+// behaviour, so this makes us honour systemd's contract rather than lowering its
+// timeout or waiving the result. The grace sits above interactiveCommand's 2s
+// child-kill WaitDelay plus terminal restore, so a clean stop unwinds and exits
+// first and never reaches the timer; the timer is the backstop for a write(2)
+// caught mid-syscall against a VT that stopped draining.
+const consoleShutdownGrace = 5 * time.Second
+
+// shutdownExitFunc is os.Exit in production; a test replaces it to observe the
+// backstop firing without terminating the test binary.
+var shutdownExitFunc = os.Exit
+
+// armShutdownExit guarantees the process exits within grace of ctx cancellation
+// regardless of which blocking syscall (write, read, or child wait) it is parked
+// in. It does NOT touch the terminal: a second goroutine poking tty state would
+// race the main goroutine's own deferred restore, and the VT is being torn down
+// regardless. The clean path exits before the timer in the common case.
+func armShutdownExit(ctx context.Context, grace time.Duration) {
+	go func() {
+		<-ctx.Done()
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		<-timer.C
+		shutdownExitFunc(0)
+	}()
 }
 
 func run() int {
@@ -40,6 +75,7 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stop()
+	armShutdownExit(ctx, consoleShutdownGrace)
 	collector := applianceconsole.NewCollector(applianceconsole.Sources{
 		Prerequisites: collectPrerequisites, RecoveryFile: hostPublic,
 		StateDir: "/var/lib/culvert-appliance/state", BuildFile: "/var/lib/culvert-appliance/build-info.json", NetDir: "/sys/class/net", Probe: runProbe, HostnameFile: "/etc/hostname", ResolverFile: "/run/systemd/resolve/resolv.conf",
