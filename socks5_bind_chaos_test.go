@@ -302,10 +302,12 @@ func TestChaos66_BindIsRecordedOnlyOnceTheAddressIsPublished(t *testing.T) {
 		if !strings.Contains(line, "bound and accepting again") {
 			return
 		}
-		probed.Add(1)
 		if s := sup.Load(); s != nil && s.Addr() == nil && socks5ListenerState().Binds > 0 {
 			unpublished.Add(1)
 		}
+		// Signalled AFTER the check, so the test cannot read unpublished
+		// before the check has run.
+		probed.Add(1)
 	}), "", 0)
 	// Registered BEFORE startSupervisedSOCKS5: cleanups are LIFO, so the
 	// supervisor is stopped before the logger global is restored.
