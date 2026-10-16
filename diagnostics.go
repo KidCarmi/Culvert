@@ -164,6 +164,7 @@ func buildOperatorContract() OperatorContract {
 		checkKeyAtRest(),
 		checkPlaintextKeyBackups(),
 		checkAuditPersistence(),
+		checkAdminRosterDurability(),
 		checkCategoryFeedDB(),
 		checkThreatFeed(),
 		checkRequestHistory(),
@@ -545,10 +546,15 @@ func checkSessionSecret() OperatorContractCheck {
 // (ui_auth.go) all cap names at 64 bytes.
 const adminUsernameAccountLimit = 64
 
+// adminUsernameLengthCode is the operator-contract code for the oversize
+// admin-username row. Named so the role redaction below and the check itself
+// cannot drift apart on a string literal.
+const adminUsernameLengthCode = "admin_username_length"
+
 func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	if cfg == nil {
 		return OperatorContractCheck{
-			Code:    "admin_username_length",
+			Code:    adminUsernameLengthCode,
 			Status:  diagOK,
 			Message: "no admin accounts configured",
 		}
@@ -569,7 +575,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	}
 	if n == 0 {
 		return OperatorContractCheck{
-			Code:    "admin_username_length",
+			Code:    adminUsernameLengthCode,
 			Status:  diagOK,
 			Message: "all configured admin usernames are within the login length limit",
 		}
@@ -580,7 +586,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	}
 	action := oversizeUsernameAction(inv, totpOversize)
 	return OperatorContractCheck{
-		Code:   "admin_username_length",
+		Code:   adminUsernameLengthCode,
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
 			"the dashboard sign-in form accepts at most %d characters and setup and Admin Users cap new names there "+
@@ -590,6 +596,95 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
 		OperatorAction: action,
 	}
+}
+
+// diagnosticsRedactedUsernameMessage is the role-safe form of the oversize
+// admin-username row. It is a CONSTANT and carries no roster-derived value —
+// not the count, not the longest length, not the legacy login's role, not
+// whether any affected account has a second factor enrolled.
+const diagnosticsRedactedUsernameMessage = "one or more admin accounts have a username above the " +
+	"supported account limit; sign in as an admin for the affected count and the remediation steps"
+
+// diagnosticsRedactedAction is the operator_action of every redacted warn/fail
+// row. The contract requires an action on any non-ok row so the GUI can
+// render a hint, but the real remediation is admin-only, so the redacted row
+// carries this FIXED text: it names no account, role, count or second-factor
+// posture and only routes the reader to an administrator.
+const diagnosticsRedactedAction = "Ask an administrator to review this row in Diagnostics; " +
+	"the details and the remediation steps are shown to administrators only."
+
+// redactContractForRole strips admin-roster-derived detail from the operator
+// contract for any caller that is not a proven admin.
+//
+// GET /api/diagnostics is deliberately viewer-readable (a management-plane
+// health surface must not need admin), but the roster that
+// checkOversizeConfiguredUsernames describes is admin-only: GET
+// /api/auth/users is RoleAdmin. Its warn row therefore carried facts a viewer
+// or operator cannot otherwise obtain — how many admin accounts exceed the
+// account limit, the longest name's byte length, whether a legacy single-user
+// login exists and is mirrored into the roster, that login's EFFECTIVE ROLE
+// (interpolated verbatim into the remediation text), and whether at least one
+// affected account has TOTP enrolled. The last is the one with real attacker
+// value: it tells a lower-privileged insider whether a high-value admin
+// account is single-factor, which is exactly the input to choosing a
+// credential-stuffing or phishing target.
+//
+// The row stays VISIBLE at every role — status and code are unchanged, so
+// monitoring and the SPA still see the warn — and only the roster-derived
+// detail is withheld. That matches the operator-contract convention this
+// repository already applies to its viewer-role rows: the identity-backend row
+// "carries the backend name and counts, never the cause", and /readyz uses
+// FIXED detail strings precisely so an unauthenticated or lower-privileged
+// reader cannot fingerprint node state.
+//
+// The admin_roster_durability row (CHAOS-70 counters) is the second classified
+// row. Below admin it is REPLACED by rosterDurabilityFacts.viewerRow: whether
+// the roster is durable and whether any change was refused are visible as a
+// fixed message, while every count, the remedy and the degraded login-write
+// posture (a backup code or TOTP replay counter that may not survive a
+// restart) are admin-only. Because that last fact can be the row's only reason
+// to warn, its STATUS is recomputed too, and so is the verdict.
+//
+// Fail-closed by construction: the ONLY input that un-redacts is a proven
+// admin, so a future role added below admin, or a caller whose role cannot be
+// resolved, gets the redacted form without this function being revisited.
+func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
+	if isAdmin {
+		return c
+	}
+	// Copy the slice before mutating: the caller's OperatorContract must not be
+	// altered in place, so a redacted render can never leak back into a
+	// subsequent unredacted one through a shared backing array.
+	checks := make([]OperatorContractCheck, len(c.Checks))
+	copy(checks, c.Checks)
+	statusChanged := false
+	for i := range checks {
+		switch checks[i].Code {
+		case adminUsernameLengthCode:
+			// An ok row names nothing about the roster, so leave it exactly as
+			// it is — redacting a healthy row would report a condition that
+			// does not exist and send an operator looking for an account that
+			// is fine.
+			if checks[i].Status == diagOK {
+				continue
+			}
+			checks[i].Message = diagnosticsRedactedUsernameMessage
+			checks[i].OperatorAction = diagnosticsRedactedAction
+		case adminRosterDurabilityCode:
+			// Re-derived from the viewer-safe facts rather than edited: the
+			// admin row's STATUS may itself be admin-only (a degraded
+			// login-path write), so the whole row, and the verdict it rolls
+			// into, is recomputed below admin.
+			prev := checks[i].Status
+			checks[i] = readRosterDurabilityFacts().viewerRow()
+			statusChanged = statusChanged || checks[i].Status != prev
+		}
+	}
+	c.Checks = checks
+	if statusChanged {
+		c.Verdict = rollUpVerdict(checks)
+	}
+	return c
 }
 
 // adminUsernameInventory is the de-duplicated set of configured login names
@@ -742,6 +837,182 @@ func checkAuditPersistence() OperatorContractCheck {
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
 	}
+}
+
+// adminRosterDurabilityCode is the operator-contract code for the admin-roster
+// durability row. Named so redactContractForRole and the check cannot drift
+// apart on a string literal.
+const adminRosterDurabilityCode = "admin_roster_durability"
+
+// Fixed viewer/operator renderings of the admin-roster durability row
+// (SEC-DIAG-ROSTER-1 policy, PR #1545). They are CONSTANTS carrying no count
+// and no second-factor or single-use-credential posture.
+const (
+	rosterDurabilityViewerNotDurable = "the admin roster is not being persisted to disk, so admin account changes " +
+		"can be lost on restart; sign in as an admin for the remediation steps"
+	rosterDurabilityViewerRefused = "one or more admin account changes were refused because the admin roster " +
+		"could not be written to disk; sign in as an admin for the details"
+	// rosterDurabilityViewerConfigured is the viewer rendering of EVERY state
+	// in which a roster file is configured and no change was refused —
+	// healthy AND degraded-login-write alike. Degraded login-path writes (a
+	// consumed backup code or TOTP replay counter that may not survive a
+	// restart) are admin-only under the policy: telling a lower-privileged
+	// reader that a replay window may be open is an oracle, so the two states
+	// must render identically below admin.
+	rosterDurabilityViewerConfigured = "an admin roster file is configured"
+)
+
+// rosterDurabilityFacts is one read of the state the durability row reports.
+// configured is the setup-complete gate (cfg.IsConfigured), NOT a roster read:
+// before setup there is no credential to lose.
+type rosterDurabilityFacts struct {
+	configured bool
+	persisted  bool // a roster file (-ui-users-file) is configured
+	// targetProblem is the admin-only reason a CONFIGURED roster file is
+	// unusable (failed startup load, not a regular file, missing parent);
+	// "" when the target looks usable.
+	targetProblem string
+	localAdmin    bool // a local account can sign in as admin without the IdP
+	notDurable    int64
+	refused       int64
+	degraded      int64
+}
+
+// rosterTargetProblem reports why a configured roster path cannot hold the
+// roster, or "" when it looks usable. READ-ONLY: it stats the target and its
+// parent directory and never creates, opens for writing or modifies anything.
+// A missing file under an existing directory is the supported first-run
+// state (the first save creates it), not a problem. The returned reason never
+// names the path.
+func rosterTargetProblem(path string, loadErr error) string {
+	if path == "" {
+		return ""
+	}
+	if loadErr != nil {
+		return "the configured roster file could not be loaded at startup"
+	}
+	fi, err := os.Stat(path)
+	switch {
+	case err == nil && !fi.Mode().IsRegular():
+		return "the configured roster path is not a regular file"
+	case err == nil:
+		return ""
+	case !os.IsNotExist(err):
+		return "the configured roster path cannot be inspected"
+	}
+	if di, err := os.Stat(filepath.Dir(path)); err != nil || !di.IsDir() {
+		return "the configured roster file's parent directory does not exist"
+	}
+	return ""
+}
+
+func readRosterDurabilityFacts() rosterDurabilityFacts {
+	if cfg == nil || !cfg.IsConfigured() {
+		return rosterDurabilityFacts{}
+	}
+	path, loadErr := cfg.rosterPersistTarget()
+	return rosterDurabilityFacts{
+		configured:    true,
+		persisted:     path != "",
+		targetProblem: rosterTargetProblem(path, loadErr),
+		localAdmin:    cfg.hasLocalAdministrator(),
+		notDurable:    rosterNotDurable.Load(),
+		refused:       rosterPersistRefused.Load(),
+		degraded:      rosterPersistBestEffort.Load(),
+	}
+}
+
+// checkAdminRosterDurability reports whether admin-roster changes survive a
+// restart (CHAOS-70, roster_persist_durability.go). Before this row the
+// evidence lived only in a boot log line (warnRosterNotDurable), a rate-limited
+// per-change line, and the culvert_admin_roster_persist_{failures,degraded}_total
+// counters — none visible to an operator working from the GUI. Report-only: it
+// reads atomics, config fields (including the recorded startup load outcome)
+// and two read-only stats of the roster target; it writes nothing and changes
+// no roster behaviour. This is the ADMIN rendering; redactContractForRole replaces it
+// with adminRow's viewer twin below admin. Counts are since process start.
+func checkAdminRosterDurability() OperatorContractCheck {
+	return readRosterDurabilityFacts().adminRow()
+}
+
+func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
+	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagOK}
+	switch {
+	case !f.configured:
+		row.Message = "initial setup is not complete; there are no admin credentials to persist yet"
+	case !f.persisted:
+		row = f.notDurableAdminRow()
+	case f.targetProblem != "":
+		row.Status = diagWarn
+		row.Message = f.targetProblem + " — admin account deletes, role changes and password rotations " +
+			"may not be saved and can be LOST on restart"
+		row.OperatorAction = "Fix the admin users file (-ui-users-file) path or its permissions so it names a " +
+			"writable regular file on a persistent volume, then restart and re-apply any account changes made since boot."
+	case f.refused == 0 && f.degraded == 0:
+		row.Message = "admin roster is persisting to disk"
+	default:
+		row.Status = diagWarn
+		row.Message = fmt.Sprintf("since this process started, %d admin account change(s) were refused because the "+
+			"roster could not be written (nothing was changed), and %d login-time write(s) failed (a consumed "+
+			"backup code or TOTP replay counter may not survive a restart)", f.refused, f.degraded)
+		row.OperatorAction = "Fix free space or permissions on the data volume (see the storage_write_failed alert), " +
+			"then re-apply the refused change from Administrators — nothing retries it automatically. If login-time " +
+			"writes failed, rotate the affected administrator's TOTP backup codes once the volume is healthy. " +
+			"The counts clear on restart."
+	}
+	return row
+}
+
+// notDurableAdminRow is the admin rendering when no roster file is configured.
+//
+// A set-up node with NO local administrator (e.g. a deployment that signs in
+// only through an identity provider) still warns here, deliberately (owner
+// decision, PR #1601): with no local admin, an identity-provider outage locks
+// everyone out of the console, and a local break-glass administrator is
+// standard practice. So that case names the break-glass gap rather than only
+// the durability gap — and the remedy orders the roster file first, because a
+// break-glass account created without it is itself lost on restart.
+func (f rosterDurabilityFacts) notDurableAdminRow() OperatorContractCheck {
+	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagWarn}
+	if f.localAdmin {
+		row.Message = "no admin roster file is configured — admin account deletes, role changes and password " +
+			"rotations apply in memory only and are LOST on restart (a rotated password reverts to the " +
+			"-user/auth.user credential)"
+		row.OperatorAction = "Set the admin users file (-ui-users-file) to a path on a persistent volume and restart, " +
+			"then re-apply any account changes made since the last restart."
+	} else {
+		row.Message = "No local administrator account: if the identity provider is unavailable, nobody can sign in. " +
+			"No admin roster file is configured either, so any account created now is LOST on restart"
+		row.OperatorAction = "Create a local break-glass administrator in Administrators. First set the admin users file " +
+			"(-ui-users-file) to a path on a persistent volume and restart, so the account survives a restart."
+	}
+	if f.notDurable > 0 {
+		row.Message += fmt.Sprintf(" — %d in-memory-only account change(s) since this process started", f.notDurable)
+	}
+	return row
+}
+
+// viewerRow is the rendering for every caller below admin: status from the
+// viewer-safe facts only (not durable, any refusal), a fixed message, no
+// count, and on a warn row the fixed diagnosticsRedactedAction (the contract
+// requires an action on every non-ok row; the real remedy is admin-only).
+func (f rosterDurabilityFacts) viewerRow() OperatorContractCheck {
+	row := f.adminRow()
+	row.OperatorAction = ""
+	switch {
+	case !f.configured:
+		// The not-configured message names no roster fact; keep it.
+	case !f.persisted, f.targetProblem != "":
+		row.Status, row.Message = diagWarn, rosterDurabilityViewerNotDurable
+	case f.refused > 0:
+		row.Status, row.Message = diagWarn, rosterDurabilityViewerRefused
+	default:
+		row.Status, row.Message = diagOK, rosterDurabilityViewerConfigured
+	}
+	if row.Status != diagOK {
+		row.OperatorAction = diagnosticsRedactedAction
+	}
+	return row
 }
 
 // checkRequestLogPersistence reports whether the operator-configured request
@@ -1933,7 +2204,22 @@ func apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, buildOperatorContract())
+	// The contract is viewer-readable, but one row is derived from the
+	// admin-only roster (GET /api/auth/users is RoleAdmin). Redact that row's
+	// detail for anything below admin — see writeOperatorContract.
+	writeOperatorContract(w, r, buildOperatorContract())
+}
+
+// writeOperatorContract is the ONLY place an OperatorContract is role-redacted
+// and serialized onto an HTTP response (SEC-DIAG-ROSTER-1). A renderer hands
+// it the FULL contract and never touches the redaction itself, so it cannot
+// compute the redacted value and then send the full one by mistake.
+// TestWall_EveryOperatorContractRendererIsClassified enforces this
+// structurally: buildOperatorContract() may only appear as this helper's
+// argument (or in the stated support-bundle exception), and no other
+// production code may pass an OperatorContract to jsonOK or a JSON encoder.
+func writeOperatorContract(w http.ResponseWriter, r *http.Request, full OperatorContract) {
+	jsonOK(w, redactContractForRole(full, uiRole(r).HasRole(RoleAdmin)))
 }
 
 // registerObservabilityRoutes wires the operator-facing observability

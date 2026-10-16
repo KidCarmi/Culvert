@@ -9,6 +9,49 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The viewer-readable operator contract rendered **admin-only roster state**
+  (SEC-DIAG-ROSTER-1). `GET /api/diagnostics` is deliberately `RoleViewer` — a
+  management-plane health surface must not require admin — but the oversize
+  admin-username row added in this window became the first contract row derived
+  from the admin roster (`cfg.ListUIUsers`/`GetUser`/`UserHasTOTP`), which
+  `GET /api/auth/users` gates at `RoleAdmin` on every method. With no role
+  filtering in `apiDiagnostics`, a viewer or operator could read the affected
+  account count, the longest username's byte length, that a legacy single-user
+  login exists and is oversize, whether it is mirrored into the roster, that
+  login's effective role interpolated verbatim, and **whether at least one
+  affected account has TOTP enrolled**.
+
+  The second-factor fact is the one with real attacker value: it tells a
+  lower-privileged insider — or a stolen read-only monitoring session — whether
+  a high-value administrator is single-factor, which is precisely the input to
+  choosing a credential-stuffing or phishing target. Before the row existed the
+  only signal was a one-shot boot log line, not reachable through the API at
+  all, so this was a new cross-role flow (CWE-497/CWE-200/CWE-1220,
+  OWASP A01:2021). `TestApiDiagnostics_NoSensitiveValues` did not catch it and
+  is not vacuous — it is a secret-*material* wall (session-secret symbols, PEM,
+  `/data/` paths, long hex runs) and identity metadata was outside its scope.
+
+  `redactContractForRole` now withholds that detail below admin. The row stays
+  **visible** at every role (code, `warn` status and the rolled-up verdict are
+  unchanged, so monitoring and the SPA still see the condition) and only the
+  roster-derived detail is withheld — hiding the row would conceal a live
+  management-plane fault and is pinned by a control. The redacted message is a
+  constant carrying no roster-derived value, an `ok` row is never redacted, and
+  the decision is fail-closed by construction: the only input that un-redacts
+  is a proven admin. No allow/deny decision, proxy path, or admission behaviour
+  changes. **Operator-visible change:** viewers and operators now see this one
+  row without its remediation text; sign in as an admin for the full
+  remediation.
+
+  **Review round (P1):** the first version wired the redaction into
+  `/api/diagnostics` only, while `GET /api/health/explain` renders the same
+  contract at the same viewer floor and returned it raw — a complete bypass
+  through the alternate endpoint. Both renderers are now redacted, and a wall
+  enumerates every caller of `buildOperatorContract` repo-wide so a third
+  renderer fails the build until it is redacted or granted a stated exception
+  (the support-bundle collector is the one recorded exception: a separate,
+  admin-approved trust boundary that writes through the bundle redactor).
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
@@ -658,6 +701,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- The operator contract (`GET /api/diagnostics`, `GET /api/health/explain`)
+  now carries an `admin_roster_durability` row (CHAOS-70 evidence): `warn`
+  when no `-ui-users-file` is configured, so admin account deletes, role
+  changes and password rotations revert on restart; when the configured file
+  failed to load at startup or is not a usable regular-file target (a
+  read-only check); and when admin-roster
+  changes were refused or login-time roster writes failed since process
+  start. Counts, the remedy and the degraded login-write state are shown to
+  admins only. Viewers and operators get a fixed message for "not durable" and
+  "a change was refused", and the row shows nothing for a degraded write
+  (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
+  `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
+  Admin Users panel hint and are deliberately absent from `/api/stats`.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

@@ -850,6 +850,12 @@ type Config struct {
 	// Empty = in-memory only (auth resets on every restart).
 	uiUsersFile string
 
+	// uiUsersLoadErr is the outcome of the most recent LoadUIUsersFile for
+	// uiUsersFile (nil = loaded, or absent on first run). Startup continues
+	// after a failed load, so without this the admin_roster_durability row
+	// would report a configured-but-unusable roster as persisted.
+	uiUsersLoadErr error
+
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
 	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
 	// (RLock) while snapshotting the roster, then releases it before the
@@ -1434,6 +1440,27 @@ func (c *Config) DeleteUIUser(username string) error {
 	return nil
 }
 
+// hasLocalAdministrator reports whether at least one LOCAL account can sign in
+// to the console as admin, independent of any identity provider: a roster
+// entry with RoleAdmin, or the legacy single-user login when no roster entry
+// shadows it (VerifyUIUser grants that login RoleAdmin). A boolean existence
+// probe only; it never exposes a name, role or count. Used by the
+// admin_roster_durability diagnostics row to name the break-glass gap.
+func (c *Config) hasLocalAdministrator() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, u := range c.uiUsers {
+		if u.role.HasRole(RoleAdmin) {
+			return true
+		}
+	}
+	if c.user == "" {
+		return false
+	}
+	_, shadowed := c.uiUsers[c.user]
+	return !shadowed
+}
+
 // ListUIUsers returns a snapshot of all admin UI users (without password hashes).
 func (c *Config) ListUIUsers() []UIUserInfo {
 	c.mu.RLock()
@@ -1450,7 +1477,17 @@ func (c *Config) ListUIUsers() []UIUserInfo {
 func (c *Config) SetUIUsersFile(path string) {
 	c.mu.Lock()
 	c.uiUsersFile = path
+	c.uiUsersLoadErr = nil // a new path has not been loaded yet
 	c.mu.Unlock()
+}
+
+// rosterPersistTarget returns the configured roster path and the outcome of
+// the last LoadUIUsersFile for it. Read-only; used by the
+// admin_roster_durability diagnostics row, which never renders either value.
+func (c *Config) rosterPersistTarget() (path string, loadErr error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersFile, c.uiUsersLoadErr
 }
 
 // uiUserRecord is the on-disk representation of a UI admin user.
@@ -1483,8 +1520,18 @@ type uiUsersFileEnvelope struct {
 }
 
 // LoadUIUsersFile reads persisted UI users from disk and populates the roster.
-// Silently returns nil if the file does not exist yet (first run).
+// Silently returns nil if the file does not exist yet (first run). The outcome
+// is recorded (rosterPersistTarget) so diagnostics can report a configured but
+// unusable roster file instead of reading it as persisted.
 func (c *Config) LoadUIUsersFile() error {
+	err := c.loadUIUsersFile()
+	c.mu.Lock()
+	c.uiUsersLoadErr = err
+	c.mu.Unlock()
+	return err
+}
+
+func (c *Config) loadUIUsersFile() error {
 	c.mu.RLock()
 	path := c.uiUsersFile
 	c.mu.RUnlock()
