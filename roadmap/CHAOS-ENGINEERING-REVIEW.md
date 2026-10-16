@@ -95,6 +95,28 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
+Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
+in, because the SOCKS5-bind sweep below had taken 66 first — another
+occurrence of the collision described above. Several other open sweeps had
+also claimed `CHAOS-66`; ids 67–72 were allocated across them in one pass
+(this sweep: 70), so §§37–39 are reserved for sweeps that had not merged when
+this one did.
+
+**2026-09-20 — `CHAOS-69` CLAIMED (placeholder, commit one). Domain: the
+client-supplied destination authority on the proxy data path — register row
+**PX-21**, opened by the §32 sweep and left open there on the explicit ground
+that it is "a different domain with a different fix shape and a real design
+decision the owner should make". Claimed as `CHAOS-66` / §36 on its branch; on
+merging `main` that id and section were already taken by the SOCKS5-bind sweep
+(the row below, merged first), so this sweep MOVED to `CHAOS-69` / §39 (67 and 68
+are allocated to other open sweeps) — the
+placeholder only prevents a collision if every open branch reads `main` before
+claiming.** This row exists so the id is allocated in a
+committed line before any code is written — the remedy the header above reaches
+twice independently after ten collisions and §35 applied first. Findings and
+gates are written up in §39 below.
+
 **2026-09-12 — CHAOS-66 sweep (the SOCKS5 listener's BIND). Id claimed in this
 row before the implementation commit**, per the convention above; `CHAOS-66` was
 free (65 was the highest merged) and did not move. The sweep closes the row §33
@@ -1002,7 +1024,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | PX-17 | **An unrecoverable listener error was retried identically to a transient one.** EBADF/ENOTSOCK on the listening descriptor return instantly and forever, so the "retry" was a pure spin that could never accept anything, on a port that stayed BOUND — clients hung against a black hole instead of getting connection-refused. | NEW → **CLOSED** (CHAOS-54: the loop stops, closes the listener so clients fail fast, and records the service DOWN; transient/unknown errors still retry, which is the fail-safe direction) | M/H | was: `socks5.go` `serve`; now `socks5AcceptFatal` — see §22 |
 | PX-18 | **The SOCKS5 listener had NO health surface** — absent from `/healthz`, `/readyz`, `/api/diagnostics` and `/metrics`. A listener spinning on EMFILE and a listener that had stopped accepting entirely were both reported by every probe as a fully healthy node. | NEW → **CLOSED** (CHAOS-54: `socks5_listener` contract row, report-only `/readyz socks5` row, `/healthz socks5` field, `culvert_socks5_{listener_up,accept_errors_total,accept_degraded,accept_backoff_seconds}`, `socks5_listener_down` alert) | M/H | `socks5_health.go` — see §22 |
 | PX-20 | **Every `net.ErrClosed` from `Accept` was read as an expected shutdown.** `ErrClosed` says the listener is gone; it does NOT say a shutdown was requested, and `Stop` is only one of the ways a listener can end up closed. Any closure outside the shutdown path therefore terminated the accept loop with EVERY probe still green (`socks5: ready`, `culvert_socks5_listener_up 1`, `ok` contract row) — PX-18 reintroduced in a narrower costume, inside the very change that closed PX-18. Raised by Codex review on the PR, not by the sweep. | NEW → **CLOSED** (CHAOS-54: the loop checks whether `stopping` was actually closed; `Stop` closes it BEFORE `ln.Close()`, so the check is race-free in the direction that matters and errs toward silence, never toward a false page) | M/H | was: `socks5.go` `serve`; see §22.3 |
-| PX-21 | **The same unbounded-untrusted-value class as AU-15, on the PROXY data path, and it is NOT fixed.** `handleRequest` writes `sanitizeLog(r.Host)` into the POLICY_* process-log line and `r.Host` verbatim into the request-log entry. `sanitizeLog` neutralises control characters but bounds NOTHING, and the proxy `http.Server` sets no `MaxHeaderBytes`, so net/http admits a request line plus headers up to ~1 MiB. **Measured on the default-deny path: one request with a 200 KB host wrote 204,899 bytes to the process log and a 204,812-byte `Host` field to the request log.** Both sinks are rotating files with one archive, and the proxy port is reachable by every client on the network — a far broader audience than the admin login endpoint, with the process log holding the diagnostics for every other incident (the §22 amplification lesson). | **NEW, OPEN** | **H** | `proxy.go:689,728` (`sanitizeLog(r.Host)`), `recordRequestAuthURI` `proxy.go:688`; reproduction in §32.6 |
+| PX-21 | **The same unbounded-untrusted-value class as AU-15, on the PROXY data path.** `handleRequest` writes `sanitizeLog(r.Host)` into the POLICY_* process-log line and `r.Host` verbatim into the request-log entry. `sanitizeLog` neutralises control characters but bounds NOTHING, and the proxy `http.Server` sets no `MaxHeaderBytes`, so net/http admits a request line plus headers up to ~1 MiB. **Measured on the default-deny path: one request with a 200 KB host wrote 204 899 bytes to the process log and a 204 812-byte `Host` field to the request log.** Both sinks are rotating files with one archive, and the proxy port is reachable by every client on the network — a far broader audience than the admin login endpoint, with the process log holding the diagnostics for every other incident (the §22 amplification lesson). **§39 re-measured this and found the copy was the SMALLER half — see PX-23 — and closed both with one entry-point bound.** | NEW → **CLOSED** (CHAOS-69, §39: TWO tiers — `maxRawDestAuthorityBytes` 1024 on the raw authority at the entry point, `maxDestHostLen` 253 on the canonical A-label host — refused ahead of every sink and every matcher; `culvert_proxy_oversize_host_rejected_total`) | **H** | was: `proxy.go:689,728` (`sanitizeLog(r.Host)`), `recordRequestAuthURI` `proxy.go:688`; now `proxy_host_bounds.go` `rejectOversizeDestHost`, gates `proxy_host_bounds_test.go` |
+| PX-22 | **The inner inspected request's URI is the same unbounded untrusted value, one layer in.** The SSL-inspect H1 loop logs `req.URL.Path` into the `SSL_INNER` process-log line and `policyLogURI(hostOnly, req.URL.Path)` into the request-log `URI` field, both unbounded; `http.ReadRequest` on the decrypted stream applies no `MaxHeaderBytes`. Narrower reach than PX-21 — it needs an ALLOWED destination and a decryption profile, so the client must first get past policy — but the amplification arithmetic is identical once there. **NOT fixed by §39**, which bounds the authority; the URI is a different value with a different legitimate size (a real URL can be long), so capping it is a product decision about log fidelity rather than an arithmetic one. | **NEW, OPEN** | M | `proxy_tunnel.go:963` (`SSL_INNER … req.URL.Path`), `proxy_tunnel.go:1048` / `proxy_tunnel_h2.go:521` (`policyLogURI`) |
+| PX-23 | **The destination authority is not only COPIED, it is WALKED — and two of the walks are QUADRATIC. This is the reachable, unauthenticated CPU-exhaustion half of PX-21 and is far more severe than the copy.** `internal/urlcat` `lookupIn` (reached by every `DestCategoryGroup` rule through `hostCatScratch.fusion()`) probes the host and then EVERY suffix starting just past a `.` against a non-empty reverse index, hashing each — Σ suffix lengths ≈ L²/4. `internal/catdb` `CommunityDB.Lookup` walks parent domains opening **one BadgerDB read transaction per label**, and `-cat-feed-db /data/catfeeddb` is enabled by DEFAULT in the shipped compose file. **Measured through the real `handleRequest` with one ordinary category-group rule and the Layer-2 feed present: 251 B → 0.45 ms, 4 095 B → 19.6 ms, 16 383 B → 260 ms, 65 535 B → 3.94 s** — clean quadratic, so ~16 minutes of a core at net/http's 1 MiB header default, inside the request goroutine, holding the conn/FD/connlimit slot, and reached BEFORE authentication (gate order: connlimit → IP filter → rate limit → auth → policy, all three front-door limiters shipping disabled). Engine primitives alone: `urlcat.LookupHost` 5.38 s at 1 MiB; `catdb.Lookup` 4.09 s at 64 KiB (32 767 badger transactions). ~256 KB/s from one client saturates a four-core gateway. | **NEW** → **CLOSED at the entry point** (CHAOS-69, §39). The matchers are still quadratic in whatever they are handed — a length guard inside them cannot be made safe (the suffix walk is why `a.b.example.com` matches `example.com`, so skipping it on length is fail-OPEN for a block rule), so the entry-point bound is the only available fix and every future caller must apply it. | **H** | `internal/urlcat/urlcat.go:1196` (`lookupIn` suffix loop), `internal/catdb/catdb.go:71` (`Lookup` per-label `db.View`), `policy_hostcat.go` `resolveFusion`, `categorygroup.go` `categoryGroupMatchesHostScratch`; measurements + gates in §39 |
+| PX-24 | **`topHosts` is bounded on the ENTRY-COUNT axis and never was on the KEY-SIZE axis** — the identical blindness §32 found in `internal/lockout`, whose `Cleanup` doc claimed the maps were bounded "against an unbounded-memory DoS". `topHostsMaxEntries` is 10 000 distinct hosts and the key is the client-supplied authority, so at the cap 1 MiB keys are ~10 GiB of resident heap in an in-line gateway whose OOM is a total traffic outage. Measured: 200 keys of 64 KiB retained 13 107 200 bytes, i.e. 655 MB at the cap for 64 KiB keys alone. Reached on the allow branch (`recordStats` → `topHosts.Record`), so a default-allow posture or any broad allow rule is enough. | **NEW** → **CLOSED** (CHAOS-69, §39 — the same entry-point bound; the cap itself is unchanged and still correct on its own axis) | **H** | `store.go:1723` (`topHosts.Record(redactedHost)`), `store.go:1937-1990` (`hostCounter`); gate `TestChaos69_DefectTopHostsNeverRetainsAnOversizeKey` |
+| PX-25 | **The admin plane reaches the same quadratic fusion from a viewer-role request.** `apiURLCatLookup` takes its host from a query string inside the 1 MiB header block and calls `lookupHostCategory` + `bl.IsBlocked`; the policy-test handler does the same with `body.Host` from a 1 MiB JSON body. Both are `RoleViewer`, so a read-only admin account could park an admin-plane goroutine for minutes with one request. | **NEW** → **CLOSED** (CHAOS-69, §39 — bounded through the SAME shared predicate as the data path, so the four entry points cannot drift apart) | M | `ui_policy.go` `apiURLCatLookup`, `ui_policy.go` policy-test handler |
 | PX-19 | **The SOCKS5 accept loop had no panic guard.** `handleSOCKS5` carries `recoverGoroutine`, but a panic in `serve` itself propagated to the runtime and killed the whole proxy process (the PX-4 class, one level up). | NEW → **CLOSED** (CHAOS-54: contained and reported as listener DOWN — the CHAOS-24 objection to recovering in a worker goroutine does not apply when the recovery path is the loudest state the subsystem can produce) | M | was: `socks5.go` `serve`; see §22 |
 | PX-6 | **No global connection cap**; per-IP map is unbounded in cardinality; limiter ships **disabled by default**. Distributed flood → FD/memory exhaustion. | GAP | H | `internal/connlimit/connlimit.go:12,67` (default disabled, `Acquire`→true when off) |
 | PX-7 | Bandwidth/QoS token buckets are **never enforced on the data path** — `AllowBytes` has no call site in the relays. Configured QoS silently does nothing. | GAP (feature dead) | M | `internal/bandwidth` `AllowBytes` `bandwidth.go:261` — no caller in `proxy.go`/`socks5.go` |
@@ -1050,7 +1076,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-18 | **Expired cluster CA kept signing node certs** (CA-1 analogue in the enrollment CA) and node cert `NotAfter` was an unconditional `now+365d`, **not clamped to the issuer** — so a node enrolled anywhere in the CA's final year held a cert overclaiming by up to a YEAR, and every expiry surface (nodes API, DP `checkDPCertExpiry`) reported validity that did not exist. Worse than CA-1: `Enroll` uses `VerifyClientCertIfGiven`, so the operator's *re-enroll* recovery succeeded and returned a certificate that was dead on arrival. | NEW → **CLOSED** (CHAOS-50: `clusterCAUsable` gate in `SignCSR` fails closed with `errClusterCAUnusable`; `clampNodeCertValidity` on both ends; `culvert_cluster_ca_{usable,expires_in_seconds,sign_refused_total,node_certs_clamped_total}`) | **H** | was: `enrollment.go` `SignCSR`; now `cluster_ca_validity.go` — see §17 |
 | CA-19 | **The cluster CA's ONLY rotation driver was gated on the INSPECTION CA being ready** (`loadRootCA`: `if certMgr.Ready() { StartCAAutoRotation(…) }`). A corrupt bundle / wrong `CULVERT_CA_PASSPHRASE` / unreadable `-ca-path` silently disabled cluster-CA auto-rotation AND secondary-overlap cleanup on a node whose cluster CA was healthy. Two independent trust roots, one shared failure — and because the cluster CA is a 10-YEAR cert, the consequence surfaces years after the fault that caused it, with nothing left to connect them. | NEW → **CLOSED** (CHAOS-50: loop started unconditionally; both halves are already no-ops when their CA is absent; pinned by `TestChaos50_ClusterRotationSurvivesInspectionCALoadFailure`, verified FAILING pre-fix) | M/H | was: `rootca_startup.go` `loadRootCA`; see §17.5 |
 | CA-20 | `ImportCA` **nil-dereferenced `ca.secondaryCert`** on a first-ever import (a node that never ran `InitOrLoad`, e.g. a non-cluster node whose admin posts `/api/cluster/ca`) — and it fired AFTER `ca.cert`/`ca.key` were swapped in, so the panic left the new CA installed with the TLS pool never rebuilt and no rotation tracking: a partially applied trust change. | NEW → **CLOSED** (CHAOS-50: guarded — a first import is a bootstrap, not a rotation) | M | was: `enrollment.go` `ImportCA`; see §17 |
-| CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
+| CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP → **CLOSED** for the revocation list (`fileutil.AtomicWrite`); the SAME sentence was never checked for the credential store beside it — the consumed-backup-code and TOTP-replay-counter writes had the identical shape, now surfaced + counted by CHAOS-70 §40 (posture deliberately fail-open, owned there) | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
 ### 2.3 Cluster / HA / Control-Plane ↔ Data-Plane
@@ -6906,3 +6932,1352 @@ status, or read the unfiltered output, before claiming a gate is green.
   accept will cycle at the 30 s ceiling indefinitely. It is rate-bounded, loudly
   reported (`down`, alert, gauge at zero) and strictly better than the previous
   terminal state, but it is a cycle rather than a convergence.
+
+---
+
+## 39. CHAOS-69 — The client-supplied destination authority on the proxy data path
+
+**Date:** 2026-09-20
+**Domain:** HTTP proxy, HTTPS/CONNECT, SOCKS5, category database, storage,
+audit/logging, metrics, admin API.
+**Origin:** register row **PX-21**, opened by the §32 sweep and deliberately left
+open there — *"a different domain with a different fix shape and a real design
+decision the owner should make, not a reviewer"*. This sweep made that decision,
+and re-measuring the path first found that the defect PX-21 described was the
+smaller half of it.
+
+### Executive summary
+
+The destination authority is written by the client. On the plain-HTTP and CONNECT
+paths it arrives as `r.Host`, `net/http` admits its 1 MiB default of request line
+plus headers, and **nothing bounded it anywhere**. PX-21 recorded the consequence
+as a log-amplification defect: the value is copied verbatim into two rotating
+sinks. That is real and is closed here. But the authority is not only copied, it
+is **WALKED**, label by label, by every destination matcher on the request path —
+and two of those walks are **quadratic in its length**:
+
+- `internal/urlcat` `lookupIn`, reached by every `DestCategoryGroup` rule through
+  `hostCatScratch.fusion()`, probes the host and then **every suffix that starts
+  just past a `.`** against the reverse host index. The index is non-empty on any
+  deployment (the shipped default taxonomy is 657 patterns), so each probe hashes
+  its whole suffix: Σ suffix lengths ≈ L²/4.
+- `internal/catdb` `CommunityDB.Lookup` walks parent domains and opens **one
+  BadgerDB read transaction per label**. `-cat-feed-db /data/catfeeddb` is
+  enabled **by default** in the shipped `docker-compose.yml`.
+
+Measured through the real `handleRequest`, on a 4-core box, with one ordinary
+category-group rule and the Layer-2 feed present:
+
+| Authority bytes | Wall clock |
+| ---: | ---: |
+| 251 | 0.45 ms |
+| 4 095 | 19.6 ms |
+| 16 383 | 260 ms |
+| **65 535** | **3.94 s** |
+
+Clean quadratic — four times the length is about fifteen times the time — so at
+net/http's 1 MiB header default **one request costs on the order of sixteen
+minutes of a core.** It is spent inside the request goroutine, holding the client
+connection, a file descriptor and a per-IP `connlimit` slot, and it is spent
+**before authentication**: the gate order in `handleRequest` is connection limit
+→ IP filter → rate limit → authentication → policy, and all three front-door
+limiters ship **disabled** (`-rate-limit` defaults to 0 — §25's finding). Roughly
+**256 KB/s from one unauthenticated client saturates a four-core gateway.**
+
+Five findings, all closed at the entry point (PX-21, PX-23, PX-24, PX-25) or
+recorded (PX-22).
+
+### The shape of the miss
+
+This is the §32 (CHAOS-63) defect one plane over, and the reason it survived the
+sweep that found it is worth recording precisely: **§32 looked for retaining
+sinks and found them.** Its own residual-risk section states the class is live on
+the proxy data path and measures the copy. What nobody asked was whether the
+value was *consumed* anywhere else, and the answer is that it is consumed
+~10 times per request by matchers each correctly normalising their own input —
+which is exactly the property CLAUDE.md's `hostutil` note records as a
+performance fact and nobody had read as a cost-amplification surface.
+
+Three of the four supporting observations were already written down somewhere in
+the tree and pointing the other way:
+
+1. `hostutil.NormalizeHostStrict`'s own comment states that under the
+   zero-option Punycode profile *"the bidi and DNS-length checks are
+   disabled"* — recorded as the justification for a fast path, which is exactly
+   why a megabyte of ASCII passes the strict gate untouched.
+2. CLAUDE.md's `urlcat` note records that `lookupIn` was made *index-backed* and
+   is now *"O(labels)"* — true, and O(labels) is O(L) probes each hashing O(L)
+   bytes when the attacker chooses the label density.
+3. CLAUDE.md's `topHosts` note states the map *"is hard-capped at
+   `topHostsMaxEntries` (10k distinct hosts) — the hostname is
+   attacker-controllable, so the map would otherwise grow unbounded (memory
+   DoS)."* That sentence names the adversary and the outcome and then bounds the
+   wrong axis. It is verbatim the same sentence `internal/lockout`'s `Cleanup`
+   doc carried before §32 corrected it (*"bounded against an unbounded-memory
+   DoS"* — true on entry count, never true on key size). **The same error, in the
+   same words, in a second component, found by the sweep immediately after the
+   one that found the first.**
+
+### The design decision PX-21 left open, and how it resolves
+
+PX-21 framed the choice as *reject the over-long authority* (defensible, changes
+data-plane behaviour, must answer for IPv6 literals / non-DNS authorities / the
+CONNECT form) versus *truncate at the log call sites* (smaller, safer, does not
+close the request-log field).
+
+Once PX-23 is on the table the choice collapses, because **truncating at the log
+sites closes nothing that matters**: the CPU cost is paid by the matchers, not by
+the logger, and a truncated log line would leave a sixteen-minute unauthenticated
+CPU-exhaustion vector in place while making its evidence harder to see. Rejection
+is the only option that bounds the actual resource.
+
+Rejection is also safe, and the arithmetic is the whole argument. RFC 1035 §2.3.4
+caps a wire-format domain name at 255 octets = 253 presentation characters (RFC
+1123 §2.1). Adding optional IPv6 brackets and a port:
+
+```
+"[" + 253 + "]" + ":" + "65535"  =  1 + 253 + 1 + 1 + 5  =  261
+```
+
+So the refused set contains **no destination any resolver would answer for**, and
+the three shapes PX-21 asked about are all comfortably inside it: an IPv6 literal
+is at most 47 bytes bracketed, a non-DNS registered name is still bounded by the
+DNS wire format for anything a resolver can return, and the CONNECT form carries
+the same `host:port` authority. The gate is ONE length compare on the raw string,
+so the host being a substring of the authority bounds every downstream walk by
+construction (261² ≈ 68k byte operations, i.e. nothing).
+
+### The sharpest structural point: there is NO structural half in the leaf
+
+§32's fix had two halves — a bound at the entry point AND an injective clamp
+inside `internal/lockout` at every public entry point, so *"no future caller can
+reintroduce it."* The instinct here is to do the same: add a length guard inside
+`urlcat`/`catdb`/`blocklist` and be done.
+
+**It cannot be made safe, and understanding why is the load-bearing part of this
+sweep.** The suffix walk exists precisely so that `a.b.example.com` matches a
+stored `example.com`. An over-long host therefore still has SHORT suffixes that
+may legitimately match a real pattern — an attacker can prefix a megabyte of
+`a.` onto `facebook.com` and the correct verdict is still *Social Media*. A
+length guard that skipped the walk would change that verdict to *no match*, which
+for a **block** rule is **fail-OPEN**: the guard would buy a cost bound with the
+exact security failure the matcher exists to prevent. A clamped lockout key is
+still a usable key; a clamped host is a different host.
+
+So the bound is at the entry points and **only** there, and that makes the
+completeness of the entry-point inventory a security property rather than a
+tidiness one. Four exist today and all four go through the SAME shared
+predicates — `rawAuthorityOversize` (raw tier) and `canonicalHostOversize`
+(canonical tier), never a hand-rolled length compare at a call site — because two
+entry points disagreeing about what is too long is the divergence class §32 pinned
+for lockout's `Check`/`RecordFailure` pair — where two call sites computing different keys silently *weakened* the
+control while passing every byte-size assertion.
+
+### What the FIRST VERSION shipped — superseded, see the review round below
+
+**Read this section with the review round that follows it.** The single bound it
+describes is NOT what ships: review found it applied a canonical-form limit to raw
+bytes, and the shipped design is TWO tiers (`maxRawDestAuthorityBytes` 1024 raw +
+`maxDestHostLen` 253 canonical, predicates `rawAuthorityOversize` and
+`canonicalHostOversize`). `destAuthorityOversize`/`destHostOversize` were DELETED by
+that rework and exist nowhere in the tree. The section is kept unedited below
+because the wrong turn is the finding — but the heading used to say "What shipped",
+which invites a reader to stop here and take a deleted predicate for the live one.
+
+`proxy_host_bounds.go`, as of the first version:
+
+- `maxDestHostLen` (253) as the documented DERIVATION constant and
+  `maxDestAuthorityLen` (261) as the bound then enforced, with the arithmetic
+  pinned by test so it stays checkable in code rather than only in prose. **Both
+  constants survive; only 253 is still enforced, and now against the CANONICAL
+  host. 261 is derivation-only.**
+- `destAuthorityOversize` — the single shared predicate. **Deleted by the review
+  round; replaced by the two predicates named above.**
+- `rejectOversizeDestHost` — the HTTP/CONNECT/WebSocket gate, placed as the FIRST
+  consumer of `r.Host` in `handleRequest` and ahead of the connection limiter, the
+  IP filter, the rate limiter, authentication and policy. **The ordering is a
+  contract, not an optimisation:** `IP_BLOCKED` and `RATE_LIMITED` both write
+  `r.Host` into the request log and both run BEFORE the host-canonicalization step
+  where RISK-013's IDNA gate sits, so the intuitive home for a host check is
+  behind two sinks that have already retained the megabyte. A rejected request
+  creates no limiter entry, no request-log row, no top-hosts key, no alert and no
+  label walk.
+- The refusal is 400 and **never echoes the value** — §32's own gates had to
+  suppress their test output because the pre-fix login handler reflected the
+  oversize input back, and the pre-fix proxy does the same (measured: a 68 392-byte
+  response body for a 64 KiB authority). That is the amplification arriving by a
+  third road.
+- `noteOversizeHostRejection` — counter + rate-limited log (one line per minute,
+  cumulative count on every line, because a mitigation for a write-amplification
+  defect must not be one itself). The line names the protocol, the client IP, the
+  **length** and the running total, and deliberately carries **no prefix of the
+  authority**: a copy would reopen the amplification on the rate-limited path,
+  and past 253 bytes the length is the only fact that separates a probe from a
+  broken client. This is the one deliberate divergence from §32's truncated audit
+  actor — a username may name an account an operator recognises; an authority this
+  long names nothing that can exist.
+
+Wired at four entry points: `handleRequest` (proxy.go), `handleSOCKS5`
+(socks5.go), `apiURLCatLookup` and the policy-test handler (ui_policy.go).
+
+**SOCKS5 is structurally bounded already and that is recorded rather than
+assumed:** RFC 1928 §4 length-prefixes DOMAINNAME with one byte, so the protocol
+caps the destination at 255 and the quadratic walks behind it cost microseconds.
+That is why SOCKS5 is not the reachable half of this finding — a pleasing contrast
+with SEC-SOCKS5-LOG-1, where SOCKS5 was the *only* protocol whose destination
+reached a sink unvalidated. The gate is applied anyway, because 255 still exceeds
+the 253 bytes a resolvable name can occupy.
+
+### A defect the fix itself introduced: the SOCKS5 gate was DEAD CODE
+
+Found in self-review, before review. The first version applied
+`destAuthorityOversize` — the 261-byte bound — to the SOCKS5 destination. But the
+value there is a BARE host (RFC 1928 carries the port in its own two-byte field)
+and the protocol caps it at **255**, which is **below 261**. So the gate could
+never fire: it was unreachable by construction, on the one protocol whose whole
+claim to safety was that it is bounded already.
+
+Worse, **its gate passed**. The test asserted only that no oversize host reached
+the request log, with the threshold expressed as `len(e.Host) > maxDestAuthorityLen`
+— and at 255 bytes that comparison is false whether the gate fires or not. The
+assertion was vacuously true, and would have stayed true if the entire SOCKS5 gate
+were deleted.
+
+Two fixes, and the second is the one that generalises:
+
+1. The predicate was matched to the KIND of the value: `destAuthorityOversize`
+   (261) for `r.Host` and the admin endpoints, where a `host:port` must not be
+   refused; `destHostOversize` (253) for the SOCKS5 destination. Two predicates
+   is a drift risk, which is why `maxDestAuthorityLen` is DERIVED from
+   `maxDestHostLen` and the derivation is pinned. The alternative — one predicate
+   applied to two kinds of value — is exactly how the gate went dead.
+   **Superseded by the review round below**, which replaced both of these with
+   `rawAuthorityOversize` (1024, raw) and `canonicalHostOversize` (253, canonical)
+   and split them by REPRESENTATION rather than by kind of value — and which is
+   what made the SOCKS5 gate live for a better reason: 255 is inside the raw cap
+   but exceeds the canonical 253.
+2. `TestChaos69_DefectSOCKS5RefusesOversizeDestination` now asserts the **refusal
+   itself** (SOCKS5 reply `0x02`) and the **counter**, and
+   `ControlBoundIsInclusiveAndDerived` asserts that `maxDestHostLen < 255` — i.e.
+   that the bound is REACHABLE within what the protocol can deliver. A gate that
+   cannot fire now fails the suite.
+
+The lesson is the not-vacuous-check rule this repo already applies to its
+structural walls (`socks5_log_injection_test.go`'s `checked < 4` guard,
+`TestExemptBenchFixturesProbeWhatTheyClaim`'s fixture assertions), arriving from a
+new direction: **a bound is only enforced if it sits inside the range the input
+can occupy, and a gate's test must assert the REFUSAL, never merely the absence of
+the thing the refusal would have prevented.** Absence is what an unreachable gate
+and a working gate have in common.
+
+Surface: `culvert_proxy_oversize_host_rejected_total`, **always emitted** — there
+is no configuration to gate it on, so a flat zero means "nothing has been probed",
+never "the feature is off" (the inverse of the socks5/cluster_ca emission rule,
+and for the same reason: the gauge must not have two readings). No new alert
+event: the operator action is the front door (`-rate-limit`, connlimit, IP
+filter), which is the same action §25's saturation alert already asks for, and a
+second name for one action is two pages for one response. Runbook:
+`docs/operator/destination-host-bounds.md`.
+
+### Gates
+
+`proxy_host_bounds_test.go` (17). Ten DEFECT gates, each verified failing
+against the reintroduced pre-fix shape, with the measured failure in each message:
+
+| Gate | Pre-fix result |
+| --- | --- |
+| `DefectOversizeAuthorityRefusedBeforeAnyState` | 403 not 400; counter 0; **68 392-byte response body** (the refusal echoed the value) |
+| `DefectProcessLogStaysBounded` | **2 097 832 bytes from 8 requests** |
+| `DefectRequestLogNeverCarriesOversizeHost` | 65 536-byte `Host` field on `POLICY_DEFAULT_DENY` |
+| `DefectIPBlockedPathDoesNotRetainTheAuthority` | `IP_BLOCKED` retained 65 536 bytes — the ORDERING gate |
+| `DefectCostIsFlatInAuthorityLength` | ratio **1 442x** (18.8 ms vs 13.0 µs at 64 KiB, warm) |
+| `DefectTopHostsNeverRetainsAnOversizeKey` | 65 536-byte key retained |
+| `DefectSOCKS5RefusesOversizeDestination` | no refusal, no reply `0x02`, counter 0 (also fails against the dead-gate shape below) |
+| `DefectAdminURLLookupIsBounded` | 200, unbounded, uncounted |
+| `DefectConnectFormIsBounded` | 403 not 400; counter 0; 65 540-byte `Host` field — the form EVERY HTTPS request uses |
+| `DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier` | 403 not 400; 1 000-byte `Host` field in the request log (fails with the canonical tier removed — the raw cap alone is not enough) |
+
+The cost gate is a **RATIO measured in ONE run**, not an absolute timing bound —
+the standing rule after the `sanitizeLog`, `connlimit` and histogram episodes: a
+gate whose bound has to be re-baselined per machine gets muted. Post-fix the
+oversize request takes the O(1) reject path and is *cheaper* than the ordinary
+one, so the ratio is below 1 against a bound of 20, orders of magnitude clear in
+both directions.
+
+`DefectIPBlockedPathDoesNotRetainTheAuthority` is the gate that pins *where* the
+bound may live: it fails against the pre-fix tree AND against the plausible-wrong
+fix of gating at the IDNA step.
+
+Five CONTROLS, because the cheapest way to pass every defect gate above is to
+refuse every destination — a total egress outage, far worse than the defect.
+Verified by flipping the predicate to always-true, which fails
+`ControlBoundIsInclusiveAndDerived`, `ControlOrdinaryDestinationStillProxies`
+(the real allow path against a live backend) and
+`ControlLegitimateAuthorityShapesAreAccepted` (maximum-length FQDN, FQDN with
+port, trailing-dot FQDN, IPv4 literal, bracketed IPv6 literal with port and with
+zone — the shapes PX-21 said a rejection had to answer for before it could ship).
+`ControlRejectionIsStillRecorded` pins that bounding the bytes did not delete the
+evidence, and `ControlLogIsRateLimited` pins that 50 refusals cost exactly one
+line while the counter carries all 50.
+
+`ControlRefusalIsAccountedAsABlock` closes a second self-review finding: the
+first version incremented `statBlocked` on the SOCKS5 gate and not on the HTTP
+one — two refusals of the same class disagreeing about whether they happened,
+which is how a dashboard figure goes quietly wrong. Both now count it, matching
+what the `INVALID_HOST` branches (the other malformed-destination refusal, on
+both paths) already do. An atomic counter is not a RETAINING sink, so this does
+not weaken the "a rejected request creates no state" property, which is about the
+log rows, map keys and limiter entries an attacker can grow. Note this control
+passes against the pre-fix tree too, and correctly so: it asserts the accounting
+exists, not that the gate does.
+
+`DefectConnectFormIsBounded` exists because the other gates drive the plain-HTTP
+form, and **every HTTPS request through this proxy is a CONNECT** — a gate proven
+only against plain HTTP is proven against the minority of traffic. It also pins
+that the refusal lands before the tunnel: a 400 on the CONNECT means no 200, no
+hijack and no drain registration.
+
+### The review round: a bound governs a REPRESENTATION, and I measured the wrong one
+
+Found by review (Codex, P2, PR #1446), not by the gates — the sharpest finding of
+the sweep and the reason this section exists.
+
+The first version applied the 253/261-byte bound to the client's **RAW** bytes.
+That is the intuitive reading of "RFC 1035 caps a hostname at 253 presentation
+characters", and it is wrong: the limit governs the **CANONICAL A-label form**, and
+an internationalized domain name *shrinks* on the way there. Measured against the
+shipped `idna.ToASCII`:
+
+| Host | Raw UTF-8 | Canonical A-label |
+| --- | ---: | ---: |
+| Codex's example (`é`×40, four labels) | **323 B** | **187 B** |
+| widest legitimate expansion (4-byte runes, maximal labels) | **883 B** | **251 B** |
+
+Both are ordinary, resolvable destinations, and **both were refused with a 400.**
+On a forward proxy that is a customer-visible outage — international destinations
+stop working — reached by a change whose entire justification was that "the refused
+set contains no destination any resolver would answer for". That claim was true of
+the canonical form and false of the bytes I was measuring.
+
+**The control test should have caught it and could not: it covered ASCII shapes
+only.** Maximum-length FQDN, FQDN with port, trailing dot, IPv4 literal, bracketed
+IPv6 with and without a zone — and not one non-ASCII character. The gate inventory
+looked thorough while being blind to an entire representation of the input.
+
+The fix is the two-tier shape Codex proposed, and each tier is now pinned by a gate
+that fails without it:
+
+1. **RAW pre-cap, `maxRawDestAuthorityBytes` = 1024 bytes** (predicate
+   `rawAuthorityOversize`), at the entry point. It has to be generous enough for
+   IDN expansion, and its value is *derived*: an A-label is ≤63 bytes = `xn--` plus
+   ≤59 Punycode bytes; Punycode emits ≥1 byte per encoded code point (RFC 3492 §3),
+   so ≤59 code points, each ≤4 UTF-8 bytes ⇒ ≤236 raw bytes per label, ⇒ ~940 for a
+   full authority. The empirical maximum is 883. 1024 clears it with 141 bytes of
+   margin, and `ControlRawCapExceedsMaximumIDNExpansion` **re-measures the expansion
+   against the shipped normalizer** rather than trusting that arithmetic, so an
+   x/net change that widens the ratio fails the build instead of silently making the
+   proxy refuse a resolvable name.
+2. **CANONICAL bound, `maxDestHostLen` = 253 bytes** (predicate
+   `canonicalHostOversize`), on the normalized host, at the existing
+   RISK-013 canonicalization gate. This is what keeps the raw tier's generosity from
+   being a hole: 1 KiB alone still admits a 1000-byte dot-dense ASCII authority
+   costing ~1.3 ms of matcher walk, and ASCII does **not** shrink under IDNA, so
+   measuring the canonical form refuses exactly the attacker's shape while the
+   883-byte IDN passes. With both tiers the realistic worst case returns to the
+   253-byte figure (~111 µs).
+
+Measured cost at each candidate cap, through the real `handleRequest` with the
+bound lifted (which is how the 1024 figure was chosen rather than guessed):
+251 B → 111 µs, 511 B → 396 µs, 1023 B → **1.28 ms**, 2047 B → 4.72 ms.
+
+Two structural consequences worth keeping. The canonical tier can safely live
+*behind* `IP_BLOCKED`/`RATE_LIMITED` — the ordering rule this section spent so long
+establishing — **only because the raw tier in front of it has already bounded what
+those sinks can retain to 1 KiB**; the tiers are ordered by what each one is able to
+measure, not by preference. And the SOCKS5 gate stopped being dead code without
+being moved: RFC 1928's one-byte length prefix caps the destination at 255, which is
+inside the raw cap and therefore unreachable there, but 255 **exceeds** the canonical
+253 — so applying the canonical bound makes that gate live and correct, where the
+first version's raw bound made it unreachable.
+
+Both new gates were verified failing against their respective wrong shapes: setting
+the raw cap to 261 (the single-tier design) fails
+`ControlLegitimateAuthorityShapesAreAccepted` naming Codex's own 323-byte case and
+the 883-byte maximum, and removing the canonical tier fails
+`DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier` with a 1000-byte `Host` field
+reaching the request log.
+
+> **The lesson: a bound derived from a specification governs whichever
+> REPRESENTATION that specification is about.** "253 characters" is a fact about the
+> A-label form; the bytes on the wire are a different value that can be four times
+> larger and still legal. Before enforcing a limit, name the representation it
+> constrains and check which one the code is holding — and make the control test
+> carry an example of *every* representation the input can arrive in, because a
+> control that samples one of them will pass while the other is broken.
+
+### The second review round: a bound is a property of its POSITION, too
+
+Found by review (Codex, two P2 findings on `d40c083`), and they are one defect
+wearing two faces: **the RAW tier was applied at all four entry points from the
+start; the CANONICAL tier was applied only where a normalized host already
+happened to be in scope.**
+
+**Face 1 — the canonical tier sat behind Stage-1 authentication.** The gate lived
+~60 lines below the raw one, at the RISK-013 canonicalization point, and the
+section above justifies that placement: the raw pre-cap has already bounded what
+`IP_BLOCKED` and `RATE_LIMITED` can RETAIN to 1 KiB. That reasoning is correct and
+it is **about retention only**. The canonical tier's other job — the one that
+motivated adding it — is bounding the **quadratic matcher walk**, and Stage-1
+authentication runs a matcher:
+
+    authRuleMatchesScratch  (authpolicy.go:643)
+      → matchDestNorm(rule, s.ctx.Host, s.normHost(), s.hostCat())
+        → the same urlcat + catdb fusion §39 exists to bound
+
+So a category-scoped Stage-1 auth rule paid the walk for a 1 000-byte dot-dense
+authority before the bound ran — and a **terminal** auth outcome returned without
+reaching the bound at all. Measured against the pre-fix tree: the request answered
+**407** and `culvert_proxy_oversize_host_rejected_total` stayed **0**, so the
+operator surface an admin would watch was blind to it.
+
+**Face 2 — both admin entry points enforced the raw tier only.** `apiURLCatLookup`
+and `apiPolicyTest` capped at 1 KiB and went straight into `lookupHostCategory`
+and `walkPolicyTestRules`. Measured pre-fix: **HTTP 200, uncounted, from a VIEWER**
+— the lowest role the product has — for the exact 1 000-byte dot-dense shape the
+canonical tier was added to reject, and `apiPolicyTest` can invoke the fusion more
+than once per call. This directly contradicted this section's own claim that the
+completeness of the entry-point inventory is a security property: four entry
+points, two of them enforcing half the contract.
+
+**What shipped for it.** `canonicalDestHost` — one shared derivation (strip port,
+`normalizeHostStrict`) — so the four entry points cannot compute that value
+differently, which is the whole reason the drift was possible. The proxy gate is
+hoisted to sit immediately after the raw tier, ahead of connlimit, the IP filter,
+the rate limiter, authentication and policy. It costs nothing: the host is
+normalized ONCE per request and the value reused at the IDNA gate, which no longer
+normalizes. Nothing between the two points mutates `r.Host`, so the hoist is
+value-preserving, and the RISK-013 **INVALID_HOST** refusal deliberately stays in
+its original position — the hoisted gate decides LENGTH only, never validity.
+`rejectOversizeCanonicalHost` now takes the protocol, so an admin refusal no longer
+reports itself as `HTTP`. SOCKS5 needed no change: its canonical gate (socks5.go:487)
+already precedes its first matcher (`bl.IsBlocked`, :495) — verified rather than
+assumed, since the finding was about position.
+
+**Gates 17 → 19**, both verified failing against the pre-fix shape with the
+measurements above: `DefectCanonicalTierPrecedesStage1Auth` (which carries a
+PRECONDITION asserting that Stage-1 really would have answered 407, so it cannot
+pass vacuously — the rule this section learned from shipping an unreachable SOCKS5
+gate) and `DefectAdminEntryPointsApplyTheCanonicalTier` (both handlers, viewer role).
+
+> **The lesson, and it is the TWIN of the round above.** That round: a bound governs
+> a REPRESENTATION, and the control sampled one of them. This round: a bound is a
+> property of its POSITION, and the gate sampled one PATH —
+> `DefectDotDenseASCIIIsStillRefusedByTheCanonicalTier` drove the plain-HTTP proxy
+> path and passed while the auth path and both admin paths were wide open. "Behind
+> these two sinks is safe" was answered for the SINKS and never asked of the
+> MATCHERS. Enumerate every path that reaches the cost, not every place you happen
+> to be standing — and when a contract has two parts, check both at every site,
+> because enforcing one tier of a two-tier bound is not enforcing the bound.
+
+### What is deliberately left
+
+- **PX-22 — the inner inspected request's URI is unbounded.** `SSL_INNER` logs
+  `req.URL.Path` and `policyLogURI` puts it in the request-log `URI` field, with
+  no `MaxHeaderBytes` on the decrypted `http.ReadRequest`. Narrower reach (an
+  allowed destination plus a decryption profile), but identical arithmetic once
+  there. Not fixed: a real URL can legitimately be long, so capping it is a
+  product decision about log fidelity, not an arithmetic one like 253.
+- **`MaxHeaderBytes` on the proxy server is unchanged.** It bounds the whole
+  header block rather than one field, so lowering it would cut the worst case by
+  a constant while breaking clients carrying large cookie or token headers. The
+  wrong instrument for a bound on one value.
+- **No length guard inside the matchers**, for the fail-open reason above. The
+  residual is that they remain quadratic in whatever they are handed, and the
+  entry-point inventory is the only thing in front of them.
+- **No new alert event and no `/readyz` row.** A refused request is a healthy
+  gateway refusing an impossible destination; failing readiness over it would
+  eject a serving node on client input.
+- **The arrival rate is still not bounded by default** (PX-6 / §25's finding —
+  `-rate-limit` ships at 0). This sweep bounds the COST of each request, not how
+  many arrive; the runbook points at the front door.
+- **ST-9 (NEW) — `TestTopHosts_ConcurrentRecordDecayAndTop` was FLAKY under CPU
+  contention, and it is what failed `Deep · determinism` on this PR. CLOSED.**
+  First recorded here as "open, recorded rather than fixed" on one-concern-per-change
+  grounds. That disposition was **wrong once it blocked a required gate on a PR
+  this sweep owned**: "pre-existing" does not make a red required check somebody
+  else's problem.
+
+  **Diagnosis, and the two false starts worth recording.** The determinism gate
+  failed on two heads. The obvious cause looked like an ORDERING leak, and the
+  sweep did have one — `TestChaos69_DefectIPBlockedPathDoesNotRetainTheAuthority`
+  set `ipf.SetMode("allow")` (an allowlist with an empty list denies everything)
+  and restored nothing, which seven test files that drive `handleRequest` without
+  `setupProxyTest` would have seen as a 403. That leak was real, was proven with a
+  probe, and **was not the determinism failure**: the first fix for it was also
+  ineffective (restoring a POINTER to an in-place-mutated object restores nothing
+  — the probe caught the restore being present and useless), and once genuinely
+  fixed, CI failed again under a NEW seed. Re-running **both** CI seeds locally
+  passed (674 s each), which is the fact that settled it: *a fixed seed that does
+  not reproduce is not an ordering bug.* It is load-dependent.
+
+  **Mechanism.** The test's own comment says "the flood is the clock: the heavy
+  hitters must be reinforced for as long as it runs". Under CPU starvation that
+  stops being true — the flood goroutine completes all 20 000 junk inserts
+  (~156 decay passes at cap 128) while the scheduler starves the four hot
+  workers, so `hot-a`/`hot-b` are halved to 1 and lose an arbitrary tie to a
+  count-1 junk entry. Measured with six spinning CPU hogs: **3 failures in 30
+  runs**, one observed `Top(2) = [{hot-b Count:4} {junk-19999 Count:1}]` — the
+  heavy hitters were **not actually heavy**. So the TEST's premise was failing,
+  not the engine's contract.
+
+  **Fix: restore the interleaving, never loosen the assertion.** The flood is now
+  PACED by the heavy hitters (`reinforcementChunk` 256, `awaitReinforcement`), so
+  the documented "flood is the clock" property holds by construction instead of by
+  scheduler luck. The `Top(2)` assertion is UNCHANGED — a tie-tolerant assertion
+  would have passed while the engine's heavy-hitter guarantee went unchecked,
+  which is the failure mode this register keeps naming. The wait is bounded (10 s)
+  and returns false so the flood abandons immediately: without that early return a
+  control that killed the hot workers took the test past 120 s, because ~78 chunks
+  each waited the full bound.
+
+  Verified both directions: 30 runs under the same contention now pass, and the
+  CONTROL — hot workers stopping early, which the test's comment says must fail
+  because a host that stops being requested is supposed to age out — fails in
+  10.0 s.
+
+  > **The lesson, and it is the third instance in this sweep of the same shape:**
+  > a flaky gate is a claim about the engine that the test cannot currently
+  > support. Two plausible causes (an ordering leak, then a second ordering leak)
+  > were each fixed on evidence and neither was the failure. What distinguished
+  > them was asking whether the failure was REPRODUCIBLE UNDER ITS OWN STATED
+  > MECHANISM: a shuffle seed that does not reproduce is not an ordering bug, no
+  > matter how many ordering bugs the diff genuinely contains.
+
+### The process lesson
+
+§21 stated one for back ends, §22 for listeners, §23 for decisions, §24 for
+documented residuals, §32 for health planes, §35 for values that outlive a parse.
+This sweep adds one about **bounds**:
+
+> A bound is a claim about one axis. `topHosts` is capped at 10 000 entries and
+> `internal/lockout` sweeps its maps on a window; both comments named an
+> *unbounded-memory DoS* and both bounded the count while the adversary chose the
+> size. The same sentence was wrong in the same way in two components, and the
+> second one survived the sweep that corrected the first. **When a comment claims
+> a structure is bounded, name the axis — and then ask which axis the attacker
+> picks.**
+
+And one about **where a cost lives**:
+
+> PX-21 recorded this value as a logging problem because logging is where the
+> value was visibly *copied*. The expensive thing was the ten places it was
+> *read*, each of them a correct, well-reviewed, individually cheap matcher. A
+> value that fans out to many consumers has no single owner of its cost, so the
+> bound belongs at the one place it has a single owner: where it enters.
+
+### The third review round: sharing a predicate is not sharing an action
+
+Two findings on `51f8922`, and neither is about what the bound *is*. Both are
+about what happens *around* it.
+
+**Face 1 — the SOCKS5 refusal charged its counter AFTER the reply.** The gate
+wrote `socks5Reply(conn, 0x02)` and only then called
+`noteOversizeHostRejection`, so anything acting on the refusal — a reader, an
+operator watching `culvert_proxy_oversize_host_rejected_total`, or the gate's own
+test — could observe the refusal with the counter unmoved.
+`TestChaos69_DefectSOCKS5RefusesOversizeDestination` failed **1 run in 4**.
+
+What makes this worth recording is that **every other call site was already
+right**: `rejectOversizeDestHost` and `rejectOversizeCanonicalHost` both charge
+before `http.Error`, and the two admin handlers copy that order. SOCKS5 was the
+one place the accounting-and-reply **sequence** was hand-written inline rather
+than going through the shared helper — because SOCKS5 speaks a wire protocol, so
+there was no `http.ResponseWriter` to hand the shared helper.
+
+The section above makes the completeness of the entry-point inventory a security
+property and satisfies it by sharing the **predicates**
+(`rawAuthorityOversize`, `canonicalHostOversize`). That was necessary and it was
+not sufficient. The four entry points agreed perfectly about *what is too long*
+and diverged about *what to do about it*, and the divergence landed exactly where
+the action was not shared:
+
+> **Sharing a predicate is not sharing an action.** When one call site cannot use
+> the shared helper, it inherits none of the helper's ordering guarantees — only
+> its answer. Enumerate what the helper *does*, not just what it *decides*.
+
+The ordering rule itself is CHAOS-57's, one plane over: the accounting lands
+ahead of what the peer observes (there, each severed tunnel's `TUNNEL_CLOSED`
+ahead of the flush hooks).
+
+**Face 2 — the runbook's log example drifted through the two-tier rework.** It
+kept a single pre-rework line:
+
+    OVERSIZE_HOST HTTP 10.4.2.19 {bytes=1048310 limit=261 total=4127 action=block}
+
+which is wrong twice. It omits `tier=`, the field the two-tier design added and
+which the runbook's own field list documents two paragraphs below — so the
+document contradicted itself. And `limit=261` is `maxDestAuthorityLen`, the
+**derivation-only** constant the emitter never prints; the real line carries
+`1024` for `raw` or `253` for `canonical`. An operator building log parsing or an
+incident-response step from that example could not match real output and could
+not tell **which bound fired** — the one question the two tiers exist to answer.
+
+This is the same drift class that, earlier in the same PR, left four places
+naming predicates the rework had deleted. Prose cannot be unit-tested; an
+**example** can:
+
+> **A documented log line is a parsing contract.** Pin it against the emitter
+> rather than against a regex rewritten in the test — otherwise the test and the
+> doc drift together and agree with each other while both disagree with the code.
+
+`TestChaos69_RunbookLogExampleMatchesTheEmitter` extracts every `OVERSIZE_HOST`
+line from the runbook, replays each through the real
+`noteOversizeHostRejection`, and compares — normalising only the live `total=`,
+which no example can pin.
+
+**What it deliberately does NOT pin is how many examples the runbook shows or
+which tiers it picks.** An earlier draft required both tiers; that is a
+formatting preference, not the contract, and a gate that enforced it would fail
+the build over layout rather than over a wrong line. The contract is narrower:
+every line the runbook prints must be one the emitter really produces, and must
+name the `tier` that fired — the field whose absence was half the original
+defect. Verified failing against the original drifted line, against the
+reviewer's exact `limit=261`, and against a runbook with the example deleted
+(the not-vacuous case); verified PASSING when a second tier's example is added,
+because that is the author's call.
+
+> A wall should pin the property that was broken, not the shape the author
+> happened to write while fixing it. Ask what a future change could get *wrong*,
+> and stop there.
+
+### The fourth review round: `ok && bound(...)` exempts the `!ok` case
+
+One finding on `1a23a00` (Codex P2), and it is the completeness rule biting for
+the third time in this sweep — first across REPRESENTATIONS, then across PATHS,
+now across **BRANCHES on a path already covered**.
+
+The hoisted canonical gate was spelled:
+
+    destNormHost, destNormOK := canonicalDestHost(r.Host)
+    if destNormOK && rejectOversizeCanonicalHost(w, "HTTP", clientIP, destNormHost) {
+
+which reads as "bound the canonical host" and behaves as "bound the canonical
+host **when there is one**". An authority with no canonical form skipped the tier
+entirely. The band is narrow and entirely reachable:
+
+- more than `maxDestHostLen` (253) bare bytes, so the DNS bound should fire;
+- at most `maxRawDestAuthorityBytes` (1024) raw, so the raw pre-cap does not;
+- carrying a malformed ACE label, so `idna.ToASCII` refuses it.
+
+Measured against the pre-fix tree with a 995-byte dot-dense host ending
+`xn--0`: `rawAuthorityOversize` false, `canonicalDestHost` ok=false, and the
+request answered **407** — it paid the quadratic matcher walk inside Stage-1
+authentication and the oversize counter never moved. Both admin handlers carried
+the identical shape, so a **viewer** could drive it as well.
+
+**Why the HTTP path was exposed and SOCKS5 was not is the transferable part.**
+SOCKS5 refuses `INVALID_HOST` at the normalization point, ahead of its canonical
+tier and every matcher. The HTTP path's `INVALID_HOST` refusal deliberately sits
+*after* `resolveRequestAuth` so it can record the authenticated identity — a good
+reason, and exactly what left the gap. The two protocols disagreed about where
+"this host is not a host" is decided, and only one of them had a cost bound in
+front of the matchers.
+
+**The fix bounds the RAW BARE host when normalization fails, and the reason that
+is safe must be written down, because round 1 is the trap it looks like.** Round
+1's regression refused *legitimate* internationalized names whose canonical form
+fitted inside 253. Here normalization FAILED, so there is no canonical form and
+no resolver can serve the host; refusing it on length cannot reject a destination
+that could have been served, and 400 is the status `INVALID_HOST` already
+answered. Only the oversize band changes — a **short** malformed host keeps its
+identity-bearing `INVALID_HOST` row, pinned by
+`ControlShortUnnormalizableHostKeepsItsInvalidHostRefusal`, because the cheapest
+way to pass the defect gate is to refuse every unnormalizable host at the entry
+point and delete that audit evidence.
+
+A third bounded class `tier=unnormalizable` is emitted rather than folded into
+`canonical`: the operator's question is which bound fired **and on what basis**,
+and the basis here is the raw bare host rather than a normalized one.
+
+> **A guard written `ok && bound(...)` silently exempts the `!ok` case — and
+> `!ok` is exactly where a hostile input wants to be.** Having enumerated every
+> representation and every path, enumerate every BRANCH: for each guard, ask what
+> happens on the arm that does not run it.
+
+Gates: `DefectUnnormalizableHostIsStillBounded` (HTTP, with the band's existence
+asserted first and the 407 precondition), `DefectAdminEntryPointsBoundUnnormalizableHosts`
+(both handlers), and the control above. Verified failing against the reverted
+HTTP shape, the reverted admin shape, and a fallback with its length check
+removed.
+
+### The fifth review round: the tiers measured a string the matchers never received
+
+One finding on `fccc058` (Codex P2), and it is the sharpest form this sweep
+produced, because **every bound was correct, every gate was green, and the
+defect was fully reachable anyway.** The previous four rounds asked whether the
+bound was the right VALUE (round 1), in the right POSITION (round 2), paired
+with the right ACTION (round 3), and on every BRANCH (round 4). None of them
+asked the prior question: *is the string the tiers measure the string the
+matchers are handed?*
+
+`net.SplitHostPort` does not require a numeric port — it splits on the last
+colon and validates nothing beyond that. So:
+
+    authority := "a:" + strings.Repeat("bb.", 333) + "bb"   // 1 003 bytes
+
+- `rawAuthorityOversize(authority)` → **false** (1 003 < 1 024).
+- `canonicalDestHost(authority)` → `("a", true)`; the port is everything after
+  the colon.
+- `canonicalHostOversize("a")` → **false** (1 < 253).
+
+Both tiers pass, on a one-byte host. The two admin handlers then wrote:
+
+    category, tier, matchedBy := lookupHostCategory(host)      // the ORIGINAL
+    blocked := bl.IsBlocked(host)
+    ...
+    trace, matched := walkPolicyTestRules(rules, …, body.Host, …)
+    stage2AuthSource, authBlock := simulateAuthOutcome(rules, …, body.Host, …)
+
+so the quadratic suffix walk ran on 1 003 bytes — the exact cost §39 exists to
+bound, reached through a surface §39 had already "closed", from a viewer-role
+request.
+
+**Bounding the ORIGINAL at 253 is not the fix.** That is round 1's IDN
+regression restated: a legitimate internationalized host measures 883 raw bytes
+and 251 canonical, so a 253-byte cap on the raw authority refuses resolvable
+destinations. The fix is to derive the bounded form ONCE with the same operation
+the tiers used — `bareDestHost`, a `net.SplitHostPort` strip with no validation —
+and hand THAT to every matcher.
+
+#### The fidelity half, which is worse than the cost half
+
+Both runtime stages already strip the port with this exact operation before
+matching:
+
+- Stage-1: `authRequestContext` (`authpolicy.go`) — `net.SplitHostPort` on
+  `r.Host`, feeding `RequestContext.Host`.
+- Stage-2: `handleRequest` (`proxy.go`) — the same strip, feeding
+  `preDispatchBlocked` and `policyStore.Evaluate`.
+
+The policy tester's entire purpose is to predict those decisions. Measured on
+the pre-fix tree with a category-scoped auth-exempt rule:
+
+| host handed to the Stage-1 resolver | outcome | rule matched |
+|---|---|---|
+| `a` (production's value) | **Exempt** | yes |
+| `a:bb.bb.…` (the tester's value) | `Default` | no |
+
+So an admin auditing the blast radius of an auth exemption was shown
+*"this exemption does not apply"* for traffic the live gate exempts — a
+**narrower** scope than production enforces, which is the dangerous direction
+for an exemption review. Stage-2 under-reported its matches identically.
+
+#### Why exactly these two paths, and no others
+
+The HTTP proxy path was already correct, and for an ordinary reason: it does its
+own `net.SplitHostPort` at `proxy.go:1513` and passes the result to
+`preDispatchBlocked` and `Evaluate`. SOCKS5 was never exposed because RFC 1928
+§4 carries the port in its own two-byte field, so its DOMAINNAME never contains
+one. **The exposure was precisely the two paths whose host value does not come
+from a wire format that separates host from port** — a query parameter and a
+JSON field, where the admin types one string and the handler must split it
+itself.
+
+#### Stage-1 was missed by the first draft of this very fix
+
+The first draft bounded `lookupHostCategory`, `bl.IsBlocked` and
+`walkPolicyTestRules`, and left `simulateAuthOutcome` alone — the THIRD matcher
+call site in the same function. That is round 2's lesson (*Stage-1 runs a
+matcher*) landing again, inside the function that had just been repaired, in the
+same sweep that recorded the lesson. Enumerating "the matchers" is not the same
+as enumerating the matchers.
+
+> **A bound is a claim about a STRING, not about a request.** Measure the value
+> you will actually hand onward. If you derive a bounded form, make every
+> consumer on that path take the derived value — never the original sitting in
+> scope beside it.
+
+#### Two vacuous gates before a real one, and why
+
+This is the most instructive part of the round.
+
+1. **A cost-RATIO gate could not see the defect.** The quadratic walk needs a
+   populated taxonomy; with the shipped test fixtures the 1 003-byte and
+   253-byte cases cost the same, so the ratio gate passed against the pre-fix
+   shape. The instrument was right for the data path (where a real taxonomy is
+   in play) and wrong here.
+2. **A structural wall keyed on the identifier's NAME also passed.** It checked
+   that the matcher's argument was one of a blessed set of spellings, so the
+   pre-fix shape re-spelled `lookupHost := host` satisfied it. A wall that
+   cannot fail for its own defect is worse than no wall, because it is recorded
+   as coverage.
+
+What shipped is **behavioural**, and the observable is deliberately a match
+rather than a cost: urlcat's `lookupIn` probes the host and then each remainder
+after a `.`, so a payload of `bb.` labels can never reach the pattern `a`. A
+one-entry taxonomy therefore resolves the category for the bounded host and
+resolves nothing for the raw authority — a sharp differential needing no feed,
+no timing and no large fixture. The labels are `bb` on purpose: an authority
+ending `.a` would match through the suffix walk and hide the defect.
+
+Gates (`proxy_host_bounds_test.go`, round 5):
+
+- `DefectAdminMatchersReceiveTheBoundedHost` — both handlers, category fusion.
+  Asserts the tiers really do pass for this shape first, so it can never be
+  asserting against a request refused for an unrelated reason.
+- `DefectPolicyTesterStage1MatchesTheRuntimeHost` — computes the runtime gate's
+  own answer via `authRequestContext` and requires the simulator to agree.
+- `ControlPortShapedAuthorityIsStillAnswered` — an ordinary `host:port` must be
+  ANSWERED, uncharged, and still resolve its category, because the cheapest way
+  to pass the three defect gates is to refuse any authority carrying a port.
+  It also pins that the ECHOED host stays what the admin typed: the strip
+  governs what the matchers receive, never what the answer reports back.
+- `DefectEveryAdminMatcherTakesTheBoundedHost` — the completeness half. Walks
+  both handlers' ASTs and requires every host argument to a matcher to be an
+  identifier **assigned from** `bareDestHost` in that handler, across all five
+  call sites, with its own not-vacuous count.
+
+Mutation results (each run against the full `TestChaos69_` set):
+
+| mutation | fails |
+|---|---|
+| `lookupHost := host` (name kept, bound lost) | url-lookup gate, control, **the wall** |
+| `testHost := body.Host` | policy-test gate, Stage-1 gate, control, **the wall** |
+| only the Stage-1 argument reverted | **Stage-1 gate + the wall, and nothing else** |
+| `bareDestHost` returns `""` on any port (a colon ban) | **the control, both handlers** |
+
+The third row is the one worth keeping: the partial revert is invisible to every
+other gate, which is what proves the Stage-1 gate and the wall are each carrying
+weight rather than restating the behavioural gates.
+
+### The determinism failure round 5 caused, and the asymmetry behind it
+
+`Deep · determinism (shuffle, count=2)` went red on `fccc058`. The dumped job
+log did not contain the `--- FAIL:` line (GitHub truncates, and the artifact host
+is blocked by this environment's egress policy), so it was reproduced locally
+with the seed the workflow prints — `-count=2 -shuffle=1790384784183295962` —
+then narrowed to two tests that reproduce it in **0.25 s**:
+
+    --- FAIL: TestUpstreamV2D_R34_DryRunReturnsPlanAndDigestAppliesNothing
+        commit: 400 import refused, dangling object reference: policy rule
+        "chaos66-block" references category-group "chaos66-group", which the
+        candidate does not define and no current authority resolves
+
+Both names belong to this sweep's own cost gate.
+
+**The mechanism is an asymmetry in `setupProxyTest`.** Its comment says it
+"resets all global state for a clean test run", and it clears `policyStore` at
+test **START**. That stops a previous test's leaked rules flowing **IN** and does
+nothing at all about this test's rules flowing **OUT** — so every gate that
+reaches it is protected from its predecessors and none is prevented from
+poisoning its successors.
+
+`DefectCostIsFlatInAuthorityLength` needs one category-group rule to reach the
+quadratic fusion. It added the group with a `t.Cleanup` delete and added the rule
+with **no cleanup at all**. So after it ran, `policyStore` held a rule pointing
+at a group that no longer existed.
+
+> **A partial cleanup is worse than no cleanup.** Leaking both the rule and the
+> group would have left the reference resolvable and nothing would have broken.
+> Cleaning up only the group MANUFACTURED the dangling reference that the next
+> object-reference validation refused. When a test creates two objects where one
+> references the other, either restore both or restore neither — and because
+> `t.Cleanup` is LIFO, register the dependent's restore AFTER the dependency's so
+> it runs BEFORE it.
+
+Two further leaks were fixed in the same pass (the allow-path control's rule, and
+round 5's Stage-1 gate, which now restores via `draftTestSetup`), and round 5's
+Stage-1 gate additionally pins the two process-global atomics it reads —
+`requireCommitFlag`, since `apiPolicyTest` evaluates `effectivePolicySnapshot()`
+and a leaked armed Draft Mode would have it read an empty candidate, and
+`authExemptDisabledRuntime`, since a leaked kill switch suppresses a matching
+Exempt rule. Both would have failed the gate for a reason unrelated to what it
+measures, and only under `-shuffle`.
+
+`TestChaos69_WallEveryGateThatMutatesPolicyRestoresIt` walls the class for this
+file: every `TestChaos69_*` that mutates `policyStore` must register its restore.
+It is **structural** because the failure is invisible to every behavioural
+assertion in the file — they all pass whether or not the rule is cleaned up, which
+is precisely why 27 green gates coexisted with a red required check. Its allowance
+for `draftTestSetup` is **self-checking**: `chaos69AssertHelperRestores` re-reads
+that helper and fails if it stops calling `snapshotPolicyStoreForTest`, so the
+allowance cannot silently become a hole.
+
+Four mutations verified failing: each lost restore names its own gate, removing
+`snapshotPolicyStoreForTest` from `draftTestSetup` trips the self-check, and
+breaking the wall's selector trips the not-vacuous count.
+
+**Process note worth keeping.** The diagnosis cost one 15-minute local run and
+two minutes of narrowing, and it would have cost far more without the seed the
+workflow prints — that `grep -m1 -- "-test.shuffle "` in `pr-deep-gate.yml` is
+the whole reason this was reproducible at all, since the log artifact carrying
+the failing test name is unreachable from here. Keep it.
+
+**How far the class spreads, measured rather than assumed.** A survey of the root
+test package finds **164** test functions that mutate `policyStore` with no
+visible restore, so the leak shape is common — but leaking a rule is only
+*dangerous* when something else the rule REFERENCES is cleaned up, which is what
+turns a harmless leftover into a dangling reference. Exactly **three** tests in
+the whole package both delete a category group and mutate `policyStore`:
+`TestConfigVersion_CategoryGroups_RuleIntegrity`,
+`TestConfigVersion_URLCategories_HazardURLA` and CHAOS-69's cost gate. The first
+two already restore the store; the cost gate was the only leak, and it is fixed.
+The remaining 164 are recorded as latent rather than fixed — most leak a rule
+with no object references at all, and `setupProxyTest` clears the store for every
+test that reaches it, so a blanket sweep would be churn without a failure to
+point at. **The signal to look for is not "a test leaked a rule" but "a test
+leaked a rule and tidied up something the rule pointed at."**
+
+---
+
+## 40. CHAOS-70 — The admin-roster mutations that report success on a write that never landed
+
+**Date:** 2026-09-22 · **Domain:** Authentication / persistence / configuration
+(the admin credential store; never previously swept as a durability surface) ·
+**Code:** `store.go` (`mutateRosterDurably`, `saveUIUsersLocked`),
+`ui_auth.go`, `roster_persist_durability.go`, `events.go` · **Runbook:**
+`docs/operator/admin-roster-durability.md`
+
+> **Id claimed before the write-up, per §35's standing recommendation.**
+> Claimed as `CHAOS-66`; renumbered to `CHAOS-70` (§40) on merging main, where
+> `CHAOS-66` (§36) had since been taken by the SOCKS5 listener-bind sweep.
+
+### Executive summary
+
+`ui_users.json` is the **only** durable home of the admin roster: every account,
+password hash, role, TOTP secret, consumed-backup-code list and TOTP replay
+counter. Every mutation changes **memory first** and persists second, so the two
+can disagree — and the disagreement is resolved at the next restart, when the
+file wins.
+
+Three handlers mutated that state, logged the persist error, and answered **2xx**.
+They are precisely the three an operator reaches for during a security incident:
+
+- **delete a compromised or departing administrator** → `204 No Content`, audited
+  as done; the account returns at the next restart with its original password
+  hash, role and TOTP enrolment,
+- **downgrade a role** (admin → viewer) → `{"ok":true}`; the privilege is restored
+  at the next restart,
+- **rotate a leaked password** → `{"ok":true}`; the old password still
+  authenticates after the next restart.
+
+The response said success. The UI said success. **The audit log said success.**
+The divergence between memory and disk then stayed invisible until a restart
+materialised it — plausibly weeks later, and most likely during the same incident
+that filled the volume in the first place.
+
+### The rule already existed, twenty lines away
+
+This is not a gap nobody had thought about. `apiSetupComplete`, in the same file,
+treats exactly this hazard as a **wrong answer rather than a degraded success** —
+in both of its branches, with the reasoning spelled out in
+`setDefaultAuthOutcomeChecked`'s comment and the `RollbackFailedSetupAuth` branch
+beside it, and pinned by two dedicated tests
+(`TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess` and its open-mode
+sibling). Its recorded rationale generalises verbatim: *an unpersisted change
+reports done for the rest of this process's lifetime and reverts on the next
+restart.*
+
+So the rule was understood, written down and tested — **for the one-time setup
+wizard only.** Every subsequent security-relevant mutation of the same file
+reported success on a failed durable write. That asymmetry, not the individual
+handlers, is the finding.
+
+### What was NOT wrong, and why that matters
+
+The platform-level signal was already present and correct. `fileutil.AtomicWrite`
+notifies the CHAOS-45 write-failure observer on every failure branch, so the
+storage plane fires underneath: the reproduction emitted
+`Storage: DURABLE WRITE FAILED for "ui_users.json" (1 since boot) — persisted
+state is being lost`, with the degraded operator-contract row and the
+`storage_write_failed` alert behind it.
+
+This is therefore **not** a silent-failure finding, and calling it one would
+overstate it. It is a **mis-reporting** finding: the operator gets an alert
+saying *some* durable write failed, and a `204` saying *this specific revocation
+succeeded*. The storage alert cannot name the administrative decision that was
+lost, and no amount of storage observability can make a wrong HTTP status right.
+
+`ui_users.json` also already used `fileutil.AtomicWrite` — register rows **ST-5**
+and **ST-6** were closed correctly. The file is never torn. The gap was never
+*how* the bytes are written; it was what the caller does when they are not.
+
+### Evidence (measured against the real handlers, pre-fix)
+
+`roster_persist_durability_chaos_test.go` drives the production handlers with the
+roster pointed at an unwritable path, so `AtomicWrite`'s `os.CreateTemp` fails
+deterministically for any uid (a `chmod`-based read-only directory does not
+constrain root, and CI runs both ways — the technique is the one the accepted
+`apiSetupComplete` gates already use).
+
+| Gate | Pre-fix result |
+|---|---|
+| `DeleteUser_PersistFailure_DoesNotClaimSuccess` | `204`; account still in the durable roster |
+| `SetUser_PersistFailure_DoesNotClaimSuccess` | `200 {"ok":true}`; disk still grants admin |
+| `ChangePassword_PersistFailure_DoesNotClaimSuccess` | `200 {"ok":true}`; no new hash on disk |
+| `RollbackRestoresTheWholeAccount` | `204`; account half-deleted (gone from memory, present on disk) |
+
+### The fix
+
+**(1) One primitive, because an inverse operation per caller is where the bugs
+live.** `Config.mutateRosterDurably(mutate func() error)` snapshots the roster
+wholesale, runs the mutation, persists, and on failure restores the snapshot and
+returns `ErrRosterNotPersisted`. Undoing a delete means restoring the password
+hash, role, TOTP secret, backup codes **and** replay counter — none of which the
+handler still holds by the time the write fails. A partial restore is *worse*
+than no rollback: it leaves an account its owner cannot use and an operator
+cannot see is broken. Pinned by `RollbackRestoresTheWholeAccount`, which asserts
+all four survive a refused delete.
+
+**(2) The rollback invalidates cached auth decisions.** A rolled-back password
+change could otherwise leave a cached positive verdict for the *new* password —
+a credential the roster no longer contains, still authenticating for the cache
+TTL. `authRevision` is bumped and `cache.clear()` called, matching
+`RollbackFailedSetupAuth`.
+
+**(3) `ErrReplacedNotSynced` is deliberately NOT rolled back.** Its contract says
+the rename already landed the new content, so every future reader — including a
+restart — sees the new roster. Rolling back would leave memory contradicting the
+file, and refusing the request would be a false negative: the operator's change
+*did* take effect. It is reported loudly and treated as committed. This is the
+same carve-out `setDefaultAuthOutcomeChecked` already documents, and it is the
+subtle half — a naive "non-nil error ⇒ roll back" reintroduces the hazard from
+the opposite direction.
+
+**(4) The mutation's own refusals keep their own status codes.** `DeleteUIUser`'s
+"cannot delete the last admin user" guard stays a `409 Conflict`: turning every
+refusal into the persistence `500` would send an operator to check their disk
+over a policy decision that has nothing to do with it. Pinned as a CONTROL, which
+also asserts the persistence counter does **not** move.
+
+**(5) The refusal is audited.** The success entry is written only on success, so
+without this the compliance record would carry no trace at all of an attempted
+revocation that did not take effect — the audit log would simply be missing the
+event rather than wrong about it. `<action>.refused` closes that.
+
+**(6) The login path stays fail-OPEN, and that is a posture decision, recorded.**
+Two roster writes happen on the login path: advancing the TOTP replay counter and
+removing a consumed single-use backup code. Both previously discarded their error
+outright (`//nolint:errcheck`), so a failed write silently weakened a security
+property — after a restart a consumed single-use code is valid again and the
+replay window for an already-used OTP reopens. **This is the same shape the
+register recorded as CA-14 for the session revocation list** (*"a revoked token
+can be honored again after crash/disk-full"*), closed there by moving to
+`AtomicWrite` and never checked for the credential store sitting beside it.
+
+They are **not** made fail-closed. Refusing the login would mean an operator whose
+TOTP device is lost, on an appliance whose volume has just gone read-only, cannot
+reach the admin UI at all — during exactly the incident they need it to diagnose.
+That is the terminal state CHAOS-55 and CHAOS-57 both refuse: *an appliance
+nobody can manage.* The weakening is bounded by the outage and requires an
+attacker to already hold a valid backup code or a live OTP; locking the
+legitimate administrator out is the larger harm. So the posture is fail-open but
+never silent: counted, and logged at onset then at most once a minute with the
+magnitude carried by the counter (the CHAOS-63 rate-limit discipline — a
+mitigation for a write-amplification defect must not be one itself).
+
+**(7) One vestigial write removed.** The TOTP *failure* branch called
+`SaveUIUsersFile()` after `loginLimiter.RecordFailure`, which changes nothing
+`ui_users.json` carries — `internal/lockout` is in-memory and deliberately
+non-persisted (register row **AU-4**). It re-serialised every account and bcrypt
+hash and `fsync`'d a rename on **every failed OTP**, persisting nothing, on the
+brute-force path that branch exists to rate-limit (its own comment anticipates
+1M-possibility OTP guessing). Removed.
+
+### Surfaces
+
+`culvert_admin_roster_persist_failures_total` (refused and rolled back) and
+`culvert_admin_roster_persist_degraded_total` (login-path write failed, login
+proceeded). Both emitted **unconditionally** — unlike the gauges elsewhere in
+this tree, a flat zero here is the healthy steady state for every appliance, not
+an ambiguous "feature not configured", so the socks5/cluster_ca emit-only-when-
+armed rule does not apply.
+
+Deliberately distinct from `storage_write_failed`, which says only that *some*
+durable write failed: these say which administrative decision was affected and
+therefore what the operator must redo. **No new alert event** — the storage plane
+already pages for the root cause (a failing volume), and a second name for one
+root cause is two pages for one action; what was missing was not a page but the
+ability to answer *"what did I lose?"*, which is a counter and a log line.
+
+**Nothing is queued and nothing retries automatically.** That is deliberate: a
+privilege change replayed later, out of order, against a roster that has since
+changed is worse than one the operator reapplies knowingly.
+
+### Gates
+
+`roster_persist_durability_chaos_test.go` — 4 defect gates, **each verified
+failing against the pre-fix handler shape** (reverted `ui_auth.go` against the
+shipped primitive, so the handler conversion is demonstrably what closes them),
+plus:
+
+- **3 CONTROLS**, because the cheapest way to pass every defect gate is to refuse
+  roster mutations outright or roll back so aggressively that legitimate changes
+  are lost: a healthy volume must still apply and persist both a role change and
+  a delete; a policy refusal must keep its `409` and must **not** be counted as a
+  persistence failure; and `ErrReplacedNotSynced` must count as committed while
+  an ordinary write failure must not.
+- **1 STRUCTURAL WALL** (`Wall_NoRosterPersistErrorIsDiscarded`), which AST-walks
+  `ui_auth.go` and fails when any `cfg.SaveUIUsersFile()` call appears as a bare
+  expression statement. Behavioural coverage cannot reach this: a future call
+  site that discards the error reintroduces the defect while every test keeps
+  passing on a healthy disk. Verified by injecting a discarded call (caught, with
+  the position named) and carrying its own not-vacuous check, so a selector that
+  stops matching fails rather than passing forever against nothing. This is
+  SEC-SOCKS5-LOG-1 round 2's lesson — *walling one call shape does not wall the
+  path* — applied to the shape that matters here.
+
+### Codex review round 1 — the rollback needed a transaction, and the rate gate needed a claim
+
+**P1 — a whole-roster rollback is only sound if nothing else can write the
+roster.** `mutateRosterDurably` restores a WHOLE-ROSTER snapshot on a failed
+write, and the login-path setters (`ConsumeBackupCode`, `SetTOTPLastCounter`)
+took only `c.mu`, not `saveUIUsersMu`. So a login that consumed a single-use
+backup code between a failing admin mutation's snapshot and its rollback had
+that consumption **discarded** — and because the login's own save blocks on
+`saveUIUsersMu` and therefore lands AFTER the rollback, it then persisted the
+reverted state, making the resurrection **durable**. `setDefaultAuthOutcomeChecked`
+had the mirror-image problem and is reachable from a live admin API
+(`ui_config.go`), not just first-time setup.
+
+That is precisely the property this section exists to protect — *a consumed
+single-use credential must not come back* — **broken by the rollback this
+section introduced**. The lesson is the one this file keeps relearning, in a new
+place: *a mechanism that restores state is only as sound as the boundary that
+stops anyone else writing it*, and CHAOS-70 added the first mechanism in this
+file that can un-apply a mutation without adding the boundary that makes it safe.
+
+`saveUIUsersMu` is now the transaction lock for **every** persisted roster
+mutation, held across mutate+persist by all three shapes: `mutateRosterDurably`
+(rollback), the new `mutateRosterBestEffort` (login path, fail-open, no
+rollback) and `setDefaultAuthOutcomeChecked` (targeted rollback). A mutation
+reporting no change issues no write at all, so a rejected backup code does not
+re-serialise the roster — the vestigial write removed above does not return
+through the fix.
+
+**P2 — the log-rate gate did not CLAIM its interval.** It read the last-emitted
+stamp, compared, then stored, so concurrent callers could all observe the same
+expired value and all emit — the log amplification the gate exists to prevent,
+arriving while the volume is already failing, on a path an unauthenticated
+client can drive. Now a `CompareAndSwap` loop: exactly one caller wins, the
+losers re-read and suppress.
+
+**The P2 gate is STRUCTURAL, and the measurement is the reason.** The defect is
+a TOCTOU on an atomic, so `-race` cannot see it (atomics are race-free by
+definition), and it is not reachable behaviourally: a 256-goroutine hammer over
+**200 trials** against the exact pre-fix shape produced more than one winner in
+**0 of 200 runs**, because the load→store window is a few nanoseconds. A
+behavioural gate therefore PASSES against the defect — measured, it did — which
+is worse than no gate, because it is a false assurance. The shipped gate asserts
+the mechanism (CAS present, no bare `Store`) and carries a control that rejects a
+verbatim copy of the pre-fix body, the same shape and the same recorded reasoning
+as `sanitizeLog`'s scan-count gate. The behavioural test is kept and **relabelled
+a CONTROL**: what it pins deterministically is that the line is suppressed while
+the COUNT never is.
+
+Gates added: `RollbackDoesNotDiscardConcurrentLoginMutation` (deterministic — the
+admin mutation blocks inside its transaction while the login goroutine is
+started, so the interleaving is forced, not raced; verified failing against the
+unserialised shape with the consumed code resurrected),
+`Control_BestEffortSkipsWriteWhenNothingChanged`,
+`Wall_LogRateGateClaimsIntervalAtomically` (+ its control), and
+`Control_LogRateGateCountsEveryCaller`. The existing structural wall's
+**not-vacuous check did its job**: moving the login path onto the new primitives
+dropped its match count and it failed rather than passing against nothing, so the
+selector was widened to every roster-persisting call.
+
+### Codex review round 2 — the transaction had one writer left outside it, and the runbook named a route that does not exist
+
+**P1 — first-time setup was still outside the transaction, and the reason round 1
+left it out was wrong.** `SetAuth` mirrors the new admin into `c.uiUsers` (it
+takes only `c.mu`), so credentialed first-time setup IS a roster mutation, and
+`apiSetupComplete` ran it as an unserialised `SetAuth` + `SaveUIUsersFile` pair.
+Round 1 dismissed this on the recorded reasoning that setup and admin
+user-management are mutually exclusive, because the latter requires a configured
+appliance. **That reasoning was false, and the gate said to be separating them is
+exactly what makes them overlap**: `uiAuthMiddleware` injects `RoleAdmin` into
+EVERY request while `!cfg.IsConfigured()`, so `POST /api/auth/users` is reachable,
+with admin authority, precisely DURING setup.
+
+The reachable interleaving is the hazard `apiSetupComplete`'s own rollback exists
+to prevent, arrived at from the opposite direction: an admin mutation snapshots
+the still-empty roster, `SetAuth` inserts the initial admin, the admin mutation's
+write fails and its wholesale restore DELETES that account, and setup's own write
+— queued behind `saveUIUsersMu` the whole time — then persists the empty roster
+and answers **200**. `IsConfigured()` stays true for the rest of the process only
+because the legacy `c.user`/`c.passHash` pair is still set, and those are not in
+`ui_users.json`, so the next restart reopens **unauthenticated first-time setup**.
+`SetAuthDurably` now holds `saveUIUsersMu` across mutate+persist. Its
+compensation stays `RollbackFailedSetupAuth` rather than `restoreRoster`, and that
+distinction is load-bearing: `SetAuth` also sets the legacy pair, which
+`rosterSnapshot` does not capture, so a wholesale roster restore would undo the
+account while leaving `IsConfigured()` true with nothing persisted — exactly the
+state that rollback exists to clear.
+
+**The P1 gate is STRUCTURAL, and once again the measurement is the reason.** The
+first draft held an admin transaction open, called `SetAuthDurably` concurrently,
+slept 50 ms and asserted the roster was untouched. It **PASSED against the
+verbatim pre-fix shape** — and not because of the lock: `SetAuth` runs bcrypt at
+`DefaultCost` (~80–100 ms) BEFORE it touches `c.mu`, so the observation window
+closed while the defect was still hashing. This is the round-1 P2 lesson from the
+opposite end — there the window was too NARROW to observe, here the observation
+was taken too EARLY — and the standing rule is the same: *a behavioural gate that
+passes against the defect is worse than no gate.* The shipped wall asserts the
+mechanism (`saveUIUsersMu.Lock()` as the FIRST statement, never the self-locking
+`SaveUIUsersFile`) and carries a control rejecting a verbatim copy of the pre-fix
+body. The behavioural half is kept and made **SELF-CALIBRATING**: the wait is
+derived from a measured `DefaultCost` hash on the machine running it, not from a
+constant, so it fails against the defect on fast and slow hardware alike
+(verified failing on both assertions).
+
+**P2 — the runbook named a route that does not exist.** The new operator runbook
+and the CHANGELOG entry both said `POST /api/auth/password`; the registered route
+is `POST /api/auth/change-password` (`ui_routes_meta.go`, `ui_auth.go`). An
+operator following the recovery steps gets a 404 in the middle of an incident,
+which is the failure mode a runbook exists to remove. Both corrected, and
+`Wall_RunbookNamesRegisteredEndpoints` now parses every `/api/` path out of the
+runbook and requires each to be present in `uiRoutes`, so a future rename cannot
+leave the documentation pointing at nothing (verified failing against the wrong
+path).
+
+The existing structural wall's **not-vacuous check fired a second time** — round 2
+moved the credentialed-setup persist out from under its previous spelling exactly
+as round 1 had — and was widened rather than weakened, to `SaveUIUsersFile`,
+`mutateRosterDurably`, `mutateRosterBestEffort` and `SetAuthDurably`.
+`SetAuthDurably_PersistFailureRollsBackLegacyPair` is labelled a **CONTROL**, not
+a defect gate: the pre-fix shape compensated the same way and it passes against it
+(verified), so what it pins is that moving setup inside the transaction did not
+quietly swap its compensation for the generic one.
+
+### Codex review round 3 (self-found) — the fourth roster mutator, on a live admin endpoint
+
+Auditing the remaining `cfg.SetAuth` call sites while answering round 2 turned up
+a **fourth** writer of the admin roster that this sweep had not covered, and it is
+**worse than the three it fixed**. `apiSettings`' POST branch (`ui_config.go`) —
+the GUI **Settings panel's Save button** (`saveSettings()`, `static/index.html`) —
+called `cfg.SetAuth` and nothing else. The admin credential is not carried in
+`admin_settings.json`, and the only writers of `ui_users.json` are the roster
+primitives, so **nothing persisted it at all**. Three faults, each measured
+against the real handler before being claimed:
+
+1. **A rotated admin password reverted at the next restart.** `200 {"ok":true}`,
+   audited as `settings.update`, the new password authenticating live, the durable
+   roster still holding the ORIGINAL hash — so after a restart the **previous
+   password authenticated again**. That is the same "rotate a leaked password"
+   hazard §40 exists for, except **unconditional**: the other three needed a disk
+   fault, this one needed only a restart.
+2. **An EMPTY password was accepted.** Complexity was validated only
+   `if body.Pass != ""`, so `{"user":"x","pass":""}` installed `bcrypt("")` as an
+   ADMIN credential — and for a new username, an admin ACCOUNT authenticating with
+   no password (measured: `VerifyUIUser("newadmin", "")` returned role `admin`,
+   ok `true`). The GUI form posts whatever its password box holds, so an operator
+   editing only the username reached this **by accident**.
+3. **An EMPTY user was accepted**, which is `SetAuth`'s documented way to DISABLE
+   local authentication — so clearing both fields switched off the admin
+   credential behind a *"Settings saved"* toast.
+
+**Fixing (1) alone would have been a regression, and that coupling is the point:**
+persisting is exactly what would have made (2) and (3) survive a restart, turning
+two restart-bounded weaknesses into permanent ones. So the three are one change.
+Running unmatched traffic without credentials stays supported through the
+`defaultAuthOutcome` endpoint, which is explicit about it, rather than by blanking
+a text field.
+
+**A CONTROL caught the first version of this fix locking the administrator out,
+and the lesson is this sweep's own rule turned back on it.** Routing `apiSettings`
+through `SetAuthDurably` inherited setup's dedicated inverse,
+`RollbackFailedSetupAuth`, which **deletes** the account — correct for a
+first-time setup (there is no prior account) and wrong for the rotation of an
+existing one: a refused rotation left the admin with **no roster entry at all**,
+locked out until a restart. That is precisely the "a PARTIAL restore is worse than
+no rollback" hazard rule (1) of this section states, reached because the snapshot
+was incomplete: `rosterSnapshot` captured the roster but not the legacy
+`c.user`/`c.passHash` pair that `SetAuth` also writes, which was why setup needed
+its own inverse in the first place. **Completing the snapshot** removed the need
+for a second inverse entirely — `SetAuthDurably` is now a one-line delegation to
+`mutateRosterDurably`, so both callers share one rollback, one transaction lock
+and one `ErrReplacedNotSynced` rule. `RollbackFailedSetupAuth` has no production
+callers left and is documented as the hazard it now is.
+
+That also **resolves** the `ErrReplacedNotSynced` inconsistency round 2 recorded as
+pre-existing rather than preserving it. Compensating on ANY persist error was
+acceptable while the function served first-time setup alone; it stopped being so
+the moment a LIVE admin endpoint became the second caller, because a rollback
+after a landed rename leaves memory contradicting the file — the new password
+refused now and accepted after a restart, worse than either consistent answer.
+
+The structural wall's not-vacuous check fired a **third** time, for the third
+consecutive round, as the lock moved from `SetAuthDurably`'s own body into the
+shared primitive. It was **widened, not weakened**: the property it pins is that
+the mutation runs inside the transaction, so it now accepts either acquiring
+`saveUIUsersMu` first or delegating wholly to `mutateRosterDurably`, with the
+control still requiring the pre-fix body — which neither locks nor delegates — to
+be rejected.
+
+Gates added (each verified failing against the pre-fix `apiSettings` shape):
+`SettingsAuthChangeIsDurable`, `SettingsRefusesEmptyPassword`,
+`SettingsRefusesEmptyUser`, and `Control_SettingsPersistFailureIsRefused` — the
+control that found the lockout, and which additionally pins that this endpoint
+charges the same refusal counter as the other three, so one metric still answers
+"which administrative decision did I lose?".
+
+**The published API contract was RIGHT and the handler did not enforce it.**
+`SetInitialAdmin` (`api/openapi/openapi.yaml`) already declares
+`required: [user, pass]` with `pass` carrying `minLength: 8`, so every body this
+branch accepted for faults (2) and (3) was a body its own contract forbids. The
+conformance test that covers it (`apicontract_request_slice3j_test.go`) asserts
+that the SPEC rejects `{"user":"admin"}` — and never that the HANDLER does, so
+it passed throughout. A request-conformance suite that validates the schema in
+isolation proves the document is strict; it says nothing about the code. Live
+request validation against the contract would have caught all three faults, and is
+recorded as a follow-up rather than built here.
+
+**Recorded, NOT fixed — the contract omits the `500` these handlers return.**
+Neither `/api/settings` nor its three siblings document a `500` response, though
+all four now return one on a refused persist (the earlier rounds of this sweep
+shipped that on `/api/auth/users` and `/api/auth/change-password`). The omission is
+pre-existing and family-wide, and closing it means editing the spec for four
+operations plus a `make api-bundle` regeneration through the API-governance and
+breaking-change gates — a wider blast radius than the finding warrants inside a
+durability sweep. Additive, so it is not a breaking change when someone takes it.
+
+**The governance note worth carrying forward:** §40 shipped with an architecture
+note claiming `saveUIUsersMu` was the transaction lock for *every* persisted roster
+mutation, and a structural wall that AST-walks `ui_auth.go` only. The claim was
+broader than the wall, and the mutator that escaped both lived in a different
+file. When a sweep states a rule over a CLASS of call sites, enumerate the class
+from the primitive (`cfg.SetAuth`, `SaveUIUsersFile`) rather than from the file
+the sweep happens to be editing.
+
+### Register rows
+
+- **CA-14** — the session-revocation half was already closed (`AtomicWrite`); the
+  same sentence was never checked for the credential store beside it. The
+  backup-code/replay-counter half is now **surfaced and counted**, posture
+  unchanged and owned above.
+- **ST-5 / ST-6** — confirmed still closed and not the cause here. The file is
+  never torn; the gap was what the caller does when the write fails.
+
+### Deliberately left, and recorded
+
+- **AU-18 (new) — TOTP 2FA has no enrolment surface at all.** `SetTOTPSecret`,
+  `ClearTOTP` and `SetBackupCodes` have **no production callers**, and `uiRoutes`
+  carries no TOTP route. The login path verifies TOTP and consumes backup codes
+  (`verifyLoginTOTP` reads `cfg.GetTOTPSecret`), so the feature is half-live: it
+  can be *enforced* but can only be *enabled* by hand-editing `ui_users.json`.
+  This is a GUI-parity gap (CLAUDE.md's code conventions require every option to
+  be manageable from the admin UI) rather than a resilience defect, and it bounds
+  the reachability of the backup-code item above to operators who hand-provision
+  TOTP. Reported, not fixed: adding an enrolment API is a feature with its own
+  security review, not a chaos remediation.
+- **The `Provider != "local"` branch of the deleted-user backstop.**
+  `uiAuthMiddleware` rejects a session for a deleted account only when
+  `sess.Provider == "local"`; a session minted by an external IdP is not checked
+  against the roster. Combined with `RevokeUser`'s users map being **neither
+  persisted nor gossiped** (`ExportRevocations` exports only `tokens`), a
+  user-level revocation is node-local and volatile where token-level revocation
+  is durable and cluster-wide — two mechanisms for one question, one of which
+  survives a restart. Today this is bounded by `RevokeUser` being reached only
+  from the local-account delete path, which the roster backstop already covers;
+  it becomes live the moment user-level revocation is wired to anything else.
+  Recorded as **AU-19**, not fixed inside a sweep about durability.

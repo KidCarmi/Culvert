@@ -1246,10 +1246,10 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	stopEscalation := armShutdownEscalation(quit, os.Exit)
 	defer stopEscalation()
 
-	var early, late shutdownRegistry
-	registerEarlyShutdownHooks(&early, s)
-	registerLateShutdownHooks(&late, s, proxySrv)
-	runShutdownSequence(&early, &late, defaultShutdownBudget)
+	early, late := newShutdownRegistry(), newShutdownRegistry()
+	registerEarlyShutdownHooks(early, s)
+	registerLateShutdownHooks(late, s, proxySrv)
+	runShutdownSequence(early, late, defaultShutdownBudget)
 
 	// Disarm as soon as the sequence is done, not at function exit: a stray
 	// signal arriving in the gap would otherwise turn a shutdown that

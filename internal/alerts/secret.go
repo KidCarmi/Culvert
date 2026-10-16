@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // webhookSecretEncPrefix tags an encrypted secret on disk so legacy cleartext
@@ -90,7 +92,12 @@ func webhookSecretKey(dir string, create bool) ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate webhook key: %w", err)
 	}
-	if err := os.WriteFile(keyPath, key, 0o600); err != nil { // #nosec G306 -- 0600 is intentional for a secret key
+	// SEC-SECRETWRITE-1: AtomicWrite, never os.WriteFile. The read above
+	// reaches this mint on fs.ErrNotExist, which a DANGLING SYMLINK planted
+	// at keyPath also produces; os.WriteFile follows it and writes the KEK
+	// that unwraps every webhook HMAC secret to a path this process never
+	// chose. AtomicWrite renames over the target, replacing a planted link.
+	if err := fileutil.AtomicWrite(keyPath, key, 0o600); err != nil {
 		return nil, fmt.Errorf("write webhook key: %w", err)
 	}
 	webhookKeyCache[keyPath] = key

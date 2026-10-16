@@ -181,6 +181,7 @@ beforeEach(() => {
     version: 13,
     updatedAt: "t",
     draft: true,
+    persisted: true,
   };
   draftBody = {
     requireCommit: true,
@@ -438,6 +439,7 @@ it("admin accept: exact ceremony wording; POST body is exactly {id, action, if_v
     version: 13,
     updatedAt: "t",
     draft: true,
+    persisted: true,
   };
   await mount("admin");
   await click(findButton((t) => t.includes("Accept to Policy Draft…")));
@@ -663,6 +665,7 @@ it("state B: verification sees the target in RUNNING — Policy state advanced, 
     version: 14,
     updatedAt: "t",
     draft: false,
+    persisted: true,
   };
   draftBody = INACTIVE_DRAFT;
   await acceptThrough();
@@ -691,6 +694,7 @@ it("state C: already_done=true with the target in RUNNING — legitimate idempot
     version: 14,
     updatedAt: "t",
     draft: false,
+    persisted: true,
   };
   draftBody = INACTIVE_DRAFT;
   await mount("admin");
@@ -725,6 +729,7 @@ it("state D: target exists but is now enabled/edited — state advanced, never '
     version: 14,
     updatedAt: "t",
     draft: true,
+    persisted: true,
   };
   await acceptThrough();
   await flushUntil(() => {
@@ -746,6 +751,7 @@ it("state E: target absent / draft reverted — state advanced, historical Accep
     version: 14,
     updatedAt: "t",
     draft: false,
+    persisted: true,
   };
   draftBody = INACTIVE_DRAFT;
   await acceptThrough();

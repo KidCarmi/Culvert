@@ -20,9 +20,12 @@ package main
 // can encrypt the CA key and logstore with a single-character passphrase,
 // which a PBKDF2 attacker brute-forces instantly regardless of 600k
 // iterations. Non-interactive/auto-generated installs (the default, and the
-// only path CI's install-lifecycle-e2e exercises) are unaffected: they always
-// produce a 40-character random passphrase via gen_passphrase and never reach
-// this code path.
+// only path CI's install-lifecycle-e2e exercises) normally produce a
+// 40-character random passphrase via gen_passphrase — but a degraded
+// gen_passphrase() (e.g. a broken/wrapped openssl) can yield a short value,
+// and that path now runs through the SAME validate_passphrase_for_env_file
+// floor/charset check as this one; see
+// install_script_gen_passphrase_validation_test.go.
 
 import (
 	"bytes"

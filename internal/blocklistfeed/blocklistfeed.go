@@ -233,8 +233,8 @@ func (bs *Syncer) SyncFeed(feedURL string) (int, error) {
 	return added, nil
 }
 
-// SyncAll syncs every configured feed (manual "Sync All Now"), regardless of
-// interval. Returns the total domains added and the first error encountered.
+// SyncAll syncs every configured feed (manual "Refresh All Now"), regardless
+// of interval. Returns the total domains added and the first error encountered.
 func (bs *Syncer) SyncAll() (int, error) {
 	var total int
 	var firstErr error

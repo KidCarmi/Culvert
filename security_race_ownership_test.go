@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
@@ -271,6 +272,162 @@ func TestSecurityRace_OwnershipPredicateIsSingleSourced(t *testing.T) {
 		t.Errorf("the aggregate's `require-success` guard has drifted from the job's `if:`.\n got: %s\nwant: %s\n"+
 			"Both are copies of one decision; update them together.", inner, raceOwnedHerePredicate)
 	}
+
+	// Two arms, in evaluation order. The owned-suite arm judges the suite AND
+	// the scans; the main-push arm judges the scans only, because QA owns the
+	// suite there and `tests-race` legitimately skips (the matrix above).
+	arms := securityRequireArms(t, req)
+	if want := append([]string{securityRaceJob}, securityScanJobs...); !slices.Equal(arms[0], want) {
+		t.Errorf("the owned-suite arm must require %v; got %v", want, arms[0])
+	}
+	if !slices.Equal(arms[1], securityScanJobs) {
+		t.Errorf("the main-push arm must require every scan (%v); got %v", securityScanJobs, arms[1])
+	}
+	if slices.Contains(arms[1], securityRaceJob) {
+		t.Errorf("the main-push arm must NOT require %q — QA owns the suite on a push and this job skips there; requiring it would refuse every healthy main push", securityRaceJob)
+	}
+	if !strings.HasSuffix(normaliseExpr(req), "|| '' }}") {
+		t.Errorf("a pull request must require nothing (the pass-through shape depends on it); require-success = %s", req)
+	}
+}
+
+// securityScanJobs are the BLOCKING scans: they run on every
+// non-pull-request event AND are members of the aggregate's `needs:`, so they
+// must all be `success` for a main push to be release evidence.
+//
+// Two jobs are deliberately absent, for different reasons, and both absences
+// are load-bearing. `tests-race` runs on tags, the schedule and dispatches but
+// NOT on a main push (QA owns the suite there), so it belongs to the
+// owned-suite arm only. `sbom` is informational and is not in `needs:` at all
+// — require-success names jobs that needs-verdict reads out of the needs
+// context, so requiring a non-member would refuse EVERY run and wedge main.
+var securityScanJobs = []string{
+	"sast-gosec",
+	"vuln-govulncheck",
+	"vuln-trivy-fs",
+	"vuln-trivy-image",
+	"secrets-gitleaks",
+	"license-check",
+	"sast-staticcheck",
+	"lint-dockerfile",
+}
+
+// securityRequireArms returns each `&& '<list>'` arm of the aggregate's
+// require-success, in evaluation order.
+func securityRequireArms(t *testing.T, req string) [][]string {
+	t.Helper()
+	ms := regexp.MustCompile(`&& '([^']*)'`).FindAllStringSubmatch(req, -1)
+	if len(ms) != 2 {
+		t.Fatalf("require-success must carry exactly two required-job arms (owned-suite, main-push); got %d in %q", len(ms), req)
+	}
+	out := make([][]string, 0, 2)
+	for _, m := range ms {
+		if m[1] == "" {
+			t.Fatalf("an arm of require-success is empty — that arm requires nothing: %q", req)
+		}
+		out = append(out, strings.Split(m[1], ","))
+	}
+	return out
+}
+
+// TestSecurityRace_RequiredJobsAreAllNeeded pins the invariant that makes a
+// require-success list safe: needs-verdict reads its verdicts out of the
+// `needs` context, so a job named in require-success but absent from the
+// aggregate's `needs:` is not "missing evidence" — it is evidence that can
+// never arrive, and the gate refuses EVERY run.
+//
+// This is not hypothetical. `sbom` runs on every non-PR event and looks like
+// the other scans, but it is deliberately informational and NOT in `needs:`;
+// including it would have wedged main on the next push while every synthetic
+// test payload that listed it still passed. The subset check is the only thing
+// that catches it, because a test fixture built from the same wrong list
+// cannot.
+func TestSecurityRace_RequiredJobsAreAllNeeded(t *testing.T) {
+	needed := jobNeeds(securityDoc(t).Jobs[securityAggregateJob])
+	if len(needed) == 0 {
+		t.Fatalf("aggregate %q lists no needs — the selector is stale", securityAggregateJob)
+	}
+	for i, arm := range securityRequireArms(t, securityRequireSuccessInput(t)) {
+		for _, job := range arm {
+			if !needed[job] {
+				t.Errorf("require-success arm %d names %q, which is NOT in the aggregate's `needs:` — needs-verdict would never see a verdict for it and the gate would refuse every run", i, job)
+			}
+		}
+	}
+}
+
+// TestSecurityRace_MainPushRefusesScansThatNeverRan drives the REAL
+// needs-verdict shell with the value the Security aggregate passes on a main
+// push — the run .github/release-evidence.txt names `mandatory` and
+// require-gate.sh reads.
+//
+// Without the push arm, needs-verdict's skipped-as-pass rule meant a main push
+// in which every scan skipped still reported APPROVED; the workflow then
+// concluded `success` rather than `skipped`, so require-gate.sh (which refuses
+// a workflow-level `skipped`) had nothing to refuse, and a commit no scan had
+// run against satisfied a mandatory release-evidence row. Every sub-case below
+// fails against the pre-fix single-arm expression.
+func TestSecurityRace_MainPushRefusesScansThatNeverRan(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq unavailable — the shared action's verdict is jq-based")
+	}
+	script := needsVerdictScript(t)
+	// Read from the workflow, not restated: emptying the push arm there must
+	// fail this gate.
+	require := strings.Join(securityRequireArms(t, securityRequireSuccessInput(t))[1], ",")
+
+	// The healthy main-push shape: every scan green, tests-race skipped
+	// because QA owns the suite on a push.
+	green := func() map[string]string {
+		m := map[string]string{securityRaceJob: "skipped"}
+		for _, n := range securityScanJobs {
+			m[n] = "success"
+		}
+		return m
+	}
+	if out, ok := runNeedsVerdictRequiring(t, script, needsJSON(green()), require); !ok {
+		t.Fatalf("a green main push must approve (tests-race skips there by design); output:\n%s", out)
+	}
+
+	// The defect itself: nothing ran.
+	allSkipped := map[string]string{securityRaceJob: "skipped"}
+	for _, n := range securityScanJobs {
+		allSkipped[n] = "skipped"
+	}
+	if out, ok := runNeedsVerdictRequiring(t, script, needsJSON(allSkipped), require); ok {
+		t.Fatalf("a main push in which EVERY scan skipped approved — nothing ran is not approval; output:\n%s", out)
+	}
+
+	for _, name := range securityScanJobs {
+		t.Run("skipped/"+name, func(t *testing.T) {
+			r := green()
+			r[name] = "skipped"
+			out, ok := runNeedsVerdictRequiring(t, script, needsJSON(r), require)
+			if ok {
+				t.Fatalf("a main push approved with %q skipped; output:\n%s", name, out)
+			}
+			if !strings.Contains(out, name) {
+				t.Errorf("the refusal does not name %q; output:\n%s", name, out)
+			}
+		})
+		t.Run("absent/"+name, func(t *testing.T) {
+			r := green()
+			delete(r, name)
+			if out, ok := runNeedsVerdictRequiring(t, script, needsJSON(r), require); ok {
+				t.Fatalf("a main push approved with %q absent from needs; output:\n%s", name, out)
+			}
+		})
+	}
+
+	// CONTROL: the requirement is scoped. A pull request passes
+	// require-success='' and every job skips on its own `if:`, so the required
+	// check must still report success or branch protection wedges every PR.
+	if out, ok := runNeedsVerdict(t, script, needsJSON(allSkipped)); !ok {
+		t.Fatalf("the PR pass-through shape must still approve; output:\n%s", out)
+	}
 }
 
 // securityRequireSuccessInput returns the aggregate step's raw require-success
@@ -308,13 +465,27 @@ func securityRequireSuccessInput(t *testing.T) string {
 // extractGuard pulls the condition out of `${{ (<cond>) && 'x' || ” }}`.
 func extractGuard(s string) string {
 	i := strings.Index(s, "(")
-	j := strings.LastIndex(s, "&&")
-	if i < 0 || j < 0 || j < i {
+	if i < 0 {
 		return s
 	}
-	guard := strings.TrimSpace(s[i:j])
-	guard = strings.TrimSuffix(strings.TrimPrefix(guard, "("), ")")
-	return guard
+	// Match the FIRST parenthesis group by depth. `strings.LastIndex(s, "&&")`
+	// read the boundary correctly only while the expression had ONE arm: a
+	// guard may contain its own `&&` (this file's does), and a SECOND arm
+	// appended after it moved the last `&&` past the guard entirely. Depth
+	// matching is stable under both.
+	depth := 0
+	for j := i; j < len(s); j++ {
+		switch s[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(s[i+1 : j])
+			}
+		}
+	}
+	return s
 }
 
 // ─── 3. Everything the stage must NOT change ─────────────────────────────────

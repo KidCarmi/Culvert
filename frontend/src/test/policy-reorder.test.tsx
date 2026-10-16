@@ -33,6 +33,7 @@ const POLICY_BODY = {
   version: 7,
   updatedAt: "2026-08-28T12:00:00Z",
   draft: false,
+  persisted: true,
 };
 const DRAFT_BODY = {
   requireCommit: false,

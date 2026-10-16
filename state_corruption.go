@@ -34,9 +34,14 @@ package main
 // problem. Only a file we READ and could not PARSE is treated as corrupt.
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,7 +49,35 @@ import (
 var (
 	stateCorruptionMu     sync.Mutex
 	stateCorruptionByKind = map[string]string{} // kind → detail, for /readyz
+	// stateCorruptionRecordByKind mirrors stateCorruptionByKind but holds only
+	// the SAFE subset of the evidence — no absolute file path or quarantine
+	// filename — for the authenticated /api/diagnostics operator-contract row
+	// (checkStateFileIntegrity), which is viewer-role and documented as never
+	// returning raw paths (apiDiagnostics, diagnostics.go). The full detail,
+	// including the path, stays log/alert-only as before.
+	stateCorruptionRecordByKind = map[string]stateCorruptionRecord{}
 )
+
+// stateCorruptionRecord is the path-free view of one recorded corruption.
+type stateCorruptionRecord struct {
+	ParseErr         string // BOUNDED cause class (stateCorruptionCauseClass); "" for a residual-only record
+	QuarantineFailed bool   // true when this boot's rename-aside attempt itself failed
+	Residual         bool   // true when detected via a prior boot's leftover quarantine file(s)
+	ResidualCount    int    // number of unreconciled quarantine siblings, when Residual
+}
+
+// stateCorruptionRecordsSnapshot returns a copy of the recorded (path-free)
+// corruption evidence, keyed by kind. Empty when every state file on this
+// node loaded cleanly.
+func stateCorruptionRecordsSnapshot() map[string]stateCorruptionRecord {
+	stateCorruptionMu.Lock()
+	defer stateCorruptionMu.Unlock()
+	out := make(map[string]stateCorruptionRecord, len(stateCorruptionRecordByKind))
+	for k, v := range stateCorruptionRecordByKind {
+		out[k] = v
+	}
+	return out
+}
 
 // stateCorruptionSnapshot returns a copy of the recorded state-file
 // corruptions (kind → human-readable detail). Empty when every state
@@ -66,6 +99,7 @@ func resetStateCorruption() {
 	stateCorruptionMu.Lock()
 	defer stateCorruptionMu.Unlock()
 	stateCorruptionByKind = map[string]string{}
+	stateCorruptionRecordByKind = map[string]stateCorruptionRecord{}
 }
 
 // quarantineCorruptStateFile moves a corrupt state file aside, fires the
@@ -85,7 +119,17 @@ func quarantineCorruptStateFile(kind, path string, parseErr error) string {
 	logger.Printf("StateCorruption: %q", sanitizeLog(detail))
 
 	stateCorruptionMu.Lock()
-	stateCorruptionByKind[kind] = detail
+	// Several files can share one kind (the per-capability MCP journals).
+	// A later SUCCESSFUL quarantine must never erase an earlier FAILED one:
+	// that file is still in the save path's line of fire, which is the more
+	// severe and more actionable state. The most severe record wins.
+	if prev, ok := stateCorruptionRecordByKind[kind]; !ok || !prev.QuarantineFailed || qpath == "" {
+		stateCorruptionByKind[kind] = detail
+		stateCorruptionRecordByKind[kind] = stateCorruptionRecord{
+			ParseErr:         stateCorruptionCauseClass(parseErr),
+			QuarantineFailed: qpath == "",
+		}
+	}
 	stateCorruptionMu.Unlock()
 
 	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
@@ -105,11 +149,31 @@ func quarantineCorruptStateFile(kind, path string, parseErr error) string {
 // removes the quarantined file. Fires at most once per boot, and never
 // clobbers a richer same-boot record from quarantineCorruptStateFile.
 func noteResidualQuarantine(kind, path string) {
-	if path == "" {
-		return
+	noteResidualQuarantinePaths(kind, path)
+}
+
+// noteResidualQuarantinePaths is noteResidualQuarantine for a kind whose
+// state lives in more than one file (the per-capability MCP journals share
+// one kind): the leftover quarantine siblings of every path are counted
+// together into ONE record, so the second capability's residual is never
+// dropped by the once-per-kind guard. Empty paths are ignored.
+func noteResidualQuarantinePaths(kind string, paths ...string) {
+	var matches []string
+	path := "" // the first path that has leftover siblings, named in the detail
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		m, err := filepath.Glob(globEscapeLiteral(p) + ".corrupt.*")
+		if err != nil || len(m) == 0 {
+			continue
+		}
+		if path == "" {
+			path = p
+		}
+		matches = append(matches, m...)
 	}
-	matches, err := filepath.Glob(path + ".corrupt.*")
-	if err != nil || len(matches) == 0 {
+	if len(matches) == 0 {
 		return
 	}
 
@@ -126,7 +190,120 @@ func noteResidualQuarantine(kind, path string) {
 
 	stateCorruptionMu.Lock()
 	stateCorruptionByKind[kind] = detail
+	stateCorruptionRecordByKind[kind] = stateCorruptionRecord{Residual: true, ResidualCount: len(matches)}
 	stateCorruptionMu.Unlock()
 
 	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
+}
+
+// stateCorruptionCauseClass maps a load error to a BOUNDED, value-free cause
+// for the viewer-role diagnostics row. The raw error stays log/alert-only:
+// a validation error can embed stored data (e.g. policy_learning's cell key
+// carries an observed IdP group name), which /api/diagnostics must never
+// disclose. A json.SyntaxError's message is a fixed-grammar description of
+// the syntax fault (at most one offending byte), so it is kept verbatim.
+func stateCorruptionCauseClass(err error) string {
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		return "unknown error"
+	case errors.As(err, &syn):
+		return fmt.Sprintf("malformed JSON: %s", syn.Error())
+	case errors.As(err, &typ):
+		return "malformed JSON: a field has an unexpected type"
+	default:
+		return "content failed validation; see the server log for detail"
+	}
+}
+
+// globEscapeLiteral escapes the filepath.Match metacharacters in a LITERAL
+// path so it can prefix a glob pattern: CULVERT_DATA_DIR may be any absolute
+// path, and an unescaped `[` (or `*`, `?`, `\`) in it would either fail the
+// glob with ErrBadPattern or silently search a different path, dropping the
+// residual-quarantine record after a restart.
+func globEscapeLiteral(p string) string {
+	var b strings.Builder
+	b.Grow(len(p) + 8)
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; {
+		case c == '*' || c == '?' || c == '[':
+			// A one-byte character class matches the byte literally on every
+			// platform (Windows disables backslash escaping in Match).
+			b.WriteByte('[')
+			b.WriteByte(c)
+			b.WriteByte(']')
+		case c == '\\' && runtime.GOOS != "windows":
+			b.WriteString(`\\`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// checkStateFileIntegrity is the `state_file_<kind>` authenticated
+// operator-contract row: every recorded CHAOS-05/07 state-file quarantine,
+// viewer-safe. It closes a gap /ready's appendStateFileChecks documents but
+// does not itself provide — that row is deliberately generic ("see server
+// logs") because /ready is unauthenticated on the proxy port, so an admin
+// with no log/SSH access and no alert webhook configured had no way to learn
+// WHICH state file was quarantined, why, or whether the situation is a fresh
+// quarantine, an unreconciled leftover from a prior boot, or (most urgent) a
+// quarantine attempt that itself failed — without reading the process log.
+//
+// Deliberately path-free: apiDiagnostics is viewer-role and documented as
+// never returning raw file paths or filesystem layout; the recovery action
+// (restore a backup, then restart) does not require the exact path, and the
+// process log / state_file_corrupt alert payload still carry it in full.
+// Read-only — reads the cached record only, never touches disk. Contributes
+// nothing when every state file on this node loaded cleanly.
+func checkStateFileIntegrity() []OperatorContractCheck {
+	recs := stateCorruptionRecordsSnapshot()
+	if len(recs) == 0 {
+		return nil
+	}
+	kinds := make([]string, 0, len(recs))
+	for k := range recs {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+
+	checks := make([]OperatorContractCheck, 0, len(kinds))
+	for _, kind := range kinds {
+		rec := recs[kind]
+		switch {
+		case rec.Residual:
+			checks = append(checks, OperatorContractCheck{
+				Code:   "state_file_" + kind,
+				Status: diagWarn,
+				Message: fmt.Sprintf("%s: %d unreconciled quarantined copy/copies remain from a prior corrupt load; the state they held may not have been restored on this node",
+					kind, rec.ResidualCount),
+				OperatorAction: "Restore the quarantined copy or a backup on this node's data volume, then restart; once reconciled, remove the leftover quarantine file(s) to clear this row.",
+			})
+		case rec.QuarantineFailed:
+			checks = append(checks, OperatorContractCheck{
+				Code:   "state_file_" + kind,
+				Status: diagFail,
+				Message: fmt.Sprintf("%s state file is corrupt (%s) and could not be quarantined — the next save will overwrite it",
+					kind, rec.ParseErr),
+				OperatorAction: "Copy the state file aside by hand immediately, then restore it or a backup and restart.",
+			})
+		default:
+			checks = append(checks, OperatorContractCheck{
+				Code:   "state_file_" + kind,
+				Status: diagWarn,
+				// Scoped to the affected FILE on purpose: a kind can span
+				// several files (the MCP journals are per capability, and one
+				// capability's runtime can be quarantined while another's
+				// restores), and some MCP loads happen lazily on an admin
+				// request rather than at boot — so neither "at startup" nor
+				// "the whole store is empty" is true in general.
+				Message: fmt.Sprintf("%s state file was corrupt (%s) and has been quarantined; the state it held was not loaded",
+					kind, rec.ParseErr),
+				OperatorAction: "Restore the quarantined copy or a backup on this node's data volume, then restart.",
+			})
+		}
+	}
+	return checks
 }
