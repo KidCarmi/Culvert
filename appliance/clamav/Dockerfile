@@ -1,20 +1,29 @@
 # appliance/clamav/Dockerfile — the ClamAV sidecar the appliance RUNS.
 #
-# CVE-2026-103111 (pcre2 < 10.49, HIGH): no official clamav/clamav image
-# carries the fix (checked 2026-10-05: every 1.4 / 1.5 tag is the 2026-09-28
-# build, which predates the 2026-09-30 advisory; the Debian variants are also
-# affected and add other HIGH/CRITICAL findings — sbom-cve-evidence.md). This
-# is the smallest possible derivative: the PINNED official 1.4.6 image, by
-# digest, with exactly one package upgraded. No other package, file, user,
-# entrypoint, healthcheck, port, volume or environment value changes.
+# ENGINE: official ClamAV 1.5.4, pinned by digest. The move from 1.4.6 to
+# 1.5.4 (#1528, 2026-10-16) closes F-P2 — the detection bypass where clamd
+# answers a clean verdict for a file it never scanned when it cannot create
+# its per-scan temporary directory (libclamav scan_common rewrites the mkdir
+# failure to CL_SUCCESS; reported to Cisco PSIRT as PSIRT-0035161972 against
+# 1.4.6). In 1.5.x that per-scan mkdir runs ONLY under the debug option
+# LeaveTemporaryFiles (ENGINE_OPTIONS_TMPDIR_RECURSION), which clamd leaves
+# off by default; the default path uses the configured temp directory and
+# creates no per-scan directory, so the edge that triggers F-P2 is not
+# reached. The appliance does not enable LeaveTemporaryFiles. Evidence:
+# docs/appliance/readiness-report.md §3k and test/e2e/appliance/lab/evidence/
+# fp2-reproduction.md (lab branch); the [fp2-isolated] lab leg re-runs the
+# reproduction against this candidate's baked sidecar and must deliver 0.
 #
-# 2026-10-07 (#1528, exact-byte scan of the OVA's baked archive): the same
-# base also carries zlib 1.3.2-r0 (CVE-2026-85091; CNA HIGH, Alpine MEDIUM —
-# gz_vacate overflow via gzprintf/gzvprintf after a non-blocking gzwrite
-# stall) and nghttp2-libs 1.69.0-r0 (CVE-2026-58055, in the nghttpx proxy,
-# which is not in this image). No dynamic import of the zlib trigger exists
-# among the image's 59 ELF files, but both have fixed builds, so both are
-# upgraded too: three packages, each pinned and asserted below.
+# CVEs: the official 1.5.4 image already ships pcre2 10.49-r0 (CVE-2026-103111,
+# HIGH), zlib 1.3.2-r1 (CVE-2026-85091) and nghttp2-libs 1.70.0-r0
+# (CVE-2026-58055) — the exact three versions the former 1.4.6 derivative
+# upgraded by hand (the old pinned 1.4.6 build carried pcre2 10.48 / zlib
+# 1.3.2-r0 / nghttp2-libs 1.69.0). The apk line below is therefore a VERIFIED
+# NO-OP on this base: it asserts those versions are present rather than
+# changing them, so a future base rebuild that regressed a package fails the
+# build instead of shipping silently. It stays the smallest possible
+# derivative: the pinned official image, no other package, file, user,
+# entrypoint, healthcheck, port, volume or environment value changes.
 #
 # The tag (manifest.env CLAMAV_SIDECAR_REF) changes with EVERY content change:
 # Compose builds this image only when its local tag is ABSENT, so new content
@@ -23,8 +32,7 @@
 # It is BUILT LOCALLY and NEVER PUBLISHED: the OVA build bakes it
 # (appliance/build/build-ova.sh) and docker-compose.yml builds it from this
 # directory only when its local-only tag (manifest.env CLAMAV_SIDECAR_REF) is
-# absent; Compose never pulls that name from a registry. Switch back to the
-# official image once upstream ships a build with pcre2 >= 10.49.
+# absent; Compose never pulls that name from a registry.
 #
 # 2026-10-08 (#1528, retained-OVA comparison): two OVA builds of the same
 # source baked sidecars with different image IDs. Every package and library
@@ -36,7 +44,7 @@
 #
 # The FROM digest must equal manifest.env CLAMAV_IMAGE_INDEX_DIGEST
 # (pinned by TestClamAVSidecar_DerivesFromThePinnedOfficialImage).
-FROM docker.io/clamav/clamav@sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23
+FROM docker.io/clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 RUN apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=1.70.0-r0' \
  && test "$(apk info -v 2>/dev/null | grep '^pcre2-[0-9]')" = 'pcre2-10.49-r0' \
  && test "$(apk info -v 2>/dev/null | grep '^zlib-[0-9]')" = 'zlib-1.3.2-r1' \

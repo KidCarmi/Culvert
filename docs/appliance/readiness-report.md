@@ -322,6 +322,27 @@ Correction: the leg's intended block rule was never created (invalid action, unc
 
 **Still BLOCKED / untested:** Microsoft AD itself (Kerberos/NTLM/Negotiate, channel binding, LDAP signing policy, nested groups); Entra ID and any other vendor IdP (no tenant); the identity flow intended for the pilot needs naming by the owner.
 
+### 3k. Round of 2026-10-16 (owner decision) — ClamAV engine bumped to 1.5.4 to close F-P2
+
+**Product change, so this is a NEW candidate** (built by the lab/gates from the head carrying this commit; identity recorded once the OVA is built). F-P2 was filed with Cisco PSIRT as **PSIRT-0035161972** against 1.4.6; the maintainers have acknowledged it and have no fix to offer yet.
+
+**The fix: `appliance/clamav/Dockerfile` `FROM` moves from the pinned official ClamAV 1.4.6 (`sha256:57deb108…`) to official 1.5.4 (`sha256:638d9020…`, amd64 `sha256:705e0723…`).** Why 1.5.4 closes F-P2, from the public source: the per-scan `mkdir` whose failure `scan_common` rewrites to `CL_SUCCESS` (the F-P2 mechanism) runs in 1.5.x ONLY when the engine option `ENGINE_OPTIONS_TMPDIR_RECURSION` is set, which clamd enables only under the debug option `LeaveTemporaryFiles` (`clamd/clamd.c`; default off). The default path uses the configured temp directory and creates no per-scan directory, so the edge is never reached. The appliance does not enable `LeaveTemporaryFiles`. The 1.4.x line (including the *rebuilt* official 1.4.6 `b5b910ce`) still has the trigger.
+
+**It also retires the CVE derivative's reason to exist.** Our 1.4.6 derivative hand-upgraded pcre2, zlib and nghttp2-libs because the *old pinned* 1.4.6 build shipped pcre2 10.48 / zlib 1.3.2-r0 / nghttp2-libs 1.69.0. Official 1.5.4 already ships pcre2 10.49-r0 / zlib 1.3.2-r1 / nghttp2-libs 1.70.0-r0 — the exact three versions (apk DB read from the registry, 2026-10-16). The `apk add --upgrade` line is kept byte-identical as a VERIFIED NO-OP: it now asserts those versions are present rather than changing them, so a future base rebuild that regressed a package fails the build. The derivative stays the smallest-possible one-RUN image; the reproducible-build gate, the pinned-digest test and the per-content tag rule are unchanged (new tag `culvert/clamav:1.5.4-culvert.1`).
+
+**What must be re-qualified (a major engine line, 1.4→1.5):**
+
+| check | how |
+|---|---|
+| F-P2 gone | the existing `[fp2-isolated]` lab leg, re-run against this candidate's baked 1.5.4 sidecar: must deliver 0 EICAR at the temp-dir edge (the 1.4.6 reproduction, run 38053156677, is the failing pre-fix control) |
+| cache-bypass still closed | the `[CB]` leg still green on this candidate (the fix from `bad788e5` is unchanged) |
+| sidecar CVE posture | exact-byte sidecar scan: 0 findings, and pcre2/zlib/nghttp2 at the asserted versions |
+| signatures + clamd config | freshclam loads a 1.5.x DB; `clamd.conf` options the appliance sets are all valid in 1.5.x; `/ready` clamav healthy; a fresh EICAR is blocked before any pressure |
+| OVA build + boot + reboots + recovery | full lab qualification + the esxi12 recovery profile |
+| ESXi | ASTRA re-handoff (new candidate identity) |
+
+Evidence that drove the decision (read-only, nothing built): registry apk-DB extraction of `57deb108` (1.4.6 old: pcre2 10.48), `b5b910ce` (1.4.6 rebuilt: 10.49, trigger present) and `638d9020` (1.5.4: 10.49, trigger absent by source) — `test/e2e/appliance/lab/evidence/` on the lab branch once committed.
+
 **4. Coverage — what was and was not exercised**
 
 | Area | Exercised | Not exercised (UNTESTED) |
