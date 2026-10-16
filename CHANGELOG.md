@@ -701,6 +701,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- The operator contract (`GET /api/diagnostics`, `GET /api/health/explain`)
+  now carries an `admin_roster_durability` row (CHAOS-70 evidence): `warn`
+  when no `-ui-users-file` is configured, so admin account deletes, role
+  changes and password rotations revert on restart, and when admin-roster
+  changes were refused or login-time roster writes failed since process
+  start. Counts, the remedy and the degraded login-write state are shown to
+  admins only. Viewers and operators get a fixed message for "not durable" and
+  "a change was refused", and the row shows nothing for a degraded write
+  (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
+  `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
+  Admin Users panel hint and are deliberately absent from `/api/stats`.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

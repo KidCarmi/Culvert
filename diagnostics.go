@@ -629,6 +629,14 @@ const diagnosticsRedactedUsernameMessage = "one or more admin accounts have a us
 // FIXED detail strings precisely so an unauthenticated or lower-privileged
 // reader cannot fingerprint node state.
 //
+// The admin_roster_durability row (CHAOS-70 counters) is the second classified
+// row. Below admin it is REPLACED by rosterDurabilityFacts.viewerRow: whether
+// the roster is durable and whether any change was refused are visible as a
+// fixed message, while every count, the remedy and the degraded login-write
+// posture (a backup code or TOTP replay counter that may not survive a
+// restart) are admin-only. Because that last fact can be the row's only reason
+// to warn, its STATUS is recomputed too, and so is the verdict.
+//
 // Fail-closed by construction: the ONLY input that un-redacts is a proven
 // admin, so a future role added below admin, or a caller whose role cannot be
 // resolved, gets the redacted form without this function being revisited.
@@ -641,20 +649,33 @@ func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
 	// subsequent unredacted one through a shared backing array.
 	checks := make([]OperatorContractCheck, len(c.Checks))
 	copy(checks, c.Checks)
+	statusChanged := false
 	for i := range checks {
-		if checks[i].Code != adminUsernameLengthCode {
-			continue
+		switch checks[i].Code {
+		case adminUsernameLengthCode:
+			// An ok row names nothing about the roster, so leave it exactly as
+			// it is — redacting a healthy row would report a condition that
+			// does not exist and send an operator looking for an account that
+			// is fine.
+			if checks[i].Status == diagOK {
+				continue
+			}
+			checks[i].Message = diagnosticsRedactedUsernameMessage
+			checks[i].OperatorAction = ""
+		case adminRosterDurabilityCode:
+			// Re-derived from the viewer-safe facts rather than edited: the
+			// admin row's STATUS may itself be admin-only (a degraded
+			// login-path write), so the whole row, and the verdict it rolls
+			// into, is recomputed below admin.
+			prev := checks[i].Status
+			checks[i] = readRosterDurabilityFacts().viewerRow()
+			statusChanged = statusChanged || checks[i].Status != prev
 		}
-		// An ok row names nothing about the roster, so leave it exactly as it
-		// is — redacting a healthy row would report a condition that does not
-		// exist and send an operator looking for an account that is fine.
-		if checks[i].Status == diagOK {
-			continue
-		}
-		checks[i].Message = diagnosticsRedactedUsernameMessage
-		checks[i].OperatorAction = ""
 	}
 	c.Checks = checks
+	if statusChanged {
+		c.Verdict = rollUpVerdict(checks)
+	}
 	return c
 }
 
@@ -810,28 +831,112 @@ func checkAuditPersistence() OperatorContractCheck {
 	}
 }
 
-// checkAdminRosterDurability reports whether the admin roster has a durable home
-// (-ui-users-file). Without one every account delete, role change and password
-// rotation answers 2xx but reverts on restart; the only signals were a boot log
-// line (warnRosterNotDurable) and a per-change log line (noteRosterNotDurable),
-// both invisible to an operator working from the GUI. Report-only: it reads the
-// same accessors those signals use and changes no roster behaviour. A node with
-// no admin credentials at all has nothing to lose, so it reports ok.
+// adminRosterDurabilityCode is the operator-contract code for the admin-roster
+// durability row. Named so redactContractForRole and the check cannot drift
+// apart on a string literal.
+const adminRosterDurabilityCode = "admin_roster_durability"
+
+// Fixed viewer/operator renderings of the admin-roster durability row
+// (SEC-DIAG-ROSTER-1 policy, PR #1545). They are CONSTANTS carrying no count
+// and no second-factor or single-use-credential posture.
+const (
+	rosterDurabilityViewerNotDurable = "no admin roster file is configured, so admin account changes are kept in " +
+		"memory only and are lost on restart; sign in as an admin for the remediation steps"
+	rosterDurabilityViewerRefused = "one or more admin account changes were refused because the admin roster " +
+		"could not be written to disk; sign in as an admin for the details"
+	// rosterDurabilityViewerConfigured is the viewer rendering of EVERY state
+	// in which a roster file is configured and no change was refused —
+	// healthy AND degraded-login-write alike. Degraded login-path writes (a
+	// consumed backup code or TOTP replay counter that may not survive a
+	// restart) are admin-only under the policy: telling a lower-privileged
+	// reader that a replay window may be open is an oracle, so the two states
+	// must render identically below admin.
+	rosterDurabilityViewerConfigured = "an admin roster file is configured"
+)
+
+// rosterDurabilityFacts is one read of the state the durability row reports.
+// configured is the setup-complete gate (cfg.IsConfigured), NOT a roster read:
+// before setup there is no credential to lose.
+type rosterDurabilityFacts struct {
+	configured bool
+	persisted  bool // a roster file (-ui-users-file) is configured
+	notDurable int64
+	refused    int64
+	degraded   int64
+}
+
+func readRosterDurabilityFacts() rosterDurabilityFacts {
+	if cfg == nil || !cfg.IsConfigured() {
+		return rosterDurabilityFacts{}
+	}
+	return rosterDurabilityFacts{
+		configured: true,
+		persisted:  cfg.rosterPathConfigured(),
+		notDurable: rosterNotDurable.Load(),
+		refused:    rosterPersistRefused.Load(),
+		degraded:   rosterPersistBestEffort.Load(),
+	}
+}
+
+// checkAdminRosterDurability reports whether admin-roster changes survive a
+// restart (CHAOS-70, roster_persist_durability.go). Before this row the
+// evidence lived only in a boot log line (warnRosterNotDurable), a rate-limited
+// per-change line, and the culvert_admin_roster_persist_{failures,degraded}_total
+// counters — none visible to an operator working from the GUI. Report-only: it
+// reads atomics and one config field, writes nothing and changes no roster
+// behaviour. This is the ADMIN rendering; redactContractForRole replaces it
+// with adminRow's viewer twin below admin. Counts are since process start.
 func checkAdminRosterDurability() OperatorContractCheck {
-	const code = "admin_roster_durability"
-	if cfg == nil || cfg.rosterPathConfigured() || (!cfg.AuthEnabled() && len(cfg.ListUIUsers()) == 0) {
-		return OperatorContractCheck{Code: code, Status: diagOK, Message: "admin roster is persisted to disk (or no admin accounts are configured)"}
+	return readRosterDurabilityFacts().adminRow()
+}
+
+func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
+	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagOK}
+	switch {
+	case !f.configured:
+		row.Message = "initial setup is not complete; there are no admin credentials to persist yet"
+	case !f.persisted:
+		row.Status = diagWarn
+		row.Message = "no admin roster file is configured — admin account deletes, role changes and password " +
+			"rotations apply in memory only and are LOST on restart (a rotated password reverts to the " +
+			"-user/auth.user credential)"
+		if f.notDurable > 0 {
+			row.Message += fmt.Sprintf(" — %d such change(s) since this process started", f.notDurable)
+		}
+		row.OperatorAction = "Set the admin users file (-ui-users-file) to a path on a persistent volume and restart, " +
+			"then re-apply any account changes made since the last restart."
+	case f.refused == 0 && f.degraded == 0:
+		row.Message = "admin roster is persisting to disk"
+	default:
+		row.Status = diagWarn
+		row.Message = fmt.Sprintf("since this process started, %d admin account change(s) were refused because the "+
+			"roster could not be written (nothing was changed), and %d login-time write(s) failed (a consumed "+
+			"backup code or TOTP replay counter may not survive a restart)", f.refused, f.degraded)
+		row.OperatorAction = "Fix free space or permissions on the data volume (see the storage_write_failed alert), " +
+			"then re-apply the refused change from Admin Users — nothing retries it automatically. If login-time " +
+			"writes failed, rotate the affected administrator's TOTP backup codes once the volume is healthy. " +
+			"The counts clear on restart."
 	}
-	msg := "no roster file is configured — admin account deletes, role changes and password rotations apply in memory only and are LOST on restart"
-	if n := rosterNotDurable.Load(); n > 0 {
-		msg += fmt.Sprintf(" (%d such change(s) since boot)", n)
+	return row
+}
+
+// viewerRow is the rendering for every caller below admin: status from the
+// viewer-safe facts only (not durable, any refusal), a fixed message, no
+// count and no operator action.
+func (f rosterDurabilityFacts) viewerRow() OperatorContractCheck {
+	row := f.adminRow()
+	row.OperatorAction = ""
+	switch {
+	case !f.configured:
+		// The not-configured message names no roster fact; keep it.
+	case !f.persisted:
+		row.Status, row.Message = diagWarn, rosterDurabilityViewerNotDurable
+	case f.refused > 0:
+		row.Status, row.Message = diagWarn, rosterDurabilityViewerRefused
+	default:
+		row.Status, row.Message = diagOK, rosterDurabilityViewerConfigured
 	}
-	return OperatorContractCheck{
-		Code:           code,
-		Status:         diagWarn,
-		Message:        msg,
-		OperatorAction: "Set the admin users file (-ui-users-file, e.g. /data/ui_users.json) on a persistent volume and restart; re-apply any account changes made since boot.",
-	}
+	return row
 }
 
 // checkRequestLogPersistence reports whether the operator-configured request

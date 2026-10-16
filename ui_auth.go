@@ -283,7 +283,16 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		jsonOK(w, map[string]any{"users": cfg.ListUIUsers()})
+		jsonOK(w, map[string]any{
+			"users": cfg.ListUIUsers(),
+			// CHAOS-70 roster-write evidence for the Users panel hint. Served
+			// HERE, on the admin-only route, and deliberately NOT on the
+			// viewer-readable /api/stats: refused-change and degraded
+			// login-write counts are admin-only (SEC-DIAG-ROSTER-1 policy,
+			// PR #1545). Since process start; the counters are not persisted.
+			"adminRosterPersistFailures": rosterPersistRefused.Load(),
+			"adminRosterPersistDegraded": rosterPersistBestEffort.Load(),
+		})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

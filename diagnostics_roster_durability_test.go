@@ -1,6 +1,22 @@
 package main
 
+// Gates for the admin_roster_durability operator-contract row (CHAOS-70
+// evidence) and its role redaction (SEC-DIAG-ROSTER-1 policy, PR #1545):
+//
+//	fact                              viewer/operator                   admin
+//	roster not durable                status + fixed message            + count + action
+//	refused admin-change count        status + fixed message, no count  count + remedy
+//	degraded login-write posture      nothing (not even the status)     count + remedy
+//
+// The degraded row is the one that needs care: it can be the row's ONLY reason
+// to warn, so a viewer rendering that kept the admin status would itself be the
+// replay-window oracle the policy withholds.
+
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,16 +31,42 @@ func swapCfgForRosterDurability(t *testing.T, c *Config) {
 	t.Cleanup(resetRosterPersistCountersForTest)
 }
 
-func TestCheckAdminRosterDurability_WarnsWhenMemoryOnly(t *testing.T) {
+// configuredRosterCfg returns a set-up node, optionally with a roster file.
+func configuredRosterCfg(t *testing.T, withFile bool) *Config {
+	t.Helper()
 	c := &Config{}
 	if err := c.SetAuth("admin", "Or1ginalPass!"); err != nil {
 		t.Fatalf("SetAuth: %v", err)
 	}
-	swapCfgForRosterDurability(t, c)
+	if withFile {
+		c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
+	}
+	return c
+}
+
+// durabilityRowAt drives the real /api/diagnostics handler at role.
+func durabilityRowAt(t *testing.T, role UIRole) (OperatorContract, *OperatorContractCheck) {
+	t.Helper()
+	r := roleCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody), role)
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("role %q: status = %d, want 200", role, w.Code)
+	}
+	c := decodeContract(t, w)
+	row := findDiagnosticCheck(c, adminRosterDurabilityCode)
+	if row == nil {
+		t.Fatalf("role %q: admin_roster_durability row missing", role)
+	}
+	return c, row
+}
+
+func TestCheckAdminRosterDurability_WarnsWhenMemoryOnly(t *testing.T) {
+	swapCfgForRosterDurability(t, configuredRosterCfg(t, false))
 	noteRosterNotDurable()
 
 	got := checkAdminRosterDurability()
-	if got.Code != "admin_roster_durability" || got.Status != diagWarn {
+	if got.Code != adminRosterDurabilityCode || got.Status != diagWarn {
 		t.Fatalf("got %+v, want warn admin_roster_durability", got)
 	}
 	if !strings.Contains(got.Message, "LOST on restart") || !strings.Contains(got.Message, "1 such change") {
@@ -33,21 +75,225 @@ func TestCheckAdminRosterDurability_WarnsWhenMemoryOnly(t *testing.T) {
 	if !strings.Contains(got.OperatorAction, "-ui-users-file") {
 		t.Errorf("operator_action = %q, want remedy naming -ui-users-file", got.OperatorAction)
 	}
+	// TestApiDiagnostics_NoSensitiveValues forbids /data/ paths on the contract.
+	if strings.Contains(got.Message+got.OperatorAction, "/data/") {
+		t.Errorf("row names a /data/ path: %+v", got)
+	}
 }
 
-func TestCheckAdminRosterDurability_OKWhenPersistedOrNoAccounts(t *testing.T) {
-	persisted := &Config{}
-	if err := persisted.SetAuth("admin", "Or1ginalPass!"); err != nil {
-		t.Fatalf("SetAuth: %v", err)
-	}
-	persisted.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
-	swapCfgForRosterDurability(t, persisted)
+func TestCheckAdminRosterDurability_OKWhenPersistedOrNotSetUp(t *testing.T) {
+	swapCfgForRosterDurability(t, configuredRosterCfg(t, true))
 	if got := checkAdminRosterDurability(); got.Status != diagOK {
 		t.Errorf("persisted roster: status = %q, want ok", got.Status)
 	}
 
-	cfg = &Config{} // no credentials, no roster: nothing to lose
+	cfg = &Config{} // setup not complete: no credential to lose
 	if got := checkAdminRosterDurability(); got.Status != diagOK {
-		t.Errorf("no accounts: status = %q, want ok", got.Status)
+		t.Errorf("not set up: status = %q, want ok", got.Status)
+	}
+	cfg = nil
+	if got := checkAdminRosterDurability(); got.Status != diagOK {
+		t.Errorf("nil cfg: status = %q, want ok", got.Status)
+	}
+}
+
+// TestCheckAdminRosterDurability_ReportsWriteFailuresToAdmin ports #1553's
+// refused/degraded counters: an admin sees both counts and the remedy.
+func TestCheckAdminRosterDurability_ReportsWriteFailuresToAdmin(t *testing.T) {
+	c := configuredRosterCfg(t, true)
+	swapCfgForRosterDurability(t, c)
+	rosterPersistRefused.Add(2)
+	rosterPersistBestEffort.Add(1)
+
+	got := checkAdminRosterDurability()
+	if got.Status != diagWarn {
+		t.Fatalf("status = %q, want warn", got.Status)
+	}
+	if !strings.Contains(got.Message, "2 admin account change(s)") || !strings.Contains(got.Message, "1 login-time") {
+		t.Errorf("message = %q, want both counts", got.Message)
+	}
+	if !strings.Contains(got.OperatorAction, "re-apply the refused change") {
+		t.Errorf("operator_action = %q, want the re-apply remedy", got.OperatorAction)
+	}
+	if strings.Contains(got.Message+got.OperatorAction, c.uiUsersFile) {
+		t.Fatal("row must not leak the roster path")
+	}
+}
+
+// TestApiDiagnostics_RosterDurabilityIsAdminOnlyDetail is the redaction gate,
+// driven through the real handler for every state the row can be in.
+func TestApiDiagnostics_RosterDurabilityIsAdminOnlyDetail(t *testing.T) {
+	cases := []struct {
+		name       string
+		withFile   bool
+		notDurable int64
+		refused    int64
+		degraded   int64
+		viewerWarn bool
+		viewerMsg  string
+	}{
+		{"memory-only", false, 3, 0, 0, true, rosterDurabilityViewerNotDurable},
+		{"refused", true, 0, 4, 0, true, rosterDurabilityViewerRefused},
+		{"refused+degraded", true, 0, 4, 5, true, rosterDurabilityViewerRefused},
+		{"degraded-only", true, 0, 0, 5, false, rosterDurabilityViewerConfigured},
+		{"healthy", true, 0, 0, 0, false, rosterDurabilityViewerConfigured},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			swapCfgForRosterDurability(t, configuredRosterCfg(t, tc.withFile))
+			rosterNotDurable.Store(tc.notDurable)
+			rosterPersistRefused.Store(tc.refused)
+			rosterPersistBestEffort.Store(tc.degraded)
+
+			_, adminRow := durabilityRowAt(t, RoleAdmin)
+			if wantWarn := tc.notDurable+tc.refused+tc.degraded > 0 || !tc.withFile; (adminRow.Status == diagWarn) != wantWarn {
+				t.Fatalf("admin: status = %q, want warn=%v", adminRow.Status, wantWarn)
+			}
+			if adminRow.Status == diagWarn && adminRow.OperatorAction == "" {
+				t.Fatal("admin: warn row lost its operator action")
+			}
+
+			for _, role := range []UIRole{RoleViewer, RoleOperator, UIRole("")} {
+				if !role.HasRole(RoleViewer) {
+					continue // the handler refuses such a role before rendering
+				}
+				_, row := durabilityRowAt(t, role)
+				label := "/api/diagnostics " + string(role) + " " + tc.name
+				assertRedactedRowIsFixed(t, label, row)
+				if (row.Status == diagWarn) != tc.viewerWarn {
+					t.Errorf("%s: status = %q, want warn=%v", label, row.Status, tc.viewerWarn)
+				}
+				if row.Message != tc.viewerMsg {
+					t.Errorf("%s: message = %q, want %q", label, row.Message, tc.viewerMsg)
+				}
+			}
+		})
+	}
+}
+
+// TestApiDiagnostics_DegradedRosterWriteIsNotAViewerOracle pins the subtle
+// half: below admin, a node whose ONLY roster problem is a degraded login-path
+// write must render byte-identically to a healthy node — row AND verdict.
+// Keeping the admin status (the #1545 username-row convention) would tell a
+// viewer that a backup-code or TOTP replay window may be open.
+func TestApiDiagnostics_DegradedRosterWriteIsNotAViewerOracle(t *testing.T) {
+	swapCfgForRosterDurability(t, configuredRosterCfg(t, true))
+	healthy, healthyRow := durabilityRowAt(t, RoleViewer)
+
+	rosterPersistBestEffort.Store(7)
+	degraded, degradedRow := durabilityRowAt(t, RoleViewer)
+	if *degradedRow != *healthyRow {
+		t.Errorf("viewer row differs between healthy and degraded-only: %+v vs %+v", healthyRow, degradedRow)
+	}
+	if degraded.Verdict != healthy.Verdict {
+		t.Errorf("viewer verdict moved %q -> %q on a degraded-only roster write", healthy.Verdict, degraded.Verdict)
+	}
+
+	// Control: the admin does see it, so the fixture really is degraded.
+	_, adminRow := durabilityRowAt(t, RoleAdmin)
+	if adminRow.Status != diagWarn || !strings.Contains(adminRow.Message, "7 login-time") {
+		t.Fatalf("admin: %+v, want the degraded count", adminRow)
+	}
+}
+
+// TestApiHealthExplain_RosterDurabilityIsRedacted covers the second renderer.
+func TestApiHealthExplain_RosterDurabilityIsRedacted(t *testing.T) {
+	swapCfgForRosterDurability(t, configuredRosterCfg(t, true))
+	rosterPersistRefused.Store(2)
+	rosterPersistBestEffort.Store(3)
+
+	r := roleCtx(httptest.NewRequest(http.MethodGet, "/api/health/explain", http.NoBody), RoleViewer)
+	w := httptest.NewRecorder()
+	apiHealthExplain(w, r)
+	row := findDiagnosticCheck(decodeContract(t, w), adminRosterDurabilityCode)
+	assertRedactedRowIsFixed(t, "/api/health/explain viewer", row)
+	if row.Message != rosterDurabilityViewerRefused {
+		t.Errorf("message = %q, want the fixed refused message", row.Message)
+	}
+}
+
+// TestApiAuthUsers_CarriesRosterPersistCounters ports #1574's Users-panel
+// feed onto the ADMIN-ONLY users payload.
+func TestApiAuthUsers_CarriesRosterPersistCounters(t *testing.T) {
+	snapshotCfgUIUsers(t)
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+	rosterPersistRefused.Store(2)
+	rosterPersistBestEffort.Store(5)
+
+	w := httptest.NewRecorder()
+	apiAuthUsers(w, adminCtx(httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin GET /api/auth/users = %d", w.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, _ := body["adminRosterPersistFailures"].(float64); got != 2 {
+		t.Errorf("adminRosterPersistFailures = %v, want 2", body["adminRosterPersistFailures"])
+	}
+	if got, _ := body["adminRosterPersistDegraded"].(float64); got != 5 {
+		t.Errorf("adminRosterPersistDegraded = %v, want 5", body["adminRosterPersistDegraded"])
+	}
+
+	// The same counters must not reach a viewer through the users route.
+	w = httptest.NewRecorder()
+	apiAuthUsers(w, viewerCtx(httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)))
+	if w.Code == http.StatusOK || strings.Contains(w.Body.String(), "adminRosterPersist") {
+		t.Errorf("viewer GET /api/auth/users = %d %q, want refused without counters", w.Code, w.Body.String())
+	}
+}
+
+// TestApiStats_DoesNotCarryRosterPersistCounters is the negative for #1574's
+// original shape: /api/stats is viewer-readable, so the counts stay off it.
+func TestApiStats_DoesNotCarryRosterPersistCounters(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+	rosterPersistRefused.Store(2)
+	rosterPersistBestEffort.Store(5)
+
+	w := httptest.NewRecorder()
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody))
+	r.RemoteAddr = "198.51.100.8:9999"
+	apiStats(w, r)
+	if strings.Contains(w.Body.String(), "adminRosterPersist") || strings.Contains(w.Body.String(), "rosterPersist") {
+		t.Errorf("/api/stats carries roster-persist counters: %s", w.Body.String())
+	}
+}
+
+// TestUI_RosterPersistHintReadsTheUsersPayload pins that the legacy SPA hint
+// is fed from the admin-only users payload, not from the /api/stats poll.
+func TestUI_RosterPersistHintReadsTheUsersPayload(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), "static", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{"roster-persist-hint", "renderRosterPersistHint(d)", "adminRosterPersistFailures", "adminRosterPersistDegraded"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("static/index.html does not reference %q", want)
+		}
+	}
+	start := strings.Index(s, "async function fetchUsers()")
+	if start < 0 {
+		t.Fatal("fetchUsers not found")
+	}
+	fetchUsers := s[start:]
+	if end := strings.Index(fetchUsers, "\n}\n"); end >= 0 {
+		fetchUsers = fetchUsers[:end]
+	}
+	if !strings.Contains(fetchUsers, "'/api/auth/users'") || !strings.Contains(fetchUsers, "renderRosterPersistHint(d)") {
+		t.Errorf("the hint must be rendered from the /api/auth/users response inside fetchUsers:\n%s", fetchUsers)
+	}
+	statsAt := strings.Index(s, "async function fetchStats()")
+	if statsAt >= 0 {
+		stats := s[statsAt:]
+		if end := strings.Index(stats, "\nasync function "); end >= 0 {
+			stats = stats[:end]
+		}
+		if strings.Contains(stats, "adminRosterPersist") || strings.Contains(stats, "roster-persist-hint") {
+			t.Error("fetchStats (the viewer-readable /api/stats poll) must not feed the roster-persist hint")
+		}
 	}
 }

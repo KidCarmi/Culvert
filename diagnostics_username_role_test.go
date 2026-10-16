@@ -489,10 +489,15 @@ func TestWall_RosterDerivedDiagnosticsAreEnumerated(t *testing.T) {
 	//     existence probe ("is any credential validator configured"). It never
 	//     renders a name, a role, a count or a second-factor posture, and the
 	//     row it feeds describes policy posture rather than roster content.
+	//   readRosterDurabilityFacts — the CHAOS-70 durability counters behind the
+	//     admin_roster_durability row, which redactContractForRole replaces
+	//     with rosterDurabilityFacts.viewerRow below admin (gated by
+	//     diagnostics_roster_durability_test.go).
 	allowed := []string{
 		"checkOversizeConfiguredUsernames",
 		"collectAdminUsernames",
 		"hasCredentialCapableProvider",
+		"readRosterDurabilityFacts",
 	}
 
 	checked := 0

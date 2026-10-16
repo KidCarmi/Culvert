@@ -172,18 +172,27 @@ administrative decision was affected, and therefore what the operator must redo.
 
 ## Recovery
 
-1. `culvert_admin_roster_persist_failures_total` is climbing, or an operator
+1. The Diagnostics panel (`GET /api/diagnostics`, also rendered by
+   `GET /api/health/explain`) carries an `admin_roster_durability` row: `warn`
+   when no `-ui-users-file` is configured (changes revert at restart) or when
+   refused or degraded roster writes have occurred since process start. The
+   Admin Users panel shows the same refused/degraded counts. Read-only; the
+   counts clear on restart. The counts, the remedy and the degraded login-write
+   state are shown to **admins only**: a viewer or operator sees a fixed message
+   for "not durable" or "a change was refused", and nothing for a degraded
+   login-time write (SEC-DIAG-ROSTER-1).
+2. `culvert_admin_roster_persist_failures_total` is climbing, or an operator
    reports a `500` from a user-management action.
-2. Check the process log for `UIUsers: REFUSED` lines — each names the action and
+3. Check the process log for `UIUsers: REFUSED` lines — each names the action and
    the account.
-3. Fix the underlying volume. `storage_write_failed` and the
+4. Fix the underlying volume. `storage_write_failed` and the
    `audit_log_persistence` contract row usually fire alongside and point at the
    same cause (disk full, read-only remount, permissions on `<dataDir>`).
-4. **Redo the refused actions.** They did not take effect. Nothing is queued and
+5. **Redo the refused actions.** They did not take effect. Nothing is queued and
    nothing retries them automatically — that is deliberate: a privilege change
    replayed later, out of order, against a roster that has since changed is worse
    than one the operator reapplies deliberately.
-5. If `culvert_admin_roster_persist_degraded_total` is non-zero, rotate the
+6. If `culvert_admin_roster_persist_degraded_total` is non-zero, rotate the
    affected administrator's TOTP backup codes after the volume is healthy.
 
 ## Related
