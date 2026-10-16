@@ -106,3 +106,27 @@ func TestInstallScript_MaintTomlString_NoComment(t *testing.T) {
 		t.Fatalf("maint_toml_string(compose_project_dir) = %q, want %q", got, want)
 	}
 }
+
+// TestInstallScript_MaintTomlString_SingleQuotedLiteral proves that a TOML
+// LITERAL string (single-quoted — spec-legal, and what an operator hand-editing
+// /etc/culvert-maint/config.toml may write) is read back without its delimiter
+// quotes. packaging/culvert-maint/install.sh's extract_toml_string already
+// strips them (TestCulvertMaintInstall_ExtractTomlString_SingleQuotedLiteral);
+// maint_toml_string drifted from it and returned `'/srv/culvert'`, so
+// wire_release_agent_for_compose compared the quoted value against
+// $INSTALL_DIR / the default socket / the release repo and silently skipped
+// Release Management auto-wiring with a "does not match" warning.
+func TestInstallScript_MaintTomlString_SingleQuotedLiteral(t *testing.T) {
+	toml := "compose_project_dir = '/srv/culvert'  # literal string\n" +
+		"proxy_repo = 'ghcr.io/kidcarmi/culvert'\n"
+
+	for key, want := range map[string]string{
+		"compose_project_dir": "/srv/culvert",
+		"proxy_repo":          "ghcr.io/kidcarmi/culvert",
+	} {
+		if got := runMaintTomlString(t, toml, key); got != want {
+			t.Fatalf("maint_toml_string(%s) = %q, want %q — a single-quoted TOML literal must have its "+
+				"delimiter quotes stripped like a double-quoted string", key, got, want)
+		}
+	}
+}
