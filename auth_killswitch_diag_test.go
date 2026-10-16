@@ -43,10 +43,17 @@ func TestAuthExemptKillSwitchRowsNoBackend(t *testing.T) {
 		if strings.Contains(rows[0].Message, "must now authenticate") {
 			t.Fatalf("no-backend row must not claim clients now authenticate, got %q", rows[0].Message)
 		}
-		if !strings.Contains(rows[0].Message, "Stage 2 policy decides every other request") ||
-			!strings.Contains(rows[0].Message, "Credential Required rules still return 407") ||
-			!strings.Contains(rows[0].Message, "SSO Required rules still deny with 403") {
-			t.Fatalf("no-backend row must name every scoped outcome before the Stage 2 fall-through, got %q", rows[0].Message)
+		if !strings.Contains(rows[0].Message, "does not make formerly exempt clients authenticate") ||
+			!strings.Contains(rows[0].Message, "remaining authentication rules and Stage 2 policy") {
+			t.Fatalf("no-backend row must say the switch adds no authentication and who decides instead, got %q", rows[0].Message)
+		}
+		// Per-rule outcomes depend on the default, rule order and presented
+		// headers; the row must not present a list of them as exhaustive.
+		if strings.Contains(rows[0].Message, "407") || strings.Contains(rows[0].Message, "403") {
+			t.Fatalf("no-backend row must not enumerate per-rule status codes, got %q", rows[0].Message)
+		}
+		if !strings.Contains(rows[0].OperatorAction, "Policy Tester") {
+			t.Fatalf("no-backend row must point to the Policy Tester, got %q", rows[0].OperatorAction)
 		}
 	}
 	withBackend := authExemptKillSwitchRows(false, true, true)

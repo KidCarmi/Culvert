@@ -38,11 +38,14 @@ func authExemptKillSwitchRows(envDisabled, runtimeDisabled, authBackend bool) []
 	}
 	effect := "so clients that were exempt from authentication must now authenticate"
 	if !authBackend {
-		// Every scoped outcome is named: with the Exempt term suppressed, a
-		// matching Credential Required rule challenges (407), a matching SSO
-		// Required rule denies (403, no eligible IdP), and only the remaining
-		// Default traffic is inert and reaches Stage 2.
-		effect = "but no credential or SSO backend is configured, so formerly exempt clients are not challenged: matching Credential Required rules still return 407, matching SSO Required rules still deny with 403, and Stage 2 policy decides every other request"
+		// Deliberately not an enumeration of per-rule outcomes: without a
+		// backend the result depends on the global default, the rule order
+		// and whether the client presented Proxy-Authorization (which turns
+		// the Stage-1 outcome into Default), so a list here is either
+		// incomplete or wrong. The row states only what holds in every case
+		// and points at the Policy Tester for a specific client.
+		effect = "but no credential or SSO backend is configured, so this does not make formerly exempt clients authenticate: their requests are decided by the remaining authentication rules and Stage 2 policy"
+		action = "Use Policies → Policy Tester to see how a specific formerly exempt client is now decided. " + action
 	}
 	return []OperatorContractCheck{{
 		Code:           "auth_exempt_kill_switch",
