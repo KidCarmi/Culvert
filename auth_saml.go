@@ -15,6 +15,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,11 @@ type SAMLProvider struct {
 	// if it came from the last-known-good cache; zero when fetched live or
 	// inline. Read only by the publish sites (idpNotePublishedGeneration).
 	cachedAt time.Time
+	// validUntil is the metadata's own expiry (the earlier of the
+	// EntityDescriptor's and an enclosing EntitiesDescriptor's validUntil);
+	// zero when it declares none. It caps how long a CACHED document may be
+	// served (idpStaleCeilingSweep), alongside idpmeta.StaleMaxAge.
+	validUntil time.Time
 }
 
 func (p *SAMLProvider) servedDocumentCachedAt() time.Time {
@@ -54,6 +60,13 @@ func (p *SAMLProvider) servedDocumentCachedAt() time.Time {
 		return time.Time{}
 	}
 	return p.cachedAt
+}
+
+func (p *SAMLProvider) servedDocumentValidUntil() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.validUntil
 }
 
 // NewSAMLProvider builds a SAMLProvider from an IdPProfile.
@@ -66,7 +79,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] name_id_format: %w", p.ID, err)
 	}
 
-	idpMeta, cachedAt, err := fetchSAMLMetadata(p.ID, cfg)
+	idpMeta, cachedAt, validUntil, err := fetchSAMLMetadata(p.ID, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] metadata: %w", p.ID, err)
 	}
@@ -100,6 +113,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		sp:         &middleware.ServiceProvider,
 		middleware: middleware,
 		cachedAt:   cachedAt,
+		validUntil: validUntil,
 	}, nil
 }
 
@@ -240,9 +254,11 @@ func newSAMLStateStore() *samlStateStore {
 // provider. The bytes it returns are parsed by the SAME samlsp.ParseMetadata
 // call as network bytes — the cache is a source of bytes, never a source of
 // trust.
-func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDescriptor, time.Time, error) {
+//
+// The third result is the metadata's own validUntil (zero when it declares
+// none); see samlMetadataValidUntil.
+func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (ed *saml.EntityDescriptor, cachedAt, validUntil time.Time, err error) {
 	var xmlData []byte
-	var cachedAt time.Time
 
 	if cfg.MetadataURL != "" {
 		// Reject a malformed or wrong-scheme URL HERE, before the fetch, so
@@ -253,12 +269,13 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 		// fetcher, which parses and guards it once in the same function that
 		// issues the request.
 		if err := validateSAMLMetadataURL(cfg.MetadataURL); err != nil {
-			return nil, time.Time{}, err
+			return nil, time.Time{}, time.Time{}, err
 		}
 		fetched, fetchErr := fetchSAMLMetadataOverNetwork(cfg.MetadataURL)
-		doc, docCachedAt, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr, validateSAMLMetadataDocument)
+		doc, docCachedAt, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr,
+			validateSAMLMetadataDocument, samlMetadataValidUntil)
 		if err != nil {
-			return nil, time.Time{}, err
+			return nil, time.Time{}, time.Time{}, err
 		}
 		xmlData = doc
 		cachedAt = docCachedAt
@@ -277,11 +294,43 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (*saml.EntityDe
 		xmlData = []byte(cfg.MetadataXML)
 	}
 
-	ed, err := samlsp.ParseMetadata(xmlData)
+	ed, err = samlsp.ParseMetadata(xmlData)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, time.Time{}, time.Time{}, err
 	}
-	return ed, cachedAt, nil
+	return ed, cachedAt, samlValidUntilOf(xmlData, ed), nil
+}
+
+// samlMetadataValidUntil reports a metadata document's own expiry: the earlier
+// of the selected EntityDescriptor's validUntil and an enclosing
+// EntitiesDescriptor's. Zero means the document declares none (or does not
+// parse, which the validator refuses separately). It is resolveIdPDocument's
+// expiry hook: a CACHED document past this instant is never served, whatever
+// its age against idpmeta.StaleMaxAge.
+func samlMetadataValidUntil(doc []byte) time.Time {
+	ed, err := samlsp.ParseMetadata(doc)
+	if err != nil {
+		return time.Time{}
+	}
+	return samlValidUntilOf(doc, ed)
+}
+
+// samlValidUntilOf is samlMetadataValidUntil for an already-parsed descriptor.
+// samlsp.ParseMetadata returns the first IdP EntityDescriptor of an aggregate
+// and drops the wrapper, so the wrapper's validUntil (which bounds every entity
+// it contains) is read separately here.
+func samlValidUntilOf(doc []byte, ed *saml.EntityDescriptor) time.Time {
+	var vu time.Time
+	if ed != nil {
+		vu = ed.ValidUntil
+	}
+	var outer saml.EntitiesDescriptor
+	if err := xml.Unmarshal(doc, &outer); err == nil && outer.ValidUntil != nil && !outer.ValidUntil.IsZero() {
+		if vu.IsZero() || outer.ValidUntil.Before(vu) {
+			vu = *outer.ValidUntil
+		}
+	}
+	return vu
 }
 
 // validateSAMLMetadataDocument is the document gate resolveIdPDocument applies
@@ -374,7 +423,9 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), samlMetadataFetchBudget)
 	defer cancel()
 	if err := isPrivateHostContext(ctx, metaURL.Host); err != nil {
-		return nil, fmt.Errorf("metadata URL host refused: %w", err)
+		// A resolution failure is an outage (stale-eligible); a definite
+		// private verdict is a policy refusal and is not (idpFetchUnavailable).
+		return nil, idpFetchUnavailable(fmt.Errorf("metadata URL host refused: %w", err))
 	}
 
 	// Use an SSRF-safe transport that rejects private/internal IPs at
@@ -390,17 +441,20 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("metadata request: %w", err)
 	}
+	// Every failure below is CLASSIFIED for resolveIdPDocument's
+	// stale-if-error rule: transport and 5xx may be answered from the
+	// last-known-good cache, a 4xx/other status may not.
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch: %w", err)
+		return nil, idpFetchUnavailable(fmt.Errorf("fetch: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d fetching metadata", resp.StatusCode)
+		return nil, idpFetchStatusError(resp.StatusCode, fmt.Errorf("HTTP %d fetching metadata", resp.StatusCode))
 	}
 	xmlData, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read: %w", err)
+		return nil, idpFetchUnavailable(fmt.Errorf("read: %w", err))
 	}
 	return xmlData, nil
 }

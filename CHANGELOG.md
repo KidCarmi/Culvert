@@ -551,23 +551,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   structure; the DNS-backed check runs on the fetch, where its failure routes to
   the cache), the SAML pre-flight host check shares the fetch's deadline instead
   of resolving unbounded ahead of it, and switching a profile to inline
-  `metadataXml` clears its now-unresolvable remote-fetch failure episode. Two
-  further operator-visible consequences: a discovery document the appliance
-  cannot accept — one naming an `authorization_endpoint` that resolves into a
-  private range — is now treated as an availability failure and the previously
-  cached document keeps serving, instead of replacing it and leaving the profile
-  with nothing to fall back to; and re-pointing a profile from one remote source
-  to another retires the old source's failure episode on commit, so a repoint
-  away from a broken IdP stops alerting instead of paging indefinitely for a URL
-  that is no longer configured. And the 7-day staleness ceiling is now enforced
-  on a **running** appliance rather than only when a profile is next compiled: a
-  provider whose cached document has expired is retired (logged as
-  `IDP_METADATA_EXPIRED`), so browser SSO for it fails closed instead of
-  continuing to trust a signing certificate your IdP may have withdrawn, and the
-  retry loop brings it back automatically on the first successful fetch. The
-  profile stays enabled and stored throughout, and a provider serving a freshly
-  fetched document is never retired however old the cached copy beside it is. See
-  `docs/operator/idp-metadata-availability.md`.
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. The
+  fallback is **stale-if-error** (RFC 5861): only a transport failure or an
+  HTTP 5xx is answered from the cache. A 4xx, any other non-200, an empty body,
+  or a document the appliance cannot accept (malformed metadata, or a discovery
+  document naming an `authorization_endpoint` that resolves into a private
+  range) fails the compile as before and never replaces the cached copy.
+  Re-pointing a profile from one remote source to another retires the old
+  source's failure episode on commit, so a repoint away from a broken IdP stops
+  alerting instead of paging indefinitely for a URL that is no longer
+  configured. The staleness ceiling is the EARLIER of 7 days and the SAML
+  metadata's own `validUntil`, and it is enforced on a **running** appliance
+  rather than only when a profile is next compiled: a provider whose cached
+  document has expired is retired (logged as `IDP_METADATA_EXPIRED`), so new
+  browser SSO through it fails closed instead of continuing to trust a signing
+  certificate your IdP may have withdrawn, and the retry loop brings it back
+  automatically on the first successful fetch. A provider that is live but
+  serving from cache is also revalidated by the retry loop and replaced the
+  moment the IdP answers again (`IDP_METADATA_REVALIDATED`), so a key rotated
+  during the outage is adopted within minutes of recovery. None of this revokes
+  sessions: the profile stays enabled and stored throughout, and a provider
+  serving a freshly fetched document is never retired however old the cached
+  copy beside it is. See `docs/operator/idp-metadata-availability.md`.
 
 ### Changed
 

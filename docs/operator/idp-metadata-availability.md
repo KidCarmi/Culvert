@@ -35,12 +35,36 @@ degrades to it when the IdP is unreachable.
 first choice, so an IdP-side signing-key rotation is picked up at the first
 compile after it happens, exactly as before.
 
-**A cached document is refused once it is older than 7 days.** Withdrawing a
-key from published metadata is your IdP's revocation lever; serving a cached
-document forever would keep trusting a key your IdP has retired. Past the
-ceiling the compile fails exactly as it did before this change. The ceiling is
-a constant with no configuration knob — the only thing a knob here could do is
-widen the window in which a withdrawn key stays trusted.
+**Only an outage is answered from the cache.** The cache follows HTTP
+stale-if-error semantics (RFC 5861): a fetch that did not complete — connection
+refused or reset, TLS failure, timeout, DNS resolution failure — or an HTTP
+**5xx** answer falls back to the cached document. An IdP that *answered* does
+not: a **4xx** (404 withdrawn, 401/403 refused, 410 gone, 429 throttled), any
+other non-200 status, an empty body, or a document the appliance cannot parse
+or accept fails the compile exactly as it did before this change, and the
+cached copy is neither served nor overwritten. A metadata host that now
+resolves to a private address is a policy refusal, not an outage, and is not
+answered from cache either.
+
+**A cached document is refused once it is older than 7 days — or past its own
+`validUntil`, whichever is first.** Withdrawing a key from published metadata
+is your IdP's revocation lever; serving a cached document forever would keep
+trusting a key your IdP has retired. For SAML, the metadata's own `validUntil`
+(on the `EntityDescriptor`, or on an enclosing `EntitiesDescriptor`) also
+bounds it: a cached document past `validUntil` is never served, however young
+the copy is. Past the ceiling the compile fails exactly as it did before this
+change. The 7-day ceiling is a constant with no configuration knob — the only
+thing a knob here could do is widen the window in which a withdrawn key stays
+trusted. (`cacheDuration` governs how often a document should be *refreshed*,
+not how long it may substitute for an unreachable IdP, so it does not shorten
+the fallback.)
+
+**An unreachable IdP never logs anybody out.** Serving from cache, failing to
+compile, and the 7-day / `validUntil` retirement are all *availability* states:
+the profile stays enabled and stored, so sessions already issued through it
+are not revoked. They stop **new** browser SSO through that provider until a
+document is fetched again. Only deleting or disabling the profile revokes its
+sessions.
 
 **A cached document is bound to its source.** Re-pointing a profile at a
 different metadata URL or issuer has no cache, so a migration can never be
@@ -64,7 +88,15 @@ its own resolving check at compile time. That check refuses only a DEFINITE
 private verdict: a name that cannot be resolved is treated as *unknown*, not
 *private*, so a resolver outage can never reject a cached document.
 
-**The degradation alert does not depend on another fetch.** A provider serving from cache is still *live*, so nothing recompiles it and the dark-provider recovery loop does not cover it. A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence — and it does not run at all on a node with no enabled remote-metadata profile.
+**A provider serving from cache is revalidated.** The retry loop below also
+re-fetches the document of every provider that is live but serving from cache,
+at the same bounded rate, and swaps in a provider built from the fresh document
+the moment the IdP answers again — so a signing key your IdP rotated during the
+outage is adopted within minutes of recovery, not when the 7-day ceiling
+expires. It logs `IDP_METADATA_REVALIDATED` when it does. While the IdP is
+still unreachable the cached provider keeps serving.
+
+**The degradation alert does not depend on another fetch.** A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence — and it does not run at all on a node with no enabled remote-metadata profile.
 
 **A dark provider recovers on its own.** If a profile still cannot be compiled
 — unreachable at boot with nothing cached — the appliance retries at a bounded
@@ -146,11 +178,12 @@ still applies.
 Providers are running from cached documents. Nobody is locked out **yet**.
 
 1. This is your warning window. Two things are true while it lasts: an
-   IdP-side signing-key rotation will not be picked up, and each cached
-   document stops being usable 7 days after it was fetched, after which browser
-   SSO stops.
+   IdP-side signing-key rotation will not be picked up until the IdP answers
+   again, and each cached document stops being usable 7 days after it was
+   fetched (or at its SAML `validUntil`, if that is sooner), after which new
+   browser SSO through that provider stops. Existing sessions are not revoked.
 
-   That 7-day ceiling is **enforced on a running appliance**, not only when a
+   That ceiling is **enforced on a running appliance**, not only when a
    profile is next compiled. A background check retires a provider whose served
    document has expired: it logs `IDP_METADATA_EXPIRED`, stops serving that
    provider (so browser SSO for it fails closed rather than trusting a signing
@@ -193,17 +226,17 @@ fetch and falls back to the cached document. A **configuration** error — a
 non-absolute URL, a scheme other than http/https, or a private IP literal — is
 rejected outright at compile time and is never answered from cache.
 
-So does a document the appliance **cannot accept**. If your IdP starts serving
-an OIDC discovery document that this appliance refuses — most realistically one
-whose `authorization_endpoint` resolves into a private range, which would
-redirect your users' browsers into the internal network — that is treated as an
-availability failure, not as a new document: the previously cached document
-keeps serving, the gauge goes to 1, and the refused document's cause appears in
-the `IDP_METADATA_FETCH_FAILED` line with `outcome="stale_cached"`. The refused
-document never replaces your last-known-good copy, so the fallback survives the
-episode. With **nothing** cached there is no fallback and the provider fails to
-compile, which is the correct fail-closed outcome — look for the same cause in
-the log and check what your IdP is publishing.
+A document the appliance **cannot accept** is different: it is an answer, not
+an outage. If your IdP starts serving metadata or an OIDC discovery document
+that this appliance refuses — malformed XML, an HTML error page with status
+200, or an `authorization_endpoint` that resolves into a private range (which
+would redirect your users' browsers into the internal network) — the compile
+fails and the cache is **not** consulted. The cause appears in the
+`IDP_METADATA_FETCH_FAILED` line with `outcome="unavailable"`. The refused
+document never replaces your last-known-good copy, so a later genuine outage
+still has a valid fallback. A provider that is already live keeps serving what
+it was built from; check what your IdP is publishing. The same applies to a
+4xx answer from the metadata or discovery URL.
 
 ### After a restore onto a fresh volume
 
@@ -241,8 +274,10 @@ safe at any time; it costs only the fallback.
   reaching the IdP, and on that path a failure still rejects the whole IdP
   profile set in the config snapshot. Steady-state nodes are covered.
 * **An IdP signing-key rotation during an outage is not picked up** until the
-  IdP is reachable again. That is the intended trade: the alternative is to
-  stop trusting a document the IdP has not actually retracted.
+  IdP is reachable again; the retry loop then adopts it within one retry
+  interval (at most 5 minutes, jittered). That is the intended trade: the
+  alternative is to stop trusting a document the IdP has not actually
+  retracted.
 * **Two discovery endpoints are not in the validation loop** (register row
   IDP-8): `userinfo_endpoint` and `introspection_endpoint` are taken from the
   document and dialled with a bearer token and the client secret respectively,
@@ -251,8 +286,9 @@ safe at any time; it costs only the fallback.
   there — a discovery document that downgraded one would send credentials in
   cleartext to a public host. Refusing non-`https` for those two is a posture
   change with its own compatibility cost and is recorded as follow-up work.
-* **Metadata is only refreshed when a profile is compiled** (boot, admin save,
-  config-version change). A long-lived process whose config never changes can
-  hold a document for a long time and will not notice a rotation until
-  something triggers a recompile. A periodic refresh is recorded as follow-up
-  work (register row IDP-4).
+* **A provider built from a FRESH document is only refreshed when its profile
+  is compiled** (boot, admin save, config-version change). Providers serving
+  from cache are revalidated by the retry loop, but a long-lived process whose
+  config never changes can hold a freshly fetched document for a long time and
+  will not notice a rotation until something triggers a recompile. A periodic
+  refresh of those is recorded as follow-up work (register row IDP-4).

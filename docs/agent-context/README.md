@@ -60,6 +60,21 @@ to this checkout, not to an unmerged branch.
   fairness, audit identity and session behavior. For credential changes read the
   [TOTP preservation block](history/authentication-and-identity.md#claude-main-l226-l226)
   and [password no-version test](../../auth_password_change_no_versioning_test.go).
+- Interactive IdP metadata/discovery last-known-good (CHAOS-71):
+  [internal/idpmeta](../../internal/idpmeta/idpmeta.go),
+  [idp_metadata_cache.go](../../idp_metadata_cache.go),
+  [idp_recovery.go](../../idp_recovery.go),
+  [idp_metadata_health.go](../../idp_metadata_health.go), the
+  [operator contract](../operator/idp-metadata-availability.md) and
+  [roadmap §41](../../roadmap/CHAOS-ENGINEERING-REVIEW.md). A third party decides
+  whether a document is fresh, never whether the IdP exists. Cache is
+  stale-if-error only on transport errors and HTTP 5xx; a 4xx or an
+  invalid/refused document fails the compile and never replaces the cached
+  copy. Cached bytes take the same parser as network bytes. Stale serving is
+  capped at min(7 days, SAML `validUntil`) on the compile path and on live
+  providers, and the recovery loop revalidates cache-serving providers. An
+  unreachable IdP is degraded availability, never revocation: only an
+  explicit delete or disable revokes sessions.
 
 ## Proxy, policy and scanning
 

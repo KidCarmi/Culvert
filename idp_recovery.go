@@ -33,9 +33,17 @@ package main
 //     that stopped failing because it stopped attempting looks identical to a
 //     healthy one.
 //
+// It also REVALIDATES providers that are live but SERVING FROM CACHE (built
+// from the last-known-good document during an outage). Without that, a
+// steady-state node never recompiles them, so after the IdP recovered the
+// cached document — for SAML, possibly a signing certificate the IdP has since
+// withdrawn — stayed trusted until the seven-day ceiling retired it. A
+// revalidation that fetches a fresh document swaps the new provider in under
+// the same generation + live-identity guard publishRecompiled uses.
+//
 // The loop is a no-op on a healthy appliance: it only runs while at least one
-// ENABLED profile has no live provider, and it exits as soon as that set is
-// empty.
+// ENABLED profile has no live provider or is serving from cache, and it exits
+// as soon as both sets are empty.
 
 import (
 	"context"
@@ -151,6 +159,117 @@ func (r *IdPRegistry) publishRecompiled(id string, generation, compiled *IdPProf
 		// stop showing discovered endpoints for any provider this loop
 		// recovered — losing the behaviour the writes exist for while fixing
 		// the race they caused.
+		copyDiscoveredOIDCEndpoints(p, compiled)
+		r.live[id] = prov
+		idpNotePublishedGeneration(id, effectiveRemoteSource(p), prov)
+		return true
+	}
+	return false // deleted while we were compiling
+}
+
+// revalidationCandidate is a LIVE provider built from the last-known-good
+// cache. live is the provider observed serving — the identity token
+// publishRevalidated compares against — and servedAt the fetch time of the
+// cached document it serves.
+type revalidationCandidate struct {
+	darkCandidate
+	live     IdentityProvider
+	servedAt time.Time
+}
+
+// cacheServingProfiles returns a copy of every ENABLED profile whose PUBLISHED
+// provider is serving a cached document (it has a served-generation record for
+// the source it still fetches). Taken under r.mu then idpServedMu — the one
+// lock order this package uses — and released before any compile.
+func (r *IdPRegistry) cacheServingProfiles() []revalidationCandidate {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	idpServedMu.Lock()
+	served := make(map[string]idpServedDoc, len(idpServed))
+	for id, sd := range idpServed {
+		served[id] = sd
+	}
+	idpServedMu.Unlock()
+	if len(served) == 0 {
+		return nil
+	}
+	var out []revalidationCandidate
+	for _, p := range r.profiles {
+		if p == nil || !p.Enabled {
+			continue
+		}
+		prov, live := r.live[p.ID]
+		sd, cached := served[p.ID]
+		if !live || !cached || sd.source != effectiveRemoteSource(p) {
+			continue
+		}
+		clones := cloneIdPProfiles([]*IdPProfile{p})
+		if len(clones) != 1 || clones[0] == nil {
+			continue
+		}
+		out = append(out, revalidationCandidate{
+			darkCandidate: darkCandidate{generation: p, candidate: clones[0]},
+			live:          prov,
+			servedAt:      sd.fetchedAt,
+		})
+	}
+	return out
+}
+
+// hasCacheServingProfile reports whether any enabled, live profile is serving a
+// cached document — the revalidation half of "is there anything to recover".
+func (r *IdPRegistry) hasCacheServingProfile() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	idpServedMu.Lock()
+	defer idpServedMu.Unlock()
+	for id, sd := range idpServed {
+		for _, p := range r.profiles {
+			if p == nil || p.ID != id || !p.Enabled {
+				continue
+			}
+			if _, live := r.live[id]; live && sd.source == effectiveRemoteSource(p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// idpRevalidationAdopts reports whether a revalidation compile produced a
+// document NEWER than the one being served: fetched live now (zero cachedAt),
+// or a cached copy fetched after the served one (a fresh document another
+// compile stored but never published — the round-18 superseded case). A
+// compile that merely fell back to the SAME cached document changes nothing
+// and is discarded.
+func idpRevalidationAdopts(prov IdentityProvider, servedAt time.Time) bool {
+	a, ok := prov.(idpServedDocumentAger)
+	if !ok {
+		return false
+	}
+	cachedAt := a.servedDocumentCachedAt()
+	return cachedAt.IsZero() || cachedAt.After(servedAt)
+}
+
+// publishRevalidated replaces a cache-serving provider with a freshly compiled
+// one. Every precondition is re-checked UNDER the lock, because the compile ran
+// without it: the profile must still be present, enabled and of the same
+// generation, and the live provider must still be the exact one revalidated —
+// an admin write, a snapshot, a retirement or another publish in the meantime
+// means this result is no longer the one to install.
+func (r *IdPRegistry) publishRevalidated(id string, generation, compiled *IdPProfile, prev, prov IdentityProvider) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur, live := r.live[id]; !live || cur != prev {
+		return false // retired, republished or recovered since selection
+	}
+	for _, p := range r.profiles {
+		if p == nil || p.ID != id {
+			continue
+		}
+		if !p.Enabled || p != generation {
+			return false // disabled, or replaced by a newer generation
+		}
 		copyDiscoveredOIDCEndpoints(p, compiled)
 		r.live[id] = prov
 		idpNotePublishedGeneration(id, effectiveRemoteSource(p), prov)
@@ -354,18 +473,52 @@ func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfil
 	forgetIdPMetadataEpisodeForSource(id, ref)
 }
 
-// runIdPRecoveryLoop retries compilation of enabled-but-dark profiles until
-// none are left or ctx is cancelled. Started from the IdP startup slice; a
-// no-op on a node where every enabled profile compiled.
+// revalidateCacheServingProviders recompiles every live provider that is serving
+// a cached document and swaps in the result when it was built from a NEWER
+// document (normally: the IdP answered again). Returns how many it replaced.
+//
+// A compile that fails, or that merely fell back to the same cached document
+// because the IdP is still down, leaves the serving provider in place: it is
+// still within its ceiling (the watchdog retires it at
+// min(StaleMaxAge, validUntil)), and an availability failure is not a reason
+// to stop serving it.
+func revalidateCacheServingProviders() int {
+	replaced := 0
+	for _, rc := range idpRegistry.cacheServingProfiles() {
+		prov, err := compileIdPProfile(rc.candidate)
+		if err != nil {
+			discardSupersededRecoveryEpisode(rc.darkCandidate)
+			continue
+		}
+		if !idpRevalidationAdopts(prov, rc.servedAt) {
+			continue // still the same cached document: the IdP has not answered
+		}
+		if idpRegistry.publishRevalidated(rc.candidate.ID, rc.generation, rc.candidate, rc.live, prov) {
+			replaced++
+			noteIdPRevalidated(rc.candidate.ID)
+			continue
+		}
+		// Lost the race to an admin write, a snapshot or a retirement; the
+		// fresh document is in the cache, and the next pass (or the dark
+		// recovery path) adopts it for whatever generation is now in service.
+		noteIdPRecoverySuperseded(rc.candidate.ID)
+	}
+	return replaced
+}
+
+// runIdPRecoveryLoop retries compilation of enabled-but-dark profiles, and
+// revalidates live providers serving from cache, until neither is left or ctx
+// is cancelled. Started from the IdP startup slice and re-armed by the
+// watchdog; a no-op on a node where every enabled profile compiled fresh.
 func runIdPRecoveryLoop(ctx context.Context) {
 	delay := idpRecoveryInitialDelay
 	announced := false
 	for {
 		dark := idpRegistry.darkEnabledProfiles()
-		if len(dark) == 0 {
-			return // nothing to recover; the loop's whole job is done
+		if len(dark) == 0 && !idpRegistry.hasCacheServingProfile() {
+			return // nothing to recover or revalidate; the loop's whole job is done
 		}
-		if !announced {
+		if !announced && len(dark) > 0 {
 			announced = true
 			logger.Printf("IdP: %d enabled profile(s) have no live provider — retrying compilation every %s to %s until they do (browser SSO is unavailable for them meanwhile)",
 				len(dark), idpRecoveryInitialDelay, idpRecoveryMaxDelay)
@@ -373,7 +526,7 @@ func runIdPRecoveryLoop(ctx context.Context) {
 		if !haSleepInterruptible(ctx.Done(), jitterDuration(delay, idpRecoveryJitter)) {
 			return
 		}
-		recovered := 0
+		recovered := revalidateCacheServingProviders()
 		for _, dc := range idpRegistry.darkEnabledProfiles() {
 			// Compile the COPY: compiling writes discovered endpoints into the
 			// profile, and this runs without r.mu held. The registry's own

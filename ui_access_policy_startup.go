@@ -73,7 +73,10 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		// live provider, LDAP included), not on the interactive-only counts
 		// the contract row reports — a start condition narrower than what the
 		// loop recovers would leave a dark profile with no way back.
-		if len(idpRegistry.darkEnabledProfiles()) > 0 {
+		// A profile that booted from the last-known-good cache is live, not
+		// dark, but must still be revalidated so a recovered IdP's document
+		// (and any rotated signing key) replaces the cached one.
+		if len(idpRegistry.darkEnabledProfiles()) > 0 || idpRegistry.hasCacheServingProfile() {
 			armIdPRecoveryLoop(resolveLifecycleCtx())
 		}
 		// Detection-only degradation watchdog. UNLIKE the recovery loop above

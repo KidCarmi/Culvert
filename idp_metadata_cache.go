@@ -18,6 +18,7 @@ package main
 // token endpoints this appliance will send users and credentials to.
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -111,17 +112,30 @@ func idpmetaStaleMaxAgeString() string {
 //     that a FUTURE outage has no fallback, and failing a working compile
 //     because a cache write failed would be strictly worse than no cache.
 //
-//  3. On failure, fall back to the last-known-good document if one exists
-//     within idpmeta.StaleMaxAge. Past the ceiling — or with nothing cached —
-//     the original fetch error is returned unchanged and the caller fails
-//     exactly as it did before this package existed.
+//  3. On failure, fall back to the last-known-good document ONLY when the
+//     failure is an AVAILABILITY failure (idpFetchStaleEligible: a transport
+//     error or an HTTP 5xx — RFC 5861 stale-if-error semantics), and only
+//     within idpmeta.StaleMaxAge. An IdP that ANSWERED — a 4xx, any other
+//     non-200 status, an empty body, or a document the validator refuses —
+//     has given an answer, not an outage, and the cache is not consulted.
+//     Past the ceiling, with nothing cached, or on an answer, the original
+//     fetch error is returned unchanged and the caller fails exactly as it
+//     did before this package existed. An unreachable IdP is degraded
+//     availability; an IdP that says "no" is not something the cache may
+//     paper over.
+//
+//  4. A cached document is served only within min(idpmeta.StaleMaxAge, the
+//     document's own expiry). `expiry` reports that expiry (SAML metadata
+//     validUntil); nil, or a zero time, means the document declares none. A
+//     cached document whose expiry has passed is refused exactly like one past
+//     the seven-day ceiling.
 //
 // The second result is WHEN the returned document was fetched from the IdP if it
 // came from the cache, and zero if it was fetched now. It is handed back to the
 // caller rather than recorded here because a fetch is not a publication: only
 // the site that PUBLISHES the provider built from this document may record it as
 // the served generation (Codex review round 14 — see idpNotePublishedGeneration).
-func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error, validate func([]byte) error) ([]byte, time.Time, error) {
+func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error, validate func([]byte) error, expiry func([]byte) time.Time) ([]byte, time.Time, error) {
 	store := idpMetadataStore()
 
 	if fetchErr == nil && len(doc) > 0 && validate != nil {
@@ -144,7 +158,22 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 	if fetchErr == nil {
 		fetchErr = fmt.Errorf("IdP returned an empty document")
 	}
+	if !idpFetchStaleEligible(fetchErr) {
+		// The IdP ANSWERED (4xx, non-200, empty or invalid document), or the
+		// request was refused by policy before it left: not an outage, so the
+		// last-known-good copy is NOT consulted — see (3) above. Counted and
+		// rate-limit-logged as unavailable, the same verdict as no cache.
+		noteIdPMetadataOutcome(profileID, idpDocRef{Kind: kind, Source: source}, idpMetaUnavailable, fetchErr)
+		return nil, time.Time{}, fetchErr
+	}
+	return serveCachedIdPDocument(store, profileID, kind, source, fetchErr, validate, expiry)
+}
 
+// serveCachedIdPDocument is resolveIdPDocument's fallback half: the fetch failed
+// for an AVAILABILITY reason, so the last-known-good document is served if one
+// is cached, usable, within idpmeta.StaleMaxAge and not past its own expiry.
+// Otherwise the original fetch error is returned unchanged.
+func serveCachedIdPDocument(store *idpmeta.Store, profileID string, kind idpmeta.Kind, source string, fetchErr error, validate func([]byte) error, expiry func([]byte) time.Time) ([]byte, time.Time, error) {
 	cached, age, cacheErr := store.Get(profileID, kind, source)
 	if cacheErr != nil {
 		noteIdPMetadataOutcome(profileID, idpDocRef{Kind: kind, Source: source}, idpMetaUnavailable, fetchErr)
@@ -168,6 +197,17 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 			return nil, time.Time{}, fetchErr
 		}
 	}
+	// The document's OWN expiry caps the ceiling — see (4) above. SAML
+	// metadata past its validUntil must not be relied on, and serving it from
+	// the cache would be the cache extending a lifetime the IdP itself bounded.
+	if expiry != nil {
+		if vu := expiry(cached); !vu.IsZero() && !time.Now().Before(vu) {
+			noteIdPMetadataOutcome(profileID, idpDocRef{Kind: kind, Source: source}, idpMetaUnavailable, fetchErr)
+			logger.Printf("IdP[%s]: metadata fetch failed (%v) AND the cached document expired at %s (its validUntil) — this profile cannot be compiled",
+				sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), vu.UTC().Format(time.RFC3339))
+			return nil, time.Time{}, fetchErr
+		}
+	}
 	noteIdPMetadataOutcome(profileID, idpDocRef{Kind: kind, Source: source}, idpMetaStale, fetchErr)
 	logger.Printf("IdP[%s]: metadata fetch failed (%v) — continuing from the cached document fetched %s ago (refused past %s)",
 		sanitizeLog(profileID), sanitizeLog(fmt.Sprint(fetchErr)), age.Round(time.Second), idpmetaStaleMaxAgeString())
@@ -175,5 +215,55 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 	// enforceable after the compile returns: Store.Get owns idpmeta.StaleMaxAge,
 	// but it is reached only from a compile and a steady-state node never
 	// recompiles (Codex review round 8).
-	return cached, time.Now().Add(-age), nil
+	//
+	// ROUNDED to the second: the store stamps fetch times in whole seconds and
+	// reports an age against its own clock read, so now-age carries a few
+	// nanoseconds of drift that differs per call. Unrounded, two compiles from
+	// the SAME cached document reported different fetch times, and the
+	// recovery loop's revalidation would read "a newer document" into what is
+	// the identical one (idpRevalidationAdopts).
+	return cached, time.Now().Add(-age).Round(time.Second), nil
+}
+
+// idpUnavailableError marks a document fetch that failed for AVAILABILITY
+// reasons: the request did not complete (dial, TLS, timeout, DNS resolution,
+// body read) or the IdP answered 5xx. It is the ONLY class resolveIdPDocument
+// answers from the last-known-good cache (RFC 5861 stale-if-error). The mark is
+// POSITIVE on purpose: an error nobody classified is not stale-eligible, so a
+// new failure path added to a fetcher fails closed (no cache) until someone
+// decides it is an outage.
+//
+// Error() is the wrapped error's text unchanged, so operator-visible messages
+// and log lines are exactly what the fetchers produced before.
+type idpUnavailableError struct{ err error }
+
+func (e *idpUnavailableError) Error() string { return e.err.Error() }
+func (e *idpUnavailableError) Unwrap() error { return e.err }
+
+// idpFetchUnavailable marks err as an availability failure. An SSRF policy
+// refusal (errSSRFBlocked, from the pre-flight or the dialer) is NEVER marked:
+// a host that now resolves into a private range is a policy verdict about the
+// destination, not an IdP outage, and is not something the cache may answer.
+func idpFetchUnavailable(err error) error {
+	if err == nil || errors.Is(err, errSSRFBlocked) {
+		return err
+	}
+	return &idpUnavailableError{err: err}
+}
+
+// idpFetchStatusError classifies a non-200 answer: a 5xx is the IdP failing to
+// serve (stale-eligible); every other status, notably a 4xx (404 withdrawn,
+// 401/403 refused, 410 gone, 429 throttled), is an ANSWER and is not.
+func idpFetchStatusError(status int, err error) error {
+	if status >= 500 && status <= 599 {
+		return idpFetchUnavailable(err)
+	}
+	return err
+}
+
+// idpFetchStaleEligible reports whether a failed fetch may be answered from the
+// last-known-good cache. See idpUnavailableError.
+func idpFetchStaleEligible(err error) bool {
+	var u *idpUnavailableError
+	return errors.As(err, &u) && !errors.Is(err, errSSRFBlocked)
 }

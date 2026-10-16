@@ -102,8 +102,9 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 	// http/https check plus isPrivateHost, and isPrivateHost's failure mode is
 	// fail-CLOSED (an unresolvable host is refused). All three properties are
 	// preserved below, so the set of URLs this function will fetch is
-	// unchanged, and a refusal still reaches resolveIdPDocument as a failed
-	// FETCH and therefore falls back to the last-known-good cache.
+	// unchanged. A resolution FAILURE still reaches resolveIdPDocument as a
+	// failed fetch and falls back to the last-known-good cache; a definite
+	// private verdict is a policy refusal and does not (idpFetchUnavailable).
 	//
 	// What changes is the BOUND. isPrivateHost resolves under
 	// context.Background(), so the guard ran to the OS resolver's full budget
@@ -122,7 +123,9 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), oidcDiscoveryFetchBudget)
 	defer cancel()
 	if err := isPrivateHostContext(ctx, u.Host); err != nil {
-		return nil, fmt.Errorf("oidc discovery: host refused: %w", err)
+		// A resolution failure is an outage (stale-eligible); a definite
+		// private verdict is a policy refusal and is not (idpFetchUnavailable).
+		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery: host refused: %w", err))
 	}
 	client := &http.Client{
 		Timeout:   oidcDiscoveryFetchBudget,
@@ -132,15 +135,22 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}
+	// Every failure below is CLASSIFIED for resolveIdPDocument's
+	// stale-if-error rule: transport and 5xx may be answered from the
+	// last-known-good cache, a 4xx/other status may not.
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("oidc discovery fetch: %w", err)
+		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery fetch: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("oidc discovery: HTTP %d", resp.StatusCode)
+		return nil, idpFetchStatusError(resp.StatusCode, fmt.Errorf("oidc discovery: HTTP %d", resp.StatusCode))
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery read: %w", err))
+	}
+	return body, nil
 }
 
 // fetchOIDCDiscovery fetches and validates the provider's well-known metadata
@@ -203,7 +213,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 		}
 		parsed = doc
 		return nil
-	})
+	}, nil) // a discovery document declares no expiry; idpmeta.StaleMaxAge alone bounds it
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -899,6 +909,10 @@ func (p *OIDCFlowProvider) servedDocumentCachedAt() time.Time {
 	}
 	return p.cachedAt
 }
+
+// servedDocumentValidUntil is always zero: an OIDC discovery document declares
+// no expiry of its own, so idpmeta.StaleMaxAge alone bounds a cached one.
+func (p *OIDCFlowProvider) servedDocumentValidUntil() time.Time { return time.Time{} }
 
 // DisplayName returns the admin-configured label shown to end users (e.g. on
 // the IdP selection screen), falling back to the machine key if unset.

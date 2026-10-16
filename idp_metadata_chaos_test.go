@@ -748,6 +748,10 @@ func TestChaos71_AdminDiscoveryProbeIsCacheFree(t *testing.T) {
 // Pre-fix the bytes were persisted BEFORE parsing, so one malformed answer
 // overwrote the valid cache and a later outage fell back to the broken bytes —
 // the provider could no longer recover from the cache at all.
+//
+// Owner decision (#1485): an invalid 200 is an ANSWER, not an outage, so it is
+// no longer answered from the cache either — the compile fails — but it still
+// must not overwrite the valid copy a later genuine outage falls back to.
 func TestChaos71_InvalidFetchedDocumentDoesNotReplaceLastKnownGood(t *testing.T) {
 	chaos71Env(t)
 	idp := newChaos71IdP(t)
@@ -756,11 +760,11 @@ func TestChaos71_InvalidFetchedDocumentDoesNotReplaceLastKnownGood(t *testing.T)
 		t.Fatalf("healthy compile: %v", err)
 	}
 	idp.doc.Store("<html>edge error page, not SAML metadata</html>")
-	if _, err := NewSAMLProvider(chaos71Profile("corp", idp.URL())); err != nil {
-		t.Fatalf("an invalid 200 answer must fall back to the last-known-good document: %v", err)
+	if _, err := NewSAMLProvider(chaos71Profile("corp", idp.URL())); err == nil {
+		t.Fatal("an invalid 200 answer is not an outage and must NOT be answered from the cache")
 	}
-	if snap := idpMetadataState(); snap.StaleServed != 1 || !snap.Failing {
-		t.Fatalf("an invalid document must be accounted as a failed acquisition served from cache: %+v", snap)
+	if snap := idpMetadataState(); snap.StaleServed != 0 || !snap.Failing {
+		t.Fatalf("an invalid document must be a failed acquisition NOT served from cache: %+v", snap)
 	}
 
 	idp.down.Store(true)
@@ -1585,10 +1589,10 @@ func TestChaos71_UnusableCachedDocumentIsNotReportedAsServed(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	fetchErr := fmt.Errorf("dial tcp: no such host")
+	fetchErr := idpFetchUnavailable(fmt.Errorf("dial tcp: no such host"))
 	reject := func([]byte) error { return fmt.Errorf("cannot parse") }
 
-	got, _, err := resolveIdPDocument("corrupt", idpmeta.KindOIDCDiscovery, src, nil, fetchErr, reject)
+	got, _, err := resolveIdPDocument("corrupt", idpmeta.KindOIDCDiscovery, src, nil, fetchErr, reject, nil)
 	if err == nil {
 		t.Fatal("a cached document the caller cannot use is not a fallback — " +
 			"resolveIdPDocument must return the fetch error")
@@ -1619,7 +1623,7 @@ func TestChaos71_UsableCachedDocumentIsStillServedStale(t *testing.T) {
 	}
 
 	got, _, err := resolveIdPDocument("good", idpmeta.KindOIDCDiscovery, src, nil,
-		fmt.Errorf("dial tcp: no such host"), func([]byte) error { return nil })
+		idpFetchUnavailable(fmt.Errorf("dial tcp: no such host")), func([]byte) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("a usable cached document must still be served: %v", err)
 	}
@@ -1981,13 +1985,11 @@ func TestChaos71_ARefusedDocumentNeverReplacesTheLastKnownGood(t *testing.T) {
 	// 2. The IdP now serves a document the COMPILE will refuse.
 	idp.serveBad.Store(true)
 
-	got2, _, err := fetchOIDCDiscovery("r7", issuer)
-	if err != nil {
-		t.Fatalf("a refused document must degrade to the last-known-good, not fail the compile: %v", err)
-	}
-	if got2.AuthorizationEndpoint != idp.goodAuthz() {
-		t.Fatalf("authorization_endpoint = %q, want the CACHED %q — the refused document must never become authoritative",
-			got2.AuthorizationEndpoint, idp.goodAuthz())
+	// Owner decision (#1485): a refused document is an ANSWER, not an outage,
+	// so it fails the compile rather than degrading to the cache — and it must
+	// still never become authoritative or replace the cached copy.
+	if got2, _, err := fetchOIDCDiscovery("r7", issuer); err == nil {
+		t.Fatalf("a refused document must fail the compile, not be answered from cache (got %q)", got2.AuthorizationEndpoint)
 	}
 
 	// 3. The cache still holds the document that can be compiled.
@@ -1999,9 +2001,9 @@ func TestChaos71_ARefusedDocumentNeverReplacesTheLastKnownGood(t *testing.T) {
 		t.Fatalf("the cache was replaced by a document the compile refuses:\n got %s\nwant %s", after, goodBytes)
 	}
 
-	// 4. And it is reported as the degradation it is, not as a success.
-	if st := idpMetadataState(); !st.Failing || st.StaleServed == 0 {
-		t.Fatalf("serving the cache because the IdP's document was refused must be counted stale and failing, got %+v", st)
+	// 4. And it is reported as the failure it is: failing, never stale-served.
+	if st := idpMetadataState(); !st.Failing || st.StaleServed != 0 {
+		t.Fatalf("a refused document must be counted failing and NOT stale-served, got %+v", st)
 	}
 }
 
@@ -2343,10 +2345,12 @@ func TestChaos71_StaleCeilingIsEnforcedOnALiveProvider(t *testing.T) {
 // served, fetched at cachedAt — what a stale compile hands the publish sites.
 type chaos71CacheBuiltProvider struct {
 	chaos71StubProvider
-	cachedAt time.Time
+	cachedAt   time.Time
+	validUntil time.Time
 }
 
-func (p chaos71CacheBuiltProvider) servedDocumentCachedAt() time.Time { return p.cachedAt }
+func (p chaos71CacheBuiltProvider) servedDocumentCachedAt() time.Time   { return p.cachedAt }
+func (p chaos71CacheBuiltProvider) servedDocumentValidUntil() time.Time { return p.validUntil }
 
 // chaos71PublishCacheBuilt records, through the production publish seam, that
 // the generation now PUBLISHED for profileID serves a cached document fetched at

@@ -8596,6 +8596,52 @@ struct's own mutex**, so the deferred `Unlock` released a fresh mutex and the
 runtime killed the process with `sync: unlock of unlocked mutex`. Fields are
 now cleared individually, with the reason recorded at the site.
 
+### Owner decision (2026-10-13, #1485 + #1564) — stale-if-error, not stale-on-anything
+
+The open-PR cleanup ruled on the interaction with #1564 (proxy-session provider
+bounds): **an unreachable IdP is degraded availability, not revocation**; only
+an explicit delete or disable revokes sessions. Three changes followed on this
+branch, each gated in `idp_metadata_staleness_policy_test.go`:
+
+1. **Only an outage is answered from the cache** (RFC 5861 stale-if-error).
+   `resolveIdPDocument` consulted the cache on ANY fetch error — a 4xx, an
+   empty body and a document the validator refused included — so an IdP that
+   withdrew its metadata (404/410) or refused the appliance (401/403) was
+   papered over for up to seven days. Fetch errors are now POSITIVELY
+   classified at the fetcher (`idpFetchUnavailable` / `idpFetchStatusError`):
+   transport failures and 5xx are stale-eligible; every other status, an
+   empty/invalid document, a configuration error and an SSRF policy refusal
+   (`errSSRFBlocked`) are not, and fail the compile without touching the
+   cached copy. An unclassified error is NOT eligible, so a new failure path
+   fails closed until someone decides it is an outage. This reverses the
+   round-1 choice to treat an invalid 200 as an availability failure; the
+   invariant that it never REPLACES the last-known-good copy is kept.
+2. **The ceiling is `min(StaleMaxAge, validUntil)`.** SAML metadata's own
+   `validUntil` (on the `EntityDescriptor`, or the enclosing
+   `EntitiesDescriptor` that `samlsp.ParseMetadata` discards) was ignored. A
+   cached document past it is refused on the compile path, and the live
+   ceiling sweep retires a provider at the earlier of the two bounds — carried
+   on `idpServedDoc.validUntil` through the SAME `idpServedDocumentAger`
+   interface, so the compile-time pair binds it as it binds the fetch time.
+   `cacheDuration` is a refresh hint, not a stale-if-error bound, and is not
+   applied.
+3. **The recovery loop revalidates providers serving from cache**, not only
+   dark ones. Before, a provider built from cache during an outage was never
+   recompiled after the IdP recovered, so a withdrawn SAML signing certificate
+   stayed trusted until the seven-day ceiling. `revalidateCacheServingProviders`
+   recompiles each one at the loop's bounded rate and `publishRevalidated`
+   swaps the result in only when it was built from a NEWER document (fresh, or
+   a later cached copy — which also closes IDP-4's round-18 route for a
+   cache-serving provider), under the generation + live-identity re-check
+   `publishRecompiled` uses. The watchdog and the boot arm both treat
+   "serving from cache" as work for the loop. The cached fetch time is now
+   rounded to the store's one-second stamp, so two compiles from the same
+   document agree on it.
+
+Ceiling retirement leaves the profile enabled and stored and is NOT a
+revocation; #1564's session-validity predicate keys on "profile exists and is
+enabled" so the seven-day retirement cannot become a mass logout.
+
 ### Codex review round (2026-09-25) — three findings, one of them the sweep's own headline defect left half-closed
 
 **P1 — a RESOLUTION failure was still reported as a CONFIGURATION error on the

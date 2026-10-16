@@ -404,6 +404,16 @@ func noteIdPRecoverySuperseded(profileID string) {
 		sanitizeLog(profileID), n)
 }
 
+// noteIdPRevalidated records that the recovery loop replaced a provider that was
+// serving from cache with one built from a newer (normally freshly fetched)
+// document. Not rate-limited: it fires at most once per outage per profile,
+// because the replacement is no longer cache-serving and so is not revalidated
+// again until a new outage publishes from cache.
+func noteIdPRevalidated(profileID string) {
+	logger.Printf("IDP_METADATA_REVALIDATED idp=%q — a newer document replaced the cached one this provider was serving; any IdP-side key rotation is now in effect",
+		sanitizeLog(profileID))
+}
+
 // forgetIdPMetadataEpisode drops EVERY episode this profile holds, across all
 // sources. It is the "this profile no longer fetches anything" case — stored
 // disabled, switched to inline metadata, or removed from the registry — where
@@ -431,9 +441,24 @@ func forgetIdPMetadataEpisode(profileID string) {
 // idpServedDoc is the SERVED-generation evidence for one profile: the remote
 // source its PUBLISHED provider was built from, and when that document was
 // fetched from the IdP because it came from the last-known-good cache.
+// validUntil is the document's own expiry (SAML metadata validUntil), zero when
+// it declares none; the served document expires at the EARLIER of it and
+// fetchedAt + idpmeta.StaleMaxAge.
 type idpServedDoc struct {
-	source    string
-	fetchedAt time.Time
+	source     string
+	fetchedAt  time.Time
+	validUntil time.Time
+}
+
+// expired reports whether the served cached document must stop being served at
+// now: past the seven-day ceiling, past its own validUntil, or stamped in the
+// future (a NEGATIVE age is expired, never maximally fresh — Codex round 13).
+func (sd idpServedDoc) expired(now time.Time) bool {
+	age := now.Sub(sd.fetchedAt)
+	if age < 0 || age >= idpmeta.StaleMaxAge {
+		return true
+	}
+	return !sd.validUntil.IsZero() && !now.Before(sd.validUntil)
 }
 
 // idpServed records, per profile, the cached document the provider CURRENTLY
@@ -466,6 +491,12 @@ var (
 // last-known-good cache.
 type idpServedDocumentAger interface {
 	servedDocumentCachedAt() time.Time
+	// servedDocumentValidUntil is the document's own expiry, zero when it
+	// declares none. Part of the SAME interface (not an optional second one)
+	// so the compile-time pair below binds it too: an optional assertion that
+	// silently fails would drop the validUntil cap exactly the way a renamed
+	// servedDocumentCachedAt used to drop the seven-day one.
+	servedDocumentValidUntil() time.Time
 }
 
 // COMPILE-TIME LINK, and it is the only thing holding the ceiling up for a
@@ -552,7 +583,7 @@ func idpServedEntry(source string, prov IdentityProvider) (idpServedDoc, bool) {
 	if fetchedAt.IsZero() {
 		return idpServedDoc{}, false
 	}
-	return idpServedDoc{source: source, fetchedAt: fetchedAt}, true
+	return idpServedDoc{source: source, fetchedAt: fetchedAt, validUntil: a.servedDocumentValidUntil()}, true
 }
 
 func noteIdPMetadataOutcome(profileID string, ref idpDocRef, outcome idpMetadataOutcome, cause error) {
@@ -840,10 +871,14 @@ type idpStaleCeilingVictim struct {
 	profileID string
 	source    string
 	age       time.Duration
+	// validUntilPassed is true when the document's OWN validUntil, not the
+	// seven-day ceiling, is what expired it — so the log names the real cause.
+	validUntilPassed bool
 }
 
 // idpStaleCeilingSweep returns the providers whose currently-served cached
-// document is older than idpmeta.StaleMaxAge. One document is adjudicated once,
+// document has expired: older than idpmeta.StaleMaxAge, or past its own SAML
+// validUntil, whichever comes first. One document is adjudicated once,
 // by idpClaimStaleServe at retirement time.
 //
 // It reads the SERVED-generation fetch time recorded by
@@ -867,10 +902,16 @@ func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 		// provider keeps trusting possibly-withdrawn SAML signing material until
 		// the clock catches up: the rule enforced on the compile path and not on
 		// the path that decides whether a LIVE provider may keep serving.
-		if age >= 0 && age < idpmeta.StaleMaxAge {
+		//
+		// The ceiling is min(StaleMaxAge, the document's own validUntil):
+		// SAML metadata the IdP itself declared expired is not served from
+		// cache however young the copy is (idpServedDoc.expired).
+		if !sd.expired(now) {
 			continue
 		}
-		out = append(out, idpStaleCeilingVictim{profileID: id, source: sd.source, age: age, servedAt: sd.fetchedAt})
+		withinAge := age >= 0 && age < idpmeta.StaleMaxAge
+		out = append(out, idpStaleCeilingVictim{profileID: id, source: sd.source, age: age, servedAt: sd.fetchedAt,
+			validUntilPassed: withinAge})
 		// The evidence is NOT destroyed here. Selecting is not adjudicating:
 		// this sweep releases idpServedMu before the retirement takes r.mu,
 		// and a publish landing in that window replaces the generation. The
@@ -924,8 +965,11 @@ var idpRetireStaleProvider = func(profileID, source string, servedAt time.Time) 
 // idpArmRecovery is the seam for re-arming the recovery loop after a retirement.
 var idpArmRecovery = func(ctx context.Context) { armIdPRecoveryLoop(ctx) }
 
-// idpAnyProfileDark is the seam for "is there anything to recover".
-var idpAnyProfileDark = func() bool { return idpRegistry.hasDarkEnabledProfile() }
+// idpAnyProfileDark is the seam for "is there anything to recover": a dark
+// enabled profile, or a live one serving from cache that must be revalidated.
+var idpAnyProfileDark = func() bool {
+	return idpRegistry.hasDarkEnabledProfile() || idpRegistry.hasCacheServingProfile()
+}
 
 func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 	t := time.NewTicker(idpMetadataWatchdogInterval)
@@ -952,7 +996,17 @@ func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 				if !idpRetireStaleProvider(v.profileID, v.source, v.servedAt) {
 					continue
 				}
-				logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is %s old, past the %s ceiling; the provider is no longer live and browser SSO is unavailable for it until a document is fetched successfully",
+				// Retirement is NOT revocation: the profile stays enabled and
+				// stored, so sessions already issued through it are untouched
+				// (owner decision on #1485/#1564 — only an explicit delete or
+				// disable revokes). What stops is NEW browser SSO through it.
+				if v.validUntilPassed {
+					logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is past its own validUntil (fetched %s ago); the provider is no longer live and new browser SSO through it is unavailable until a document is fetched successfully (existing sessions are not revoked)",
+						sanitizeLog(v.profileID), v.age.Round(time.Minute))
+					fireIdPMetadataAlert("IdP metadata document expired past its own validUntil; the provider is no longer live")
+					continue
+				}
+				logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is %s old, past the %s ceiling; the provider is no longer live and new browser SSO through it is unavailable until a document is fetched successfully (existing sessions are not revoked)",
 					sanitizeLog(v.profileID), v.age.Round(time.Minute), idpmeta.StaleMaxAge)
 				fireIdPMetadataAlert(fmt.Sprintf(
 					"IdP metadata/discovery document expired past the %s staleness ceiling; the provider is no longer live",
