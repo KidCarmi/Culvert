@@ -2171,10 +2171,15 @@ lacks -- as that file's own header says, the captured shape passes them even und
 `TestPreSend_MayStillBeRunningAfterCallReturns` pins the property itself, against the real
 transport: the hook is parked on a channel at the moment the test needs it parked, the context is
 cancelled, `Call` returns, and the test OBSERVES that the hook has not finished. It is
-deterministic rather than timing-based, and it refuses to pass vacuously -- if the hook completes
-before `Call` returns, the run is declared inconclusive and fails. Without it, a future net/http or
-client change could make the hook complete before `Call` returns, the carrier's whole
-justification would silently become false, and nothing would go red.
+deterministic rather than timing-based, and it refuses to pass vacuously -- it PASSES only after
+observing the hook still parked once `Call` has returned. If a future net/http or client change
+makes `Call` wait for the hook instead (joining the dial goroutine), the gate does **not** fail and
+CI stays green: it releases the hook and **skips** with a message naming the changed premise,
+because the carrier stays correct under a narrower lifetime -- conservative rather than required.
+Only a `Call` that still does not return once the hook is released fails the run. So a lifetime
+change surfaces as a named skip, not a red build; the gate exists so that nobody deletes the
+carrier on the belief that the hook cannot outlive `Call`, and reviewers should treat that skip as
+the signal to re-derive the `CallOptions.PreSend` note before relying on the narrower lifetime.
 
 `CallOptions.PreSend` now states the contract on the field itself, so the next caller does not
 have to rediscover it: the hook is a pure predicate whose lifetime is not `Call`'s, a caller must
