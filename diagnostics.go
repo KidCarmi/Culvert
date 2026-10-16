@@ -176,6 +176,7 @@ func buildOperatorContract() OperatorContract {
 		checkIdentityBackend(),
 		checkCredentialVerification(),
 		checkInteractiveLoginState(),
+		checkSessionRevocation(),
 		checkAlertWebhookSigning(),
 		checkUpstreamCredentials(),
 		checkOIDCJWKSTrust(),
