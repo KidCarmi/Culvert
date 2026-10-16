@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "upstream_revision": "b3b5c8b93c5fb1dff6f19d9cca51d79977b3cd21",
+  "upstream_revision": "9dbdbcfd3f809d6f2d30b0e047690f6b51fd190f",
   "normalization": "LF bytes; controller freeze records runtime raw hashes",
   "files": {
     "test/e2e/appliance/lab/appliance-lab.sh": {
-      "upstream_sha256": "b21bc593a867c1fff1d2203951ba71196807d8372b3f1dec890935278efaa743",
-      "controller_lf_sha256": "342841920722f1afa8fb6febc6f0762e2c3eb9adcaa9d165db9c07c468ec4eff",
+      "upstream_sha256": "288978ef4708077fad6f3b55900dcb9f6fb1a750b8279dbf74a152a3e9139d52",
+      "controller_lf_sha256": "e5e8d86574e432a2697b35cf0aee8a58e0a8ee1ec21f99b0de671ed1603c25e0",
       "local_changes": [
         "guarded restore before signed lifecycle",
         "pre-reboot ESXi observations",

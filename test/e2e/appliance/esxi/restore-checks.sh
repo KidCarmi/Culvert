@@ -10,6 +10,52 @@ esxi_restore_valid_backup() {
   [[ ${#name} -le 200 && $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz$ && $name != *..* ]]
 }
 
+# Status-only public evidence. Never save proxy response bodies or credentials.
+esxi_restore_record_traffic() {
+  python3 - "$EV/09-restore-traffic-$1.json" "$2" "$3" <<'PY'
+import json,re,sys
+values=[x if re.fullmatch(r'[0-9\s]{1,32}',x) else '<invalid-status-output>' for x in sys.argv[2:]]
+with open(sys.argv[1],'x',encoding='utf-8') as out:
+    json.dump({'allowed_host':'example.com','blocked_host':'example.org',
+               'allowed_http_status':values[0],'blocked_http_status':values[1],
+               'expected_allowed':'200','expected_blocked':'403'},out,sort_keys=True)
+PY
+}
+
+# Snapshot through the authenticated read-only API BEFORE any assertion.
+# The body stays private; no post-restore PUT or configuration repair exists.
+esxi_restore_record_allowlist() {
+  ( set -o noclobber; api GET /api/security-scan/feeds/domain-allowlist >"$SEC/actual-restore/allowlist-$1.txt" )
+}
+
+esxi_restore_assert_allowlist() {
+  python3 - "$SEC/actual-restore" "$1" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);phase=sys.argv[2]
+if phase not in ('before','after'):raise ValueError('invalid allowlist phase')
+def snapshot(name):
+    file=root/('allowlist-'+name+'.txt')
+    if file.stat().st_size>4*1024*1024:raise ValueError('allowlist response exceeded bound')
+    body,status=file.read_text().rstrip('\r\n').rsplit('\n',1)
+    if status!='200':raise ValueError('allowlist GET failed')
+    value=json.loads(body).get('domains')
+    if not isinstance(value,list) or len(value)>4096 or not all(isinstance(x,str) and 0<len(x)<=1024 for x in value) or len(set(value))!=len(value):
+        raise ValueError('malformed allowlist')
+    return sorted(value)
+record={'phase':phase,'result':'fail','mutation_performed':False}
+try:
+    expected=snapshot('before');record['expected']=expected
+    actual=snapshot(phase);record['actual']=actual
+    if not {'example.com','allowlist-survives-marker.example'}.issubset(expected):raise ValueError('source custom marker or traffic canary missing')
+    if actual!=expected:raise ValueError('restored allowlist differs from source')
+    record['result']='pass'
+except (ValueError,KeyError,TypeError) as error:
+    record['reason']=str(error)
+with (root/('allowlist-'+phase+'-verdict.json')).open('x',encoding='utf-8') as out:json.dump(record,out,sort_keys=True)
+if record['result']!='pass':raise SystemExit(1)
+PY
+}
+
 esxi_restore_guest_script() {
   cat <<'GUEST'
 set +x
@@ -163,6 +209,12 @@ PY
   fi
   before_allowed=$(through_proxy http://example.com/)
   before_denied=$(through_proxy http://example.org/)
+  esxi_restore_record_traffic before "$before_allowed" "$before_denied"
+  esxi_restore_record_allowlist before
+  if [[ ${ESXI_ENGINE_SOURCE:-} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 ]] && ! esxi_restore_assert_allowlist before; then
+    check "$step" restore-allowlist-baseline fail 'source custom allowlist fixture unproven; private snapshot retained'
+    return 1
+  fi
   if [[ "$before_allowed $before_denied" != '200 403' ]]; then
     check "$step" restore-baseline fail 'baseline allow/deny traffic did not match successful shared qualification'
     return 1
@@ -239,6 +291,12 @@ assert any(r.get("name")=="lab-allow-example" and r.get("enabled") is True for r
   fi
   before_allowed=$(through_proxy http://example.com/)
   before_denied=$(through_proxy http://example.org/)
+  esxi_restore_record_traffic after "$before_allowed" "$before_denied"
+  esxi_restore_record_allowlist after
+  if [[ ${ESXI_ENGINE_SOURCE:-} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 ]] && ! esxi_restore_assert_allowlist after; then
+    check "$step" restore-allowlist fail 'restored domain allowlist differs; exact private before/after retained; no repair'
+    return 1
+  fi
   if [[ "$before_allowed $before_denied" != '200 403' ]]; then
     check "$step" restore-enforcement fail 'restored policy did not enforce example.com200 and example.org403'
     return 1

@@ -29,7 +29,7 @@ $env:ESXI_HOST_KEY_ALIAS = $owned.name
 $env:ESXI_OPERATOR_ENROLLED = '1'
 $env:ESXI_HOST_KEY_PINNED = '1'
 $env:ESXI_EXTENDED_CAMPAIGN = '1'
-$env:ESXI_ENGINE_SURFACE = if ($configuration.source_sha -in @('7c7b29ee3be40af6a0809c73ad04d4337303263d','91e05872dfe5f96c94ec725b8b2dc2b1002116ab','72c827b7f59f4e43ff2a813241be9029f58f23a9','bad788e54ffef2a2f8490ba27ebfe027a2a6eb11', '9e34452677d77f574f5c3c08ba23ea897d8e17cb')) { '1' } else { '0' }
+$env:ESXI_ENGINE_SURFACE = if ($configuration.source_sha -in @('7c7b29ee3be40af6a0809c73ad04d4337303263d','91e05872dfe5f96c94ec725b8b2dc2b1002116ab','72c827b7f59f4e43ff2a813241be9029f58f23a9','bad788e54ffef2a2f8490ba27ebfe027a2a6eb11', '9e34452677d77f574f5c3c08ba23ea897d8e17cb', 'a80be4b61ff7f2f069cf81ede1eebe6945d65306')) { '1' } else { '0' }
 $env:ESXI_ENGINE_SOURCE = $configuration.source_sha
 $env:ESXI_BIND = $Bind
 if ($ContinueUndispatched) {

@@ -30,6 +30,35 @@ with mock.patch.dict(sys.modules, {'fcntl': SimpleNamespace(LOCK_EX=2, LOCK_NB=4
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_custom_marker_required_before_export_and_retained_on_failure(self):
+        required=controller.ALLOWLIST_REQUIRED[controller.ALLOWLIST_MARKER_SOURCE]
+        for domains in ([], ['example.com'], list(required)):
+            recorded=[]
+            with mock.patch.object(controller.observation,'read_domain_allowlist',return_value={'domains':domains}):
+                if domains==list(required):
+                    self.assertEqual(controller.observation.capture_domain_allowlist('guest','admin','private',recorded.append,required),sorted(domains))
+                else:
+                    with self.assertRaises(ValueError):controller.observation.capture_domain_allowlist('guest','admin','private',recorded.append,required)
+                    self.assertEqual(recorded[0]['actual'],domains)
+
+    def test_custom_marker_fresh_restore_whole_set_equality(self):
+        expected=list(controller.ALLOWLIST_REQUIRED[controller.ALLOWLIST_MARKER_SOURCE])+['additional.example']
+        for i,domains in enumerate((expected,expected[:-1],['example.com'],[])):
+            private=self.root/str(i);private.mkdir()
+            with mock.patch.object(controller.observation,'read_domain_allowlist',return_value={'domains':domains}):
+                args=(controller.ALLOWLIST_MARKER_SOURCE,'guest','admin','private',{'threat_domain_allowlist':expected},private)
+                if domains==expected:controller.verify_restored_allowlist(*args)
+                else:
+                    with self.assertRaises(ValueError):controller.verify_restored_allowlist(*args)
+            receipt=json.loads((private/'restored-domain-allowlist.json').read_bytes())
+            self.assertEqual(receipt['actual'],domains);self.assertFalse(receipt['mutation_performed'])
+
+    def test_explicit_empty_oracle_is_distinct_from_missing_offline_only(self):
+        compare=controller.observation.domain_allowlist_comparison
+        self.assertEqual(compare([],{'domains':[]})['result'],'pass')
+        for response in ({},{'domains':None},{'domains':['example.com']}):
+            self.assertEqual(compare([],response)['result'],'fail')
+
     def test_new_source_allowlist_requires_nonempty_canary(self):
         observe = controller.observation
         for value in ({}, {'domains': []}, {'domains': ['other.example']}):

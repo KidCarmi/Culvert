@@ -94,11 +94,12 @@ def read_domain_allowlist(guest, admin, password):
     return client.api('/api/security-scan/feeds/domain-allowlist')
 
 
-def capture_domain_allowlist(guest, admin, password, record=None):
+def capture_domain_allowlist(guest, admin, password, record=None, required_domains=('example.com',)):
     response = read_domain_allowlist(guest, admin, password)
     actual = response.get('domains') if isinstance(response, dict) else None
     checked = domain_allowlist_comparison(actual, response)
-    checked['source_canary_present'] = isinstance(actual, list) and 'example.com' in actual
+    checked['required_domains'] = list(required_domains)
+    checked['source_canary_present'] = isinstance(actual, list) and all(domain in actual for domain in required_domains)
     if not checked['source_canary_present']:
         checked['result'] = 'blocked'
         checked['reason'] = 'Intended source canary absent; custom-setting recovery not exercised.'

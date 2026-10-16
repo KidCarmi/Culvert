@@ -34,6 +34,9 @@ MAX_METADATA = 64 * 1024
 SOURCE = 'b579ca28c9d936e9141292ce5ec564a26feeae86'
 HISTORY_SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
 ALLOWLIST_SOURCE = '9e34452677d77f574f5c3c08ba23ea897d8e17cb'
+ALLOWLIST_MARKER_SOURCE = 'a80be4b61ff7f2f069cf81ede1eebe6945d65306'
+ALLOWLIST_MARKER = 'allowlist-survives-marker.example'
+ALLOWLIST_REQUIRED = {ALLOWLIST_SOURCE: ('example.com',), ALLOWLIST_MARKER_SOURCE: ('example.com', ALLOWLIST_MARKER)}
 EXPORT_NAMES = ('recovery.tar.gz.enc', 'recovery-secrets.json', 'archive-metadata.json',
                 'backup-passphrase', 'admin-pass', 'source-owned.json', 'provenance.json', 'source-observation.json')
 HISTORY_NAMES = ('history.cvst', 'history-passphrase', 'rotated-log-passphrase')
@@ -217,10 +220,10 @@ def endpoint(transfer, bind, tls_dir):
 
 
 def verify_restored_allowlist(source, guest, admin, password, baseline, transport_dir):
-    if source != ALLOWLIST_SOURCE:
+    if source not in ALLOWLIST_REQUIRED:
         return  # Historical profiles keep their original observation contract.
     expected = baseline.get('threat_domain_allowlist')
-    require(isinstance(expected, list) and 'example.com' in expected,
+    require(isinstance(expected, list) and all(domain in expected for domain in ALLOWLIST_REQUIRED[source]),
             'Exact nonempty source canary domain-allowlist baseline required.')
     checked = observation.domain_allowlist_comparison(expected,
         observation.read_domain_allowlist(guest, admin, password))
@@ -237,7 +240,7 @@ def run(args):
     identities = importlib.util.module_from_spec(profile_spec); profile_spec.loader.exec_module(identities)
     source = identities.scope_profile(lab.c)['source_sha']
     history = getattr(args, 'history', False)
-    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344), 'History qualification requires a reviewed history-capable candidate.')
+    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE), 'History qualification requires a reviewed history-capable candidate.')
     require(lab.c['source_sha'] == source and lab.c['max_vms'] == 1)
     console.b.module.validate_scope(lab.c)
     escrow = private_escrow(args.escrow, lab.run)
@@ -260,9 +263,10 @@ def run(args):
             provenance = {k: lab.c[k] for k in ('source_sha', 'image_id', 'ova_sha256', 'endpoint')}
             write_new(escrow / 'provenance.json', json.dumps(provenance).encode())
             observed = observation.observe(lab.guest_ip(timeout=30), 'labadmin', admin_password)
-            if source == ALLOWLIST_SOURCE:
+            if source in ALLOWLIST_REQUIRED:
                 observed['threat_domain_allowlist'] = observation.capture_domain_allowlist(lab.guest_ip(timeout=30), 'labadmin', admin_password,
-                    record=lambda value: write_new(escrow / 'source-domain-allowlist.json', json.dumps(value).encode()))
+                    record=lambda value: write_new(escrow / 'source-domain-allowlist.json', json.dumps(value).encode()),
+                    required_domains=ALLOWLIST_REQUIRED[source])
             write_new(escrow / 'source-observation.json', json.dumps(observed).encode())
         else:
             require(args.source_ledger and args.deletion_receipt)

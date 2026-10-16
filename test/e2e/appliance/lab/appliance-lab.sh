@@ -260,32 +260,43 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   rm -f "$d/exp.json"; bl "$good" 0.8 FAIL "no pre-reboot baseline"
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
-# allowlist_threat_domain DOMAIN — exempt DOMAIN from DOMAIN-level threat-feed
-# blocking (urlhaus/openphish) via PUT /api/security-scan/feeds/domain-allowlist.
-# The harness's ALLOWED canary (example.com) can appear in the LIVE urlhaus feed
-# fetched at boot (observed 2026-10-16: THREAT_BLOCKED domain example.com). Threat
-# intelligence runs in preDispatchBlocked BEFORE policy, so a feed hit overrides
-# even an explicit Allow+Bypass rule and the canary is 403 regardless of policy —
-# which measures the feed's contents on the day, not the policy path the step is
-# about. Exempting the canary isolates the Allow-rule traffic checks from feed
-# noise: URL-level threat blocking, response scanning and policy are unchanged,
-# the DENIED canaries (example.org/.net) are not allowlisted, and default-deny
-# still returns 403 before the Allow rule. The allowlist persists in the
-# threat-feed DB (under /data), so it survives the restore and history-recovery
-# phases that reuse this canary.
+# Threat-domain allowlist FIXTURES + survival proof (owner P1, PR #1528). The
+# admin-managed allowlist is persisted independently of the disposable feed DB
+# and backed up (threat_domain_allowlist.json), so it must survive a restore.
+# example.com is the ALLOWED policy canary: it can appear in the LIVE urlhaus
+# feed fetched at boot, and threat intelligence runs in preDispatchBlocked
+# BEFORE policy, so without an exemption the Allow-rule traffic checks would
+# measure the feed's contents on the day, not policy. ALLOWLIST_MARKER is a
+# DISTINCT admin-added entry used to PROVE the saved allowlist survived a
+# restore — set as a fixture BEFORE the backup and asserted present AFTER
+# restore WITHOUT re-adding it (re-adding proves nothing). These are TEST
+# FIXTURES, set once in step 5; the restore assertions never reconfigure the
+# allowlist. example.org/.net stay denied canaries (never allowlisted).
+ALLOWLIST_MARKER="allowlist-survives-marker.example"
+# allowlist_threat_domain DOMAIN... — union one or more domains into the
+# allowlist (GET current, add, PUT). Fixture setup only, never post-restore.
 allowlist_threat_domain() {
-  local d="$1" cur payload
+  local cur payload
   cur="$(api GET /api/security-scan/feeds/domain-allowlist | body)"
-  payload="$(python3 - "$cur" "$d" <<'EOF'
+  payload="$(python3 - "$cur" "$@" <<'EOF'
 import json,sys
 try: cur=json.loads(sys.argv[1]).get("domains",[]) or []
 except Exception: cur=[]
-d=sys.argv[2]
-if d not in cur: cur.append(d)
+for d in sys.argv[2:]:
+    if d not in cur: cur.append(d)
 print(json.dumps({"domains":cur}))
 EOF
 )"
   api PUT /api/security-scan/feeds/domain-allowlist "$payload"
+}
+# allowlist_has DOMAIN — exit 0 if DOMAIN is in the CURRENT allowlist (GET),
+# else 1. Read-only: the survival assertion checks membership, never re-adds.
+allowlist_has() {
+  api GET /api/security-scan/feeds/domain-allowlist | body | python3 -c '
+import json,sys
+try: d=json.loads(sys.stdin.read()).get("domains",[]) or []
+except Exception: d=[]
+sys.exit(0 if sys.argv[1] in d else 1)' "$1"
 }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
 MON_SOCK="/tmp/culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
@@ -714,12 +725,15 @@ EOS
     [[ $c == 200 ]] && check 5 auth-exempt pass "200" || check 5 auth-exempt fail "http $c"
     api GET /api/default-action > "$EV/05-default-action.txt"
     grep -q '"deny"' "$EV/05-default-action.txt" && check 5 default-deny pass "$(body < "$EV/05-default-action.txt")" || check 5 default-deny fail "$(body < "$EV/05-default-action.txt")"
-    # example.com is the ALLOWED canary; exempt it from DOMAIN-level threat-feed
-    # blocking so this step measures policy (default-deny vs Allow), not whatever
-    # the live urlhaus feed lists today. See allowlist_threat_domain. Persists in
-    # /data, so the restore (6b), history (H) and signed-update (6c) canaries
-    # inherit it. Default-deny still gives 403 before the Allow rule.
-    allowlist_threat_domain example.com > "$EV/05-threat-allowlist.txt" 2>&1 || true
+    # FIXTURE: exempt the allowed canary (example.com) from domain-level threat
+    # blocking so the Allow-rule traffic checks measure policy, not the live
+    # urlhaus feed; AND set a DISTINCT admin marker the restore phases assert
+    # SURVIVED (never re-added). Both set once here, before the backup. The
+    # admin allowlist is persisted independently of the disposable feed DB and
+    # backed up, so it must return on restore. Default-deny still gives 403
+    # before the Allow rule.
+    allowlist_threat_domain example.com "$ALLOWLIST_MARKER" > "$EV/05-threat-allowlist.txt" 2>&1 || true
+    api GET /api/security-scan/feeds/domain-allowlist | body > "$EV/05-allowlist-baseline.json" 2>/dev/null || true
     local b a o
     b="$(through_proxy http://example.com/)"
     api POST /api/policy '{"name":"lab-allow-example","priority":10,"action":"Allow","destFQDN":"example.com","sslAction":"Bypass","enabled":true}' > "$EV/05-rule.txt"
@@ -856,12 +870,17 @@ EOS
     until curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do (( $(date +%s) < deadline )) || break; sleep 5; done
     : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | code)"
     rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
-    # A restore resets the threat-feed domain allowlist to defaults (it is a
-    # re-downloadable cache, not in the backup manifest), and the re-synced
-    # urlhaus feed can re-block the allowed canary. Re-assert the exemption so
-    # this step measures that the restore brought the POLICY back, not the
-    # feed's contents today. example.net stays a denied canary (not allowlisted).
-    allowlist_threat_domain example.com > "$EV/06b-threat-allowlist.txt" 2>&1 || true
+    # SURVIVAL ASSERTION (owner P1): the admin allowlist is backed up
+    # independently of the disposable feed DB, so the marker set as a fixture
+    # BEFORE the backup must come back after restore — WITHOUT re-adding it.
+    # Its survival is also why the example.com canary (restored in the same
+    # allowlist) is usable, so the policy traffic check below is meaningful.
+    api GET /api/security-scan/feeds/domain-allowlist | body > "$EV/06b-allowlist-after-restore.json" 2>/dev/null || true
+    if allowlist_has "$ALLOWLIST_MARKER"; then
+      check 6b allowlist-survived-restore pass "admin marker $ALLOWLIST_MARKER present after restore (not re-added) — the saved allowlist survived the backup"
+    else
+      check 6b allowlist-survived-restore fail "admin marker $ALLOWLIST_MARKER MISSING after restore — the saved allowlist did NOT survive the backup"; STOP=1
+    fi
     local ra; ra="$(through_proxy http://example.com/) $(through_proxy http://example.net/)"
     printf 'exit %s\nlogin %s\nrules %s\ntraffic example.com/example.net %s\n' "$rc" "$c" "$rules" "$ra" >> "$EV/06b-restore-offline.txt"
     if [[ $rc == 0 && $c == 200 && " $rules " == *" lab-allow-example "* && " $rules " != *" lab-post-backup "* && "$ra" == "200 403" ]]; then
@@ -1639,10 +1658,15 @@ EOS
   if [[ $rc == 0 && $c == 200 && "$same" == 1 ]]; then
     check H history-recovered pass "$(grep -m1 '^imported=' "$EV/H-09-import-offline.txt"); the $(hist_total "$after") marker records read back identical (ts, host, status, method) under the ROTATED log key"
   else check H history-recovered fail "import rc $rc, login $c, markers $(hist_total "$after") of $(hist_total "$before"), identical=$same ($(grep -E '^(imported|import-rc|up-rc)=' "$EV/H-09-import-offline.txt" | tr '\n' ' '))"; fi
-  # The history recovery destroys and restores the data volume, resetting the
-  # threat-feed domain allowlist; re-assert the allowed canary's exemption so
-  # this check measures enforcement after recovery, not the live urlhaus feed.
-  allowlist_threat_domain example.com > "$EV/H-11-threat-allowlist.txt" 2>&1 || true
+  # SURVIVAL ASSERTION (owner P1): history recovery destroys the data volume
+  # and restores onto a FRESH one (source-absent) — the strongest case. The
+  # admin allowlist marker set before the backup must survive, WITHOUT re-adding.
+  api GET /api/security-scan/feeds/domain-allowlist | body > "$EV/H-11-allowlist-after-recovery.json" 2>/dev/null || true
+  if allowlist_has "$ALLOWLIST_MARKER"; then
+    check H allowlist-survived-recovery pass "admin marker $ALLOWLIST_MARKER present after fresh-volume recovery (not re-added)"
+  else
+    check H allowlist-survived-recovery fail "admin marker $ALLOWLIST_MARKER MISSING after fresh-volume recovery — saved allowlist lost"
+  fi
   local ok; ok="$(through_proxy http://example.com/)"
   [[ "$ok" == 200 ]] && check H history-enforcement pass "example.com 200 through the proxy after the recovery" || check H history-enforcement fail "example.com $ok"
   redact_tree
