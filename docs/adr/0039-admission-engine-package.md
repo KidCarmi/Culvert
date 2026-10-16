@@ -70,13 +70,16 @@ The extraction makes that trap strictly easier to reach rather than harder.
 Both types now carry only unexported fields, so the complete literal package
 main previously wrote (`&IPFilter{single: map[string]bool{}}`) no longer
 compiles outside this package and `&IPFilter{}` — the silently broken shape —
-is the only literal form left. The two reachable panic sites are the DP
-snapshot apply path (`applySnapshotAdmission` → `AddAll`, so a Control Plane
-config push would crash the node applying it) and the request path.
+is the only literal form left. No production path reaches the panic today:
+every production instance, including the filter `applySnapshotAdmission`
+builds before `AddAll`, comes from a constructor, and no non-test code writes
+a bare literal. The trigger would be a future caller doing so — panicking on
+its first `Add`/`AddAll`, or on the request path once a bare limiter is
+`Configure`d.
 
 The precondition is therefore replaced by a guarantee: every map write lazily
 initializes, using the idiom already present in `addExemptionLocked`. This is
-an availability hardening, not a policy change — the nil checks sit in the cold
+defensive availability hardening, not a policy change — the nil checks sit in the cold
 miss branch (a nil map reads as a miss), the allocation benchgates still measure
 zero, and `TestBareLiteral_MatchesConstructedInstance` differentially pins a
 bare instance equal to a constructed one across every mode and probe. The

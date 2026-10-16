@@ -9,8 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
-- The ADR-0039 admission extraction left the zero value of both front-door
-  gates usable only under a documented PRECONDITION, with nothing enforcing it.
+- Defensive zero-value hardening of the admission engine. No production crash
+  is reachable today: every production `IPFilter`/`RateLimiter` (including the
+  one `applySnapshotAdmission` builds before `AddAll`) comes from
+  `NewIPFilter`/`NewRateLimiter`, and no non-test code constructs a bare value.
+  The ADR-0039 admission extraction nevertheless left the zero value of both
+  front-door gates usable only under a documented PRECONDITION, with nothing
+  enforcing it.
   Three map writes panicked on a nil map — `IPFilter.addLocked`,
   `RateLimiter.Allow` and `RateLimiter.AllowClusterAware` — while
   `addExemptionLocked` in the same file already lazily initialized, so the
@@ -24,9 +29,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   both types now carry only unexported fields, so the complete literal package
   main used to write (`&IPFilter{single: map[string]bool{}}`) no longer compiles
   outside the package and `&IPFilter{}`, the silently broken shape, is the only
-  literal form left. The two reachable panic sites are the DP snapshot apply
-  path (`applySnapshotAdmission` → `AddAll`, so a Control Plane config push
-  would crash the node applying it) and the request path.
+  literal form left. A future caller that wrote it would have panicked on its
+  first `Add`/`AddAll`, or on the request path once a bare limiter was
+  `Configure`d.
 
   The precondition is replaced by a guarantee using the idiom already present
   in `addExemptionLocked`. This is an availability hardening, not a policy

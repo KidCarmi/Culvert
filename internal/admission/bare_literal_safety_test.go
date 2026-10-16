@@ -7,16 +7,18 @@ import (
 	"time"
 )
 
-// A bare composite literal — IPFilter{} / RateLimiter{} — is a REACHABLE shape,
-// not a hypothetical one: every field of both types is unexported, so after the
-// ADR-0039 extraction it is the only literal form available outside this
-// package. TestRLExemptView_BareLiteralLimiterIsSafe already pins the invariant
+// A bare composite literal — IPFilter{} / RateLimiter{} — compiles anywhere:
+// every field of both types is unexported, so after the ADR-0039 extraction it
+// is the only literal form available outside this package. No production
+// caller writes it today (every production instance, including the snapshot
+// apply path's, comes from a constructor), so these gates are defensive: they
+// keep a future bare caller from panicking. TestRLExemptView_BareLiteralLimiterIsSafe already pins the invariant
 // for the exemption path ("it must still accept a first mutation"); these gates
 // complete it for the three remaining map writes, which were nil-map panics:
 //
-//	IPFilter.Add / AddAll  — reached from the DP snapshot apply path
-//	                         (applySnapshotAdmission → AddAll), so the panic
-//	                         lands on a node applying a Control Plane push.
+//	IPFilter.Add / AddAll  — direct bare-filter mutation coverage
+//	                         (applySnapshotAdmission constructs its filter
+//	                         with NewIPFilter before calling AddAll).
 //	RateLimiter.Allow      — the request hot path.
 //	RateLimiter.AllowClusterAware — the clustered request hot path.
 //
@@ -45,7 +47,8 @@ func TestBareLiteral_IPFilterAcceptsFirstMutationAndEnforces(t *testing.T) {
 }
 
 func TestBareLiteral_IPFilterAddAllIsTheSnapshotPath(t *testing.T) {
-	// applySnapshotAdmission bulk-loads the CP's IP list through AddAll.
+	// AddAll is the bulk-load API applySnapshotAdmission uses (on a
+	// constructed filter); this pins the same API on a bare one.
 	f := &IPFilter{}
 	invalid := f.AddAll([]string{"203.0.113.7", "10.0.0.0/8", "not-an-ip", ""})
 	f.SetMode("allow")

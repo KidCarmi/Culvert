@@ -15,9 +15,11 @@
 // strengthens: both types have only unexported fields, so the bare literal is
 // the sole literal form available outside this package, and the three write
 // sites that lacked the lazy init already present in addExemptionLocked
-// panicked on a nil map — on the DP snapshot apply path (AddAll) and on the
-// request path (Allow/AllowClusterAware). Verdicts are unchanged; a bare
-// instance is differentially pinned equal to a constructed one.
+// (IPFilter Add/AddAll, RateLimiter Allow/AllowClusterAware) panicked on a
+// nil map. This is defensive: production instances all come from the
+// constructors today, so no production path reached the panic. Verdicts are
+// unchanged; a bare instance is differentially pinned equal to a constructed
+// one.
 //
 // ClusterFreshness derives the verdict from the current window and receipt
 // stamp. ObserveClusterFreshness additionally owns diagnostic episode accounting;

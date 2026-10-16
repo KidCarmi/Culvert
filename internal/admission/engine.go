@@ -387,11 +387,11 @@ func (f *IPFilter) addLocked(entry string) error {
 	}
 	if ip := net.ParseIP(entry); ip != nil {
 		// Lazy init, exactly as addExemptionLocked does: a bare IPFilter{}
-		// composite literal is a reachable shape (its fields are unexported, so
+		// composite literal compiles anywhere (its fields are unexported, so
 		// it is the only literal form outside this package), and a nil map here
-		// would panic on the first mutation instead of storing the entry. The
-		// panic site is the DP snapshot apply path via AddAll, where it would
-		// take down the node applying a Control Plane config push.
+		// would panic on the first mutation instead of storing the entry.
+		// Defensive: production filters (including the snapshot apply path's,
+		// which calls NewIPFilter before AddAll) are constructor-created.
 		if f.single == nil {
 			f.single = map[string]bool{}
 		}
@@ -912,8 +912,9 @@ func (r *RateLimiter) Enabled() bool {
 // Allow and AllowClusterAware share this one bucket-creation path so the two
 // admission entry points cannot drift apart. A nil shard map reads as a miss,
 // so the cold branch is the only one that writes: a bare RateLimiter{} that
-// was Configure()d would otherwise panic here, on the request path. The lazy
-// init keeps the limit enforced against a real bucket; zero cost once warm.
+// was Configure()d would otherwise panic here, on the request path. This is
+// defensive (production limiters come from NewRateLimiter); the lazy init keeps
+// the limit enforced against a real bucket, at zero cost once warm.
 func (s *rlShard) bucketFor(ip string) *clientBucket {
 	b, ok := s.clients[ip]
 	if !ok {
