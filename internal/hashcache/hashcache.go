@@ -176,7 +176,9 @@ func (c *HashCache) Clear() {
 // afterward, it drops approximately 25 % of the remaining entries.
 // Must be called with c.mu held for writing.
 //
-// ── Measured cost (Go 1.26, 4-core amd64, hashcache_evict_bench_test.go) ────
+// ── Measured cost (Go 1.26, 4-vCPU amd64, 64-hex-char keys as SHA256Hex
+// produces, hashcache_evict_bench_test.go; 2026-10-16 on a ~3x-oversubscribed
+// shared host, so read the figures as upper-biased) ───────────────────────────
 //
 // This runs on the Set path, synchronously, under the EXCLUSIVE write lock, on
 // whichever scan arrives when the map is full — so its duration stalls every
@@ -186,24 +188,26 @@ func (c *HashCache) Clear() {
 // amortizes:
 //
 //	cache_size │ one evictLocked │ recurs every      │ amortized per Set
-//	   10 000  │    0.38 ms      │ 2 500 inserts     │  152 ns
-//	  100 000  │    7.39 ms      │ 25 000 inserts    │  296 ns
-//	1 000 000  │  122.57 ms      │ 250 000 inserts   │  490 ns
+//	   10 000  │    0.54 ms      │ 2 500 inserts     │  ~218 ns
+//	  100 000  │    10.4 ms      │ 25 000 inserts    │  ~414 ns
+//	1 000 000  │     150 ms      │ 250 000 inserts   │  ~600 ns
 //
-// (Nothing expired — the state a busy gateway holds, and the worst realistic
-// one. The amortized column is this implementation's own per-Set cost; do not
-// confuse it with the base-vs-candidate SAVING reported in the roadmap note.)
+// (10-sample medians, nothing expired: the state a busy gateway holds, and
+// the worst realistic one. The 1 000 000 row is BenchmarkEvictLocked_
+// NothingExpired_1M and is the noisiest: read it as 150-300 ms. The amortized
+// column is this implementation's own per-Set cost; do not confuse it with
+// the base-vs-candidate difference reported in the roadmap note.)
 //
 // cache_size is an operator YAML knob that config validation only FLOORS
 // (non-positive → 10 000) and never caps, so the spike grows with it without
 // anything warning the operator. Eviction also gets SLOWER the more
-// reclaimable the cache is (0.68 ms at 10 000 fully expired, against 0.38 ms
+// reclaimable the cache is (0.94 ms at 10 000 fully expired, against 0.54 ms
 // with none expired), because a sweep that finds expired entries also deletes
 // them.
 //
-// At the 10 000 default this is deliberately left alone: 152 ns amortized per
+// At the 10 000 default this is deliberately left alone: ~218 ns amortized per
 // Set, and a Set happens only on a scan MISS, which then costs a ClamAV/YARA
-// scan measured in MILLISECONDS — four to five orders of magnitude more. The
+// scan measured in MILLISECONDS — three to four orders of magnitude more. The
 // spike is noise against the work it guards. Bounding it independent of
 // maxSize means giving up the "no expired entry survives an eviction"
 // invariant that TestSet_EvictsExpiredFirst pins (an early exit cannot know
@@ -212,12 +216,15 @@ func (c *HashCache) Clear() {
 //
 // Do not reach for the obvious layout fix without reading the measurements
 // first. Holding entries by value instead of behind a pointer makes this sweep
-// 11-32 % faster and removes one allocation per Set; it also costs ~8 ns on
-// every Get miss and ~77 ns per Set at cache_size 100000. That is a MIXED and
-// IMMATERIAL result — tens of nanoseconds either way, against a ClamAV/YARA
-// scan measured in milliseconds — so it was measured and NOT shipped, for want
-// of a payoff rather than because it is harmful. roadmap/SCAN-CACHE-EVICTION-COST.md
-// has the interleaved benchstat numbers, and the retraction of an earlier,
+// 9-62 % faster (no change when everything has expired) and removes one
+// allocation per Set. It also costs ~10 ns (+27 %) on every Get miss, and the
+// steady-state Set cost showed no significant change at either 10 000 or
+// 100 000. That is a MIXED and IMMATERIAL result at the default size, so it
+// was measured and NOT shipped, for want of a payoff rather than because it is
+// harmful. At large cache_size the real fix is bounding or sharding the
+// eviction, not a constant-factor layout change.
+// roadmap/SCAN-CACHE-EVICTION-COST.md has the interleaved benchstat numbers,
+// the superseded short-key figures, and the retraction of an earlier,
 // stronger claim that the comparison refuted it.
 func (c *HashCache) evictLocked() {
 	now := time.Now()
