@@ -195,7 +195,7 @@ type PolicyRule struct {
 	srcIPNet *net.IPNet
 
 	// srcPrefix is srcIPNet expressed as a netip.Prefix, precomputed by
-	// sortLocked() from the SAME *net.IPNet via prefixFromIPNet (security.go) —
+	// sortLocked() from the SAME *net.IPNet via prefixFromIPNet (admission.go, over internal/admission) —
 	// the helper the IP filter already uses, so both matchers inherit one
 	// pinned conversion (including the 4-in-6 subtlety its differential test
 	// covers) instead of two hand-rolled ones.
@@ -1807,7 +1807,7 @@ func newClientSource(clientIP string) clientSource {
 // zone here restores net.ParseIP's verdict exactly, so a zoned address still
 // matches no source-scoped rule rather than newly matching one. This is the
 // same parser swap, with the same explicit zone rejection, that the IP filter
-// already makes (ipFilterView.contains, security.go); the equivalence is
+// already makes (ipFilterView.contains, internal/admission); the equivalence is
 // pinned here by TestSrcPrefix_DifferentialAgainstLegacyMatcher, whose oracle
 // is still net.ParseIP.
 //
