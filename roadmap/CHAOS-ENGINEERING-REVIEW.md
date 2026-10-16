@@ -10210,3 +10210,36 @@ state on the response for a boot condition nobody can observe. If a future
 change makes an intent pending on a path the admin UI is already serving — a
 re-point that dials asynchronously, say — this becomes reachable and the
 response needs a `dialPending` field.
+
+#### Round 17 — process: a round lands as ONE push
+
+Four of this round's required-check failures were not failures. `Fast PR Gate`
+and `Deep PR Gate` reported `failure` on `b48812f`, `f31bded`, `6f4ba92`,
+`4eab29a`, `ce57bbd` and `43faff6`; every one of those workflow runs has
+conclusion **`cancelled`**, and the aggregate's own message says why:
+
+```
+##[error]required job 'test-race' result=cancelled — cannot trust the gate
+```
+
+The gate is right to refuse — a cancelled race job is not evidence — and the
+cause was mine: six pushes in about twenty-five minutes, each cancelling the
+in-flight run for the ref. Three of them were polish (a tightened doc sentence,
+a recorded residual, this note's predecessor), and each cost a full CI cycle and
+manufactured a pair of red required checks indistinguishable from real ones
+until the logs were read. Two of those reds arrived as wake events whose
+handling instructions are "this ends in a pushed fix or a comment on the PR" —
+so a self-inflicted cancellation also generates work that looks mandatory.
+
+> **A review round lands as one push. Polish that arrives separately is not
+> free: it costs a CI cycle, it replaces a green verdict with a pending one,
+> and it produces red required checks that cannot be distinguished from genuine
+> failures without opening the job log.**
+
+Verified on the uncancelled head: both required gates green, plus API Contract,
+API Governance, CI, Code Review, CodeQL, Edge-Case Validation Lab, Proxy UI E2E,
+QA Gate and Security Release Gate. Module-wide `-count=2 -shuffle=on` (seed
+1792156379732326309): 111 packages pass; the root package's 9 failures are all
+`validateExternalURL` failing closed because `example.com` does not resolve in
+that sandbox, each appearing exactly twice — deterministic environment, not
+ordering. Nothing this round touched failed.
