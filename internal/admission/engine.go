@@ -906,6 +906,26 @@ func (r *RateLimiter) Enabled() bool {
 	return r.enabled.Load()
 }
 
+// bucketFor returns ip's sliding-window bucket in this shard, creating it on
+// first sight. Callers MUST hold s.mu.
+//
+// Allow and AllowClusterAware share this one bucket-creation path so the two
+// admission entry points cannot drift apart. A nil shard map reads as a miss,
+// so the cold branch is the only one that writes: a bare RateLimiter{} that
+// was Configure()d would otherwise panic here, on the request path. The lazy
+// init keeps the limit enforced against a real bucket; zero cost once warm.
+func (s *rlShard) bucketFor(ip string) *clientBucket {
+	b, ok := s.clients[ip]
+	if !ok {
+		if s.clients == nil {
+			s.clients = map[string]*clientBucket{}
+		}
+		b = &clientBucket{}
+		s.clients[ip] = b
+	}
+	return b
+}
+
 // Allow returns true if the IP is within its rate limit or is exempt.
 func (r *RateLimiter) Allow(ip string) bool {
 	if !r.enabled.Load() {
@@ -923,17 +943,7 @@ func (r *RateLimiter) Allow(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		// A nil shard map reads as a miss, so this cold branch is the only one
-		// that writes — a bare RateLimiter{} that was Configure()d would
-		// otherwise panic here, on the request path. Zero cost once warm.
-		if s.clients == nil {
-			s.clients = map[string]*clientBucket{}
-		}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).
@@ -1181,17 +1191,7 @@ func (r *RateLimiter) AllowClusterAware(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		// A nil shard map reads as a miss, so this cold branch is the only one
-		// that writes — a bare RateLimiter{} that was Configure()d would
-		// otherwise panic here, on the request path. Zero cost once warm.
-		if s.clients == nil {
-			s.clients = map[string]*clientBucket{}
-		}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).

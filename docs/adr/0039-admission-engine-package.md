@@ -80,7 +80,9 @@ an availability hardening, not a policy change — the nil checks sit in the col
 miss branch (a nil map reads as a miss), the allocation benchgates still measure
 zero, and `TestBareLiteral_MatchesConstructedInstance` differentially pins a
 bare instance equal to a constructed one across every mode and probe. The
-constructors remain the blessed construction path.
+constructors remain the blessed construction path. `Allow` and
+`AllowClusterAware` create buckets through one shared helper,
+`rlShard.bucketFor`, so the two request paths cannot drift on this decision.
 
 Gates: `internal/admission/bare_literal_safety_test.go` (5), each verified
 failing against the reintroduced pre-fix shape, and four of them additionally
