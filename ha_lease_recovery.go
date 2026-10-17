@@ -361,9 +361,10 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 // a landed grant — never on elapsed time (the ca_health.go / storage_health.go
 // rule).
 //
-// It installs the grant first (installGrantLocked: a snapshot stamped with the
-// new epoch commits, and only then is the epoch advertised); a refused install
-// returns false and the loop retries, still read-only.
+// It installs the grant first (commitGrant, then exposeGrantLocked: a
+// snapshot stamped with the new epoch commits, and only then is the epoch
+// advertised); a refused install returns false and the loop retries, still
+// read-only.
 //
 // Note the ordering: the grant is installed at the top of this function (that
 // is what makes WriteAllowed true), and the recovering flag drops a beat later
@@ -372,10 +373,16 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 // second is the safe direction — and it is harmless, because the alertable
 // condition is `unfenced=1 AND recovering=0` and unfenced is already 0 here.
 func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) bool {
-	h.mu.Lock()
 	// The grant is installed — its epoch advertised, write authority back —
-	// only after a snapshot stamped with it commits (ha_epoch_commit.go).
-	if err := h.installGrantLocked(haTransitionRecovery); err != nil {
+	// only after a snapshot stamped with it commits, outside h.mu, while the
+	// keepalive renews the staged grant (ha_epoch_commit.go).
+	h.startLeaseKeepalive()
+	staged, err := h.commitGrant(haTransitionRecovery)
+	if err != nil {
+		return false
+	}
+	h.mu.Lock()
+	if err := h.exposeGrantLocked(staged); err != nil {
 		h.mu.Unlock()
 		return false
 	}

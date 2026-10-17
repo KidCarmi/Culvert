@@ -64,7 +64,7 @@ func (h *HAState) syncFenceEpochLocked() {
 
 // PublishedFenceEpoch is the epoch a config publish stamps
 // (ConfigStore.commitPublish), read without h.mu so it is safe while h.mu is
-// held. It equals CurrentEpoch except while installGrantLocked commits a new
+// held. It equals CurrentEpoch except while commitGrant commits a new
 // grant's epoch: then it is already the new one, so that commit (and any
 // concurrent publish) carries it before CurrentEpoch advertises it.
 func (h *HAState) PublishedFenceEpoch() int64 { return h.fenceEpoch.Load() }

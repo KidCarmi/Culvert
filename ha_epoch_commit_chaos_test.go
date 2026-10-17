@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -370,24 +371,28 @@ func cpRecoveryRound(h *HAState) bool {
 // TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit: no surface that
 // publishes a fencing epoch (CurrentEpoch → heartbeat, issuance, deltas,
 // /healthz, write authority; the leader role) is reachable from a grant before
-// the snapshot stamped with it commits.
+// the snapshot stamped with it commits, and renewal never waits on that
+// commit.
 //
 //   - leaseEpoch takes a non-zero value only in exposeGrantLocked, and every
-//     caller of exposeGrantLocked commits (commitGrantLocked) first;
+//     caller of exposeGrantLocked commits (commitGrant) first;
 //   - the acquisition never reaches the commit, the exposure, a role or the
 //     keepalive;
-//   - every authority-gaining transition commits before it starts the
-//     Control Plane listener (onPromote), and exposes before it takes the
-//     leader role or starts the keepalive;
+//   - every authority-gaining transition starts the keepalive on the staged
+//     grant before the commit, commits before it starts the Control Plane
+//     listener (onPromote), and exposes before it takes the leader role;
 //   - the staged and in-flight epochs are read only by the install halves and
 //     the stamp mirror, and the stamp mirror is read only by the publish stamp.
+//
+// TestChaos71_Wall_NoSnapshotPublishUnderTheHALock separately pins that the
+// commit itself never runs under HAState.mu.
 func TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit(t *testing.T) {
 	funcs, _ := cpParseFuncsAndGateHolders(t)
 	cpWallNonZeroEpochOnlyAfterCommit(t, funcs)
 	for _, start := range []string{"acquireLeaseAttempt", "acquireLeaseForLeadership", "acquireLeaseForResume", "resumeAcquireRound"} {
 		forbidden := map[string]bool{
 			"setLeaseEpochLocked": true, "setTopologyLocked": true, "startLeaseKeepalive": true,
-			"installGrantLocked": true, "commitGrantLocked": true, "exposeGrantLocked": true,
+			"commitGrant": true, "exposeGrantLocked": true,
 		}
 		if path, bad := cpReaches(funcs, start, forbidden, 8); bad {
 			t.Errorf("%s reaches %s — a grant would be advertised or acted on before its epoch commits", start, strings.Join(path, " → "))
@@ -396,18 +401,27 @@ func TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit(t *testing.T) {
 	for _, fn := range []string{"EnableAsLeader", "resumeAsLeader", "promote", "completeLeaseRecovery"} {
 		cpWallInstallsFirst(t, funcs, fn)
 	}
-	cpWallFieldUse(t, "grantEpoch", map[string]bool{"acquireLeaseAttempt": true, "commitGrantLocked": true})
+	cpWallFieldUse(t, "grantEpoch", map[string]bool{
+		"acquireLeaseAttempt": true, "commitGrant": true, "exposeGrantLocked": true, "abandonGrantLocked": true, "heldEpochLocked": true,
+	})
 	cpWallFieldUse(t, "stampEpoch", map[string]bool{
-		"commitEpochStampLocked": true, "syncFenceEpochLocked": true, "exposeGrantLocked": true, "abandonGrantLocked": true,
+		"commitGrant": true, "syncFenceEpochLocked": true, "exposeGrantLocked": true, "abandonGrantLocked": true,
 	})
 	cpWallFieldUse(t, "PublishedFenceEpoch", map[string]bool{"publishFenceEpoch": true})
 }
 
+// cpCommitCallers are the calls that run commitGrant: itself, and the
+// resume's wrapper (which must call it).
+var cpCommitCallers = []string{"commitGrant", "commitResumeGrant"}
+
 // cpWallNonZeroEpochOnlyAfterCommit: every setLeaseEpochLocked call outside
 // exposeGrantLocked passes a literal 0, and every function that calls
-// exposeGrantLocked calls commitGrantLocked before it.
+// exposeGrantLocked commits before it.
 func cpWallNonZeroEpochOnlyAfterCommit(t *testing.T, funcs map[string][]*ast.FuncDecl) {
 	t.Helper()
+	if w := funcs["commitResumeGrant"]; len(w) != 1 || len(cpCallsNamed(w[0], "commitGrant")) == 0 {
+		t.Fatal("commitResumeGrant no longer calls commitGrant — the wall's selector has gone stale")
+	}
 	installs, exposers := 0, 0
 	for name, decls := range funcs {
 		for _, fn := range decls {
@@ -423,8 +437,7 @@ func cpWallNonZeroEpochOnlyAfterCommit(t *testing.T, funcs map[string][]*ast.Fun
 			}
 			for _, call := range cpCallsNamed(fn, "exposeGrantLocked") {
 				exposers++
-				commits := cpCallsNamed(fn, "commitGrantLocked")
-				if len(commits) == 0 || commits[0].Pos() > call.Pos() {
+				if commit := cpFirstCallPos(fn, cpCommitCallers...); commit == token.NoPos || commit > call.Pos() {
 					t.Errorf("%s exposes a fencing epoch before committing the snapshot stamped with it", name)
 				}
 			}
@@ -435,33 +448,40 @@ func cpWallNonZeroEpochOnlyAfterCommit(t *testing.T, funcs map[string][]*ast.Fun
 	}
 }
 
-// cpWallInstallsFirst: in fn, the epoch is committed (installGrantLocked or
-// commitGrantLocked) before the Control Plane listener starts (onPromote),
-// and exposed (installGrantLocked or exposeGrantLocked) before every
-// leader-role write and keepalive start.
+// cpWallInstallsFirst: in fn, the keepalive starts before the commit (in fn,
+// or in the resume's wrapper), the commit precedes the Control Plane listener
+// (onPromote), and the exposure precedes every leader-role write.
 func cpWallInstallsFirst(t *testing.T, funcs map[string][]*ast.FuncDecl, fn string) {
 	t.Helper()
 	decls := funcs[fn]
 	if len(decls) != 1 {
 		t.Fatalf("%s: %d declarations — the wall's selector has gone stale", fn, len(decls))
 	}
-	commit := cpFirstCallPos(decls[0], "installGrantLocked", "commitGrantLocked")
-	expose := cpFirstCallPos(decls[0], "installGrantLocked", "exposeGrantLocked")
+	commit := cpFirstCallPos(decls[0], cpCommitCallers...)
+	expose := cpFirstCallPos(decls[0], "exposeGrantLocked")
 	if commit == token.NoPos || expose == token.NoPos {
 		t.Errorf("%s takes authority without committing and exposing its grant", fn)
 		return
+	}
+	keepaliveIn, commitIn := decls[0], commit
+	if direct := cpFirstCallPos(decls[0], "commitGrant"); direct == token.NoPos {
+		keepaliveIn = funcs["commitResumeGrant"][0] // the commit runs in the wrapper
+		commitIn = cpFirstCallPos(keepaliveIn, "commitGrant")
+	}
+	if ka := cpFirstCallPos(keepaliveIn, "startLeaseKeepalive"); ka == token.NoPos || ka > commitIn {
+		t.Errorf("%s commits its epoch before the keepalive starts on the staged grant — renewal would wait on the commit", fn)
 	}
 	for _, call := range append(cpCallsNamed(decls[0], "runOnPromote"), cpCallsNamed(decls[0], "onPromote")...) {
 		if call.Pos() < commit {
 			t.Errorf("%s starts the Control Plane listener before the new epoch is committed — a refused commit would leave it running", fn)
 		}
 	}
-	for _, call := range append(cpCallsNamed(decls[0], "setTopologyLocked"), cpCallsNamed(decls[0], "startLeaseKeepalive")...) {
+	for _, call := range cpCallsNamed(decls[0], "setTopologyLocked") {
 		if lit, ok := cpFirstStringArg(call); ok && lit != "leader" {
 			continue // a non-leader role (a resume's standby re-entry) is not authority
 		}
 		if call.Pos() < expose {
-			t.Errorf("%s takes the leader role or starts the keepalive before the new epoch is exposed", fn)
+			t.Errorf("%s takes the leader role before the new epoch is exposed", fn)
 		}
 	}
 }
@@ -671,4 +691,116 @@ func TestChaos71_PromoteListenerFailureAbandonsTheCommittedEpoch(t *testing.T) {
 		t.Fatalf("the retry failed: %v", err)
 	}
 	cpAssertEpochServable(t, h, want)
+}
+
+// TestChaos71_SlowEpochCommitDoesNotCostTheLease — the class rule of Codex P1
+// 4301857115, for the stamped commit: an enable whose epoch commit takes
+// longer than a 3 s TTL keeps its lease. The keepalive renews the staged grant
+// while the commit runs outside HAState.mu, so when the commit returns the
+// lease is still held and renewed, the epoch is installed and committed, and
+// the node has not self-fenced.
+func TestChaos71_SlowEpochCommitDoesNotCostTheLease(t *testing.T) {
+	const ttl = 3 * time.Second
+	h, _, _ := cpEpochHarness(t, "10.0.0.2:50051")
+	f := halease.NewFake(ttl)
+	h.SetLeaseProvider(f, "cp-a")
+	want := cpNextGrantEpoch(t, f)
+	var slowed atomic.Int32
+	prev := haRestampFenceEpoch
+	haRestampFenceEpoch = func() error {
+		if slowed.Add(1) == 1 {
+			time.Sleep(ttl + 700*time.Millisecond) // longer than the TTL, let alone the trusted window
+		}
+		return prev()
+	}
+	t.Cleanup(func() { haRestampFenceEpoch = prev })
+
+	if _, err := h.EnableAsLeader("10.0.0.9:50051", false); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if slowed.Load() == 0 {
+		t.Fatal("precondition: the enable never reached the slow epoch commit")
+	}
+	cpAssertEpochServable(t, h, want)
+	st, err := f.Read(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Holder != "cp-a" || st.Epoch != want || st.ValidFor <= 0 {
+		t.Fatalf("lease holder=%q epoch=%d valid_for=%s — the staged grant was not renewed during the commit", st.Holder, st.Epoch, st.ValidFor)
+	}
+}
+
+// TestChaos71_GrantLostDuringTheEpochCommitIsNotExposed: the exposure
+// re-checks that the grant is still held. A grant superseded while its epoch
+// commit runs is dropped by the keepalive, and the enable is refused: no
+// role, no advertised epoch, the stamp mirror back on the installed grant,
+// and no keepalive left renewing anything.
+func TestChaos71_GrantLostDuringTheEpochCommitIsNotExposed(t *testing.T) {
+	h, _, _ := cpEpochHarness(t, "10.0.0.2:50051")
+	f := halease.NewFake(300 * time.Millisecond)
+	h.SetLeaseProvider(f, "cp-a")
+	e := cpNextGrantEpoch(t, f)
+	prev := haRestampFenceEpoch
+	haRestampFenceEpoch = func() error {
+		f.ExpireForTest()
+		if granted, _, err := f.Acquire(context.Background(), "cp-b"); !granted || err != nil {
+			t.Errorf("precondition: the peer could not take the lease (granted=%v err=%v)", granted, err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) { // the keepalive's next renewal sees the loss
+			h.mu.RLock()
+			lost := h.grantEpoch == 0
+			h.mu.RUnlock()
+			if lost {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return prev()
+	}
+	t.Cleanup(func() { haRestampFenceEpoch = prev })
+
+	if _, err := h.EnableAsLeader("10.0.0.9:50051", false); err == nil {
+		t.Fatal("enable succeeded although its grant was lost before the epoch could be installed")
+	}
+	if st := h.Status(); st.Role != "" {
+		t.Errorf("role = %q, want none", st.Role)
+	}
+	cpAssertEpochNotAdvertised(t, h, e, 0)
+	h.mu.RLock()
+	keepalive := h.leaseStopCh != nil
+	h.mu.RUnlock()
+	if keepalive {
+		t.Error("a keepalive is still running for the lost grant")
+	}
+}
+
+// TestChaos71_RefusedEpochCommitRevertsTheStampAtomically: the keep-or-revert
+// decision reverts the stamp mirror under the store lock, in the same step as
+// the check. A publish that lands right after the decision (here, inside the
+// seam, with HAState.mu still held by the caller) must stamp the installed
+// epoch, never the refused one, which nothing advertises.
+func TestChaos71_RefusedEpochCommitRevertsTheStampAtomically(t *testing.T) {
+	h, f, _ := cpEpochHarness(t, "10.0.0.2:50051")
+	e := cpNextGrantEpoch(t, f)
+	cpRejectEpochStamp(t, e)
+	prevKeep := haKeepEpochStampIfCommitted
+	haKeepEpochStampIfCommitted = func(epoch int64, revert func()) bool {
+		kept := prevKeep(epoch, revert)
+		snapshotWireBudget = maxSnapshotWireBytes // the concurrent publish itself fits
+		if _, err := globalConfigStore.UpdateCPAddressesFrom(func() []string { return []string{"10.0.0.8:50051"} }); err != nil {
+			t.Errorf("concurrent publish: %v", err)
+		}
+		return kept
+	}
+	t.Cleanup(func() { haKeepEpochStampIfCommitted = prevKeep })
+
+	if _, err := h.EnableAsLeader("10.0.0.9:50051", false); err == nil {
+		t.Fatal("enable succeeded although its epoch commit was refused")
+	}
+	if got := globalConfigStore.Get().Epoch; got == e {
+		t.Errorf("a publish landing after the refusal committed the refused epoch %d — DPs would learn an epoch nothing advertises", got)
+	}
+	cpAssertEpochNotAdvertised(t, h, e, 0)
 }

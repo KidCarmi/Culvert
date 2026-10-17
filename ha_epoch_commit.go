@@ -61,88 +61,127 @@ var haKeepEpochStampIfCommitted = func(e int64, revert func()) bool {
 	return globalConfigStore.keepEpochStampIfCommitted(e, revert)
 }
 
-// installGrantLocked installs the grant acquireLeaseAttempt staged, after a
-// snapshot stamped with its epoch has committed: commitGrantLocked, then
-// exposeGrantLocked. Caller holds h.mu (write). A non-nil error means the
-// epoch was NOT installed (and the refusal has been paged); the caller must
-// not take write authority on it. transition is a bounded label.
-func (h *HAState) installGrantLocked(transition string) error {
-	e, err := h.commitGrantLocked(transition)
-	if err != nil {
-		return err
-	}
-	h.exposeGrantLocked(e)
-	return nil
-}
-
-// commitGrantLocked is the first half of an install: it commits the snapshot
+// commitGrant is the first half of every install: it commits the snapshot
 // stamped with the staged grant's epoch and leaves that epoch UNADVERTISED,
 // with the stamp mirror on it, until exposeGrantLocked installs it or
-// abandonGrantLocked drops it. promote splits the halves around onPromote, so
-// a refused commit never starts the Control Plane listener (Codex review of
-// #1556). Returns the epoch to expose (0: nothing to expose). Caller holds
-// h.mu (write). A refusal is paged.
-func (h *HAState) commitGrantLocked(transition string) (int64, error) {
+// abandonGrantLocked drops it. Returns the epoch to expose (0: nothing to
+// expose). A refusal is paged, and the staged grant is abandoned.
+//
+// The caller must NOT hold h.mu, and should have started the keepalive on the
+// staged grant: the commit marshals a snapshot of up to snapshotWireBudget,
+// and nothing that long may run under h.mu, where it would block lease
+// renewal (Codex review of #1556; TestChaos71_Wall_NoSnapshotPublishUnderTheHALock).
+// h.mu is taken only to read the grant and set the stamp, and afterwards for
+// the compare-only keep-or-revert decision.
+func (h *HAState) commitGrant(transition string) (int64, error) {
+	h.mu.Lock()
 	e := h.grantEpoch
-	h.grantEpoch = 0
-	if h.lease == nil {
+	switch {
+	case h.lease == nil:
+		h.mu.Unlock()
 		return 0, nil // legacy mode: no fencing epoch
-	}
-	if e == 0 {
-		if h.leaseEpoch != 0 {
+	case e == 0:
+		installed := h.leaseEpoch != 0
+		h.mu.Unlock()
+		if installed {
 			return 0, nil // a concurrent transition already installed this process's grant
 		}
 		return 0, errNoStagedGrant
 	}
-	if err := h.commitEpochStampLocked(e); err != nil {
-		h.pageEpochRefusedLocked(transition, e, err)
-		return 0, err
+	stamping := h == haTopologySource() // otherwise this HAState's epoch stamps no snapshot
+	if stamping {
+		h.stampEpoch = e
+		h.syncFenceEpochLocked()
 	}
-	return e, nil
-}
-
-// exposeGrantLocked installs a committed grant's epoch — the ONLY place a
-// non-zero epoch reaches leaseEpoch, and so the heartbeat, issuance,
-// /healthz and write authority. Caller holds h.mu (write) and has had e
-// committed by commitGrantLocked.
-func (h *HAState) exposeGrantLocked(e int64) {
-	if h.lease == nil || e == 0 {
-		return
+	h.mu.Unlock()
+	if !stamping {
+		return e, nil
 	}
-	h.epochRefused = false // the refusal episode, if any, ended
-	h.stampEpoch = 0       // the mirror stays e: setLeaseEpochLocked re-derives it from leaseEpoch
-	h.setLeaseEpochLocked(e)
-}
-
-// abandonGrantLocked drops a committed but unexposed grant (its transition
-// failed after the commit): the stamp mirror returns to the installed grant,
-// and the grant itself is left to its TTL. Caller holds h.mu (write).
-func (h *HAState) abandonGrantLocked() {
-	h.stampEpoch = 0
-	h.syncFenceEpochLocked()
-}
-
-// commitEpochStampLocked commits the snapshot restamped with e and leaves the
-// stamp mirror on e. On failure the mirror reverts, atomically with every
-// commit, unless a concurrent publish already committed e (then e IS
-// committed and distributable, and the install proceeds). Caller holds h.mu.
-func (h *HAState) commitEpochStampLocked(e int64) error {
-	if h != haTopologySource() {
-		return nil // this HAState's epoch stamps no snapshot
-	}
-	h.stampEpoch = e
-	h.syncFenceEpochLocked()
-	err := haRestampFenceEpoch()
+	err := haRestampFenceEpoch() // the marshal and commit: outside h.mu
 	if err == nil {
-		return nil
+		return e, nil
 	}
-	if haKeepEpochStampIfCommitted(e, func() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Keep or revert, atomically with every commit (a compare under the store
+	// lock, no marshal): a concurrent publish that committed e already made it
+	// distributable, and the install proceeds.
+	if h.stampEpoch == e && haKeepEpochStampIfCommitted(e, func() {
 		h.stampEpoch = 0
 		h.syncFenceEpochLocked()
 	}) {
+		return e, nil
+	}
+	if h.grantEpoch == e {
+		h.pageEpochRefusedLocked(transition, e, err)
+	}
+	h.abandonGrantLocked()
+	return 0, err
+}
+
+// errGrantLost: the staged grant was lost (superseded, expired, or no longer
+// confirmed) between its commit and its exposure.
+var errGrantLost = errors.New("the fencing-lease grant was lost before its epoch could be installed")
+
+// exposeGrantLocked installs a committed grant's epoch — the ONLY place a
+// non-zero epoch reaches leaseEpoch, and so the heartbeat, issuance,
+// /healthz and write authority. It re-checks that the grant is still held:
+// still staged, since the keepalive drops a grant it loses (superseded, or
+// unconfirmed past its validity window). Write authority itself stays gated
+// on the confirmed window (WriteAllowed). Caller holds h.mu (write) and has
+// had e committed by commitGrant.
+func (h *HAState) exposeGrantLocked(e int64) error {
+	if h.lease == nil || e == 0 {
 		return nil
 	}
-	return err
+	if h.grantEpoch != e {
+		h.abandonGrantLocked()
+		return errGrantLost
+	}
+	h.grantEpoch = 0
+	h.epochRefused = false // the refusal episode, if any, ended
+	h.stampEpoch = 0       // the mirror stays e: setLeaseEpochLocked re-derives it from leaseEpoch
+	h.setLeaseEpochLocked(e)
+	return nil
+}
+
+// abandonGrantLocked drops a staged, unexposed grant (its transition failed
+// or was aborted): the stamp mirror returns to the installed grant, and a
+// keepalive that renewed only the staged grant stops, so the grant lapses at
+// its TTL (ADR-0005 has no Release primitive). Caller holds h.mu (write).
+func (h *HAState) abandonGrantLocked() {
+	h.grantEpoch = 0
+	h.stampEpoch = 0
+	h.syncFenceEpochLocked()
+	if h.leaseEpoch == 0 && h.leaseStopCh != nil {
+		close(h.leaseStopCh)
+		h.leaseStopCh = nil
+	}
+}
+
+// dropStagedGrant is abandonGrantLocked for a caller not holding h.mu.
+func (h *HAState) dropStagedGrant() {
+	h.mu.Lock()
+	h.abandonGrantLocked()
+	h.mu.Unlock()
+}
+
+// heldEpochLocked is the grant this process holds and the keepalive renews:
+// the installed one, else a staged one (renewing it exposes nothing). Caller
+// holds h.mu.
+func (h *HAState) heldEpochLocked() int64 {
+	if h.leaseEpoch != 0 {
+		return h.leaseEpoch
+	}
+	return h.grantEpoch
+}
+
+// loseStagedGrant is the keepalive's response to losing a grant that was
+// never installed: there is no role to fence, so the grant is dropped and
+// the transition waiting to expose it is refused (exposeGrantLocked).
+func (h *HAState) loseStagedGrant(reason string) {
+	h.dropStagedGrant()
+	logger.Printf("HA: the staged fencing-lease grant was lost before it was installed — %s", sanitizeLog(reason))
 }
 
 // pageEpochRefusedLocked logs every refusal and pages the episode's first:

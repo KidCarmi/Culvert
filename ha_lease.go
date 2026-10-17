@@ -126,9 +126,10 @@ func (h *HAState) acquireLeaseAttempt(reason string) (granted bool, st halease.S
 	}
 	// The grant is STAGED, not installed: nothing advertises its epoch (the
 	// heartbeat, issuance, /healthz) and it confers no write authority until
-	// the caller's installGrantLocked has committed a snapshot stamped with it
-	// (Codex review of #1556: a fencing token is exposed only once state
-	// stamped with it is distributable).
+	// the caller's commitGrant has committed a snapshot stamped with it and
+	// exposeGrantLocked installs it (Codex review of #1556: a fencing token is
+	// exposed only once state stamped with it is distributable). The
+	// keepalive may renew it meanwhile; renewing exposes nothing.
 	h.mu.Lock()
 	h.grantEpoch = st.Epoch
 	h.leaseConfirmedAt = time.Now()
@@ -145,7 +146,7 @@ func (h *HAState) startLeaseKeepalive() {
 	// h.stopping: Stop() is joining — a fresh keepalive spawned now (e.g. a
 	// tracked standby loop promoting mid-shutdown) would hold a channel the
 	// in-flight stopLoops already missed, deadlocking the join.
-	if h.lease == nil || h.leaseEpoch == 0 || h.leaseStopCh != nil || h.stopping || h.shutdown {
+	if h.lease == nil || h.heldEpochLocked() == 0 || h.leaseStopCh != nil || h.stopping || h.shutdown {
 		h.mu.Unlock()
 		return
 	}
@@ -240,14 +241,14 @@ func (h *HAState) leaseRenewRound() (fenced bool) {
 // write authority.
 func (h *HAState) fenceIfLeaseWindowElapsed(reason string) bool {
 	h.mu.RLock()
-	p, epoch := h.lease, h.leaseEpoch
+	p, epoch, staged := h.lease, h.heldEpochLocked(), h.leaseEpoch == 0
 	confirmedAt, validFor := h.leaseConfirmedAt, h.leaseValidFor
 	h.mu.RUnlock()
 	if p == nil || epoch == 0 {
 		return true // no write authority left to protect; stop looping
 	}
 	if time.Since(confirmedAt) >= validFor-haLeaseWriteMargin {
-		h.selfFence(reason)
+		h.fenceHeldGrant(staged, reason)
 		return true
 	}
 	return false
@@ -275,7 +276,7 @@ var haLeaseRenewWithheld = cpGRPCLeaseRenewWithheld
 // Withholding never EXTENDS authority: it can only end it sooner.
 func (h *HAState) leaseRenewOnce() (fenced bool) {
 	h.mu.RLock()
-	p, id, epoch := h.lease, h.leaseCandidateID, h.leaseEpoch
+	p, id, epoch, staged := h.lease, h.leaseCandidateID, h.heldEpochLocked(), h.leaseEpoch == 0
 	confirmedAt, validFor := h.leaseConfirmedAt, h.leaseValidFor
 	h.mu.RUnlock()
 	if p == nil || epoch == 0 {
@@ -299,18 +300,29 @@ func (h *HAState) leaseRenewOnce() (fenced bool) {
 		return false
 	case err == nil:
 		// Confirmed loss: superseded or expired. Fence NOW.
-		h.selfFence("fencing lease lost (superseded or expired)")
+		h.fenceHeldGrant(staged, "fencing lease lost (superseded or expired)")
 		return true
 	default:
 		// Transport failure: the truth is unknown. Keep retrying while the
 		// last CONFIRMED window still covers us; fence the moment it ends.
 		if time.Since(confirmedAt) >= validFor-haLeaseWriteMargin {
-			h.selfFence(fmt.Sprintf("fencing lease unconfirmed beyond validity window (%v)", err))
+			h.fenceHeldGrant(staged, fmt.Sprintf("fencing lease unconfirmed beyond validity window (%v)", err))
 			return true
 		}
 		logger.Printf("HA: lease keepalive transport error (retrying inside confirmed window): %v", err)
 		return false
 	}
+}
+
+// fenceHeldGrant ends the grant the keepalive renews: an installed one
+// self-fences; a staged one (never advertised, no role) is dropped, which
+// refuses the transition waiting to expose it.
+func (h *HAState) fenceHeldGrant(staged bool, reason string) {
+	if staged {
+		h.loseStagedGrant(reason)
+		return
+	}
+	h.selfFence(reason)
 }
 
 // withholdLeaseRenewal is the CHAOS-71 branch of leaseRenewOnce: skip the

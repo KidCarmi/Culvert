@@ -89,11 +89,12 @@ type HAState struct {
 	leaseEpoch       int64 // epoch of our current INSTALLED grant (advertised); 0 = not held
 	// grantEpoch is a grant acquireLeaseAttempt took that is NOT yet
 	// installed: leaseEpoch (and so CurrentEpoch, the heartbeat, issuance,
-	// /healthz and write authority) moves to it only in installGrantLocked,
-	// after a snapshot stamped with it has committed (Codex review of #1556,
-	// ha_epoch_commit.go). 0 = none.
+	// /healthz and write authority) moves to it only in exposeGrantLocked,
+	// after commitGrant has committed a snapshot stamped with it (Codex review
+	// of #1556, ha_epoch_commit.go). The keepalive renews it meanwhile.
+	// 0 = none.
 	grantEpoch int64
-	// stampEpoch is the epoch installGrantLocked is committing: while it is
+	// stampEpoch is the epoch commitGrant is committing: while it is
 	// set the fence mirror (what publishes stamp) reads it, so every commit in
 	// that window carries the new epoch before anything advertises it.
 	stampEpoch int64
@@ -321,13 +322,19 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 	if !h.acquireLeaseForLeadership("ha enable") {
 		return "", fmt.Errorf("fencing lease not acquired — cannot enable HA leadership (see logs)")
 	}
-	h.mu.Lock()
-	// The new epoch is committed into the snapshot BEFORE it is advertised or
-	// any role is taken; refused, HA stays off (ha_epoch_commit.go). The new
+	// The keepalive renews the staged grant while the new epoch is committed
+	// into the snapshot, outside h.mu; only then is the epoch advertised and
+	// the role taken. Refused, HA stays off (ha_epoch_commit.go). The new
 	// address list is published afterwards, on its own, by the topology writer.
-	if err := h.installGrantLocked(haTransitionEnable); err != nil {
-		h.mu.Unlock()
+	h.startLeaseKeepalive()
+	epoch, err := h.commitGrant(haTransitionEnable)
+	if err != nil {
 		return "", fmt.Errorf("HA enable refused — the config snapshot could not carry the new fencing epoch: %w", err)
+	}
+	h.mu.Lock()
+	if err := h.exposeGrantLocked(epoch); err != nil {
+		h.mu.Unlock()
+		return "", fmt.Errorf("HA enable refused: %w", err)
 	}
 	h.setTopologyLocked("leader", peerAddr, haTransitionEnable)
 	h.since = time.Now()
@@ -436,6 +443,7 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// interrupted resume.
 	leaseGranted, foreignHolder := h.acquireLeaseForResume()
 	if !resumePersistedStill(guard) {
+		h.dropStagedGrant()
 		return false
 	}
 	// A grant taken by a resume that then aborts (shutdown, or a live HA
@@ -455,21 +463,28 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 			return true
 		}
 	}
+	// A grant is installed (its epoch advertised) only after a snapshot
+	// stamped with it commits, outside h.mu. Refused, the resume takes the
+	// ADR-0005 S2 stance for a resume without a usable fence: the role,
+	// read-only (no write authority, issuance refused) — never a roleless
+	// node, whose standalone sinks are ungated. The refusal is paged once.
+	var epoch int64
+	epochRefused := false
+	if leaseGranted {
+		var aborted bool
+		if epoch, epochRefused, aborted = h.commitResumeGrant(guard); aborted {
+			return false
+		}
+		leaseGranted = !epochRefused
+	}
 	h.mu.Lock()
 	if h.resumeClaimedLocked(guard) {
+		h.abandonGrantLocked()
 		h.mu.Unlock()
 		return false
 	}
-	// A grant is installed (its epoch advertised) only after a snapshot
-	// stamped with it commits. Refused, the resume takes the ADR-0005 S2
-	// stance for a resume without a usable fence: the role, read-only (no
-	// write authority, issuance refused) — never a roleless node, whose
-	// standalone sinks are ungated. The refusal is paged once.
-	epochRefused := false
-	if leaseGranted {
-		if err := h.installGrantLocked(haTransitionResume); err != nil {
-			leaseGranted, epochRefused = false, true
-		}
+	if leaseGranted && h.exposeGrantLocked(epoch) != nil {
+		leaseGranted, epochRefused = false, true
 	}
 	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
 	h.token = cfg.Token
@@ -489,6 +504,28 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// Re-persist the SAME values (idempotent; keeps the file canonical).
 	_ = saveHAConfig(cfg)
 	return true
+}
+
+// commitResumeGrant is the resume's commit of its staged grant, outside h.mu:
+// an early claim check (abandoning the grant if the resume lost), the
+// keepalive on the staged grant, then the stamped commit. refused: the commit
+// was refused (paged); aborted: the resume must not proceed.
+func (h *HAState) commitResumeGrant(guard func() bool) (epoch int64, refused, aborted bool) {
+	h.mu.Lock()
+	aborted = h.resumeClaimedLocked(guard)
+	if aborted {
+		h.abandonGrantLocked()
+	}
+	h.mu.Unlock()
+	if aborted {
+		return 0, false, true
+	}
+	h.startLeaseKeepalive() // renews the staged grant; renewing exposes nothing
+	e, err := h.commitGrant(haTransitionResume)
+	if err != nil {
+		return 0, true, false
+	}
+	return e, false, false
 }
 
 // reportReadOnlyResume reports a resume that took the leader role WITHOUT write
@@ -1055,9 +1092,8 @@ func (h *HAState) promote(reason string) {
 	// retryable standby: no listener, no claimed role (Codex review of #1556).
 	// Until exposure the stamp mirror stays on the new epoch, so onPromote's
 	// activation publishes carry it too.
-	h.mu.Lock()
-	epoch, err := h.commitGrantLocked(haTransitionPromote)
-	h.mu.Unlock()
+	h.startLeaseKeepalive() // renews the staged grant; renewing exposes nothing
+	epoch, err := h.commitGrant(haTransitionPromote)
 	if err != nil {
 		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
 		logger.Printf("HA: promote (%s) refused — staying as standby: %v", sanitizeLog(reason), err)
@@ -1079,7 +1115,15 @@ func (h *HAState) promote(reason string) {
 	}
 
 	h.mu.Lock()
-	h.exposeGrantLocked(epoch)
+	if err := h.exposeGrantLocked(epoch); err != nil {
+		h.mu.Unlock()
+		h.promoted.Store(false)
+		// Residual: onPromote already started the listener, so a later
+		// promote's onPromote finds it running. Reaching here needs the grant
+		// to be lost in the moments between the commit and the exposure.
+		logger.Printf("HA: promote (%s) refused — staying as standby: %v", sanitizeLog(reason), err)
+		return
+	}
 	h.setTopologyLocked("leader", h.peerAddr, haTransitionPromote)
 	h.since = time.Now()
 	if h.lease != nil {
@@ -1130,9 +1174,7 @@ func (h *HAState) runOnPromote(pc promoteContext) bool {
 	if !panicked && promoteErr == nil {
 		return true
 	}
-	h.mu.Lock()
-	h.abandonGrantLocked()
-	h.mu.Unlock()
+	h.dropStagedGrant()
 	h.promoted.Store(false) // allow a later retry (we are provably not leader here)
 	if panicked {
 		logger.Printf("HA: promote panicked and was contained — staying as standby (retryable)")

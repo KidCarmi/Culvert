@@ -880,7 +880,7 @@ func (s *ConfigStore) clearPublishErrLocked(kind publishKind) {
 	// record's (noteCPAddrPublish), guarded by the publish generation.
 	// publishEpoch: nothing either — a restamp carries none of a rejected full
 	// publish's policy, and its refusal is the HA transition's to report
-	// (installGrantLocked).
+	// (commitGrant).
 }
 
 // afterCommit records the blocklist delta and notifies subscribers OUTSIDE the
@@ -961,7 +961,7 @@ func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool
 // RestampFenceEpoch commits the COMMITTED snapshot, content unchanged,
 // restamped with the current stamp epoch (publishFenceEpoch) — the commit an
 // authority-gaining HA transition makes BEFORE it advertises a new fencing
-// epoch (installGrantLocked, ha_epoch_commit.go). The candidate is the
+// epoch (commitGrant, ha_epoch_commit.go). The candidate is the
 // committed snapshot plus the epoch digits, through the same commit-time gates
 // and optimistic concurrency as every publish. Nothing published yet (no
 // snapshot to restamp: the first publish stamps the epoch itself) and an
@@ -1015,7 +1015,7 @@ func (s *ConfigStore) rejectPublish(kind publishKind, err error) error {
 		// before the webhooks load) belong to the generation-guarded record:
 		// the caller's noteCPAddrPublish decides and pageCPAddrRejection
 		// delivers. The epoch kind's refusal is paged, once per episode, by
-		// the HA transition that needed it (installGrantLocked).
+		// the HA transition that needed it (commitGrant).
 		return err
 	}
 	payload := AlertPayload{

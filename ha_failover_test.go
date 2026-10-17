@@ -203,9 +203,12 @@ func TestAcquireLeaseForResume_WaitsOutOwnGhost(t *testing.T) {
 	if h.WriteAllowed() {
 		t.Fatal("a staged grant conferred write authority before it was installed")
 	}
-	h.mu.Lock()
-	err := h.installGrantLocked("test")
-	h.mu.Unlock()
+	epoch, err := h.commitGrant("test")
+	if err == nil {
+		h.mu.Lock()
+		err = h.exposeGrantLocked(epoch)
+		h.mu.Unlock()
+	}
 	if err != nil || !h.WriteAllowed() {
 		t.Fatalf("installing the resume's grant must confer write authority (err=%v)", err)
 	}

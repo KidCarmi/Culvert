@@ -8810,6 +8810,42 @@ required before merge; each is now in the tree.
     transition returns with its republish only recorded.
 
   Five mutations each fail a gate.
+* **Nineteenth review round — the epoch-stamped commit runs outside
+  `HAState.mu` (the class rule of Codex P1 4301857115, applied to HA
+  fencing).** #1556 fixed the topology republish under `h.mu`. The stamped
+  commit of the seventeenth round ran under `h.mu` too
+  (`installGrantLocked`), with the keepalive started only afterwards, so a
+  large snapshot could cost a short-TTL lease in the same way.
+
+  The commit now runs outside the lock, with the keepalive already renewing
+  the grant:
+  - The acquire stages the grant.
+  - The transition starts the keepalive on the staged grant
+    (`heldEpochLocked`; renewing exposes nothing).
+  - `commitGrant` commits the stamped snapshot outside `h.mu`. It takes the
+    lock only to set the stamp, and afterwards for the compare-only
+    keep-or-revert decision.
+  - `exposeGrantLocked` takes `h.mu` again, re-checks that the grant is still
+    staged, installs the epoch and takes the role.
+
+  If the keepalive loses a grant that was never installed, it drops the grant
+  (`loseStagedGrant`) instead of self-fencing a role that was never taken,
+  and the exposure is then refused. An aborted or refused transition stops a
+  keepalive that renewed only the staged grant, so the grant lapses at its
+  TTL.
+
+  Gates:
+  - `TestChaos71_SlowEpochCommitDoesNotCostTheLease`: a commit longer than a
+    3 s TTL leaves the lease held and renewed, and the epoch installed.
+  - `TestChaos71_GrantLostDuringTheEpochCommitIsNotExposed`.
+  - `TestChaos71_Wall_NoSnapshotPublishUnderTheHALock`, from #1556, now
+    passes here.
+  - The fencing wall now requires the keepalive before the commit.
+
+  Residual: a promote whose grant is lost in the moments between
+  `onPromote` and the exposure leaves the listener running, so the next
+  promote's `onPromote` finds it already running. That needs a lease loss
+  during the promotion itself.
 * **Eighteenth review round — a refused promote commit never starts the
   listener (Codex P1 4300948604; HA fencing, split out of #1556).** The
   seventeenth round committed the new epoch after `onPromote`. A fresh
