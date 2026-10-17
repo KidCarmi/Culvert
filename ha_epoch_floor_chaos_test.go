@@ -190,8 +190,8 @@ func TestChaos71_HARoleLosingACommittedGrantStampsZero(t *testing.T) {
 }
 
 // TestChaos71_Wall_RoleLessEpochFloorAppliesOnlyWithoutAnHARole: the floor
-// reaches the stamp mirror and the config reply epoch only while no HA role is
-// held; taking a role drops it at once (setTopologyLocked re-derives the
+// reaches the stamp mirror (and so the committed stamp a delta reply carries)
+// only while no HA role is held; taking a role drops it at once (setTopologyLocked re-derives the
 // mirror); an installed grant wins under every role. committedEpoch is
 // written only by noteCommittedEpochLocked and read only by
 // configEpochLocked, inside its no-role branch.
@@ -205,9 +205,6 @@ func TestChaos71_Wall_RoleLessEpochFloorAppliesOnlyWithoutAnHARole(t *testing.T)
 		t.Helper()
 		if got := h.PublishedFenceEpoch(); got != want {
 			t.Errorf("%s: publishes stamp %d, want %d", step, got, want)
-		}
-		if got := h.ConfigReplyEpoch(); got != want {
-			t.Errorf("%s: config replies carry %d, want %d", step, got, want)
 		}
 	}
 	h.mu.Lock()

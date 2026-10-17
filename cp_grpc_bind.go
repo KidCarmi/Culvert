@@ -812,6 +812,58 @@ func buildControlPlaneServer(cfg cpListenerConfig) (*grpc.Server, net.Listener, 
 // in production.
 var cpWrapListener = func(ln net.Listener) net.Listener { return ln }
 
+// cpPromoteUndoTimeout bounds undoPromoteControlPlane's listener stop.
+const cpPromoteUndoTimeout = 5 * time.Second
+
+// undoPromoteControlPlane is the HA promote's undo (StartAsStandbyWithUndo):
+// a promote whose activation completed but which then failed leaves no
+// Control Plane behind (deactivateControlPlane). A package-level seam so a
+// gate can observe it.
+var undoPromoteControlPlane = func() {
+	ctx, cancel := context.WithTimeout(context.Background(), cpPromoteUndoTimeout)
+	defer cancel()
+	if err := deactivateControlPlane(ctx); err != nil {
+		logErrorf("ControlPlane: undoing a failed promote's activation did not complete: %v", err)
+	}
+}
+
+// deactivateControlPlane undoes a synchronous activation (activateControlPlane)
+// that a failed HA promote completed, through the existing stop and release
+// paths: the supervisor stops (stopControlPlaneListener's step, its server
+// with it), and once its loop has exited the role it claimed is restored and
+// address-list ownership released (releaseActivation). The node is then what
+// it was before the activation, so the activation can run again. Nothing
+// armed: a no-op.
+func deactivateControlPlane(ctx context.Context) error {
+	cpActivationMu.Lock()
+	sup := cpSupervisor
+	cpSupervisor = nil
+	cpActivationMu.Unlock()
+	if sup == nil {
+		return nil
+	}
+	if err := sup.Stop(ctx); err != nil {
+		return fmt.Errorf("stop the control plane listener: %w", err)
+	}
+	sup.releaseActivation()
+	return nil
+}
+
+// releaseActivation gives back what the supervisor's activation claimed: the
+// Control Plane role (restored to what it first replaced, unless another
+// writer has changed it since) and CP address-list ownership — after any
+// withdrawal of this node from the committed list commits, as a terminal exit
+// does (exitTerminal), but without its terminal report: an undo is not a
+// listener failure. Only after the loop exited (Stop returned), so s.committed
+// and s.original are no longer the loop's.
+func (s *cpListenerSupervisor) releaseActivation() {
+	if s.committed && s.haveOriginal && restoreControlPlaneRole(s.original, s.cfg.addr) {
+		s.committed = false
+	}
+	_, _ = cpWithdrawCPAddress(s.cfg.addr)
+	globalConfigStore.releaseCPAddressSourceAfterWithdrawal(s.cfg.addr)
+}
+
 // stopControlPlaneListener stops the supervisor (and with it the current
 // server), bounded by ctx. The shutdown hook's entry point: stopping the
 // SERVER alone would leave the supervisor to rebind on its way out.

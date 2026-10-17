@@ -184,7 +184,12 @@ type HAState struct {
 type promoteContext struct {
 	grpcAddr, certFile, keyFile, caFile string
 	onPromote                           func() error
-	set                                 bool
+	// undoPromote undoes what a SUCCESSFUL onPromote activated, when the
+	// promote fails after it (undoPromoteActivation). nil: onPromote
+	// activates nothing (a demoted leader's re-entry, whose Control Plane
+	// never stopped).
+	undoPromote func()
+	set         bool
 }
 
 var globalHA = &HAState{}
@@ -339,12 +344,12 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 	h.startLeaseKeepalive()
 	epoch, err := h.commitGrant(haTransitionEnable)
 	if err != nil {
-		return "", fmt.Errorf("HA enable refused — the config snapshot could not carry the new fencing epoch: %w", err)
+		return "", haInstallError("enable", err)
 	}
 	h.mu.Lock()
 	if err := h.exposeGrantLocked(haTransitionEnable, epoch); err != nil {
 		h.mu.Unlock()
-		return "", fmt.Errorf("HA enable refused: %w", err)
+		return "", haInstallError("enable", err)
 	}
 	h.setTopologyLocked("leader", peerAddr, haTransitionEnable)
 	h.since = time.Now()
@@ -478,14 +483,18 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// ADR-0005 S2 stance for a resume without a usable fence: the role,
 	// read-only (no write authority, issuance refused) — never a roleless
 	// node, whose standalone sinks are ungated. The refusal is paged once.
+	// A grant LOST meanwhile is not a refusal but an unknown fence: the
+	// resume continues as an unfenced leader and recovery is armed
+	// (resumeInstallOutcome).
 	var epoch int64
 	epochRefused := false
 	if leaseGranted {
 		var aborted bool
-		if epoch, epochRefused, aborted = h.commitResumeGrant(guard); aborted {
+		var err error
+		if epoch, aborted, err = h.commitResumeGrant(guard); aborted {
 			return false
 		}
-		leaseGranted = !epochRefused
+		leaseGranted, epochRefused = resumeInstallOutcome(err)
 	}
 	h.mu.Lock()
 	if h.resumeClaimedLocked(guard) {
@@ -493,8 +502,8 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 		h.mu.Unlock()
 		return false
 	}
-	if leaseGranted && h.exposeGrantLocked(haTransitionResume, epoch) != nil {
-		leaseGranted, epochRefused = false, true
+	if leaseGranted {
+		leaseGranted, epochRefused = resumeInstallOutcome(h.exposeGrantLocked(haTransitionResume, epoch))
 	}
 	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
 	h.token = cfg.Token
@@ -518,9 +527,9 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 
 // commitResumeGrant is the resume's commit of its staged grant, outside h.mu:
 // an early claim check (abandoning the grant if the resume lost), the
-// keepalive on the staged grant, then the stamped commit. refused: the commit
-// was refused (paged); aborted: the resume must not proceed.
-func (h *HAState) commitResumeGrant(guard func() bool) (epoch int64, refused, aborted bool) {
+// keepalive on the staged grant, then the stamped commit. aborted: the resume
+// must not proceed; err: commitGrant's failure, for resumeInstallOutcome.
+func (h *HAState) commitResumeGrant(guard func() bool) (epoch int64, aborted bool, err error) {
 	h.mu.Lock()
 	aborted = h.resumeClaimedLocked(guard)
 	if aborted {
@@ -528,14 +537,29 @@ func (h *HAState) commitResumeGrant(guard func() bool) (epoch int64, refused, ab
 	}
 	h.mu.Unlock()
 	if aborted {
-		return 0, false, true
+		return 0, true, nil
 	}
 	h.startLeaseKeepalive() // renews the staged grant; renewing exposes nothing
 	e, err := h.commitGrant(haTransitionResume)
 	if err != nil {
-		return 0, true, false
+		return 0, false, err
 	}
-	return e, false, false
+	return e, false, nil
+}
+
+// resumeInstallOutcome classifies a resume's install step by cause
+// (grantLost): installed (nil); unfenced (the grant was lost, so the fence is
+// unknown and recovery is armed); or refused (the snapshot could not carry the
+// epoch: paged, read-only, no auto-retry, ADR-0005 S2).
+func resumeInstallOutcome(err error) (granted, refused bool) {
+	switch {
+	case err == nil:
+		return true, false
+	case grantLost(err):
+		return false, false
+	default:
+		return false, true
+	}
 }
 
 // reportReadOnlyResume reports a resume that took the leader role WITHOUT write
@@ -581,6 +605,16 @@ func (h *HAState) reportReadOnlyResume(epochRefused, unfenced, foreignHolder boo
 func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
 	onPromote func() error) {
+	h.StartAsStandbyWithUndo(ctx, leaderAddr, token, grpcAddr, certFile, keyFile, caFile, autoFailover, onPromote, nil)
+}
+
+// StartAsStandbyWithUndo is StartAsStandby for an onPromote that activates
+// something (the Control Plane): undoPromote reverses a successful onPromote
+// when the promote then fails, so the node is left a clean, retryable standby
+// (undoPromoteActivation).
+func (h *HAState) StartAsStandbyWithUndo(ctx context.Context, leaderAddr, token string,
+	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
+	onPromote func() error, undoPromote func()) {
 	h.mu.Lock()
 	if h.stopping || h.shutdown {
 		// Stop() is joining our goroutines — spawning a new sync loop here
@@ -594,7 +628,8 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	h.since = time.Now()
 	h.autoFailover = autoFailover
 	h.syncFailCount = 0 // fresh loop — don't carry over a stale streak from a prior standby stint
-	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile, onPromote: onPromote, set: true}
+	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile,
+		onPromote: onPromote, undoPromote: undoPromote, set: true}
 	h.promoted.Store(false)
 	stopCh := make(chan struct{})
 	h.stopCh = stopCh
@@ -1106,7 +1141,7 @@ func (h *HAState) promote(reason string) {
 	epoch, err := h.commitGrant(haTransitionPromote)
 	if err != nil {
 		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
-		logger.Printf("HA: promote (%s) refused — staying as standby: %v", sanitizeLog(reason), err)
+		logger.Printf("HA: promote (%s): %v — staying as standby", sanitizeLog(reason), haInstallError("promote", err))
 		return
 	}
 
@@ -1127,11 +1162,16 @@ func (h *HAState) promote(reason string) {
 	h.mu.Lock()
 	if err := h.exposeGrantLocked(haTransitionPromote, epoch); err != nil {
 		h.mu.Unlock()
+		// onPromote is transactional (Codex P1 4302926144 on #1645): the
+		// activation it completed is undone BEFORE the once-guard is reset, so
+		// a retry starts from a clean standby — no listener, no claimed
+		// Control Plane role, no address-list ownership — instead of failing
+		// "already running as control-plane" on every attempt. Reached when
+		// the activation's first publish was rejected after the preflight
+		// passed, or the grant was lost between the commit and here.
+		undoPromoteActivation(pc, reason)
 		h.promoted.Store(false)
-		// Residual: onPromote already started the listener, so a later
-		// promote's onPromote finds it running. Reaching here needs the grant
-		// to be lost in the moments between the commit and the exposure.
-		logger.Printf("HA: promote (%s) refused — staying as standby: %v", sanitizeLog(reason), err)
+		logger.Printf("HA: promote (%s): %v — staying as standby", sanitizeLog(reason), haInstallError("promote", err))
 		return
 	}
 	h.setTopologyLocked("leader", h.peerAddr, haTransitionPromote)
@@ -1192,6 +1232,19 @@ func (h *HAState) runOnPromote(pc promoteContext) bool {
 		logger.Printf("HA: promote failed: %v — staying as standby", promoteErr)
 	}
 	return false
+}
+
+// undoPromoteActivation runs a promote context's undo for an onPromote that
+// succeeded before the promote failed, contained like onPromote itself. The
+// caller must NOT hold h.mu: the undo stops the Control Plane listener, whose
+// activation reads HA status.
+func undoPromoteActivation(pc promoteContext, reason string) {
+	if pc.undoPromote == nil {
+		return
+	}
+	if runGuarded(haPromoteComponent, pc.undoPromote) {
+		logger.Printf("HA: undoing the failed promote's (%s) Control Plane activation panicked and was contained", sanitizeLog(reason))
+	}
 }
 
 // PromoteManually performs an explicit, operator- or orchestrator-triggered

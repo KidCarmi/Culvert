@@ -1209,6 +1209,19 @@ func (s *ConfigStore) Version() int64 {
 	return s.version
 }
 
+// committedVersionEpoch returns the committed version and the fencing epoch
+// the committed snapshot is stamped with (0 before the first publish), read
+// together under one lock: the epoch a reply describing that version must
+// carry (GetConfigDelta).
+func (s *ConfigStore) committedVersionEpoch() (version, epoch int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.published {
+		epoch = s.snap.Epoch
+	}
+	return s.version, epoch
+}
+
 // Subscribe returns a channel that receives a signal on every config update.
 func (s *ConfigStore) Subscribe() chan struct{} {
 	ch := make(chan struct{}, 1)

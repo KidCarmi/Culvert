@@ -51,7 +51,11 @@ package main
 //     leader's higher epoch. With no HA role (a failed enable) it is the
 //     role-less floor, E itself, so the HA-off node's Data Planes keep
 //     accepting its config (owner decision on Codex P1 4302435329 of #1645,
-//     recorded in ADR-0005's implementation notes).
+//     recorded in ADR-0005's implementation notes). A lost grant is NOT the
+//     refusal of step 4 (grantLost, Codex P1 4302926142 of #1645): nothing
+//     is paged, and a resume becomes an unfenced leader with CHAOS-55
+//     recovery armed, as for any unknown fence. A promote that loses it after
+//     onPromote also undoes the activation (undoPromoteActivation).
 //
 // TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit pins the order.
 
@@ -63,8 +67,9 @@ import (
 // haTransitionRecovery labels the CHAOS-55 lease-recovery grant.
 const haTransitionRecovery = "ha_lease_recovery"
 
-// errNoStagedGrant: an install with a lease configured but no grant staged.
-var errNoStagedGrant = errors.New("no staged fencing-lease grant to install")
+// errNoStagedGrant: an install with a lease configured but no grant staged —
+// the keepalive dropped it before the commit began. A lost grant.
+var errNoStagedGrant = fmt.Errorf("%w: no staged fencing-lease grant to install", errGrantLost)
 
 // haRestampFenceEpoch commits the committed snapshot restamped with the
 // current stamp epoch. Test seam.
@@ -158,16 +163,38 @@ func (h *HAState) commitGrant(transition string) (int64, error) {
 		h.noteCommittedEpochLocked(e)
 		return e, nil
 	}
-	if h.grantEpoch == e {
-		h.pageEpochRefusedLocked(transition, e, err)
+	if h.grantEpoch != e {
+		// The keepalive dropped the grant while it was committing: whatever
+		// the commit's own error, the cause is the fence, not the snapshot.
+		h.abandonGrantLocked()
+		return 0, fmt.Errorf("%w: %w", errGrantLost, err)
 	}
+	h.pageEpochRefusedLocked(transition, e, err)
 	h.abandonGrantLocked()
 	return 0, err
 }
 
 // errGrantLost: the staged grant was lost (superseded, expired, or no longer
-// confirmed) between its commit and its exposure.
+// confirmed) before its epoch could be installed.
 var errGrantLost = errors.New("the fencing-lease grant was lost before its epoch could be installed")
+
+// grantLost classifies an install failure (commitGrant, exposeGrantLocked) BY
+// CAUSE (Codex P1 4302926142 on #1645). A lost grant means the fence's state
+// is lost or unknown, not that the snapshot cannot carry an epoch: it takes
+// the path ADR-0005 arms for an unknown fence (a resume becomes an unfenced
+// leader and the CHAOS-55 recovery loop re-acquires). Every other failure is
+// a snapshot-commit refusal (budget, validation, nothing published, the
+// commit race lost every attempt): paged, and a resume takes the no-retry
+// read-only stance.
+func grantLost(err error) bool { return errors.Is(err, errGrantLost) }
+
+// haInstallError words a failed enable or promote by cause (grantLost).
+func haInstallError(transition string, err error) error {
+	if grantLost(err) {
+		return fmt.Errorf("HA %s did not complete — the fencing lease was lost before its epoch could be installed (retry): %w", transition, err)
+	}
+	return fmt.Errorf("HA %s refused — the config snapshot could not carry the new fencing epoch: %w", transition, err)
+}
 
 // exposeGrantLocked installs a committed grant's epoch — the ONLY place a
 // non-zero epoch reaches leaseEpoch, and so the heartbeat, issuance,

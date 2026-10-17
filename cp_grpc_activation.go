@@ -120,6 +120,11 @@ var cpWithdrawCPAddress = func(addr string) (changed bool, err error) {
 // the "shutdown began after the claim" window deterministically.
 var cpActivationAfterClaim func()
 
+// cpHeartbeatMonitorOnce starts the Control Plane's heartbeat monitor once per
+// process: it runs for the process lifecycle, and an activation can be undone
+// and redone (deactivateControlPlane).
+var cpHeartbeatMonitorOnce sync.Once
+
 // commitActivation is the ONE post-bind activation step (see the file header
 // for the ordering and why each step is where it is). conflictRole names the
 // established role on cpCommitRoleConflict; err carries the publish rejection
@@ -157,7 +162,11 @@ func (s *cpListenerSupervisor) commitActivation() (outcome cpCommitOutcome, conf
 		// the context is nil in every one-shot command path and in the test
 		// binary, and on the SUPERVISOR goroutine a nil deref is a panic that
 		// kills the listener permanently (found by this sweep's self-heal gate).
-		globalClusterStore.StartHeartbeatMonitor(resolveLifecycleCtx().Done())
+		// Once per process: an activation undone by a failed promote
+		// (deactivateControlPlane) and run again must not start another.
+		cpHeartbeatMonitorOnce.Do(func() {
+			globalClusterStore.StartHeartbeatMonitor(resolveLifecycleCtx().Done())
+		})
 	}
 	return cpCommitted, "", nil
 }

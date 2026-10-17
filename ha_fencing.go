@@ -79,20 +79,6 @@ func (h *HAState) configEpochLocked() int64 {
 	return h.leaseEpoch
 }
 
-// ConfigReplyEpoch is the epoch a config reply that carries no snapshot (a
-// GetConfigDelta reply) is fenced with: CurrentEpoch, except that with no HA
-// role it never drops below the role-less floor, so it matches the stamp
-// those Data Planes ratcheted to (configEpochLocked). Unlike the stamp mirror
-// it never carries an in-flight, unexposed epoch.
-func (h *HAState) ConfigReplyEpoch() int64 {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	if h.lease == nil {
-		return 0
-	}
-	return h.configEpochLocked()
-}
-
 // PublishedFenceEpoch is the epoch a config publish stamps
 // (ConfigStore.commitPublish), read without h.mu so it is safe while h.mu is
 // held. It equals CurrentEpoch except while commitGrant commits a new
