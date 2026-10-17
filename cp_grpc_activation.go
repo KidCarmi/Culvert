@@ -212,7 +212,8 @@ func (s *cpListenerSupervisor) rollbackRole(prev cpRoleFields) {
 //
 // This publish reflects the HA topology AS OF NOW. An HA transition after it —
 // onActivated's leadership resume included (Codex review of #1556) — is
-// republished by the HA topology writer itself (setTopologyLocked,
+// republished by the HA topology writer itself (setTopologyLocked records it,
+// republishTopology publishes it once HAState.mu is released;
 // ha_topology.go), so no caller here has to order anything after the resume.
 // Lock order: cpActivationGateMu → HAState.mu (read, via Status) → clusterRoleMu
 // → ConfigStore.mu.

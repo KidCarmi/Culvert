@@ -55,6 +55,12 @@ func TestChaos71_HATransitionsRepublishTheCPAddressList(t *testing.T) {
 
 	check := func(step string, want []string) {
 		t.Helper()
+		h.mu.RLock()
+		left := h.topologyRepublish
+		h.mu.RUnlock()
+		if left != "" {
+			t.Errorf("%s: the transition returned with its republish (%q) still only recorded — it never ran", step, left)
+		}
 		got := globalConfigStore.Get().CPAddresses
 		if derived := buildCPAddressList(); !slicesEqual(got, derived) {
 			t.Errorf("%s: published CP address list %v != derived %v — the transition did not republish", step, got, derived)

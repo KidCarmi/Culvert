@@ -112,14 +112,18 @@ type HAState struct {
 	shutdownCh chan struct{}
 	// fenceEpoch is the epoch every config publish STAMPS (lease == nil ? 0 :
 	// stampEpoch while an install commits it, else leaseEpoch), for LOCK-FREE
-	// readers: the HA topology writer publishes while holding h.mu, so the
-	// stamp must not re-enter it. Written only by syncFenceEpochLocked, under
-	// h.mu, in the same critical section as the fields it derives from
+	// readers: a config publish stamps it at commit without taking h.mu.
+	// Written only by syncFenceEpochLocked, under h.mu, in the same critical
+	// section as the fields it derives from
 	// (TestChaos71_Wall_OnlyCommitPublishCommits).
-	fenceEpoch       atomic.Int64
-	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
-	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
-	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running
+	fenceEpoch atomic.Int64
+	// topologyRepublish is the transition whose CP address republish is due
+	// (setTopologyLocked records it under h.mu; republishTopology runs it
+	// after h.mu is released). "" = none.
+	topologyRepublish string
+	leaseConfirmedAt  time.Time     // local time of the last backend-CONFIRMED grant/renew
+	leaseValidFor     time.Duration // validity the backend confirmed at leaseConfirmedAt
+	leaseStopCh       chan struct{} // keepalive loop stop; nil = not running
 	// leaseRenewWithheld is true while the keepalive is deliberately NOT
 	// renewing because this leader's Control Plane gRPC listener is dark
 	// (CHAOS-71 self-fence, see leaseRenewOnce). Only drives the transition
@@ -348,6 +352,7 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 	})
 	h.mu.Unlock()
 	h.startLeaseKeepalive()
+	h.republishTopology() // after the keepalive: renewal never waits on publication
 
 	logPeerAddr := sanitizeLog(peerAddr)
 	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", logPeerAddr, autoFailover, term)
@@ -480,6 +485,7 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	h.mu.Unlock()
 	h.reportReadOnlyResume(epochRefused, leaseConfigured && !leaseGranted, foreignHolder)
 	h.startLeaseKeepalive()
+	h.republishTopology() // after the keepalive: renewal never waits on publication
 	// Re-persist the SAME values (idempotent; keeps the file canonical).
 	_ = saveHAConfig(cfg)
 	return true
@@ -551,6 +557,7 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	// passing the check guarantees this Add happens-before it.
 	h.wg.Add(1)
 	h.mu.Unlock()
+	h.republishTopology()
 
 	// Persist HA config so standby restarts know HA is enabled.
 	_ = saveHAConfig(&haConfig{
@@ -1108,6 +1115,7 @@ func (h *HAState) promote(reason string) {
 	// joining would deadlock waiting on ourselves.
 	h.stopLoops()
 	h.startLeaseKeepalive() // after stopLoops(): it halts the keepalive too
+	h.republishTopology()   // after the keepalive: renewal never waits on publication
 
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }

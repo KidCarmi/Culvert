@@ -10,7 +10,8 @@ package main
 // nothing republished after. Fixing that call order would leave every other
 // transition (enable, standby entry, promote, self-fence, resume) to the same
 // discipline, so instead the two fields the list derives from — role and peer —
-// have ONE writer, setTopologyLocked, and that writer republishes.
+// have ONE writer, setTopologyLocked, which records a republish that its
+// caller runs (republishTopology) once HAState.mu is released.
 // TestChaos71_Wall_HATopologyHasOneWriter pins the single writer;
 // TestChaos71_HATransitionsRepublishTheCPAddressList drives every transition.
 
@@ -54,24 +55,19 @@ func cpAddressListFor(haEnabled bool, peer, myAddr string) []string {
 
 // setTopologyLocked is the ONE writer of h.role and h.peerAddr. Caller holds
 // h.mu (write). transition is a bounded label (haTransition*) naming the
-// caller, carried into the pending state if the republish fails. When the topology source actually changes, the CP address
-// list is republished right here, from the NEW values — under h.mu, so no
-// other transition can interleave, and without re-reading h (the derivation
-// takes the values as arguments; Status() would self-deadlock).
+// caller, carried into the pending state if the republish fails.
 //
-// Lock order: h.mu → clusterRoleMu (clusterRoleSnapshot) → ConfigStore.mu.
-// Neither of the inner locks is ever held while taking h.mu, and nothing on
-// the publish path re-enters h.mu (the derivation takes its inputs as
-// arguments). Holding h.mu here is also what orders this against activation:
-// a concurrent first publish derives through Status(), so it either runs
-// before this write (and the reconcile below corrects it) or after (and sees
-// the new topology) — never between.
-//
-// Cost under h.mu: UpdateCPAddressesFrom returns before validating when the
-// derived list is unchanged, so promote and self-fence (same peer) commit
-// nothing; the full validate/commit runs only when the list actually changes
-// (enable with a new peer, standby entry against a new leader, a resume after
-// a delayed bind) — boot- and admin-rate events.
+// It only RECORDS the change: when the topology source actually changes it
+// marks a republish due (topologyRepublish). The republish itself runs in
+// republishTopology, which every caller invokes AFTER releasing h.mu — and,
+// on an authority-gaining transition, after the keepalive has started. A
+// publish marshals and commits a snapshot of up to snapshotWireBudget (and
+// records an O(N) blocklist delta); run under h.mu it could outlast a
+// short-TTL lease's trusted window before the keepalive could start or a
+// renewal could take h.mu, so the first renewal would find the lease expired
+// and self-fence (Codex review of #1556). No ConfigStore publish or commit
+// runs while h.mu is held, and lease renewal never waits on publication
+// (TestChaos71_Wall_NoSnapshotPublishUnderTheHALock).
 func (h *HAState) setTopologyLocked(role, peer, transition string) {
 	if h.role == role && h.peerAddr == peer {
 		return
@@ -80,19 +76,38 @@ func (h *HAState) setTopologyLocked(role, peer, transition string) {
 	if h != haTopologySource() {
 		return
 	}
-	enabled := role != ""
-	// A no-op unless this node is an active Control Plane (the store has an
-	// address source). A failure is NEVER dropped and NEVER rolls the
-	// transition back (Codex review of #1556): rejectPublish logs and alerts
-	// it, and publishOwnedCPAddresses latches the `cp_address_list` pending
-	// state and retries from the live source until it publishes. Why no
-	// transition — authority-gaining included — is refused over it is the
-	// ADR-0005 reasoning in cp_addr_publish.go's header. It can be a hint and
-	// nothing more because the fencing epoch never rides in this commit: an
-	// authority-gaining transition has already committed the snapshot stamped
-	// with its new epoch (installGrantLocked, ha_epoch_commit.go) before it
-	// reaches here, so a rejected list leaves the fleet on the right epoch.
-	_ = globalConfigStore.reconcileCPAddressesFrom(transition, func() []string {
-		return cpAddressListFor(enabled, peer, clusterRoleSnapshot().grpcAddr)
-	})
+	h.topologyRepublish = transition // the latest change wins: the republish derives from live state
+}
+
+// republishTopology runs the republish setTopologyLocked marked due, if any.
+// The caller must NOT hold h.mu.
+//
+// It derives the list from the LIVE topology (buildCPAddressList reads
+// Status()), on every compare-and-swap attempt, so a transition that lands
+// before this runs is published too, and an activation publish built from
+// the older topology loses its commit race and rebuilds. A no-op unless this
+// node is an active Control Plane (the store has an address source). A
+// failure is NEVER dropped and NEVER rolls the transition back (Codex review
+// of #1556): rejectPublish logs it, and publishOwnedCPAddresses latches the
+// `cp_address_list` pending state, pages once per episode and retries from
+// the live source until it publishes. Why no transition — authority-gaining
+// included — is refused over it is the ADR-0005 reasoning in
+// cp_addr_publish.go's header. It can be a hint and nothing more because the
+// fencing epoch never rides in this commit: an authority-gaining transition
+// has already committed the snapshot stamped with its new epoch
+// (ha_epoch_commit.go) before it reaches here, so a rejected list leaves the
+// fleet on the right epoch.
+//
+// Lock order: the publish takes clusterRoleMu (clusterRoleSnapshot) and
+// ConfigStore.mu, and h.mu only through Status(), never while holding the
+// others.
+func (h *HAState) republishTopology() {
+	h.mu.Lock()
+	transition := h.topologyRepublish
+	h.topologyRepublish = ""
+	h.mu.Unlock()
+	if transition == "" {
+		return
+	}
+	_ = globalConfigStore.reconcileCPAddressesFrom(transition, buildCPAddressList)
 }

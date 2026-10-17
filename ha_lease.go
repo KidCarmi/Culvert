@@ -371,6 +371,7 @@ func (h *HAState) selfFence(reason string) {
 	globalHAFailoverRing.Load().record("leader", "standby", "self-fence: "+reason, fencedEpoch, time.Now())
 	h.mu.Unlock()
 	h.promoted.Store(false) // a future (fence-gated) promotion is legitimate
+	h.republishTopology()
 
 	logger.Printf("HA: SELF-FENCED — demoted to read-only standby: %s", sanitizeLog(reason))
 	go alerts.Fire("ha_self_fenced", alerts.Payload{
