@@ -243,7 +243,18 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 			// TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits.
 			name: "panic_with_a_rejected_withdrawal",
 			setup: func(e *cpEdgeEnv) {
-				_, _, _ = cpWithdrawalTopology(e.t, true)
+				_, spawned, _ := cpWithdrawalTopology(e.t, true)
+				// Join the retry loop the rejected withdrawal spawns before the
+				// harness restores the seams it reads (cleanups run LIFO, so
+				// this runs first): receiving its signal orders the loop's seam
+				// reads before those writes (-race).
+				e.t.Cleanup(func() {
+					select {
+					case <-spawned:
+					case <-time.After(10 * time.Second):
+						e.t.Error("the rejected withdrawal never started its retry loop")
+					}
+				})
 				e.onActivated = cpWithdrawalRejectingOnActivated(e.t, true)
 			},
 			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnKeptUntilWithdrawn,
