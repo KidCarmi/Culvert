@@ -37,15 +37,20 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # F-DISK-1 job input: the bad788e5 candidate's image (Deep gate run
-  # 38040017115), which carries every badger/ristretto F-DISK-1 fix incl.
-  # the in-place memtable emptying (5b389f38). The ORIGINAL image (run
-  # 37124197333) reproduced the SIGBUS in 37397680555 (pre-fix control).
-  SOURCE_IMAGE_RUN_ID: "38040017115"
-  SOURCE_IMAGE_TAR_SHA256: b1d63190dec3f45a733fc78e40fd4f844390f4b918c66c9f1ae3f573d6835790
+  # F-DISK-1 job input: candidate 6248daf7's image (Deep gate run 38961525689,
+  # app manifest sha256:20a547ed…), binding F-DISK evidence to the EXACT app +
+  # agent under qualification (ASTRA 23:00Z: the prior F-DISK artifact named
+  # bad788e source/agent/image and cannot establish F-DISK PASS for 6248). 6248
+  # is a descendant of the bad788e5 lineage, so it carries every badger/
+  # ristretto F-DISK-1 fix (incl. the in-place memtable emptying 5b389f38). The
+  # ORIGINAL bad788e5 image (run 38040017115) stays the retained control in its
+  # own scope. obtain-image.sh falls back to the lab-preserved copy
+  # (lab-source-image-38961525689) if the deep-gate artifact has expired.
+  SOURCE_IMAGE_RUN_ID: "38961525689"
+  SOURCE_IMAGE_TAR_SHA256: d05f2c1d39db4223b9549fb312ba3c4ae0ac5761f7175218926e7f021bb65dfd
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it.
-  SOURCE_IMAGE_SHA: bad788e54ffef2a2f8490ba27ebfe027a2a6eb11
+  SOURCE_IMAGE_SHA: 6248daf72a5312e75062e2c2823438911604af7f
 
 jobs:
   guest-boot:
