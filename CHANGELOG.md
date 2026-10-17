@@ -516,6 +516,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- Four recovery bounds and two operator signals stopped expiring when the wall
+  clock stepped **backwards** (CHAOS-71). Go's monotonic reading protects an
+  interval only while it stays inside a `time.Time`; `time.Unix(0, n)` and
+  `time.UnixMilli(n)` rebuild one without it, so every interval measured from a
+  stamp held as a bare `int64` is a wall-clock interval. An NTP correction after
+  a wrong RTC, a resumed hypervisor snapshot or an operator fixing the date made
+  those intervals negative, so each `elapsed >= limit` test stayed false — and a
+  bound whose job is to END a degraded state never fired again until the clock
+  caught up. Nothing errored, nothing was counted, nothing was logged.
+
+  Seventeen such comparisons exist; eight were already guarded. The seven that
+  were not were each a recovery bound or the only signal for one. The raw-tunnel
+  idle reaper is the sole limit on a half-open CONNECT tunnel, and because its
+  read deadline is monotonic the relay kept waking on schedule and re-arming
+  forever — two goroutines, two FDs, a pooled relay buffer and the
+  connection-limiter slot pinned per dead tunnel. The parent-proxy circuit
+  breaker stayed open, and since the pool falls back to **direct egress** when
+  no parent is eligible, one parent blip plus a clock correction left the
+  appliance egressing around the parent-proxy chain long after the parents
+  recovered; the CDR breaker stayed open the same way, leaving content disarm
+  unavailable. The data-plane readiness grace became unexpirable, so a node with
+  a dead control-plane link kept answering `ok` on `/ready` while a load
+  balancer routed traffic to it on stale configuration. And the roster-durability
+  and OCSP responder-cap notices read a future stamp as "already logged",
+  silencing the only warning that an admin credential mutation never reached the
+  volume.
+
+  An unmeasurable interval now never counts as infinite. The three bounds that
+  govern a live resource or dependency re-anchor their stamp and serve one fresh
+  window measured from the step — treating a step as "expired" would have reaped
+  every quiet tunnel on the appliance and fired every breaker's probe at parents
+  that may still be down, a mass reset caused by the mitigation. The readiness
+  probe and the log gates, which protect nothing live, count it as expired:
+  fail-closed for the probe, audible for the gates. Recovery is automatic and
+  bounded by one window of the bound in question rather than by the size of the
+  step; no state latches and no restart is required. No configuration, metric,
+  alert or persisted format changes, and behaviour with a sane clock is
+  unchanged. See
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md`.
+
 ### Changed
 
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
