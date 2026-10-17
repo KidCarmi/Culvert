@@ -517,12 +517,24 @@ qemu-img convert -q -O qcow2 "$BASE_FILE" "$DISK"
 qemu-img resize -q "$DISK" "${VM_DISK_GB}G"
 part_layout() { LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$1" run : part-list /dev/sda | awk '/part_num:/{n=$2} /part_start:/{print n":"$2}' | tr '\n' ' '; }
 layout_before="$(part_layout "$DISK")"
+# The shipped-base root fsck policy, recorded BEFORE we touch it: a periodic
+# mount-count or time-based check fires a FULL root fsck on some later
+# maintenance reboot, which on slow ESXi-like storage adds ~20-30 s to local-fs
+# and can push the recovery over its 120 s budget (ASTRA observed a 32 s
+# local-fs + fsck transition on a 141 s ESXi run; the calibrated lab run had a
+# clean 8.9 s local-fs). Record the base policy, then disable both periodic
+# triggers so no maintenance reboot ever pays a surprise fsck. The on-boot
+# check of a cleanly-unmounted fs stays instant. See docs/appliance/recovery-time.md.
+base_fsck="$(LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$DISK" run : tune2fs-l /dev/sda1 | awk -F': *' '$1=="Maximum mount count"||$1=="Check interval"{print $1"="$2}' | tr '\n' ' ')"
+log "base root fsck policy before tuning: ${base_fsck:-unknown}"
+echo "base: ${base_fsck:-unknown}" > "$OUT/root-fsck-policy.txt"
 LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish -a "$DISK" <<'GF' || die "growing the root partition in place failed"
 run
 part-expand-gpt /dev/sda
 part-resize /dev/sda 1 -34
 e2fsck-f /dev/sda1
 resize2fs /dev/sda1
+tune2fs /dev/sda1 maxmountcount:0 intervalbetweenchecks:0
 GF
 layout_after="$(part_layout "$DISK")"
 # Same partition numbers at the same starts: only sda1's END may move.
@@ -598,10 +610,19 @@ if grep -qE '^linux-image-(virtual|generic)	' "$OUT/dpkg-list.txt"; then die "a 
 # names an EA inode on a filesystem without it ("ea_inode specified without
 # ea_inode feature enabled"). No filesystem the appliance ships may have it.
 for fs in $(LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$DISK" run : list-filesystems | awk -F': ' '$2=="ext4"{print $1}'); do
-  feats="$(LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$DISK" run : tune2fs-l "$fs" | awk -F': *' '$1=="Filesystem features"{print $2}')"
+  tl="$(LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" guestfish --ro -a "$DISK" run : tune2fs-l "$fs")"
+  feats="$(awk -F': *' '$1=="Filesystem features"{print $2}' <<<"$tl")"
   [[ -n "$feats" ]] || die "could not read the ext4 features of $fs"
   if grep -qw ea_inode <<<"$feats"; then die "ext4 filesystem $fs has the ea_inode feature (CVE-2025-40190 prerequisite)"; fi
   echo "$fs ext4 features: $feats" >> "$OUT/ext4-features.txt"
+  # No ext4 the appliance ships may arm a periodic (mount-count or time-based)
+  # fsck: a surprise full root fsck on slow storage blows the recovery budget
+  # (disabled in the grow step above; verified here, fail-closed).
+  mmc="$(awk -F': *' '$1=="Maximum mount count"{print $2}' <<<"$tl")"
+  ci="$(awk -F': *' '$1=="Check interval"{print $2}' <<<"$tl")"
+  echo "$fs max-mount-count=${mmc:-?} check-interval=${ci:-?}" >> "$OUT/root-fsck-policy.txt"
+  case "${mmc:-?}" in -1|0) ;; *) die "ext4 $fs still arms a periodic mount-count fsck (Maximum mount count: $mmc)";; esac
+  case "${ci:-?}" in 0|"0 (<none>)"|"<none>") ;; *) die "ext4 $fs still arms a periodic time-based fsck (Check interval: $ci)";; esac
 done
 [[ -s "$OUT/ext4-features.txt" ]] || die "no ext4 filesystem found in the image (features not checked)"
 # The initramfs GRUB loads at every boot: storage the supported hypervisors

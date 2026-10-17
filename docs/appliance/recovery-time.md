@@ -54,6 +54,27 @@ In every case:
 - `culvert-appliance-reset-identity` removes the marker, so a reset or cloned appliance regenerates its identity through cloud-init on its next boot.
 - An unwritable marker is logged and never fails provisioning.
 
+**Periodic root fsck disabled**: `build-ova.sh` runs `tune2fs -c 0 -i 0` on the
+root ext4 (guestfish `maxmountcount:0 intervalbetweenchecks:0`) right after the
+in-place grow, and the build then re-reads `tune2fs -l` and refuses any ext4
+with a mount-count or time-based check still armed (`$OUT/root-fsck-policy.txt`
+records the base and final policy).
+- A periodic check fires a FULL root fsck on some later maintenance reboot; on
+  slow ESXi-like storage that adds ~20-30 s to local-fs and can push the
+  recovery over the 120 s budget. The on-boot check of a cleanly-unmounted fs
+  stays instant, so this never trades away integrity — it only removes the
+  surprise full check.
+- Motivated by ASTRA's 141 s ESXi reboot showing local-fs at 32 s with a fsck
+  transition, vs a clean 8.9 s local-fs in the calibrated 12 ms lab run
+  (recovery-ab run 38989972928, 6248daf7: 107.69 / 107.53 / 107.52 s, under
+  budget). The build-time report makes the shipped base policy visible so a
+  real-ESXi run can confirm whether the +23 s is fsck or pure latency.
+
+**`e2scrub_all.timer` masked**: `prepare-guest.sh`. The appliance root is a
+plain partition with no LVM snapshot target, so the periodic online scrub does
+no useful work and must not compete for I/O with a latency-bound recovery.
+`e2scrub_reap` (stale-snapshot cleanup) is left alone — it is instant.
+
 ## What does not ship, and why
 
 **Service masking** gave no measurable gain, so it is not worth the change.

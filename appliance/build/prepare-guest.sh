@@ -266,6 +266,14 @@ install -m 0644 "$APPL/provision/cloud-90-culvert.cfg" /etc/cloud/cloud.cfg.d/90
 # Boot/recovery time: 4 MiB read-ahead on whole disks (measured, see the rule).
 install -m 0644 "$APPL/provision/60-culvert-readahead.rules" /etc/udev/rules.d/60-culvert-readahead.rules
 
+# e2scrub_all.timer runs a periodic online ext4 metadata scrub (via an LVM
+# snapshot). The appliance root is a plain partition with no LVM snapshot
+# target, so it does no useful work here, and it must never compete for disk
+# I/O with a latency-bound maintenance-reboot recovery (docs/appliance/
+# recovery-time.md). Mask the timer; e2scrub_reap (stale-snapshot cleanup) is
+# left alone as it is instant and harmless.
+systemctl mask e2scrub_all.timer >/dev/null 2>&1 || true
+
 # DRM device nodes root-only: removes the unprivileged prerequisite of the open
 # vmwgfx ioctl CVEs (see the rule).
 install -m 0644 "$APPL/provision/72-culvert-drm.rules" /etc/udev/rules.d/72-culvert-drm.rules
