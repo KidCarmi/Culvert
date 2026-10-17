@@ -310,29 +310,32 @@ diagnostics row say so. The node keeps running as a Data Plane, and
 restarting does not change anything. Remove one of the two wirings from this
 node's configuration.
 
-## The one state that does *not* recover on its own
+## The terminal states: the listener does *not* recover on its own
 
-If the supervisor goroutine itself panics, nothing rebinds. The same terminal
-state is used — reason `role_conflict` — when a delayed bind finds that this node
-has meanwhile become a **Data Plane**: the Control Plane listener refuses to
-replace an established role and stops (fix the CP/DP configuration, then
-restart). The reverse also holds: if the Control Plane claimed the role first,
-Data-Plane startup is refused and the DP client does not start. In both orders
-the role claimed FIRST wins, and the `cluster_posture` diagnostics row reports
-*"cluster role conflict"* as FAIL until the node is reconfigured and
-restarted. Either way it is reported distinctly:
+Two exits are terminal: nothing rebinds afterwards. They share the terminal
+state (diagnostics row FAIL, its own alert latch, the node gives up the Control
+Plane role and the fleet's address list stops naming it) but **not** the
+remedy, so the row and the alert are worded per reason:
 
-* diagnostics row: *"supervisor stopped … and will **NOT** rebind"*, and its
-  operator action is the only one in this family that tells you to **restart
-  the node**;
-* the alert says the same.
+| Reason | Cause | Diagnostics row (`cp_grpc_listener`) | `cp_grpc_listener_down` alert | Remedy |
+| --- | --- | --- | --- | --- |
+| `bind loop panicked` | the supervisor goroutine itself panicked | *"supervisor stopped (reason: bind loop panicked) and will **NOT** rebind"*; action: *"Restart this node"* | *"supervisor stopped … will NOT rebind on its own … unavailable fleet-wide until this node is restarted"* | **restart the node** |
+| `role_conflict` | this node has both Control Plane and Data Plane wiring, and its Data Plane claimed the cluster role first (including a delayed bind that finds the node has meanwhile become a Data Plane) | *"will not start: this node has both Control Plane and Data Plane wiring …"*; action: *"remove either the Control Plane or the Data Plane wiring … restarting does not resolve it"* | *"a local configuration conflict on this node, not a fleet outage … a restart does not change it. Remove the Control Plane or the Data Plane wiring"* | **fix the configuration**: remove one of the two wirings. A restart on its own reproduces the conflict; the log line says to restart only after the configuration is fixed. |
 
-The two states are kept separate precisely because they point at opposite
-actions. Do not restart a node whose row says the listener is rebinding. If a
-listener that was already paged as *retrying* then turns terminal, you are
-paged **again** with the restart instruction — the terminal alert has its own
-latch. On a terminal exit the node also gives up the Control Plane role and
-the fleet's address list stops naming it.
+`role_conflict` is not a fleet outage: the node keeps running as a Data Plane
+and may be serving fine from a remote Control Plane. The reverse order also
+holds: if the Control Plane claimed the role first, Data-Plane startup is
+refused and the DP client does not start. In both orders the role claimed
+FIRST wins, and the `cluster_posture` diagnostics row reports *"cluster role
+conflict"* as FAIL until the node is reconfigured and restarted.
+
+A terminal panic is kept separate from an ordinary bind failure precisely
+because they point at opposite actions: the panic row is the only one in this
+family whose action is a restart. Do not restart a node whose row says the
+listener is rebinding, and do not restart a `role_conflict` node without
+changing its configuration. If a listener that was already paged as
+*retrying* then turns terminal, you are paged **again** with that reason's
+instruction — the terminal alert has its own latch.
 
 ## Runbook
 
@@ -350,9 +353,14 @@ the fleet's address list stops naming it.
    curl -s -u <admin> http://<node>:<ui-port>/api/diagnostics \
      | jq '.checks[] | select(.code=="cp_grpc_listener")'
    ```
-3. If the row says the **supervisor stopped and will not rebind**, restart the
-   node. Otherwise do **not** restart — fix the underlying fault and the
-   listener picks it up within 30 s.
+3. Act on the row's reason:
+   * the row says the **supervisor stopped and will not rebind** (reason
+     `bind loop panicked`): restart the node;
+   * reason `role_conflict` (*"will not start: this node has both Control
+     Plane and Data Plane wiring"*): do **not** just restart — remove the
+     Control Plane or the Data Plane wiring from this node's configuration;
+   * anything else: do **not** restart — fix the underlying fault and the
+     listener picks it up within 30 s.
 4. Check the fleet is still enforcing (it should be — Data Planes serve
    last-good config):
    ```

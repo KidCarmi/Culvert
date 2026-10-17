@@ -753,6 +753,9 @@ func (s *ConfigStore) commitLocked(kind publishKind, snap ConfigSnapshot) config
 	s.published = true
 	s.clearPublishErrLocked(kind)
 	s.persistVersionLocked()
+	// Claim this commit's delta slot under the commit lock, so the deltas
+	// computed outside it are applied in commit order (afterCommit).
+	s.deltaRing.reserve(c.target)
 	c.subs = append([]chan struct{}{}, s.subs...)
 	return c
 }
@@ -899,9 +902,10 @@ func (s *ConfigStore) clearPublishErrLocked(kind publishKind) {
 // afterCommit records the blocklist delta and notifies subscribers OUTSIDE the
 // store lock: the O(N) diff + fingerprint over up to 2 M hosts must not stall
 // config readers/pollers. Config publishes are admin-action-rate, so the cost
-// is not hot-path.
+// is not hot-path. Concurrent commits may finish this in any order; the ring
+// applies their deltas in commit order (the slot commitLocked reserved).
 func (s *ConfigStore) afterCommit(c configCommit) {
-	s.deltaRing.record(c.base, c.target, c.oldHosts, c.newHosts, blocklistSyncedFingerprint(c.newHosts), c.epoch)
+	s.recordCommitDelta(c)
 	for _, ch := range c.subs {
 		select {
 		case ch <- struct{}{}:
@@ -910,6 +914,23 @@ func (s *ConfigStore) afterCommit(c configCommit) {
 	}
 	logger.Printf("ControlPlane: config v%d published", c.target)
 }
+
+// recordCommitDelta computes c's delta and completes its reserved slot. The
+// slot is completed even if the computation panics (as a resync marker), so
+// one failed commit can never stall every later delta behind it.
+func (s *ConfigStore) recordCommitDelta(c configCommit) {
+	d := blocklistDelta{Version: c.target, Base: c.base, Epoch: c.epoch, Resync: true}
+	defer func() { s.deltaRing.complete(d) }()
+	if hook := afterCommitBeforeDelta; hook != nil {
+		hook(c.target)
+	}
+	d = buildBlocklistDelta(c.base, c.target, c.oldHosts, c.newHosts, blocklistSyncedFingerprint(c.newHosts), c.epoch)
+}
+
+// afterCommitBeforeDelta, when non-nil, runs before a commit's delta is
+// computed. Test seam only (nil in production): it makes one commit's delta
+// slow so a later commit's finishes first.
+var afterCommitBeforeDelta func(target int64)
 
 // cpAddrMergeAttempts bounds UpdateCPAddresses' optimistic retries. Publishes
 // are admin-action-rate, so losing the race this many times in a row means
