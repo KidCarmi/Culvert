@@ -53,8 +53,16 @@ all-zero result).
   first-boot, setup-with-token, RBAC demotion, `/ready` ca+policy+clamav,
   category enforcement, agent + backup + offline restore, encrypted history
   recovery, and the admin-allowlist SURVIVAL assertions ([6b] same-volume,
-  [H] fresh-volume). The maintenance reboots in this run exercise the
-  console-shutdown path with **no 90s session-scope stall**. **F-DISK-1 PASS**.
+  [H] fresh-volume).
+- **F-DISK-1 PASS, bound to 6248daf7's EXACT app + agent** (lab run 38990080517,
+  0 failures): the bounded ENOSPC-midwrite campaign built the maintenance agent
+  from `6248daf` and ran it against 6248daf7's app image (config re-hashed from
+  source tar `d05f2c1d`, runtime `v1.0.263-candidate.g6248daf72a53` — NOT
+  bad788e). The ClamAV feed write filled the disk mid-write; the proxy SURVIVED
+  (no crash, no restart), recovered on `docker compose up -d`, state + CA
+  identity intact, category store opens, the feed import converges on retry.
+  This REPLACES the earlier F-DISK claim, whose evidence (artifact 12073939869)
+  named bad788e source/agent/image (ASTRA 23:00Z correction).
 - **Console-shutdown P1 bounded** (Phase-2 boot-console, lab run 38968007999,
   22 PASS / 0 FAIL): clean maintenance reboot (V4) and the failing-unit reboot
   (V2) both complete; no stuck graphics after the splash; tty1 returns to the
@@ -79,27 +87,61 @@ all-zero result).
   (OVA `59d4d371` → archive `7fefc79c` → image id `8af92aa4`, Trivy ImageID
   matched) — `severity-summary.json` = `[]` (0 findings, gate_exit=0; Deep-gate
   policy: no fixable HIGH/CRITICAL). 42 SBOM components; nghttpx absent.
+- **Console-shutdown P1 CONFIRMED FIXED on real ESXi** (ASTRA 22:22Z): the exact
+  original PAM → console → recovery-shell → sudo lifecycle teardown
+  (`session-1.scope`, 243 journal entries, no truncation) completed in
+  **0.340147 s**, no timeout/SIGKILL — the old 90.011826 s stall is gone.
+- **Recovery is latency-bound and WITHIN budget at the calibrated profile**
+  (lab recovery-ab run 38989972928, esxi12 = dm-delay 12 ms read / 3 ms write):
+  three maintenance reboots recovered in **107.69 / 107.53 / 107.52 s**, under
+  the 120 s budget; split ≈ **46 s pre-kernel** (firmware reads kernel 17 MB +
+  initrd 41 MB) + ≈ **46 s kernel→ready** (local-fs @8.9 s with a CLEAN root, no
+  periodic fsck; 798 MiB / ~104 s host read-wait). Matches the shipped b579
+  baseline (`docs/appliance/recovery-time.md`, 103.1 s), so the newer payload
+  (HWE 7.0.0-38, Docker 29.9.0, ClamAV 1.5.4) did NOT regress recovery at the
+  calibration latency.
 
-## What ESXi must repeat on THIS OVA
+## Recovery: the one OPEN item on real ESXi
 
-1. Boot on the real ESXi/vSphere topology (the lab proves QEMU/KVM only).
-2. Recovery/reboot timing: **≥3 reboots, each ≤120s** to a ready-to-enforce
-   state — the budget the prior candidates were held to. The console-shutdown
-   fix should REMOVE the ~90s stall ASTRA saw on a80be4b6; re-measure the number
-   on this artifact, not inherited.
-3. **Original lifecycle path, not only the quiescent reboot** (owner direction):
-   exercise the real PAM → console → recovery shell → `sudo shutdown` ancestry,
-   not just a clean reboot, and confirm no session-scope stall at shutdown.
-4. **Confirm the boot-UX hint on real VMware SVGA**: the status line + Esc hint
-   are visible through the service-start window, and the failure warning appears
-   when a unit fails (the lab proved the healthy line on QEMU; the degraded line
-   is proven only by code + the unit's `is-system-running` branch).
-5. Confirm the baked 1.5 sidecar reaches `/ready clamav ok` after boot with
-   signatures fetched by the guest.
-6. ASTRA's read-only source/restore equality check: the admin threat-domain
-   allowlist saved before a backup must equal the restored state.
+ASTRA measured **141.218 s** original-path recovery on real ESXi (over the
+120 s budget) — the console-shutdown P1 is NOT the cause (teardown 0.34 s). The
+141 s is **latency-bound boot I/O**: ~750 MiB read every reboot (kernel + initrd
++ container layers + ClamAV DB), and datastore latency turns that into seconds
+(`recovery-time.md`: ~9 s per ms). At the calibrated 12 ms profile recovery is
+107.5 s; ASTRA's own range is "ESXi E0 114–162 s ≈ 9–14 ms, shared-device reads
+up to 90 ms on the slowest runs", so 141 s is a ~14 ms+ datastore run — slower
+than the 12 ms calibration. ASTRA's 141 s boot showed local-fs at **32 s with a
+fsck transition**, vs **8.9 s / clean root** in the calibrated lab run; the
+~23 s delta is a full root fsck (dirty or periodic) and/or higher read latency.
 
-Do not reuse a80be4b6's ESXi result for this candidate — the OVA bytes changed
-(new app Go bytes for the console fix, new splash assets, independent sidecar
-rebuild), so the number is re-measured on the new artifact. ASTRA's frozen
-controllers / retained OVAs / guests for the earlier rounds are untouched.
+**Opus owns the focused provisioning correction; ASTRA owns the ESXi
+comparison.** Levers, by impact and risk:
+- **initramfs reduction (curated `MODULES=list`)** — the 41 MB initrd + 17 MB
+  kernel are read by firmware before the kernel runs (~46 s of the 12 ms split,
+  more at higher latency). `MODULES=list` cuts the initrd's ~13 MB driver chunk
+  (recovery-time.md: 41→25 MB ≈ −8 s at 12 ms, proportionally more at ESXi
+  latency). BOOT-CRITICAL: needs the build's existing storage-driver guard PLUS
+  per-hypervisor boot proof (ESXi/VirtualBox). Owner/ASTRA risk sign-off before
+  it ships.
+- **`tune2fs -c 0 -i 0`** on the root ext4 + mask `e2scrub_all.timer` — low
+  risk: removes any surprise periodic fsck/scrub on a maintenance reboot
+  (matches ASTRA's fsck transition). A build-time report of the shipped root's
+  Max-mount-count/Check-interval is added so the shipped state is visible and
+  the fsck hypothesis is testable.
+
+**What ESXi must capture on the 141 s-class boot (to split fsck from latency):**
+1. The original PAM → console → recovery-shell → `sudo shutdown` recovery, ≥3
+   reboots, recovery_s per reboot, AND the root fs state at the START of each
+   boot (`dmesg | grep EXT4-fs`: "clean" vs "recovering journal"/full check) +
+   a `tune2fs -l` of the root.
+2. The native datastore read-latency samples during each recovery, to place the
+   run on the 9 s/ms curve.
+3. Confirm the baked 1.5 sidecar reaches `/ready clamav ok`.
+4. The admin threat-domain allowlist source/restore equality (no repair).
+
+**Same-bytes note:** OVA `59d4d371` (artifact 12074562532) is the bytes ASTRA
+already tested — not a new import. A provisioning fix (initramfs / tune2fs /
+e2scrub) changes the OVA disk but KEEPS the same app image (20a547ed) + agent,
+so F-DISK / console / F-P2 / sidecar carry over; only recovery is re-measured.
+ASTRA's frozen controllers / retained OVAs / guests for the earlier rounds are
+untouched.
