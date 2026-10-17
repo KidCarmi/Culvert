@@ -110,9 +110,15 @@ func TestBuildOVA_NoExt4FilesystemHasEAInode(t *testing.T) {
 	ova := readSource(t, "appliance/build/build-ova.sh")
 	for _, want := range []string{
 		`guestfish --ro -a "$DISK" run : list-filesystems | awk -F': ' '$2=="ext4"{print $1}'`,
-		`run : tune2fs-l "$fs" | awk -F': *' '$1=="Filesystem features"{print $2}'`,
+		`feats="$(awk -F': *' '$1=="Filesystem features"{print $2}' <<<"$tl")"`,
 		`if grep -qw ea_inode <<<"$feats"; then die`,
 		`[[ -s "$OUT/ext4-features.txt" ]] || die "no ext4 filesystem found in the image (features not checked)"`,
+		// Periodic root fsck disabled (recovery-budget protection, ASTRA 141s
+		// recovery): tune2fs disables both triggers in the grow step, and the
+		// ext4 loop fails the build if any ext4 still arms a periodic check.
+		`tune2fs /dev/sda1 maxmountcount:0 intervalbetweenchecks:0`,
+		`still arms a periodic mount-count fsck`,
+		`still arms a periodic time-based fsck`,
 	} {
 		if !strings.Contains(ova, want) {
 			t.Errorf("build-ova.sh must contain %q", want)
