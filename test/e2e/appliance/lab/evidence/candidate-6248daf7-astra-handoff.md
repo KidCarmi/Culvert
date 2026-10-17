@@ -110,24 +110,33 @@ ASTRA measured **141.218 s** original-path recovery on real ESXi (over the
 (`recovery-time.md`: ~9 s per ms). At the calibrated 12 ms profile recovery is
 107.5 s; ASTRA's own range is "ESXi E0 114–162 s ≈ 9–14 ms, shared-device reads
 up to 90 ms on the slowest runs", so 141 s is a ~14 ms+ datastore run — slower
-than the 12 ms calibration. ASTRA's 141 s boot showed local-fs at **32 s with a
-fsck transition**, vs **8.9 s / clean root** in the calibrated lab run; the
-~23 s delta is a full root fsck (dirty or periodic) and/or higher read latency.
+than the 12 ms calibration. ASTRA's 141 s boot showed local-fs at **~32 s**, vs
+**8.9 s / clean root** in the calibrated lab run. That ~23 s local-fs delta is
+only part of the full **141.218 − 107.5 ≈ 33.7 s** recovery gap; ~11 s sits in
+other stages (firmware/kernel/initrd read at higher latency) and is NOT fsck. A
+`local-fs` milestone does not by itself prove a periodic full check — the
+capture below separates a scheduled fsck from pure latency.
 
-**Opus owns the focused provisioning correction; ASTRA owns the ESXi
-comparison.** Levers, by impact and risk:
-- **initramfs reduction (curated `MODULES=list`)** — the 41 MB initrd + 17 MB
-  kernel are read by firmware before the kernel runs (~46 s of the 12 ms split,
-  more at higher latency). `MODULES=list` cuts the initrd's ~13 MB driver chunk
-  (recovery-time.md: 41→25 MB ≈ −8 s at 12 ms, proportionally more at ESXi
-  latency). BOOT-CRITICAL: needs the build's existing storage-driver guard PLUS
-  per-hypervisor boot proof (ESXi/VirtualBox). Owner/ASTRA risk sign-off before
-  it ships.
-- **`tune2fs -c 0 -i 0`** on the root ext4 + mask `e2scrub_all.timer` — low
-  risk: removes any surprise periodic fsck/scrub on a maintenance reboot
-  (matches ASTRA's fsck transition). A build-time report of the shipped root's
-  Max-mount-count/Check-interval is added so the shipped state is visible and
-  the fsck hypothesis is testable.
+**Owner-advisor decision (2026-10-17, PR comment 6230751701), answering the
+MODULES=list ask:**
+- **Keep the current broad storage-driver coverage for the next diagnostic
+  candidate; DEFER `MODULES=list`.** It is a separately-qualified optimization,
+  not part of the fsck-policy change. Its 41→25 MB / −8 s is an ESTIMATE — the
+  measured −8 s is for `MODULES=dep` on the b579 payload only; do not transfer
+  it. Before it can ship it needs per-profile boot proof (ESXi AND
+  **Proxmox VE/KVM** AND VirtualBox: cold boot, maintenance reboot,
+  kernel-update/initramfs-regeneration, recovery path). Generic QEMU success is
+  not Proxmox qualification.
+- **The fsck-policy change is what the next diagnostic candidate carries** —
+  `tune2fs -c 0 -i 0` on the root ext4 + masked `e2scrub_all.timer` + the
+  build-time root-fsck-policy report. Safeguards (per the advisor): it disables
+  ONLY the mount-count/time-based schedules — error-triggered checking and the
+  ext4 journal recovery stay, and the operator path for a suspected-corruption
+  case is an OFFLINE `e2fsck -f /dev/sda1` on the stopped appliance's unmounted
+  root. A repair is never suppressed to meet the budget. `e2scrub_all.timer`
+  masking is housekeeping on a plain-partition root, not a measured gain.
+- **141.218 s stays OPEN until the real-ESXi capture closes it** — no closure as
+  "probably storage."
 
 **What ESXi must capture on the 141 s-class boot (to split fsck from latency):**
 1. The original PAM → console → recovery-shell → `sudo shutdown` recovery, ≥3
