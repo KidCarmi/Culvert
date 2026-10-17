@@ -704,3 +704,106 @@ func TestChaos71_StaleRetrySuccessDoesNotClearANewerFailure(t *testing.T) {
 		t.Errorf("the loop ran %d round(s), want a second round for B", rounds)
 	}
 }
+
+// TestChaos71_DeltaRingAppliesDeltasInCommitOrder is Codex P2 4302641878 on
+// #1556: a full publish commits vN and then spends O(N) computing its delta
+// outside the lock; meanwhile an address-only publish commits vN+1 and
+// finishes first. The ring must still end contiguous at Version() — the late
+// vN delta must not clear vN+1 — so a DP at vN-1 is served a delta to vN+1
+// instead of a full snapshot.
+func TestChaos71_DeltaRingAppliesDeltasInCommitOrder(t *testing.T) {
+	ip := "203.0.113.71"
+	clearUnenrolledPull(ip)
+	t.Cleanup(func() { clearUnenrolledPull(ip) })
+	svc := setupDeltaStore(t, cpCommitSnapshot(50).BlockedHosts, cpCommitSnapshot(60).BlockedHosts)
+	s := globalConfigStore
+	base := s.Version() // vN-1
+	slow := base + 1    // vN: the full publish whose delta is slow
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	prev := afterCommitBeforeDelta
+	afterCommitBeforeDelta = func(target int64) {
+		if target == slow {
+			close(entered)
+			<-release
+		}
+	}
+	t.Cleanup(func() { afterCommitBeforeDelta = prev })
+
+	done := make(chan error, 1)
+	go func() { done <- s.Update(cpCommitSnapshot(80)) }()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the full publish never reached its delta computation")
+	}
+	// vN+1 commits and finishes its afterCommit while vN's delta is pending.
+	if changed, err := s.UpdateCPAddressesFrom(func() []string { return []string{"10.0.0.7:50051"} }); err != nil || !changed {
+		close(release)
+		t.Fatalf("address publish: changed=%v err=%v", changed, err)
+	}
+	if _, _, _, newest := s.deltaRing.stats(); newest != base {
+		t.Errorf("ring head = v%d while v%d is still computing, want v%d: a delta was applied out of commit order", newest, slow, base)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("full publish: %v", err)
+	}
+
+	cur := s.Version()
+	if cur != slow+1 {
+		t.Fatalf("Version() = %d, want %d", cur, slow+1)
+	}
+	if _, _, _, newest := s.deltaRing.stats(); newest != cur {
+		t.Fatalf("ring head = v%d, want Version() v%d: the late delta left the ring behind", newest, cur)
+	}
+	chain, latest, ok := s.deltaRing.chain(base)
+	if !ok || latest != cur || len(chain) != 2 {
+		t.Fatalf("chain(v%d) = %d deltas, latest v%d, ok=%v; want 2 deltas to v%d", base, len(chain), latest, ok, cur)
+	}
+	for i := range chain {
+		if want := base + int64(i); chain[i].Base != want || chain[i].Version != want+1 {
+			t.Errorf("chain[%d] = v%d→v%d, want v%d→v%d", i, chain[i].Base, chain[i].Version, want, want+1)
+		}
+	}
+	if len(chain[0].Added) != 20 || len(chain[1].Added)+len(chain[1].Removed) != 0 {
+		t.Errorf("deltas: vN added %d, vN+1 changed %d; want 20 and 0", len(chain[0].Added), len(chain[1].Added)+len(chain[1].Removed))
+	}
+	if reply := callDelta(t, svc, deltaCtx(ip), base); reply.Mode != "delta" || reply.TargetVersion != cur || len(reply.Deltas) != 2 {
+		t.Errorf("GetConfigDelta(v%d) = mode %q to v%d with %d deltas, want delta to v%d with 2", base, reply.Mode, reply.TargetVersion, len(reply.Deltas), cur)
+	}
+}
+
+// TestChaos71_DeltaSlotCompletesWhenItsComputationPanics pins the hand-off's
+// liveness: a commit whose delta computation panics still completes its slot
+// (as a resync marker), so every later commit's delta is not stalled behind
+// it forever.
+func TestChaos71_DeltaSlotCompletesWhenItsComputationPanics(t *testing.T) {
+	setupDeltaStore(t, cpCommitSnapshot(5).BlockedHosts)
+	s := globalConfigStore
+	boom := s.Version() + 1
+	prev := afterCommitBeforeDelta
+	afterCommitBeforeDelta = func(target int64) {
+		if target == boom {
+			panic("delta computation failed")
+		}
+	}
+	t.Cleanup(func() { afterCommitBeforeDelta = prev })
+	func() {
+		defer func() { _ = recover() }()
+		_ = s.Update(cpCommitSnapshot(6))
+	}()
+	if err := s.Update(cpCommitSnapshot(7)); err != nil {
+		t.Fatalf("publish after the panic: %v", err)
+	}
+	if _, _, _, newest := s.deltaRing.stats(); newest != s.Version() {
+		t.Fatalf("ring head = v%d, want v%d: a panicked commit's slot stalled the hand-off", newest, s.Version())
+	}
+	if _, _, ok := s.deltaRing.chain(boom - 1); ok {
+		t.Error("a DP before the panicked commit was offered a delta across it, want a resync")
+	}
+	if _, latest, ok := s.deltaRing.chain(boom); !ok || latest != s.Version() {
+		t.Errorf("chain(v%d) ok=%v latest=v%d, want a delta to v%d", boom, ok, latest, s.Version())
+	}
+}
