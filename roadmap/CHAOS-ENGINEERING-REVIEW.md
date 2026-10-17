@@ -8773,61 +8773,6 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
-* **Seventeenth review round — a fencing epoch is advertised only once a
-  snapshot stamped with it has committed.** An authority-gaining HA transition
-  installed its new epoch E at acquire time (`acquireLeaseAttempt`), so the
-  heartbeat, issuance, deltas and `/healthz` advertised E at once. The restamp
-  to E rode in the topology writer's commit together with the new CP address
-  list. When that commit was rejected (the added HA addresses pushed the
-  snapshot past `snapshotWireBudget`), the transition still completed: DPs
-  ratcheted to E and rejected the committed snapshot, which still had the old
-  epoch. Existing DPs stayed on stale policy and fresh ones could not
-  initialize. Lease recovery had the same class with no rejection needed: its
-  role does not change, so nothing restamped at all.
-
-  The fix uses the standard fencing order (`ha_epoch_commit.go`):
-  1. The acquire only stages the grant (`grantEpoch`). It confers no write
-     authority and reaches no surface.
-  2. `installGrantLocked` commits the committed snapshot, content unchanged,
-     restamped with E (`ConfigStore.RestampFenceEpoch`, kind `publishEpoch`).
-     During that commit the stamp mirror already reads E, so a concurrent
-     publish cannot commit the old epoch after it.
-  3. Only on success does `leaseEpoch` become E.
-  4. The caller then takes its role, and the topology writer publishes the
-     address list as an ordinary owned publish (latched, retried, paged once).
-     A list that does not fit is only a stale failover hint.
-
-  If the E-stamped commit is refused, E is never advertised and the stamp
-  mirror reverts, atomically with every commit. The one exception is a
-  concurrent publish that already committed E: then E is committed, and the
-  install proceeds. The transition then fails closed on leadership, never on
-  fencing:
-  - enable errors with no role;
-  - promote stays standby and retryable;
-  - lease recovery stays a read-only leader and retries;
-  - a boot resume takes the ADR-0005 S2 read-only leader stance: the role is
-    kept with no write authority, so issuance is refused. A roleless node
-    would have its standalone sinks ungated.
-
-  The refusal pages `config_snapshot_rejected` once per episode, queued before
-  the webhooks load. Grants are left to their TTL, because ADR-0005 has no
-  Release primitive. The refused resume arms no auto-retry, per ADR-0005 S2:
-  the CHAOS-55 recovery loop is armed only for an unknown fence. In-process
-  recovery of that case is S4 follow-up work.
-
-  Gates:
-  - `TestChaos71_EpochCommitsBeforeTheAddressList_AddressesOverBudget`
-    (enable, resume): E is committed and advertised, a DP accepts the
-    snapshot, and only the list is pending and paged once.
-  - `TestChaos71_PromoteAndRecoveryCommitTheEpochBeforeAdvertisingIt`.
-  - `TestChaos71_RefusedEpochCommitNeverAdvertisesTheEpoch` (enable, promote,
-    resume, recovery).
-  - `TestChaos71_RefusedBootResumePagesOnceAfterTheWebhooksLoad`.
-  - `TestChaos71_EpochCommittedByAConcurrentPublishIsInstalled`.
-  - The call-graph wall `TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit`.
-
-  `TestAcquireLeaseForResume_WaitsOutOwnGhost` now installs the staged grant
-  before it asserts write authority. Ten mutations each fail a gate.
 * **Sixteenth review round — the address latch is part of the
   generation-guarded publish record.** An address publish that found the list
   already current cleared the rounds-14/15 latch (`addrRejectPaged`) in

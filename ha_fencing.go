@@ -48,25 +48,18 @@ func (h *HAState) setLeaseEpochLocked(epoch int64) {
 	h.syncFenceEpochLocked()
 }
 
-// syncFenceEpochLocked refreshes fenceEpoch, the epoch publishes stamp: the
-// one an install is committing (stampEpoch), else the installed grant. Caller
-// holds h.mu (write).
+// syncFenceEpochLocked refreshes fenceEpoch from the fields CurrentEpoch
+// reads. Caller holds h.mu (write).
 func (h *HAState) syncFenceEpochLocked() {
-	switch {
-	case h.lease == nil:
+	if h.lease == nil {
 		h.fenceEpoch.Store(0)
-	case h.stampEpoch != 0:
-		h.fenceEpoch.Store(h.stampEpoch)
-	default:
-		h.fenceEpoch.Store(h.leaseEpoch)
+		return
 	}
+	h.fenceEpoch.Store(h.leaseEpoch)
 }
 
-// PublishedFenceEpoch is the epoch a config publish stamps
-// (ConfigStore.commitPublish), read without h.mu so it is safe while h.mu is
-// held. It equals CurrentEpoch except while installGrantLocked commits a new
-// grant's epoch: then it is already the new one, so that commit (and any
-// concurrent publish) carries it before CurrentEpoch advertises it.
+// PublishedFenceEpoch is CurrentEpoch without h.mu — what a config publish
+// stamps (ConfigStore.commitPublish), safe to call while h.mu is held.
 func (h *HAState) PublishedFenceEpoch() int64 { return h.fenceEpoch.Load() }
 
 // CurrentEpoch reports this node's fencing epoch for stamping outbound
