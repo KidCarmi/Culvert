@@ -786,8 +786,9 @@ type publishPlan struct {
 }
 
 // publishFenceEpoch is the fencing epoch every publish is stamped with: the
-// node's CURRENT epoch, read lock-free (PublishedFenceEpoch) because the HA
-// topology writer publishes while holding HAState.mu. It reads the same
+// node's CURRENT epoch, read lock-free (PublishedFenceEpoch) so a publish
+// never needs HAState.mu (no publish runs under it, and none may wait on it
+// either: TestChaos71_Wall_NoSnapshotPublishUnderTheHALock). It reads the same
 // HAState the CP address list derives from (haTopologySource: globalHA in
 // production). Test seam.
 var publishFenceEpoch = func() int64 { return haTopologySource().PublishedFenceEpoch() }

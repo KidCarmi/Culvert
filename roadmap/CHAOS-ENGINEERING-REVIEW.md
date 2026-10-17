@@ -8773,6 +8773,43 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **No snapshot publish under `HAState.mu` (Codex P1 4301857115, on the
+  listener-only head after the split).** `setTopologyLocked` ran the CP
+  address republish synchronously under `h.mu`, right after a lease grant. A
+  large permitted snapshot (a marshal of up to the wire budget plus an O(N)
+  blocklist delta) could outlast a 3 s TTL's roughly 2 s trusted window
+  before the keepalive started or a renewal could take `h.mu`. The first
+  renewal then found the lease expired and self-fenced, and every
+  re-promotion repeated the same path.
+
+  The class rule: no snapshot marshal or commit runs while `h.mu` is held,
+  and lease renewal never waits on publication.
+  - `setTopologyLocked` now only records the change (`topologyRepublish`).
+  - Every caller runs `republishTopology` after releasing `h.mu`, and an
+    authority-gaining transition runs it after starting the keepalive.
+  - The republish derives from the live topology on every compare-and-swap
+    attempt, through the owned-publish path (latch, retry, once-per-episode
+    page).
+
+  Nothing depended on the publish being synchronous under the lock:
+  - The epoch is stamped at commit from the lock-free mirror.
+  - Ordering against activation is the publish's own compare-and-swap.
+  - Promote's refusal on a rejected address publish is the activation
+    publish inside `onPromote`, which never ran under `h.mu`, and is kept.
+
+  Gates:
+  - `TestChaos71_SlowTopologyPublishDoesNotCostTheLease`: an enable whose
+    republish takes longer than a 3 s TTL keeps a renewed lease and does not
+    self-fence.
+  - `TestChaos71_Wall_NoSnapshotPublishUnderTheHALock`: no `*Locked`
+    `HAState` method, and no call inside an `h.mu` or `globalHA.mu` critical
+    section, reaches `commitPublish`, `validateSnapshotForPublish` or
+    `commitLocked`. The by-name call graph follows package-level function
+    seams.
+  - `TestChaos71_HATransitionsRepublishTheCPAddressList` now also fails if a
+    transition returns with its republish only recorded.
+
+  Five mutations each fail a gate.
 * **Sixteenth review round — the address latch is part of the
   generation-guarded publish record.** An address publish that found the list
   already current cleared the rounds-14/15 latch (`addrRejectPaged`) in

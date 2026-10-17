@@ -3,7 +3,7 @@ package main
 // cp_addr_publish.go — CHAOS-71: a failed CP address-list republish is never
 // silent and never final (Codex review of #1556, P1 4295648192).
 //
-// Every OWNED republish (an HA transition through setTopologyLocked, the
+// Every OWNED republish (an HA transition through republishTopology, the
 // reconcile after a full publish, and the retry loop below) goes through
 // publishOwnedCPAddresses, which records its outcome. A failure (the list
 // would push a near-budget snapshot past snapshotWireBudget, or the commit
