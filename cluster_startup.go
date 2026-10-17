@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -84,7 +85,16 @@ func startHAStandby(cfg clusterStartupConfig, ctx context.Context, leaderAddr, t
 // leader cannot probe its peer (ADR-0004 scope note).
 func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context) {
 	haCfg, haErr := loadHAConfig()
-	if haRestartAction(haCfg, haErr) == "standby" {
+	action, unreadable := haPersistedAction(haCfg, haErr)
+	if unreadable != nil {
+		// Standby or leader cannot be told apart: never come up as an ungated
+		// Control Plane. The node is HA-gated from here, and the deferred
+		// resume re-reads (and retries) once the listener binds (ha_intent.go).
+		globalHA.noteIntentUnreadable(unreadable)
+		logWarnf("HA: %s could not be read at boot (%q) — leader-gated RPCs and CA issuance stay refused until it can be; the read is retried once the Control Plane listener binds",
+			haConfigFile, sanitizeLog(unreadable.Error()))
+	}
+	if action == "standby" {
 		startHAStandby(cfg, ctx, haCfg.PeerAddr, haCfg.Token, haCfg.AutoFailover)
 		logger.Printf("HA: restarted as standby from %s (leader=%s) — not self-asserting leader (ADR-0004)",
 			haConfigFile, sanitizeLog(haCfg.PeerAddr))
@@ -163,27 +173,73 @@ func haConfigStillResumable(cfg *haConfig) bool {
 // It re-reads the config rather than using the one loaded at boot because the
 // callback runs on the first successful bind, which with the retrying
 // supervisor can be long after boot. It resumes only if the CURRENT config
-// still says this node leads (haRestartAction == "leader": readable, enabled,
+// still says this node leads (haPersistedAction == "leader": decoded, enabled,
 // not standby), and never when this process already holds an HA role — an
 // operator acting through the live HA API in the meantime has already decided
 // it, and ResumeAsLeader would overwrite that and persist the stale leader.
+//
+// The callback runs ONCE (the supervisor's sync.Once), so it must not spend
+// that chance on a read it could not decide (Codex review of #1556): the
+// node is then HA-gated (ha_intent.go) and the attempt is re-armed in the
+// background with capped backoff until a read decides it.
 func resumeLeadershipIfStillPersisted() {
-	haCfg, haErr := loadHAConfig()
-	if action := haRestartAction(haCfg, haErr); action != "leader" {
-		if action == "standby" {
-			logger.Printf("HA: %s now records this node as standby — not resuming leadership on the "+
-				"Control Plane listener's first bind", haConfigFile)
-		}
+	if resumeLeadershipAttempt() {
 		return
+	}
+	haIntentRetrySpawn(retryLeadershipResume)
+}
+
+// retryLeadershipResume re-runs resumeLeadershipAttempt with capped backoff
+// until it decides, or the HA shutdown latch interrupts it (the gate then
+// stays set: a node going away serves nothing leader-gated).
+func retryLeadershipResume() {
+	defer func() {
+		if r := recover(); r != nil {
+			logErrorf("HA: the leadership-resume retry panicked (contained): %v — the node stays HA-gated until restarted", r)
+		}
+	}()
+	backoff := haIntentRetryMin
+	for {
+		if !haIntentRetrySleep(backoff) {
+			return
+		}
+		if resumeLeadershipAttempt() {
+			return
+		}
+		backoff = min(backoff*2, haIntentRetryMax)
+	}
+}
+
+// resumeLeadershipAttempt is one decision on the persisted HA intent. It
+// reports whether the intent was DECIDED (resumed, or nothing to resume);
+// false means it could not be — the node is left HA-gated for a retry.
+func resumeLeadershipAttempt() (decided bool) {
+	haCfg, haErr := loadHAConfig()
+	action, err := haPersistedAction(haCfg, haErr)
+	if err != nil {
+		haIntentStillUnknown(err)
+		return false
+	}
+	if action != "leader" {
+		return haIntentDecidedNotLeader(action)
 	}
 	if role := globalHA.Status().Role; role != "" {
 		logger.Printf("HA: this node already holds HA role %q — not resuming leadership from %s on the "+
 			"Control Plane listener's first bind", role, haConfigFile)
-		return
+		globalHA.clearIntentUnknown()
+		return true
 	}
 	if !haBootResumeAsLeader(haCfg) {
-		return // revalidation lost to a live HA transition; it logged why
+		// Lost to shutdown or a live HA transition (decided), or the
+		// revalidation after the lease acquisition did not confirm the
+		// persisted config — its re-read failed or changed it: decide again.
+		if globalHA.shuttingDown() || globalHA.Status().Role != "" {
+			return true
+		}
+		haIntentStillUnknown(errHAIntentNotRevalidated)
+		return false
 	}
+	globalHA.clearIntentUnknown()
 	if haCfg.AutoFailover {
 		logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
 			"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
@@ -191,6 +247,40 @@ func resumeLeadershipIfStillPersisted() {
 	} else {
 		logger.Printf("HA: resumed as leader from %s after restart (peer=%q)", haConfigFile, sanitizeLog(haCfg.PeerAddr))
 	}
+	return true
+}
+
+// errHAIntentNotRevalidated: the resume's post-acquisition revalidation did
+// not confirm the persisted config, and nothing else decided the intent.
+var errHAIntentNotRevalidated = errors.New("the persisted HA config was not confirmed after the fencing-lease acquisition")
+
+// haIntentStillUnknown gates the node on an undecided read, logs it, and
+// pages once per episode if it keeps failing.
+func haIntentStillUnknown(err error) {
+	if globalHA.noteIntentUnreadable(err) {
+		pageHAIntentUnreadable(err)
+	}
+	logWarnf("HA: the persisted HA intent in %s could not be decided on the Control Plane listener's bind (%q) — "+
+		"leader-gated RPCs and CA issuance stay refused; retrying", haConfigFile, sanitizeLog(err.Error()))
+}
+
+// haIntentDecidedNotLeader handles a decided read that is not "leader". A
+// standby record that this process could not read earlier (the gate is set,
+// no HA role held) means it came up as a plain Control Plane although the node
+// is persisted as a standby: it cannot re-enter standby at runtime, so it
+// stays HA-gated and asks for a restart. Otherwise the intent is decided.
+func haIntentDecidedNotLeader(action string) bool {
+	if action == "standby" {
+		if globalHA.intentUnknown() && globalHA.Status().Role == "" {
+			logErrorf("HA: %s records this node as standby, but it could not be read when this process started, "+
+				"so the node came up as a plain Control Plane — it stays HA-gated; restart it to re-enter standby (ADR-0004)", haConfigFile)
+			return true
+		}
+		logger.Printf("HA: %s now records this node as standby — not resuming leadership on the "+
+			"Control Plane listener's first bind", haConfigFile)
+	}
+	globalHA.clearIntentUnknown()
+	return true
 }
 
 // dpWiring is the resolved Data-Plane connection material.

@@ -104,6 +104,10 @@ func (h *HAState) CurrentEpoch() int64 {
 // its write authority must be live (WriteAllowed re-checks the confirmed
 // validity window at call time — the commit-time re-check of Finding 3).
 func haIssuanceAllowed() (ok bool, reason string) {
+	// Unknown persisted intent is not "standalone" (ha_intent.go).
+	if reason, gated := globalHA.intentGate(); gated {
+		return false, reason
+	}
 	st := globalHA.Status()
 	if !st.Enabled {
 		return true, ""

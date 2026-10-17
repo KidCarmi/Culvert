@@ -1324,7 +1324,8 @@ func TestChaos71_WallTheBootPathDefersLeadershipToAnObservedBind(t *testing.T) {
 	// ...through the REVALIDATED resume (Codex review of #1556): an admin HA
 	// enable landing during the lease acquisition must win.
 	if !strings.Contains(body, "globalHA.ResumeAsLeaderIfUnclaimed(") ||
-		!strings.Contains(cpFuncBody(t, body, "func resumeLeadershipIfStillPersisted("), "haBootResumeAsLeader(haCfg)") {
+		!strings.Contains(cpFuncBody(t, body, "func resumeLeadershipAttempt("), "haBootResumeAsLeader(haCfg)") ||
+		!strings.Contains(cpFuncBody(t, body, "func resumeLeadershipIfStillPersisted("), "resumeLeadershipAttempt()") {
 		t.Fatal("resumeLeadershipIfStillPersisted no longer resumes leadership through globalHA.ResumeAsLeaderIfUnclaimed")
 	}
 	resume := strings.Index(fn, "resumeLeadershipIfStillPersisted(")

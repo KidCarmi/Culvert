@@ -1140,8 +1140,13 @@ var cpRPCPolicies = map[string]cpRPCPolicy{
 }
 
 // haServingAllowed is the leader gate for ConfigService reads and writes:
-// standalone (HA off) serves; with HA on only the leader does.
+// standalone (HA off) serves; with HA on only the leader does. A node whose
+// persisted HA intent could not be read is not "HA off": it serves nothing
+// leader-gated until a read decides it (ha_intent.go).
 func haServingAllowed() (ok bool, reason string) {
+	if reason, gated := globalHA.intentGate(); gated {
+		return false, reason
+	}
 	st := globalHA.Status()
 	if !st.Enabled || st.Role == "leader" {
 		return true, ""
