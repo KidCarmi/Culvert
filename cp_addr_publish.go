@@ -108,12 +108,116 @@ var cpAddrRetryCtx = resolveLifecycleCtx
 // cpAddrPublishNow is the clock the pending state is stamped with. Test seam.
 var cpAddrPublishNow = time.Now
 
-// publishOwnedCPAddresses is the ONE path an owned republish takes: publish
-// build() and record the outcome (pending latch + retry on failure, clear on
-// success). trigger is a bounded label naming the caller.
+// ─── Ownership: one generation for every change of owner ────────────────────
+//
+// The address list's owner (cpAddrSource, and cpAddrWithdrawal when that
+// source is a withdrawal) changes on activation (setCPAddressSource), when a
+// terminal exit installs a withdrawal, and when ownership is released or
+// superseded. Each such change goes through setCPAddrOwnerLocked, which bumps
+// cpAddrOwnerGen. A publish reads the owner ONCE, as a cpAddrOwner carrying
+// that generation, and commits only while the generation is unchanged
+// (updateCPAddressesBound): a source captured before an ownership change can
+// never commit after it. Three Codex findings on #1556 were instances of one
+// class — a captured source or ownership bit outliving its owner — and the
+// generation closes the class rather than each window
+// (TestChaos71_Wall_AddressSourceReadsCarryTheOwnerGeneration).
+
+// errCPAddrOwnerChanged: the ownership generation a publish was bound to
+// changed before it committed. Nothing was committed; the caller rebuilds
+// from the current owner or stops (updateOwnedCPAddresses).
+var errCPAddrOwnerChanged = errors.New("CP address list ownership changed before the publish committed")
+
+// errCPAddrOwnerReleased: a bound publish found nothing owning the list any
+// more. Not a failure: nothing is owned, so nothing is pending.
+var errCPAddrOwnerReleased = errors.New("CP address list ownership released before the publish committed")
+
+// cpAddrOwner is ONE read of the address-list ownership: the source, the
+// withdrawal it serves (if any) and the generation they belong to. The source
+// is reachable only through its methods, so whatever builds from it carries
+// the generation.
+type cpAddrOwner struct {
+	src        func() []string
+	withdrawal string
+	gen        uint64
+}
+
+func (o cpAddrOwner) owned() bool { return o.src != nil }
+
+// builder is what a publish bound to o builds from: the caller's build, or
+// o's own source when the caller gave none — and always o's source while a
+// withdrawal owns the list, so no builder that may still name the Control
+// Plane being withdrawn is ever committed over it.
+func (o cpAddrOwner) builder(build func() []string) func() []string {
+	if build == nil || o.withdrawal != "" {
+		return o.src
+	}
+	return build
+}
+
+// without derives o's list without addr (a withdrawal source).
+func (o cpAddrOwner) without(addr string) func() []string {
+	return cpAddrSourceWithout(o.src, addr)
+}
+
+// cpAddrOwnerLocked reads the owner. The ONLY read of cpAddrSource. Caller
+// holds s.mu (read or write).
+func (s *ConfigStore) cpAddrOwnerLocked() cpAddrOwner {
+	return cpAddrOwner{src: s.cpAddrSource, withdrawal: s.cpAddrWithdrawal, gen: s.cpAddrOwnerGen}
+}
+
+// currentCPAddrOwner reads the owner under s.mu.
+func (s *ConfigStore) currentCPAddrOwner() cpAddrOwner {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cpAddrOwnerLocked()
+}
+
+// setCPAddrOwnerLocked is the ONE writer of the owner: it installs (src,
+// withdrawal) and bumps the generation, so every publish bound to the
+// previous owner stops at its commit. Caller holds s.mu (write).
+func (s *ConfigStore) setCPAddrOwnerLocked(src func() []string, withdrawal string) {
+	s.cpAddrSource, s.cpAddrWithdrawal = src, withdrawal
+	s.cpAddrOwnerGen++
+}
+
+// updateOwnedCPAddresses commits own.builder(build) bound to own. When the
+// owner changes first, the caller's build (chosen for the previous owner) is
+// dropped and the publish rebuilds from the NEW owner's source; when nothing
+// owns the list any more it stops with errCPAddrOwnerReleased.
+func (s *ConfigStore) updateOwnedCPAddresses(own cpAddrOwner, build func() []string) (bool, error) {
+	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
+		b := own.builder(build)
+		if b == nil {
+			return false, errCPAddrOwnerReleased
+		}
+		changed, err := s.updateCPAddressesBound(own, b)
+		if !errors.Is(err, errCPAddrOwnerChanged) {
+			return changed, err
+		}
+		own, build = s.currentCPAddrOwner(), nil
+	}
+	return false, fmt.Errorf("%w %d times in a row", errCPAddrCommitRace, cpAddrMergeAttempts)
+}
+
+// publishOwnedCPAddresses is publishOwnedCPAddressesAs bound to the owner
+// current at the call. For callers whose build does not come from the store
+// (the activation and HA builders); a caller that read the owner itself
+// passes that read to publishOwnedCPAddressesAs.
 func (s *ConfigStore) publishOwnedCPAddresses(trigger string, build func() []string) (bool, error) {
+	return s.publishOwnedCPAddressesAs(trigger, s.currentCPAddrOwner(), build)
+}
+
+// publishOwnedCPAddressesAs is the ONE path an owned republish takes: publish
+// own.builder(build), bound to own, and record the outcome (pending latch +
+// retry on failure, clear on success). trigger is a bounded label naming the
+// caller. A publish whose owner was released before it committed records
+// nothing: the release ended the episode.
+func (s *ConfigStore) publishOwnedCPAddressesAs(trigger string, own cpAddrOwner, build func() []string) (bool, error) {
 	gen := s.cpAddrPublishGen()
-	changed, err := s.UpdateCPAddressesFrom(build)
+	changed, err := s.updateOwnedCPAddresses(own, build)
+	if errors.Is(err, errCPAddrOwnerReleased) {
+		return false, nil
+	}
 	note := s.noteCPAddrPublish(trigger, err, gen)
 	if note.page {
 		s.pageCPAddrRejection(note.episode, err)
@@ -161,11 +265,11 @@ var errCPAddrWithdrawalInterrupted = errors.New("CP address list withdrawal has 
 // publish commits. A no-op when nothing is owned or the committed list does
 // not name addr.
 func (s *ConfigStore) withdrawCPAddress(addr string) (changed bool, err error) {
-	src := s.beginCPAddressWithdrawal(addr)
-	if src == nil {
+	own, ok := s.beginCPAddressWithdrawal(addr)
+	if !ok {
 		return false, nil
 	}
-	return s.publishOwnedCPAddresses(cpAddrWithdrawalTrigger, src)
+	return s.publishOwnedCPAddressesAs(cpAddrWithdrawalTrigger, own, nil)
 }
 
 // beginCPAddressWithdrawal decides from the COMMITTED list — the one Data
@@ -173,26 +277,27 @@ func (s *ConfigStore) withdrawCPAddress(addr string) (changed bool, err error) {
 // committed it — whether addr needs withdrawing, and if so replaces the owned
 // source with one that derives the same live list without addr. The pending
 // episode (if any) is kept: the withdrawal is the same list, one node shorter,
-// so an open episode stays paged once. Returns the withdrawal source, or nil
-// when there is nothing to withdraw.
-func (s *ConfigStore) beginCPAddressWithdrawal(addr string) func() []string {
+// so an open episode stays paged once. Returns the withdrawal owner (read
+// under the same lock that installed it), or ok=false when there is nothing
+// to withdraw.
+func (s *ConfigStore) beginCPAddressWithdrawal(addr string) (own cpAddrOwner, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cpAddrSource == nil || !s.cpAddrNamesLocked(addr) {
-		return nil
+	if !s.cpAddrOwnerLocked().owned() || !s.cpAddrNamesLocked(addr) {
+		return cpAddrOwner{}, false
 	}
 	s.beginCPAddressWithdrawalLocked(addr)
-	return s.cpAddrSource
+	return s.cpAddrOwnerLocked(), true
 }
 
 // beginCPAddressWithdrawalLocked installs the withdrawal of addr (idempotent).
 // Caller holds s.mu and has checked the list is owned.
 func (s *ConfigStore) beginCPAddressWithdrawalLocked(addr string) {
-	if s.cpAddrWithdrawal == addr {
+	own := s.cpAddrOwnerLocked()
+	if own.withdrawal == addr {
 		return
 	}
-	s.cpAddrSource = cpAddrSourceWithout(s.cpAddrSource, addr)
-	s.cpAddrWithdrawal = addr
+	s.setCPAddrOwnerLocked(own.without(addr), addr)
 }
 
 // cpAddrSourceWithout derives from's list without addr. It copies: a source
@@ -234,7 +339,7 @@ func (s *ConfigStore) completeCPAddressWithdrawal() {
 		s.mu.Unlock()
 		return
 	}
-	s.cpAddrSource, s.cpAddrWithdrawal = nil, ""
+	s.setCPAddrOwnerLocked(nil, "")
 	s.mu.Unlock()
 	s.resetCPAddrPublish()
 	logger.Printf("ControlPlane: withdrew %q from the fleet's CP address list; address-list ownership released", sanitizeLog(addr))
@@ -250,10 +355,10 @@ func (s *ConfigStore) completeCPAddressWithdrawal() {
 // once. Reports whether ownership was kept.
 func (s *ConfigStore) releaseCPAddressSourceAfterWithdrawal(addr string) (kept bool) {
 	s.mu.Lock()
-	named := s.cpAddrSource != nil && s.cpAddrNamesLocked(addr)
+	named := s.cpAddrOwnerLocked().owned() && s.cpAddrNamesLocked(addr)
 	inFlight := s.cpAddrWithdrawal != "" && !s.cpAddrWithdrawnLocked()
 	if !named && !inFlight {
-		s.cpAddrSource, s.cpAddrWithdrawal = nil, ""
+		s.setCPAddrOwnerLocked(nil, "")
 		s.mu.Unlock()
 		s.resetCPAddrPublish()
 		return false
@@ -389,20 +494,11 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 			s.addrPubMu.Unlock()
 			return
 		}
-		s.mu.RLock()
-		src := s.cpAddrSource
-		s.mu.RUnlock()
-		gen := s.cpAddrPublishGen()
-		var err error
-		if src != nil {
-			_, err = s.UpdateCPAddressesFrom(src)
-		} else {
-			gen = s.cpAddrPublishGen() // no source: nothing is owned any more, so nothing is pending
-		}
+		gen, published, err := s.retryCPAddrPublishOnce()
 		if note := s.noteCPAddrPublish("retry", err, gen); note.page {
 			s.pageCPAddrRejection(note.episode, err)
 		}
-		if src != nil && err == nil {
+		if published {
 			s.completeCPAddressWithdrawal() // a committed withdrawal ends ownership, and with it the episode
 		}
 
@@ -422,6 +518,24 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 	}
 }
 
+// retryCPAddrPublishOnce is one retry attempt: republish from the CURRENT
+// owner's source, bound to it. It returns the pending-state generation to note
+// the outcome against, whether a bound publish completed, and its error. With
+// nothing owned — before the attempt or released during it — nothing is
+// pending: a clean outcome at the current generation.
+func (s *ConfigStore) retryCPAddrPublishOnce() (gen uint64, published bool, err error) {
+	own := s.currentCPAddrOwner()
+	gen = s.cpAddrPublishGen()
+	if !own.owned() {
+		return s.cpAddrPublishGen(), false, nil
+	}
+	_, err = s.updateOwnedCPAddresses(own, nil)
+	if errors.Is(err, errCPAddrOwnerReleased) {
+		return s.cpAddrPublishGen(), false, nil
+	}
+	return gen, err == nil, err
+}
+
 // cpAddrPublishSnapshot returns a copy of the pending-republish record.
 func (s *ConfigStore) cpAddrPublishSnapshot() cpAddrPublishState {
 	s.addrPubMu.Lock()
@@ -436,11 +550,8 @@ func checkCPAddressList() OperatorContractCheck {
 	s := globalConfigStore
 	st := s.cpAddrPublishSnapshot()
 	if !st.pending {
-		s.mu.RLock()
-		owned := s.cpAddrSource != nil
-		s.mu.RUnlock()
 		msg := "Not an active Control Plane (no CP address list to publish)"
-		if owned {
+		if s.currentCPAddrOwner().owned() {
 			msg = "Control Plane address list is current"
 		}
 		return OperatorContractCheck{Code: "cp_address_list", Status: diagOK, Message: msg}

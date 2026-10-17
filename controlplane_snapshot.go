@@ -475,6 +475,14 @@ type ConfigStore struct {
 	// (cp_addr_publish.go, Codex review of #1556). Cleared by
 	// setCPAddressSource and releaseCPAddressSource. Guarded by mu.
 	cpAddrWithdrawal string
+	// cpAddrOwnerGen is the address-list OWNERSHIP generation: bumped by every
+	// change of cpAddrSource/cpAddrWithdrawal (a new owner, a withdrawal
+	// installed, a release), all of which go through setCPAddrOwnerLocked. A
+	// publish captures it with the source it builds from (cpAddrOwner) and
+	// commits only while it is unchanged (commitPublish), so a source captured
+	// before an ownership change can never commit after it (Codex review of
+	// #1556). Never reset. Guarded by mu.
+	cpAddrOwnerGen uint64
 	// addrPub is the owned address list's pending-republish record
 	// (cp_addr_publish.go): set when an owned republish fails, cleared by the
 	// retry loop or the next success. Guarded by addrPubMu, which is never held
@@ -631,15 +639,14 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	if err != nil {
 		return err
 	}
-	s.mu.RLock()
-	src := s.cpAddrSource
-	s.mu.RUnlock()
-	if src != nil {
+	if own := s.currentCPAddrOwner(); own.owned() {
 		// Propagate an address change this publish was carrying. A failure is
 		// logged and alerted by rejectPublish and latched pending (with a
 		// retry) by publishOwnedCPAddresses; this publish itself already
-		// succeeded.
-		_, _ = s.publishOwnedCPAddresses("config_publish", src)
+		// succeeded. Bound to the ownership read here: if a withdrawal or a
+		// release lands before it commits, it rebuilds from the new owner or
+		// stops, never committing this owner's list.
+		_, _ = s.publishOwnedCPAddressesAs("config_publish", own, nil)
 	}
 	return nil
 }
@@ -654,19 +661,14 @@ var configPublishBeforeCommit func()
 // otherwise, so a standby or a Data Plane never publishes one. A failure is
 // recorded pending and retried (publishOwnedCPAddresses).
 func (s *ConfigStore) reconcileCPAddressesFrom(trigger string, build func() []string) error {
-	s.mu.RLock()
-	src, withdrawing := s.cpAddrSource, s.cpAddrWithdrawal != ""
-	s.mu.RUnlock()
-	if src == nil {
+	own := s.currentCPAddrOwner()
+	if !own.owned() {
 		return nil
 	}
-	if withdrawing {
-		// A withdrawal owns the list: an HA transition re-derives it from the
-		// withdrawal source, never from a builder that may still name the
-		// Control Plane being withdrawn.
-		build = src
-	}
-	_, err := s.publishOwnedCPAddresses(trigger, build)
+	// A withdrawal owning the list replaces build (cpAddrOwner.builder): an HA
+	// transition re-derives it from the withdrawal source, never from a
+	// builder that may still name the Control Plane being withdrawn.
+	_, err := s.publishOwnedCPAddressesAs(trigger, own, build)
 	return err
 }
 
@@ -677,7 +679,7 @@ func (s *ConfigStore) reconcileCPAddressesFrom(trigger string, build func() []st
 // with it; a running retry loop sees no source and exits clean.
 func (s *ConfigStore) releaseCPAddressSource() {
 	s.mu.Lock()
-	s.cpAddrSource, s.cpAddrWithdrawal = nil, ""
+	s.setCPAddrOwnerLocked(nil, "")
 	s.mu.Unlock()
 	s.resetCPAddrPublish()
 }
@@ -686,7 +688,7 @@ func (s *ConfigStore) releaseCPAddressSource() {
 // cpAddrSource). Called once at Control Plane activation.
 func (s *ConfigStore) setCPAddressSource(build func() []string) {
 	s.mu.Lock()
-	s.cpAddrSource, s.cpAddrWithdrawal = build, "" // a new owner ends any withdrawal
+	s.setCPAddrOwnerLocked(build, "") // a new owner ends any withdrawal
 	s.mu.Unlock()
 	s.resetCPAddrPublish() // a new owner starts a new episode
 }
@@ -775,9 +777,10 @@ const (
 type publishAct int
 
 const (
-	publishCommit   publishAct = iota // validate and commit the candidate
-	publishUpToDate                   // the committed snapshot already says this
-	publishNotYet                     // nothing published yet: nothing to correct
+	publishCommit       publishAct = iota // validate and commit the candidate
+	publishUpToDate                       // the committed snapshot already says this
+	publishNotYet                         // nothing published yet: nothing to correct
+	publishOwnerChanged                   // the address-list owner this publish was bound to is gone
 )
 
 // committedView is the committed state one publish attempt builds from, read
@@ -786,7 +789,8 @@ type committedView struct {
 	snap      ConfigSnapshot
 	version   int64
 	published bool
-	owned     bool // an active Control Plane owns the CP address list
+	owned     bool   // an active Control Plane owns the CP address list
+	ownerGen  uint64 // the ownership generation (cpAddrOwnerGen) at this read
 }
 
 func (v committedView) ownsList() bool { return v.owned && v.published }
@@ -832,7 +836,8 @@ var publishFenceEpoch = func() int64 { return haTopologySource().PublishedFenceE
 func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
 		s.mu.RLock()
-		cur := committedView{snap: s.snap, version: s.version, published: s.published, owned: s.cpAddrSource != nil}
+		own := s.cpAddrOwnerLocked()
+		cur := committedView{snap: s.snap, version: s.version, published: s.published, owned: own.owned(), ownerGen: own.gen}
 		s.mu.RUnlock()
 
 		epoch := publishFenceEpoch()
@@ -845,6 +850,8 @@ func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 		switch act {
 		case publishNotYet:
 			return false, nil
+		case publishOwnerChanged:
+			return false, errCPAddrOwnerChanged // the caller rebuilds from the new owner, or stops
 		case publishUpToDate:
 			// What this kind would publish is already committed. Only the FULL
 			// latch is the store's to clear; the address latch is cleared by
@@ -878,10 +885,12 @@ func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 }
 
 // committedIsLocked reports whether the committed state is still exactly the
-// base an attempt built from. Caller holds s.mu.
+// base an attempt built from. Caller holds s.mu. Any address-list ownership
+// change (the generation) is a changed base too: the attempt rebuilds, and an
+// attempt bound to the previous owner then stops (publishOwnerChanged).
 func (s *ConfigStore) committedIsLocked(base committedView) bool {
 	return s.version == base.version && s.snap.Version == base.snap.Version &&
-		s.published == base.published && (s.cpAddrSource != nil) == base.owned
+		s.published == base.published && s.cpAddrOwnerGen == base.ownerGen
 }
 
 // clearPublishErrLocked clears the rejection latch of one kind. Caller holds
@@ -964,10 +973,27 @@ var cpAddrMergeBeforeCommit func()
 // carry the address list) or when the committed list already equals addrs. A
 // gate rejection goes through rejectPublish (logged, alerted,
 // LastPublishError) and is RETURNED so activation can refuse to succeed.
+//
+// It is bound to the address-list ownership current at the call; see
+// updateCPAddressesBound.
 func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool, err error) {
+	return s.updateCPAddressesBound(s.currentCPAddrOwner(), build)
+}
+
+// updateCPAddressesBound is UpdateCPAddressesFrom bound to own: build commits
+// only while the ownership generation is still own's, checked on the view
+// every attempt builds from and again, under s.mu, at the commit
+// (committedIsLocked). An ownership change since own was read returns
+// errCPAddrOwnerChanged with nothing committed (Codex review of #1556: a
+// source captured before a withdrawal committed and released ownership
+// re-added the dead Control Plane at a higher version).
+func (s *ConfigStore) updateCPAddressesBound(own cpAddrOwner, build func() []string) (changed bool, err error) {
 	return s.commitPublish(publishPlan{
 		kind: publishAddresses,
 		build: func(cur committedView) (ConfigSnapshot, publishAct) {
+			if cur.ownerGen != own.gen {
+				return ConfigSnapshot{}, publishOwnerChanged
+			}
 			if !cur.published {
 				return ConfigSnapshot{}, publishNotYet
 			}
