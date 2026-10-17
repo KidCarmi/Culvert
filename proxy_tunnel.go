@@ -179,12 +179,56 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 // production never mutates it (configurability is a recorded deferral).
 var tunnelIdleTimeout = 1 * time.Hour
 
-// newTunnelActivityStamp returns the shared last-activity stamp (unix nanos)
-// for one tunnel's two relay directions, seeded to now so a tunnel that never
-// moves a byte is reaped one idle window after establishment.
+// relayEpoch anchors the tunnel idle clock to a MONOTONIC basis.
+//
+// CHAOS-71. time.Now() carries a monotonic reading and time.Since preserves it,
+// so time.Since(relayEpoch) is nanoseconds of monotonic time since process
+// start and is immune to every wall-clock step. The activity stamp is measured
+// against this, NOT against the unix epoch, because an int64 of unix nanos
+// forces time.Unix on the read side, which rebuilds a Time with no monotonic
+// reading and turns the idleness test into a wall-clock subtraction.
+//
+// Both step directions broke that test, and the stamp is the only thing
+// bounding a half-open tunnel:
+//
+//   - BACKWARD (NTP correcting a wrong RTC, a resumed snapshot, an operator
+//     fixing the date): every live stamp reads into the future, measured
+//     idleness goes negative, `>= timeout` is false for the whole step, and the
+//     reaper never fires. The read deadline is monotonic (netpoll converts it
+//     against runtimeNano), so the loop keeps waking exactly on schedule — the
+//     verdict was lost, not the wake-up. Two goroutines, two FDs, a pooled
+//     relay buffer and the connection-limiter slot per dead tunnel, held until
+//     the clock catches up.
+//   - FORWARD (the same dead-RTC appliance boot, seen from the other side: the
+//     clock starts wrong and NTP jumps it forward, possibly by years): apparent
+//     idleness jumps by the step. A tunnel that is QUIET BUT ALIVE — an idle
+//     SSH session, a long-poll waiting on an event — moves no bytes, so nothing
+//     refreshes its stamp, and it is torn down at the next deadline pop despite
+//     having been idle for seconds in real time. Only a tunnel actively moving
+//     bytes re-stamps and survives.
+//
+// A monotonic basis closes both at once and leaves nothing to guard: a
+// wall-clock step cannot be represented in the stamp at all. On Linux the
+// reading comes from CLOCK_MONOTONIC, which does not advance while the host is
+// suspended, so a tunnel idle across a suspend measures as LESS idle than wall
+// time — conservative, and the safe direction for a bound protecting a live
+// resource.
+//
+// The stamp is process-internal: every holder passes it straight to
+// idleCopyCounted and nothing publishes it, so the basis is not an observable
+// contract. TestChaos71_TunnelActivityStampIsNotOnTheWallClock pins that.
+var relayEpoch = time.Now()
+
+// relayMonoNanos returns monotonic nanoseconds since relayEpoch.
+func relayMonoNanos() int64 { return int64(time.Since(relayEpoch)) }
+
+// newTunnelActivityStamp returns the shared last-activity stamp (monotonic
+// nanos since relayEpoch — see that var) for one tunnel's two relay directions,
+// seeded to now so a tunnel that never moves a byte is reaped one idle window
+// after establishment.
 func newTunnelActivityStamp() *atomic.Int64 {
 	s := new(atomic.Int64)
-	s.Store(time.Now().UnixNano())
+	s.Store(relayMonoNanos())
 	return s
 }
 
@@ -223,11 +267,11 @@ func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atom
 		n, err := io.CopyBuffer(dst, src, *bp)
 		total += n
 		if n > 0 {
-			shared.Store(time.Now().UnixNano())
+			shared.Store(relayMonoNanos())
 		}
 		var ne net.Error
 		if err != nil && errors.As(err, &ne) && ne.Timeout() {
-			if time.Since(time.Unix(0, shared.Load())) >= timeout {
+			if tunnelIdleFor(shared) >= timeout {
 				logger.Printf("tunnel idle timeout: no bytes in either direction for %v, closing relay", timeout)
 				dst.Close()     //nolint:errcheck // teardown; peer relay unblocks on the close
 				srcConn.Close() //nolint:errcheck // teardown; peer relay unblocks on the close
@@ -239,6 +283,21 @@ func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atom
 		// on peer close; the byte count is still valid.
 		return total
 	}
+}
+
+// tunnelIdleFor reports how long the tunnel has been silent in BOTH directions,
+// on the monotonic basis relayEpoch establishes — so no wall-clock step, in
+// either direction, can change the verdict. See relayEpoch for the two faults
+// this replaced and why a monotonic basis beats guarding a wall-clock one.
+//
+// The clamp is not a clock guard; it covers the benign race where the other
+// direction stores a stamp between this read of now and the Load.
+func tunnelIdleFor(shared *atomic.Int64) time.Duration {
+	idle := time.Duration(relayMonoNanos() - shared.Load())
+	if idle < 0 {
+		return 0
+	}
+	return idle
 }
 
 // relayCounted copies src→dst through a pooled relay buffer, adds the bytes

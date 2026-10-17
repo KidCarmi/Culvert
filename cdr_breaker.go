@@ -109,7 +109,23 @@ func (b *cdrCircuitBreaker) Allow() bool {
 		return true
 	case cbStateOpen:
 		// Check if the reset timeout has elapsed.
-		elapsed := b.now().UnixNano() - b.openedAt.Load()
+		//
+		// CHAOS-71: openedAt is wall-clock unix nanos, so a BACKWARD clock step
+		// makes elapsed negative and `elapsed < ResetTimeout` stays true for the
+		// whole step — the open→half-open transition never fires and content
+		// disarm stays unavailable long after the Sluice recovered. Re-anchor the
+		// trip instant to the stepped clock rather than probing immediately (an
+		// unmeasurable interval must not become a probe flood at an instance that
+		// may still be down) so recovery takes one full ResetTimeout measured
+		// from the step. The CAS keeps a concurrent OnFailure's fresher stamp.
+		now := b.now().UnixNano()
+		openedAt := b.openedAt.Load()
+		elapsed := now - openedAt
+		if elapsed < 0 {
+			b.openedAt.CompareAndSwap(openedAt, now)
+			b.totalTrips.Add(1)
+			return false
+		}
 		if elapsed < int64(b.cfg.ResetTimeout) {
 			b.totalTrips.Add(1)
 			return false
