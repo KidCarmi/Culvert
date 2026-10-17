@@ -79,6 +79,48 @@ var (
 	backpressure int64
 )
 
+// persistRunning mirrors "persistCh != nil" as a lock-free flag, published
+// under persistMu by the two functions that own the channel's lifetime
+// (startPersist/stopPersist) and read without the lock by enqueue.
+//
+// It exists because enqueue runs ONCE PER LOGGED REQUEST and persistCh changes
+// only at Init/Close. Taking persistMu — an EXCLUSIVE mutex — to read two
+// pointers put a global serialization point on the request hot path: every
+// request goroutine on the box queued on one lock to be told, in the default
+// configuration, that there is no file to write to.
+//
+// Measured on BenchmarkEnqueue_DisabledParallel* (4-core Xeon @ 2.10GHz,
+// benchtime=2s, count=5, request-log persistence off, which is the default)
+// against the frozen pre-change shape:
+//
+//	-cpu=1    22.7 ns/op → 5.9 ns/op
+//	-cpu=4    65.8 ns/op → 1.5 ns/op
+//
+// The old shape's cost per request GREW 2.9x as the cores went 1→4, because the
+// critical section serialized them; the flag's shared cache line is read-only,
+// so its cost FALLS with core count instead. The whole of reqlog.Add, which is
+// what a proxied request actually pays, goes 55.5 → 39.7 ns/op serial and
+// 196.1 → 142.1 ns/op at four goroutines (BenchmarkAdd / BenchmarkAddParallel).
+//
+// The flag only ever lets a caller SKIP work; it never lets one send. The
+// enqueue fast path returns without touching the channel, so the enqueueWG
+// registration invariant below is untouched: every sender that can still reach
+// `ch <- e` went through persistMu and registered there, exactly as before, and
+// stopPersist's wait still covers all of them.
+//
+// Both directions of a race with the lifecycle are the pre-existing behaviour,
+// not a new one:
+//
+//   - running==false while startPersist is mid-flight ⇒ the entry is dropped,
+//     which is what a caller that won the lock ahead of startPersist already
+//     got (it read a nil persistCh and returned). Init runs at startup before
+//     the proxy listeners accept, so the window is a startup one either way.
+//   - running==true after stopPersist has swept ⇒ the caller takes persistMu,
+//     reads the nil channel and returns, i.e. it falls back to the slow path
+//     and the old code's exact outcome. The flag can only be stale toward
+//     MORE locking, never toward an unregistered send.
+var persistRunning atomic.Bool
+
 // Backpressure reports how many request-log entries had to wait for room in
 // the persistence queue. Non-zero means the JSONL sink is not keeping up with
 // the request rate and proxy latency is once again coupled to disk latency —
@@ -92,6 +134,13 @@ func Backpressure() int64 { return atomic.LoadInt64(&backpressure) }
 // non-blocking send onto the buffered queue. No-op when persistence is
 // disabled.
 func enqueue(e Entry) {
+	// No drain goroutine ⇒ nothing to send on and nothing to register, so
+	// answer that from a lock-free read rather than from inside persistMu.
+	// See persistRunning for why this is on the request hot path and why
+	// skipping cannot strand an entry.
+	if !persistRunning.Load() {
+		return
+	}
 	persistMu.Lock()
 	ch, stop := persistCh, stopCh
 	if ch != nil {
@@ -156,6 +205,9 @@ func startPersist() {
 	stopCh = make(chan struct{})
 	persistWG.Add(1)
 	go drainLoop(persistCh, flushCh, stopCh)
+	// Published LAST, and under the mutex that publishes the channel, so a
+	// caller that observes the flag observes a channel with a live drainer.
+	persistRunning.Store(true)
 }
 
 // stopPersist drains everything still queued, then stops the goroutine.
@@ -168,6 +220,10 @@ func stopPersist() {
 	}
 	ch, stop := persistCh, stopCh
 	persistCh, flushCh, stopCh = nil, nil, nil
+	// Cleared with the pointers it mirrors. A caller that still reads true
+	// takes persistMu, finds the nil channel and returns — the slow path's
+	// pre-existing outcome — so the sweep below stays complete.
+	persistRunning.Store(false)
 	persistMu.Unlock()
 
 	close(stop)

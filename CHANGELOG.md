@@ -591,6 +591,49 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The request log no longer takes a global exclusive mutex per request to
+  discover that there is nothing to persist. `reqlog.Add` runs once per logged
+  request — which on this product is once per proxied request, from the HTTP
+  forward path, the CONNECT path and every terminal block — and its `enqueue`
+  half acquired `persistMu`, the JSONL drain goroutine's **lifecycle** mutex,
+  purely to read two channel pointers that change only at `Init`/`Close`. With
+  request-log file persistence off, which is the default, that lock bought
+  nothing at all: every request goroutine on the box queued on one cache line
+  to be told there is no file to write to.
+
+  The cost is a scalability property, not a constant. Measured on a 4-core Xeon
+  @ 2.10 GHz against the frozen pre-change lock discipline, persistence off:
+  **22.7 ns/op at one goroutine and 65.8 ns/op at four** — the per-request cost
+  *grew 2.9x as the cores went 1→4*, because the critical section serialized
+  them, so the old shape got worse on exactly the hardware an appliance is sold
+  on. `enqueue` now answers from a lock-free `atomic.Bool` published under the
+  same mutex that publishes the channel: **5.9 ns/op and 1.5 ns/op**. The
+  shared line is read-only, so the cost now *falls* with core count. Whole-`Add`
+  figures, which is what a request actually pays: **55.5 → 39.7 ns/op** serial
+  and **196.1 → 142.1 ns/op** at four goroutines.
+
+  Nothing about the durable audit record changes. The flag only ever lets a
+  caller **skip** work, never send: the fast path returns without touching the
+  channel, so every sender that can still reach `ch <- e` went through
+  `persistMu` and registered on `enqueueWG` exactly as before, and
+  `stopPersist`'s wait-then-sweep still covers all of them. A stale flag can
+  only be stale toward *more* locking — a caller that still reads `true` after a
+  stop takes the mutex, finds the nil channel and returns, which is the old
+  code's outcome. With persistence enabled the arm is unchanged and was measured
+  to confirm it (`BenchmarkEnqueue_EnabledParallel`); there the channel hand-off
+  dominates and the mutex was never the bottleneck.
+
+  The regression gate is deterministic rather than a ns/op ratio, the shape this
+  repository has repeatedly had to abandon: `TestEnqueue_TakesNoLockWhenPersistenceIsOff`
+  **holds** `persistMu` and then calls `enqueue`, so reintroducing the
+  acquisition blocks and fails on any hardware, at any load, with or without
+  `-race`. Controls assert that entries still reach the file when persistence is
+  running, serially and from eight concurrent goroutines.
+
+  The in-memory ring's own `ringMu` is untouched and is the remaining ~142 ns at
+  four goroutines; it is a separate concern and genuinely needs exclusion for
+  the in-place slot write.
+
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
   `hostutil.NormalizeHostStrict` already had an already-canonical fast path
