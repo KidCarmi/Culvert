@@ -61,27 +61,42 @@ with a mount-count or time-based check still armed (`$OUT/root-fsck-policy.txt`
 records the base and final policy).
 - A periodic check fires a FULL root fsck on some later maintenance reboot; on
   slow ESXi-like storage that adds ~20-30 s to local-fs and can push the
-  recovery over the 120 s budget. The on-boot check of a cleanly-unmounted fs
-  stays instant, so this never trades away integrity — it only removes the
-  surprise full check.
-- Motivated by ASTRA's 141 s ESXi reboot showing local-fs at 32 s with a fsck
-  transition, vs a clean 8.9 s local-fs in the calibrated 12 ms lab run
-  (recovery-ab run 38989972928, 6248daf7: 107.69 / 107.53 / 107.52 s, under
-  budget). The build-time report makes the shipped base policy visible so a
-  real-ESXi run can confirm whether the +23 s is fsck or pure latency.
+  recovery over the 120 s budget. `tune2fs -c 0 -i 0` disables ONLY the
+  mount-count and time-based schedules; error-triggered checking and the ext4
+  journal recovery are untouched, and the on-boot check of a cleanly-unmounted
+  fs stays instant. This is not a free integrity win: with no scheduled sweep,
+  latent on-disk corruption is surfaced only on an error or journal-replay
+  trigger, so a necessary repair must never be suppressed to meet the timing
+  budget. The operator path for a suspected-corruption case is an OFFLINE check
+  — stop the stack, boot the recovery shell (or attach the disk to another
+  host) and run `e2fsck -f /dev/sda1` against the unmounted root before
+  returning it to service.
+- Motivated by ASTRA's 141.218 s ESXi reboot showing local-fs at ~32 s with a
+  suspected fsck transition, vs a clean 8.9 s local-fs in the calibrated 12 ms
+  lab run (recovery-ab run 38989972928, 6248daf7: 107.69 / 107.53 / 107.52 s,
+  under budget). That ~23 s local-fs delta is only part of the full
+  141.218 − 107.5 ≈ 33.7 s recovery gap; the remaining ~11 s sits in other
+  stages (firmware/kernel/initrd read time at higher latency) and is NOT
+  attributed to fsck. A `local-fs` milestone or a journal-replay line does not
+  by itself prove a periodic full check — the real-ESXi capture must carry the
+  initramfs/systemd fsck output, `tune2fs -l` policy/state, and concurrent
+  datastore latency to separate a scheduled fsck from pure latency. The
+  build-time report makes the shipped base policy visible for that comparison.
 
 **`e2scrub_all.timer` masked**: `prepare-guest.sh`. The appliance root is a
-plain partition with no LVM snapshot target, so the periodic online scrub does
-no useful work and must not compete for I/O with a latency-bound recovery.
-`e2scrub_reap` (stale-snapshot cleanup) is left alone — it is instant.
+plain partition with no LVM snapshot target, so the periodic online scrub has
+nothing to scrub. Masking it is housekeeping — it removes a no-op timer, not a
+measured recovery gain. `e2scrub_reap` (stale-snapshot cleanup) is left alone —
+it is instant.
 
 ## What does not ship, and why
 
 **Service masking** gave no measurable gain, so it is not worth the change.
 
 **`MODULES=dep`** builds the initrd with only the drivers of the machine that builds it.
-- The OVA is built on QEMU (virtio) and deployed to ESXi (`vmw_pvscsi` / LSI), VirtualBox and other hypervisors. An initrd without their storage drivers would not boot.
-- A curated `MODULES=list` covering every supported controller is the safe form of this −8 s. It needs boot proof on each supported hypervisor before it can ship.
+- The OVA is built on QEMU (virtio) and deployed to ESXi (`vmw_pvscsi` / LSI), VirtualBox, Proxmox VE / KVM and other hypervisors. An initrd without their storage drivers would not boot.
+- The −8 s / 37.3→25.1 MB in the table above is the MEASURED figure for `MODULES=dep` on the b579 payload. A curated `MODULES=list` covering every supported controller is the safe form of it, but its size and gain on the CURRENT payload are an ESTIMATE until measured — do not transfer the `dep` number to it.
+- It is a separately-qualified optimization, not part of the fsck-policy change. Before it can ship it needs, per supported profile (hypervisor/version, disk controller + transport, firmware mode, NIC — ESXi AND Proxmox VE/KVM AND VirtualBox explicitly): cold boot, maintenance reboot, kernel-update/initramfs-regeneration boot, and the supported recovery path. Generic QEMU success is not Proxmox qualification.
 
 ## How this is proven
 
