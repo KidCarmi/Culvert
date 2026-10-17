@@ -99,10 +99,19 @@ type Checker struct {
 func (oc *Checker) allowTruncationLog(now time.Time) bool {
 	// CHAOS-71: the stamp is unix nanos, so the comparison is a wall-clock one
 	// and a BACKWARD clock step reads as "logged in the future", suppressing the
-	// notice for the duration of the step. An unmeasurable interval counts as
-	// expired, so a capped responder stays reportable across a clock correction.
+	// notice for the duration of the step. An interval that cannot be measured
+	// counts as expired, so a capped responder stays reportable across a clock
+	// correction.
+	//
+	// MAGNITUDE, not sign, decides: a concurrent handshake that loses the CAS
+	// below also sees a stamp marginally ahead of its own sample, and that is an
+	// ordering artifact rather than a clock step. The gate therefore suppresses
+	// while the stamp is within one interval of now in EITHER direction, so a
+	// rollback costs at most one suppressed notice — the rate limit already
+	// allows that — and the two causes can never be confused. Same rule, same
+	// reasoning, as the roster gates in roster_persist_durability.go.
 	last := oc.lastTruncationLog.Load()
-	if d := now.Sub(time.Unix(0, last)); last != 0 && d >= 0 && d < truncationLogEvery {
+	if d := now.Sub(time.Unix(0, last)); last != 0 && d.Abs() < truncationLogEvery {
 		return false
 	}
 	return oc.lastTruncationLog.CompareAndSwap(last, now.UnixNano())

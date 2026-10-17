@@ -66,18 +66,63 @@ import (
 const clockStepBack = time.Hour
 
 // ─── CK-1: the raw-tunnel idle reaper ────────────────────────────────────────
-
-// TestChaos71_TunnelIdleReaperSurvivesABackwardClockStep is the DEFECT gate for
-// the only bound on a half-open CONNECT tunnel.
 //
-// idleCopyCounted re-arms a read deadline every half-window and reaps the
-// tunnel when the shared activity stamp has been stale for a full window. The
-// deadline is monotonic (netpoll converts it against runtimeNano), so the loop
-// keeps WAKING after a backward step — it is the staleness test that stops
-// being true. Pre-fix the relay re-arms forever: two goroutines, two FDs, a
-// pooled relay buffer and the connection-limiter slot are pinned for the
-// duration of the step on a tunnel whose peer is already gone.
-func TestChaos71_TunnelIdleReaperSurvivesABackwardClockStep(t *testing.T) {
+// The idle bound now measures on the MONOTONIC basis relayEpoch establishes,
+// which is why these gates inject stamps on that basis rather than wall-clock
+// ones. The basis IS the fix: a wall-clock step cannot be represented in a
+// monotonic stamp, so neither step direction can reach the verdict. The first
+// gate pins the basis itself; the rest pin that the mechanism still works.
+
+// TestChaos71_TunnelActivityStampIsNotOnTheWallClock is the PERMANENT DEFECT
+// PROOF for both halves of CK-1.
+//
+// Every wall-clock failure of this bound — the backward step that stopped it
+// reaping a dead tunnel, and the forward step that made it tear down a quiet
+// live one — follows from the stamp being a unix-epoch value, because an int64
+// of unix nanos forces time.Unix on the read side and the idleness test becomes
+// a wall-clock subtraction. A monotonic stamp is nanos since process start:
+// nine orders of magnitude smaller, and immune by construction.
+//
+// So this asserts the BASIS, not a behaviour. If anyone ever restores a
+// wall-clock stamp, this fails immediately and names the reason, which no
+// behavioural gate can do — the faults it prevents need a clock step to
+// observe, and a test cannot step the host clock.
+func TestChaos71_TunnelActivityStampIsNotOnTheWallClock(t *testing.T) {
+	got := newTunnelActivityStamp().Load()
+	// A monotonic stamp is bounded by this process's own age. A unix-nanos
+	// stamp is ~1.8e18. Any plausible test-process age separates them.
+	if limit := int64(24 * time.Hour); got > limit {
+		t.Fatalf("activity stamp = %d, want < %d (monotonic nanos since process start).\n"+
+			"A stamp this large is a unix-epoch value, which makes the idleness test a "+
+			"WALL-CLOCK subtraction: a backward step then stops the reaper firing on a dead "+
+			"tunnel, and a forward step tears down quiet live ones.", got, limit)
+	}
+	if got < 0 {
+		t.Fatalf("activity stamp = %d, want >= 0", got)
+	}
+}
+
+// TestChaos71_TunnelIdleForIgnoresAWallClockEpochStamp is a CONTROL, and
+// deliberately labelled as one: it passes in BOTH trees, which is exactly what
+// makes it a control rather than a proof. A unix-epoch stamp is ~1.8e18 — far in
+// the "future" of a monotonic reading — so the monotonic implementation reaches
+// its clamp here. The gate pins that the clamp holds, so a stamp on the wrong
+// basis can never produce a REAPABLE idleness and tear down a live tunnel.
+// (The basis itself is proved by the gate above, which does discriminate.)
+func TestChaos71_TunnelIdleForIgnoresAWallClockEpochStamp(t *testing.T) {
+	setTunnelIdleTimeout(t, 200*time.Millisecond)
+	shared := new(atomic.Int64)
+	shared.Store(time.Now().UnixNano())
+	if got := tunnelIdleFor(shared); got >= tunnelIdleTimeout {
+		t.Fatalf("tunnelIdleFor(unix-epoch stamp) = %v, >= the idle window: the read side is "+
+			"still comparing against the wall clock", got)
+	}
+}
+
+// TestChaos71_TunnelIdleReaperReapsAnIdleTunnel is the mechanism gate: a stamp
+// older than the window on the live basis must still reap a half-open tunnel.
+// This is the CHAOS-03 guarantee the monotonic switch must not have broken.
+func TestChaos71_TunnelIdleReaperReapsAnIdleTunnel(t *testing.T) {
 	setTunnelIdleTimeout(t, 200*time.Millisecond)
 
 	// A half-open tunnel: both peers silent, neither closed.
@@ -85,37 +130,8 @@ func TestChaos71_TunnelIdleReaperSurvivesABackwardClockStep(t *testing.T) {
 	destProxy, destPeer := net.Pipe()
 	t.Cleanup(func() { clientPeer.Close(); destPeer.Close() })
 
-	// The stamp was written before a one-hour backward step, so it now reads
-	// one hour into the future.
 	shared := new(atomic.Int64)
-	shared.Store(time.Now().Add(clockStepBack).UnixNano())
-
-	done := make(chan int64, 1)
-	go func() { done <- idleCopyCounted(destProxy, clientProxy, clientProxy, shared) }()
-
-	// Three windows is ample: the reaper decides at a deadline pop, one every
-	// half-window.
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("idleCopyCounted never reaped a half-open tunnel after a backward clock step — " +
-			"the only bound on a dead tunnel is wall-clock-dependent, so the FDs, goroutines and " +
-			"connlimit slot stay pinned until the clock catches up")
-	}
-}
-
-// TestChaos71_TunnelIdleReaperStillReapsAnOrdinaryStaleTunnel is the CONTROL
-// that the guard did not replace the mechanism: an ordinary stale stamp (no
-// clock step) must still reap.
-func TestChaos71_TunnelIdleReaperStillReapsAnOrdinaryStaleTunnel(t *testing.T) {
-	setTunnelIdleTimeout(t, 200*time.Millisecond)
-
-	clientProxy, clientPeer := net.Pipe()
-	destProxy, destPeer := net.Pipe()
-	t.Cleanup(func() { clientPeer.Close(); destPeer.Close() })
-
-	shared := new(atomic.Int64)
-	shared.Store(time.Now().Add(-clockStepBack).UnixNano()) // genuinely idle for an hour
+	shared.Store(relayMonoNanos() - int64(time.Hour)) // idle for an hour
 
 	done := make(chan int64, 1)
 	go func() { done <- idleCopyCounted(destProxy, clientProxy, clientProxy, shared) }()
@@ -128,8 +144,8 @@ func TestChaos71_TunnelIdleReaperStillReapsAnOrdinaryStaleTunnel(t *testing.T) {
 }
 
 // TestChaos71_TunnelIdleReaperDoesNotReapAFreshTunnel is the CONTROL that the
-// guard cannot become "always reap": a tunnel whose stamp is current must
-// survive at least one full window.
+// bound cannot become "always reap": a tunnel seeded by the production helper
+// must survive a full window.
 func TestChaos71_TunnelIdleReaperDoesNotReapAFreshTunnel(t *testing.T) {
 	setTunnelIdleTimeout(t, 400*time.Millisecond)
 
@@ -137,8 +153,7 @@ func TestChaos71_TunnelIdleReaperDoesNotReapAFreshTunnel(t *testing.T) {
 	destProxy, destPeer := net.Pipe()
 	t.Cleanup(func() { clientPeer.Close(); destPeer.Close() })
 
-	shared := new(atomic.Int64)
-	shared.Store(time.Now().UnixNano())
+	shared := newTunnelActivityStamp()
 
 	done := make(chan int64, 1)
 	go func() { done <- idleCopyCounted(destProxy, clientProxy, clientProxy, shared) }()
@@ -330,5 +345,55 @@ func TestChaos71_RosterRateGatesStillSuppressWithinTheInterval(t *testing.T) {
 	noteRosterNotDurable()
 	if got := rosterNotDurableSuppress.Load(); got != 1 {
 		t.Fatalf("rosterNotDurableSuppress = %d, want 1 — the rate gate stopped suppressing", got)
+	}
+}
+
+// TestChaos71_RosterGateDoesNotMistakeItsOwnStalenessForARollback is the gate
+// for the ordering defect the CK-5 guard itself introduced.
+//
+// The guard treats a negative interval as "the clock stepped back, emit". That
+// is only sound while `now` cannot be OLDER than the stamp for an ordinary
+// reason — and a clock sample hoisted above the CAS loop can be: a caller that
+// loses the CAS re-reads a stamp the winner just wrote from a later sample. With
+// a hoisted sample the loser saw a negative interval, read it as a rollback, and
+// emitted a duplicate line while moving the stamp backwards — the amplification
+// the CAS exists to prevent, arriving when the volume is already failing.
+//
+// Simulated deterministically: a stamp very slightly in the future is exactly
+// what a loser observes. Microseconds cannot be a real clock correction, so the
+// gate distinguishes an ordering artifact from the genuine rollback CK-5 covers
+// (one hour, asserted above) without racing two goroutines.
+func TestChaos71_RosterGateDoesNotMistakeItsOwnStalenessForARollback(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+
+	err := errors.New("read-only file system")
+
+	// A winner's stamp, a few microseconds ahead of a loser's hoisted sample.
+	rosterPersistLogLast.Store(time.Now().Add(50 * time.Microsecond).UnixNano())
+	noteRosterPersistBestEffort("backup codes", err)
+	if got := rosterPersistSuppress.Load(); got != 1 {
+		t.Fatalf("rosterPersistSuppress = %d, want 1: a stamp microseconds ahead is a lost CAS, "+
+			"not a clock rollback, and must still suppress", got)
+	}
+
+	rosterNotDurableLogLast.Store(time.Now().Add(50 * time.Microsecond).UnixNano())
+	noteRosterNotDurable()
+	if got := rosterNotDurableSuppress.Load(); got != 1 {
+		t.Fatalf("rosterNotDurableSuppress = %d, want 1", got)
+	}
+}
+
+// TestChaos71_RosterGateNeverMovesItsStampBackwards pins the second half: the
+// winner's stamp must not be replaced by an older one, whatever a loser decides.
+func TestChaos71_RosterGateNeverMovesItsStampBackwards(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+
+	winner := time.Now().Add(50 * time.Microsecond).UnixNano()
+	rosterPersistLogLast.Store(winner)
+	noteRosterPersistBestEffort("backup codes", errors.New("read-only file system"))
+	if got := rosterPersistLogLast.Load(); got < winner {
+		t.Fatalf("rosterPersistLogLast moved backwards: %d < %d", got, winner)
 	}
 }

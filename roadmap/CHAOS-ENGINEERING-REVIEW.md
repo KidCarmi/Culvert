@@ -8313,15 +8313,25 @@ those seven was a recovery bound or the sole operator signal for one.**
 
 ### Register rows
 
-- **CK-1 (P1, CLOSED)** — `idleCopyCounted` is the ONLY bound on a half-open
-  CONNECT tunnel, and its staleness verdict was wall-clock. The read deadline is
+- **CK-1 (P1, CLOSED — both step directions)** — `idleCopyCounted` is the ONLY
+  bound on a half-open CONNECT tunnel, and its staleness verdict was wall-clock. The read deadline is
   monotonic (netpoll converts against `runtimeNano`), so after a step the loop
   keeps waking exactly on schedule — it is the *verdict* that is lost, not the
   wake-up, and every pop re-arms forever. Per dead tunnel: two goroutines, two
   FDs, a pooled relay buffer and the connlimit slot, held for the whole step. A
   half-open peer is the normal outcome of a NAT timeout or a packet-loss
   blackhole, so the leak needs no attacker — only a clock correction while
-  tunnels are open. Closed by `tunnelIdleFor` (re-anchor on a future stamp).
+  tunnels are open. The FORWARD direction was the other half, and the first
+  write-up wrongly called it immune: a tunnel that is quiet but ALIVE (idle SSH,
+  a long-poll) moves no bytes, so nothing refreshes its stamp, and a forward step
+  — the same dead-RTC appliance boot seen from the other side, where NTP jumps
+  the clock forward, possibly by years — tears it down at the next deadline pop.
+  Closed by moving the stamp to a MONOTONIC basis (`relayEpoch`,
+  `relayMonoNanos`), which is strictly stronger than guarding a wall-clock one:
+  a step cannot be represented in the stamp, so there is no negative case left to
+  decide. Available here, and not for the breakers, because the stamp is
+  process-internal — all five holders pass it straight to `idleCopyCounted` and
+  nothing publishes it.
 - **CK-2 (P1, CLOSED)** — `internal/upstream` `CircuitBreaker.Allow` held
   `openedAt` as `UnixMilli`; a step pinned every tripped breaker OPEN. This is
   the security row, because `Pool.Next` falls back to **direct egress** when
@@ -8343,9 +8353,12 @@ those seven was a recovery bound or the sole operator signal for one.**
 
 **Posture, and the asymmetry that is the finding's substance.** "An unmeasurable
 interval must never count as INFINITE" fixes all five, but what it counts as
-instead depends on what the bound protects. CK-1/CK-2/CK-3 govern a live resource
-or dependency, so they **re-anchor** (CAS, so a concurrent writer's fresher stamp
-survives) and serve one fresh window measured from the step — treating a step as
+instead depends on what the bound protects. CK-1 goes further and leaves the wall
+clock altogether (monotonic basis), which it can because its stamp is private;
+CK-2/CK-3 cannot, because `OpenedAt()` publishes their trip instant on
+`/api/diagnostics`. Those two govern a live dependency, so they **re-anchor**
+(CAS, so a concurrent writer's fresher stamp survives) and serve one fresh window
+measured from the step — treating a step as
 "expired" would reap every quiet tunnel on the appliance and fire every breaker's
 probe at parents that may still be down, a mass reset caused by the mitigation.
 CK-4/CK-5 only report, have no live resource to protect and an
@@ -8356,7 +8369,24 @@ latches and no restart is needed. **No new metric and no new alert** — every o
 of these faults already lands on a series that means it; what was missing was the
 recovery, not the signal.
 
-**Gates.** 8 defect + 7 control = 15, all eight defect gates verified FAILING
+**Review round (CodeRabbit, PR #1650) — two Minor findings, both real.** (1) The
+forward half of CK-1 was documented as immune and was not, which is what moved
+CK-1 to a monotonic basis; (2) the CK-5 guard mistook its own staleness for a
+rollback — a caller that LOSES the CAS re-reads a stamp the winner stored from a
+later sample, so the negative interval was an ORDERING artifact, and the guard
+emitted a duplicate line and moved the stamp backwards, reintroducing the
+amplification the CAS was added to prevent. The proposed fix (re-sample after the
+Load) was measured INSUFFICIENT — the winner's sample may still be later — so the
+gates now discriminate on MAGNITUDE, not sign: suppress while the stamp is within
+one interval of now in EITHER direction. A rollback therefore costs at most one
+suppressed line instead of silencing the warning for the whole step. The OCSP
+half of (2) was NOT a live defect (no CAS loop; a lost CAS suppresses) and took
+the same rule only for uniformity. **The general lesson: a guard on the SIGN of
+an interval guards the wrong thing — a negative interval means the two readings
+are out of order, which concurrency produces with no clock involved. Compare
+against the quantity's natural scale, or leave the wall clock entirely.**
+
+**Gates.** 10 defect + 8 control = 18, all ten defect gates verified FAILING
 against the pre-fix tree. Fault injection is deterministic and needs no host
 clock: a backward step of Δ is observationally identical to a stamp Δ in the
 FUTURE, because the stamp is written before the step and read after it. The

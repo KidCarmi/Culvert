@@ -114,8 +114,8 @@ privilege; the trigger is an ordinary clock correction.
 
 | # | Scenario | Before | After |
 |---|---|---|---|
-| CK-1a | Half-open CONNECT tunnel open across a backward step | idle reaper **never fires**; 2 goroutines + 2 FDs + relay buffer + connlimit slot pinned for Δ | one fresh idle window from the step, then reaped |
-| CK-1b | Live-but-quiet tunnels during a FORWARD step | reaped early at the next pop (apparent idleness jumps) | unaffected — an active direction re-stamps before the check |
+| CK-1a | Half-open CONNECT tunnel open across a backward step | idle reaper **never fires**; 2 goroutines + 2 FDs + relay buffer + connlimit slot pinned for Δ | monotonic basis — a wall step cannot reach the verdict |
+| CK-1b | **Quiet-but-alive** tunnel during a FORWARD step | **torn down at the next deadline pop**, after seconds of real idleness: a quiet tunnel moves no bytes, so nothing refreshes its stamp | monotonic basis — same immunity, both directions |
 | CK-2a | Parent proxies trip, then the clock steps back | every breaker pinned **open** for Δ → `Pool.Next` returns nil → **direct egress, parent chain bypassed** | one reset timeout from the step, then half-open probes resume |
 | CK-2b | Same, diagnostics view | `OpenedAt()` reports a trip instant in the future | re-anchored to the stepped clock; the published instant stays coherent |
 | CK-3 | Sluice recovers, but the clock stepped back | CDR breaker pinned **open** for Δ → content disarm unavailable | one `ResetTimeout` from the step, then a probe |
@@ -143,11 +143,22 @@ privilege; the trigger is an ordinary clock correction.
 substance.** "An unmeasurable interval must never count as infinite" fixes all
 five. What it should count as instead depends on what the bound protects.
 
-- **Re-anchor** — CK-1, CK-2, CK-3. These bounds govern a **live resource** or a
+- **Monotonic basis** — CK-1. The tunnel stamp was moved off the wall clock
+  entirely (`relayEpoch` + `relayMonoNanos`), which is strictly stronger than
+  guarding it: a wall-clock step cannot be *represented* in a monotonic stamp, so
+  neither direction can reach the verdict and there is no negative case left to
+  decide. This was taken after review showed the guard closed only the backward
+  half — see the correction note below. It is available here because the stamp is
+  process-internal (all five holders pass it straight to `idleCopyCounted`;
+  nothing publishes it), which is not true of the breakers below.
+- **Re-anchor** — CK-2, CK-3. These bounds govern a **live resource** or a
   **live dependency**. Treating the step as "expired" would reap every quiet
   tunnel on the appliance at the first deadline pop after a routine clock
   correction, and fire every breaker's probe simultaneously at parents that may
-  still be down — a mass reset *caused by the mitigation*. Re-anchoring the stamp
+  still be down — a mass reset *caused by the mitigation*. Their stamps cannot
+  move to a monotonic basis the way CK-1's could, because `OpenedAt()` publishes
+  the trip instant on `/api/diagnostics`, so the wall stamp is an observable
+  contract. Re-anchoring the stamp
   to the stepped clock grants exactly **one** fresh window measured from the
   step: bounded, deterministic, and it costs a genuinely dead tunnel or a
   recovered parent at most one extra window. Each re-anchor is a
@@ -198,9 +209,11 @@ was missing was never a signal; it was the recovery the signal is waiting for.
 
 ## 6. Suggested Improvements — shipped in this PR
 
-1. `proxy_tunnel.go` — `tunnelIdleFor` replaces the inline
-   `time.Since(time.Unix(0, shared.Load()))`. Re-anchors on a future stamp and
-   returns 0; all four relay call sites go through it.
+1. `proxy_tunnel.go` — the activity stamp moves to a **monotonic basis**
+   (`relayEpoch`, `relayMonoNanos`), and `tunnelIdleFor` replaces the inline
+   `time.Since(time.Unix(0, shared.Load()))`. All five holders (three in
+   `proxy_tunnel.go`, one in `proxy_tunnel_h2.go`, one in `socks5.go`) seed and
+   compare on that basis, so both step directions are closed at once.
 2. `internal/upstream/upstream.go` — `Allow` splits the open case: a negative
    `since` re-anchors `openedAt` (CAS) and denies; the timeout comparison is
    otherwise unchanged. `openedAt` stays a wall stamp because `OpenedAt()`
@@ -220,11 +233,13 @@ no posture change in the absence of a clock step.
 ## 7. Residual Risk / deliberately left
 
 - **A forward step still shortens CK-4 and CK-5.** A jump forward expires the
-  readiness grace and the log intervals early. Both directions are the *honest*
-  one for those two (report the degradation, emit the line), so this is left as
-  the correct behaviour rather than guarded. CK-1 is immune in the forward
-  direction because an active relay re-stamps before the staleness check, and
-  CK-2/CK-3 only lose part of a reset timeout, which costs one early probe.
+  readiness grace early, and shortens the log intervals by at most one interval
+  (the symmetric window below bounds it). Both are the *honest* direction for
+  those two — report the degradation, emit the line — so this is left as correct
+  behaviour rather than guarded. CK-1 is immune in **both** directions now that
+  the basis is monotonic. CK-2/CK-3 lose part of a reset timeout on a forward
+  step, which costs one early probe at a dependency: self-correcting, and the
+  cheapest outcome of the three.
 - **Nothing detects or reports the step itself.** Each bound now recovers
   locally, but no subsystem says "the wall clock moved backwards by an hour",
   which is the single log line that would have made all five of these diagnosable
@@ -269,12 +284,14 @@ no posture change in the absence of a clock step.
 
 ## 8. Required Tests
 
-**All eight defect gates were verified FAILING against the pre-fix tree**, not
-written after the fix:
+**All ten defect gates were verified FAILING against the shape each replaces**,
+not written after the fix. The eight below are the original sweep's; the review
+round in §8b adds two more (the wall-clock-basis proof and the roster ordering
+pair) with their own pre-fix results recorded there:
 
 | Gate | Pre-fix result |
 |---|---|
-| `TestChaos71_TunnelIdleReaperSurvivesABackwardClockStep` | FAIL — `idleCopyCounted never reaped a half-open tunnel after a backward clock step` (timed out at 3 s) |
+| `TestChaos71_TunnelIdleReaperSurvivesABackwardClockStep` (original form) | FAIL — `idleCopyCounted never reaped a half-open tunnel after a backward clock step` (timed out at 3 s). **Superseded in §8b**: once the stamp moved to a monotonic basis a wall-clock step could no longer be injected into it at all, so this behavioural gate was replaced by `TestChaos71_TunnelActivityStampIsNotOnTheWallClock`, which proves the basis instead (pre-fix: `activity stamp = 1792278133265559320, want < 86400000000000`). |
 | `TestChaos71_CDRBreakerRecoversAfterABackwardClockStep` | FAIL — `breaker never left open after a backward clock step plus a full reset timeout` |
 | `TestChaos71_DPReadinessFailsWhenTheGraceCannotBeMeasured` | FAIL — `cp_poll status = "ok", want "fail"` |
 | `TestChaos71_RosterPersistWarningIsNotSuppressedByABackwardClockStep` | FAIL — `rosterPersistSuppress = 1, want 0` |
@@ -294,8 +311,11 @@ eventually happens.
 **CONTROLS** — a passing gate must not be able to mean the mechanism simply
 stopped firing. Seven, one per changed decision:
 
-- `TestChaos71_TunnelIdleReaperStillReapsAnOrdinaryStaleTunnel` — an ordinary
-  hour-idle tunnel is still reaped.
+- `TestChaos71_TunnelIdleReaperReapsAnIdleTunnel` — an ordinary hour-idle tunnel
+  is still reaped, i.e. the monotonic switch did not break the CHAOS-03
+  guarantee this bound exists for.
+- `TestChaos71_TunnelIdleForIgnoresAWallClockEpochStamp` — a stamp on the wrong
+  basis can never produce a REAPABLE idleness and tear down a live tunnel.
 - `TestChaos71_TunnelIdleReaperDoesNotReapAFreshTunnel` — the guard cannot
   become "always reap"; a current stamp survives a full window. (It also joins
   the relay goroutine before returning, so the package-global timeout is never
@@ -313,9 +333,10 @@ stopped firing. Seven, one per changed decision:
 - `TestChaos71_RosterRateGatesStillSuppressWithinTheInterval` — both gates still
   rate-limit to one line per interval.
 
-**Counts.** 8 defect gates + 7 controls = **15 new gates**, in
-`chaos71_clock_rollback_test.go` (root, 9), `internal/upstream/clock_rollback_test.go` (3)
-and `internal/ocsp/clock_rollback_test.go` (3).
+**Counts.** 10 defect gates + 8 controls = **18 new gates**, in
+`chaos71_clock_rollback_test.go` (root, 13), `internal/upstream/clock_rollback_test.go` (3)
+and `internal/ocsp/clock_rollback_test.go` (2) — including the four the review
+round in §8b added.
 
 **Verification run.** `go build ./...` clean; `go vet ./...` clean;
 `gofmt` clean. The 15 gates pass, and pass under `-race` together with the
@@ -328,6 +349,102 @@ must not point to a private address` — a sandbox DNS/SSRF-guard artifact, not 
 regression, and untouched by this change. `golangci-lint` could not run in this
 environment (the installed binary is built with Go 1.25 and panics on a Go 1.26
 module); the hosted Fast PR Gate runs the pinned version.
+
+---
+
+## 8b. Review round — the guard closed one half of CK-1, and the other guard had an ordering bug
+
+Two findings from CodeRabbit on `4535833`, both labelled Minor, both correct on
+the substance and both traced to a real path before being acted on.
+
+### CK-1b was documented as immune, and was not
+
+The table above originally read *"CK-1b … unaffected — an active direction
+re-stamps before the check."* That is true only of a tunnel **actively moving
+bytes**. A tunnel that is **quiet but alive** — an idle SSH session, a long-poll
+waiting on an event — moves no bytes, so `n > 0` is never true and nothing
+refreshes its stamp. After a forward step the apparent idleness jumps by the
+step, and the tunnel is torn down at the next deadline pop having been idle for
+seconds in real time.
+
+The behaviour was not a regression — the pre-fix code measured the forward
+direction identically — but **the claim of immunity was wrong**, and the fault
+matters more than the write-up implied. The forward step is arguably the *more
+common* direction on an appliance: a dead or wrong RTC boots the clock at a
+default, NTP then corrects it forward, possibly by years, and every quiet tunnel
+on the box is reset at the next pop.
+
+The response was not to add a second guard but to remove the need for one: the
+stamp moved to a **monotonic basis**, which closes CK-1a and CK-1b together
+because a wall-clock step cannot be represented in it at all. That is a smaller
+conceptual surface than the guard it replaces — the negative branch is gone —
+and it is available precisely here because the stamp is process-internal. The
+permanent proof is `TestChaos71_TunnelActivityStampIsNotOnTheWallClock`, which
+asserts the **basis** rather than a behaviour: a behavioural gate cannot step the
+host clock, so only the basis is checkable, and if anyone restores a wall stamp
+it fails immediately with the reason.
+
+### The CK-5 guard mistook its own staleness for a rollback
+
+Sharper, because this one *was* introduced by this sweep. The roster gates claim
+their rate-limit interval with a CAS loop, and the guard read a negative interval
+as "the clock stepped back, emit". But negative does not mean stepped: a caller
+that **loses the CAS** re-reads a stamp the winner just stored from a later
+sample, so the difference is negative for an **ordering** reason. The loser then
+emitted a duplicate line and moved the stamp backwards — reintroducing exactly
+the log amplification a previous sweep's Codex review added the CAS to prevent,
+arriving when the volume is already failing.
+
+CodeRabbit's proposed fix — re-sample the clock after each `Load` — was
+**insufficient**, and measuring it showed why: the winner's sample may still be
+later than ours, so the window narrows but does not close. The gate was failing
+on the wrong question.
+
+**Magnitude is the discriminator, not sign.** A lost CAS puts the stamp
+microseconds ahead; a rollback worth reacting to puts it the whole step ahead. So
+both roster gates and the OCSP gate now suppress while the stamp is within one
+interval of now in **either** direction, and emit once it is further ahead than
+the interval. A rollback therefore costs at most **one** suppressed line — which
+the rate limit already permits — instead of silencing the warning for the whole
+step, and an ordering artifact can never be read as a clock step. The clock is
+also now sampled after each `Load`, which is simply the correct ordering even
+though the symmetric window is what closes the hole.
+
+**The OCSP half of that finding was not a live defect.** `allowTruncationLog` has
+no CAS *loop*: it loads once, and a lost CAS returns false, which suppresses. So
+the interleaving could not produce a duplicate there. The symmetric rule was
+applied anyway, for one rule with one reason across the three gates rather than
+two rules and a subtle argument about why one of them is safe — and its `now`
+stays an injected parameter, so the deterministic-clock contract its tests rely
+on is untouched.
+
+### What the round changes about the sweep's own claims
+
+- CK-1's posture is **monotonic basis**, not re-anchor. CK-2 and CK-3 still
+  re-anchor, and now state why they cannot do the same: `OpenedAt()` publishes
+  their stamp, so the wall basis is an observable contract.
+- CK-1 is immune in **both** step directions, not just backward.
+- CK-5's bound is "silenced for at most one interval", not "emits on any
+  backward step".
+
+Four gates were added (`TunnelActivityStampIsNotOnTheWallClock`,
+`TunnelIdleForIgnoresAWallClockEpochStamp`,
+`RosterGateDoesNotMistakeItsOwnStalenessForARollback`,
+`RosterGateNeverMovesItsStampBackwards`). Three of the four were verified failing
+against the shape each replaces; the fourth passes in both trees and is labelled
+a control for that reason. The roster pair was additionally re-run against the
+sign-based guard to confirm it discriminates, and the second of them caught the
+stamp provably moving backwards (`1792278293183292997 < 1792278293183342788`).
+
+### The lesson in it
+
+**A guard on the sign of an interval is a guard on the wrong thing.** Both
+findings are the same mistake in different places: the sweep reasoned that a
+negative interval means the clock moved, when a negative interval only means the
+two readings are out of order — and concurrency produces that without any clock
+involvement. Where the quantity being measured has a natural scale (one rate-limit
+interval, one idle window), compare against that scale. Where it can be taken off
+the wall clock entirely, do that instead and there is no sign to test.
 
 ---
 

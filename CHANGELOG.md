@@ -543,13 +543,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   silencing the only warning that an admin credential mutation never reached the
   volume.
 
-  An unmeasurable interval now never counts as infinite. The three bounds that
-  govern a live resource or dependency re-anchor their stamp and serve one fresh
-  window measured from the step — treating a step as "expired" would have reaped
+  The forward direction was the other half of the tunnel case, and it is the one
+  an appliance meets most often: a dead or wrong RTC boots the clock at a
+  default, NTP corrects it forward, and because a quiet-but-alive tunnel (an idle
+  SSH session, a long-poll) moves no bytes, nothing refreshes its stamp and it is
+  torn down at the next deadline pop after seconds of real idleness. The tunnel
+  idle clock therefore leaves the wall clock altogether, onto a monotonic basis
+  that no step in either direction can reach.
+
+  An unmeasurable interval now never counts as infinite. The two breaker bounds,
+  whose trip instant is published on `/api/diagnostics` and so cannot change
+  basis, re-anchor their stamp and serve one fresh window measured from the step — treating a step as "expired" would have reaped
   every quiet tunnel on the appliance and fired every breaker's probe at parents
   that may still be down, a mass reset caused by the mitigation. The readiness
   probe and the log gates, which protect nothing live, count it as expired:
-  fail-closed for the probe, audible for the gates. Recovery is automatic and
+  fail-closed for the probe, audible for the gates. The log gates decide on the
+  MAGNITUDE of the interval rather than its sign — suppressing while the stamp is
+  within one interval of now in either direction — because a caller that loses the
+  gate's compare-and-swap also sees a stamp marginally ahead of its own sample,
+  and reading that as a clock step emitted a duplicate line and moved the stamp
+  backwards. A rollback now costs at most one suppressed line. Recovery is automatic and
   bounded by one window of the bound in question rather than by the size of the
   step; no state latches and no restart is required. No configuration, metric,
   alert or persisted format changes, and behaviour with a sane clock is

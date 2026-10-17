@@ -152,7 +152,6 @@ func noteRosterPersistBestEffort(what string, err error) {
 		return
 	}
 	n := rosterPersistBestEffort.Add(1)
-	now := time.Now()
 	// CHAOS-70 (Codex P2): CLAIM the interval atomically. A plain load/compare/
 	// store lets every caller that finishes concurrently read the same expired
 	// stamp and all emit a line — which is the log amplification this gate
@@ -161,13 +160,34 @@ func noteRosterPersistBestEffort(what string, err error) {
 	// the CAS; the losers re-read and land in the suppressed branch.
 	for {
 		last := rosterPersistLogLast.Load()
+		// Sample the clock AFTER the Load, every iteration.
+		//
 		// CHAOS-71: a NEGATIVE difference means the wall clock stepped back past
 		// the stamp (the gate keeps unix nanos, so the subtraction is a
 		// wall-clock one). The interval is then unmeasurable, and suppressing on
 		// it would silence a durability warning for the whole step — the one
 		// notice that a credential/roster mutation did not reach the volume. An
 		// unmeasurable interval counts as expired: claim it and emit.
-		if d := now.Sub(time.Unix(0, last)); last != 0 && d >= 0 && d < rosterPersistLogInterval {
+		//
+		// But "negative" alone does NOT mean the clock stepped: a caller that
+		// loses the CAS re-reads a stamp the WINNER just stored from a later
+		// sample, so the difference is negative for an ORDERING reason. A guard
+		// keyed on the sign mistook that for a rollback, emitted a duplicate
+		// line and moved the stamp backwards — reintroducing the amplification
+		// the CAS exists to stop (CodeRabbit, PR #1650). Re-sampling after the
+		// Load narrows that window but cannot close it: the winner's sample may
+		// still be later than ours.
+		//
+		// MAGNITUDE is the discriminator, not sign. A lost CAS puts the stamp
+		// microseconds ahead; a rollback worth reacting to puts it the whole step
+		// ahead. So the gate suppresses while the stamp is within one interval of
+		// now in EITHER direction, and emits once it is further ahead than the
+		// interval. A rollback therefore costs at most ONE suppressed line — the
+		// rate limit already allows that — instead of silencing the warning for
+		// the whole step, and an ordering artifact can never be read as a clock
+		// step.
+		now := time.Now()
+		if d := now.Sub(time.Unix(0, last)); last != 0 && d.Abs() < rosterPersistLogInterval {
 			rosterPersistSuppress.Add(1)
 			return
 		}
@@ -192,16 +212,36 @@ func noteRosterPersistBestEffort(what string, err error) {
 // must not share a rate gate).
 func noteRosterNotDurable() {
 	n := rosterNotDurable.Add(1)
-	now := time.Now()
 	for {
 		last := rosterNotDurableLogLast.Load()
+		// Sample the clock AFTER the Load, every iteration.
+		//
 		// CHAOS-71: a NEGATIVE difference means the wall clock stepped back past
 		// the stamp (the gate keeps unix nanos, so the subtraction is a
 		// wall-clock one). The interval is then unmeasurable, and suppressing on
 		// it would silence a durability warning for the whole step — the one
 		// notice that a credential/roster mutation did not reach the volume. An
 		// unmeasurable interval counts as expired: claim it and emit.
-		if d := now.Sub(time.Unix(0, last)); last != 0 && d >= 0 && d < rosterPersistLogInterval {
+		//
+		// But "negative" alone does NOT mean the clock stepped: a caller that
+		// loses the CAS re-reads a stamp the WINNER just stored from a later
+		// sample, so the difference is negative for an ORDERING reason. A guard
+		// keyed on the sign mistook that for a rollback, emitted a duplicate
+		// line and moved the stamp backwards — reintroducing the amplification
+		// the CAS exists to stop (CodeRabbit, PR #1650). Re-sampling after the
+		// Load narrows that window but cannot close it: the winner's sample may
+		// still be later than ours.
+		//
+		// MAGNITUDE is the discriminator, not sign. A lost CAS puts the stamp
+		// microseconds ahead; a rollback worth reacting to puts it the whole step
+		// ahead. So the gate suppresses while the stamp is within one interval of
+		// now in EITHER direction, and emits once it is further ahead than the
+		// interval. A rollback therefore costs at most ONE suppressed line — the
+		// rate limit already allows that — instead of silencing the warning for
+		// the whole step, and an ordering artifact can never be read as a clock
+		// step.
+		now := time.Now()
+		if d := now.Sub(time.Unix(0, last)); last != 0 && d.Abs() < rosterPersistLogInterval {
 			rosterNotDurableSuppress.Add(1)
 			return
 		}
