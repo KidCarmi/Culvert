@@ -76,8 +76,32 @@ func (cb *CircuitBreaker) Allow() bool {
 		return true
 	case circuitOpen:
 		// Check if timeout has elapsed → transition to half-open.
-		opened := time.UnixMilli(cb.openedAt.Load())
-		if time.Since(opened) > cb.timeout {
+		//
+		// CHAOS-71: openedAt is a UnixMilli int64, so time.UnixMilli rebuilds a
+		// Time with no monotonic reading and time.Since on it is a WALL-CLOCK
+		// subtraction. A backward step (NTP correcting a wrong RTC, a resumed
+		// snapshot, an operator fixing the date) makes that difference negative
+		// for the duration of the step, and `> cb.timeout` is then false however
+		// long the parent has actually been down — so the open→half-open
+		// transition, this breaker's only route back to service, never fires.
+		// That is worse here than in an ordinary breaker because Pool.Next falls
+		// back to DIRECT when nothing is eligible: a step that pins every tripped
+		// breaker open leaves the appliance egressing around the parent-proxy
+		// chain long after the parents recovered.
+		//
+		// Re-anchor instead of half-opening immediately: an unmeasurable interval
+		// must not become a probe flood at a parent that may still be down, nor
+		// an unbounded wait. The breaker then serves one full timeout measured
+		// from the step. openedAt stays a wall stamp because OpenedAt() publishes
+		// it on /api/diagnostics; the CAS keeps a concurrent RecordFailure's
+		// fresher stamp.
+		opened := cb.openedAt.Load()
+		since := time.Since(time.UnixMilli(opened))
+		if since < 0 {
+			cb.openedAt.CompareAndSwap(opened, time.Now().UnixMilli())
+			return false
+		}
+		if since > cb.timeout {
 			cb.state.CompareAndSwap(int32(circuitOpen), int32(circuitHalfOpen))
 			return true
 		}

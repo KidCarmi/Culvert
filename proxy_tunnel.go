@@ -227,7 +227,7 @@ func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atom
 		}
 		var ne net.Error
 		if err != nil && errors.As(err, &ne) && ne.Timeout() {
-			if time.Since(time.Unix(0, shared.Load())) >= timeout {
+			if tunnelIdleFor(shared) >= timeout {
 				logger.Printf("tunnel idle timeout: no bytes in either direction for %v, closing relay", timeout)
 				dst.Close()     //nolint:errcheck // teardown; peer relay unblocks on the close
 				srcConn.Close() //nolint:errcheck // teardown; peer relay unblocks on the close
@@ -239,6 +239,43 @@ func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atom
 		// on peer close; the byte count is still valid.
 		return total
 	}
+}
+
+// tunnelIdleFor reports how long the tunnel has been silent in BOTH directions,
+// re-anchoring the shared stamp when the wall clock has stepped backwards past
+// it.
+//
+// CHAOS-71. The stamp is a bare int64 of unix nanos, so time.Unix rebuilds a
+// Time with no monotonic reading and the subtraction below is a wall-clock one.
+// An NTP correction after a wrong RTC, a resumed hypervisor snapshot, or an
+// operator fixing the date moves the clock back by Δ; every live tunnel's stamp
+// then reads Δ into the FUTURE and the measured idleness is negative, so
+// `>= timeout` is false for the whole of Δ and the only bound on a half-open
+// tunnel stops existing. Nothing errors and nothing is logged: the read deadline
+// is monotonic (netpoll converts it against runtimeNano), so the loop keeps
+// waking on schedule — it is the verdict that is lost, not the wake-up. The cost
+// is two goroutines, two FDs, a pooled relay buffer and the connection-limiter
+// slot per dead tunnel, held until the clock catches up.
+//
+// A step is NOT a reason to reap. Treating an unmeasurable interval as expired
+// would tear down every live-but-quiet tunnel on the appliance at the first
+// deadline pop after an ordinary clock correction — a mass reset caused by the
+// mitigation. Re-anchoring grants the tunnel exactly ONE fresh idle window
+// measured from the step: bounded, deterministic, and it costs a genuinely dead
+// tunnel at most one extra window. Same rule, same reason, as the breaker
+// re-anchors in internal/upstream and cdr_breaker.go.
+//
+// The CompareAndSwap (not a Store) means a relay that moved bytes concurrently
+// keeps its own, newer stamp instead of having it rewritten to this instant.
+func tunnelIdleFor(shared *atomic.Int64) time.Duration {
+	now := time.Now()
+	stamp := shared.Load()
+	idle := now.Sub(time.Unix(0, stamp))
+	if idle < 0 {
+		shared.CompareAndSwap(stamp, now.UnixNano())
+		return 0
+	}
+	return idle
 }
 
 // relayCounted copies src→dst through a pooled relay buffer, adds the bytes

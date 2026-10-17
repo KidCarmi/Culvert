@@ -97,8 +97,12 @@ type Checker struct {
 // now, at most once per truncationLogEvery. A CAS keeps two concurrent
 // handshakes from both emitting.
 func (oc *Checker) allowTruncationLog(now time.Time) bool {
+	// CHAOS-71: the stamp is unix nanos, so the comparison is a wall-clock one
+	// and a BACKWARD clock step reads as "logged in the future", suppressing the
+	// notice for the duration of the step. An unmeasurable interval counts as
+	// expired, so a capped responder stays reportable across a clock correction.
 	last := oc.lastTruncationLog.Load()
-	if last != 0 && now.Sub(time.Unix(0, last)) < truncationLogEvery {
+	if d := now.Sub(time.Unix(0, last)); last != 0 && d >= 0 && d < truncationLogEvery {
 		return false
 	}
 	return oc.lastTruncationLog.CompareAndSwap(last, now.UnixNano())

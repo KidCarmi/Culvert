@@ -161,7 +161,13 @@ func noteRosterPersistBestEffort(what string, err error) {
 	// the CAS; the losers re-read and land in the suppressed branch.
 	for {
 		last := rosterPersistLogLast.Load()
-		if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
+		// CHAOS-71: a NEGATIVE difference means the wall clock stepped back past
+		// the stamp (the gate keeps unix nanos, so the subtraction is a
+		// wall-clock one). The interval is then unmeasurable, and suppressing on
+		// it would silence a durability warning for the whole step — the one
+		// notice that a credential/roster mutation did not reach the volume. An
+		// unmeasurable interval counts as expired: claim it and emit.
+		if d := now.Sub(time.Unix(0, last)); last != 0 && d >= 0 && d < rosterPersistLogInterval {
 			rosterPersistSuppress.Add(1)
 			return
 		}
@@ -189,7 +195,13 @@ func noteRosterNotDurable() {
 	now := time.Now()
 	for {
 		last := rosterNotDurableLogLast.Load()
-		if last != 0 && now.Sub(time.Unix(0, last)) < rosterPersistLogInterval {
+		// CHAOS-71: a NEGATIVE difference means the wall clock stepped back past
+		// the stamp (the gate keeps unix nanos, so the subtraction is a
+		// wall-clock one). The interval is then unmeasurable, and suppressing on
+		// it would silence a durability warning for the whole step — the one
+		// notice that a credential/roster mutation did not reach the volume. An
+		// unmeasurable interval counts as expired: claim it and emit.
+		if d := now.Sub(time.Unix(0, last)); last != 0 && d >= 0 && d < rosterPersistLogInterval {
 			rosterNotDurableSuppress.Add(1)
 			return
 		}
