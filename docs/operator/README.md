@@ -10,8 +10,8 @@ For the product-level overview, quick start, and feature list, start at the
 repository [`README.md`](../../README.md) instead — it links directly to the
 runbook for anything it calls out as needing operator attention. For the
 underlying design/engineering record behind a given behavior (ADRs, chaos-
-engineering sweeps, technical registers), see `CLAUDE.md`'s Architecture Notes
-and `docs/engineering/`.
+engineering sweeps, technical registers), see the [agent-context
+index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/engineering/`.
 
 ## Install, upgrade, and release management
 
@@ -33,6 +33,7 @@ and `docs/engineering/`.
 - [`cluster-ca-expiry.md`](cluster-ca-expiry.md) — cluster (enrollment) CA expiry and the resulting control-plane trust outage.
 - [`cluster-config-capacity.md`](cluster-config-capacity.md) — CP→DP config-sync capacity limits and operations.
 - [`cluster-rate-limit-freshness.md`](cluster-rate-limit-freshness.md) — how cluster-wide rate limiting degrades during a Control Plane outage.
+- [`dp-bootstrap-artifact-safety.md`](dp-bootstrap-artifact-safety.md) — why the Control Plane refuses to render a Data Plane enrollment script or compose file for an untrusted request authority (SEC-BOOTSTRAP-HOST-1).
 
 ## Authentication and identity
 
@@ -41,6 +42,8 @@ and `docs/engineering/`.
 - [`ldap-directory-stalls.md`](ldap-directory-stalls.md) — what happens when a directory accepts a connection and then stops answering.
 - [`credential-verification-cost.md`](credential-verification-cost.md) — the bounded credential-verification governor and the `auth_verify_saturated` alert.
 - [`admin-login-input-bounds.md`](admin-login-input-bounds.md) — why the admin login endpoint bounds the submitted username, and what it protects.
+- [`admin-basic-auth.md`](admin-basic-auth.md) — how the admin-plane HTTP Basic fallback for CLI/API clients is enforced, and the one case it is refused (SEC-BASIC-1).
+- [`admin-roster-durability.md`](admin-roster-durability.md) — `ui_users.json` as the only durable home of the admin roster, and the recommended alerts (CHAOS-70).
 
 ## TLS inspection, certificates, and decryption
 
@@ -60,6 +63,8 @@ and `docs/engineering/`.
 - [`dns-resolution-health.md`](dns-resolution-health.md) — destination-host DNS resolution health, bounding, and recovery.
 - [`geoip-resolution-health.md`](geoip-resolution-health.md) — GeoIP policy resolution health and the warmer that backs it.
 - [`traffic-log-destination-privacy.md`](traffic-log-destination-privacy.md) — controlling how much destination detail lands in traffic logs.
+- [`destination-host-bounds.md`](destination-host-bounds.md) — the bound on the client-supplied destination authority on every protocol, and what you see when it fires (CHAOS-69).
+- [`request-tracing-input-bounds.md`](request-tracing-input-bounds.md) — bounds on client-supplied tracing headers reused as the request correlation ID (SEC-REQID-1).
 
 ## Security scanning and threat intelligence
 
