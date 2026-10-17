@@ -43,6 +43,44 @@ In every case:
 - the first post-reboot backup listing passed (about 1.7 s);
 - traffic was enforced.
 
+## Two-latency comparison (candidate 6248daf7, retained bytes)
+
+After ASTRA's capture ruled out fsck, the same retained 6248 OVA was run at two
+injected latencies (lab run 39012697264, dm-delay): the calibrated `esxi12`
+(12 ms read / 3 ms write) and a diagnostic `esxi30` (30 ms / 15 ms ≈ ASTRA's
+device-read mean). 3 reboots each, same bytes, one runner.
+
+| Phase | esxi12 (s) | esxi30 (s) | ×, for a ×2.5 latency step |
+|---|---|---|---|
+| recovery (total) | 107.7 | 226.9 | 2.11 |
+| firmware_gap (pre-kernel: kernel + initrd reads) | 46.6 | 114.3 | 2.45 |
+| kernel (initramfs) | 6.8 | 12.9 | 1.90 |
+| apparmor | 2.1 | 5.1 | 2.47 |
+| dbus | 0.6 | 1.4 | 2.37 |
+| containerd | 1.9 | 4.6 | 2.45 |
+| containerd metadata→next-plugin gap | 1.40 | 3.50 | 2.50 |
+| docker | 2.8 | 6.3 | 2.26 |
+| stack resume (compose up → ClamAV ready) | 16.7 | 26.8 | 1.60 |
+| boot fsck (UEFI + BOOT only; root skipped) | 1.1 | 2.6 | 2.48 |
+| containerd read volume (MiB) | 51.2 | 51.2 | 1.00 |
+| docker read volume (MiB) | 116.3 | 116.3 | 1.00 |
+
+**Every phase grows with latency; the bytes read do not.** Recovery is
+latency-bound reads end to end — the pre-kernel firmware/initrd read is the
+single largest block, then the container-engine and stack phases. The
+containerd metadata→next-plugin gap scales almost exactly with latency (×2.50),
+confirming it is a read burst (ASTRA's ESXi 11.5 s is the same gap at higher
+per-read latency). The only product-side levers are therefore **fewer bytes
+read** in those phases (initrd size for pre-kernel — the `MODULES=list` target,
+deferred pending per-hypervisor proof; container-layer reads for engine/stack);
+per-read latency itself is infrastructure.
+
+Caveat: the dm-delay lab is cache=none + direct-I/O, so every read pays the full
+injected latency — a PESSIMISTIC bound. Real ESXi does readahead/caching, which
+is why ASTRA's 141 s at a ~30 ms device mean sits BELOW the lab's 227 s at
+`esxi30`. The comparison proves latency-sensitivity and phase distribution, not
+an absolute ESXi number.
+
 ## What ships
 
 **4 MiB read-ahead** for whole disks: `appliance/provision/60-culvert-readahead.rules`.
