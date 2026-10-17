@@ -1166,7 +1166,70 @@ func policyRulePersistable(r *PolicyRule) (ok bool, reason string) {
 	if r.Auth != nil {
 		return false, "auth spec is only valid on auth rules"
 	}
+	// SEC-POLICYACTION-1: the Action must be one this build dispatches. Only
+	// the API ingress path validated it (validateAccessRule, ui_helpers.go), so
+	// the durable and bulk paths this gate exists to protect — PolicyStore.Load
+	// (the operator-managed policy_file), PolicyStore.ReplaceAll (the CP→DP
+	// snapshot apply and replace-mode config import) — installed an
+	// unrecognized action verbatim. Such a rule matched and, pre-fix, ALLOWED
+	// the request while shadowing every lower-priority deny rule under
+	// first-match-wins. Dropping it here is the same fail-closed warn-and-skip
+	// this function already applies to a source-scoped access rule, and is the
+	// exact case the doc above describes as "a hand-edited or newer-version
+	// policy.json".
+	//
+	// An EMPTY action is included deliberately rather than defaulted: no
+	// documented per-rule default exists, validateAccessRule has always
+	// required an explicit action, so no rule Culvert itself created can lack
+	// one — and treating absence as Allow is the fail-open this closes.
+	if _, known := canonicalPolicyAction(r.Action); !known {
+		return false, fmt.Sprintf("action %q is not one this build dispatches (Allow, Drop, Block_Page, Redirect)", r.Action)
+	}
 	return true, ""
+}
+
+// canonicalPolicyAction folds a STORED action onto the canonical constant
+// applyPolicyDecision dispatches on, reporting false when this build has no
+// branch for it at all. It is the single definition of "an action this build
+// understands" shared by the runtime dispatch and the durable-load gate, so the
+// two can never disagree (SEC-POLICYACTION-1).
+//
+// It is deliberately more tolerant than the API ingress validator
+// (validateAccessRule, ui_helpers.go), which still demands the exact documented
+// spelling. The two have different jobs: the ingress validator refuses sloppy
+// input at the door, where there is a human or a client to tell; this function
+// decides what to do with data that is ALREADY on disk or already arriving in a
+// snapshot, where the only choices are to honour it or to drop it.
+//
+// Two tolerances, each with a reason, and NEITHER is ever more permissive than
+// the pre-fix fall-through:
+//
+//   - CASE IS FOLDED. Operator-managed policy files and snapshot fixtures carry
+//     lowercase spellings ("allow"), and pre-fix those fell out of the dispatch
+//     switch and were ALLOWED. Folding resolves them to the action the operator
+//     plainly meant: "allow" keeps allowing (unchanged), while "drop" and
+//     "block_page" start BLOCKING where they previously allowed — strictly
+//     fail-closed relative to the status quo.
+//   - UNSET IS NOT UNRECOGNIZED. An empty action resolves to Allow, which is
+//     exactly what the pre-fix fall-through did, so no deployment's traffic
+//     changes direction. It is a historical shape, not a version skew:
+//     validateAccessRule has always required an explicit action, so an empty one
+//     can only come from data that predates it or was written by hand — and
+//     whoever can write the policy file could equally have written "Allow", so
+//     honouring it adds no attack surface. The security hole this closes is the
+//     version-skew case (a renamed or newer action), which is never empty.
+//     Requiring an explicit action on load would be a defensible tightening, but
+//     it is a migration, not a security fix, and it is recorded as such.
+func canonicalPolicyAction(action PolicyAction) (PolicyAction, bool) {
+	if action == "" {
+		return ActionAllow, true
+	}
+	for _, known := range []PolicyAction{ActionAllow, ActionDrop, ActionBlockPage, ActionRedirect} {
+		if strings.EqualFold(string(action), string(known)) {
+			return known, true
+		}
+	}
+	return "", false
 }
 
 // subjectSourceBreadth classifies the source breadth of a SubjectMatch for

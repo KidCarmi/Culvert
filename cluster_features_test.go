@@ -49,9 +49,16 @@ func TestPolicyStore_ReplaceAll(t *testing.T) {
 	origRules := policyStore.List()
 	defer policyStore.ReplaceAll(origRules)
 
+	// "block" is not a Culvert action — the four are Allow, Drop, Block_Page and
+	// Redirect, and validateAccessRule has always refused anything else. The
+	// fixture only survived because an unrecognized action used to fall out of
+	// applyPolicyDecision's switch and be ALLOWED; now it is refused at install
+	// (SEC-POLICYACTION-1), so the fixture names a real action. The lowercase
+	// "allow" is left as-is deliberately: it is a shape real policy files carry,
+	// and canonicalPolicyAction resolves it, so it belongs in this fixture.
 	rules := []PolicyRule{
 		{Priority: 1, Name: "r1", DestFQDN: "a.com", Action: "allow"},
-		{Priority: 2, Name: "r2", DestFQDN: "b.com", Action: "block"},
+		{Priority: 2, Name: "r2", DestFQDN: "b.com", Action: ActionBlockPage},
 	}
 	policyStore.ReplaceAll(rules)
 	got := policyStore.List()

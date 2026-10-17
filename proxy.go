@@ -675,9 +675,41 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		if match.Rule.LogFullURI {
 			ruleURI = policyLogURI(r.Host, r.URL.Path)
 		}
+		// SEC-POLICYACTION-1 — resolve the stored action onto the constant
+		// this switch dispatches on, and fail CLOSED when it cannot be
+		// resolved.
+		//
+		// Pre-fix the switch read match.Action directly and had no `default:`,
+		// so an action this build does not recognize fell out of it to the
+		// function's trailing `return "OK", false`: the request was ALLOWED, no
+		// decision was recorded, and because the rule scan is first-match-wins
+		// (evalAccessRules) every LOWER-PRIORITY DENY RULE WAS SKIPPED TOO. One
+		// unrecognized action on a priority-1 `destFqdn: "*"` rule therefore
+		// disabled the whole rulebase beneath it, silently.
+		//
+		// It was reachable without hand-editing, because Action was validated
+		// only on the API ingress path: a mixed-version cluster (a Control Plane
+		// pushing a snapshot with a newer or renamed action), a restored backup,
+		// or an operator-managed policy_file all produced one.
+		// policyRulePersistable now refuses to install such a rule, and this is
+		// the runtime backstop for one that reached the matcher anyway.
+		//
+		// Blocking is the correct direction and mirrors the sibling gate in the
+		// same engine: IPFilter.Allowed denies all traffic on an unrecognized
+		// mode rather than admitting it.
+		action, actionKnown := canonicalPolicyAction(match.Action)
+		if !actionKnown {
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(match.Action), authenticatedIdentity, "", ruleURI, authLog)
+			logger.Printf("POLICY_UNKNOWN_ACTION %s %s %q {rule=%q priority=%d action=%q req_id=%s identity=%s action_taken=block}",
+				clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.Rule.Name), match.Rule.Priority,
+				sanitizeLog(string(match.Action)), reqID, sanitizeLog(authenticatedIdentity))
+			serveBlockPage(w, r.Host, "Unknown Policy Action", match.Rule.Name)
+			return "POLICY_BLOCK", true
+		}
 		// Each branch below emits its decision line through one of the
 		// logPolicy* helpers (see below the function) rather than inline.
-		switch match.Action {
+		switch action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", ruleURI, authLog)
