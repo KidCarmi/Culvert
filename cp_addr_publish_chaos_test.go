@@ -264,19 +264,25 @@ func TestChaos71_CPAddrCommitRaceIsPendingAndWarned(t *testing.T) {
 	}
 }
 
-// TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded: UpdateCPAddressesFrom
-// is called only from the recording path and its retry loop — the activation
+// TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded: an address-list commit
+// is reached only from the recording path and its retry loop — the activation
 // publish included, which goes through publishOwnedCPAddresses — so no caller
 // can drop a failed republish on the floor or page outside the episode latch.
+// Every such commit is bound to an ownership read (updateCPAddressesBound);
+// UpdateCPAddressesFrom, the unbound entry, has no production caller.
 func TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded(t *testing.T) {
-	allowed := map[string]bool{"publishOwnedCPAddresses": true, "retryCPAddrPublish": true}
+	allowed := map[string]map[string]bool{
+		"updateCPAddressesBound": {"updateOwnedCPAddresses": true, "UpdateCPAddressesFrom": true},
+		"updateOwnedCPAddresses": {"publishOwnedCPAddressesAs": true, "retryCPAddrPublishOnce": true},
+		"UpdateCPAddressesFrom":  {},
+	}
+	found := map[string]int{}
 	dir := pkgSourceDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	found := 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -293,19 +299,25 @@ func TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "UpdateCPAddressesFrom" {
-					found++
-					if !allowed[owner] {
-						t.Errorf("%s: %s calls UpdateCPAddressesFrom directly — use publishOwnedCPAddresses so a failure is latched pending and retried",
-							fset.Position(call.Pos()), owner)
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if callers, watched := allowed[sel.Sel.Name]; watched {
+					found[sel.Sel.Name]++
+					if !callers[owner] {
+						t.Errorf("%s: %s calls %s directly — use publishOwnedCPAddresses(As) so the commit is bound to an ownership read and a failure is latched pending and retried",
+							fset.Position(call.Pos()), owner, sel.Sel.Name)
 					}
 				}
 				return true
 			})
 		}
 	}
-	if found < 2 {
-		t.Fatalf("the wall found only %d calls — its selector has gone stale", found)
+	for callee, callers := range allowed {
+		if len(callers) > 0 && found[callee] < len(callers) {
+			t.Errorf("the wall found %d call(s) of %s, want one from each of %v — its selector has gone stale", found[callee], callee, callers)
+		}
 	}
 }
 
