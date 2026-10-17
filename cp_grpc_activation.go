@@ -236,7 +236,6 @@ func (s *cpListenerSupervisor) publishAndActivate() (cpCommitOutcome, error) {
 		return cpCommitPublishFailed, fmt.Errorf("%w: %w", errCPGRPCAddressPublish, perr)
 	}
 	if changed {
-		s.everPublished = true
 		// Operator- and peer-supplied addresses: format, sanitize (CWE-117), %q.
 		logger.Printf("ControlPlane: published the committed CP address list %q",
 			sanitizeLog(fmt.Sprint(globalConfigStore.Get().CPAddresses)))

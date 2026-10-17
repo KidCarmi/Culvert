@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -25,14 +26,16 @@ const withdrawalTestPeer = "standby-peer.example.internal:50051"
 
 // cpWithdrawalTopology prepares a published store and an HA leader whose
 // derived CP address list is [peer, <the CP's own address>] once the CP role
-// is claimed. The retry loop is isolated (cpAddrPublishHarness): a spawned
+// is claimed — enabled at once, or (enableHA false) left for the caller to
+// enable later through h, so the node is first published by an HA
+// transition's republishTopology rather than by the activation. The retry loop is isolated (cpAddrPublishHarness): a spawned
 // loop reports on the returned channel and exits, and the test drives
 // retryCPAddrPublish synchronously. The caller has isolated globalConfigStore
 // (cpIsolateActivation) and sets the address source itself.
-func cpWithdrawalTopology(t *testing.T) (spawned chan struct{}, alerts func() []string) {
+func cpWithdrawalTopology(t *testing.T, enableHA bool) (h *HAState, spawned chan struct{}, alerts func() []string) {
 	t.Helper()
 	tempHADir(t)
-	h := &HAState{}
+	h = &HAState{}
 	cpUseTopologySource(t, h)
 	t.Cleanup(h.Stop)
 	spawned, alerts = cpAddrPublishHarness(t)
@@ -44,13 +47,32 @@ func cpWithdrawalTopology(t *testing.T) (spawned chan struct{}, alerts func() []
 	if err := globalConfigStore.Update(seed); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
-	if _, err := h.EnableAsLeader(withdrawalTestPeer, false); err != nil {
-		t.Fatalf("enable HA: %v", err)
+	if enableHA {
+		if _, err := h.EnableAsLeader(withdrawalTestPeer, false); err != nil {
+			t.Fatalf("enable HA: %v", err)
+		}
 	}
 	clusterRoleMu.Lock()
 	clusterRole.role, clusterRole.grpcAddr = "standalone", ""
 	clusterRoleMu.Unlock()
-	return spawned, alerts
+	return h, spawned, alerts
+}
+
+// cpWithdrawalHALaterOnActivated is an onActivated for a listener that
+// activated with HA OFF (its activation publish was a no-op): it enables HA,
+// whose republishTopology commits [peer, addr] — this node published by a
+// path no supervisor flag observes — optionally arms a rejection of the
+// withdrawal, then panics.
+func cpWithdrawalHALaterOnActivated(t *testing.T, h *HAState, reject bool) func() {
+	return func() {
+		if _, err := h.EnableAsLeader(withdrawalTestPeer, false); err != nil {
+			panic(fmt.Sprintf("enable HA: %v", err))
+		}
+		if reject {
+			cpAddrSetBudgetExcluding(t, []string{withdrawalTestPeer})
+		}
+		panic("injected: onActivated after an HA transition published this node")
+	}
 }
 
 // cpWithdrawalRejectingOnActivated is an onActivated that arms a commit-time
@@ -100,7 +122,7 @@ func cpWithdrawalEnv(t *testing.T) (addr string, supervisorAlerts func() []strin
 // release ownership.
 func TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits(t *testing.T) {
 	addr, supervisorAlerts := cpWithdrawalEnv(t)
-	spawned, alerts := cpWithdrawalTopology(t)
+	_, spawned, alerts := cpWithdrawalTopology(t, true)
 	globalConfigStore.setCPAddressSource(buildCPAddressList) // as activateControlPlane does
 
 	sup, _ := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, cpWithdrawalRejectingOnActivated(t, true))
@@ -184,7 +206,7 @@ func TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits(t *t
 // exit and ownership is released there, with nothing pending and no page.
 func TestChaos71_TerminalExitWithACommittedWithdrawalReleasesAtOnce(t *testing.T) {
 	addr, _ := cpWithdrawalEnv(t)
-	_, alerts := cpWithdrawalTopology(t)
+	_, _, alerts := cpWithdrawalTopology(t, true)
 	globalConfigStore.setCPAddressSource(buildCPAddressList)
 
 	sup, _ := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, cpWithdrawalRejectingOnActivated(t, false))
@@ -227,7 +249,7 @@ func TestChaos71_NewOwnerEndsAPendingWithdrawal(t *testing.T) {
 		t.Fatal("precondition: the withdrawal was not rejected")
 	}
 	cpAddrAwaitSpawn(t, spawned)
-	if !s.releaseCPAddressSourceAfterWithdrawal() {
+	if !s.releaseCPAddressSourceAfterWithdrawal(dead) {
 		t.Fatal("a terminal exit released ownership while the withdrawal was uncommitted")
 	}
 
@@ -276,7 +298,7 @@ func TestChaos71_InterruptedWithdrawalIsLatchedForRetry(t *testing.T) {
 	if st := s.cpAddrPublishSnapshot(); st.pending {
 		t.Fatalf("precondition: the interrupted withdrawal recorded an outcome: %+v", st)
 	}
-	if !s.releaseCPAddressSourceAfterWithdrawal() {
+	if !s.releaseCPAddressSourceAfterWithdrawal(dead) {
 		t.Fatal("an interrupted withdrawal released ownership")
 	}
 	if st := s.cpAddrPublishSnapshot(); !st.pending || st.trigger != cpAddrWithdrawalTrigger {
@@ -320,7 +342,7 @@ func TestChaos71_HARepublishDuringAWithdrawalNeverReAddsTheNode(t *testing.T) {
 		t.Fatal("precondition: the withdrawal was not rejected")
 	}
 	cpAddrAwaitSpawn(t, spawned)
-	if !s.releaseCPAddressSourceAfterWithdrawal() {
+	if !s.releaseCPAddressSourceAfterWithdrawal(dead) {
 		t.Fatal("precondition: ownership was not kept for the pending withdrawal")
 	}
 
@@ -333,5 +355,135 @@ func TestChaos71_HARepublishDuringAWithdrawalNeverReAddsTheNode(t *testing.T) {
 	}
 	if owned, withdrawing := cpWithdrawalOwnership(); owned || withdrawing != "" {
 		t.Errorf("after the withdrawal committed through an HA republish: owned=%v withdrawing=%q, want released", owned, withdrawing)
+	}
+}
+
+// TestChaos71_TerminalExitWithdrawsANodeAnHATransitionPublished — Codex P2
+// 4302464278. The listener activates with HA off, so its activation publish
+// is a no-op; EnableAsLeader then publishes this node through
+// republishTopology. A terminal exit must still withdraw it: the decision is
+// the committed list's, not a flag only the activation publish set.
+func TestChaos71_TerminalExitWithdrawsANodeAnHATransitionPublished(t *testing.T) {
+	t.Run("withdrawal_commits", func(t *testing.T) {
+		_, _, alerts := cpRunHALaterPanic(t, false)
+		cpAssertWithdrawnAndReleased(t)
+		if n := cpCountEvent(alerts(), "config_snapshot_rejected"); n != 0 {
+			t.Errorf("a committed withdrawal paged %d time(s)", n)
+		}
+	})
+	t.Run("withdrawal_rejected_then_recovers", func(t *testing.T) {
+		addr, spawned, alerts := cpRunHALaterPanic(t, true)
+		if owned, withdrawing := cpWithdrawalOwnership(); !owned || withdrawing != addr {
+			t.Fatalf("after a rejected withdrawal: owned=%v withdrawing=%q, want kept as a withdrawal of %q", owned, withdrawing, addr)
+		}
+		if st := globalConfigStore.cpAddrPublishSnapshot(); !st.pending || st.trigger != cpAddrWithdrawalTrigger {
+			t.Fatalf("pending state = %+v, want pending on %q", st, cpAddrWithdrawalTrigger)
+		}
+		if !cpAddrContains(globalConfigStore.Get().CPAddresses, addr) {
+			t.Fatal("precondition: the rejected withdrawal committed")
+		}
+		cpAddrAwaitSpawn(t, spawned)
+
+		snapshotWireBudget = maxSnapshotWireBytes
+		rounds := 0
+		cpAddrRetrySleep = func(context.Context, time.Duration) bool { rounds++; return rounds <= 3 }
+		globalConfigStore.retryCPAddrPublish(context.Background())
+		cpAssertWithdrawnAndReleased(t)
+		if n := cpCountEvent(alerts(), "config_snapshot_rejected"); n != 1 {
+			t.Errorf("the episode paged %d time(s), want 1", n)
+		}
+	})
+}
+
+// cpRunHALaterPanic activates the real supervisor with HA off, lets onActivated
+// enable HA (whose republish commits [peer, addr]), optionally arms a
+// rejection of the withdrawal, and panics; it returns once the supervisor has
+// exited terminally, with the precondition checked.
+func cpRunHALaterPanic(t *testing.T, reject bool) (addr string, spawned chan struct{}, alerts func() []string) {
+	t.Helper()
+	addr, _ = cpWithdrawalEnv(t)
+	h, spawned, alerts := cpWithdrawalTopology(t, false)
+	globalConfigStore.setCPAddressSource(buildCPAddressList)
+
+	var noopActivation, named atomic.Bool
+	onActivated := cpWithdrawalHALaterOnActivated(t, h, reject)
+	observe := func() {
+		noopActivation.Store(len(globalConfigStore.Get().CPAddresses) == 0)
+		defer func() {
+			v := recover()
+			named.Store(slicesEqual(globalConfigStore.Get().CPAddresses, []string{withdrawalTestPeer, addr}))
+			panic(v)
+		}()
+		onActivated()
+	}
+	sup, _ := cpStartSupervised(t, cpListenerConfig{addr: addr}, true, observe)
+	if sup == nil {
+		t.Fatal("the boot path returned no supervisor")
+	}
+	select {
+	case <-sup.done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the supervisor did not exit terminally after the panic")
+	}
+	if !noopActivation.Load() || !named.Load() {
+		t.Fatalf("precondition: activation publish no-op=%v, HA republish named [peer, addr]=%v", noopActivation.Load(), named.Load())
+	}
+	if st := cpGRPCListenerState(); !st.SupervisorDown {
+		t.Fatalf("precondition: not a terminal exit: %+v", st)
+	}
+	return addr, spawned, alerts
+}
+
+// cpAssertWithdrawnAndReleased: the committed list is [peer] and ownership is
+// released.
+func cpAssertWithdrawnAndReleased(t *testing.T) {
+	t.Helper()
+	if got := globalConfigStore.Get().CPAddresses; !slicesEqual(got, []string{withdrawalTestPeer}) {
+		t.Fatalf("committed list = %v, want [%s] — the dead address an HA transition published stays with the fleet",
+			got, withdrawalTestPeer)
+	}
+	if owned, withdrawing := cpWithdrawalOwnership(); owned || withdrawing != "" {
+		t.Errorf("after the withdrawal committed: owned=%v withdrawing=%q, want released", owned, withdrawing)
+	}
+}
+
+// TestChaos71_TerminalReleaseDecidesFromTheCommittedList: the ownership step
+// keeps ownership whenever the committed list names the exiting node, even if
+// no withdrawal was started (it installs one and latches it for retry) — and
+// releases at once when the list does not name it.
+func TestChaos71_TerminalReleaseDecidesFromTheCommittedList(t *testing.T) {
+	_ = cpIsolateActivation(t)
+	spawned, _ := cpAddrPublishHarness(t)
+	s := globalConfigStore
+	const dead, other = "10.0.0.2:50051", "10.0.0.9:50051"
+	s.setCPAddressSource(func() []string { return []string{other, dead} })
+	if err := s.Update(ConfigSnapshot{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Control: a node the committed list does not name releases at once.
+	if s.releaseCPAddressSourceAfterWithdrawal("10.0.0.77:50051") {
+		t.Fatal("a node the committed list does not name kept ownership")
+	}
+	s.setCPAddressSource(func() []string { return []string{other, dead} }) // re-own for the case under test
+
+	if !s.releaseCPAddressSourceAfterWithdrawal(dead) {
+		t.Fatal("released ownership while the committed list still names the exiting node and no withdrawal ran")
+	}
+	if st := s.cpAddrPublishSnapshot(); !st.pending || st.trigger != cpAddrWithdrawalTrigger {
+		t.Fatalf("the due withdrawal was not latched for retry: %+v", st)
+	}
+	cpAddrAwaitSpawn(t, spawned)
+	rounds := 0
+	cpAddrRetrySleep = func(context.Context, time.Duration) bool { rounds++; return rounds <= 3 }
+	s.retryCPAddrPublish(context.Background())
+	if got := s.Get().CPAddresses; !slicesEqual(got, []string{other}) {
+		t.Errorf("after the retry the committed list = %v, want [%s]", got, other)
+	}
+	s.mu.RLock()
+	owned := s.cpAddrSource != nil
+	s.mu.RUnlock()
+	if owned {
+		t.Error("ownership kept after the withdrawal committed")
 	}
 }
