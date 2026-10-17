@@ -230,12 +230,16 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess, err := readUISessionCookie(r)
-	if err == nil && sess != nil {
-		// Same fail-closed resolution uiAuthMiddleware applies. Reporting a
-		// session whose role this build does not enroll as `role: admin` would
-		// have the console render the full admin surface for a principal every
-		// gated endpoint is about to refuse; treating it as not-logged-in is
-		// both honest and the safe direction.
+	if err == nil && uiSessionAdmissible(sess) {
+		// Same fail-closed resolution uiAuthMiddleware applies, including
+		// uiSessionAdmissible above (SEC-UISESSION-AUD-1): this endpoint is on
+		// the PUBLIC allowlist, so without that test it answered
+		// {"loggedIn":true,"role":"admin"} for a replayed portal token and the
+		// console rendered the full admin surface off the back of it.
+		// Reporting a session whose role this build does not enroll as
+		// `role: admin` would have the same effect for a principal every gated
+		// endpoint is about to refuse; treating it as not-logged-in is both
+		// honest and the safe direction.
 		if role, ok := sessionRoleOrReject(sess.Role); ok {
 			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
 			return
@@ -261,13 +265,33 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sess, _ := readUISessionCookie(r)
-	if sess != nil {
+	// SEC-REVOKE-1: act ONLY on a session this plane may honour. The decode
+	// error used to be discarded here (`sess, _ :=`) while
+	// revokeSessionCookie ran unconditionally — and that function does its own
+	// base64+JSON decode with NO signature check, on the stated premise that
+	// "HMAC already verified by decodeSession". The premise was false on this
+	// path, and this route is on the PUBLIC allowlist, so an unauthenticated
+	// POST carrying `base64({"sub":"...","exp":9999999999}).garbage` inserted
+	// an attacker-chosen key into the revocation list with an attacker-chosen
+	// (far-future, so never evicted) expiry. That list is an unbounded map; the
+	// insert is then persisted by SaveRevocations and gossiped to every node in
+	// the cluster, so one unauthenticated client could grow permanent heap on
+	// every node and make each request rewrite the whole revocations file.
+	//
+	// uiSessionAdmissible rather than a bare `sess != nil` also keeps logout
+	// from acting across audiences (SEC-UISESSION-AUD-1): a portal token
+	// replayed under this cookie's name must not revoke the real portal
+	// session that shares its payload.
+	sess, err := readUISessionCookie(r)
+	if err == nil && uiSessionAdmissible(sess) {
 		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
+		// Revoke the session token so it cannot be reused even if the cookie is
+		// replayed before it naturally expires.
+		revokeSessionCookie(uiSessionCookieName, r)
 	}
-	// Revoke the session token so it cannot be reused even if the cookie is
-	// replayed before it naturally expires.
-	revokeSessionCookie(uiSessionCookieName, r)
+	// Clearing stays UNCONDITIONAL and the answer stays 200: a browser holding
+	// a junk or foreign cookie must still be able to get rid of it, and a
+	// logout that reported why it refused would be an oracle.
 	clearUISessionCookie(w, r)
 	jsonOK(w, map[string]any{"ok": true})
 }

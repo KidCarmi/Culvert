@@ -146,10 +146,10 @@ func sseAuthStillValid(r *http.Request) bool {
 		return false // revoked, expired, or tampered session
 	}
 	if sess != nil {
-		if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
-			return false
-		}
-		return true
+		// SEC-UISESSION-AUD-1: the same admissibility test uiAuthMiddleware
+		// applies at connect time, so a deleted user — or a replayed portal
+		// token — cannot keep a live telemetry stream open.
+		return uiSessionAdmissible(sess)
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
 	if user, pass, ok := r.BasicAuth(); ok {
