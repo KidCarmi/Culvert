@@ -1371,7 +1371,13 @@ jobs:
       OVA_B_ARTIFACT: "12074562532"
       OVA_B_SHA256: 59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61
       OVA_B_IMAGE_ID: sha256:20a547edd3e9db83cd1fa65f734bdeec5fc8f6d077f6f73344a38798a5d9692d
-      AB_ORDER: "A B"
+      # One OVA (A) is enough for the baseline split; the cold boot on
+      # cache=none+dm is heavy for this payload (firstboot loads the app +
+      # ClamAV 1.5.4 + agent images), so the first attempt timed out at the
+      # default 2400s SSH wait (run 38980510436). Latency is injected ONLY
+      # during the reboots, not cold boot, so a longer cold-boot wait does not
+      # change the measured recovery numbers.
+      AB_ORDER: "A"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Host preflight (KVM, RAM, disk) and lab directory
@@ -1465,7 +1471,7 @@ jobs:
           for X in $AB_ORDER; do
             n=$((n+1)); tag="$n-$X"
             export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="esxi12:12:3:120" \
-              LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
+              LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm LAB_FIRSTBOOT_TIMEOUT=6000
             img_var="OVA_${X}_IMAGE_ID"; export LAB_EXPECT_IMAGE_ID="${!img_var}"
             export LAB_OVA="$(ls "$LAB_ROOT/ova-$X/"*.ova)" LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova-$X/"*.ova.sha256)"
             echo "::group::$tag ($LAB_OVA_SHA256)"
