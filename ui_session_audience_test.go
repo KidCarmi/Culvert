@@ -574,25 +574,6 @@ func uiSessionCookieConsumers(t *testing.T) map[string]string {
 	return out
 }
 
-// fnsReferencing maps each function whose body mentions ident (and for which
-// keep returns true) to "file:line".
-func fnsReferencing(t *testing.T, ident string, keep func(fn string) bool) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	forEachPkgFunc(t, func(file string, fn *ast.FuncDecl, fset *token.FileSet) {
-		if !keep(fn.Name.Name) {
-			return
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && id.Name == ident {
-				out[fn.Name.Name] = fmt.Sprintf("%s:%d", file, fset.Position(n.Pos()).Line)
-			}
-			return true
-		})
-	})
-	return out
-}
-
 // fnReferences reports whether the named function's body mentions ident.
 func fnReferences(t *testing.T, fnName, ident string) bool {
 	t.Helper()

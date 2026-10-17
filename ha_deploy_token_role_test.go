@@ -22,7 +22,12 @@ import (
 // wrapped under PBKDF2 of that same token. So a read-only viewer could obtain
 // the cluster CA key and mint node certificates the Control Plane trusts.
 
-const haProbeToken = "SEC-HATOKEN-1-PROBE-TOKEN"
+// haProbeSentinel is the recognizable value the probe HAState carries, so a
+// test can assert it does or does not appear in a response body. Named for the
+// sentinel it is rather than for the credential it stands in for: gosec G101
+// matches the IDENTIFIER against a credential-name pattern, and a suppression
+// here would be concealing a match rather than avoiding one (conventions.md).
+const haProbeSentinel = "SEC-HATOKEN-1-PROBE-VALUE"
 
 // haLeaderWithToken installs a leader HAState carrying a recognizable token.
 func haLeaderWithToken(t *testing.T) {
@@ -31,7 +36,7 @@ func haLeaderWithToken(t *testing.T) {
 	t.Cleanup(func() { globalHA = prev })
 	globalHA = &HAState{
 		role:         "leader",
-		token:        haProbeToken,
+		token:        haProbeSentinel,
 		peerAddr:     "cp2.internal:50051",
 		since:        time.Now(),
 		autoFailover: false,
@@ -40,7 +45,7 @@ func haLeaderWithToken(t *testing.T) {
 
 // getClusterHAAs drives GET /api/cluster/ha with role injected the way
 // uiAuthMiddleware injects it.
-func getClusterHAAs(t *testing.T, role UIRole) (int, string) {
+func getClusterHAAs(t *testing.T, role UIRole) (code int, body string) {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", http.NoBody)
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
@@ -59,7 +64,7 @@ func TestSECHATOKEN1_NonAdminRolesNeverSeeTheJoinToken(t *testing.T) {
 			if code != http.StatusOK {
 				t.Fatalf("status = %d, want 200 (the panel must stay readable); body=%s", code, body)
 			}
-			if strings.Contains(body, haProbeToken) {
+			if strings.Contains(body, haProbeSentinel) {
 				t.Errorf("DEFECT: role %q obtained the live HA join token.\nbody=%s", role, body)
 			}
 			if strings.Contains(body, "--ha-token") {
@@ -97,7 +102,7 @@ func TestSECHATOKEN1_AdminStillReceivesTheDeployCommand(t *testing.T) {
 	if cmd == "" {
 		t.Fatal("admin lost deploy_cmd — the fix over-narrowed")
 	}
-	if !strings.Contains(cmd, "--ha-token "+haProbeToken) {
+	if !strings.Contains(cmd, "--ha-token "+haProbeSentinel) {
 		t.Errorf("admin deploy_cmd does not carry the join token: %q", cmd)
 	}
 }
@@ -109,7 +114,7 @@ func TestSECHATOKEN1_UnenrolledRoleSeesNoToken(t *testing.T) {
 	haLeaderWithToken(t)
 	for _, role := range []UIRole{"", "superuser", "Admin", "ADMIN", "root", "owner"} {
 		code, body := getClusterHAAs(t, role)
-		if code == http.StatusOK && strings.Contains(body, haProbeToken) {
+		if code == http.StatusOK && strings.Contains(body, haProbeSentinel) {
 			t.Errorf("DEFECT: unenrolled role %q obtained the HA join token", role)
 		}
 	}
@@ -122,8 +127,8 @@ func TestSECHATOKEN1_StandbyAndDisabledEmitNoToken(t *testing.T) {
 		name  string
 		state *HAState
 	}{
-		{"standby", &HAState{role: "standby", token: haProbeToken, since: time.Now()}},
-		{"disabled", &HAState{token: haProbeToken}},
+		{"standby", &HAState{role: "standby", token: haProbeSentinel, since: time.Now()}},
+		{"disabled", &HAState{token: haProbeSentinel}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prev := globalHA
@@ -131,7 +136,7 @@ func TestSECHATOKEN1_StandbyAndDisabledEmitNoToken(t *testing.T) {
 			globalHA = tc.state
 			for _, role := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
 				_, body := getClusterHAAs(t, role)
-				if strings.Contains(body, haProbeToken) {
+				if strings.Contains(body, haProbeSentinel) {
 					t.Errorf("%s: role %q obtained the HA join token", tc.name, role)
 				}
 			}
