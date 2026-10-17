@@ -1361,15 +1361,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
-      # BASELINE MEASUREMENT of candidate 6248daf7 under the esxi12 latency
-      # profile (ASTRA reported 141.218s original-path recovery on real ESXi,
-      # over the 120s budget). A and B are the SAME 6248daf7 OVA (artifact
-      # 12074562532, run 38964077956) run twice for variance; the per-reboot
-      # firmware_gap_s (pre-kernel) / kernel_to_ready_s (post-kernel) split is
-      # the diagnostic for the focused provisioning fix. docs/appliance/
-      # recovery-time.md: shipped readahead+cloud-init-disabled reached 103.1s
-      # on the OLD b579 OVA; this measures how much the newer payload (HWE
-      # 7.0.0-38 kernel, Docker 29.9.0, ClamAV 1.5.4) regressed it.
+      # TWO-LATENCY CONTROLLED COMPARISON of candidate 6248daf7 (comment
+      # 6230967268). ASTRA's original-path ESXi capture RULED OUT fsck (root was
+      # already -c -1 -i 0, initramfs clean+condition-skipped, no full root
+      # check) and gave a per-phase breakdown pointing at the pre-local-fs reads
+      # + container-engine + stack phases, latency-bound. This runs the SAME
+      # retained 6248 OVA at the calibrated esxi12 (12ms read/3ms write, 120s
+      # product gate) AND a diagnostic esxi30 (~30ms read/15ms write, matching
+      # ASTRA's device-read mean; generous 400s budget so it MEASURES rather than
+      # hard-fails) and splits every reboot into ASTRA's phase boundaries
+      # (recovery-engine-phases.py) so a phase that grows with latency is
+      # latency-bound and a flat one is fixed work. esxi12's 120s gate is
+      # unchanged. docs/appliance/recovery-time.md carries the ESXi phase table.
       OVA_A_ARTIFACT: "12074562532"
       OVA_A_SHA256: 59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61
       OVA_A_IMAGE_ID: sha256:20a547edd3e9db83cd1fa65f734bdeec5fc8f6d077f6f73344a38798a5d9692d
@@ -1472,10 +1475,10 @@ jobs:
         run: |
           set -uo pipefail
           n=0; rc=0
-          printf 'order\tova\treboot\trecovery_s\tfirmware_gap_s\tkernel_to_ready_s\n' > "$LAB_ROOT/ab-evidence/ab-summary.tsv"
+          printf 'order\tova\tprofile\treboot\trecovery_s\tfirmware_gap_s\tkernel_to_ready_s\n' > "$LAB_ROOT/ab-evidence/ab-summary.tsv"
           for X in $AB_ORDER; do
             n=$((n+1)); tag="$n-$X"
-            export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="esxi12:12:3:120" \
+            export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="esxi12:12:3:120 esxi30:30:15:400" \
               LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm LAB_FIRSTBOOT_TIMEOUT=6000
             img_var="OVA_${X}_IMAGE_ID"; export LAB_EXPECT_IMAGE_ID="${!img_var}"
             export LAB_OVA="$(ls "$LAB_ROOT/ova-$X/"*.ova)" LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova-$X/"*.ova.sha256)"
@@ -1484,17 +1487,37 @@ jobs:
             echo "::endgroup::"
             ev="$LAB_DIR/evidence"; dst="$LAB_ROOT/ab-evidence/$tag"; mkdir -p "$dst"
             cp "$ev"/checks.jsonl "$ev"/REPORT.md "$ev"/R-* "$ev"/preflight.json "$dst/" 2>/dev/null || true
-            for i in 1 2 3; do
-              rec="$(awk -F'\t' -v i="$i" '$3==i{print $4}' "$ev/R-summary.tsv" 2>/dev/null)"
-              gap="$(awk '/Restarting system/{a=$1} /Linux version/{print $1-a; exit}' "$ev/R-esxi12-$i-console-marks.tsv" 2>/dev/null)"
-              k2r="$(python3 -c 'import json,sys;t=json.load(open(sys.argv[1]))["seconds_after_acceptance"];print(round(t["first_ready_clamav_ok"]-t["kernel"],1))' "$ev/R-esxi12-$i-timeline.json" 2>/dev/null)"
-              printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$LAB_OVA_SHA256" "$i" "${rec:-none}" "${gap:-?}" "${k2r:-?}" >> "$LAB_ROOT/ab-evidence/ab-summary.tsv"
+            for prof in esxi12 esxi30; do
+              for i in 1 2 3; do
+                rec="$(awk -F'\t' -v p="$prof" -v i="$i" '$2==p && $3==i{print $4}' "$ev/R-summary.tsv" 2>/dev/null)"
+                gap="$(awk '/Restarting system/{a=$1} /Linux version/{print $1-a; exit}' "$ev/R-$prof-$i-console-marks.tsv" 2>/dev/null)"
+                k2r="$(python3 -c 'import json,sys;t=json.load(open(sys.argv[1]))["seconds_after_acceptance"];print(round(t["first_ready_clamav_ok"]-t["kernel"],1))' "$ev/R-$prof-$i-timeline.json" 2>/dev/null)"
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$LAB_OVA_SHA256" "$prof" "$i" "${rec:-none}" "${gap:-?}" "${k2r:-?}" >> "$LAB_ROOT/ab-evidence/ab-summary.tsv"
+              done
             done
             sudo rm -rf "$LAB_DIR/work"
           done
-          { echo "### Recovery A/B (one runner; budget 120 s)"; echo '```'; column -t -s$'\t' "$LAB_ROOT/ab-evidence/ab-summary.tsv"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Recovery A/B (one runner; esxi12 gate 120 s, esxi30 diagnostic 400 s)"; echo '```'; column -t -s$'\t' "$LAB_ROOT/ab-evidence/ab-summary.tsv"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           cat "$LAB_ROOT/ab-evidence/ab-summary.tsv"
           exit "$rc"
+      - name: "Per-phase engine/stack split (ASTRA boundaries) — esxi12 vs esxi30"
+        if: always()
+        run: |
+          set -uo pipefail
+          # Re-reads the already-collected recovery_guest dumps into ASTRA's
+          # phase shape (recovery-engine-phases.py); collects nothing new. A
+          # column that grows from esxi12 to esxi30 is latency-bound reads; a
+          # flat one is fixed work. ctrd_meta_gap_s is ASTRA's single largest
+          # ESXi item (11.5 s at ~30-53 ms); compare its esxi12 vs esxi30 value.
+          out="$LAB_ROOT/ab-evidence/engine-phases.tsv"
+          files="$(ls "$LAB_ROOT"/ab-evidence/*/R-esxi12-*-guest.txt "$LAB_ROOT"/ab-evidence/*/R-esxi30-*-guest.txt 2>/dev/null | sort)"
+          if [ -n "$files" ]; then
+            python3 -I test/e2e/appliance/lab/recovery-engine-phases.py $files > "$out" 2>&1 || true
+            { echo "### Per-phase engine/stack split (seconds; compare esxi12 vs esxi30 down each column)"; echo '```'; column -t -s$'\t' "$out" 2>/dev/null || cat "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            cat "$out"
+          else
+            echo "no guest.txt dumps found" | tee "$out"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
