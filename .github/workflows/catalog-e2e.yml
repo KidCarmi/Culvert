@@ -33,6 +33,7 @@ on:
     branches: [main]
     paths:
       - "release_*.go"
+      - "pkg/releaseproof/**"
       # Non-Go trust material: the baked Sigstore root and the CI↔binary
       # identity SSOT are release-trust inputs too (CI review P1-3).
       - "trusted_root.json"

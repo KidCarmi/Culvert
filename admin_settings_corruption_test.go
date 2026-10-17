@@ -18,6 +18,7 @@ import (
 // file is moved aside (so a later save can't clobber it), fires the state_file_corrupt
 // alert, and records a /readyz fail row.
 func TestLoadAdminSettings_CorruptFileQuarantinedNotOverwritten(t *testing.T) {
+	resetUIAccessPolicyGlobals(t)
 	captured := captureStartupAlerts(t)
 	isolateStateCorruption(t)
 	isolateRewriterForTest(t)
@@ -44,13 +45,13 @@ func TestLoadAdminSettings_CorruptFileQuarantinedNotOverwritten(t *testing.T) {
 		t.Fatal("quarantine content differs from the original corrupt bytes")
 	}
 
-	// The exact pre-fix destruction scenario: an admin mutation saves a fresh
-	// defaults snapshot afterwards. The evidence must survive byte-identical.
-	if err := SaveAdminSettings(); err != nil {
-		t.Fatalf("save after quarantine: %v", err)
+	// Unknown management policy must not be replaced by an open defaults
+	// snapshot. Local repair is required; the quarantined evidence survives.
+	if err := SaveAdminSettings(); err == nil {
+		t.Fatal("save must refuse while stored management policy is unknown")
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("fresh settings not written after quarantine: %v", err)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("refused save wrote a defaults-only replacement")
 	}
 	if after, _ := os.ReadFile(qfiles[0]); !bytes.Equal(after, corrupt) {
 		t.Fatal("post-quarantine save destroyed the quarantined evidence")
@@ -72,6 +73,7 @@ func TestLoadAdminSettings_CorruptFileQuarantinedNotOverwritten(t *testing.T) {
 // TestLoadAdminSettings_MissingFile_NoQuarantineNoAlert — a missing file is first-run,
 // not corruption: silent, no quarantine, no alert, no /readyz row.
 func TestLoadAdminSettings_MissingFile_NoQuarantineNoAlert(t *testing.T) {
+	resetUIAccessPolicyGlobals(t)
 	captured := captureStartupAlerts(t)
 	isolateStateCorruption(t)
 
@@ -93,6 +95,7 @@ func TestLoadAdminSettings_MissingFile_NoQuarantineNoAlert(t *testing.T) {
 // fresh clean file, so on the next boot the current file parses — but the unreconciled
 // .corrupt.* sibling must still re-surface the alert + /readyz row until repaired.
 func TestLoadAdminSettings_ResidualQuarantineResurfacedAcrossRestart(t *testing.T) {
+	resetUIAccessPolicyGlobals(t)
 	isolateRewriterForTest(t)
 	captured := captureStartupAlerts(t)
 	isolateStateCorruption(t)

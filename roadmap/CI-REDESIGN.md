@@ -1516,7 +1516,7 @@ engine. There is still exactly one implementation.
 | Coverage floors | a step in the same job | `coverage-floors` job on the verdict's merged profile |
 | `fast-gate-coverage` | uploaded `if: always()` by the race job | uploaded by the verdict, only after it proved the evidence complete (same name, `coverage.out`, 30-day retention) |
 | Runner hardening | harden-runner (egress `audit`) on the race job | the same step first in **every** engine job, the floors job and the audit jobs |
-| Mount-point regression | `sudo go test -run TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting .` | `race-privileged`: the SAME prebuilt binary as root; must print PASS (a SKIP fails) |
+| Mount-point regression | `sudo go test -run TestRestoreCommit_DataDirIsMountPoint_Commits .` | `race-privileged`: the SAME prebuilt binary as root; must print PASS (a SKIP fails) |
 | Aggregate | skipped = pass for every need | + the race path (`test-race`, `coverage-floors`) must be exactly `success` when the diff classified as code |
 | Unsharded run | every code PR | dispatch-only audit (`unsharded_audit: true`) |
 
@@ -1534,7 +1534,7 @@ which still passes only `shards: 4` (pinned by
 |---|---|---|
 | `coverage-artifact` | `qa-coverage` | `fast-gate-coverage` |
 | `harden-runner` | `false` | `true` |
-| `privileged-test` | *(none: `race-privileged` skipped, and the verdict requires `skipped`)* | `TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting` (the verdict requires `success`) |
+| `privileged-test` | *(none: `race-privileged` skipped, and the verdict requires `skipped`)* | `TestRestoreCommit_DataDirIsMountPoint_Commits` (the verdict requires `success`) |
 | `fault` | `none` | forwarded from `workflow_dispatch` (qualification only) |
 
 The engine's evidence artifacts keep their `qa-race-` names in a Fast run: the
@@ -1616,7 +1616,7 @@ input; all dispatches share one concurrency group, so they ran one at a time.
 | Case | Run | Observed |
 |---|---|---|
 | Code-changing PR, real `pull_request` event, PR merge commit | [35859739941](https://github.com/KidCarmi/Culvert/actions/runs/35859739941) | All 21 jobs green: 4 shards, lane, universe, privileged, verdict, `coverage-floors`, aggregate |
-| Privileged mount-point regression | same run; also [35859947671](https://github.com/KidCarmi/Culvert/actions/runs/35859947671) | `sudo env TEST_SEED=… root.test -test.run ^TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting$` on this run's prebuilt binary: `--- PASS … (0.03s)`, then "executed as root and passed" |
+| Privileged mount-point regression | same run; also [35859947671](https://github.com/KidCarmi/Culvert/actions/runs/35859947671) | `sudo env TEST_SEED=… root.test -test.run ^TestRestoreCommit_DataDirIsMountPoint_Commits$` on this run's prebuilt binary: `--- PASS … (0.03s)`, then "executed as root and passed" |
 | Docs-only classification (`fault=docs-only`, a docs-only file list through the real classifier) | [35859812047](https://github.com/KidCarmi/Culvert/actions/runs/35859812047) | `code=false`; `test-race`, `coverage-floors` and every other code job skipped; gitleaks ran; `needs-verdict` **passed**; "Qualification runs never approve" then refused, by design |
 | Classifier failure (`fault=classifier-fails`) | [35859745755](https://github.com/KidCarmi/Culvert/actions/runs/35859745755) | Everything downstream skipped; aggregate: `required job 'changes' result=failure — cannot trust the gate` |
 | Cancellation (run superseded by a newer dispatch) | [35859947671](https://github.com/KidCarmi/Culvert/actions/runs/35859947671) | Run `cancelled`; shards and lane cancelled; the verdict still ran and **failed**; aggregate **failed** — no green check left behind |

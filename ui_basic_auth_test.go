@@ -29,6 +29,13 @@ import (
 // middleware actually gates), and a snapshotted loginLimiter.
 func secBasicEnv(t *testing.T) {
 	t.Helper()
+	// setupProxyTest installs a fresh global cfg and never puts the previous
+	// one back; without this restore the users these tests create (one is
+	// 261 bytes) stay in the global roster and fail whichever test the
+	// shuffle runs next (TestApiDiagnostics_UsernameLengthOKByDefault).
+	// Registered first, so it runs last.
+	orig := cfg
+	t.Cleanup(func() { cfg = orig })
 	setupProxyTest(t)
 	snapshotLoginLimiter(t)
 	cfg.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))

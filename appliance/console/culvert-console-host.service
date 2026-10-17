@@ -1,0 +1,25 @@
+[Unit]
+Description=Culvert local recovery transaction worker
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/opt/culvert-appliance/bin/culvert-console --host=worker
+User=root
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+Restart=always
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

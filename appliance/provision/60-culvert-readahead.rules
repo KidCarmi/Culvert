@@ -1,0 +1,10 @@
+# Culvert appliance: 4 MiB read-ahead on whole disks.
+#
+# Boot and stack recovery are latency-bound: the same ~15k reads happen on
+# every maintenance reboot, so each millisecond of storage latency costs
+# seconds. The kernel default (128 KiB) turns the sequential reads of
+# container layers and the ClamAV database into many small I/Os. Measured on
+# the QEMU lab at 12 ms read / 3 ms write latency (calibrated against ESXi):
+# maintenance-reboot recovery 146.6 s -> 116.4 s, three reboots each (run
+# 37389977929, docs/appliance/recovery-time.md).
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="sd*|vd*|xvd*|nvme*n*", ATTR{queue/read_ahead_kb}="4096"

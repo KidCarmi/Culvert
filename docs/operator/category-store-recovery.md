@@ -18,9 +18,12 @@ Culvert categorises hosts in two tiers:
 | Layer 2 | community store (BadgerDB, `-cat-feed-db`) | a **cache** of the downloadable UT1 feed | none — it re-syncs |
 
 Layer 2 holds no authoritative state. Everything in it came from a feed the
-node can download again, and the syncer performs an immediate sync when it
-finds the store empty. That is why the recovery below is safe: re-creating the
-store costs one feed sync, not data.
+node can download again, and the syncer performs an immediate sync at start
+whenever the store holds no certified complete import of its feed — an empty
+store, a re-created one, a legacy store from before completion records, or one
+whose import was interrupted part-way (a durable completion record is written
+only after the whole import is fsynced; F-FEED-1). That is why the recovery
+below is safe: re-creating the store costs one feed sync, not data.
 
 ## What happens when the store is damaged
 
@@ -92,7 +95,7 @@ day** — that is disk nobody has reclaimed and an incident nobody has looked at
 
 1. **Nothing urgent.** The gateway is serving. Category rules that depend on
    the community feed will not match until the next sync completes (default
-   cadence 24 h; a re-created empty store syncs immediately on start).
+   cadence 24 h; a re-created store syncs immediately on start).
 
 2. **Find out why the volume was damaged.** A quarantine is evidence of an
    unclean stop or a sick disk, not of a Culvert bug. Check the host for OOM

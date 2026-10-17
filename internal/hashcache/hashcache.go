@@ -29,6 +29,11 @@ type ScanCacheResult struct {
 	Reason    string // virus name or YARA rule name when not clean
 	Source    string // "clamav", "yara", or "clean"
 	ScannedAt time.Time
+	// Epoch is a caller-defined validity generation, recorded when the scan
+	// that produced this result STARTED. The cache stores it and never reads
+	// it; a caller that moves its generation on (secscan: a ClamAV engine
+	// fault) treats results from an older generation as misses.
+	Epoch uint64
 }
 
 // hashCacheEntry wraps a result with an absolute expiry timestamp.

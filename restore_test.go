@@ -398,6 +398,9 @@ func TestRestore_DryRun_NoBakOrDataModification(t *testing.T) {
 			t.Errorf("dry-run created %s next to dataDir; must not happen", s.Name())
 		}
 	}
+	if _, ok := readBak(t, dataDir); ok {
+		t.Error("dry-run created an in-place .restore-bak dir; must not happen")
+	}
 }
 
 // ── 12. Absolute path in tarball entry rejected ─────────────────────
@@ -820,37 +823,34 @@ func equalSnapshots(a, b map[string]string) bool {
 
 // ─── D1.3b.2b: destructive commit path tests ────────────────────────────────
 
-// readBak finds the .bak.<timestamp> sibling created by a successful
-// restore commit. Test-only convenience.
+// readBak finds the in-place `.restore-bak.<ts>-<pid>` directory created
+// INSIDE dataDir by a restore commit (restore_inplace.go). Test-only
+// convenience.
 func readBak(t *testing.T, dataDir string) (string, bool) {
 	t.Helper()
-	parent := filepath.Dir(dataDir)
-	base := filepath.Base(dataDir)
-	entries, err := os.ReadDir(parent)
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		t.Fatalf("readdir parent: %v", err)
+		return "", false
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), base+".bak.") {
-			return filepath.Join(parent, e.Name()), true
+		if strings.HasPrefix(e.Name(), restoreBakPrefix) {
+			return filepath.Join(dataDir, e.Name()), true
 		}
 	}
 	return "", false
 }
 
-// stagingExists returns true if any .staging.<suffix> sibling of
-// dataDir is on disk. Should be false after success or atomic-failure
-// scenarios.
+// stagingExists returns true if any in-place `.restore-staging.<suffix>`
+// directory is inside dataDir. Should be false after success or
+// pre-swap-failure scenarios.
 func stagingExists(t *testing.T, dataDir string) bool {
 	t.Helper()
-	parent := filepath.Dir(dataDir)
-	base := filepath.Base(dataDir)
-	entries, err := os.ReadDir(parent)
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		t.Fatalf("readdir parent: %v", err)
+		return false
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), base+".staging.") {
+		if strings.HasPrefix(e.Name(), restoreStagingPrefix) {
 			return true
 		}
 	}
@@ -1196,30 +1196,32 @@ func TestRestoreCommit_InjectionBetweenRenames_RecoveryMessage(t *testing.T) {
 		t.Errorf("error should mention COMMIT INTERRUPTED, got: %v", err)
 	}
 
-	// Recovery instruction must contain the exact .bak path so the
-	// operator can copy/paste.
+	// The in-place swap is journaled: the previous data is in the bak dir,
+	// the staged data is STILL on disk (both are needed for the operator's
+	// choice), the journal records the phase, and the error names the
+	// recovery command rather than a bare mv.
 	bakPath, ok := readBak(t, currentDir)
 	if !ok {
-		t.Fatal(".bak should exist after interrupted commit (rename A succeeded)")
+		t.Fatal(".restore-bak should exist after interrupted commit (evacuation succeeded)")
 	}
-	wantMV := fmt.Sprintf("mv %s %s", bakPath, currentDir)
-	if !strings.Contains(err.Error(), wantMV) {
-		t.Errorf("error should contain recovery command %q, got: %v", wantMV, err)
+	if !strings.Contains(err.Error(), bakPath) || !strings.Contains(err.Error(), "--recover-restore") {
+		t.Errorf("error should name the bak path and --recover-restore, got: %v", err)
 	}
-
-	// Staging dir must be cleaned even on between-renames failure, so
-	// the operator's only recovery path is the .bak (no ambiguity).
-	if stagingExists(t, currentDir) {
-		t.Error("staging dir should be cleaned even on between-renames failure")
+	if !stagingExists(t, currentDir) {
+		t.Error("staged data must be preserved on an interrupted swap (recovery needs it)")
 	}
-
-	// Cleanup: do the manual recovery so test directories stay tidy.
-	if rerr := os.Rename(bakPath, currentDir); rerr != nil {
-		t.Logf("post-test cleanup mv: %v", rerr)
+	j, present, jerr := readRestoreJournal(currentDir)
+	if !present || jerr != nil {
+		t.Fatalf("journal should be present and readable: present=%v err=%v", present, jerr)
+	}
+	if j.Phase != restorePhasePromoting {
+		t.Errorf("injection point is after evacuation; journal phase = %q, want %q", j.Phase, restorePhasePromoting)
+	}
+	// The boot guard must refuse to start on this state.
+	if gerr := checkInterruptedRestore(currentDir); gerr == nil || !strings.Contains(gerr.Error(), "--recover-restore") {
+		t.Errorf("boot guard should refuse with recovery instructions, got: %v", gerr)
 	}
 }
-
-// ── 32. .bak preserved (not auto-deleted) ────────────────────────────
 
 func TestRestoreCommit_BakPreservedNotAutoDeleted(t *testing.T) {
 	src, currentDir, _, _ := makeCommitFixture(t, 0)
@@ -1452,7 +1454,7 @@ func TestRestoreCommit_PreExistingStagingDir_AbortsBeforeDataTouched(t *testing.
 
 	suffix := fmt.Sprintf("%s-%d",
 		fixedNow.Format("20060102T150405Z"), os.Getpid())
-	stagingDir := currentDir + ".staging." + suffix
+	stagingDir := filepath.Join(currentDir, restoreStagingPrefix+suffix)
 	if err := os.Mkdir(stagingDir, 0o700); err != nil {
 		t.Fatalf("pre-create staging: %v", err)
 	}
@@ -1512,7 +1514,7 @@ func TestRestoreCommit_PreExistingBakDir_AbortsBeforeDataTouched(t *testing.T) {
 	// Pre-create the bak dir at the path runRestoreCommit will derive.
 	suffix := fmt.Sprintf("%s-%d",
 		fixedNow.UTC().Format("20060102T150405Z"), os.Getpid())
-	bakPath := currentDir + ".bak." + suffix
+	bakPath := filepath.Join(currentDir, restoreBakPrefix+suffix)
 	if err := os.Mkdir(bakPath, 0o700); err != nil {
 		t.Fatalf("pre-create bak: %v", err)
 	}

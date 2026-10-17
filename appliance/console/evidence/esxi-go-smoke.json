@@ -1,0 +1,175 @@
+{
+  "kind": "Go console development overlay smoke, not full appliance qualification",
+  "implementation": "Go",
+  "compiler": "go1.26.8",
+  "tested_at_utc": "2026-10-03T21:22:19Z",
+  "base_ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+  "base_provisioning_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+  "base_image_source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+  "provisioning_drift": true,
+  "runtime_overlay": true,
+  "overlay_sha256": {
+    "command.test": "a7f2ce4216cf4b08230a42c247f6afee5176a283c41491a5c85cddf90a6daa35",
+    "console.test": "9cef7f8d78b1886738840697cb7684ae28084e46100ed9570932777ab54591ec",
+    "culvert-console": "aba01e7e9dc6b4af636aec807a414c46e32edbb3b91dd40a5f1c63affd6ba0e5",
+    "getty-override.conf": "d9af020bec840a46357dcb9dacdff01e58b52bb914145be991f050f4ecbe2ca9",
+    "install.sh": "6cea7e6fe9baaa4e98df2e54405ea3f40360a2e2dfcf16f5fea80e0f1ae3d317",
+    "profile.sh": "2c1d0dcd0c535341972102440d688dce6877e82f7d744563c4a671d9380fade7"
+  },
+  "hypervisor": "ESXi 8.0.1 build-21813344",
+  "vm": "culvert-esxi-3fd475af1f98",
+  "vcpu": 2,
+  "memory_mib": 4096,
+  "disk_gib": 40,
+  "results": {
+    "ubuntu_go_tests": "PASS (domain and Linux command packages, shuffled, count=2)",
+    "installer_twice": "PASS",
+    "failed_firstboot_display": "PASS",
+    "incorrect_console_password": "PASS",
+    "pam_login_to_admin_menu": "PASS",
+    "logout_to_public_menu": "PASS",
+    "docker_stopped_console_active": "PASS",
+    "real_reboot_menu_automatic": "PASS",
+    "machine_identity_retained": "PASS",
+    "full_appliance_qualification": "BLOCKED",
+    "post_reboot_vcs1_public_menu": "PASS",
+    "golangci_lint_v2.5.0": "PASS (0 issues, Linux target, both packages)"
+  },
+  "docker_stopped_snapshot": {
+    "schema_version": 1,
+    "observed_at": "2026-10-03T21:21:36Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.117"
+    ],
+    "management_urls": [
+      "https://192.168.1.117:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "1",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "exit-code",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "failed",
+    "reason": "FIRSTBOOT_FAILED",
+    "message": "Provisioning failed; open diagnostics.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "after_reboot_snapshot": {
+    "schema_version": 1,
+    "observed_at": "2026-10-03T21:22:19Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.117"
+    ],
+    "management_urls": [
+      "https://192.168.1.117:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "0",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "success",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "waiting",
+    "reason": "FIRSTBOOT_NOT_RUNNING",
+    "message": "Provisioning is incomplete and is not running.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "limitations": [
+    "Existing incomplete ClamAV payload remains unfixed in this OVA.",
+    "Console password was set only in this disposable key-only guest to exercise PAM.",
+    "No new OVA built; console installed as an explicit development overlay.",
+    "Browser bootstrap and guided network rollback not implemented in this slice.",
+    "ESXi returned partial public/reboot framebuffer screenshots even after tty2/tty1 redraw; the retained partial capture is not full visual proof. The complete public menu was independently verified in /dev/vcs1 after reboot; the authenticated-menu screenshot is complete. No image editing."
+  ],
+  "memory_current_bytes": "10149888",
+  "cleanup": "PASS: owned VM deleted; zero matching lab VMs; private per-run files removed",
+  "implementation_commit": "654af2fef4cd1d8f726fb5229734113406504f7d",
+  "ci": {
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37154661568",
+    "result": "PASS",
+    "checks": "Linux race tests, vet, static build, compiler identity, shell syntax and degraded-host smoke"
+  },
+  "captures": {
+    "authenticated_menu": "esxi-go-admin.png",
+    "reboot_partial": "esxi-go-boot-partial.png"
+  }
+}

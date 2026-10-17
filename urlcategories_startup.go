@@ -124,6 +124,13 @@ func loadCommunityFeedDB(cfg urlCategoriesStartupConfig, ctx context.Context) *F
 	reportCatFeedDBOpened(cfg.FeedDBPath, rec)
 
 	syncer := newFeedSyncer(communityDB, cfg.FeedURL, cfg.FeedSyncInterval)
+	// A bulk write onto a full filesystem SIGBUSes the process inside badger;
+	// let the syncer refuse to start one below its floor (internal/feedsync).
+	feedDBPath := cfg.FeedDBPath
+	syncer.SetFreeSpaceProbe(func() (uint64, error) {
+		_, free, _, err := diskUsage(feedDBPath)
+		return free, err
+	})
 	globalUT1FeedSyncer = syncer // UC-6: expose Stats() to /metrics
 	syncer.Start(ctx)
 	logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", cfg.FeedDBPath, cfg.FeedSyncInterval)

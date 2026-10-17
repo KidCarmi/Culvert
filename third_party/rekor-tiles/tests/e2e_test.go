@@ -1,0 +1,474 @@
+// Copyright 2025 The Sigstore Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build e2e
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	v1 "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+	pbs "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
+	"github.com/sigstore/rekor-tiles/v2/pkg/client/read"
+	"github.com/sigstore/rekor-tiles/v2/pkg/client/write"
+	pb "github.com/sigstore/rekor-tiles/v2/pkg/generated/protobuf"
+	"github.com/sigstore/rekor-tiles/v2/pkg/note"
+	"github.com/sigstore/rekor-tiles/v2/pkg/verify"
+	"github.com/sigstore/sigstore/pkg/cryptoutils"
+	"github.com/sigstore/sigstore/pkg/signature"
+	"github.com/stretchr/testify/assert"
+	f_note "github.com/transparency-dev/formats/note"
+	"github.com/transparency-dev/merkle/proof"
+	"github.com/transparency-dev/merkle/rfc6962"
+	"github.com/transparency-dev/tessera/api"
+	"github.com/transparency-dev/tessera/api/layout"
+	signednote "golang.org/x/mod/sumdb/note"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+const (
+	defaultRekorHostname   = "rekor-local"
+	defaultWitnessVKey     = "rekor-witness-test+a478f5cd+AUtKAvrTeY7srtAMfP5JCUOkZoU+A7F5VA094y5LGr89"
+	defaultServerPublicKey = "./testdata/pki/ed25519-pub-key.pem"
+)
+
+// backendConfig contains per-storage-backend configuration
+type backendConfig struct {
+	// ServerURL is the write path for uploading entries
+	ServerURL string
+	// StorageURL is the read path for the tiles and entry bundles
+	StorageURL string
+	// ComposePath is the path to the docker compose file
+	ComposePath string
+}
+
+var gcpSpannerConfig = backendConfig{
+	ServerURL:   "http://localhost:3003",
+	StorageURL:  "http://localhost:7080/tiles",
+	ComposePath: "compose.yml",
+}
+
+func TestGCPSpanner(t *testing.T) {
+	t.Run("ReadWrite", func(t *testing.T) {
+		testReadWrite(t, gcpSpannerConfig)
+	})
+	t.Run("UnimplementedReadMethods", func(t *testing.T) {
+		testUnimplementedReadMethods(t, gcpSpannerConfig)
+	})
+	t.Run("PersistentDeduplication", func(t *testing.T) {
+		testPersistentDeduplication(t, gcpSpannerConfig)
+	})
+}
+
+var posixConfig = backendConfig{
+	ServerURL:   "http://localhost:3003",
+	StorageURL:  "http://localhost:8000",
+	ComposePath: "compose.yml",
+}
+
+func TestPOSIX(t *testing.T) {
+	t.Run("ReadWrite", func(t *testing.T) {
+		testReadWrite(t, posixConfig)
+	})
+	t.Run("UnimplementedReadMethods", func(t *testing.T) {
+		testUnimplementedReadMethods(t, posixConfig)
+	})
+	t.Run("PersistentDeduplication", func(t *testing.T) {
+		testPersistentDeduplication(t, posixConfig)
+	})
+}
+
+var awsConfig = backendConfig{
+	ServerURL:   "http://localhost:3004",
+	StorageURL:  "http://localhost:9000/tiles",
+	ComposePath: "aws-compose.yml",
+}
+
+func TestAWS(t *testing.T) {
+	t.Run("ReadWrite", func(t *testing.T) {
+		testReadWrite(t, awsConfig)
+	})
+	t.Run("UnimplementedReadMethods", func(t *testing.T) {
+		testUnimplementedReadMethods(t, awsConfig)
+	})
+	t.Run("PersistentDeduplication", func(t *testing.T) {
+		testPersistentDeduplication(t, awsConfig)
+	})
+}
+
+var cloudSQLConfig = backendConfig{
+	ServerURL:   "http://localhost:3005",
+	StorageURL:  "http://localhost:9002/tiles",
+	ComposePath: "cloudsql-compose.yml",
+}
+
+func TestGCPCloudSQL(t *testing.T) {
+	t.Run("ReadWrite", func(t *testing.T) {
+		testReadWrite(t, cloudSQLConfig)
+	})
+	t.Run("UnimplementedReadMethods", func(t *testing.T) {
+		testUnimplementedReadMethods(t, cloudSQLConfig)
+	})
+	t.Run("PersistentDeduplication", func(t *testing.T) {
+		testPersistentDeduplication(t, cloudSQLConfig)
+	})
+}
+
+func testReadWrite(t *testing.T, config backendConfig) {
+	ctx := context.Background()
+
+	// get verifier needed for both read and write
+	serverPubKeyPEM, err := os.ReadFile(defaultServerPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPubKey, err := cryptoutils.UnmarshalPEMToPublicKey(serverPubKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := signature.LoadDefaultVerifier(serverPubKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteVerifier, err := note.NewNoteVerifier(defaultRekorHostname, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// load witness verifier
+	witnessNoteVerifier, err := f_note.NewVerifierForCosignatureV1(defaultWitnessVKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteVerifiers := []signednote.Verifier{noteVerifier, witnessNoteVerifier}
+
+	// reader client
+	reader, err := read.NewReader(config.StorageURL, defaultRekorHostname, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// writer client
+	writer, err := write.NewWriter(config.ServerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// log ID
+	_, logID, err := note.KeyHash(defaultRekorHostname, serverPubKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get the current checkpoint
+	checkpoint, note, err := reader.ReadCheckpoint(ctx)
+	assert.NoError(t, err)
+	assert.NotNil(t, checkpoint)
+	assert.NotNil(t, note)
+	initialTreeSize := checkpoint.Size
+
+	clientPrivKey, clientPubKey, err := genKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Add new entries - more than one tile's worth
+	numNewEntries := uint64(260)
+	group := new(errgroup.Group)
+	// Limit number of concurrent requests, as e2e tests fail on macOS
+	// without a reasonable limit set
+	group.SetLimit(50)
+	for i := uint64(1); i <= numNewEntries; i++ {
+		i := i
+		group.Go(func() error {
+			hr, err := newHashedRekordRequest(clientPrivKey, clientPubKey, i)
+			if err != nil {
+				return err
+			}
+			tle, err := writer.Add(ctx, hr)
+			assert.NoError(t, err)
+			assertHashedRekordTLE(t, tle, initialTreeSize, numNewEntries, logID, noteVerifiers, hr)
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	// Add one more entry outside of the errgroup so we know it's the last one.
+	numNewEntries++
+	hr, err := newHashedRekordRequest(clientPrivKey, clientPubKey, numNewEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tle, err := writer.Add(ctx, hr)
+	assert.NoError(t, err)
+	assertHashedRekordTLE(t, tle, initialTreeSize, numNewEntries, logID, noteVerifiers, hr)
+
+	// Check the checkpoint again
+	checkpoint, note, err = reader.ReadCheckpoint(ctx)
+	assert.NoError(t, err)
+	assert.NotNil(t, checkpoint)
+	assert.NotNil(t, note)
+	latestTreeSize := checkpoint.Size
+	assert.GreaterOrEqual(t, latestTreeSize, initialTreeSize+numNewEntries)
+
+	// Get the first tile, this should be full as long as more than 256 entries have been added.
+	tileLevel := uint64(0)
+	tileIndex := uint64(0)
+	tilePart := uint8(0)
+	firstTileBytes, err := reader.ReadTile(ctx, tileLevel, tileIndex, tilePart)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, firstTileBytes)
+	entryBundle, err := reader.ReadEntryBundle(ctx, tileIndex, tilePart)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, entryBundle)
+
+	// Get the latest tile on the lowest level. Since we added >256 entries, this index should be at least 1.
+	tileIndex = latestTreeSize / layout.TileWidth
+	assert.GreaterOrEqual(t, tileIndex, uint64(1))
+	tilePart = layout.PartialTileSize(tileLevel, latestTreeSize-1, latestTreeSize)
+	lastTileBytes, err := reader.ReadTile(ctx, tileLevel, tileIndex, tilePart)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, lastTileBytes)
+	assert.NotEqual(t, firstTileBytes, lastTileBytes)
+	entryBundle, err = reader.ReadEntryBundle(ctx, tileIndex, tilePart)
+	assert.NoError(t, err)
+	assert.Contains(t, string(entryBundle), base64.StdEncoding.EncodeToString(artifactDigest(numNewEntries)))
+
+	// Parse a HashedRekord entry from the latest entry bundle
+	bundle := api.EntryBundle{}
+	err = bundle.UnmarshalText(entryBundle)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, bundle.Entries)
+	e := &pb.Entry{}
+	err = protojson.Unmarshal(bundle.Entries[0], e)
+	assert.NoError(t, err)
+	assert.Equal(t, "hashedrekord", e.Kind)
+	assert.Equal(t, "0.0.2", e.ApiVersion)
+	hrEntry := e.Spec.GetHashedRekordV002()
+	assert.NotNil(t, hrEntry)
+}
+
+func testUnimplementedReadMethods(t *testing.T, config backendConfig) {
+	ctx := context.Background()
+
+	serverPubKeyPEM, err := os.ReadFile(defaultServerPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPubKey, err := cryptoutils.UnmarshalPEMToPublicKey(serverPubKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := signature.LoadDefaultVerifier(serverPubKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := read.NewReader(config.ServerURL+"/api/v2", defaultRekorHostname, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = reader.ReadCheckpoint(ctx)
+	assert.ErrorContains(t, err, "501") // the reader client drops the request body, hence why we only check the status code
+	_, err = reader.ReadTile(ctx, 0, 0, 0)
+	assert.ErrorContains(t, err, "501")
+	_, err = reader.ReadEntryBundle(ctx, 0, 0)
+	assert.ErrorContains(t, err, "501")
+}
+
+func testPersistentDeduplication(t *testing.T, config backendConfig) {
+	ctx := context.Background()
+
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("skipping persistent deduplication test because docker is not installed")
+	}
+	output, err := exec.Command(path, "compose", "ps", "rekor").Output()
+	if err != nil || !strings.Contains(string(output), "rekor-tiles-rekor-1") {
+		t.Skip("skipping persistent deduplication test because rekor-tiles is not running as a local docker container")
+	}
+
+	// writer client
+	writer, err := write.NewWriter(config.ServerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientPrivKey, clientPubKey, err := genKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// add one entry
+	hr, err := newHashedRekordRequest(clientPrivKey, clientPubKey, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = writer.Add(ctx, hr)
+	assert.NoError(t, err)
+
+	// add the same entry and check for in-memory deduplication
+	_, err = writer.Add(ctx, hr)
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "unexpected response: 409")
+	assert.ErrorContains(t, err, "an equivalent entry already exists in the transparency log with index")
+	// verify custom response header is set
+	payload, err := protojson.Marshal(&pb.CreateEntryRequest{
+		Spec: &pb.CreateEntryRequest_HashedRekordRequestV002{
+			HashedRekordRequestV002: hr,
+		},
+	})
+	resp, err := http.Post(config.ServerURL+"/api/v2/log/entries", "application/json", bytes.NewBuffer(payload))
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, resp.StatusCode, 409)
+	assert.NotEmpty(t, resp.Header.Get("x-log-index"))
+
+	// restart rekor-tiles and check for persistent deduplication
+	err = exec.Command(path, "compose", "restart", "rekor").Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= 3; i++ {
+		out, err := exec.Command(path, "compose", "ps", "rekor", "--format='{{print .Status}}'").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), "(healthy)") {
+			break
+		}
+		if i == 3 {
+			t.Fatal("docker container took too long to restart")
+		}
+		time.Sleep(1 * time.Second)
+	}
+	_, err = writer.Add(ctx, hr)
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "unexpected response: 409")
+	assert.ErrorContains(t, err, "an equivalent entry already exists in the transparency log with index")
+}
+
+func artifactDigest(idx uint64) []byte {
+	baseArtifact := "testartifact"
+	artifact := []byte(fmt.Sprintf("%s%d", baseArtifact, idx))
+	digest := sha256.Sum256(artifact)
+	return digest[:]
+}
+
+func genKeys() (*ecdsa.PrivateKey, []byte, error) {
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	pubKey, err := x509.MarshalPKIXPublicKey(privKey.Public())
+	if err != nil {
+		return nil, nil, err
+	}
+	return privKey, pubKey, nil
+}
+
+func newHashedRekordRequest(privKey *ecdsa.PrivateKey, pubKey []byte, idx uint64) (*pb.HashedRekordRequestV002, error) {
+	digest := artifactDigest(idx)
+	sig, err := ecdsa.SignASN1(rand.Reader, privKey, digest)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.HashedRekordRequestV002{
+		Signature: &pb.Signature{
+			Content: sig,
+			Verifier: &pb.Verifier{
+				Verifier: &pb.Verifier_PublicKey{
+					PublicKey: &pb.PublicKey{
+						RawBytes: pubKey,
+					},
+				},
+				KeyDetails: v1.PublicKeyDetails_PKIX_ECDSA_P256_SHA_256,
+			},
+		},
+		Digest: digest,
+	}, nil
+}
+
+func assertHashedRekordTLE(t *testing.T, tle *pbs.TransparencyLogEntry, initialTreeSize, numNewEntries uint64, logID []byte, verifiers []signednote.Verifier, hr *pb.HashedRekordRequestV002) {
+	assert.NotNil(t, tle)
+
+	// Check server does not set deprecated fields
+	assert.Zero(t, tle.IntegratedTime)
+	assert.Nil(t, tle.InclusionPromise)
+
+	// Check populated fields
+	// Assert log index is [initialTreeSize, initialTreeSize+numNewEntries). We can't know the precise index since
+	// entry upload is done in parallel.
+	assert.GreaterOrEqual(t, tle.LogIndex, int64(initialTreeSize))
+	assert.Less(t, tle.LogIndex, int64(initialTreeSize+numNewEntries))
+	// Assert log IDs are equivalent
+	assert.Equal(t, tle.LogId.KeyId, logID)
+	// Assert kind and version match expected values
+	assert.Equal(t, tle.KindVersion.Kind, "hashedrekord")
+	assert.Equal(t, tle.KindVersion.Version, "0.0.2")
+	// Verify checkpoint and inclusion proof
+	verifyInclusionProof(t, tle, verifiers)
+	// Parse canonicalized body and assert entry matches request
+	e := &pb.Entry{}
+	assert.NotNil(t, tle.CanonicalizedBody)
+	err := protojson.Unmarshal(tle.CanonicalizedBody, e)
+	assert.NoError(t, err)
+	assert.Equal(t, "hashedrekord", e.Kind)
+	assert.Equal(t, "0.0.2", e.ApiVersion)
+	hrEntry := e.Spec.GetHashedRekordV002()
+	assert.NotNil(t, hrEntry)
+	assert.Equal(t, hrEntry.Signature, hr.Signature)
+	assert.Equal(t, hrEntry.Data.Algorithm, v1.HashAlgorithm_SHA2_256)
+	assert.Equal(t, hrEntry.Data.Digest, hr.Digest)
+}
+
+func verifyInclusionProof(t *testing.T, tle *pbs.TransparencyLogEntry, verifiers []signednote.Verifier) {
+	// Server also verifies inclusion proof before returning response
+	assert.NotNil(t, tle.InclusionProof)
+
+	// Verify checkpoint signature, assuming the first verifier in the list is for the log and the remaining verifiers are for witnesses
+	checkpoint, note, err := verify.VerifyWitnessedCheckpoint(tle.InclusionProof.Checkpoint.Envelope, verifiers[0], verifiers[1:]...)
+	assert.NoError(t, err)
+	// Expect 2 valid signatures, from the log and witness
+	assert.Len(t, note.Sigs, 2)
+
+	// Verify duplicated tle.inclusion_proof fields match bundle and parsed checkpoint values
+	assert.Equal(t, tle.InclusionProof.LogIndex, tle.LogIndex)
+	assert.Equal(t, tle.InclusionProof.TreeSize, int64(checkpoint.Size))
+	assert.Equal(t, tle.InclusionProof.RootHash, checkpoint.Hash)
+
+	// Verify inclusion proof
+	leafHash := rfc6962.DefaultHasher.HashLeaf(tle.CanonicalizedBody)
+	assert.NoError(t, proof.VerifyInclusion(rfc6962.DefaultHasher,
+		uint64(tle.LogIndex),
+		checkpoint.Size,
+		leafHash,
+		tle.InclusionProof.Hashes,
+		checkpoint.Hash))
+}

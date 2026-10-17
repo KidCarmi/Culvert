@@ -127,7 +127,7 @@ func TestSAMLCaptiveLoginURLStoresRequestIDInRelayState(t *testing.T) {
 	prov := testSAMLRedirectProvider(t)
 	relayURL := "https://app.example/protected"
 
-	loginURL := prov.CaptiveLoginURL(relayURL, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
+	loginURL := prov.CaptiveLoginURL(relayURL, boundLogin(t, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)))
 	if loginURL == "" {
 		t.Fatal("CaptiveLoginURL returned empty URL")
 	}
@@ -170,7 +170,8 @@ func TestSAMLExchangeAssertionRequiresKnownState(t *testing.T) {
 	}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	id, relay, err := prov.ExchangeAssertion(r)
+	ex, err := prov.ExchangeAssertion(r)
+	id, relay := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected missing SAML state to fail")
 	}
@@ -196,7 +197,8 @@ func TestSAMLExchangeAssertionRejectsExpiredState(t *testing.T) {
 	}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	id, relay, err := prov.ExchangeAssertion(r)
+	ex, err := prov.ExchangeAssertion(r)
+	id, relay := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected expired SAML state to fail")
 	}
@@ -222,7 +224,7 @@ func TestSAMLExchangeAssertionProviderMismatchDoesNotConsumeState(t *testing.T) 
 	}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	_, _, err := prov.ExchangeAssertion(r)
+	_, err := prov.ExchangeAssertion(r)
 	if err == nil {
 		t.Fatal("expected provider mismatch to fail")
 	}
@@ -245,7 +247,8 @@ func TestSAMLExchangeAssertionConsumesStateBeforeValidation(t *testing.T) {
 	}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	id, relay, err := prov.ExchangeAssertion(r)
+	ex, err := prov.ExchangeAssertion(r)
+	id, relay := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected malformed SAMLResponse to fail")
 	}

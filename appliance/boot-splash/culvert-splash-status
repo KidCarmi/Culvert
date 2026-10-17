@@ -1,0 +1,31 @@
+#!/bin/sh
+# Keep the boot-console status line and key hint visible in the REAL root.
+#
+# culvert-splash-message sets the line in the initramfs, but once the real
+# root's plymouth-start takes the splash over the line is gone, leaving the
+# ~50 s service-start wait as title + dots with no status, no key hint and no
+# warning when a service fails (owner report, #1528). This runs after
+# plymouth-start and re-asserts the line, refreshing it so a theme redraw on
+# boot progress cannot drop it, and switches to a failure warning if a unit
+# has failed. It exits by itself when Plymouth quits (the console menu starts),
+# so it needs no explicit stop. Best-effort throughout; a machine with no
+# display never reaches here (ExecCondition=culvert-has-display on the unit).
+#
+# /bin/sh is dash on Ubuntu: POSIX only. ASCII only — the console is VGA text
+# (nomodeset), where non-ASCII (an em dash) does not render.
+set -u
+command -v plymouth >/dev/null 2>&1 || exit 0
+ok='Starting system services  -  Esc: boot messages'
+bad='A service failed to start  -  Esc: boot messages, Alt+F12: kernel log'
+while plymouth --ping 2>/dev/null; do
+    # is-system-running reports "degraded" once any unit has failed; "starting"
+    # during the ordinary wait. Anything else (or no systemctl) keeps the hint.
+    if [ "$(systemctl is-system-running 2>/dev/null)" = degraded ]; then
+        msg=$bad
+    else
+        msg=$ok
+    fi
+    plymouth display-message --text="$msg" 2>/dev/null || true
+    sleep 2
+done
+exit 0

@@ -59,6 +59,11 @@ type Config struct {
 	// State directory root. Default "/var/lib/culvert-maint".
 	StateDir string
 
+	// DockerRoot is the Docker daemon's data root (images, containerd
+	// content, container state). The upgrade preflight measures its free
+	// space before a pull. Default "/var/lib/docker".
+	DockerRoot string
+
 	// Privilege model. Default PrivilegeSudoers.
 	PrivilegeMode PrivilegeMode
 
@@ -94,7 +99,20 @@ type Config struct {
 	// at the sudo boundary (P1.4). A pinned upgrade/rollback ref must be
 	// `<ProxyRepo>@sha256:<64hex>`. Default "ghcr.io/kidcarmi/culvert".
 	// MUST describe the same repository as ImageAllowlist.
-	ProxyRepo string
+	ProxyRepo          string
+	ReleaseCatalogRepo string
+	ReleaseTrustRoot   string
+	ReleaseTrustKeys   string
+
+	// ReconcileOnStartup enables the crash-recovery startup reconciler
+	// (RISK-022 PR-E): at boot every interrupted journal record is classified
+	// against Docker truth, a durable verdict is written, and ONLY verdicts
+	// that mutate nothing are auto-resolved (safe-boundary no-op; adopt of a
+	// target that is already live AND healthy). Everything else stays visible
+	// on /v1/status (attention_required) for the explicit
+	// POST /v1/reconcile/{op_id} endpoint. Default true. false ⇒ mark-only
+	// (records are listed but never classified or touched at boot).
+	ReconcileOnStartup bool
 
 	// AllowPeers is the closed list of UID-or-username tokens permitted
 	// to connect to the agent's UDS. The agent refuses to start with
@@ -132,6 +150,7 @@ type rawConfig struct {
 	ComposeOverrideFile string   `toml:"compose_override_file"`
 	SocketPath          string   `toml:"socket_path"`
 	StateDir            string   `toml:"state_dir"`
+	DockerRoot          string   `toml:"docker_root"`
 	PrivilegeMode       string   `toml:"privilege_mode"`
 	HealthBaseURL       string   `toml:"health_base_url"`
 	HealthPath          string   `toml:"health_path"`
@@ -142,6 +161,10 @@ type rawConfig struct {
 	AllowedBackupDir    string   `toml:"allowed_backup_dir"`
 	ImageAllowlist      string   `toml:"image_allowlist"`
 	ProxyRepo           string   `toml:"proxy_repo"`
+	ReleaseCatalogRepo  string   `toml:"release_catalog_repo"`
+	ReleaseTrustRoot    string   `toml:"release_trust_root"`
+	ReleaseTrustKeys    string   `toml:"release_trust_keys"`
+	ReconcileOnStartup  *bool    `toml:"reconcile_on_startup"`
 	AllowPeers          []string `toml:"allow_peers"`
 }
 
@@ -149,6 +172,7 @@ const (
 	defaultComposeFile      = "docker-compose.yml"
 	defaultSocketPath       = "/run/culvert-maint/culvert-maint.sock"
 	defaultStateDir         = "/var/lib/culvert-maint"
+	defaultDockerRoot       = "/var/lib/docker"
 	defaultPrivilegeMode    = string(PrivilegeSudoers)
 	defaultHealthBaseURL    = "http://127.0.0.1:8080"
 	defaultHealthPath       = "/health"
@@ -275,6 +299,16 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: state_dir must be absolute: %q", sd)
 	}
 	cfg.StateDir = filepath.Clean(sd)
+
+	// docker_root — default /var/lib/docker. Must be absolute.
+	dr := raw.DockerRoot
+	if dr == "" {
+		dr = defaultDockerRoot
+	}
+	if !filepath.IsAbs(dr) {
+		return nil, fmt.Errorf("config: docker_root must be absolute: %q", dr)
+	}
+	cfg.DockerRoot = filepath.Clean(dr)
 
 	// privilege_mode — default sudoers. Closed enum.
 	pm := raw.PrivilegeMode
@@ -405,6 +439,21 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: proxy_repo has an invalid repository shape: %q", pr)
 	}
 	cfg.ProxyRepo = pr
+	cfg.ReleaseCatalogRepo = strings.TrimSpace(raw.ReleaseCatalogRepo)
+	if cfg.ReleaseCatalogRepo == "" {
+		cfg.ReleaseCatalogRepo = defaultProxyRepo
+	}
+	cfg.ReleaseTrustRoot = strings.TrimSpace(raw.ReleaseTrustRoot)
+	cfg.ReleaseTrustKeys = strings.TrimSpace(raw.ReleaseTrustKeys)
+	for _, trustPath := range []string{cfg.ReleaseTrustRoot, cfg.ReleaseTrustKeys} {
+		if trustPath != "" && !filepath.IsAbs(trustPath) {
+			return nil, fmt.Errorf("config: release trust paths must be absolute")
+		}
+	}
+
+	// reconcile_on_startup — default true (classify + auto-resolve only the
+	// non-mutating verdicts). Absent key ⇒ default; an explicit false ⇒ mark-only.
+	cfg.ReconcileOnStartup = raw.ReconcileOnStartup == nil || *raw.ReconcileOnStartup
 
 	// allow_peers — required, no default. Validated only as non-empty
 	// shape here; the resolution to a concrete UID set happens in

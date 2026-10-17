@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh the Culvert appliance console banner (/etc/issue.d)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/culvert-appliance/bin/culvert-issue-update

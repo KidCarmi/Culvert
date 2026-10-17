@@ -31,6 +31,11 @@ ENV GOTOOLCHAIN=local
 WORKDIR /app
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
+COPY third_party/crewjam-saml/ ./third_party/crewjam-saml/
+COPY third_party/ristretto/ ./third_party/ristretto/
+COPY third_party/badger/ ./third_party/badger/
+COPY third_party/rekor-tiles/ ./third_party/rekor-tiles/
+COPY pkg/releaseproof/ ./pkg/releaseproof/
 RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \
     [ -n "${want}" ] && [ "${have}" = "${want}" ]
@@ -95,6 +100,9 @@ ENV GOTOOLCHAIN=local
 
 WORKDIR /src
 COPY cmd/culvert-maint/go.mod cmd/culvert-maint/go.sum ./
+COPY pkg/releaseproof/ /pkg/releaseproof/
+# The agent module replaces rekor-tiles with ../../third_party/rekor-tiles (CVE-2026-37236).
+COPY third_party/rekor-tiles/ /third_party/rekor-tiles/
 COPY go.mod /tmp/culvert-root.go.mod
 RUN want="$(sed -n 's/^toolchain //p' /tmp/culvert-root.go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \
@@ -138,7 +146,12 @@ RUN apk add --no-cache wget && \
 #       (see deploy/seccomp.json)
 #   • Drop all Linux capabilities: --cap-drop=ALL
 #   • No new privileges: --security-opt no-new-privileges
-FROM alpine:3.24
+# Named so the image builds can exclude it from the layer cache
+# (no-cache-filters: runtime): `apk upgrade` below must fetch today's Alpine
+# security fixes, and a cached layer silently replays an old package set — the
+# 7e53720d exact-byte scan found zlib 1.3.2-r0 shipped while r1 (CVE-2026-85091)
+# had been published.
+FROM alpine:3.24 AS runtime
 
 # /data and /backup are pre-created + chowned to proxy so that a FRESH named
 # volume mounted over them (proxy-data:/data, culvert-backups:/backup) inherits
@@ -177,6 +190,9 @@ COPY --chown=proxy:proxy yara/ ./yara/
 # channel. Never read at container runtime; the proxy process ignores it.
 COPY --chown=proxy:proxy docker-compose.yml docker-compose.maint-agent.yml ./deploy/
 COPY --chown=proxy:proxy packaging/ ./deploy/packaging/
+# The ClamAV sidecar build context (docker-compose.yml `build:`), so a host
+# without the local-only sidecar tag can build it from the pinned base.
+COPY --chown=proxy:proxy appliance/clamav/Dockerfile ./deploy/appliance/clamav/Dockerfile
 COPY --from=maintbuilder --chown=proxy:proxy /culvert-maint ./deploy/bin/culvert-maint
 
 # /data is the persistent volume for the Root CA bundle, policy rules, and

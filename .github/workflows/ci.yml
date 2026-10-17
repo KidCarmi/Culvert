@@ -343,6 +343,9 @@ jobs:
             VERSION=${{ steps.chan.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Never replay the runtime stage from cache: its `apk upgrade` must
+          # see today's Alpine security fixes (see Dockerfile).
+          no-cache-filters: runtime
           # Embed provenance + SBOM attestations directly in the image manifest.
           provenance: true
           sbom: true
@@ -785,8 +788,28 @@ jobs:
             # is already past); it is NOT written into any catalog byte.
             echo "now=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
+      # Release lineage: the agent authorizes an upgrade only when the release a
+      # node RUNS is also proven by the signed catalog, so the catalog carries
+      # every supported upgrade source (>= releaseMinUpgradeFrom, < this
+      # version, skipped releases included). Fetch each published release's
+      # ORIGINAL signed catalog asset; the gate verifies every one with the
+      # baked Sigstore root + pinned identity before carrying it byte-identical
+      # (release_lineage.go). A published release without its asset fails here.
+      - name: Fetch supported predecessor catalogs (release lineage)
+        id: lineage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.spec.outputs.version }}
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/release-lineage"
+          REQUIRE="$(.github/scripts/fetch-release-lineage.sh "$VERSION" "$SRC")"
+          echo "lineage: carrying ${REQUIRE:-<none>}"
+          { echo "src=$SRC"; echo "require=$REQUIRE"; } >> "$GITHUB_OUTPUT"
       - name: Run release catalog gate (build spec + generate + verify + digest-match)
         env:
+          CULVERT_RELEASE_LINEAGE_SRC: ${{ steps.lineage.outputs.src }}
+          CULVERT_RELEASE_LINEAGE_REQUIRE: ${{ steps.lineage.outputs.require }}
           CULVERT_RELEASE_SPEC_VERSION: ${{ steps.spec.outputs.version }}
           CULVERT_RELEASE_SPEC_DIGEST: ${{ steps.spec.outputs.digest }}
           CULVERT_RELEASE_SPEC_REPO: ghcr.io/kidcarmi/culvert

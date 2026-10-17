@@ -382,7 +382,7 @@ func TestClusterAuth_LoginURLUsesCachedBaseURL(t *testing.T) {
 	if len(providers) != 1 {
 		t.Fatalf("enabled providers = %d, want 1", len(providers))
 	}
-	loginURL := providers[0].CaptiveLoginURL("https://app.example.test/", httptest.NewRequest(http.MethodGet, "/", nil))
+	loginURL := providers[0].CaptiveLoginURL("https://app.example.test/", boundLogin(t, httptest.NewRequest(http.MethodGet, "/", http.NoBody)))
 	u, err := url.Parse(loginURL)
 	if err != nil {
 		t.Fatalf("parse SAML login URL: %v", err)

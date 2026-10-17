@@ -371,15 +371,12 @@ func (s *socks5Supervisor) run() {
 		// UI's equivalent announced a listener that did not exist yet (§33);
 		// keeping the announcement strictly downstream of the evidence is the
 		// rule, not the accident of where it happened to sit.
-		suppressed, recovered := noteSOCKS5Bound()
-		s.markFirstAttempt() // after the bind is recorded, for the reason above
-		if recovered {
-			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
-				s.port, suppressed)
-		} else {
-			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
-		}
-
+		//
+		// Publish the server BEFORE recording the bind: every surface the
+		// record feeds (/healthz ready, binds counter, listener_up) must
+		// describe a listener whose address is already readable. Recording
+		// first left a window in which a reader saw "bound" and a nil Addr()
+		// (TestChaos66_ListenerRebindsOnceThePortIsFree, intermittent).
 		srv := newSOCKS5Server(ln)
 		if !s.adopt(srv) {
 			// Stop won the race: close the listener we just bound rather than
@@ -387,6 +384,14 @@ func (s *socks5Supervisor) run() {
 			_ = ln.Close()
 			noteSOCKS5ListenerStopped()
 			return
+		}
+		suppressed, recovered := noteSOCKS5Bound()
+		s.markFirstAttempt() // after the bind is recorded, for the reason above
+		if recovered {
+			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
+				s.port, suppressed)
+		} else {
+			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
 		}
 		srv.Start()
 		<-srv.done

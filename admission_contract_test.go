@@ -149,7 +149,7 @@ func TestAdmissionMigration_DeepClassifier(t *testing.T) {
 	for _, path := range []string{"admission.go", "cluster_ratelimit_wire.go", "cluster_ratelimit_freshness.go", "internal/admission/engine.go", "internal/admission/security_test.go"} {
 		t.Run(path, func(t *testing.T) {
 			dir := t.TempDir()
-			script := strings.ReplaceAll(body, "git diff --name-only HEAD^1 HEAD > changed.txt", "printf '%s\\n' '"+path+"' > changed.txt")
+			script := strings.ReplaceAll(body, "git diff --no-renames --name-only HEAD^1 HEAD > changed.txt", "printf '%s\\n' '"+path+"' > changed.txt")
 			out, ok := runShell(t, "export GITHUB_OUTPUT=outputs\n"+script, dir)
 			if !ok {
 				t.Fatalf("classifier: %s", out)

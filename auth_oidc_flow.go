@@ -464,14 +464,17 @@ type pkceEntry struct {
 	nonce      string
 	relayURL   string
 	providerID string
+	// bind is the SHA-256 of the browser's ps_login_bind cookie at minting;
+	// the callback must present the same cookie (auth_login_binding.go).
+	bind [32]byte
 }
 
 // pkceStore is the bounded, fair-share store for in-flight OIDC authorization
 // requests (verifier + nonce + return target), keyed by the `state` token.
 //
 // Entries are minted SPECULATIVELY for clients that have not authenticated —
-// resolveCaptivePortalURL does it on the proxy's no-credentials path, and the
-// public /auth/select page does it per render — so the store's eviction policy
+// the public /auth/select page does it per render (the proxy's captive path
+// only redirects there; #1528 login binding) — so the store's eviction policy
 // decides whether an anonymous flood can destroy other users' in-flight login
 // state. It cannot: see internal/authstate.
 type pkceStore = authstate.Store[*pkceEntry]
@@ -706,6 +709,16 @@ func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string, r *http.Request) str
 	if p.disc.AuthorizationEndpoint == "" {
 		return ""
 	}
+	// Login state is minted only for a request carrying a browser binding
+	// (set by /auth/select); an unbound state could be finished by any
+	// browser, which is exactly login CSRF.
+	if r == nil {
+		return ""
+	}
+	bind, ok := loginBindingFrom(r.Context())
+	if !ok {
+		return ""
+	}
 
 	// Generate state (CSRF token), PKCE verifier + challenge, nonce.
 	state := mustRandHex(16)
@@ -723,6 +736,7 @@ func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string, r *http.Request) str
 		nonce:      nonce,
 		relayURL:   relayURL,
 		providerID: p.profile.ID,
+		bind:       bind,
 	})
 
 	scopes := p.cfg.Scopes
@@ -756,6 +770,12 @@ func (p *OIDCFlowProvider) ExchangeCode(r *http.Request, code, state string) (*I
 	}
 	if entry.providerID != p.profile.ID {
 		return nil, fmt.Errorf("oidc callback: state belongs to different provider")
+	}
+	// The callback is a top-level GET navigation, so the Lax binding cookie
+	// is present when this is the browser that started the login. Checked
+	// BEFORE the code is redeemed: a forged callback costs the IdP nothing.
+	if !loginBindingMatches(entry.bind, r) {
+		return nil, fmt.Errorf("oidc callback: %w", errLoginNotBound)
 	}
 
 	// Exchange code → tokens.

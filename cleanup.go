@@ -11,7 +11,10 @@ package main
 //
 // Safety contract (non-negotiable):
 //  1. dataDir is never a deletion candidate.
-//  2. Only direct siblings of dataDir are even considered.
+//  2. Only direct siblings of dataDir (legacy layout) and direct children of
+//     dataDir named `.restore-{bak,staging}.<ts>-<pid>` (in-place layout,
+//     restore_inplace.go) are even considered; a child referenced by an
+//     unresolved restore journal is never a candidate.
 //  3. Only directories matching the exact regex are eligible.
 //  4. Lstat at admission AND Lstat at deletion (TOCTOU re-check).
 //  5. Symlinks are never followed and never deleted.
@@ -58,6 +61,13 @@ type leftover struct {
 	Timestamp time.Time
 	PID       int
 	SizeBytes int64
+	// Parent is the directory the candidate was admitted from: the parent of
+	// dataDir for legacy sibling leftovers (`<base>.bak.<ts>-<pid>`), or
+	// dataDir itself for in-place leftovers (`.restore-bak.<ts>-<pid>`,
+	// restore_inplace.go). Deletion re-verifies against the same parent.
+	Parent string
+	// InDir marks an in-place (inside dataDir) leftover.
+	InDir bool
 }
 
 // skipReason describes a regex-shaped candidate that was rejected by an
@@ -87,6 +97,49 @@ var preDeleteHook func(path string)
 func compileLeftoverNameRE(base string) *regexp.Regexp {
 	quoted := regexp.QuoteMeta(base)
 	return regexp.MustCompile(`^` + quoted + `\.(bak|staging)\.([0-9]{8}T[0-9]{6}Z)-([0-9]+)$`)
+}
+
+// inDirLeftoverNameRE matches the in-place leftover names restore_inplace.go
+// creates INSIDE dataDir (mount-point-safe commits):
+//
+//	.restore-bak.<YYYYMMDDTHHMMSSZ>-<pid>
+//	.restore-staging.<YYYYMMDDTHHMMSSZ>-<pid>
+var inDirLeftoverNameRE = regexp.MustCompile(`^\.restore-(bak|staging)\.(\d{8}T\d{6}Z)-(\d+)$`)
+
+// discoverInDirLeftovers admits the in-place restore leftovers that live
+// INSIDE dataDir. A leftover referenced by an unresolved restore journal is
+// the operator's recovery material and is withheld, never offered for
+// cleanup; an unreadable journal withholds every in-dir leftover.
+func discoverInDirLeftovers(abs string) (valid []leftover, skipped []skipReason) {
+	inner, rerr := os.ReadDir(abs)
+	if rerr != nil {
+		if !os.IsNotExist(rerr) {
+			skipped = append(skipped, skipReason{Path: abs, Reason: fmt.Sprintf("read data dir: %v", rerr)})
+		}
+		return valid, skipped
+	}
+	var pending *restoreJournal
+	if j, present, jerr := readRestoreJournal(abs); present && jerr == nil {
+		pending = j
+	} else if present {
+		skipped = append(skipped, skipReason{Path: restoreJournalPath(abs), Reason: fmt.Sprintf("unreadable restore journal (%v); in-place leftovers withheld until it is resolved", jerr)})
+		pending = &restoreJournal{} // withhold everything: phase unknown
+	}
+	for _, entry := range inner {
+		lo, skip := admitEntry(entry, abs, abs, inDirLeftoverNameRE)
+		if skip != nil {
+			skipped = append(skipped, *skip)
+		}
+		if lo == nil {
+			continue
+		}
+		if pending != nil && (pending.StagingDir == "" || entry.Name() == pending.StagingDir || entry.Name() == pending.BakDir) {
+			skipped = append(skipped, skipReason{Path: lo.Path, Reason: "referenced by an unresolved interrupted restore (run --recover-restore first)"})
+			continue
+		}
+		valid = append(valid, *lo)
+	}
+	return valid, skipped
 }
 
 // resolveDataDirRoots normalizes dataDir into (parent, base, abs) and
@@ -156,7 +209,7 @@ func admitEntry(entry os.DirEntry, parent, abs string, re *regexp.Regexp) (*left
 		kind = leftoverStaging
 	}
 	size, sizeErr := dirSizeBytes(full)
-	lo := &leftover{Path: full, Kind: kind, Timestamp: ts, PID: pid, SizeBytes: size}
+	lo := &leftover{Path: full, Kind: kind, Timestamp: ts, PID: pid, SizeBytes: size, Parent: parent, InDir: parent == abs}
 	if sizeErr != nil {
 		// Size is informational; admit but warn.
 		return lo, &skipReason{Path: full, Reason: fmt.Sprintf("size walk failed: %v", sizeErr)}
@@ -193,6 +246,12 @@ func discoverLeftovers(dataDir string) ([]leftover, []skipReason, error) {
 			valid = append(valid, *lo)
 		}
 	}
+
+	// In-place leftovers live INSIDE dataDir (restore_inplace.go). A missing
+	// dataDir (legacy interrupted sibling rename) simply has none.
+	inValid, inSkipped := discoverInDirLeftovers(abs)
+	valid = append(valid, inValid...)
+	skipped = append(skipped, inSkipped...)
 
 	sort.Slice(valid, func(i, j int) bool {
 		if !valid[i].Timestamp.Equal(valid[j].Timestamp) {
@@ -383,11 +442,23 @@ func deleteOneLeftover(lo leftover, parent, dataDirAbs string, re *regexp.Regexp
 		preDeleteHook(lo.Path)
 	}
 	name := filepath.Base(lo.Path)
+	if lo.InDir {
+		re = inDirLeftoverNameRE
+		parent = dataDirAbs
+	}
 	if !re.MatchString(name) {
 		return fmt.Errorf("name no longer matches leftover pattern")
 	}
-	if filepath.Dir(lo.Path) != parent {
+	if filepath.Dir(lo.Path) != parent || lo.Parent != parent {
 		return fmt.Errorf("parent mismatch")
+	}
+	if lo.InDir {
+		// Never delete recovery material out from under an unresolved journal.
+		if j, present, jerr := readRestoreJournal(dataDirAbs); present {
+			if jerr != nil || name == j.StagingDir || name == j.BakDir {
+				return fmt.Errorf("referenced by an unresolved interrupted restore (refusing)")
+			}
+		}
 	}
 	if filepath.Clean(lo.Path) == dataDirAbs {
 		return fmt.Errorf("candidate equals data dir")

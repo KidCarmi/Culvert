@@ -1,0 +1,24 @@
+#!/bin/sh
+# Kernel messages belong to their own console, not to tty1. tty1 is the
+# appliance console (the menu and setup URL); a kernel line drawn over it is
+# left on screen around the menu. Route the kernel's VT output to tty12
+# (Alt+F12) instead. Nothing is suppressed: the log level is unchanged, the
+# serial console and the journal (journalctl -k) receive every message, and
+# tty12 starts with the kernel log so far.
+set -u
+vt=12
+# Everything runs with fd 3 open on the VT: opening the device allocates it,
+# and it stays allocated afterwards. The redirection is on a function call
+# because a failed redirection on a bare `exec` (braced or not) makes dash exit
+# 2 instead of degrading; on a function it is an ordinary failed command.
+route() {
+    setlogcons "$vt" || return 0
+    {
+        printf '\033[2J\033[H'
+        printf 'Culvert kernel log (tty%s). Alt+F1 returns to the appliance console.\n' "$vt"
+        printf 'Also in: journalctl -k, and on the serial console when one is attached.\n\n'
+        dmesg --color=never 2>/dev/null | tail -n 300
+    } >&3
+}
+route 3>"/dev/tty$vt" || exit 0
+exit 0

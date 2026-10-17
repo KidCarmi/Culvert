@@ -378,14 +378,24 @@ func checkStorage() OperatorContractCheck {
 func checkPolicyLoaded() OperatorContractCheck {
 	version, updatedAt := policyStore.policyVersion()
 	if updatedAt == "" && version == 0 {
-		// Default-deny is already applied when no rules exist; this is a
-		// warn (operational hint), not a failure — empty policy is a
-		// valid Zero-Trust posture for a brand-new install.
+		// An empty ruleset is NOT default-deny: with no rules and no
+		// default_action the proxy boots in ALLOW (passthrough), and that
+		// posture is persisted by the first settings save. Say which one is
+		// in effect instead of asserting Zero Trust (appliance readiness F).
+		action := defaultPolicyAction()
+		if action == "deny" {
+			return OperatorContractCheck{
+				Code:           "policy_loaded",
+				Status:         diagWarn,
+				Message:        "policy ruleset is empty (default-deny in effect: all proxy traffic is refused)",
+				OperatorAction: "Author at least one allow rule under Policy, or confirm default-deny is intended.",
+			}
+		}
 		return OperatorContractCheck{
 			Code:           "policy_loaded",
 			Status:         diagWarn,
-			Message:        "policy ruleset is empty (default-deny in effect)",
-			OperatorAction: "Author at least one allow rule under Policy, or confirm default-deny is intended.",
+			Message:        "policy ruleset is empty and the default action is ALLOW (passthrough — nothing is enforced)",
+			OperatorAction: "Set the default action to deny under Policy (or CULVERT_DEFAULT_ACTION=deny at boot) and author allow rules.",
 		}
 	}
 	return OperatorContractCheck{

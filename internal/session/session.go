@@ -349,6 +349,7 @@ type Session struct {
 	Groups   []string `json:"grp,omitempty"`
 	Provider string   `json:"pvd"`
 	Role     string   `json:"role,omitempty"` // UI admin role: admin|operator|viewer
+	Audience string   `json:"aud,omitempty"`  // Optional signed purpose; enforced by the consuming surface.
 	Exp      int64    `json:"exp"`            // Unix timestamp
 	// Jti is a 128-bit random session identifier (hex-encoded). Added in
 	// Phase C5.1 to make the JSON payload unique per login even when two

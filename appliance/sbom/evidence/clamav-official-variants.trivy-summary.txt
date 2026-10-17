@@ -1,0 +1,34 @@
+# trivy 0.75.0 (ghcr.io/aquasecurity/trivy:0.75.0), DB fetched 2026-10-03; --scanners vuln
+# Official clamav/clamav images checked for a CVE-2026-103111 fix. Docker Hub
+# tag list read the same day: newest official builds are 2026-09-28; the
+# advisory was published 2026-09-30. None carries the fix.
+
+clamav/clamav:1.4.6
+  sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23
+  os: alpine 3.24.2
+  severities: HIGH=1, MEDIUM=1
+  CVE-2026-103111: pcre2 10.48-r0 (fixed 10.49-r0)
+
+clamav/clamav:1.4.6-debian
+  sha256:6d0680780fd29855cb7018f68272cb520821f614259e2066f8ec669069ac91b3
+  os: debian 13.7
+  severities: CRITICAL=1, HIGH=62, MEDIUM=102, LOW=110, UNKNOWN=2
+  CVE-2026-103111: libpcre2-8-0 10.46-1~deb13u2 (fixed 10.46-1~deb13u3)
+
+clamav/clamav:1.5.4
+  sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+  os: alpine 3.24.2
+  severities: HIGH=1, MEDIUM=1
+  CVE-2026-103111: pcre2 10.48-r0 (fixed 10.49-r0)
+
+clamav/clamav:1.5.4-debian
+  sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578
+  os: debian 13.7
+  severities: CRITICAL=1, HIGH=62, MEDIUM=102, LOW=110, UNKNOWN=2
+  CVE-2026-103111: libpcre2-8-0 10.46-1~deb13u2 (fixed 10.46-1~deb13u3)
+
+culvert-candidate/clamav:1.4.6-pcre2-10.49 (local build, NOT published)
+  image id sha256:5fe4144098cc38dd0c0dd8a528b46512530b903bf446a90d8f030fb36e561f21
+  os: alpine 3.24.2
+  severities: MEDIUM=1
+  CVE-2026-103111: not present

@@ -299,7 +299,7 @@ func configuredCfg(t *testing.T) {
 func driveMiddleware(t *testing.T, sessionRole string) (int, UIRole, bool) {
 	t.Helper()
 	value, err := encodeSession(&Session{
-		Sub: "bob", Provider: "local", Role: sessionRole,
+		Sub: "bob", Provider: "local", Role: sessionRole, Audience: uiSessionAudience,
 		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 	})
 	if err != nil {
@@ -337,17 +337,14 @@ func TestSessionRole_UnenrolledSessionIsRefusedNotPromoted(t *testing.T) {
 	}
 }
 
-// CONTROL. The pre-RBAC compatibility case must survive — refusing it would
-// pass the defect gate while locking legacy single-admin deployments out.
-func TestSessionRole_EmptyRoleStillResolvesToAdmin(t *testing.T) {
+// Role-less legacy UI cookies cannot be distinguished from portal cookies.
+// Require a fresh UI login rather than promoting a portal token to admin.
+func TestSessionRole_EmptyRoleRequiresFreshUILogin(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
 	code, role, reached := driveMiddleware(t, "")
-	if !reached || code != http.StatusOK {
-		t.Fatalf("legacy role-less session refused: status=%d reached=%v", code, reached)
-	}
-	if role != RoleAdmin {
-		t.Fatalf("legacy role-less session resolved to %q, want %q", role, RoleAdmin)
+	if reached || code != http.StatusUnauthorized || role != "" {
+		t.Fatalf("role-less session admitted: status=%d reached=%v role=%q", code, reached, role)
 	}
 }
 
@@ -356,6 +353,9 @@ func TestSessionRole_EnrolledRolesPassThroughUnchanged(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
 	for _, r := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
+		if err := cfg.SetUIUser("bob", "", r); err != nil {
+			t.Fatal(err)
+		}
 		code, got, reached := driveMiddleware(t, string(r))
 		if !reached || code != http.StatusOK {
 			t.Fatalf("session role %q refused: status=%d reached=%v", r, code, reached)
@@ -367,8 +367,8 @@ func TestSessionRole_EnrolledRolesPassThroughUnchanged(t *testing.T) {
 }
 
 func TestSessionRoleOrReject_Table(t *testing.T) {
-	if got, ok := sessionRoleOrReject(""); !ok || got != RoleAdmin {
-		t.Errorf(`sessionRoleOrReject("") = (%q,%v), want (admin,true)`, got, ok)
+	if got, ok := sessionRoleOrReject(""); ok || got != "" {
+		t.Errorf(`sessionRoleOrReject("") = (%q,%v), want refused`, got, ok)
 	}
 	for _, r := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
 		if got, ok := sessionRoleOrReject(string(r)); !ok || got != r {
@@ -389,7 +389,7 @@ func TestAuthStatus_UnenrolledSessionIsNotReportedAsAdmin(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
 	value, err := encodeSession(&Session{
-		Sub: "bob", Provider: "local", Role: "superuser",
+		Sub: "bob", Provider: "local", Role: "superuser", Audience: uiSessionAudience,
 		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 	})
 	if err != nil {

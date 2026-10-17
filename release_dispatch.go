@@ -10,9 +10,9 @@
 //
 // It is a PURE, deterministic planner: no I/O, no randomness, no agent contact.
 // The idempotency key is an INPUT (higher orchestration owns op identity); the
-// catalog snapshot is read exactly once at plan start. The agent receives only
-// an image_ref + existing apply flags — no release/channel/version/catalog data
-// crosses to it, and it stays release-agnostic.
+// catalog snapshot is read exactly once at plan start. Exact signed evidence
+// accompanies image_ref so the host independently authorizes the requested
+// release and its recovery predecessor using host-owned trust policy.
 //
 // Scope (roadmap/D1.6d-P1.6-release-dispatch-plan.md — Slice a): planning + the
 // request object + tests. NO agent POST, NO upgrades.check, NO tags, NO tag
@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/releaseproof"
 )
 
 var (
@@ -33,6 +35,11 @@ var (
 	errDispatchUnknownTarget   = errors.New("dispatch: unknown release_id or channel")
 	errDispatchRepoMismatch    = errors.New("dispatch: catalog repo does not match deployment proxy_repo")
 	errDispatchMalformedRef    = errors.New("dispatch: malformed pinned ref")
+	// Transition policy (appliance readiness: supported upgrade transitions are
+	// ENFORCED before any mutation, never merely parsed).
+	errDispatchUnsupportedTransition = errors.New("dispatch: running release is older than the target's min_upgrade_from")
+	errDispatchUnknownCurrent        = errors.New("dispatch: running release is not in the catalog, so the target's min_upgrade_from cannot be checked")
+	errDispatchDowngrade             = errors.New("dispatch: target release is older than the running release")
 )
 
 // RefusedKind is the machine-readable classification of a refusal. Consumers
@@ -50,6 +57,9 @@ const (
 	RefusedMalformedRef          RefusedKind = "malformed_ref"           // derived ref is not repo@digest
 	RefusedInvalidConfig         RefusedKind = "invalid_config"          // bad proxy_repo (construction time)
 	RefusedInvalidRewriteMapping RefusedKind = "invalid_rewrite_mapping" // bad repo_rewrite (construction time)
+	RefusedUnsupportedTransition RefusedKind = "unsupported_transition"  // current < target.min_upgrade_from (hard refusal)
+	RefusedUnknownCurrent        RefusedKind = "unknown_current"         // target carries min_upgrade_from but current is not a catalog release; needs acknowledge_unknown_current
+	RefusedDowngrade             RefusedKind = "downgrade"               // target < current; needs allow_downgrade
 )
 
 // DispatchRefusal is a classified, human-readable refusal. It wraps the
@@ -122,6 +132,18 @@ type RepoRewrite struct {
 type DispatchConfig struct {
 	ProxyRepo   string
 	RepoRewrite *RepoRewrite // nil for connected deployments
+	// SelfVersion is this binary's own release version (main.version, linker-
+	// set to the tag on official builds; "dev" otherwise). Catalogs published
+	// by a release with lineage (release_lineage.go) carry every supported
+	// predecessor, so the running release is normally a catalog entry and the
+	// agent receives its signed prior_release_proof. A catalog that cannot
+	// name the running release (one published before lineage, or a running
+	// digest no release produced) leaves detectCurrent Unknown; the transition
+	// policy then falls back to the binary's own version — the proxy IS the
+	// thing being upgraded — but no baseline proof can be sent, so the agent
+	// refuses unless its ledger already holds that baseline. Non-semver
+	// ("dev") ⇒ unknown.
+	SelfVersion string
 }
 
 func (c DispatchConfig) validate() error {
@@ -199,6 +221,19 @@ type DispatchOptions struct {
 	PassphraseRef  string // REQUIRED by the agent iff pre_backup ends up true
 	NoRollback     bool   // opt out of rollback_on_failure (default: rollback ON)
 	IdempotencyKey string // op identity from higher orchestration; passed through verbatim (may be empty)
+	// AllowDowngrade admits a target OLDER than the running release. Default
+	// off: a downgrade is never an "upgrade", persistent state written by the
+	// newer build may be unreadable or silently ignored by the older one, and
+	// the supported way back is restore-from-backup (docs/appliance/
+	// upgrade-transition-matrix.md). Explicit break-glass only.
+	AllowDowngrade bool
+	// AcknowledgeUnknownCurrent admits a target that carries min_upgrade_from
+	// when the running release is NOT a catalog release (custom build, pre-
+	// catalog install): the check cannot be evaluated, so the operator must
+	// state that they have verified the transition themselves. A hard refusal
+	// here would strand exactly the installs the catalog was introduced for
+	// (dispatch-plan §102-106), so it is a confirmation, not a block.
+	AcknowledgeUnknownCurrent bool
 }
 
 // DefaultDispatchOptions returns the standard options: pre_backup desired,
@@ -207,14 +242,16 @@ func DefaultDispatchOptions() DispatchOptions { return DispatchOptions{PreBackup
 
 // UpgradeApplyRequest is the CP's view of the agent's existing
 // POST /v1/upgrades/apply body. rollback_on_failure has NO omitempty so it is
-// always serialized explicitly (design §6). image_ref is the ONLY field derived
-// from the release; no release/channel/version data is included.
+// always serialized explicitly. Proof bytes are captured from the same immutable
+// catalog snapshot; the host independently verifies them before any mutation.
 type UpgradeApplyRequest struct {
-	ImageRef          string `json:"image_ref"`
-	PreBackup         bool   `json:"pre_backup"`
-	PassphraseRef     string `json:"passphrase_ref,omitempty"`
-	RollbackOnFailure bool   `json:"rollback_on_failure"`
-	IdempotencyKey    string `json:"idempotency_key,omitempty"`
+	ImageRef          string                 `json:"image_ref"`
+	PreBackup         bool                   `json:"pre_backup"`
+	PassphraseRef     string                 `json:"passphrase_ref,omitempty"`
+	RollbackOnFailure bool                   `json:"rollback_on_failure"`
+	IdempotencyKey    string                 `json:"idempotency_key,omitempty"`
+	ReleaseProof      *releaseproof.Evidence `json:"release_proof,omitempty"`
+	PriorReleaseProof *releaseproof.Evidence `json:"prior_release_proof,omitempty"`
 }
 
 // DispatchPlan is the structured result of planning one dispatch op.
@@ -229,6 +266,16 @@ type DispatchPlan struct {
 	PinnedRef string      // catalog pinned ref (pre-rewrite)
 	ImageRef  string      // dispatch image_ref (post-rewrite) — what the agent receives
 	Current   CurrentView // what is running now (reverse-mapped); !Known ⇒ unknown/custom
+
+	// MinUpgradeFrom is the target's declared oldest supported predecessor
+	// (catalog manifest min_upgrade_from; empty ⇒ unconstrained).
+	MinUpgradeFrom string
+	// CurrentVersion is the predecessor version the transition policy was
+	// evaluated against ("" ⇒ unknown) and CurrentVersionSource says where it
+	// came from: "catalog" (running digest is a catalog release) or "binary"
+	// (this build's own version stamp).
+	CurrentVersion       string
+	CurrentVersionSource string
 
 	AlreadyCurrent bool
 	Apply          UpgradeApplyRequest // valid iff Outcome == OutcomePlan
@@ -294,6 +341,7 @@ func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts Dispatch
 		Severity:       rel.Severity,
 		PinnedRef:      rel.PinnedRef,
 		ImageRef:       imageRef,
+		MinUpgradeFrom: rel.MinUpgradeFrom,
 		Current:        current,
 		AlreadyCurrent: alreadyCurrent,
 	}
@@ -301,8 +349,22 @@ func (d *Dispatcher) Plan(target DispatchTarget, running []string, opts Dispatch
 		plan.Outcome = OutcomeAlreadyCurrent
 		return plan
 	}
+	// Transition policy — evaluated BEFORE the apply request exists, so a
+	// refused transition can never reach the agent.
+	plan.CurrentVersion, plan.CurrentVersionSource = effectiveCurrentVersion(current, d.cfg.SelfVersion)
+	if kind, err := checkTransition(plan.CurrentVersion, rel, opts); err != nil {
+		p := refuse(kind, err)
+		p.ReleaseID, p.VersionID, p.Severity, p.PinnedRef, p.ImageRef = rel.ReleaseID, rel.VersionID, rel.Severity, rel.PinnedRef, imageRef
+		p.MinUpgradeFrom, p.Current = rel.MinUpgradeFrom, current
+		p.CurrentVersion, p.CurrentVersionSource = plan.CurrentVersion, plan.CurrentVersionSource
+		return p
+	}
 	plan.Outcome = OutcomePlan
 	plan.Apply, plan.BackupSkipped = buildApplyRequest(imageRef, opts)
+	plan.Apply.ReleaseProof = cat.releaseProof(rel.ReleaseID)
+	if current.Known {
+		plan.Apply.PriorReleaseProof = cat.releaseProof(current.ReleaseID)
+	}
 	return plan
 }
 
@@ -322,7 +384,7 @@ func (d *Dispatcher) resolveTarget(cat *Catalog, t DispatchTarget) (ResolvedRele
 		if !ok {
 			return ResolvedRelease{}, RefusedUnknownTarget, fmt.Errorf("%w (release_id %q)", errDispatchUnknownTarget, t.ReleaseID)
 		}
-		return ResolvedRelease{ReleaseID: rel.ReleaseID, VersionID: rel.VersionID, Severity: rel.Severity, PinnedRef: rel.PinnedRef}, RefusedNone, nil
+		return ResolvedRelease{ReleaseID: rel.ReleaseID, VersionID: rel.VersionID, Severity: rel.Severity, PinnedRef: rel.PinnedRef, MinUpgradeFrom: rel.MinUpgradeFrom}, RefusedNone, nil
 	case t.Channel != "":
 		rel, err := cat.Resolve(t.Channel)
 		if err != nil {
@@ -361,6 +423,60 @@ func (d *Dispatcher) detectCurrent(cat *Catalog, running []string, targetRelease
 		}
 	}
 	return firstKnown, false
+}
+
+// checkTransition enforces the supported-transition policy between the running
+// release and the target. Order matters and is deliberate:
+//
+//  1. DOWNGRADE (target < current, both known): refused unless opts.AllowDowngrade.
+//     A downgrade is checked FIRST because min_upgrade_from describes upgrades;
+//     an older target's min_upgrade_from says nothing about going backwards.
+//  2. UNSUPPORTED (target.min_upgrade_from set, current known, current < min):
+//     hard refusal — there is no acknowledgement that makes an unqualified
+//     jump supported. The operator steps through a release that is >= min
+//     (or restores from backup onto the target).
+//  3. UNKNOWN CURRENT (target.min_upgrade_from set, current not a catalog
+//     release): refused unless opts.AcknowledgeUnknownCurrent.
+//
+// A target with no min_upgrade_from constrains nothing (the pre-policy
+// catalogs CI published carried none, so existing installs keep their
+// behaviour until a release declares a floor).
+func checkTransition(curVer string, rel ResolvedRelease, opts DispatchOptions) (RefusedKind, error) {
+	if curVer != "" && catalogSemverRE.MatchString(rel.VersionID) {
+		if catalogCompareSemver(rel.VersionID, curVer) < 0 && !opts.AllowDowngrade {
+			return RefusedDowngrade, fmt.Errorf("%w (running %s, target %s); pass allow_downgrade only as break-glass — restore-from-backup is the supported way back", errDispatchDowngrade, curVer, rel.VersionID)
+		}
+	}
+	if rel.MinUpgradeFrom == "" {
+		return RefusedNone, nil
+	}
+	if curVer == "" {
+		if opts.AcknowledgeUnknownCurrent {
+			return RefusedNone, nil
+		}
+		return RefusedUnknownCurrent, fmt.Errorf("%w (target %s requires >= %s); pass acknowledge_unknown_current after verifying the running build is supported", errDispatchUnknownCurrent, rel.VersionID, rel.MinUpgradeFrom)
+	}
+	if catalogCompareSemver(curVer, rel.MinUpgradeFrom) < 0 {
+		return RefusedUnsupportedTransition, fmt.Errorf("%w (running %s < min_upgrade_from %s for target %s); upgrade through a release >= %s first, or restore a backup onto the target",
+			errDispatchUnsupportedTransition, curVer, rel.MinUpgradeFrom, rel.VersionID, rel.MinUpgradeFrom)
+	}
+	return RefusedNone, nil
+}
+
+// effectiveCurrentVersion picks the predecessor version the transition policy
+// is evaluated against: the catalog's identity of the running digest when it
+// has one, else this binary's own version stamp (leading "v" tolerated; must
+// be bare X.Y.Z — "dev"/"candidate-…" are unknown). Returns ("", "") when
+// neither names a release.
+func effectiveCurrentVersion(current CurrentView, selfVersion string) (ver, source string) {
+	if current.Known && catalogSemverRE.MatchString(current.VersionID) {
+		return current.VersionID, "catalog"
+	}
+	v := strings.TrimPrefix(strings.TrimSpace(selfVersion), "v")
+	if catalogVersionCoreRE.MatchString(v) {
+		return v, "binary"
+	}
+	return "", ""
 }
 
 func buildApplyRequest(imageRef string, opts DispatchOptions) (req UpgradeApplyRequest, backupSkipped bool) {

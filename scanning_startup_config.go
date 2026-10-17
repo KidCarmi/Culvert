@@ -19,6 +19,10 @@ type scanningCLIFlags struct {
 	ThreatFeedDB  string
 	ScanSvcURL    string
 	ScanSvcListen string
+
+	// AVUnavailableEnv is CULVERT_AV_UNAVAILABLE as read by the shim (env,
+	// not a flag, but read in the same place so the resolver stays pure).
+	AVUnavailableEnv string
 }
 
 // scanningStartupConfig carries the resolved scanning inputs. The loader
@@ -57,8 +61,19 @@ type scanningStartupConfig struct {
 	// dir) skips the load.
 	ScanExclusionsPath string
 
+	// DomainAllowlistPath is the admin-managed threat-domain allowlist,
+	// persisted independently of the disposable feed DB so a backup restored
+	// onto a fresh appliance preserves it (owner P1, PR #1528). "" (no data
+	// dir) keeps the allowlist in the feed DB only.
+	DomainAllowlistPath string
+
 	// SvcListenAddr != "" runs the scan microservice sidecar.
 	SvcListenAddr string
+
+	// AVUnavailableEnv is the raw CULVERT_AV_UNAVAILABLE boot posture
+	// ("open", "closed", or ""). Validated and applied by the loader in BOTH
+	// scanning modes; a saved admin setting, applied later, still wins.
+	AVUnavailableEnv string
 }
 
 // resolveScanningStartupConfig is the single startup-time reader of
@@ -94,19 +109,25 @@ func resolveScanningStartupConfig(fc *FileConfig, flags scanningCLIFlags, dataDi
 	if dataDirVal != "" {
 		exclusionsPath = filepath.Join(dataDirVal, "scan_exclusions.json")
 	}
+	allowlistPath := ""
+	if dataDirVal != "" {
+		allowlistPath = filepath.Join(dataDirVal, "threat_domain_allowlist.json")
+	}
 
 	return scanningStartupConfig{
-		RemoteScanURL:      firstStr(flags.ScanSvcURL, secCfg.ScanSvcURL),
-		ClamAddr:           clamAddr,
-		YaraDir:            yaraDir,
-		FeedDB:             feedDB,
-		LocalEnabled:       secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "",
-		ThreatFeedEnabled:  feedDB != "" || secCfg.Enabled,
-		CacheTTL:           cacheTTL,
-		SyncInterval:       syncInterval,
-		CacheSize:          cacheSize,
-		MaxScanBytes:       maxScanBytes,
-		ScanExclusionsPath: exclusionsPath,
-		SvcListenAddr:      firstStr(flags.ScanSvcListen, secCfg.ScanSvcListen),
+		RemoteScanURL:       firstStr(flags.ScanSvcURL, secCfg.ScanSvcURL),
+		ClamAddr:            clamAddr,
+		YaraDir:             yaraDir,
+		FeedDB:              feedDB,
+		LocalEnabled:        secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "",
+		ThreatFeedEnabled:   feedDB != "" || secCfg.Enabled,
+		CacheTTL:            cacheTTL,
+		SyncInterval:        syncInterval,
+		CacheSize:           cacheSize,
+		MaxScanBytes:        maxScanBytes,
+		ScanExclusionsPath:  exclusionsPath,
+		DomainAllowlistPath: allowlistPath,
+		SvcListenAddr:       firstStr(flags.ScanSvcListen, secCfg.ScanSvcListen),
+		AVUnavailableEnv:    flags.AVUnavailableEnv,
 	}
 }

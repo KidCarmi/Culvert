@@ -44,11 +44,17 @@ PD="$(platform_digest "$LINES" "$PLATFORM")" || { echo "::error::${PLATFORM}: no
 REF="${IMAGE}@${PD}"
 "$DOCKER" pull --quiet --platform "$PLATFORM" "$REF" >/dev/null
 
-AGENT="$("$DOCKER" run --rm --platform "$PLATFORM" --entrypoint /app/deploy/bin/culvert-maint "$REF" -version 2>&1 | tr -d '[:space:]')" || true
+# stdout only: the agent prints its version there, while the docker CLI writes
+# host warnings (e.g. "IPv4 forwarding is disabled") to stderr. Merging the two
+# made a host warning read as a wrong version. stderr is kept for the error.
+AGENT_ERR="$(mktemp)"
+AGENT="$("$DOCKER" run --rm --platform "$PLATFORM" --entrypoint /app/deploy/bin/culvert-maint "$REF" -version 2>"$AGENT_ERR" | tr -d '[:space:]')" || true
 if [ "$AGENT" != "$VERSION" ]; then
-  echo "::error::${PLATFORM}: culvert-maint -version reports '${AGENT}', want ${VERSION}"
+  echo "::error::${PLATFORM}: culvert-maint -version reports '${AGENT}', want ${VERSION} (stderr: $(tr '\n' ' ' <"$AGENT_ERR"))"
+  rm -f "$AGENT_ERR"
   exit 1
 fi
+rm -f "$AGENT_ERR"
 echo "${PLATFORM}: culvert-maint reports ${AGENT}"
 
 CID="$("$DOCKER" run -d --platform "$PLATFORM" -p "127.0.0.1:${PORT}:8080" "$REF" \

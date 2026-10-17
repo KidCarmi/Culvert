@@ -198,12 +198,26 @@ if ! sudo -n true 2>/dev/null; then
   warn "sudo access required. You may be prompted for your password."
 fi
 
-# Check internet
-if curl -fsSL --connect-timeout 5 https://download.docker.com > /dev/null 2>&1 || \
+# Check internet — needed to install Docker from download.docker.com. An
+# appliance image (appliance/) pre-installs Docker + the compose plugin and
+# sets CULVERT_INSTALL_ASSUME_DOCKER=1, so a restricted-egress first boot must
+# not fail here on a host that will never contact the Docker repo. Without the
+# variable, a host that already has docker + compose is still allowed through
+# with a warning; only a host that NEEDS the install is refused.
+DOCKER_PRESENT=0
+if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
+  DOCKER_PRESENT=1
+fi
+if [[ "${CULVERT_INSTALL_ASSUME_DOCKER:-0}" == "1" ]]; then
+  [[ "$DOCKER_PRESENT" == "1" ]] || error "CULVERT_INSTALL_ASSUME_DOCKER=1 but docker + docker compose are not installed"
+  info "Docker preinstalled (CULVERT_INSTALL_ASSUME_DOCKER=1); skipping the download.docker.com reachability check"
+elif curl -fsSL --connect-timeout 5 https://download.docker.com > /dev/null 2>&1 || \
    wget -q --timeout=5 -O /dev/null https://download.docker.com 2>/dev/null; then
   info "Internet connectivity OK"
+elif [[ "$DOCKER_PRESENT" == "1" ]]; then
+  warn "Cannot reach download.docker.com, but docker + docker compose are already installed; continuing (set CULVERT_INSTALL_ASSUME_DOCKER=1 to silence this)"
 else
-  error "No internet connection. Cannot reach download.docker.com"
+  error "No internet connection. Cannot reach download.docker.com (required to install Docker)"
 fi
 
 # Memory check — Culvert + ClamAV need ~1.5 GB to run comfortably.
@@ -564,11 +578,11 @@ GH_REPO="${CULVERT_GITHUB_REPO:-KidCarmi/Culvert}"
 # download (fail-closed) rather than trusting an unverified binary.
 MAINT_SIGSTORE_ISSUER="https://token.actions.githubusercontent.com"
 MAINT_SIGSTORE_SAN_REGEX='^https://github\.com/KidCarmi/Culvert/\.github/workflows/ci\.yml@refs/tags/v.*$'
-# Pinned cosign verifier image (the root of trust for the check). A bare tag is
-# mutable; high-assurance operators should override with a digest-pinned ref.
+# Immutable multi-platform cosign verifier (the root of trust for the check).
+# The digest binds the official GHCR v3.0.6 index; never resolve a mutable tag.
 # MUST be cosign v3.x (new-format Sigstore bundles). Mirrors the agent
 # installer's COSIGN_IMAGE default.
-MAINT_COSIGN_IMAGE="${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6}"
+MAINT_COSIGN_IMAGE="${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00}"
 
 # verify_pinned_image_signature — cosign-verify (keyless) the registry image
 # behind $PINNED_TAG against the pinned tag identity. No host cosign needed;
@@ -1194,36 +1208,39 @@ copy_bundle_file() {
   sudo install -m "$3" -o "$(id -un)" "$1" "$2"
 }
 
-# extract_deploy_bundle — pull the deployment files out of the pinned proxy
-# image's /app/deploy bundle into $INSTALL_DIR: the compose files and the
-# maintenance-agent packaging/ tree (installer, config example, systemd unit,
-# sudoers template). The agent BINARY in the bundle is deliberately NOT left
-# in the stack dir — install_maint_agent extracts it into a throwaway temp dir
-# when it needs it (extract_bundled_maint_bin). Fails cleanly (nothing written)
-# when the image predates the bundle, so the caller can fall back to git.
-extract_deploy_bundle() {
-  local tmp cid
-  tmp="$(mktemp -d)" || return 1
-  cid="$(sudo docker create "$PINNED_TAG" 2>/dev/null)" || { rm -rf "$tmp"; return 1; }
+# stage_deploy_bundle DIR — copy the pinned proxy image's /app/deploy bundle
+# into DIR (a fresh temp dir) and check it carries what a deployment needs.
+# Returns 1 when the image has no usable bundle (an older release). Writes
+# nothing under $INSTALL_DIR.
+stage_deploy_bundle() {
+  local tmp="$1" cid
+  cid="$(sudo docker create "$PINNED_TAG" 2>/dev/null)" || return 1
   if ! sudo docker cp "$cid:/app/deploy/." "$tmp/" >/dev/null 2>&1; then
     sudo docker rm -f "$cid" >/dev/null 2>&1 || true
-    sudo rm -rf "$tmp"
     return 1
   fi
   sudo docker rm -f "$cid" >/dev/null 2>&1 || true
-  if [[ ! -f "$tmp/docker-compose.yml" || ! -f "$tmp/docker-compose.maint-agent.yml" \
-     || ! -f "$tmp/packaging/culvert-maint/install.sh" ]]; then
-    sudo rm -rf "$tmp"
+  [[ -f "$tmp/docker-compose.yml" && -f "$tmp/docker-compose.maint-agent.yml" \
+     && -f "$tmp/packaging/culvert-maint/install.sh" ]] || return 1
+  # The ClamAV sidecar build context is required exactly when this bundle's
+  # compose file names it.
+  if ! sudo test -f "$tmp/appliance/clamav/Dockerfile" \
+     && sudo grep -q 'context: ./appliance/clamav' "$tmp/docker-compose.yml"; then
+    echo "deploy bundle names the ClamAV build context but does not carry appliance/clamav/Dockerfile" >&2
     return 1
   fi
-  # Install order matters for crash-safety: the packaging/ tree and the override
-  # compose file go in FIRST, and docker-compose.yml — the re-extraction sentinel
-  # that §6b and §5's reuse check key on — goes in LAST. So a copy that fails
-  # partway leaves NO sentinel (or we remove it below), and the next run
-  # re-extracts instead of treating an incomplete tree as a finished deployment.
-  # Every copy is checked; the previous version ignored the loop's failures and
-  # unconditionally returned 0, which permanently stranded a partial extract.
-  local ok=1 f rel
+  return 0
+}
+
+# install_staged_bundle DIR — install a staged bundle into $INSTALL_DIR: the
+# packaging/ tree, the override compose file and the ClamAV build context
+# FIRST, docker-compose.yml — the re-extraction sentinel that §6b and §5's
+# reuse check key on — LAST. Every copy is checked; returns 2 when a write
+# failed (disk full / permissions). The agent BINARY in the bundle is
+# deliberately NOT installed here — install_maint_agent extracts it into a
+# throwaway temp dir when it needs it (extract_bundled_maint_bin).
+install_staged_bundle() {
+  local tmp="$1" ok=1 f rel
   while IFS= read -r -d '' f; do
     rel="${f#"$tmp"/}"
     sudo mkdir -p "$INSTALL_DIR/$(dirname "$rel")" || { ok=0; break; }
@@ -1236,21 +1253,101 @@ extract_deploy_bundle() {
     copy_bundle_file "$tmp/docker-compose.maint-agent.yml" \
       "$INSTALL_DIR/docker-compose.maint-agent.yml" 0644 || ok=0
   fi
+  if [[ "$ok" -eq 1 ]] && sudo test -f "$tmp/appliance/clamav/Dockerfile"; then
+    sudo mkdir -p "$INSTALL_DIR/appliance/clamav" \
+      && copy_bundle_file "$tmp/appliance/clamav/Dockerfile" "$INSTALL_DIR/appliance/clamav/Dockerfile" 0644 || ok=0
+  fi
   if [[ "$ok" -eq 1 ]]; then
-    # LAST — the sentinel. Only now is the deployment considered complete.
     copy_bundle_file "$tmp/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml" 0644 || ok=0
   fi
+  [[ "$ok" -eq 1 ]] || return 2
+  return 0
+}
+
+# extract_deploy_bundle — install the pinned image's bundle into an install
+# dir that has no (complete) deployment yet. Returns 1 = no bundle in the
+# image (older release; nothing written), 2 = the bundle was present but
+# writing it failed. On 2 the sentinel is removed so a partial extract can't be
+# mistaken for a complete one on the next run (which re-extracts).
+extract_deploy_bundle() {
+  local tmp rc=0
+  tmp="$(mktemp -d)" || return 1
+  if ! stage_deploy_bundle "$tmp"; then
+    sudo rm -rf "$tmp"
+    return 1
+  fi
+  install_staged_bundle "$tmp" || rc=$?
   sudo rm -rf "$tmp"
-  if [[ "$ok" -ne 1 ]]; then
-    # Remove the sentinel so a partial extract can't be mistaken for a complete
-    # one on the next run (it may not have been written, but be certain).
+  if [[ "$rc" -ne 0 ]]; then
     sudo rm -f "$INSTALL_DIR/docker-compose.yml" 2>/dev/null || true
-    # Return 2 = the bundle WAS present but writing it into $INSTALL_DIR failed
-    # (disk full / permissions), distinct from return 1 = no bundle in the image
-    # (older release). The caller errors directly on 2 instead of attempting a
-    # git clone that would fail the same way.
     return 2
   fi
+  return 0
+}
+
+# sidecar_image_of COMPOSE_FILE — the locally built ClamAV sidecar tag the
+# compose file names (empty when it names none).
+sidecar_image_of() {
+  sudo sed -n 's/^[[:space:]]*image:[[:space:]]*\(culvert\/clamav:[^[:space:]#]*\).*/\1/p' "$1" | head -n 1
+}
+
+# staged_bundle_differs DIR — true when any host component the staged bundle
+# would install is missing from $INSTALL_DIR or differs from it.
+staged_bundle_differs() {
+  local tmp="$1" f rel
+  while IFS= read -r -d '' f; do
+    rel="${f#"$tmp"/}"
+    case "$rel" in
+      bin/*) continue ;;  # the agent binary is install_maint_agent's, not a stack file
+    esac
+    sudo cmp -s "$f" "$INSTALL_DIR/$rel" || return 0
+  done < <(sudo find "$tmp" -type f -print0)
+  return 1
+}
+
+# refresh_deploy_bundle — a re-run over an existing deployment adopts the
+# pinned image's host components (compose files, agent packaging, ClamAV
+# build context). An application upgrade replaces only the proxy image, so this
+# is how a changed sidecar (e.g. a package security fix, which always carries a
+# new tag) reaches an installed appliance. A new sidecar tag is BUILT before
+# any file is replaced: the compose file must never name an image this host
+# cannot produce, or the next `compose up` (an agent upgrade, a restart) would
+# fail. Returns 0 = current or refreshed, 3 = not refreshed (nothing replaced;
+# the stack keeps its previous components), 1 = the image has no bundle.
+refresh_deploy_bundle() {
+  local tmp tag rc=0
+  tmp="$(mktemp -d)" || return 3
+  if ! stage_deploy_bundle "$tmp"; then
+    sudo rm -rf "$tmp"
+    return 1
+  fi
+  if ! staged_bundle_differs "$tmp"; then
+    sudo rm -rf "$tmp"
+    info "Host components already match $PINNED_TAG's deploy bundle."
+    return 0
+  fi
+  tag="$(sidecar_image_of "$tmp/docker-compose.yml")"
+  if [[ -n "$tag" ]] && ! sudo docker image inspect "$tag" >/dev/null 2>&1; then
+    info "Building the ClamAV sidecar $tag from the new bundle (needs Docker Hub and the Alpine package CDN)..."
+    if ! sudo docker build -t "$tag" "$tmp/appliance/clamav"; then
+      sudo rm -rf "$tmp"
+      warn "Could not build $tag. Host components were NOT refreshed; the stack keeps its"
+      warn "previous compose file and sidecar. Restore egress to Docker Hub and the Alpine"
+      warn "package CDN (or load the image), then re-run."
+      return 3
+    fi
+  fi
+  sudo cp -a "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml.pre-refresh" || { sudo rm -rf "$tmp"; return 3; }
+  install_staged_bundle "$tmp" || rc=$?
+  sudo rm -rf "$tmp"
+  if [[ "$rc" -ne 0 ]]; then
+    # Keep a compose file that names images this host has: put the previous one back.
+    sudo cp -a "$INSTALL_DIR/docker-compose.yml.pre-refresh" "$INSTALL_DIR/docker-compose.yml" || true
+    warn "Writing the refreshed host components to $INSTALL_DIR failed (disk full or permissions);"
+    warn "the previous compose file was put back. Free space / fix permissions and re-run."
+    return 3
+  fi
+  info "Host components refreshed from $PINNED_TAG (previous compose: docker-compose.yml.pre-refresh)."
   return 0
 }
 
@@ -1301,6 +1398,17 @@ if [[ ! -f "$INSTALL_DIR/docker-compose.yml" \
   current signed release instead and re-run:
     CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh"
   fi
+elif [[ -e "$INSTALL_DIR/.git" || -f "$INSTALL_DIR/go.mod" ]]; then
+  info "Source checkout at $INSTALL_DIR: its own compose files are used (not refreshed from the image)."
+else
+  step "Refreshing host components"
+  refresh_rc=0
+  refresh_deploy_bundle || refresh_rc=$?
+  case "$refresh_rc" in
+    0) ;;
+    1) warn "$PINNED_TAG carries no deploy bundle; host components left as installed." ;;
+    *) HOST_REFRESH_FAILED=1 ;;
+  esac
 fi
 
 ###############################################################################
@@ -1862,6 +1970,44 @@ if [[ -n "$CATALOG_URL" ]]; then
   env_put CULVERT_RELEASE_CATALOG_URL "$CATALOG_URL" "$INSTALL_DIR/.env"
 fi
 env_put CULVERT_INSTALL_CHANNEL "$INSTALL_CHANNEL" "$INSTALL_DIR/.env"
+# Boot-time policy posture (CULVERT_DEFAULT_ACTION, read by the proxy when
+# config.yaml sets no default_action). The appliance first boot passes
+# CULVERT_INSTALL_DEFAULT_ACTION=deny so a fresh gateway enforces from the
+# start; a quick-start host keeps the historical passthrough unless asked.
+case "${CULVERT_INSTALL_DEFAULT_ACTION:-}" in
+  allow|deny) env_put CULVERT_DEFAULT_ACTION "$CULVERT_INSTALL_DEFAULT_ACTION" "$INSTALL_DIR/.env" ;;
+  "") ;;
+  *) warn "Ignoring CULVERT_INSTALL_DEFAULT_ACTION='${CULVERT_INSTALL_DEFAULT_ACTION}' (want allow or deny)" ;;
+esac
+# Scanner AV-unavailable posture (CULVERT_AV_UNAVAILABLE, read once by the
+# proxy; a saved admin choice still wins). The appliance first boot passes
+# CULVERT_INSTALL_AV_UNAVAILABLE=closed so content the AV engine cannot scan
+# (ClamAV stopped/crashed/unreachable) is REFUSED rather than forwarded
+# unscanned; a quick-start host keeps the historical fail-open unless asked.
+case "${CULVERT_INSTALL_AV_UNAVAILABLE:-}" in
+  open|closed) env_put CULVERT_AV_UNAVAILABLE "$CULVERT_INSTALL_AV_UNAVAILABLE" "$INSTALL_DIR/.env" ;;
+  "") ;;
+  *) warn "Ignoring CULVERT_INSTALL_AV_UNAVAILABLE='${CULVERT_INSTALL_AV_UNAVAILABLE}' (want open or closed)" ;;
+esac
+# Per-instance first-admin setup token (CULVERT_SETUP_TOKEN, read once by the
+# proxy): the appliance first boot mints one per instance so the one-time
+# setup window on the published admin port is not open to whoever reaches it
+# first. Persisted like the other .env secrets — never overwritten once set, so
+# a re-run after an interrupted first boot keeps the token the console showed.
+# Restricted to a safe .env alphabet (see setup_at_rest_encryption's rationale).
+if [[ -n "${CULVERT_INSTALL_SETUP_TOKEN:-}" ]]; then
+  if secret_already_set CULVERT_SETUP_TOKEN "$INSTALL_DIR/.env"; then
+    # env_put REPLACES; the never-overwrite property every .env secret has
+    # comes from this guard, exactly as for the passphrases above. The token
+    # the console already showed stays the token the wizard accepts.
+    info "Keeping the existing first-admin setup token in $INSTALL_DIR/.env"
+  elif [[ "$CULVERT_INSTALL_SETUP_TOKEN" =~ ^[A-Za-z0-9._-]{16,128}$ ]]; then
+    env_put CULVERT_SETUP_TOKEN "$CULVERT_INSTALL_SETUP_TOKEN" "$INSTALL_DIR/.env"
+    info "Persisted the first-admin setup token (CULVERT_SETUP_TOKEN) into $INSTALL_DIR/.env"
+  else
+    warn "Ignoring CULVERT_INSTALL_SETUP_TOKEN: must be 16-128 characters from [A-Za-z0-9._-]"
+  fi
+fi
 
 info "Pulling images and starting services (first run may take a few minutes — ClamAV downloads ~250 MB of virus signatures)..."
 
@@ -2628,8 +2774,19 @@ install_maint_agent() {
         # rather than install a crash-looping systemd unit (#10). (If binfmt IS
         # registered the foreign binary runs emulated and --version succeeds,
         # which is degraded-but-functional and acceptable.)
-        if bundled_version="$("$cand" --version 2>/dev/null)" \
-           && [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+        if ! bundled_version="$("$cand" --version 2>/dev/null)"; then
+          bundled_version=""
+          info "Bundled agent binary is not runnable on this host (architecture mismatch or"
+          info "corrupt) — falling back to the signed-release download / source build."
+        elif ! [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+          # It RAN, but its stamp is not a release version (e.g. "dev" from an
+          # unversioned build): it cannot be pinned or upgraded, so it is not
+          # installed. Said as such — the old message called this "not
+          # runnable", which sent diagnosis to the wrong place (PR #1528 §3f L11).
+          warn "Bundled agent reports version '${bundled_version}', not a release version (vX.Y.Z[-pre]) — not installing it."
+          bundled_version=""
+        fi
+        if [[ -n "$bundled_version" ]]; then
           if [[ -z "$target_version" ]]; then
             # No explicit target — adopt the verified image's bundled version.
             target_version="$bundled_version"
@@ -2646,9 +2803,6 @@ install_maint_agent() {
             info "Proxy image bundles agent $bundled_version but the target is $target_version —"
             info "using the signed-release download for $target_version instead of the image bundle."
           fi
-        else
-          info "Bundled agent binary is not runnable on this host (architecture mismatch or"
-          info "corrupt) — falling back to the signed-release download / source build."
         fi
       fi
     else
@@ -2876,4 +3030,12 @@ if [[ "${MAINT_AGENT_INSTALLED:-0}" == "1" ]]; then
     echo "  for custom Docker, userns-remap, rootless, or remote-agent setups."
   fi
   echo ""
+fi
+# A re-run that could not adopt the image's host components (§6b) must not end
+# as a success: the stack still runs on its previous compose file and sidecar.
+if [[ "${HOST_REFRESH_FAILED:-0}" == "1" ]]; then
+  echo -e "${YELLOW}  ⚠ Host components were NOT refreshed (see the warning under${NC}"
+  echo -e "${YELLOW}    'Refreshing host components'). The stack runs its previous compose${NC}"
+  echo -e "${YELLOW}    file and ClamAV sidecar; re-run after fixing the cause.${NC}"
+  exit 3
 fi

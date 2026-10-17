@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# culvert-net — console network helper (netplan). No DHCP server? Use this.
+#
+#   sudo culvert-net show
+#   sudo culvert-net dhcp
+#   sudo culvert-net static <addr/prefix> <gateway> [dns1,dns2] [search1,search2]
+#
+# Writes ONE file, /etc/netplan/60-culvert.yaml, for the first non-loopback
+# interface, then `netplan apply`. cloud-init's generated DHCP config stays in
+# place and is overridden by the higher-numbered file; `dhcp` removes ours.
+set -euo pipefail
+NP="${CULVERT_NET_NETPLAN_FILE:-/etc/netplan/60-culvert.yaml}"
+cmd="${1:-show}"
+# The interface carrying the default route, else the first physical-looking one.
+iface="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+[[ -n "$iface" ]] || iface="$(ip -o link show | awk -F': ' '$2 ~ /^(en|eth)/ {print $2; exit}')"
+[[ -n "$iface" ]] || { echo "no network interface found" >&2; exit 1; }
+need_root() { [[ "$(id -u)" -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }; }
+# Real parsing, not shape regexes: `999.1.1.1/99` has the right shape and
+# would be written to netplan, failing first boot and leaving a persistent
+# file that breaks networking on the next boot (Codex P1, PR #1528).
+# ip_family prints 4 or 6 for a valid address (with a prefix when $2=cidr).
+ip_family() {
+  python3 - "$1" "${2:-}" <<'PY' 2>/dev/null
+import ipaddress, sys
+v, kind = sys.argv[1], sys.argv[2]
+if kind == "cidr":
+    if v.count("/") != 1:
+        sys.exit(1)
+    a = ipaddress.ip_interface(v)
+else:
+    a = ipaddress.ip_address(v)
+print(a.version)
+PY
+}
+valid_cidr() { [[ -n "$(ip_family "$1" cidr)" ]]; }
+# gateway_reachable ADDR/PREFIX GW — the default route must be reachable
+# through the configured prefix: a gateway outside it is written without an
+# on-link declaration and the appliance loses its default route at first
+# boot (Codex P1, PR #1528). The gateway is also neither the appliance's own
+# address nor (IPv4, prefix <= 30) the network/broadcast address. An IPv6
+# link-local gateway (fe80::/10) is the one exception: it is the usual
+# router next hop and is reachable on the interface whatever the prefix.
+gateway_reachable() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import ipaddress, sys
+iface, gw = ipaddress.ip_interface(sys.argv[1]), ipaddress.ip_address(sys.argv[2])
+net = iface.network
+if gw.version != iface.version or gw == iface.ip:
+    sys.exit(1)
+if gw.version == 6 and gw.is_link_local:
+    sys.exit(0)
+if gw not in net:
+    sys.exit(1)
+if gw.version == 4 and net.prefixlen <= 30 and gw in (net.network_address, net.broadcast_address):
+    sys.exit(1)
+PY
+}
+valid_ip()   { [[ -n "$(ip_family "$1")" ]]; }
+# A search domain is interpolated into YAML: hostname characters only.
+valid_domain() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
+
+# settled — `netplan apply` returns once systemd-networkd has the new
+# configuration, not once the interface is usable again: a DHCP lease and
+# its default route arrive after it (ESXi qualification of #1528 caught the
+# rollback reporting "restored" while the route was still missing). So a
+# restored or re-applied configuration is reported only once the interface
+# carries a default route again, waiting at most CULVERT_NET_SETTLE_SECS.
+SETTLE_SECS="${CULVERT_NET_SETTLE_SECS:-45}"
+default_route() { { ip -4 route show default dev "$iface"; ip -6 route show default dev "$iface"; } 2>/dev/null | head -1; }
+settled() {
+  local deadline=$((SECONDS + SETTLE_SECS))
+  while :; do
+    [[ -n "$(default_route)" ]] && return 0
+    (( SECONDS >= deadline )) && return 1
+    sleep 0.5
+  done
+}
+
+case "$cmd" in
+  show)
+    echo "interface: $iface"
+    ip -br addr show "$iface"; ip route show default || true
+    [[ -f "$NP" ]] && { echo "--- $NP"; cat "$NP"; } || echo "(DHCP via cloud-init; no $NP)"
+    ;;
+  dhcp)
+    need_root
+    rm -f "$NP"
+    netplan apply
+    if ! settled; then
+      echo "DHCP configured on $iface, but it has no default route after ${SETTLE_SECS}s (no lease yet?); check: culvert-net show" >&2
+      exit 1
+    fi
+    echo "DHCP restored on $iface ($(default_route))"
+    ;;
+  static)
+    need_root
+    addr="${2:-}"; gw="${3:-}"; dns="${4:-}"; search="${5:-}"
+    [[ -n "$addr" && -n "$gw" ]] || { echo "usage: culvert-net static <addr/prefix> <gateway> [dns,dns] [search,search]" >&2; exit 2; }
+    valid_cidr "$addr" || { echo "bad address/prefix: $addr" >&2; exit 2; }
+    valid_ip "$gw"     || { echo "bad gateway: $gw" >&2; exit 2; }
+    [[ "$(ip_family "$addr" cidr)" == "$(ip_family "$gw")" ]] || { echo "gateway $gw is not in the address family of $addr" >&2; exit 2; }
+    gateway_reachable "$addr" "$gw" || { echo "gateway $gw is not a usable host in the subnet of $addr; the default route would be unreachable" >&2; exit 2; }
+    dns_yaml=""; search_yaml=""
+    if [[ -n "$dns" ]]; then
+      IFS=',' read -ra d <<<"$dns"; for x in "${d[@]}"; do valid_ip "$x" || { echo "bad DNS server: $x" >&2; exit 2; }; done
+      dns_yaml="        addresses: [$(printf '%s' "$dns" | sed 's/,/, /g')]"
+    fi
+    if [[ -n "$search" ]]; then
+      IFS=',' read -ra d <<<"$search"; for x in "${d[@]}"; do valid_domain "$x" || { echo "bad search domain: $x" >&2; exit 2; }; done
+      search_yaml="        search: [$(printf '%s' "$search" | sed 's/,/, /g')]"
+    fi
+    tmp="$(mktemp)"
+    {
+      echo "# written by culvert-net; remove with: sudo culvert-net dhcp"
+      echo "network:"
+      echo "  version: 2"
+      echo "  ethernets:"
+      echo "    $iface:"
+      echo "      dhcp4: false"
+      echo "      dhcp6: false"
+      echo "      addresses: [$addr]"
+      echo "      routes:"
+      echo "        - to: default"
+      echo "          via: $gw"
+      if [[ -n "$dns_yaml" || -n "$search_yaml" ]]; then
+        echo "      nameservers:"
+        [[ -n "$dns_yaml" ]] && echo "$dns_yaml"
+        [[ -n "$search_yaml" ]] && echo "$search_yaml"
+      fi
+    } > "$tmp"
+    # Keep the previous file until netplan has both accepted AND applied the
+    # new one: a value netplan rejects, or one it cannot activate, must never
+    # persist into the next boot (first boot reports a failure here as "stays
+    # on DHCP", which is only true if this restores the previous state).
+    prev=""
+    if [[ -f "$NP" ]]; then prev="$(mktemp)"; cp -p "$NP" "$prev"; fi
+    restore_prev() {
+      if [[ -n "$prev" ]]; then mv -f "$prev" "$NP"; else rm -f "$NP"; fi
+      netplan generate || true
+    }
+    install -m 0600 "$tmp" "$NP"; rm -f "$tmp"
+    if ! netplan generate; then
+      restore_prev
+      echo "netplan rejected the static configuration; the previous network configuration is kept" >&2
+      exit 1
+    fi
+    if ! netplan apply; then
+      restore_prev
+      netplan apply || true
+      if settled; then
+        echo "netplan could not apply the static configuration; the previous network configuration was restored ($(default_route))" >&2
+      else
+        echo "netplan could not apply the static configuration; the previous network configuration was re-applied, but $iface has no default route after ${SETTLE_SECS}s; check: culvert-net show" >&2
+      fi
+      exit 1
+    fi
+    [[ -n "$prev" ]] && rm -f "$prev"
+    # Applied and persisted either way, so the exit stays 0 (first boot reads
+    # a failure here as "refused, staying on DHCP", which would be false).
+    if ! settled; then
+      echo "static address $addr via $gw applied on $iface, but it has no default route after ${SETTLE_SECS}s; check: culvert-net show" >&2
+    else
+      echo "static address $addr via $gw applied on $iface"
+    fi
+    ;;
+  *) echo "usage: culvert-net show|dhcp|static <addr/prefix> <gateway> [dns,dns] [search,search]" >&2; exit 2 ;;
+esac

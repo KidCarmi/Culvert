@@ -1,0 +1,43 @@
+# Kernel modules an unprivileged process can make load over the network API
+# (a socket family, a generic-netlink family, a sock_diag request, or a TCP
+# ULP) that the appliance leaves loadable. prepare-guest.sh refuses to build
+# a disk on which any module with such an alias is neither denied
+# (modprobe-culvert-unused.conf) nor listed here, and refuses a listed module
+# that the kernel no longer ships, so this list cannot rot silently.
+#
+# Every entry was already on the GA 6.8.0 virtual-kernel disk the appliance
+# was first qualified with: keeping them loadable does not widen what that
+# disk exposed. Entries that depend on a denied module cannot load anyway.
+# module                    why it stays loadable
+nfnetlink                   used: nftables / Docker's iptables-nft
+inet_diag                   used: ss(8) and diagnostics
+tcp_diag                    used: ss(8)
+udp_diag                    used: ss(8)
+raw_diag                    ss(8)
+unix_diag                   ss(8)
+netlink_diag                ss(8)
+af_packet_diag              ss(8)
+vmw_vsock_vmci_transport    used: VMware Tools (open-vm-tools) on ESXi
+vsock_loopback              vsock stack (VMware Tools)
+vsock_diag                  vsock stack (VMware Tools)
+hv_sock                     vsock family alias (Hyper-V transport; no Hyper-V device here)
+af_alg                      kernel crypto API for userspace
+crypto_user                 crypto API configuration (CAP_NET_ADMIN to change anything)
+tls                         kernel TLS ULP
+xfrm_user                   IPsec state (CAP_NET_ADMIN to configure)
+af_key                      PF_KEY IPsec (CAP_NET_ADMIN)
+wireguard                   genl family; configuring needs CAP_NET_ADMIN
+nbd                         genl family; connecting needs CAP_SYS_ADMIN
+scsi_transport_iscsi        iSCSI netlink; configuring needs CAP_SYS_ADMIN
+sctp_diag                   depends on sctp (denied): cannot load
+pptp                        depends on pppox (denied): cannot load
+llc2                        on the GA disk; unused
+appletalk                   on the GA disk; unused
+atm                         on the GA disk; unused
+ax25                        on the GA disk; unused
+netrom                      on the GA disk; unused
+rose                        on the GA disk; unused
+x25                         on the GA disk; unused
+phonet                      on the GA disk; unused
+pn_pep                      on the GA disk; unused
+ieee802154_socket           on the GA disk; unused

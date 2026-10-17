@@ -150,6 +150,13 @@ func remoteScanFail(class, cause string) {
 		obs.Warnf("ScanSvc: remote scan failed (%s): %s — forwarding UNSCANNED (fail-open); total %d",
 			class, cause, RemoteScanFailTotal())
 	}
+	remoteScanFaultAlert(class)
+}
+
+// remoteScanFaultAlert fires the scan_svc_down alert for a sidecar FAULT. It is
+// shared by both av_unavailable postures: whether the content was forwarded or
+// refused, the sidecar is down and the operator must hear about it.
+func remoteScanFaultAlert(class string) {
 	if !alerts.HasSubscriber("scan_svc_down") {
 		return
 	}
@@ -247,8 +254,15 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 		atomic.AddInt64(&statRemoteScanSaturated, 1)
 		return remoteScanRefused(hash)
 	default:
+		if avUnavailableClosed.Load() {
+			// av_unavailable=closed: the SAME posture the local ClamAV leg
+			// follows (one budget, one posture — CHAOS-53). The fault is still
+			// alerted exactly as under open; only the content's fate differs.
+			remoteScanFaultAlert(class)
+			return avUnavailableRefusal(hash, "remote sidecar", class, cause)
+		}
 		remoteScanFail(class, cause)
-		return nil // fail-open (WK-2b)
+		return nil // fail-open (WK-2b, av_unavailable=open)
 	}
 }
 
@@ -344,7 +358,7 @@ func (rs *RemoteScanner) scanOnce(ctx context.Context, client *http.Client, base
 // cut short by the same deadline surfaces as an i/o error with only the
 // context to distinguish it.
 func budgetGone(ctx context.Context, err error) bool {
-	return ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)
+	return budgetExhausted(ctx) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // Health checks the remote scan service liveness.

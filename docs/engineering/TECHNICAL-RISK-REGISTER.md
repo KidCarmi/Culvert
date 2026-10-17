@@ -194,6 +194,15 @@
   honoring the entry and the blocking gate goes red, which is the intended forcing function. Do not
   extend the date by reflex: per this row's original fix, extending requires re-validating the
   reachability rationale, and the preferred resolution is the `apk upgrade` picking up `3.5.8-r0`.
+- **Update 2026-10-08 — the suppression is retired; `.trivyignore` is empty again.** The preferred
+  resolution happened: the exact-byte SBOM of the `7e53720d` application image lists
+  `libcrypto3`/`libssl3` **3.5.9-r0**, past the `3.5.8-r0` fix, so the entry had been an expired
+  no-op since 2026-09-15 and is removed rather than renewed. The same scan found the opposite
+  failure of the `apk upgrade` mechanism this entry relied on: the GHA layer cache had REPLAYED the
+  runtime stage's `apk upgrade` layer, shipping `zlib 1.3.2-r0` after `-r1` was published. Both
+  image builds now pass `no-cache-filters: runtime`, and the Deep gate adds an OS-package pass that
+  fails on any fixable finding at any severity with `--ignorefile /dev/null`
+  (`appliance_scan_closeout_test.go` pins both).
 - Original finding preserved below for context.
 
 ### (was) RISK-006 — Trivy gate config blind spots · MEDIUM · OPEN
