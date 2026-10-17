@@ -189,45 +189,150 @@ func cpHAStateReceiver(fn *ast.FuncDecl) string {
 	return fn.Recv.List[0].Names[0].Name
 }
 
-// cpScanHALockedCalls walks body in source order, modelling whether an
+// cpScanHALockedCalls walks body's statements in order, modelling whether an
 // HAState mutex (recv.mu or globalHA.mu) is held, and returns how many
 // acquisitions it saw plus the callee names called while held. A deferred
-// unlock keeps it held to the end; closures run later and are skipped.
+// unlock keeps it held to the end; an unlock inside a branch that leaves the
+// function (`if ... { h.mu.Unlock(); return }`) releases only that branch;
+// closures and go statements run later and are skipped.
 func cpScanHALockedCalls(body *ast.BlockStmt, recv string) (locks int, callees []string) {
 	if body == nil {
 		return 0, nil
 	}
-	held := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.FuncLit:
-			return false
-		case *ast.DeferStmt:
-			if _, ok := cpHALockOp(n.Call, recv); ok {
-				return false
-			}
-		case *ast.CallExpr:
-			if op, ok := cpHALockOp(n, recv); ok {
+	w := &cpHALockWalker{recv: recv}
+	w.stmts(body.List, false)
+	return w.locks, w.callees
+}
+
+type cpHALockWalker struct {
+	recv    string
+	locks   int
+	callees []string
+}
+
+// stmts walks a statement list starting in state held and returns the state
+// after it, and whether the list always leaves the function.
+func (w *cpHALockWalker) stmts(list []ast.Stmt, held bool) (after bool, leaves bool) {
+	for _, st := range list {
+		if held, leaves = w.stmt(st, held); leaves {
+			return held, true
+		}
+	}
+	return held, false
+}
+
+func (w *cpHALockWalker) stmt(st ast.Stmt, held bool) (after bool, leaves bool) {
+	switch st := st.(type) {
+	case *ast.ExprStmt:
+		if call, ok := st.X.(*ast.CallExpr); ok {
+			if op, ok := cpHALockOp(call, w.recv); ok {
 				if op == "Lock" || op == "RLock" {
-					held = true
-					locks++
-				} else {
-					held = false
+					w.locks++
+					return true, false
 				}
-				return true
+				return false, false
 			}
-			if held {
-				switch f := n.Fun.(type) {
-				case *ast.Ident:
-					callees = append(callees, f.Name)
-				case *ast.SelectorExpr:
-					callees = append(callees, f.Sel.Name)
-				}
-			}
+		}
+	case *ast.DeferStmt:
+		if _, ok := cpHALockOp(st.Call, w.recv); ok {
+			return held, false
+		}
+		return held, false // a deferred call runs at return; not scanned as held code
+	case *ast.GoStmt:
+		return held, false
+	case *ast.ReturnStmt:
+		w.calls(st, held)
+		return held, true
+	case *ast.BlockStmt:
+		return w.stmts(st.List, held)
+	case *ast.IfStmt:
+		return w.ifStmt(st, held)
+	case *ast.ForStmt:
+		w.calls(st.Init, held)
+		w.calls(st.Cond, held)
+		w.stmts(st.Body.List, held)
+		return held, false
+	case *ast.RangeStmt:
+		w.calls(st.X, held)
+		w.stmts(st.Body.List, held)
+		return held, false
+	case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+		w.clauses(st, held)
+		return held, false
+	}
+	w.calls(st, held)
+	return held, false
+}
+
+func (w *cpHALockWalker) ifStmt(st *ast.IfStmt, held bool) (after, leaves bool) {
+	if st.Init != nil {
+		held, _ = w.stmt(st.Init, held)
+	}
+	w.calls(st.Cond, held)
+	bodyHeld, bodyLeaves := w.stmts(st.Body.List, held)
+	elseHeld, elseLeaves := held, false
+	if st.Else != nil {
+		elseHeld, elseLeaves = w.stmt(st.Else, held)
+	}
+	switch {
+	case bodyLeaves && elseLeaves:
+		return held, true
+	case bodyLeaves:
+		return elseHeld, false
+	case elseLeaves:
+		return bodyHeld, false
+	}
+	return bodyHeld || elseHeld, false // conservative: held if either path holds it
+}
+
+func (w *cpHALockWalker) clauses(n ast.Node, held bool) {
+	ast.Inspect(n, func(x ast.Node) bool {
+		switch c := x.(type) {
+		case *ast.CaseClause:
+			w.calls(c.List, held)
+			w.stmts(c.Body, held)
+			return false
+		case *ast.CommClause:
+			w.stmts(c.Body, held)
+			return false
 		}
 		return true
 	})
-	return locks, callees
+}
+
+// calls records every call in n (closures excluded) when held.
+func (w *cpHALockWalker) calls(n any, held bool) {
+	if !held || n == nil {
+		return
+	}
+	var nodes []ast.Node
+	switch v := n.(type) {
+	case []ast.Expr:
+		for _, e := range v {
+			nodes = append(nodes, e)
+		}
+	case ast.Node:
+		if v == nil {
+			return
+		}
+		nodes = append(nodes, v)
+	}
+	for _, node := range nodes {
+		ast.Inspect(node, func(x ast.Node) bool {
+			switch c := x.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.CallExpr:
+				switch f := c.Fun.(type) {
+				case *ast.Ident:
+					w.callees = append(w.callees, f.Name)
+				case *ast.SelectorExpr:
+					w.callees = append(w.callees, f.Sel.Name)
+				}
+			}
+			return true
+		})
+	}
 }
 
 // cpHALockOp reports the mutex method a call invokes on recv.mu or
