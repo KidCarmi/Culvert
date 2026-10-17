@@ -1305,6 +1305,9 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl; host read service ${ex} ms/request above the injected ${r:-0} ms$(python3 -c 'import sys; print("" if float(sys.argv[1]) <= 1 else " — runner disk slower than the profile: attribute only after a same-runner A/B")' "$ex" 2>/dev/null)"
   fi
   recovery_guest "$tag"
+  # The early-boot I/O sampler's per-boot log (/run, tmpfs → this boot's). Its own
+  # file so it is not truncated with the rest of the guest dump.
+  gpriv <<<'cat /run/culvert-boot-io.log 2>/dev/null' > "$EV/$tag-bootio.log" 2>/dev/null || true
   recovery_state "$name" "$i"
   printf '%s\t%s\t%s\t%s\t%s\n' "${REC_VARIANT:-base}" "$name" "$i" "$rec" "$budget" >> "$EV/R-summary.tsv"
 }
@@ -1500,6 +1503,45 @@ ls -l /boot; echo '--- initramfs composition (KiB, top 25)'
 d=$(mktemp -d); unmkinitramfs "/boot/initrd.img-$(uname -r)" "$d" >/dev/null 2>&1 && (cd "$d" && du -sk */usr/lib/modules/*/kernel/* */usr/lib/firmware */usr/lib/modules */usr/lib/x86_64-linux-gnu */usr/share/plymouth 2>/dev/null | sort -rn | head -25; du -sk . ); rm -rf "$d"
 echo '--- read_ahead_kb'; for q in /sys/block/*/queue/read_ahead_kb; do echo "$q $(cat "$q")"; done
 echo '--- enabled units'; systemctl list-unit-files --state=enabled --no-legend | awk '{print $1}' | paste -sd' '
+EOS
+  # Early-boot I/O sampler (LAB-ONLY, diagnostic; PR #1528). From early userspace
+  # it records /proc/uptime + the root device's sectors-read/written every 0.25s
+  # into a tmpfs log, so per-phase READ VOLUME can be aligned to the monotonic
+  # service boundaries after each reboot (the input ASTRA named missing).
+  # Installed once and enabled, so every subsequent recovery reboot records; /run
+  # is tmpfs, so each boot's log is that boot's. It cannot see pre-kernel/initramfs
+  # (no systemd there) — that phase's reads are host-device counters.
+  gpriv > "$EV/R-sampler-install.txt" 2>&1 <<'EOS' || true
+set -e
+cat > /usr/local/sbin/culvert-boot-io.sh <<'SH'
+#!/bin/sh
+dev="$(findmnt -no SOURCE / | sed 's#/dev/##; s/[0-9]*$//')"
+exec >/run/culvert-boot-io.log
+echo "# uptime_s sectors_read sectors_written dev=$dev sector=512B"
+while :; do
+  up="$(cut -d' ' -f1 /proc/uptime)"
+  awk -v u="$up" -v d="$dev" '$3==d{print u, $6, $10; exit}' /proc/diskstats
+  sleep 0.25
+done
+SH
+chmod 0755 /usr/local/sbin/culvert-boot-io.sh
+cat > /etc/systemd/system/culvert-boot-io.service <<'UNIT'
+[Unit]
+Description=Culvert lab early-boot I/O sampler (diagnostic)
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=sysinit.target
+Conflicts=shutdown.target
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/culvert-boot-io.sh
+Restart=no
+[Install]
+WantedBy=sysinit.target
+UNIT
+systemctl daemon-reload
+systemctl enable culvert-boot-io.service
+echo "boot-io sampler installed + enabled"
 EOS
   printf 'variant\tprofile\treboot\trecovery_s\tbudget_s\n' > "$EV/R-summary.tsv"
   local variant

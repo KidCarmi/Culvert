@@ -1361,18 +1361,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
-      # TWO-LATENCY CONTROLLED COMPARISON of candidate 6248daf7 (comment
-      # 6230967268). ASTRA's original-path ESXi capture RULED OUT fsck (root was
-      # already -c -1 -i 0, initramfs clean+condition-skipped, no full root
-      # check) and gave a per-phase breakdown pointing at the pre-local-fs reads
-      # + container-engine + stack phases, latency-bound. This runs the SAME
-      # retained 6248 OVA at the calibrated esxi12 (12ms read/3ms write, 120s
-      # product gate) AND a diagnostic esxi30 (~30ms read/15ms write, matching
-      # ASTRA's device-read mean; generous 400s budget so it MEASURES rather than
-      # hard-fails) and splits every reboot into ASTRA's phase boundaries
-      # (recovery-engine-phases.py) so a phase that grows with latency is
-      # latency-bound and a flat one is fixed work. esxi12's 120s gate is
-      # unchanged. docs/appliance/recovery-time.md carries the ESXi phase table.
+      # READ/WRITE-ISOLATION comparison of candidate 6248daf7 (comment
+      # 6230967268 round 2: the earlier esxi12->esxi30 step changed read AND write
+      # delay together, so it did NOT isolate read cost or rule out CPU/scheduling/
+      # metadata). Three profiles on the SAME retained 6248 OVA, name:read:write:budget:
+      #   r12w3  (12ms read / 3ms  write) — product baseline, 120s PRODUCT gate (unchanged)
+      #   r30w3  (30ms read / 3ms  write) — write HELD at 3, read varied -> READ effect
+      #   r12w15 (12ms read / 15ms write) — read HELD at 12, write varied -> WRITE effect
+      # r30w3/r12w15 are diagnostic (400s budget so they MEASURE, not hard-fail).
+      # Every reboot is split into monotonic phase boundaries
+      # (recovery-engine-phases.py) AND carries the early-boot /proc/diskstats
+      # sampler, so per-phase read vs write cost is attributed, not inferred.
+      # No causal claim is made from elapsed time alone. docs/appliance/
+      # recovery-time.md carries ASTRA's ESXi phase table.
       OVA_A_ARTIFACT: "12074562532"
       OVA_A_SHA256: 59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61
       OVA_A_IMAGE_ID: sha256:20a547edd3e9db83cd1fa65f734bdeec5fc8f6d077f6f73344a38798a5d9692d
@@ -1478,7 +1479,7 @@ jobs:
           printf 'order\tova\tprofile\treboot\trecovery_s\tfirmware_gap_s\tkernel_to_ready_s\n' > "$LAB_ROOT/ab-evidence/ab-summary.tsv"
           for X in $AB_ORDER; do
             n=$((n+1)); tag="$n-$X"
-            export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="esxi12:12:3:120 esxi30:30:15:400" \
+            export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="r12w3:12:3:120 r30w3:30:3:400 r12w15:12:15:400" \
               LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm LAB_FIRSTBOOT_TIMEOUT=6000
             img_var="OVA_${X}_IMAGE_ID"; export LAB_EXPECT_IMAGE_ID="${!img_var}"
             export LAB_OVA="$(ls "$LAB_ROOT/ova-$X/"*.ova)" LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova-$X/"*.ova.sha256)"
@@ -1487,7 +1488,7 @@ jobs:
             echo "::endgroup::"
             ev="$LAB_DIR/evidence"; dst="$LAB_ROOT/ab-evidence/$tag"; mkdir -p "$dst"
             cp "$ev"/checks.jsonl "$ev"/REPORT.md "$ev"/R-* "$ev"/preflight.json "$dst/" 2>/dev/null || true
-            for prof in esxi12 esxi30; do
+            for prof in r12w3 r30w3 r12w15; do
               for i in 1 2 3; do
                 rec="$(awk -F'\t' -v p="$prof" -v i="$i" '$2==p && $3==i{print $4}' "$ev/R-summary.tsv" 2>/dev/null)"
                 gap="$(awk '/Restarting system/{a=$1} /Linux version/{print $1-a; exit}' "$ev/R-$prof-$i-console-marks.tsv" 2>/dev/null)"
@@ -1497,20 +1498,22 @@ jobs:
             done
             sudo rm -rf "$LAB_DIR/work"
           done
-          { echo "### Recovery A/B (one runner; esxi12 gate 120 s, esxi30 diagnostic 400 s)"; echo '```'; column -t -s$'\t' "$LAB_ROOT/ab-evidence/ab-summary.tsv"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Recovery read/write isolation (one runner; r12w3 gate 120 s, r30w3/r12w15 diagnostic 400 s)"; echo '```'; column -t -s$'\t' "$LAB_ROOT/ab-evidence/ab-summary.tsv"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           cat "$LAB_ROOT/ab-evidence/ab-summary.tsv"
           exit "$rc"
-      - name: "Per-phase engine/stack split (ASTRA boundaries) — esxi12 vs esxi30"
+      - name: "Per-phase engine/stack split (monotonic boundaries) — r12w3 / r30w3 / r12w15"
         if: always()
         run: |
           set -uo pipefail
           # Re-reads the already-collected recovery_guest dumps into ASTRA's
-          # phase shape (recovery-engine-phases.py); collects nothing new. A
-          # column that grows from esxi12 to esxi30 is latency-bound reads; a
-          # flat one is fixed work. ctrd_meta_gap_s is ASTRA's single largest
-          # ESXi item (11.5 s at ~30-53 ms); compare its esxi12 vs esxi30 value.
+          # phase shape (recovery-engine-phases.py, monotonic boundaries); collects
+          # nothing new. Compare r12w3 vs r30w3 (read varied, write held) for the
+          # READ effect and r12w3 vs r12w15 (write varied, read held) for the WRITE
+          # effect. The per-boot R-*-bootio.log sampler carries per-phase read
+          # VOLUME for the userspace phases; this table is the timeline, the
+          # sampler + isolation profiles are the attribution.
           out="$LAB_ROOT/ab-evidence/engine-phases.tsv"
-          files="$(ls "$LAB_ROOT"/ab-evidence/*/R-esxi12-*-guest.txt "$LAB_ROOT"/ab-evidence/*/R-esxi30-*-guest.txt 2>/dev/null | sort)"
+          files="$(ls "$LAB_ROOT"/ab-evidence/*/R-*-guest.txt 2>/dev/null | sort)"
           if [ -n "$files" ]; then
             python3 -I test/e2e/appliance/lab/recovery-engine-phases.py $files > "$out" 2>&1 || true
             { echo "### Per-phase engine/stack split (seconds; compare esxi12 vs esxi30 down each column)"; echo '```'; column -t -s$'\t' "$out" 2>/dev/null || cat "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
