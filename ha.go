@@ -98,6 +98,15 @@ type HAState struct {
 	// set the fence mirror (what publishes stamp) reads it, so every commit in
 	// that window carries the new epoch before anything advertises it.
 	stampEpoch int64
+	// committedEpoch is the highest fencing epoch a snapshot this node
+	// committed is known to carry, recorded only from a check against the
+	// committed snapshot made under the store lock (noteCommittedEpochLocked).
+	// It is the ROLE-LESS FLOOR (ADR-0005 implementation note, owner decision
+	// on Codex P1 4302435329 of #1645): while no HA role is held, config
+	// publishes never stamp below it, so Data Planes that ratcheted to it keep
+	// accepting config. Under an HA role it is never read: S3's zombie-0 rule
+	// stands (configEpochLocked). In memory only.
+	committedEpoch int64
 	// epochRefused latches the page for a refused epoch commit, once per
 	// episode (cleared by the next successful install); epochRefusedEpisode
 	// numbers episodes so a page queued before the webhooks load can test at
@@ -112,7 +121,8 @@ type HAState struct {
 	shutdown   bool
 	shutdownCh chan struct{}
 	// fenceEpoch is the epoch every config publish STAMPS (lease == nil ? 0 :
-	// stampEpoch while an install commits it, else leaseEpoch), for LOCK-FREE
+	// stampEpoch while an install commits it, else configEpochLocked: the
+	// installed grant, floored by committedEpoch with no HA role), for LOCK-FREE
 	// readers: a config publish stamps it at commit without taking h.mu.
 	// Written only by syncFenceEpochLocked, under h.mu, in the same critical
 	// section as the fields it derives from

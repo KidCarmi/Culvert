@@ -44,6 +44,14 @@ package main
 //     leader stance (role kept, no write authority, issuance refused). The
 //     refusal pages config_snapshot_rejected once per episode. The staged
 //     grant is left to its TTL: ADR-0005 has no Release primitive.
+//  5. A grant lost AFTER its commit (the keepalive drops it before exposure)
+//     leaves a committed E that nothing advertises. The mirror leaves E for
+//     configEpochLocked (abandonGrantLocked). Under an HA role that is S3's
+//     zombie 0: Data Planes that fetched E wait, fail closed, for the real
+//     leader's higher epoch. With no HA role (a failed enable) it is the
+//     role-less floor, E itself, so the HA-off node's Data Planes keep
+//     accepting its config (owner decision on Codex P1 4302435329 of #1645,
+//     recorded in ADR-0005's implementation notes).
 //
 // TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit pins the order.
 
@@ -66,6 +74,13 @@ var haRestampFenceEpoch = func() error { return globalConfigStore.RestampFenceEp
 // epoch e and, if not, runs revert atomically with every commit. Test seam.
 var haKeepEpochStampIfCommitted = func(e int64, revert func()) bool {
 	return globalConfigStore.keepEpochStampIfCommitted(e, revert)
+}
+
+// haRevertEpochStamp runs revert under the store lock, atomically with every
+// commit; committed reports whether the committed snapshot carries epoch e.
+// Test seam.
+var haRevertEpochStamp = func(e int64, revert func(committed bool)) {
+	globalConfigStore.revertEpochStamp(e, revert)
 }
 
 // errNoSnapshotToRestamp: the store has published nothing, so no commit can
@@ -140,6 +155,7 @@ func (h *HAState) commitGrant(transition string) (int64, error) {
 		h.stampEpoch = 0
 		h.syncFenceEpochLocked()
 	}) {
+		h.noteCommittedEpochLocked(e)
 		return e, nil
 	}
 	if h.grantEpoch == e {
@@ -173,13 +189,16 @@ func (h *HAState) exposeGrantLocked(transition string, e int64) error {
 		h.abandonGrantLocked()
 		return errGrantLost
 	}
-	if h == haTopologySource() && !haKeepEpochStampIfCommitted(e, func() {
-		h.stampEpoch = 0
-		h.syncFenceEpochLocked()
-	}) {
-		h.pageEpochRefusedLocked(transition, e, errEpochNotCommitted)
-		h.abandonGrantLocked()
-		return errEpochNotCommitted
+	if h == haTopologySource() {
+		if !haKeepEpochStampIfCommitted(e, func() {
+			h.stampEpoch = 0
+			h.syncFenceEpochLocked()
+		}) {
+			h.pageEpochRefusedLocked(transition, e, errEpochNotCommitted)
+			h.abandonGrantLocked()
+			return errEpochNotCommitted
+		}
+		h.noteCommittedEpochLocked(e)
 	}
 	h.grantEpoch = 0
 	h.epochRefused = false // the refusal episode, if any, ended
@@ -189,16 +208,44 @@ func (h *HAState) exposeGrantLocked(transition string, e int64) error {
 }
 
 // abandonGrantLocked drops a staged, unexposed grant (its transition failed
-// or was aborted): the stamp mirror returns to the installed grant, and a
+// or was aborted): the stamp mirror leaves the in-flight epoch, and a
 // keepalive that renewed only the staged grant stops, so the grant lapses at
 // its TTL (ADR-0005 has no Release primitive). Caller holds h.mu (write).
+//
+// The mirror then reads configEpochLocked: under an HA role the installed
+// grant (0 when none, S3's zombie shape); with no HA role the role-less
+// floor. The revert runs under the store lock, atomically with every commit,
+// and if the committed snapshot already carries the in-flight epoch it is
+// recorded first (Codex P1 4302435329 on #1645): a failed enable that
+// committed E then leaves the HA-off node stamping E, never 0, so Data Planes
+// that fetched the E-stamped snapshot keep accepting its config. An
+// in-flight epoch that never committed reverts to the floor below it.
 func (h *HAState) abandonGrantLocked() {
 	h.grantEpoch = 0
-	h.stampEpoch = 0
-	h.syncFenceEpochLocked()
+	if e := h.stampEpoch; e != 0 && h == haTopologySource() {
+		haRevertEpochStamp(e, func(committed bool) {
+			if committed {
+				h.noteCommittedEpochLocked(e)
+			}
+			h.stampEpoch = 0
+			h.syncFenceEpochLocked()
+		})
+	} else {
+		h.stampEpoch = 0
+		h.syncFenceEpochLocked()
+	}
 	if h.leaseEpoch == 0 && h.leaseStopCh != nil {
 		close(h.leaseStopCh)
 		h.leaseStopCh = nil
+	}
+}
+
+// noteCommittedEpochLocked records that a committed snapshot carries epoch e,
+// as checked under the store lock by the caller: the role-less floor rises to
+// it (configEpochLocked). Caller holds h.mu (write).
+func (h *HAState) noteCommittedEpochLocked(e int64) {
+	if e > h.committedEpoch {
+		h.committedEpoch = e
 	}
 }
 

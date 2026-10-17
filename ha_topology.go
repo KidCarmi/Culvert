@@ -73,6 +73,7 @@ func (h *HAState) setTopologyLocked(role, peer, transition string) {
 		return
 	}
 	h.role, h.peerAddr = role, peer
+	h.syncFenceEpochLocked() // the stamp derives from the role: the role-less floor ends here
 	if h != haTopologySource() {
 		return
 	}

@@ -382,7 +382,10 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 		}
 	}
 
-	epoch := globalHA.CurrentEpoch()
+	// The same HAState the snapshot stamp reads (haTopologySource), with the
+	// same role-less floor, so a Data Plane that ratcheted to an HA-off node's
+	// committed epoch accepts its deltas too (ConfigReplyEpoch, ADR-0005).
+	epoch := haTopologySource().ConfigReplyEpoch()
 	cur := globalConfigStore.Version()
 	if dreq.KnownVersion == cur {
 		// Idle-drift detection: if the DP reports a fingerprint for the current

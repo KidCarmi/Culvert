@@ -1031,6 +1031,16 @@ func (s *ConfigStore) keepEpochStampIfCommitted(e int64, revert func()) bool {
 	return false
 }
 
+// revertEpochStamp runs revert — an abandoned install's stamp-mirror rollback
+// (abandonGrantLocked) — under s.mu, the lock every commit re-checks the
+// mirror under, telling it whether the committed snapshot carries epoch e. So
+// the check and the rollback are one step: no publish commits e between them.
+func (s *ConfigStore) revertEpochStamp(e int64, revert func(committed bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revert(s.published && s.snap.Epoch == e)
+}
+
 // rejectPublish records a commit-time rejection (count OR byte gate): it does
 // NOT publish, stamps LastPublishError, logs, and fires the operator alert.
 // Returns err so callers can surface it inline too.
