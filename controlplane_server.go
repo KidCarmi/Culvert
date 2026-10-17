@@ -996,6 +996,12 @@ func registerConfigService(srv grpc.ServiceRegistrar) {
 // still completes the graceful path. CHAOS-56.
 const cpGRPCGracefulStopBudget = 8 * time.Second
 
+// cpGRPCStopBudget is the drain budget stopControlPlaneServer applies:
+// cpGRPCGracefulStopBudget in production. A package-level seam so a gate can
+// hold a drain past a caller's wait without an 8 s test. A caller that waits
+// on a supervisor stop derives its bound from it (cpListenerStopWait).
+var cpGRPCStopBudget = cpGRPCGracefulStopBudget
+
 // stopControlPlaneServer stops one gRPC server instance, draining in-flight
 // RPCs, and force-closes anything still holding a transport once the graceful
 // budget is spent.
@@ -1044,11 +1050,12 @@ const cpGRPCGracefulStopBudget = 8 * time.Second
 // unbounded active-stream case the force-close exists for.
 func stopControlPlaneServer(srv *grpc.Server) {
 	logger.Printf("ControlPlane: graceful gRPC shutdown...")
-	if gracefulStopBounded(srv, cpGRPCGracefulStopBudget) {
+	budget := cpGRPCStopBudget
+	if gracefulStopBounded(srv, budget) {
 		logger.Printf("ControlPlane: gRPC stopped")
 		return
 	}
-	logger.Printf("ControlPlane: gRPC drain exceeded %s — force-closed connections", cpGRPCGracefulStopBudget)
+	logger.Printf("ControlPlane: gRPC drain exceeded %s — force-closed connections", budget)
 }
 
 // gracefulStopBounded runs srv.GracefulStop under a budget and falls back to

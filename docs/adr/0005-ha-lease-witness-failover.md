@@ -153,7 +153,13 @@ This note amends S3's stamping in one case and leaves the S3 rule itself unchang
   - `onPromote` is transactional. If a promote fails after its Control Plane activation
     completed, the activation is undone (`deactivateControlPlane`: the supervisor stops, the
     role is restored, address ownership is released after any withdrawal) before the promote
-    can be retried.
+    can be retried. The release runs when the old supervisor's loop exits, not from the
+    caller's wait (Codex P1 4303232156 on #1645). An in-flight Data Plane RPC can hold the
+    gRPC drain past any wait, and a wait that expired used to skip the release for good. A
+    promote retry that arrives during the drain waits for the release, or is refused as
+    retryable (`errCPDeactivating`), never "already running as control-plane". Every wait on
+    a supervisor stop is derived from the drain budget (`cpListenerStopWait`).
+    Pinned by `cp_deactivate_drain_chaos_test.go`.
   - Pinned by `ha_epoch_install_cause_chaos_test.go`.
 
 ### 2026-07-03 — S5 SHIPPED: operator wiring (flags/YAML/compose/GUI/runbook) — PROGRAM COMPLETE

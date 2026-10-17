@@ -161,6 +161,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -309,7 +310,9 @@ func startControlPlaneListener(cfg cpListenerConfig, tolerateFirstFailure bool, 
 	}
 	// Runtime path: tear the supervisor down so no background loop is left
 	// retrying an address the admin is about to correct, and report the fault.
-	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// The first attempt did not bind, so normally there is no drain; the bound
+	// still covers one (cpListenerStopWait) in case a retry bound meanwhile.
+	stopCtx, cancel := context.WithTimeout(context.Background(), cpListenerStopWait())
 	defer cancel()
 	_ = s.Stop(stopCtx)
 	reason := cpGRPCListenerState().LastReason
@@ -332,7 +335,9 @@ func (s *cpListenerSupervisor) markFirstAttempt() {
 
 // Stop interrupts the supervisor, stops the currently bound server if there is
 // one, and waits for the loop to exit — bounded by ctx. Nil-safe and
-// idempotent.
+// idempotent: only the first call drains the server, so a later one (the
+// shutdown hook joining a deactivation still draining) waits on the same exit
+// instead of starting a second GracefulStop.
 func (s *cpListenerSupervisor) Stop(ctx context.Context) error {
 	if s == nil {
 		return nil
@@ -343,11 +348,12 @@ func (s *cpListenerSupervisor) Stop(ctx context.Context) error {
 	// either it has already published a server (and we stop it here) or it will
 	// refuse and tear it down itself.
 	s.mu.Lock()
+	first := !s.stopped
 	s.stopped = true
 	srv := s.srv
 	s.mu.Unlock()
 
-	if srv != nil {
+	if first && srv != nil {
 		// The graceful/force split and its two grpc-go hazards are
 		// gracefulStopBounded's (CHAOS-56); this call site must not hold a lock
 		// across it, which is why srv was read above and released.
@@ -812,41 +818,135 @@ func buildControlPlaneServer(cfg cpListenerConfig) (*grpc.Server, net.Listener, 
 // in production.
 var cpWrapListener = func(ln net.Listener) net.Listener { return ln }
 
-// cpPromoteUndoTimeout bounds undoPromoteControlPlane's listener stop.
-const cpPromoteUndoTimeout = 5 * time.Second
+// cpListenerStopWait bounds a caller's wait for a supervisor stop: the gRPC
+// drain budget (cpGRPCStopBudget) plus half again for the forced close and
+// the loop's exit. Derived, never hard-coded: a wait shorter than the drain
+// expires while an in-flight Data Plane RPC still holds it (Codex P1
+// 4303232156 on #1645, where a 5 s undo wait sat under the 8 s drain). No
+// caller's correctness rests on it — an undo's release runs from the
+// supervisor's exit (deactivate), whenever that comes.
+func cpListenerStopWait() time.Duration {
+	return cpGRPCStopBudget + cpGRPCStopBudget/2
+}
+
+// cpDeactivation is the undo in progress (deactivateControlPlane): non-nil
+// from the moment it stops the supervisor until the supervisor's loop has
+// exited and its activation has been released, then closed. Guarded by
+// cpActivationMu. While it is set cpSupervisor still names the draining
+// supervisor and the Control Plane role is still claimed, so an activation
+// must not read either as "already running": it waits for this, or reports
+// errCPDeactivating so the caller retries.
+var cpDeactivation chan struct{}
+
+// errCPDeactivating is the retryable refusal of an activation that arrives
+// while an undo is still draining.
+var errCPDeactivating = errors.New("a control-plane listener is still draining from a deactivation")
 
 // undoPromoteControlPlane is the HA promote's undo (StartAsStandbyWithUndo):
 // a promote whose activation completed but which then failed leaves no
 // Control Plane behind (deactivateControlPlane). A package-level seam so a
-// gate can observe it.
+// gate can observe it. Its wait covers the drain; if it still expires, the
+// release completes on its own and a promote retry waits for it.
 var undoPromoteControlPlane = func() {
-	ctx, cancel := context.WithTimeout(context.Background(), cpPromoteUndoTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cpListenerStopWait())
 	defer cancel()
 	if err := deactivateControlPlane(ctx); err != nil {
-		logErrorf("ControlPlane: undoing a failed promote's activation did not complete: %v", err)
+		logErrorf("ControlPlane: undoing a failed promote's activation is still in progress: %v", err)
 	}
 }
 
 // deactivateControlPlane undoes a synchronous activation (activateControlPlane)
-// that a failed HA promote completed, through the existing stop and release
-// paths: the supervisor stops (stopControlPlaneListener's step, its server
-// with it), and once its loop has exited the role it claimed is restored and
+// that a failed HA promote completed: the supervisor stops (its server with
+// it), and once its loop has exited the role it claimed is restored and
 // address-list ownership released (releaseActivation). The node is then what
 // it was before the activation, so the activation can run again. Nothing
 // armed: a no-op.
+//
+// The release runs from the supervisor's exit, on the deactivation's own
+// goroutine (deactivate), never from this waiter: ctx bounds only how long the
+// caller waits. A wait that expires while an in-flight RPC holds the drain
+// returns an error, and the release still completes when the drain does
+// (Codex P1 4303232156 on #1645: the waiter cleared the handle, returned on
+// its timeout and never released, so every later promote failed "already
+// running as control-plane"). A second call while one is in progress joins it.
 func deactivateControlPlane(ctx context.Context) error {
+	done := beginCPDeactivation()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("the control plane listener is still draining; its release completes when the drain does: %w", ctx.Err())
+	}
+}
+
+// beginCPDeactivation starts the undo of the armed supervisor, or joins the
+// one in progress, and returns the channel its completion closes; nil when
+// nothing is armed. The supervisor handle is KEPT until the release completes.
+func beginCPDeactivation() <-chan struct{} {
 	cpActivationMu.Lock()
+	defer cpActivationMu.Unlock()
+	if cpDeactivation != nil {
+		return cpDeactivation
+	}
 	sup := cpSupervisor
-	cpSupervisor = nil
-	cpActivationMu.Unlock()
 	if sup == nil {
 		return nil
 	}
-	if err := sup.Stop(ctx); err != nil {
-		return fmt.Errorf("stop the control plane listener: %w", err)
+	done := make(chan struct{})
+	cpDeactivation = done
+	go sup.deactivate(done)
+	return done
+}
+
+// deactivate stops the supervisor, waits for its loop to exit however long
+// the drain takes, releases its activation, and only then drops the handle and
+// ends the deactivation. The release is contained: a panic in it is recorded,
+// and the deactivation still ends so a later activation is not refused
+// forever. If grpc-go never lets the loop exit (gracefulStopBounded's
+// hazards), the deactivation stays in progress and activations keep getting
+// the retryable errCPDeactivating: the old server may still hold transports.
+func (s *cpListenerSupervisor) deactivate(done chan struct{}) {
+	defer func() {
+		cpActivationMu.Lock()
+		if cpSupervisor == s {
+			cpSupervisor = nil
+		}
+		if cpDeactivation == done {
+			cpDeactivation = nil
+		}
+		cpActivationMu.Unlock()
+		close(done)
+	}()
+	defer func() {
+		if v := recover(); v != nil {
+			recordCrash("control-plane-deactivate", "", v)
+		}
+	}()
+	_ = s.Stop(context.Background()) // unbounded on purpose: the release follows the exit
+	s.releaseActivation()
+}
+
+// awaitCPDeactivation waits up to wait for an undo in progress to complete.
+// It reports errCPDeactivating when it is still draining. The caller must not
+// hold cpActivationMu: the deactivation takes it to end.
+func awaitCPDeactivation(wait time.Duration) error {
+	cpActivationMu.Lock()
+	done := cpDeactivation
+	cpActivationMu.Unlock()
+	if done == nil {
+		return nil
 	}
-	sup.releaseActivation()
-	return nil
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("%w — retry once it completes", errCPDeactivating)
+	}
 }
 
 // releaseActivation gives back what the supervisor's activation claimed: the
@@ -855,7 +955,7 @@ func deactivateControlPlane(ctx context.Context) error {
 // withdrawal of this node from the committed list commits, as a terminal exit
 // does (exitTerminal), but without its terminal report: an undo is not a
 // listener failure. Only after the loop exited (Stop returned), so s.committed
-// and s.original are no longer the loop's.
+// and s.original are no longer the loop's. Its one caller is deactivate.
 func (s *cpListenerSupervisor) releaseActivation() {
 	if s.committed && s.haveOriginal && restoreControlPlaneRole(s.original, s.cfg.addr) {
 		s.committed = false
