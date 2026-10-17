@@ -1472,15 +1472,22 @@ jobs:
           set -euo pipefail
           sudo modprobe dm_delay 2>/dev/null || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe dm_delay; }
           lsmod | grep -E '^dm_delay' && sudo dmsetup targets | grep -E '^(delay|linear) '
-      - name: "A B B A: up → qualify → 3 maintenance reboots (esxi12), each on its own lab dir"
+      - name: "Focused read lever: base (4 MiB read-ahead) vs ra (16 MiB), read-dominated r30w3"
         run: |
           set -uo pipefail
           n=0; rc=0
           printf 'order\tova\tprofile\treboot\trecovery_s\tfirmware_gap_s\tkernel_to_ready_s\n' > "$LAB_ROOT/ab-evidence/ab-summary.tsv"
           for X in $AB_ORDER; do
             n=$((n+1)); tag="$n-$X"
-            export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="r12w3:12:3:120 r30w3:30:3:400 r12w15:12:15:400" \
-              LAB_RECOVERY_VARIANTS=base LAB_HISTORY=0 LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm LAB_FIRSTBOOT_TIMEOUT=6000
+            # FOCUSED read-targeting measurement (comment 6235905791): the
+            # read/write isolation showed recovery is read-latency dominated, so
+            # compare the shipped 4 MiB read-ahead (variant base) against 16 MiB
+            # (variant ra, LAB_RA_KB) at the read-dominated r30w3 profile. LAB-ONLY
+            # variant — no shipped bytes change. Matched baseline, same OVA, same
+            # boot. (Pre-kernel initrd is the largest read block but that is the
+            # deferred MODULES=list; read-ahead can only help userspace reads.)
+            export LAB_DIR="$LAB_ROOT/ab-$tag" LAB_DISK=dm LAB_RECOVERY_REBOOTS=3 LAB_RECOVERY_PROFILES="r30w3:30:3:400" \
+              LAB_RECOVERY_VARIANTS="base ra" LAB_RA_KB=16384 LAB_HISTORY=0 LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm LAB_FIRSTBOOT_TIMEOUT=6000
             img_var="OVA_${X}_IMAGE_ID"; export LAB_EXPECT_IMAGE_ID="${!img_var}"
             export LAB_OVA="$(ls "$LAB_ROOT/ova-$X/"*.ova)" LAB_OVA_SHA256="$(cut -d' ' -f1 "$LAB_ROOT/ova-$X/"*.ova.sha256)"
             echo "::group::$tag ($LAB_OVA_SHA256)"
@@ -1488,13 +1495,13 @@ jobs:
             echo "::endgroup::"
             ev="$LAB_DIR/evidence"; dst="$LAB_ROOT/ab-evidence/$tag"; mkdir -p "$dst"
             cp "$ev"/checks.jsonl "$ev"/REPORT.md "$ev"/R-* "$ev"/preflight.json "$dst/" 2>/dev/null || true
-            for prof in r12w3 r30w3 r12w15; do
-              for i in 1 2 3; do
-                rec="$(awk -F'\t' -v p="$prof" -v i="$i" '$2==p && $3==i{print $4}' "$ev/R-summary.tsv" 2>/dev/null)"
-                gap="$(awk '/Restarting system/{a=$1} /Linux version/{print $1-a; exit}' "$ev/R-$prof-$i-console-marks.tsv" 2>/dev/null)"
-                k2r="$(python3 -c 'import json,sys;t=json.load(open(sys.argv[1]))["seconds_after_acceptance"];print(round(t["first_ready_clamav_ok"]-t["kernel"],1))' "$ev/R-$prof-$i-timeline.json" 2>/dev/null)"
-                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$LAB_OVA_SHA256" "$prof" "$i" "${rec:-none}" "${gap:-?}" "${k2r:-?}" >> "$LAB_ROOT/ab-evidence/ab-summary.tsv"
-              done
+            # Name-agnostic: R-summary.tsv carries variant, profile (the name used
+            # in filenames — "ra-r30w3" for a non-base variant), reboot, recovery_s.
+            tail -n +2 "$ev/R-summary.tsv" 2>/dev/null | while IFS="$(printf '\t')" read -r vcol pcol rcol rec budget; do
+              [ -n "$pcol" ] || continue
+              gap="$(awk '/Restarting system/{a=$1} /Linux version/{print $1-a; exit}' "$ev/R-$pcol-$rcol-console-marks.tsv" 2>/dev/null)"
+              k2r="$(python3 -c 'import json,sys;t=json.load(open(sys.argv[1]))["seconds_after_acceptance"];print(round(t["first_ready_clamav_ok"]-t["kernel"],1))' "$ev/R-$pcol-$rcol-timeline.json" 2>/dev/null)"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$LAB_OVA_SHA256" "$pcol" "$rcol" "${rec:-none}" "${gap:-?}" "${k2r:-?}" >> "$LAB_ROOT/ab-evidence/ab-summary.tsv"
             done
             sudo rm -rf "$LAB_DIR/work"
           done
