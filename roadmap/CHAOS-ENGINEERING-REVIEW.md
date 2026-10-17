@@ -8773,6 +8773,34 @@ required before merge; each is now in the tree.
   is a CP, a TERMINAL alert latch separate from the recoverable one (the
   SOCKS5 plane's escalation rule), and a full publish that substitutes the
   owned list BEFORE validating and commits only what it validated.
+* **Eighteenth review round — a refused promote commit never starts the
+  listener (Codex P1 4300948604; HA fencing, split out of #1556).** The
+  seventeenth round committed the new epoch after `onPromote`. A fresh
+  standby whose commit was then refused reset only the promotion once-guard:
+  the Control Plane listener and the `control-plane` role stayed up, so every
+  later promote failed "already running as control-plane" before it reached
+  another commit.
+
+  `installGrantLocked` is now split into `commitGrantLocked` (commit the
+  stamped snapshot; the epoch stays unadvertised with the stamp mirror on it)
+  and `exposeGrantLocked` (the only writer of a non-zero `leaseEpoch`).
+  `promote` commits before `onPromote` and exposes after it. A refused
+  commit leaves a clean, retryable standby, with no listener and no role. A
+  failed `onPromote` abandons the committed epoch
+  (`abandonGrantLocked`): it is never advertised, and publishes stop
+  stamping it. Enable, resume and recovery keep the single-call
+  `installGrantLocked`.
+
+  Gates:
+  - `TestChaos71_RefusedPromoteCommitNeverStartsTheListener`, with a stateful
+    `onPromote` that fails "already running as control-plane" on a second
+    start. The refused promote starts nothing, and the retry after the config
+    fits succeeds and starts the listener exactly once.
+  - `TestChaos71_PromoteListenerFailureAbandonsTheCommittedEpoch`.
+  - The fencing wall now also requires the commit before `onPromote`, and the
+    exposure before the leader role.
+
+  Eight mutations each fail a gate, including the pre-fix order.
 * **Seventeenth review round — a fencing epoch is advertised only once a
   snapshot stamped with it has committed.** An authority-gaining HA transition
   installed its new epoch E at acquire time (`acquireLeaseAttempt`), so the

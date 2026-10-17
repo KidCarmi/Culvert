@@ -372,19 +372,23 @@ func cpRecoveryRound(h *HAState) bool {
 // /healthz, write authority; the leader role) is reachable from a grant before
 // the snapshot stamped with it commits.
 //
-//   - leaseEpoch takes a non-zero value only in installGrantLocked, and there
-//     only after commitEpochStampLocked;
-//   - the acquisition never reaches the installed epoch, a role or the
+//   - leaseEpoch takes a non-zero value only in exposeGrantLocked, and every
+//     caller of exposeGrantLocked commits (commitGrantLocked) first;
+//   - the acquisition never reaches the commit, the exposure, a role or the
 //     keepalive;
-//   - every authority-gaining transition installs before it takes the leader
-//     role or starts the keepalive;
-//   - the staged and in-flight epochs are read only by the install and the
-//     stamp mirror, and the stamp mirror is read only by the publish stamp.
+//   - every authority-gaining transition commits before it starts the
+//     Control Plane listener (onPromote), and exposes before it takes the
+//     leader role or starts the keepalive;
+//   - the staged and in-flight epochs are read only by the install halves and
+//     the stamp mirror, and the stamp mirror is read only by the publish stamp.
 func TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit(t *testing.T) {
 	funcs, _ := cpParseFuncsAndGateHolders(t)
 	cpWallNonZeroEpochOnlyAfterCommit(t, funcs)
 	for _, start := range []string{"acquireLeaseAttempt", "acquireLeaseForLeadership", "acquireLeaseForResume", "resumeAcquireRound"} {
-		forbidden := map[string]bool{"setLeaseEpochLocked": true, "setTopologyLocked": true, "startLeaseKeepalive": true, "installGrantLocked": true}
+		forbidden := map[string]bool{
+			"setLeaseEpochLocked": true, "setTopologyLocked": true, "startLeaseKeepalive": true,
+			"installGrantLocked": true, "commitGrantLocked": true, "exposeGrantLocked": true,
+		}
 		if path, bad := cpReaches(funcs, start, forbidden, 8); bad {
 			t.Errorf("%s reaches %s — a grant would be advertised or acted on before its epoch commits", start, strings.Join(path, " → "))
 		}
@@ -392,62 +396,87 @@ func TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit(t *testing.T) {
 	for _, fn := range []string{"EnableAsLeader", "resumeAsLeader", "promote", "completeLeaseRecovery"} {
 		cpWallInstallsFirst(t, funcs, fn)
 	}
-	cpWallFieldUse(t, "grantEpoch", map[string]bool{"acquireLeaseAttempt": true, "installGrantLocked": true})
-	cpWallFieldUse(t, "stampEpoch", map[string]bool{"commitEpochStampLocked": true, "syncFenceEpochLocked": true})
+	cpWallFieldUse(t, "grantEpoch", map[string]bool{"acquireLeaseAttempt": true, "commitGrantLocked": true})
+	cpWallFieldUse(t, "stampEpoch", map[string]bool{
+		"commitEpochStampLocked": true, "syncFenceEpochLocked": true, "exposeGrantLocked": true, "abandonGrantLocked": true,
+	})
 	cpWallFieldUse(t, "PublishedFenceEpoch", map[string]bool{"publishFenceEpoch": true})
 }
 
 // cpWallNonZeroEpochOnlyAfterCommit: every setLeaseEpochLocked call outside
-// installGrantLocked passes a literal 0, and installGrantLocked's call comes
-// after its commitEpochStampLocked call.
+// exposeGrantLocked passes a literal 0, and every function that calls
+// exposeGrantLocked calls commitGrantLocked before it.
 func cpWallNonZeroEpochOnlyAfterCommit(t *testing.T, funcs map[string][]*ast.FuncDecl) {
 	t.Helper()
-	installs := 0
+	installs, exposers := 0, 0
 	for name, decls := range funcs {
 		for _, fn := range decls {
 			for _, call := range cpCallsNamed(fn, "setLeaseEpochLocked") {
 				if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Value == "0" {
 					continue
 				}
-				if name != "installGrantLocked" {
-					t.Errorf("%s installs a non-zero fencing epoch — only installGrantLocked may, after the stamped commit", name)
+				if name != "exposeGrantLocked" {
+					t.Errorf("%s installs a non-zero fencing epoch — only exposeGrantLocked may, after the stamped commit", name)
 					continue
 				}
 				installs++
-				commits := cpCallsNamed(fn, "commitEpochStampLocked")
+			}
+			for _, call := range cpCallsNamed(fn, "exposeGrantLocked") {
+				exposers++
+				commits := cpCallsNamed(fn, "commitGrantLocked")
 				if len(commits) == 0 || commits[0].Pos() > call.Pos() {
-					t.Error("installGrantLocked installs the epoch before committing the snapshot stamped with it")
+					t.Errorf("%s exposes a fencing epoch before committing the snapshot stamped with it", name)
 				}
 			}
 		}
 	}
-	if installs != 1 {
-		t.Errorf("installGrantLocked installs the epoch %d time(s), want exactly 1 — the wall's selector has gone stale", installs)
+	if installs != 1 || exposers == 0 {
+		t.Errorf("exposeGrantLocked installs the epoch %d time(s) and has %d caller(s), want 1 and at least 1 — the wall's selector has gone stale", installs, exposers)
 	}
 }
 
-// cpWallInstallsFirst: in fn, the first installGrantLocked call precedes
-// every leader-role write and keepalive start.
+// cpWallInstallsFirst: in fn, the epoch is committed (installGrantLocked or
+// commitGrantLocked) before the Control Plane listener starts (onPromote),
+// and exposed (installGrantLocked or exposeGrantLocked) before every
+// leader-role write and keepalive start.
 func cpWallInstallsFirst(t *testing.T, funcs map[string][]*ast.FuncDecl, fn string) {
 	t.Helper()
 	decls := funcs[fn]
 	if len(decls) != 1 {
 		t.Fatalf("%s: %d declarations — the wall's selector has gone stale", fn, len(decls))
 	}
-	installs := cpCallsNamed(decls[0], "installGrantLocked")
-	if len(installs) == 0 {
-		t.Errorf("%s takes authority without installGrantLocked", fn)
+	commit := cpFirstCallPos(decls[0], "installGrantLocked", "commitGrantLocked")
+	expose := cpFirstCallPos(decls[0], "installGrantLocked", "exposeGrantLocked")
+	if commit == token.NoPos || expose == token.NoPos {
+		t.Errorf("%s takes authority without committing and exposing its grant", fn)
 		return
 	}
-	first := installs[0].Pos()
+	for _, call := range append(cpCallsNamed(decls[0], "runOnPromote"), cpCallsNamed(decls[0], "onPromote")...) {
+		if call.Pos() < commit {
+			t.Errorf("%s starts the Control Plane listener before the new epoch is committed — a refused commit would leave it running", fn)
+		}
+	}
 	for _, call := range append(cpCallsNamed(decls[0], "setTopologyLocked"), cpCallsNamed(decls[0], "startLeaseKeepalive")...) {
 		if lit, ok := cpFirstStringArg(call); ok && lit != "leader" {
 			continue // a non-leader role (a resume's standby re-entry) is not authority
 		}
-		if call.Pos() < first {
-			t.Errorf("%s takes the leader role or starts the keepalive before installGrantLocked commits the new epoch", fn)
+		if call.Pos() < expose {
+			t.Errorf("%s takes the leader role or starts the keepalive before the new epoch is exposed", fn)
 		}
 	}
+}
+
+// cpFirstCallPos is the position of fn's first call to any of names.
+func cpFirstCallPos(fn *ast.FuncDecl, names ...string) token.Pos {
+	first := token.NoPos
+	for _, name := range names {
+		for _, call := range cpCallsNamed(fn, name) {
+			if first == token.NoPos || call.Pos() < first {
+				first = call.Pos()
+			}
+		}
+	}
+	return first
 }
 
 // cpWallFieldUse: the selector name appears only in the allowed top-level
@@ -545,6 +574,101 @@ func TestChaos71_EpochCommittedByAConcurrentPublishIsInstalled(t *testing.T) {
 	t.Cleanup(func() { haRestampFenceEpoch = prev })
 	if _, err := h.EnableAsLeader(peer, false); err != nil {
 		t.Fatalf("enable refused although its epoch was committed by a concurrent publish: %v", err)
+	}
+	cpAssertEpochServable(t, h, want)
+}
+
+// cpStatefulOnPromote models the production onPromote (enableControlPlane): a
+// second call after a successful first one fails "already running as
+// control-plane". It counts the listener starts.
+func cpStatefulOnPromote(fail *bool) (onPromote func() error, starts func() int) {
+	var mu sync.Mutex
+	started := 0
+	return func() error {
+			mu.Lock()
+			defer mu.Unlock()
+			if fail != nil && *fail {
+				return errors.New("injected: listener failed to start")
+			}
+			if started > 0 {
+				return errors.New("already running as control-plane")
+			}
+			started++
+			return nil
+		}, func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return started
+		}
+}
+
+// TestChaos71_RefusedPromoteCommitNeverStartsTheListener — Codex P1 4300948604.
+// A fresh standby's promote whose epoch commit is refused must not start the
+// Control Plane listener: the once-guard reset alone would leave the listener
+// and role up, and every later promote would fail "already running as
+// control-plane" before reaching another commit. Once the config fits again,
+// the next promote must succeed.
+func TestChaos71_RefusedPromoteCommitNeverStartsTheListener(t *testing.T) {
+	const myAddr = "10.0.0.2:50051"
+	h, f, pages := cpEpochHarness(t, myAddr)
+	onPromote, starts := cpStatefulOnPromote(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.StartAsStandby(ctx, "10.0.0.7:50051", "tok", myAddr, "", "", "", false, onPromote)
+
+	e := cpNextGrantEpoch(t, f)
+	prev := snapshotWireBudget
+	cpRejectEpochStamp(t, e)
+	if err := h.PromoteManually(); err == nil {
+		t.Fatal("promote succeeded although its epoch could not be committed")
+	}
+	if n := starts(); n != 0 {
+		t.Fatalf("a promote whose epoch commit was refused started the Control Plane listener %d time(s)", n)
+	}
+	cpAssertEpochNotAdvertised(t, h, e, 0)
+	cpAssertRefusalPagedOnce(t, pages)
+
+	snapshotWireBudget = prev // the operator reduced the config
+	f.ExpireForTest()         // the refused grant lapses unkept
+	want := cpNextGrantEpoch(t, f)
+	if err := h.PromoteManually(); err != nil {
+		t.Fatalf("the retry after the config fits again failed: %v — the refused promote left the node unpromotable", err)
+	}
+	if n := starts(); n != 1 {
+		t.Errorf("the listener was started %d time(s), want exactly once (by the successful promote)", n)
+	}
+	cpAssertEpochServable(t, h, want)
+}
+
+// TestChaos71_PromoteListenerFailureAbandonsTheCommittedEpoch: the epoch is
+// committed, then onPromote fails. The node stays a retryable standby, the
+// committed epoch is never advertised, and publishes stop stamping it.
+func TestChaos71_PromoteListenerFailureAbandonsTheCommittedEpoch(t *testing.T) {
+	const myAddr = "10.0.0.2:50051"
+	h, f, _ := cpEpochHarness(t, myAddr)
+	fail := true
+	onPromote, _ := cpStatefulOnPromote(&fail)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.StartAsStandby(ctx, "10.0.0.7:50051", "tok", myAddr, "", "", "", false, onPromote)
+
+	if err := h.PromoteManually(); err == nil {
+		t.Fatal("promote succeeded although onPromote failed")
+	}
+	if st := h.Status(); st.Role != "standby" || h.promoted.Load() {
+		t.Fatalf("after a failed onPromote: role=%q promoted=%v, want a retryable standby", st.Role, h.promoted.Load())
+	}
+	if got := h.CurrentEpoch(); got != 0 {
+		t.Errorf("a promote whose listener failed advertises epoch %d", got)
+	}
+	if got := h.PublishedFenceEpoch(); got != 0 {
+		t.Errorf("publishes still stamp the abandoned epoch %d (want 0)", got)
+	}
+	fail = false
+	f.ExpireForTest()
+	want := cpNextGrantEpoch(t, f)
+	if err := h.PromoteManually(); err != nil {
+		t.Fatalf("the retry failed: %v", err)
 	}
 	cpAssertEpochServable(t, h, want)
 }

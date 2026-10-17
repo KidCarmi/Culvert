@@ -62,34 +62,69 @@ var haKeepEpochStampIfCommitted = func(e int64, revert func()) bool {
 }
 
 // installGrantLocked installs the grant acquireLeaseAttempt staged, after a
-// snapshot stamped with its epoch has committed — the ONLY place a non-zero
-// epoch reaches leaseEpoch. Caller holds h.mu (write). A non-nil error means
-// the epoch was NOT installed (and the refusal has been paged); the caller
-// must not take write authority on it. transition is a bounded label.
+// snapshot stamped with its epoch has committed: commitGrantLocked, then
+// exposeGrantLocked. Caller holds h.mu (write). A non-nil error means the
+// epoch was NOT installed (and the refusal has been paged); the caller must
+// not take write authority on it. transition is a bounded label.
 func (h *HAState) installGrantLocked(transition string) error {
-	e := h.grantEpoch
-	h.grantEpoch = 0
-	if h.lease == nil {
-		return nil // legacy mode: no fencing epoch
-	}
-	if e == 0 {
-		if h.leaseEpoch != 0 {
-			return nil // a concurrent transition already installed this process's grant
-		}
-		return errNoStagedGrant
-	}
-	if err := h.commitEpochStampLocked(e); err != nil {
-		h.pageEpochRefusedLocked(transition, e, err)
+	e, err := h.commitGrantLocked(transition)
+	if err != nil {
 		return err
 	}
-	h.epochRefused = false // the refusal episode, if any, ended
-	h.setLeaseEpochLocked(e)
+	h.exposeGrantLocked(e)
 	return nil
 }
 
-// commitEpochStampLocked commits the snapshot restamped with e. The stamp
-// mirror reads e for the duration; on failure it reverts, atomically with
-// every commit, unless a concurrent publish already committed e (then e IS
+// commitGrantLocked is the first half of an install: it commits the snapshot
+// stamped with the staged grant's epoch and leaves that epoch UNADVERTISED,
+// with the stamp mirror on it, until exposeGrantLocked installs it or
+// abandonGrantLocked drops it. promote splits the halves around onPromote, so
+// a refused commit never starts the Control Plane listener (Codex review of
+// #1556). Returns the epoch to expose (0: nothing to expose). Caller holds
+// h.mu (write). A refusal is paged.
+func (h *HAState) commitGrantLocked(transition string) (int64, error) {
+	e := h.grantEpoch
+	h.grantEpoch = 0
+	if h.lease == nil {
+		return 0, nil // legacy mode: no fencing epoch
+	}
+	if e == 0 {
+		if h.leaseEpoch != 0 {
+			return 0, nil // a concurrent transition already installed this process's grant
+		}
+		return 0, errNoStagedGrant
+	}
+	if err := h.commitEpochStampLocked(e); err != nil {
+		h.pageEpochRefusedLocked(transition, e, err)
+		return 0, err
+	}
+	return e, nil
+}
+
+// exposeGrantLocked installs a committed grant's epoch — the ONLY place a
+// non-zero epoch reaches leaseEpoch, and so the heartbeat, issuance,
+// /healthz and write authority. Caller holds h.mu (write) and has had e
+// committed by commitGrantLocked.
+func (h *HAState) exposeGrantLocked(e int64) {
+	if h.lease == nil || e == 0 {
+		return
+	}
+	h.epochRefused = false // the refusal episode, if any, ended
+	h.stampEpoch = 0       // the mirror stays e: setLeaseEpochLocked re-derives it from leaseEpoch
+	h.setLeaseEpochLocked(e)
+}
+
+// abandonGrantLocked drops a committed but unexposed grant (its transition
+// failed after the commit): the stamp mirror returns to the installed grant,
+// and the grant itself is left to its TTL. Caller holds h.mu (write).
+func (h *HAState) abandonGrantLocked() {
+	h.stampEpoch = 0
+	h.syncFenceEpochLocked()
+}
+
+// commitEpochStampLocked commits the snapshot restamped with e and leaves the
+// stamp mirror on e. On failure the mirror reverts, atomically with every
+// commit, unless a concurrent publish already committed e (then e IS
 // committed and distributable, and the install proceeds). Caller holds h.mu.
 func (h *HAState) commitEpochStampLocked(e int64) error {
 	if h != haTopologySource() {
@@ -99,14 +134,12 @@ func (h *HAState) commitEpochStampLocked(e int64) error {
 	h.syncFenceEpochLocked()
 	err := haRestampFenceEpoch()
 	if err == nil {
-		h.stampEpoch = 0 // the mirror stays e: setLeaseEpochLocked re-derives it from leaseEpoch
 		return nil
 	}
 	if haKeepEpochStampIfCommitted(e, func() {
 		h.stampEpoch = 0
 		h.syncFenceEpochLocked()
 	}) {
-		h.stampEpoch = 0
 		return nil
 	}
 	return err

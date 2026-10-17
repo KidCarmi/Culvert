@@ -1042,6 +1042,21 @@ func (h *HAState) promote(reason string) {
 		return
 	}
 
+	// The new epoch is committed into the snapshot BEFORE onPromote starts
+	// the Control Plane listener, and advertised only after the leader role
+	// is ready (ha_epoch_commit.go). A refused commit therefore leaves a clean,
+	// retryable standby: no listener, no claimed role (Codex review of #1556).
+	// Until exposure the stamp mirror stays on the new epoch, so onPromote's
+	// activation publishes carry it too.
+	h.mu.Lock()
+	epoch, err := h.commitGrantLocked(haTransitionPromote)
+	h.mu.Unlock()
+	if err != nil {
+		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
+		logger.Printf("HA: promote (%s) refused — staying as standby: %v", sanitizeLog(reason), err)
+		return
+	}
+
 	logger.Printf("HA: promoting to leader (%s)", reason)
 	// CHAOS-25: onPromote starts the CP gRPC server — foreign, failure-prone
 	// startup work reached from THREE callers (the standby loop, the planned
@@ -1052,28 +1067,12 @@ func (h *HAState) promote(reason string) {
 	// grant taken just above is left unkept and simply expires after its TTL,
 	// exactly as the error branch already documents; haIssuanceAllowed is
 	// role-gated, so a standby holding an unrenewed grant issues nothing.
-	var promoteErr error
-	if runGuarded(haPromoteComponent, func() { promoteErr = pc.onPromote() }) {
-		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
-		logger.Printf("HA: promote panicked and was contained — staying as standby (retryable)")
-		return
-	}
-	if promoteErr != nil {
-		h.promoted.Store(false) // allow a later retry
-		logger.Printf("HA: promote failed: %v — staying as standby", promoteErr)
+	if !h.runOnPromote(pc) {
 		return
 	}
 
 	h.mu.Lock()
-	// The new epoch is committed into the snapshot BEFORE it is advertised or
-	// the leader role is taken; refused, this node stays standby, retryable
-	// (ha_epoch_commit.go). The grant is left to its TTL, as above.
-	if err := h.installGrantLocked(haTransitionPromote); err != nil {
-		h.mu.Unlock()
-		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
-		logger.Printf("HA: promote (%s) refused — staying as standby: %v", sanitizeLog(reason), err)
-		return
-	}
+	h.exposeGrantLocked(epoch)
 	h.setTopologyLocked("leader", h.peerAddr, haTransitionPromote)
 	h.since = time.Now()
 	if h.lease != nil {
@@ -1111,6 +1110,28 @@ func (h *HAState) promote(reason string) {
 	h.startLeaseKeepalive() // after stopLoops(): it halts the keepalive too
 
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
+}
+
+// runOnPromote runs the promote context's onPromote, contained, and reports
+// whether it succeeded. On a panic or an error the node stays a retryable
+// standby: the once-guard is reset and the committed-but-unexposed grant is
+// abandoned (its epoch is never advertised; the grant expires unkept).
+func (h *HAState) runOnPromote(pc promoteContext) bool {
+	var promoteErr error
+	panicked := runGuarded(haPromoteComponent, func() { promoteErr = pc.onPromote() })
+	if !panicked && promoteErr == nil {
+		return true
+	}
+	h.mu.Lock()
+	h.abandonGrantLocked()
+	h.mu.Unlock()
+	h.promoted.Store(false) // allow a later retry (we are provably not leader here)
+	if panicked {
+		logger.Printf("HA: promote panicked and was contained — staying as standby (retryable)")
+	} else {
+		logger.Printf("HA: promote failed: %v — staying as standby", promoteErr)
+	}
+	return false
 }
 
 // PromoteManually performs an explicit, operator- or orchestrator-triggered
