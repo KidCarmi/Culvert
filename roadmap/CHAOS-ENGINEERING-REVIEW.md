@@ -8847,6 +8847,28 @@ required before merge; each is now in the tree.
     `panic_with_a_rejected_withdrawal` (kept as a pending withdrawal).
 
   Seven mutations each fail a gate, including the old release-on-failure.
+
+  Follow-up (Codex P2 4302464278): whether to withdraw was decided by a
+  supervisor flag (`everPublished`) that only the activation publish set. A
+  listener that activated with HA off (a no-op publish) and was then
+  published by `EnableAsLeader` or a resume through `republishTopology`
+  skipped the withdrawal and released ownership. The flag is gone. Both
+  decisions now read the committed list: `beginCPAddressWithdrawal` (does
+  `published` hold, and does the snapshot name the node) and the ownership
+  step `releaseCPAddressSourceAfterWithdrawal(addr)`. The ownership step
+  keeps ownership whenever that list names the node, and installs and latches
+  the withdrawal if no publish started it. `published` is set by
+  `commitLocked`, the one commit path. A snapshot seeded from a peer is not
+  this store's commit, and is not carried into one.
+
+  Gates:
+  - `TestChaos71_TerminalExitWithdrawsANodeAnHATransitionPublished` (commits;
+    and rejected, then recovers).
+  - `TestChaos71_TerminalReleaseDecidesFromTheCommittedList`.
+  - The exit-edge row `panic_after_an_HA_transition_published_the_node`.
+
+  The flag-based decision fails these gates, whether it is restored in
+  `exitTerminal`, in the ownership step, or in both.
 * **Sixteenth review round — the address latch is part of the
   generation-guarded publish record.** An address publish that found the list
   already current cleared the rounds-14/15 latch (`addrRejectPaged`) in

@@ -196,8 +196,11 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 			},
 			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleased,
 			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
-				if n := withdrawals.Load(); n != 0 {
-					t.Errorf("a node the fleet was never told about was withdrawn (%d withdrawal(s))", n)
+				if n := withdrawals.Load(); n != 1 {
+					t.Errorf("the terminal exit consulted the withdrawal %d time(s), want 1", n)
+				}
+				if st := globalConfigStore.cpAddrPublishSnapshot(); st.pending {
+					t.Errorf("a node the committed list never named left a withdrawal pending: %+v", st)
 				}
 			},
 		},
@@ -216,13 +219,31 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 			},
 		},
 		{
+			// Codex P2 4302464278: the listener activated with HA off (a no-op
+			// activation publish), then an HA enable's republishTopology
+			// published this node. The terminal exit decides from the
+			// committed list, so it withdraws it — a flag set only by the
+			// activation publish skipped the withdrawal and released.
+			name: "panic_after_an_HA_transition_published_the_node",
+			setup: func(e *cpEdgeEnv) {
+				h, _, _ := cpWithdrawalTopology(e.t, false)
+				e.onActivated = cpWithdrawalHALaterOnActivated(e.t, h, false)
+			},
+			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleasedAfterWithdrawal,
+			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
+				if got := globalConfigStore.Get().CPAddresses; !slicesEqual(got, []string{withdrawalTestPeer}) {
+					t.Errorf("committed list after the exit = %v, want [%s]", got, withdrawalTestPeer)
+				}
+			},
+		},
+		{
 			// Codex P2 4302158678: the withdrawal itself is rejected at commit.
 			// Ownership is kept as a pending, retried withdrawal; its release
 			// once the fault clears is driven by
 			// TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits.
 			name: "panic_with_a_rejected_withdrawal",
 			setup: func(e *cpEdgeEnv) {
-				_, _ = cpWithdrawalTopology(e.t)
+				_, _, _ = cpWithdrawalTopology(e.t, true)
 				e.onActivated = cpWithdrawalRejectingOnActivated(e.t, true)
 			},
 			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnKeptUntilWithdrawn,

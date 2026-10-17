@@ -227,14 +227,18 @@ type cpListenerSupervisor struct {
 	committed bool
 
 	// cur is what the in-flight attempt holds; original is the role tuple this
-	// supervisor replaced on its FIRST claim; everPublished records that the
-	// fleet was told this node is a Control Plane. Together they let EVERY exit
-	// edge — including a panic at any stage — release exactly what was
-	// acquired (see the exit-edge table on run). Supervisor goroutine only.
-	cur           *cpAttempt
-	original      cpRoleFields
-	haveOriginal  bool
-	everPublished bool
+	// supervisor replaced on its FIRST claim. Together they let EVERY exit edge
+	// — including a panic at any stage — release exactly what was acquired
+	// (see the exit-edge table on run). Supervisor goroutine only.
+	//
+	// Whether the fleet was told this node is a Control Plane is deliberately
+	// NOT a field here: an HA transition (EnableAsLeader, a resume) publishes
+	// this node through republishTopology, which no supervisor flag observes.
+	// The terminal exit reads it from the committed snapshot instead (Codex
+	// review of #1556).
+	cur          *cpAttempt
+	original     cpRoleFields
+	haveOriginal bool
 }
 
 // cpAttempt is everything ONE bind attempt holds.
@@ -417,8 +421,11 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 // not keep reporting and reconciling a CP list (Codex review of #1556) — and
 // then records the terminal state (fail row, alert).
 //
-// If the fleet was told this node is a Control Plane, ownership is released
-// only AFTER the list without this node commits: the withdrawal is an owned
+// If the committed CP address list names this node — whichever owned path
+// published it: this supervisor's activation, or an HA transition's
+// republishTopology after it (a supervisor-local "published" flag missed the
+// latter: Codex review of #1556) — ownership is released only AFTER the list
+// without this node commits: the withdrawal is an owned
 // publish, so a rejection or a lost commit race is pending, paged once per
 // episode and retried, and the retry loop releases ownership when it commits
 // (withdrawCPAddress). Releasing first — the previous order — discarded a
@@ -430,15 +437,14 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 // is contained: a panic in it leaves the withdrawal unrecorded, and the
 // ownership step then latches it pending so a retry still owns it.
 func (s *cpListenerSupervisor) exitTerminal(reason string) {
-	if s.everPublished {
-		func() {
-			defer func() { _ = recover() }()
-			// The outcome is recorded (and a failure retried) by the store;
-			// the ownership step below reads it from there.
-			_, _ = cpWithdrawCPAddress(s.cfg.addr)
-		}()
-	}
-	globalConfigStore.releaseCPAddressSourceAfterWithdrawal()
+	func() {
+		defer func() { _ = recover() }()
+		// A no-op unless the committed list names this node. The outcome is
+		// recorded (and a failure retried) by the store; the ownership step
+		// below decides from the committed list again.
+		_, _ = cpWithdrawCPAddress(s.cfg.addr)
+	}()
+	globalConfigStore.releaseCPAddressSourceAfterWithdrawal(s.cfg.addr)
 	noteCPGRPCSupervisorDown(reason)
 }
 
@@ -466,7 +472,7 @@ func (s *cpListenerSupervisor) exitTerminal(reason string) {
 //	panic after a serve ended    | role restored + address ownership after the withdrawal commits | TERMINAL + alert (bypasses latch)
 //
 // Address ownership: every TERMINAL exit releases it (exitTerminal) — at once
-// when the fleet was never told about this node, otherwise only after the
+// when the committed list does not name this node, otherwise only after the
 // list without it commits (a failed withdrawal keeps ownership, pending and
 // retried, until then); every recoverable and stopped exit keeps it (a retry,
 // or shutdown, follows).
