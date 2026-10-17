@@ -18,12 +18,19 @@ package main
 //
 //  1. acquireLeaseAttempt only STAGES the grant (grantEpoch). Nothing reads it
 //     as the node's epoch, and it confers no write authority.
-//  2. installGrantLocked commits the COMMITTED snapshot, content unchanged,
+//  2. commitGrant commits the COMMITTED snapshot, content unchanged,
 //     restamped with E (ConfigStore.RestampFenceEpoch). Its size is the prior
 //     committed size plus the epoch digits, so it fits whenever the prior
 //     snapshot did. During this commit the stamp mirror already reads E, so a
-//     concurrent publish cannot commit the old epoch after it.
-//  3. Only on success does leaseEpoch become E: the heartbeat, issuance,
+//     concurrent publish cannot commit the old epoch after it. "Nothing
+//     published yet" is not success (Codex P1 4302217586 on #1645): a Control
+//     Plane whose initial publish was rejected has no snapshot to carry E, so
+//     the transition is refused (step 4). The one exception is a promote,
+//     whose Control Plane activation (onPromote) makes the first publish,
+//     stamped E by the mirror: it is preflighted before the listener starts.
+//  3. exposeGrantLocked re-verifies, atomically with every commit, that the
+//     committed snapshot carries E — the rule itself, whatever the path to
+//     it — and only then does leaseEpoch become E: the heartbeat, issuance,
 //     /healthz, keepalive and write authority follow. The caller then takes
 //     its role, and the topology writer publishes the new address list as an
 //     ordinary owned address publish — latched, retried and paged once per
@@ -61,11 +68,27 @@ var haKeepEpochStampIfCommitted = func(e int64, revert func()) bool {
 	return globalConfigStore.keepEpochStampIfCommitted(e, revert)
 }
 
+// errNoSnapshotToRestamp: the store has published nothing, so no commit can
+// carry a new fencing epoch (RestampFenceEpoch).
+var errNoSnapshotToRestamp = errors.New("no committed config snapshot to carry the new fencing epoch (the initial publish was rejected or has not run)")
+
+// errEpochNotCommitted: at exposure, the committed snapshot does not carry
+// the grant's epoch.
+var errEpochNotCommitted = errors.New("no committed config snapshot carries the new fencing epoch")
+
+// haPreflightFirstPublish runs the commit-time gates over the first publish a
+// promote's Control Plane activation will make (CurrentConfigSnapshot,
+// stamped with the in-flight epoch), committing nothing. Test seam.
+var haPreflightFirstPublish = func() error { return preflightFirstPublish(CurrentConfigSnapshot()) }
+
 // commitGrant is the first half of every install: it commits the snapshot
 // stamped with the staged grant's epoch and leaves that epoch UNADVERTISED,
 // with the stamp mirror on it, until exposeGrantLocked installs it or
 // abandonGrantLocked drops it. Returns the epoch to expose (0: nothing to
-// expose). A refusal is paged, and the staged grant is abandoned.
+// expose). A refusal is paged, and the staged grant is abandoned. A store
+// that has published nothing is a refusal, except for a promote whose
+// activation's first publish passes the preflight; that publish, like every
+// path here, is verified to have committed by exposeGrantLocked.
 //
 // The caller must NOT hold h.mu, and should have started the keepalive on the
 // staged grant: the commit marshals a snapshot of up to snapshotWireBudget,
@@ -98,6 +121,13 @@ func (h *HAState) commitGrant(transition string) (int64, error) {
 		return e, nil
 	}
 	err := haRestampFenceEpoch() // the marshal and commit: outside h.mu
+	if errors.Is(err, errNoSnapshotToRestamp) && transition == haTransitionPromote {
+		// A promote's first publish is its Control Plane activation's, inside
+		// onPromote, and the mirror stamps it e. Refuse NOW if it would not
+		// pass the commit-time gates, before the listener exists; whether it
+		// committed is verified at exposure (exposeGrantLocked).
+		err = haPreflightFirstPublish()
+	}
 	if err == nil {
 		return e, nil
 	}
@@ -127,16 +157,29 @@ var errGrantLost = errors.New("the fencing-lease grant was lost before its epoch
 // non-zero epoch reaches leaseEpoch, and so the heartbeat, issuance,
 // /healthz and write authority. It re-checks that the grant is still held:
 // still staged, since the keepalive drops a grant it loses (superseded, or
-// unconfirmed past its validity window). Write authority itself stays gated
-// on the confirmed window (WriteAllowed). Caller holds h.mu (write) and has
-// had e committed by commitGrant.
-func (h *HAState) exposeGrantLocked(e int64) error {
+// unconfirmed past its validity window). And it re-checks the rule itself:
+// a committed snapshot carries e, compared atomically with every commit under
+// the store lock (a compare, no marshal). commitGrant's success says a commit
+// was made or is to come (a promote's activation publish); only this says it
+// landed (Codex P1 4302217586 on #1645). Refused, the stamp mirror reverts in
+// the same step, the refusal pages once per episode and the grant is
+// abandoned. Write authority itself stays gated on the confirmed window
+// (WriteAllowed). Caller holds h.mu (write) and has run commitGrant for e.
+func (h *HAState) exposeGrantLocked(transition string, e int64) error {
 	if h.lease == nil || e == 0 {
 		return nil
 	}
 	if h.grantEpoch != e {
 		h.abandonGrantLocked()
 		return errGrantLost
+	}
+	if h == haTopologySource() && !haKeepEpochStampIfCommitted(e, func() {
+		h.stampEpoch = 0
+		h.syncFenceEpochLocked()
+	}) {
+		h.pageEpochRefusedLocked(transition, e, errEpochNotCommitted)
+		h.abandonGrantLocked()
+		return errEpochNotCommitted
 	}
 	h.grantEpoch = 0
 	h.epochRefused = false // the refusal episode, if any, ended
@@ -174,14 +217,6 @@ func (h *HAState) heldEpochLocked() int64 {
 		return h.leaseEpoch
 	}
 	return h.grantEpoch
-}
-
-// loseStagedGrant is the keepalive's response to losing a grant that was
-// never installed: there is no role to fence, so the grant is dropped and
-// the transition waiting to expose it is refused (exposeGrantLocked).
-func (h *HAState) loseStagedGrant(reason string) {
-	h.dropStagedGrant()
-	logger.Printf("HA: the staged fencing-lease grant was lost before it was installed — %s", sanitizeLog(reason))
 }
 
 // pageEpochRefusedLocked logs every refusal and pages the episode's first:

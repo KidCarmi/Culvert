@@ -206,7 +206,7 @@ func TestAcquireLeaseForResume_WaitsOutOwnGhost(t *testing.T) {
 	epoch, err := h.commitGrant("test")
 	if err == nil {
 		h.mu.Lock()
-		err = h.exposeGrantLocked(epoch)
+		err = h.exposeGrantLocked("test", epoch)
 		h.mu.Unlock()
 	}
 	if err != nil || !h.WriteAllowed() {

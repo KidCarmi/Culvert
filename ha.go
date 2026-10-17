@@ -332,7 +332,7 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 		return "", fmt.Errorf("HA enable refused — the config snapshot could not carry the new fencing epoch: %w", err)
 	}
 	h.mu.Lock()
-	if err := h.exposeGrantLocked(epoch); err != nil {
+	if err := h.exposeGrantLocked(haTransitionEnable, epoch); err != nil {
 		h.mu.Unlock()
 		return "", fmt.Errorf("HA enable refused: %w", err)
 	}
@@ -483,7 +483,7 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 		h.mu.Unlock()
 		return false
 	}
-	if leaseGranted && h.exposeGrantLocked(epoch) != nil {
+	if leaseGranted && h.exposeGrantLocked(haTransitionResume, epoch) != nil {
 		leaseGranted, epochRefused = false, true
 	}
 	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
@@ -1115,7 +1115,7 @@ func (h *HAState) promote(reason string) {
 	}
 
 	h.mu.Lock()
-	if err := h.exposeGrantLocked(epoch); err != nil {
+	if err := h.exposeGrantLocked(haTransitionPromote, epoch); err != nil {
 		h.mu.Unlock()
 		h.promoted.Store(false)
 		// Residual: onPromote already started the listener, so a later

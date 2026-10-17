@@ -963,14 +963,22 @@ func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool
 // authority-gaining HA transition makes BEFORE it advertises a new fencing
 // epoch (commitGrant, ha_epoch_commit.go). The candidate is the
 // committed snapshot plus the epoch digits, through the same commit-time gates
-// and optimistic concurrency as every publish. Nothing published yet (no
-// snapshot to restamp: the first publish stamps the epoch itself) and an
-// already-current stamp are success.
+// and optimistic concurrency as every publish. An already-current stamp is
+// success.
+//
+// Nothing published yet is NOT success: it returns errNoSnapshotToRestamp
+// (Codex P1 4302217586 on #1645). A Control Plane whose initial publish was
+// rejected has no distributable snapshot, so no commit carries the epoch, and
+// the transition must not advertise it on that strength. commitGrant decides
+// what follows: a refusal, or for a promote a first publish its activation
+// makes, verified before the epoch is exposed.
 func (s *ConfigStore) RestampFenceEpoch() error {
+	notYet := false
 	_, err := s.commitPublish(publishPlan{
 		kind: publishEpoch,
 		build: func(cur committedView) (ConfigSnapshot, publishAct) {
-			if !cur.published {
+			notYet = !cur.published
+			if notYet {
 				return ConfigSnapshot{}, publishNotYet
 			}
 			// Content unchanged: commitPublish restamps an up-to-date snapshot
@@ -979,7 +987,21 @@ func (s *ConfigStore) RestampFenceEpoch() error {
 		},
 		exhausted: fmt.Errorf("fencing-epoch restamp lost the commit race %d times in a row", cpAddrMergeAttempts),
 	})
+	if err == nil && notYet {
+		return errNoSnapshotToRestamp
+	}
 	return err
+}
+
+// preflightFirstPublish runs the commit-time gates over snap stamped with the
+// current stamp epoch, committing nothing: whether a first publish of snap,
+// made now, would be accepted. A promote whose store has published nothing
+// uses it before its activation starts the Control Plane listener
+// (commitGrant): an activation whose first publish would be rejected must be
+// refused before that listener exists, not after.
+func preflightFirstPublish(snap ConfigSnapshot) error {
+	snap.Epoch = publishFenceEpoch()
+	return validateSnapshotForPublish(snap)
 }
 
 // keepEpochStampIfCommitted reports whether the committed snapshot already

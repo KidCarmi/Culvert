@@ -190,10 +190,26 @@ func (h *HAState) leaseKeepaliveLoop(stop chan struct{}, tick time.Duration) {
 			return
 		case <-t.C:
 			if fenced := h.leaseRenewRound(); fenced {
+				h.releaseKeepaliveHandle(stop)
 				return
 			}
 		}
 	}
+}
+
+// releaseKeepaliveHandle clears the keepalive handle when it is still the
+// exiting loop's own: a loop that leaves never leaves its handle set, or no
+// later startLeaseKeepalive could start one (Codex P1 4302217588 on #1645).
+// Every path that ends a grant closes and clears the handle under h.mu, so
+// this is normally a no-op; whoever closes a handle clears it in the same
+// critical section, so a handle still set here is still open.
+func (h *HAState) releaseKeepaliveHandle(stop chan struct{}) {
+	h.mu.Lock()
+	if h.leaseStopCh == stop {
+		close(stop)
+		h.leaseStopCh = nil
+	}
+	h.mu.Unlock()
 }
 
 // leaseRenewRound runs one keepalive round under a panic guard, returning true
@@ -241,17 +257,21 @@ func (h *HAState) leaseRenewRound() (fenced bool) {
 // write authority.
 func (h *HAState) fenceIfLeaseWindowElapsed(reason string) bool {
 	h.mu.RLock()
-	p, epoch, staged := h.lease, h.heldEpochLocked(), h.leaseEpoch == 0
-	confirmedAt, validFor := h.leaseConfirmedAt, h.leaseValidFor
+	p, epoch, elapsed := h.lease, h.heldEpochLocked(), h.leaseWindowElapsedLocked()
 	h.mu.RUnlock()
 	if p == nil || epoch == 0 {
 		return true // no write authority left to protect; stop looping
 	}
-	if time.Since(confirmedAt) >= validFor-haLeaseWriteMargin {
-		h.fenceHeldGrant(staged, reason)
-		return true
+	if elapsed {
+		return h.endRenewedGrant(epoch, reason)
 	}
 	return false
+}
+
+// leaseWindowElapsedLocked reports whether the last etcd-CONFIRMED validity
+// window, minus the write margin, has run out. Caller holds h.mu.
+func (h *HAState) leaseWindowElapsedLocked() bool {
+	return time.Since(h.leaseConfirmedAt) >= h.leaseValidFor-haLeaseWriteMargin
 }
 
 // haLeaseRenewWithheld reports whether this leader must STOP renewing its
@@ -274,10 +294,18 @@ var haLeaseRenewWithheld = cpGRPCLeaseRenewWithheld
 // listener serves again while the confirmed window still covers us, the next
 // round simply renews — nothing was given up that a rebind cannot restore.
 // Withholding never EXTENDS authority: it can only end it sooner.
+//
+// Renew blocks (up to haLeaseOpTimeout), and a transition can install,
+// abandon or replace the grant while it does: a keepalive started on a
+// STAGED grant routinely sees it exposed mid-RPC. So the only thing taken
+// from before the RPC is which grant was renewed (epoch); every decision on
+// its outcome reads the grant state as it is NOW, under h.mu (Codex P1
+// 4302217588 on #1645: a cached staged=true sent a confirmed loss of an
+// INSTALLED grant to the staged-grant drop, leaving the epoch, the leader role
+// and write authority in place with no keepalive left to end them).
 func (h *HAState) leaseRenewOnce() (fenced bool) {
 	h.mu.RLock()
-	p, id, epoch, staged := h.lease, h.leaseCandidateID, h.heldEpochLocked(), h.leaseEpoch == 0
-	confirmedAt, validFor := h.leaseConfirmedAt, h.leaseValidFor
+	p, id, epoch := h.lease, h.leaseCandidateID, h.heldEpochLocked()
 	h.mu.RUnlock()
 	if p == nil || epoch == 0 {
 		return false
@@ -294,35 +322,58 @@ func (h *HAState) leaseRenewOnce() (fenced bool) {
 	switch {
 	case err == nil && ok:
 		h.mu.Lock()
-		h.leaseConfirmedAt = time.Now()
-		h.leaseValidFor = validNow
+		// Only a grant still held is confirmed: a renewal of a grant dropped
+		// meanwhile must not extend the window of whatever is held now.
+		if h.heldEpochLocked() == epoch {
+			h.leaseConfirmedAt = time.Now()
+			h.leaseValidFor = validNow
+		}
 		h.mu.Unlock()
 		return false
 	case err == nil:
 		// Confirmed loss: superseded or expired. Fence NOW.
-		h.fenceHeldGrant(staged, "fencing lease lost (superseded or expired)")
-		return true
+		return h.endRenewedGrant(epoch, "fencing lease lost (superseded or expired)")
 	default:
 		// Transport failure: the truth is unknown. Keep retrying while the
 		// last CONFIRMED window still covers us; fence the moment it ends.
-		if time.Since(confirmedAt) >= validFor-haLeaseWriteMargin {
-			h.fenceHeldGrant(staged, fmt.Sprintf("fencing lease unconfirmed beyond validity window (%v)", err))
-			return true
+		h.mu.RLock()
+		elapsed := h.leaseWindowElapsedLocked()
+		h.mu.RUnlock()
+		if elapsed {
+			return h.endRenewedGrant(epoch, fmt.Sprintf("fencing lease unconfirmed beyond validity window (%v)", err))
 		}
 		logger.Printf("HA: lease keepalive transport error (retrying inside confirmed window): %v", err)
 		return false
 	}
 }
 
-// fenceHeldGrant ends the grant the keepalive renews: an installed one
-// self-fences; a staged one (never advertised, no role) is dropped, which
-// refuses the transition waiting to expose it.
-func (h *HAState) fenceHeldGrant(staged bool, reason string) {
-	if staged {
-		h.loseStagedGrant(reason)
-		return
+// endRenewedGrant ends the grant a keepalive round renewed (epoch), on the
+// grant state as it is NOW, never on a copy taken before the round's blocking
+// Renew: installed, the node self-fences (atomically with the re-check);
+// still staged (never advertised, no role), the grant is dropped, which
+// refuses the transition waiting to expose it; no longer held, there is
+// nothing of it to end. Grants only move staged → installed → fenced, so a
+// state read here cannot move back under the action taken on it. Returns
+// true when the keepalive loop must exit.
+func (h *HAState) endRenewedGrant(epoch int64, reason string) (exit bool) {
+	h.mu.Lock()
+	switch {
+	case epoch != 0 && h.leaseEpoch == epoch:
+		h.mu.Unlock()
+		h.selfFenceGrant(epoch, reason) // re-checked under h.mu: another path may have fenced first
+		return true
+	case epoch != 0 && h.leaseEpoch == 0 && h.heldEpochLocked() == epoch:
+		h.abandonGrantLocked() // closes and clears the keepalive handle
+		h.mu.Unlock()
+		logger.Printf("HA: the staged fencing-lease grant was lost before it was installed — %s", sanitizeLog(reason))
+		return true
+	default:
+		// The renewed grant is gone already (dropped, or fenced by another
+		// path); keep renewing only if something else is held.
+		exit = h.heldEpochLocked() == 0
+		h.mu.Unlock()
+		return exit
 	}
-	h.selfFence(reason)
 }
 
 // withholdLeaseRenewal is the CHAOS-71 branch of leaseRenewOnce: skip the
@@ -347,8 +398,20 @@ func (h *HAState) withholdLeaseRenewal(reason string) (fenced bool) {
 // ex-standby (enterStandbyResync below); when target/material is missing
 // the node stays passive pending operator action.
 func (h *HAState) selfFence(reason string) {
+	h.selfFenceWhen(func() bool { return true }, reason)
+}
+
+// selfFenceGrant is selfFence for one installed grant: it fences only while
+// epoch is still the installed one, checked under h.mu atomically with the
+// demotion.
+func (h *HAState) selfFenceGrant(epoch int64, reason string) {
+	h.selfFenceWhen(func() bool { return h.leaseEpoch == epoch }, reason)
+}
+
+// selfFenceWhen is selfFence's body; held is evaluated under h.mu (write).
+func (h *HAState) selfFenceWhen(held func() bool, reason string) {
 	h.mu.Lock()
-	if h.role != "leader" {
+	if h.role != "leader" || !held() {
 		h.mu.Unlock()
 		return
 	}

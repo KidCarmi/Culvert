@@ -168,7 +168,12 @@ and write authority become live, so Data Planes never learn an epoch that the
 committed snapshot does not carry.
 
 That commit is the prior config plus a few bytes, so it is refused only when
-the committed config is already at the cap. Then the transition is refused and
+the committed config is already at the cap. It is also refused when there is
+no committed config at all, for example when the node's initial config publish
+was itself rejected at boot: there is nothing that could carry the epoch. (A
+promoting standby has not published yet; its first publish is checked against
+the cap before the listener starts, and the epoch goes live only once that
+publish has committed.) Then the transition is refused and
 `config_snapshot_rejected` fires once:
 - An enable returns an error and HA stays off.
 - A promote leaves the node a retryable standby.

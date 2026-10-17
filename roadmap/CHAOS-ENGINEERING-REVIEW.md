@@ -8810,6 +8810,45 @@ required before merge; each is now in the tree.
     transition returns with its republish only recorded.
 
   Five mutations each fail a gate.
+* **Twentieth review round — "nothing to restamp" is not success, and the
+  keepalive acts on the grant state after its Renew (Codex P1s 4302217586 and
+  4302217588 on #1645).**
+  - *No committed snapshot.* A persisted leader whose initial publish was
+    rejected has nothing published, and `RestampFenceEpoch` reported that as
+    success, so the resume exposed an epoch no distributable snapshot carried.
+    It now returns `errNoSnapshotToRestamp`, and `commitGrant` refuses (enable
+    errors, a boot resume takes the ADR-0005 S2 read-only leader stance and
+    pages once, recovery stays read-only and retries). The rule itself moved
+    into `exposeGrantLocked`: it exposes only when the committed snapshot
+    carries the epoch, checked atomically with every commit under the store
+    lock (a compare, no marshal), and reverts the stamp mirror in the same
+    step otherwise. A fresh standby's promote is the one path with no
+    snapshot that is still correct: its first publish is the activation
+    inside `onPromote`, stamped by the mirror. It is preflighted against the
+    commit-time gates before the listener starts (`preflightFirstPublish`),
+    so an oversized config refuses a clean, retryable standby, and the
+    exposure verifies that the publish committed.
+  - *Decisions taken before a blocking lease RPC.* A keepalive started on a
+    staged grant cached `staged=true` across `Renew`; when the transition
+    exposed the grant mid-RPC, a confirmed loss went to the staged-grant drop,
+    which left the installed epoch, the leader role and write authority in
+    place and the loop gone with its handle set. Every outcome of a round now
+    reads the grant state after the RPC, under `h.mu` (`endRenewedGrant`):
+    installed self-fences (`selfFenceGrant`, the epoch re-checked atomically
+    with the demotion), still staged is dropped, already gone ends nothing. A
+    renewal confirms the window only for a grant still held, and an exiting
+    loop clears its own handle (`releaseKeepaliveHandle`). The same rule for
+    the CHAOS-55 recovery round, which read "unfenced leader" before its
+    Acquire: the state is re-checked under `h.mu` before the commit and again
+    with the exposure (`recoveryDisarmedLocked`), so a node that re-entered
+    standby meanwhile never gets an epoch, write authority or a keepalive.
+
+  Gates: `TestChaos71_NoCommittedSnapshotNeverAdvertisesTheEpoch`,
+  `TestChaos71_PromoteWithNothingPublishedExposesOnlyItsCommittedFirstPublish`,
+  `TestChaos71_KeepaliveActsOnTheGrantStateAfterItsRenew` and
+  `TestChaos71_LeaseRecoveryRechecksItsStateAfterTheAcquire`, each with a
+  control. Six mutations each fail a gate, including the pre-fix pair (the
+  restamp's success plus no exposure check).
 * **Nineteenth review round — the epoch-stamped commit runs outside
   `HAState.mu` (the class rule of Codex P1 4301857115, applied to HA
   fencing).** #1556 fixed the topology republish under `h.mu`. The stamped
