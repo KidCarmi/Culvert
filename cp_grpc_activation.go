@@ -108,6 +108,13 @@ var cpPublishCPAddresses = func() (changed bool, err error) {
 	return globalConfigStore.publishOwnedCPAddresses("activation", buildCPAddressList)
 }
 
+// cpWithdrawCPAddress takes addr out of the fleet's CP address list on a
+// terminal exit, keeping address-list ownership until that withdrawal commits
+// (withdrawCPAddress). Package-level seam so a gate can observe it.
+var cpWithdrawCPAddress = func(addr string) (changed bool, err error) {
+	return globalConfigStore.withdrawCPAddress(addr)
+}
+
 // cpActivationAfterClaim, when non-nil, runs between the role claim and the
 // gated publish/onActivated step. Test seam only (nil in production): it opens
 // the "shutdown began after the claim" window deterministically.

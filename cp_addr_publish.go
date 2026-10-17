@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -120,7 +121,127 @@ func (s *ConfigStore) publishOwnedCPAddresses(trigger string, build func() []str
 	if note.startRetry {
 		go s.retryCPAddrPublish(cpAddrRetryCtx())
 	}
+	if err == nil {
+		s.completeCPAddressWithdrawal()
+	}
 	return changed, err
+}
+
+// ─── Withdrawal: a terminal exit keeps ownership until the list drops it ─────
+//
+// A Control Plane listener supervisor that exits TERMINALLY (a panic, a role
+// conflict) after the fleet was told this node is a Control Plane must take
+// its address out of the list Data Planes fail over to. That withdrawal is an
+// ordinary owned publish, so it can be rejected at commit or lose every
+// optimistic commit attempt like any other. The first draft then released
+// ownership regardless — and with no source the retry loop exits clean, so the
+// fleet kept a dead CP address that nothing ever reconciled, in a process that
+// survived the panic (Codex review of #1556).
+//
+// So the terminal exit turns the source into a WITHDRAWAL source (the live
+// list without this node) instead of dropping it: a rejected withdrawal is
+// pending, paged once per episode and retried by the same loop as every other
+// owned republish, and ownership is released only once the committed list no
+// longer names the node. A new owner (setCPAddressSource) ends the withdrawal.
+
+// cpAddrWithdrawalTrigger is the bounded trigger label of a withdrawal publish.
+const cpAddrWithdrawalTrigger = "cp_withdrawal"
+
+// errCPAddrWithdrawalInterrupted latches a withdrawal whose publish never
+// recorded an outcome (it was interrupted, e.g. by a contained panic), so the
+// retry loop owns it rather than nothing.
+var errCPAddrWithdrawalInterrupted = errors.New("CP address list withdrawal was interrupted before its publish recorded an outcome")
+
+// withdrawCPAddress starts withdrawing addr from the owned CP address list and
+// publishes the list without it. A failure is recorded and retried
+// (publishOwnedCPAddresses); ownership stays until a publish commits. A no-op
+// when nothing is owned.
+func (s *ConfigStore) withdrawCPAddress(addr string) (changed bool, err error) {
+	src := s.beginCPAddressWithdrawal(addr)
+	if src == nil {
+		return false, nil
+	}
+	return s.publishOwnedCPAddresses(cpAddrWithdrawalTrigger, src)
+}
+
+// beginCPAddressWithdrawal replaces the owned source with one that derives the
+// same live list without addr, and marks the withdrawal. The pending episode
+// (if any) is kept: the withdrawal is the same list, one node shorter, so an
+// open episode stays paged once. Returns the withdrawal source, or nil when
+// nothing is owned.
+func (s *ConfigStore) beginCPAddressWithdrawal(addr string) func() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cpAddrSource == nil || addr == "" {
+		return nil
+	}
+	s.cpAddrSource = cpAddrSourceWithout(s.cpAddrSource, addr)
+	s.cpAddrWithdrawal = addr
+	return s.cpAddrSource
+}
+
+// cpAddrSourceWithout derives from's list without addr. It copies: a source
+// may hand back a slice it shares.
+func cpAddrSourceWithout(from func() []string, addr string) func() []string {
+	return func() []string {
+		var out []string
+		for _, a := range from() {
+			if a != addr {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+}
+
+// cpAddrWithdrawnLocked reports whether the committed list no longer names the
+// address being withdrawn (or nothing was ever published). Caller holds s.mu.
+func (s *ConfigStore) cpAddrWithdrawnLocked() bool {
+	return !s.published || !slices.Contains(s.snap.CPAddresses, s.cpAddrWithdrawal)
+}
+
+// completeCPAddressWithdrawal releases ownership once a withdrawal has
+// committed. A no-op when no withdrawal owns the list or it has not committed
+// yet. Called after every successful owned publish.
+func (s *ConfigStore) completeCPAddressWithdrawal() {
+	s.mu.Lock()
+	addr := s.cpAddrWithdrawal
+	if addr == "" || !s.cpAddrWithdrawnLocked() {
+		s.mu.Unlock()
+		return
+	}
+	s.cpAddrSource, s.cpAddrWithdrawal = nil, ""
+	s.mu.Unlock()
+	s.resetCPAddrPublish()
+	logger.Printf("ControlPlane: withdrew %q from the fleet's CP address list; address-list ownership released", sanitizeLog(addr))
+}
+
+// releaseCPAddressSourceAfterWithdrawal is a terminal exit's ownership step:
+// release now, unless a withdrawal is still uncommitted — then ownership is
+// KEPT and the retry loop releases it when the withdrawal commits. A withdrawal
+// that never recorded an outcome is latched pending here, so a retry owns it.
+// Reports whether ownership was kept.
+func (s *ConfigStore) releaseCPAddressSourceAfterWithdrawal() (kept bool) {
+	s.mu.Lock()
+	if s.cpAddrWithdrawal == "" || s.cpAddrWithdrawnLocked() {
+		s.cpAddrSource, s.cpAddrWithdrawal = nil, ""
+		s.mu.Unlock()
+		s.resetCPAddrPublish()
+		return false
+	}
+	addr := s.cpAddrWithdrawal
+	s.mu.Unlock()
+	if !s.cpAddrPublishSnapshot().pending {
+		note := s.noteCPAddrPublish(cpAddrWithdrawalTrigger, errCPAddrWithdrawalInterrupted, s.cpAddrPublishGen())
+		if note.page {
+			s.pageCPAddrRejection(note.episode, errCPAddrWithdrawalInterrupted)
+		}
+		if note.startRetry {
+			go s.retryCPAddrPublish(cpAddrRetryCtx())
+		}
+	}
+	logWarnf("ControlPlane: the fleet's CP address list still names %q — keeping address-list ownership until the withdrawal commits (retrying)", sanitizeLog(addr))
+	return true
 }
 
 // cpAddrPublishGen is the current pending-state generation, captured by a
@@ -248,6 +369,9 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 		}
 		if note := s.noteCPAddrPublish("retry", err, gen); note.page {
 			s.pageCPAddrRejection(note.episode, err)
+		}
+		if src != nil && err == nil {
+			s.completeCPAddressWithdrawal() // a committed withdrawal ends ownership, and with it the episode
 		}
 
 		s.addrPubMu.Lock()

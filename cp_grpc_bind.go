@@ -412,14 +412,33 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 
 // exitTerminal is the ONE way the supervisor ends terminally
 // (TestChaos71_Wall_TerminalExitsGoThroughExitTerminal). A terminal exit
-// leaves no Control Plane behind, so it releases CP address-list ownership —
+// leaves no Control Plane behind, so it gives up CP address-list ownership —
 // a Data Plane that won a role conflict, or a node whose loop panicked, must
 // not keep reporting and reconciling a CP list (Codex review of #1556) — and
-// then records the terminal state (fail row, alert). The panic path's own
-// republish (abandonAfterPanic) runs BEFORE this, while the list is still
-// owned, so the fleet's list drops this node first.
+// then records the terminal state (fail row, alert).
+//
+// If the fleet was told this node is a Control Plane, ownership is released
+// only AFTER the list without this node commits: the withdrawal is an owned
+// publish, so a rejection or a lost commit race is pending, paged once per
+// episode and retried, and the retry loop releases ownership when it commits
+// (withdrawCPAddress). Releasing first — the previous order — discarded a
+// failed withdrawal: with no source the retry loop exits clean, and Data
+// Planes kept a dead CP address that nothing ever reconciled, in a process
+// that survived the panic (Codex review of #1556).
+//
+// On the panic edge this runs inside the deferred recover, so the withdrawal
+// is contained: a panic in it leaves the withdrawal unrecorded, and the
+// ownership step then latches it pending so a retry still owns it.
 func (s *cpListenerSupervisor) exitTerminal(reason string) {
-	globalConfigStore.releaseCPAddressSource()
+	if s.everPublished {
+		func() {
+			defer func() { _ = recover() }()
+			// The outcome is recorded (and a failure retried) by the store;
+			// the ownership step below reads it from there.
+			_, _ = cpWithdrawCPAddress(s.cfg.addr)
+		}()
+	}
+	globalConfigStore.releaseCPAddressSourceAfterWithdrawal()
 	noteCPGRPCSupervisorDown(reason)
 }
 
@@ -436,17 +455,21 @@ func (s *cpListenerSupervisor) exitTerminal(reason string) {
 //	Stop during a backoff sleep  | nothing held                               | stopped
 //	Stop wins the adopt race     | server + listener                          | stopped
 //	Stop / shutdown at the claim | server + listener + handle                 | stopped
-//	role_conflict                | server + listener + handle (role is not ours) + address ownership | TERMINAL + alert (bypasses latch)
+//	role_conflict                | server + listener + handle (role is not ours) + address ownership, after any withdrawal commits | TERMINAL + alert (bypasses latch)
 //	shutdown after the claim     | server + listener + handle + role rollback, no publish | stopped
 //	address publish rejected     | server + listener + handle + role rollback | recoverable failure, backoff
 //	panic after the claim        | server + listener + handle + role restored + address ownership | TERMINAL + alert (bypasses latch)
-//	panic in onActivated         | as above + address list republished first  | TERMINAL + alert (bypasses latch)
+//	panic in onActivated         | as above, ownership released after the withdrawal commits | TERMINAL + alert (bypasses latch)
+//	panic, withdrawal rejected   | as above; ownership KEPT (withdrawal pending, retried) until it commits | TERMINAL + alert + config_snapshot_rejected
 //	Stop while serving           | handle (Stop owns the graceful drain)      | stopped
 //	serve ends on its own        | server RETIRED (DP transports) + handle    | recoverable failure, backoff
-//	panic after a serve ended    | role restored + list republished + address ownership | TERMINAL + alert (bypasses latch)
+//	panic after a serve ended    | role restored + address ownership after the withdrawal commits | TERMINAL + alert (bypasses latch)
 //
-// Address ownership: every TERMINAL exit releases it (exitTerminal); every
-// recoverable and stopped exit keeps it (a retry, or shutdown, follows).
+// Address ownership: every TERMINAL exit releases it (exitTerminal) — at once
+// when the fleet was never told about this node, otherwise only after the
+// list without it commits (a failed withdrawal keeps ownership, pending and
+// retried, until then); every recoverable and stopped exit keeps it (a retry,
+// or shutdown, follows).
 //
 // Two more rows are the ENTRY's (activateControlPlane), not the loop's, and
 // the same table test drives them:
@@ -474,8 +497,8 @@ func (s *cpListenerSupervisor) run() {
 			// the terminal state: a panic between adopt and Serve otherwise
 			// left the server, the bound socket and the CP role claimed with
 			// nothing serving (Codex review of #1556).
-			s.abandonAfterPanic() // republishes the list without this node FIRST
-			s.exitTerminal("bind loop panicked")
+			s.abandonAfterPanic()
+			s.exitTerminal("bind loop panicked") // withdraws this node from the list, then releases ownership
 		}
 	}()
 
@@ -618,9 +641,10 @@ func (s *cpListenerSupervisor) releaseAttempt() {
 // abandonAfterPanic is the panic edge's release: whatever the interrupted
 // stage held (releaseAttempt), then the CP role — a claim that is only true
 // while a socket is real, and nothing will rebind now — restored to what this
-// supervisor first replaced, and, if the fleet was told this node is a Control
-// Plane, the address list republished without it. Each step is contained:
-// the panic being handled may have come from the very code a step reuses.
+// supervisor first replaced. Withdrawing this node from the fleet's address
+// list is exitTerminal's, which follows (it applies to every terminal edge).
+// Each step is contained: the panic being handled may have come from the very
+// code a step reuses.
 func (s *cpListenerSupervisor) abandonAfterPanic() {
 	contained := func(f func()) {
 		defer func() { _ = recover() }()
@@ -633,9 +657,6 @@ func (s *cpListenerSupervisor) abandonAfterPanic() {
 				s.committed = false
 			}
 		})
-	}
-	if s.everPublished {
-		contained(func() { _, _ = cpPublishCPAddresses() })
 	}
 }
 

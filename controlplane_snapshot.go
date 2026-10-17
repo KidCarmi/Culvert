@@ -468,6 +468,13 @@ type ConfigStore struct {
 	// captured, then reconciles it from this source. Nil on bare/test stores
 	// and on non-CP nodes. Guarded by mu.
 	cpAddrSource func() []string
+	// cpAddrWithdrawal, when non-empty, is the address of a Control Plane
+	// whose supervisor exited terminally while the fleet's list still named
+	// it: cpAddrSource is then a WITHDRAWAL source (the live list without
+	// it), and ownership is released only once a publish from it commits
+	// (cp_addr_publish.go, Codex review of #1556). Cleared by
+	// setCPAddressSource and releaseCPAddressSource. Guarded by mu.
+	cpAddrWithdrawal string
 	// addrPub is the owned address list's pending-republish record
 	// (cp_addr_publish.go): set when an owned republish fails, cleared by the
 	// retry loop or the next success. Guarded by addrPubMu, which is never held
@@ -648,10 +655,16 @@ var configPublishBeforeCommit func()
 // recorded pending and retried (publishOwnedCPAddresses).
 func (s *ConfigStore) reconcileCPAddressesFrom(trigger string, build func() []string) error {
 	s.mu.RLock()
-	owned := s.cpAddrSource != nil
+	src, withdrawing := s.cpAddrSource, s.cpAddrWithdrawal != ""
 	s.mu.RUnlock()
-	if !owned {
+	if src == nil {
 		return nil
+	}
+	if withdrawing {
+		// A withdrawal owns the list: an HA transition re-derives it from the
+		// withdrawal source, never from a builder that may still name the
+		// Control Plane being withdrawn.
+		build = src
 	}
 	_, err := s.publishOwnedCPAddresses(trigger, build)
 	return err
@@ -664,7 +677,7 @@ func (s *ConfigStore) reconcileCPAddressesFrom(trigger string, build func() []st
 // with it; a running retry loop sees no source and exits clean.
 func (s *ConfigStore) releaseCPAddressSource() {
 	s.mu.Lock()
-	s.cpAddrSource = nil
+	s.cpAddrSource, s.cpAddrWithdrawal = nil, ""
 	s.mu.Unlock()
 	s.resetCPAddrPublish()
 }
@@ -673,7 +686,7 @@ func (s *ConfigStore) releaseCPAddressSource() {
 // cpAddrSource). Called once at Control Plane activation.
 func (s *ConfigStore) setCPAddressSource(build func() []string) {
 	s.mu.Lock()
-	s.cpAddrSource = build
+	s.cpAddrSource, s.cpAddrWithdrawal = build, "" // a new owner ends any withdrawal
 	s.mu.Unlock()
 	s.resetCPAddrPublish() // a new owner starts a new episode
 }

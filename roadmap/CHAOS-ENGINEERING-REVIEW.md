@@ -8968,6 +8968,43 @@ required before merge; each is now in the tree.
 
   `TestAcquireLeaseForResume_WaitsOutOwnGhost` now installs the staged grant
   before it asserts write authority. Ten mutations each fail a gate.
+* **A terminal exit keeps address ownership until its withdrawal commits
+  (Codex P2 4302158678).** After a panic, the publish of the list without
+  this node had its error discarded, and `exitTerminal` then released
+  ownership and reset the pending record. A rejected withdrawal (snapshot
+  validation, or every commit attempt lost) started a retry loop that found
+  no source and exited clean. Data Planes kept a dead CP address that nothing
+  reconciled, in a process that survived the panic.
+
+  The class rule: a terminal exit never drops address ownership while a
+  withdrawal is uncommitted.
+  - `exitTerminal` withdraws the node (contained) whenever the fleet was told
+    about it, on every terminal edge: the panic edges and `role_conflict`.
+  - `withdrawCPAddress` turns the source into a withdrawal source (the live
+    list without this node) and publishes it through the owned path, so a
+    failure is pending, paged once per episode and retried.
+  - Ownership is released only once the committed list no longer names the
+    node: at once in `exitTerminal`, otherwise by the next successful owned
+    publish or retry (`completeCPAddressWithdrawal`). A withdrawal that never
+    recorded an outcome is latched pending, so a retry owns it. An HA
+    republish during a withdrawal derives from the withdrawal source. A new
+    owner (`setCPAddressSource`) ends the withdrawal.
+  - The latch keeps its single writer (`noteCPAddrPublish`), and nothing new
+    publishes under `HAState.mu`.
+
+  Gates:
+  - `TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits`
+    (the real supervisor): the withdrawal is rejected, the fault persists
+    through a retry, the fault clears, and the retry commits and releases.
+  - `TestChaos71_TerminalExitWithACommittedWithdrawalReleasesAtOnce` (control).
+  - `TestChaos71_NewOwnerEndsAPendingWithdrawal`,
+    `TestChaos71_InterruptedWithdrawalIsLatchedForRetry` and
+    `TestChaos71_HARepublishDuringAWithdrawalNeverReAddsTheNode`.
+  - The exit-edge table's ownership column now says "released after the
+    withdrawal commits" for the published terminal rows, and it gains
+    `panic_with_a_rejected_withdrawal` (kept as a pending withdrawal).
+
+  Seven mutations each fail a gate, including the old release-on-failure.
 * **Sixteenth review round — the address latch is part of the
   generation-guarded publish record.** An address publish that found the list
   already current cleared the rounds-14/15 latch (`addrRejectPaged`) in

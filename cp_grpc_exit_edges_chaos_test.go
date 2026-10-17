@@ -43,6 +43,14 @@ const (
 	cpOwnUnset cpEdgeOwnership = iota
 	cpOwnKept
 	cpOwnReleased
+	// cpOwnReleasedAfterWithdrawal: the fleet was told this node is a Control
+	// Plane, so the terminal exit withdrew it from the list and released
+	// ownership only once that committed.
+	cpOwnReleasedAfterWithdrawal
+	// cpOwnKeptUntilWithdrawn: the withdrawal was rejected, so ownership is
+	// KEPT as a pending, retried withdrawal (Codex P2 4302158678) — released
+	// only when it commits (TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits).
+	cpOwnKeptUntilWithdrawn
 )
 
 // cpEdgeObservation is what the probe captured when the loop went to sleep.
@@ -81,7 +89,8 @@ type cpEdgeRow struct {
 	// (boot).
 	activate string
 	// addrOwnership: the released column for CP address-list ownership,
-	// asserted for EVERY row (terminal exits release it, others keep it).
+	// asserted for EVERY row (terminal exits release it — after the
+	// withdrawal commits, when there is one — others keep it).
 	addrOwnership cpEdgeOwnership
 }
 
@@ -89,12 +98,21 @@ type cpEdgeRow struct {
 // listener supervisor (the table on cpListenerSupervisor.run).
 func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 	boom := errors.New("injected commit-time rejection")
-	var publishes atomic.Int32
+	var publishes, withdrawals atomic.Int32
 	countingPublish := func(changed bool, err error) func() (bool, error) {
 		return func() (bool, error) {
 			publishes.Add(1)
 			return changed, err
 		}
+	}
+	// Every row observes the REAL withdrawal (counted, not replaced).
+	countWithdrawals := func(t *testing.T) {
+		prev := cpWithdrawCPAddress
+		cpWithdrawCPAddress = func(addr string) (bool, error) {
+			withdrawals.Add(1)
+			return prev(addr)
+		}
+		t.Cleanup(func() { cpWithdrawCPAddress = prev })
 	}
 	var lnMu sync.Mutex
 	var lns []net.Listener
@@ -177,6 +195,11 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				e.t.Cleanup(func() { cpActivationAfterClaim = nil })
 			},
 			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleased,
+			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
+				if n := withdrawals.Load(); n != 0 {
+					t.Errorf("a node the fleet was never told about was withdrawn (%d withdrawal(s))", n)
+				}
+			},
 		},
 		{
 			name: "panic_in_onActivated",
@@ -184,11 +207,31 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 				cpInjectPublish(e.t, countingPublish(true, nil))
 				e.onActivated = func() { panic("injected: onActivated") }
 			},
-			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleased,
+			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleasedAfterWithdrawal,
 			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
-				if publishes.Load() < 2 {
-					t.Errorf("the address list naming this node was published but never republished after the "+
-						"panic (%d publish call(s)) — the fleet keeps a Control Plane that is gone", publishes.Load())
+				if withdrawals.Load() == 0 {
+					t.Error("the address list naming this node was published but this node was never withdrawn " +
+						"after the panic — the fleet keeps a Control Plane that is gone")
+				}
+			},
+		},
+		{
+			// Codex P2 4302158678: the withdrawal itself is rejected at commit.
+			// Ownership is kept as a pending, retried withdrawal; its release
+			// once the fault clears is driven by
+			// TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits.
+			name: "panic_with_a_rejected_withdrawal",
+			setup: func(e *cpEdgeEnv) {
+				_, _ = cpWithdrawalTopology(e.t)
+				e.onActivated = cpWithdrawalRejectingOnActivated(e.t, true)
+			},
+			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnKeptUntilWithdrawn,
+			check: func(t *testing.T, sup *cpListenerSupervisor, _ *cpEdgeObservation) {
+				if !cpAddrContains(globalConfigStore.Get().CPAddresses, sup.cfg.addr) {
+					t.Error("precondition: the rejected withdrawal committed")
+				}
+				if st := globalConfigStore.cpAddrPublishSnapshot(); !st.pending || st.trigger != cpAddrWithdrawalTrigger {
+					t.Errorf("the rejected withdrawal is not pending for retry: %+v", st)
 				}
 			},
 		},
@@ -224,10 +267,10 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 					_ = firstListener().Close()
 				}
 			},
-			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleased,
+			ownPort: true, wantRole: "standalone", signal: cpEdgeTerminal, wantReason: "bind loop panicked", addrOwnership: cpOwnReleasedAfterWithdrawal,
 			check: func(t *testing.T, _ *cpListenerSupervisor, _ *cpEdgeObservation) {
-				if publishes.Load() < 2 {
-					t.Errorf("no republish after the terminal exit (%d publish call(s))", publishes.Load())
+				if withdrawals.Load() == 0 {
+					t.Error("no withdrawal after the terminal exit")
 				}
 			},
 		},
@@ -259,6 +302,8 @@ func TestChaos71_SupervisorExitEdgeTable(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			publishes.Store(0)
+			withdrawals.Store(0)
+			countWithdrawals(t)
 			lnMu.Lock()
 			lns = nil
 			lnMu.Unlock()
@@ -335,7 +380,7 @@ func cpRunEdgeRow(t *testing.T, row cpEdgeRow) {
 	if started.currentServer() != nil {
 		t.Error("a server handle is still published after the edge")
 	}
-	cpAssertAddrOwnership(t, row)
+	cpAssertAddrOwnership(t, row, e.cfg.addr)
 	if row.ownPort {
 		cpRequirePortReleased(t, e.cfg.addr)
 	}
@@ -529,7 +574,7 @@ func cpRunActivationEdgeRow(t *testing.T, row cpEdgeRow) {
 	}
 
 	// ---- released column
-	cpAssertAddrOwnership(t, row)
+	cpAssertAddrOwnership(t, row, e.cfg.addr)
 	if got := cpRoleNow(); got != row.wantRole {
 		t.Errorf("role after the edge = %q, want %q", got, row.wantRole)
 	}
@@ -552,15 +597,27 @@ func cpRunActivationEdgeRow(t *testing.T, row cpEdgeRow) {
 }
 
 // cpAssertAddrOwnership checks the address-ownership column: a released row
-// must also read "Not an active Control Plane" on cp_address_list.
-func cpAssertAddrOwnership(t *testing.T, row cpEdgeRow) {
+// must also read "Not an active Control Plane" on cp_address_list and, after a
+// withdrawal, the committed list must no longer name addr; a row kept until
+// withdrawn must still own the list AS a withdrawal of addr.
+func cpAssertAddrOwnership(t *testing.T, row cpEdgeRow, addr string) {
 	t.Helper()
 	globalConfigStore.mu.RLock()
-	owned := globalConfigStore.cpAddrSource != nil
+	owned, withdrawing := globalConfigStore.cpAddrSource != nil, globalConfigStore.cpAddrWithdrawal
 	globalConfigStore.mu.RUnlock()
-	want := row.addrOwnership == cpOwnKept
+	want := row.addrOwnership == cpOwnKept || row.addrOwnership == cpOwnKeptUntilWithdrawn
 	if owned != want {
 		t.Errorf("CP address ownership after the edge = %v, want %v", owned, want)
+	}
+	switch row.addrOwnership {
+	case cpOwnKeptUntilWithdrawn:
+		if withdrawing != addr {
+			t.Errorf("ownership was kept, but not as a withdrawal of %q (withdrawing=%q)", addr, withdrawing)
+		}
+	case cpOwnReleasedAfterWithdrawal:
+		if cpAddrContains(globalConfigStore.Get().CPAddresses, addr) {
+			t.Errorf("ownership was released while the committed list still names %q", addr)
+		}
 	}
 	if !want {
 		if c := checkCPAddressList(); c.Status != diagOK || !strings.Contains(c.Message, "Not an active Control Plane") {
