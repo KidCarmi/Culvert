@@ -101,52 +101,60 @@ all-zero result).
   (HWE 7.0.0-38, Docker 29.9.0, ClamAV 1.5.4) did NOT regress recovery at the
   calibration latency.
 
-## Recovery: the one OPEN item on real ESXi
+## Recovery: the one OPEN item on real ESXi — fsck RULED OUT
 
 ASTRA measured **141.218 s** original-path recovery on real ESXi (over the
-120 s budget) — the console-shutdown P1 is NOT the cause (teardown 0.34 s). The
-141 s is **latency-bound boot I/O**: ~750 MiB read every reboot (kernel + initrd
-+ container layers + ClamAV DB), and datastore latency turns that into seconds
-(`recovery-time.md`: ~9 s per ms). At the calibrated 12 ms profile recovery is
-107.5 s; ASTRA's own range is "ESXi E0 114–162 s ≈ 9–14 ms, shared-device reads
-up to 90 ms on the slowest runs", so 141 s is a ~14 ms+ datastore run — slower
-than the 12 ms calibration. ASTRA's 141 s boot showed local-fs at **~32 s**, vs
-**8.9 s / clean root** in the calibrated lab run. That ~23 s local-fs delta is
-only part of the full **141.218 − 107.5 ≈ 33.7 s** recovery gap; ~11 s sits in
-other stages (firmware/kernel/initrd read at higher latency) and is NOT fsck. A
-`local-fs` milestone does not by itself prove a periodic full check — the
-capture below separates a scheduled fsck from pure latency.
+120 s budget) — the console-shutdown P1 is NOT the cause (teardown 0.34 s).
 
-**Owner-advisor decision (2026-10-17, PR comment 6230751701), answering the
-MODULES=list ask:**
-- **Keep the current broad storage-driver coverage for the next diagnostic
-  candidate; DEFER `MODULES=list`.** It is a separately-qualified optimization,
-  not part of the fsck-policy change. Its 41→25 MB / −8 s is an ESTIMATE — the
-  measured −8 s is for `MODULES=dep` on the b579 payload only; do not transfer
-  it. Before it can ship it needs per-profile boot proof (ESXi AND
-  **Proxmox VE/KVM** AND VirtualBox: cold boot, maintenance reboot,
-  kernel-update/initramfs-regeneration, recovery path). Generic QEMU success is
-  not Proxmox qualification.
-- **The fsck-policy change is what the next diagnostic candidate carries** —
-  `tune2fs -c 0 -i 0` on the root ext4 + masked `e2scrub_all.timer` + the
-  build-time root-fsck-policy report. Safeguards (per the advisor): it disables
-  ONLY the mount-count/time-based schedules — error-triggered checking and the
-  ext4 journal recovery stay, and the operator path for a suspected-corruption
-  case is an OFFLINE `e2fsck -f /dev/sda1` on the stopped appliance's unmounted
-  root. A repair is never suppressed to meet the budget. `e2scrub_all.timer`
-  masking is housekeeping on a plain-partition root, not a measured gain.
-- **141.218 s stays OPEN until the real-ESXi capture closes it** — no closure as
-  "probably storage."
+**ASTRA's original-path filesystem capture is COMPLETE (17 Oct 2026, PR comment
+6230967268 / 5978949299), and it RULES OUT fsck** on the retained 6248 boot
+`13b52b23-…`: root `/dev/sda1` was ALREADY `Maximum mount count -1` /
+`Check interval 0`, the initramfs check reported `cloudimg-rootfs: clean` and
+was condition-skipped at 22.181 s, the journal shows no full root check, and
+`e2scrub_all` never executed. So the proposed fsck-policy change validates
+policy/reporting but is **not** the demonstrated fix for this failure — its two
+triggers were already disabled on the shipped image. (`e2scrub_reap` DID run
+35.379→61.084 s ≈ 25.7 s concurrently; ASTRA records it as "not a demonstrated
+ordering/I/O cause" — a candidate to investigate, not proven.)
 
-**What ESXi must capture on the 141 s-class boot (to split fsck from latency):**
-1. The original PAM → console → recovery-shell → `sudo shutdown` recovery, ≥3
-   reboots, recovery_s per reboot, AND the root fs state at the START of each
-   boot (`dmesg | grep EXT4-fs`: "clean" vs "recovering journal"/full check) +
-   a `tune2fs -l` of the root.
-2. The native datastore read-latency samples during each recovery, to place the
-   run on the 9 s/ms curve.
-3. Confirm the baked 1.5 sidecar reaches `/ready clamav ok`.
-4. The admin threat-domain allowlist source/restore equality (no repair).
+**Measured recovery phases (new-kernel uptime, s)** — where the time actually
+goes, latency-bound reads not fsck:
+
+| Phase | Window (s) | Span |
+|---|---|---|
+| kernel start → local-fs | 0 → 32.375 | ~32 s (kernel + initramfs + mounts) |
+| AppArmor + DBus | 32.65 → 37.95 | ~5 s |
+| containerd | 38.65 → 54.68 | 16.0 s (gap 43.02→54.53 = **11.5 s**) |
+| Docker | 54.69 → 68.16 | 13.5 s (container load 60.39→65.56) |
+| stack resume | 68.16 → 90.79 | 22.6 s (compose up → ClamAV ready) |
+
+ESXi latency on that VM: device read mean ~30 ms / max 67 ms, VM read mean
+~53 ms / max 156 ms — well above the 12 ms lab calibration (107.5 s). Dominant,
+latency-sensitive phases: the **pre-local-fs reads** and the **container-engine
++ stack** phases; single largest identified item is the 11.5 s containerd
+metadata→next-plugin gap. ASTRA is explicit: sampled latency is not yet
+demonstrated causation, and no guest boot-I/O sampler existed for this reboot.
+
+**Owner-advisor decision (PR comment 6230751701) still holds:** keep broad
+storage-driver coverage; DEFER `MODULES=list` (its −8 s is an ESTIMATE measured
+for `MODULES=dep` on b579 only; needs per-profile boot proof incl. **Proxmox
+VE/KVM** before shipping). The `tune2fs -c 0 -i 0` + masked `e2scrub_all.timer`
++ build-time report stays as reporting/guarantee hardening (error-triggered +
+journal checks preserved; offline `e2fsck -f /dev/sda1` is the repair path) —
+NOT the recovery fix. **141.218 s stays OPEN; no closure as "probably storage."**
+
+**Selected next controlled comparison (in-lab, retained 6248 bytes, no new OVA):**
+1. **Per-phase breakdown in the recovery-ab job** matching ASTRA's boundaries
+   (local-fs / AppArmor / DBus / containerd / Docker / stack resume + the
+   containerd metadata→next-plugin gap), so lab and ESXi phases are comparable.
+2. **A guest boot-I/O sampler** over the recovery window (per-phase
+   `/proc/diskstats` sectors-read deltas) — the specific MISSING INPUT ASTRA
+   named; proves which phase pays the latency.
+3. **Two injected latencies** — the calibrated `esxi12` and a new `esxi30`
+   (~30 ms read / 15 ms write, matching ASTRA's device-read mean) — to see which
+   phases scale with latency (the latency-bound ones) vs which are fixed.
+4. Only then, a focused engine/provisioning A/B on the dominant phase. Exact
+   replacement bytes still require independent ESXi qualification.
 
 **Same-bytes note:** OVA `59d4d371` (artifact 12074562532) is the bytes ASTRA
 already tested — not a new import. A provisioning fix (initramfs / tune2fs /
