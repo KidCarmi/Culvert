@@ -771,6 +771,7 @@ type publishKind int
 const (
 	publishFull      publishKind = iota // Update: the whole config
 	publishAddresses                    // UpdateCPAddressesFrom: the CP address list only
+	publishEpoch                        // RestampFenceEpoch: the committed content, new fencing epoch
 )
 
 // publishAct is a plan's verdict on one attempt.
@@ -902,6 +903,9 @@ func (s *ConfigStore) clearPublishErrLocked(kind publishKind) {
 	}
 	// publishAddresses: nothing here — its latch is the address-publish
 	// record's (noteCPAddrPublish), guarded by the publish generation.
+	// publishEpoch: nothing either — a restamp carries none of a rejected full
+	// publish's policy, and its refusal is the HA transition's to report
+	// (commitGrant).
 }
 
 // afterCommit records the blocklist delta and notifies subscribers OUTSIDE the
@@ -1014,6 +1018,76 @@ func (s *ConfigStore) updateCPAddressesBound(own cpAddrOwner, build func() []str
 	})
 }
 
+// RestampFenceEpoch commits the COMMITTED snapshot, content unchanged,
+// restamped with the current stamp epoch (publishFenceEpoch) — the commit an
+// authority-gaining HA transition makes BEFORE it advertises a new fencing
+// epoch (commitGrant, ha_epoch_commit.go). The candidate is the
+// committed snapshot plus the epoch digits, through the same commit-time gates
+// and optimistic concurrency as every publish. An already-current stamp is
+// success.
+//
+// Nothing published yet is NOT success: it returns errNoSnapshotToRestamp
+// (Codex P1 4302217586 on #1645). A Control Plane whose initial publish was
+// rejected has no distributable snapshot, so no commit carries the epoch, and
+// the transition must not advertise it on that strength. commitGrant decides
+// what follows: a refusal, or for a promote a first publish its activation
+// makes, verified before the epoch is exposed.
+func (s *ConfigStore) RestampFenceEpoch() error {
+	notYet := false
+	_, err := s.commitPublish(publishPlan{
+		kind: publishEpoch,
+		build: func(cur committedView) (ConfigSnapshot, publishAct) {
+			notYet = !cur.published
+			if notYet {
+				return ConfigSnapshot{}, publishNotYet
+			}
+			// Content unchanged: commitPublish restamps an up-to-date snapshot
+			// whose epoch is stale, and commits nothing when it is current.
+			return ConfigSnapshot{}, publishUpToDate
+		},
+		exhausted: fmt.Errorf("fencing-epoch restamp lost the commit race %d times in a row", cpAddrMergeAttempts),
+	})
+	if err == nil && notYet {
+		return errNoSnapshotToRestamp
+	}
+	return err
+}
+
+// preflightFirstPublish runs the commit-time gates over snap stamped with the
+// current stamp epoch, committing nothing: whether a first publish of snap,
+// made now, would be accepted. A promote whose store has published nothing
+// uses it before its activation starts the Control Plane listener
+// (commitGrant): an activation whose first publish would be rejected must be
+// refused before that listener exists, not after.
+func preflightFirstPublish(snap ConfigSnapshot) error {
+	snap.Epoch = publishFenceEpoch()
+	return validateSnapshotForPublish(snap)
+}
+
+// keepEpochStampIfCommitted reports whether the committed snapshot already
+// carries epoch e (a concurrent publish committed it); if not it runs revert —
+// the stamp mirror's rollback — under s.mu, the lock every commit re-checks
+// the mirror under, so no publish can commit e after the revert.
+func (s *ConfigStore) keepEpochStampIfCommitted(e int64, revert func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.published && s.snap.Epoch == e {
+		return true
+	}
+	revert()
+	return false
+}
+
+// revertEpochStamp runs revert — an abandoned install's stamp-mirror rollback
+// (abandonGrantLocked) — under s.mu, the lock every commit re-checks the
+// mirror under, telling it whether the committed snapshot carries epoch e. So
+// the check and the rollback are one step: no publish commits e between them.
+func (s *ConfigStore) revertEpochStamp(e int64, revert func(committed bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revert(s.published && s.snap.Epoch == e)
+}
+
 // rejectPublish records a commit-time rejection (count OR byte gate): it does
 // NOT publish, stamps LastPublishError, logs, and fires the operator alert.
 // Returns err so callers can surface it inline too.
@@ -1028,11 +1102,12 @@ func (s *ConfigStore) rejectPublish(kind publishKind, err error) error {
 	// The log line still records EVERY rejection (and the pending state counts
 	// each attempt); only the page is latched.
 	logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
-	if kind == publishAddresses {
+	if kind != publishFull {
 		// The address kind's latch and its page (once per episode, queued
 		// before the webhooks load) belong to the generation-guarded record:
 		// the caller's noteCPAddrPublish decides and pageCPAddrRejection
-		// delivers.
+		// delivers. The epoch kind's refusal is paged, once per episode, by
+		// the HA transition that needed it (commitGrant).
 		return err
 	}
 	payload := AlertPayload{
@@ -1158,6 +1233,19 @@ func (s *ConfigStore) Version() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.version
+}
+
+// committedVersionEpoch returns the committed version and the fencing epoch
+// the committed snapshot is stamped with (0 before the first publish), read
+// together under one lock: the epoch a reply describing that version must
+// carry (GetConfigDelta).
+func (s *ConfigStore) committedVersionEpoch() (version, epoch int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.published {
+		epoch = s.snap.Epoch
+	}
+	return s.version, epoch
 }
 
 // Subscribe returns a channel that receives a signal on every config update.

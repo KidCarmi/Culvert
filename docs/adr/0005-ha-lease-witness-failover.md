@@ -108,6 +108,54 @@ Recorded so implementation cannot forget them:
 
 ## Implementation log
 
+### 2026-10-17 — Implementation note (owner decision): the role-less epoch floor (CHAOS-71, #1645)
+This note amends S3's stamping in one case and leaves the S3 rule itself unchanged.
+- **Problem (Codex P1 4302435329 on #1645):** an authority-gaining transition commits a
+  snapshot stamped with its new epoch E before it advertises E (`ha_epoch_commit.go`). If the
+  grant is lost between that commit and the exposure, nothing advertises E, but the committed
+  snapshot still carries it. Data Planes that fetched it ratchet to E. Before this note, the
+  stamp then fell to the installed grant, 0, and those Data Planes rejected every later publish
+  as the zombie shape. After a failed enable the node holds no HA role and is still serving, so
+  its Data Planes froze on stale config.
+- **Decision (project owner, the narrow option):** while the node holds **no HA role** (HA off,
+  for example after a failed enable), the published config stamp never drops below the highest
+  epoch this node has committed in a snapshot (`committedEpoch`, `configEpochLocked` in
+  `ha_fencing.go`). A `GetConfigDelta` reply carries the committed stamp, so it carries the
+  floor too. While the node holds
+  **an HA role** (standby, read-only leader, recovering leader), S3 is unchanged: a node that
+  lost its lease stamps 0, so a fenced node's unfenced writes are still rejected. Data Planes
+  that ratcheted to E from a failed promote or recovery wait, fail closed, for the real leader's
+  higher epoch.
+- **Mechanics:** the floor is recorded only from a check against the committed snapshot made
+  under the store lock (`noteCommittedEpochLocked`), and an abandoned install reverts the stamp
+  under that lock (`abandonGrantLocked`). The stamp mirror keeps its single writer,
+  `syncFenceEpochLocked`, which a role change now re-runs. Reverting an uncommitted E still
+  returns to the floor below it, because nothing carrying E committed. The floor never reaches
+  `CurrentEpoch`, the heartbeat, issuance, `/healthz` or write authority.
+- **Limits (outside this decision's scope):** the floor is kept in memory, so after a restart an
+  HA-off node stamps 0 again, and Data Planes whose D4 ratchet persisted E reject it. Heartbeat
+  replies and RenewCert responses still carry `CurrentEpoch` (0): a Data Plane at E logs the
+  heartbeat rejection and refuses a certificate that node renews.
+- **Pinned by:** `TestChaos71_FailedEnableAfterItsCommitKeepsTheRoleLessFloor`,
+  `TestChaos71_HARoleLosingACommittedGrantStampsZero` and
+  `TestChaos71_Wall_RoleLessEpochFloorAppliesOnlyWithoutAnHARole` (`ha_epoch_floor_chaos_test.go`).
+- **Follow-up rules (Codex P1s 4302926142, 4302926140 and 4302926144 on #1645):**
+  - An install failure is classified by its cause (`grantLost`). A grant that was lost or lapsed
+    between the commit and the exposure means the fence state is unknown. A resume then becomes
+    an unfenced leader and arms the CHAOS-55 recovery loop. Only a real snapshot-commit refusal
+    (budget, validation, nothing published) takes the S2 read-only stance with no retry.
+  - An epoch label on outbound data comes from the committed data it labels, never from live
+    HA state. A delta reply carries its target snapshot's stamp, read together with the version
+    under one lock. The Data Plane fences on every epoch the reply carries: it ratchets to the
+    highest one, then requires the target data (the remainder and the last delta) to be at that
+    ratchet. Heartbeat, Enroll and RenewCert replies carry live authority (`CurrentEpoch`) by
+    design. A full `GetConfig` reply serves the committed snapshot together with its own stamp.
+  - `onPromote` is transactional. If a promote fails after its Control Plane activation
+    completed, the activation is undone (`deactivateControlPlane`: the supervisor stops, the
+    role is restored, address ownership is released after any withdrawal) before the promote
+    can be retried.
+  - Pinned by `ha_epoch_install_cause_chaos_test.go`.
+
 ### 2026-07-03 — S5 SHIPPED: operator wiring (flags/YAML/compose/GUI/runbook) — PROGRAM COMPLETE
 - **Config surface:** `-ha-etcd-endpoints/-ha-etcd-cert/-ha-etcd-key/-ha-etcd-ca/-ha-lease-ttl`
   flags + `cluster.{etcd_endpoints,etcd_cert_file,etcd_key_file,etcd_ca_file,lease_ttl_seconds}`

@@ -48,18 +48,43 @@ func (h *HAState) setLeaseEpochLocked(epoch int64) {
 	h.syncFenceEpochLocked()
 }
 
-// syncFenceEpochLocked refreshes fenceEpoch from the fields CurrentEpoch
-// reads. Caller holds h.mu (write).
+// syncFenceEpochLocked refreshes fenceEpoch, the epoch publishes stamp: the
+// one an install is committing (stampEpoch), else configEpochLocked. Caller
+// holds h.mu (write). The mirror derives from the role too, so a role change
+// re-runs it (setTopologyLocked).
 func (h *HAState) syncFenceEpochLocked() {
-	if h.lease == nil {
+	switch {
+	case h.lease == nil:
 		h.fenceEpoch.Store(0)
-		return
+	case h.stampEpoch != 0:
+		h.fenceEpoch.Store(h.stampEpoch)
+	default:
+		h.fenceEpoch.Store(h.configEpochLocked())
 	}
-	h.fenceEpoch.Store(h.leaseEpoch)
 }
 
-// PublishedFenceEpoch is CurrentEpoch without h.mu — what a config publish
-// stamps (ConfigStore.commitPublish), safe to call while h.mu is held.
+// configEpochLocked is the epoch this node's config carries outside an
+// install. Under an HA role (leader, read-only leader, standby) it is the
+// installed grant: a node that lost its lease stamps 0, ADR-0005 S3's zombie
+// shape, which a Data Plane that has seen an epoch rejects. With NO HA role it
+// never drops below committedEpoch, the highest epoch this node committed in a
+// snapshot (the role-less floor, ADR-0005 implementation note): a node that
+// committed E and then lost the grant before exposing it (a failed enable) is
+// HA-off and still serving, and stamping 0 would freeze every Data Plane that
+// fetched the E-stamped snapshot. Caller holds h.mu.
+func (h *HAState) configEpochLocked() int64 {
+	if h.role == "" {
+		return max(h.leaseEpoch, h.committedEpoch)
+	}
+	return h.leaseEpoch
+}
+
+// PublishedFenceEpoch is the epoch a config publish stamps
+// (ConfigStore.commitPublish), read without h.mu so it is safe while h.mu is
+// held. It equals CurrentEpoch except while commitGrant commits a new
+// grant's epoch: then it is already the new one, so that commit (and any
+// concurrent publish) carries it before CurrentEpoch advertises it. And with
+// no HA role it never drops below the role-less floor (configEpochLocked).
 func (h *HAState) PublishedFenceEpoch() int64 { return h.fenceEpoch.Load() }
 
 // CurrentEpoch reports this node's fencing epoch for stamping outbound

@@ -8810,6 +8810,164 @@ required before merge; each is now in the tree.
     transition returns with its republish only recorded.
 
   Five mutations each fail a gate.
+* **Twentieth review round — "nothing to restamp" is not success, and the
+  keepalive acts on the grant state after its Renew (Codex P1s 4302217586 and
+  4302217588 on #1645).**
+  - *No committed snapshot.* A persisted leader whose initial publish was
+    rejected has nothing published, and `RestampFenceEpoch` reported that as
+    success, so the resume exposed an epoch no distributable snapshot carried.
+    It now returns `errNoSnapshotToRestamp`, and `commitGrant` refuses (enable
+    errors, a boot resume takes the ADR-0005 S2 read-only leader stance and
+    pages once, recovery stays read-only and retries). The rule itself moved
+    into `exposeGrantLocked`: it exposes only when the committed snapshot
+    carries the epoch, checked atomically with every commit under the store
+    lock (a compare, no marshal), and reverts the stamp mirror in the same
+    step otherwise. A fresh standby's promote is the one path with no
+    snapshot that is still correct: its first publish is the activation
+    inside `onPromote`, stamped by the mirror. It is preflighted against the
+    commit-time gates before the listener starts (`preflightFirstPublish`),
+    so an oversized config refuses a clean, retryable standby, and the
+    exposure verifies that the publish committed.
+  - *Decisions taken before a blocking lease RPC.* A keepalive started on a
+    staged grant cached `staged=true` across `Renew`; when the transition
+    exposed the grant mid-RPC, a confirmed loss went to the staged-grant drop,
+    which left the installed epoch, the leader role and write authority in
+    place and the loop gone with its handle set. Every outcome of a round now
+    reads the grant state after the RPC, under `h.mu` (`endRenewedGrant`):
+    installed self-fences (`selfFenceGrant`, the epoch re-checked atomically
+    with the demotion), still staged is dropped, already gone ends nothing. A
+    renewal confirms the window only for a grant still held, and an exiting
+    loop clears its own handle (`releaseKeepaliveHandle`). The same rule for
+    the CHAOS-55 recovery round, which read "unfenced leader" before its
+    Acquire: the state is re-checked under `h.mu` before the commit and again
+    with the exposure (`recoveryDisarmedLocked`), so a node that re-entered
+    standby meanwhile never gets an epoch, write authority or a keepalive.
+
+  Gates: `TestChaos71_NoCommittedSnapshotNeverAdvertisesTheEpoch`,
+  `TestChaos71_PromoteWithNothingPublishedExposesOnlyItsCommittedFirstPublish`,
+  `TestChaos71_KeepaliveActsOnTheGrantStateAfterItsRenew` and
+  `TestChaos71_LeaseRecoveryRechecksItsStateAfterTheAcquire`, each with a
+  control. Six mutations each fail a gate, including the pre-fix pair (the
+  restamp's success plus no exposure check).
+* **Nineteenth review round — the epoch-stamped commit runs outside
+  `HAState.mu` (the class rule of Codex P1 4301857115, applied to HA
+  fencing).** #1556 fixed the topology republish under `h.mu`. The stamped
+  commit of the seventeenth round ran under `h.mu` too
+  (`installGrantLocked`), with the keepalive started only afterwards, so a
+  large snapshot could cost a short-TTL lease in the same way.
+
+  The commit now runs outside the lock, with the keepalive already renewing
+  the grant:
+  - The acquire stages the grant.
+  - The transition starts the keepalive on the staged grant
+    (`heldEpochLocked`; renewing exposes nothing).
+  - `commitGrant` commits the stamped snapshot outside `h.mu`. It takes the
+    lock only to set the stamp, and afterwards for the compare-only
+    keep-or-revert decision.
+  - `exposeGrantLocked` takes `h.mu` again, re-checks that the grant is still
+    staged, installs the epoch and takes the role.
+
+  If the keepalive loses a grant that was never installed, it drops the grant
+  (`loseStagedGrant`) instead of self-fencing a role that was never taken,
+  and the exposure is then refused. An aborted or refused transition stops a
+  keepalive that renewed only the staged grant, so the grant lapses at its
+  TTL.
+
+  Gates:
+  - `TestChaos71_SlowEpochCommitDoesNotCostTheLease`: a commit longer than a
+    3 s TTL leaves the lease held and renewed, and the epoch installed.
+  - `TestChaos71_GrantLostDuringTheEpochCommitIsNotExposed`.
+  - `TestChaos71_Wall_NoSnapshotPublishUnderTheHALock`, from #1556, now
+    passes here.
+  - The fencing wall now requires the keepalive before the commit.
+
+  Residual: a promote whose grant is lost in the moments between
+  `onPromote` and the exposure leaves the listener running, so the next
+  promote's `onPromote` finds it already running. That needs a lease loss
+  during the promotion itself.
+* **Eighteenth review round — a refused promote commit never starts the
+  listener (Codex P1 4300948604; HA fencing, split out of #1556).** The
+  seventeenth round committed the new epoch after `onPromote`. A fresh
+  standby whose commit was then refused reset only the promotion once-guard:
+  the Control Plane listener and the `control-plane` role stayed up, so every
+  later promote failed "already running as control-plane" before it reached
+  another commit.
+
+  `installGrantLocked` is now split into `commitGrantLocked` (commit the
+  stamped snapshot; the epoch stays unadvertised with the stamp mirror on it)
+  and `exposeGrantLocked` (the only writer of a non-zero `leaseEpoch`).
+  `promote` commits before `onPromote` and exposes after it. A refused
+  commit leaves a clean, retryable standby, with no listener and no role. A
+  failed `onPromote` abandons the committed epoch
+  (`abandonGrantLocked`): it is never advertised, and publishes stop
+  stamping it. Enable, resume and recovery keep the single-call
+  `installGrantLocked`.
+
+  Gates:
+  - `TestChaos71_RefusedPromoteCommitNeverStartsTheListener`, with a stateful
+    `onPromote` that fails "already running as control-plane" on a second
+    start. The refused promote starts nothing, and the retry after the config
+    fits succeeds and starts the listener exactly once.
+  - `TestChaos71_PromoteListenerFailureAbandonsTheCommittedEpoch`.
+  - The fencing wall now also requires the commit before `onPromote`, and the
+    exposure before the leader role.
+
+  Eight mutations each fail a gate, including the pre-fix order.
+* **Seventeenth review round — a fencing epoch is advertised only once a
+  snapshot stamped with it has committed.** An authority-gaining HA transition
+  installed its new epoch E at acquire time (`acquireLeaseAttempt`), so the
+  heartbeat, issuance, deltas and `/healthz` advertised E at once. The restamp
+  to E rode in the topology writer's commit together with the new CP address
+  list. When that commit was rejected (the added HA addresses pushed the
+  snapshot past `snapshotWireBudget`), the transition still completed: DPs
+  ratcheted to E and rejected the committed snapshot, which still had the old
+  epoch. Existing DPs stayed on stale policy and fresh ones could not
+  initialize. Lease recovery had the same class with no rejection needed: its
+  role does not change, so nothing restamped at all.
+
+  The fix uses the standard fencing order (`ha_epoch_commit.go`):
+  1. The acquire only stages the grant (`grantEpoch`). It confers no write
+     authority and reaches no surface.
+  2. `installGrantLocked` commits the committed snapshot, content unchanged,
+     restamped with E (`ConfigStore.RestampFenceEpoch`, kind `publishEpoch`).
+     During that commit the stamp mirror already reads E, so a concurrent
+     publish cannot commit the old epoch after it.
+  3. Only on success does `leaseEpoch` become E.
+  4. The caller then takes its role, and the topology writer publishes the
+     address list as an ordinary owned publish (latched, retried, paged once).
+     A list that does not fit is only a stale failover hint.
+
+  If the E-stamped commit is refused, E is never advertised and the stamp
+  mirror reverts, atomically with every commit. The one exception is a
+  concurrent publish that already committed E: then E is committed, and the
+  install proceeds. The transition then fails closed on leadership, never on
+  fencing:
+  - enable errors with no role;
+  - promote stays standby and retryable;
+  - lease recovery stays a read-only leader and retries;
+  - a boot resume takes the ADR-0005 S2 read-only leader stance: the role is
+    kept with no write authority, so issuance is refused. A roleless node
+    would have its standalone sinks ungated.
+
+  The refusal pages `config_snapshot_rejected` once per episode, queued before
+  the webhooks load. Grants are left to their TTL, because ADR-0005 has no
+  Release primitive. The refused resume arms no auto-retry, per ADR-0005 S2:
+  the CHAOS-55 recovery loop is armed only for an unknown fence. In-process
+  recovery of that case is S4 follow-up work.
+
+  Gates:
+  - `TestChaos71_EpochCommitsBeforeTheAddressList_AddressesOverBudget`
+    (enable, resume): E is committed and advertised, a DP accepts the
+    snapshot, and only the list is pending and paged once.
+  - `TestChaos71_PromoteAndRecoveryCommitTheEpochBeforeAdvertisingIt`.
+  - `TestChaos71_RefusedEpochCommitNeverAdvertisesTheEpoch` (enable, promote,
+    resume, recovery).
+  - `TestChaos71_RefusedBootResumePagesOnceAfterTheWebhooksLoad`.
+  - `TestChaos71_EpochCommittedByAConcurrentPublishIsInstalled`.
+  - The call-graph wall `TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit`.
+
+  `TestAcquireLeaseForResume_WaitsOutOwnGhost` now installs the staged grant
+  before it asserts write authority. Ten mutations each fail a gate.
 * **A terminal exit keeps address ownership until its withdrawal commits
   (Codex P2 4302158678).** After a panic, the publish of the list without
   this node had its error discarded, and `exitTerminal` then released
