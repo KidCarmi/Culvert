@@ -54,40 +54,62 @@ In every case:
 - `culvert-appliance-reset-identity` removes the marker, so a reset or cloned appliance regenerates its identity through cloud-init on its next boot.
 - An unwritable marker is logged and never fails provisioning.
 
-**Periodic root fsck disabled**: `build-ova.sh` runs `tune2fs -c 0 -i 0` on the
-root ext4 (guestfish `maxmountcount:0 intervalbetweenchecks:0`) right after the
-in-place grow, and the build then re-reads `tune2fs -l` and refuses any ext4
-with a mount-count or time-based check still armed (`$OUT/root-fsck-policy.txt`
-records the base and final policy).
-- A periodic check fires a FULL root fsck on some later maintenance reboot; on
-  slow ESXi-like storage that adds ~20-30 s to local-fs and can push the
-  recovery over the 120 s budget. `tune2fs -c 0 -i 0` disables ONLY the
-  mount-count and time-based schedules; error-triggered checking and the ext4
-  journal recovery are untouched, and the on-boot check of a cleanly-unmounted
-  fs stays instant. This is not a free integrity win: with no scheduled sweep,
-  latent on-disk corruption is surfaced only on an error or journal-replay
-  trigger, so a necessary repair must never be suppressed to meet the timing
-  budget. The operator path for a suspected-corruption case is an OFFLINE check
-  — stop the stack, boot the recovery shell (or attach the disk to another
-  host) and run `e2fsck -f /dev/sda1` against the unmounted root before
+**Periodic root fsck guaranteed off + reported** — policy/reporting hardening,
+**NOT the fix for the 141.218 s failure** (ruled out below): `build-ova.sh` runs
+`tune2fs -c 0 -i 0` on the root ext4 (guestfish
+`maxmountcount:0 intervalbetweenchecks:0`) right after the in-place grow, then
+re-reads `tune2fs -l` and refuses any ext4 with a mount-count or time-based
+check still armed (`$OUT/root-fsck-policy.txt` records the base and final
+policy).
+- It disables ONLY the mount-count and time-based schedules; error-triggered
+  checking and the ext4 journal recovery are untouched, and the on-boot check of
+  a cleanly-unmounted fs stays instant. This is not a free integrity win: with
+  no scheduled sweep, latent on-disk corruption is surfaced only on an error or
+  journal-replay trigger, so a necessary repair must never be suppressed to meet
+  the timing budget. The operator path for a suspected-corruption case is an
+  OFFLINE check — stop the stack, boot the recovery shell (or attach the disk to
+  another host) and run `e2fsck -f /dev/sda1` against the unmounted root before
   returning it to service.
-- Motivated by ASTRA's 141.218 s ESXi reboot showing local-fs at ~32 s with a
-  suspected fsck transition, vs a clean 8.9 s local-fs in the calibrated 12 ms
-  lab run (recovery-ab run 38989972928, 6248daf7: 107.69 / 107.53 / 107.52 s,
-  under budget). That ~23 s local-fs delta is only part of the full
-  141.218 − 107.5 ≈ 33.7 s recovery gap; the remaining ~11 s sits in other
-  stages (firmware/kernel/initrd read time at higher latency) and is NOT
-  attributed to fsck. A `local-fs` milestone or a journal-replay line does not
-  by itself prove a periodic full check — the real-ESXi capture must carry the
-  initramfs/systemd fsck output, `tune2fs -l` policy/state, and concurrent
-  datastore latency to separate a scheduled fsck from pure latency. The
-  build-time report makes the shipped base policy visible for that comparison.
+- **fsck is RULED OUT as the cause of the 141.218 s failure** (ASTRA
+  original-path ESXi capture, 17 Oct 2026, retained 6248 boot `13b52b23-…`): the
+  root was ALREADY `Maximum mount count -1` / `Check interval 0`, the initramfs
+  check reported `cloudimg-rootfs: clean` and was condition-skipped at 22.181 s,
+  the journal shows no full root check, and `e2scrub_all` never executed. So
+  this change only GUARANTEES and REPORTS a state the retained image already
+  had — it does not recover the lost seconds. The earlier "suspected fsck
+  transition" hypothesis is retired by that capture.
 
 **`e2scrub_all.timer` masked**: `prepare-guest.sh`. The appliance root is a
 plain partition with no LVM snapshot target, so the periodic online scrub has
 nothing to scrub. Masking it is housekeeping — it removes a no-op timer, not a
-measured recovery gain. `e2scrub_reap` (stale-snapshot cleanup) is left alone —
-it is instant.
+measured recovery gain. NOTE: `e2scrub_reap` is NOT instant — ASTRA observed it
+running 35.379→61.084 s (≈25.7 s) CONCURRENTLY with the container-engine phase
+on the 141 s boot; ASTRA records it as "not a demonstrated ordering/I/O cause,"
+so it is a candidate contributor to investigate, not a proven one, and is left
+unmasked pending that evidence.
+
+## Measured recovery phases (ESXi 141.218 s boot)
+
+ASTRA's original-path capture (new-kernel uptime, seconds) localises where the
+time goes — latency-bound reads, not fsck:
+
+| Phase | Window (s) | Span |
+|---|---|---|
+| kernel start → local-fs | 0 → 32.375 | ~32 s (kernel + initramfs + mounts) |
+| AppArmor + DBus | 32.65 → 37.95 | ~5 s |
+| containerd | 38.65 → 54.68 | 16.0 s (incl. one gap 43.02→54.53 = **11.5 s**) |
+| Docker | 54.69 → 68.16 | 13.5 s (container load 60.39→65.56) |
+| stack resume | 68.16 → 90.79 | 22.6 s (compose up → ClamAV ready) |
+
+ESXi storage latency on that VM: device read mean ~30 ms / max 67 ms, VM read
+mean ~53 ms / max 156 ms — well above the 12 ms lab calibration (which recovers
+in 107.5 s). The dominant, latency-sensitive phases are the **pre-local-fs
+reads** and the **container-engine + stack** phases; the single largest
+identified item is the 11.5 s containerd metadata→next-plugin gap. ASTRA is
+explicit that sampled latency is not yet demonstrated causation and that no
+guest boot-I/O sampler existed for this reboot — closing that is the next
+controlled comparison (per-phase timing + a guest `/proc/diskstats` sampler at
+two injected latencies, retained bytes, before any engine/provisioning change).
 
 ## What does not ship, and why
 
