@@ -95,6 +95,18 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-04 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: the
+Control Plane's gRPC listener, and the third instance of "which plane may kill
+which". `CLAUDE.md`'s CHAOS-66 note names this path explicitly — *"the CP gRPC
+bind (`cluster_startup.go`) is the closest unexamined analogue"* — after §33
+(CHAOS-57, the admin UI listener) and §36 (CHAOS-66, the SOCKS5 bind) closed
+the same shape on two other planes. First claimed on its branch as `CHAOS-73`
+(ids 67–72 were then allocated across open sweeps and only 70 had merged);
+**renumbered to `CHAOS-71` in merge order** when main was brought in — 71 was
+the id this domain's earlier sweep (#1534, closed in favour of this one) held,
+and it is the next free id on main. Findings and gates are written up in §41
+below.**
+
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
 in, because the SOCKS5-bind sweep below had taken 66 first — another
@@ -1102,6 +1114,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | HA-13 | HA-aware CP update handoff uses a **fixed 15s sleep**, never confirms the standby actually promoted before taking the leader down → possible leaderless window; reports success regardless. | GAP | M | `update_cluster.go:593-598,706-746` |
 | HA-14 | Session HMAC / secrets sync: fenced in-band (good), but `persistDPLastGoodConfigSnapshot` writes the whole snapshot **including `SessionHMAC`** as plaintext JSON (0600) — no envelope encryption like the CA key gets. | GAP (at-rest) | M | `controlplane.go:1979-1997,2058-2061` vs DP node-key encrypt `main.go:1757-1760` |
 | HA-15 | Puller "no live holder" reject couples standby replication to a healthy leader lease — a witness outage stalls replication until a holder reappears (intended safety-over-availability; needs a runbook entry). | ✓ (documented) | L | `ha_fencing.go:94-97,83-85` |
+| CL-22 | **CP gRPC listener bind/TLS failure was FATAL on the boot path** — `logFatalf` from `initCluster`, which runs BEFORE the proxy, SOCKS5 and admin UI start, so an occupied gRPC address or an unreadable mTLS pair killed the whole appliance; and a `Serve` that returned after a successful bind was SILENT and TERMINAL while `clusterRole.role`/`grpcAddr` kept reporting a healthy Control Plane. The only listener in the appliance with no health plane at all. | GAP → **CLOSED** (CHAOS-71 §41, `cp_grpc_bind.go` + `cp_grpc_health.go`) | H | `cluster_startup.go:96` (pre-fix); `main.go:228` vs `269`/`271`; `controlplane_server.go` `srv.Serve` goroutine |
+| CL-23 | **The Data Plane's two boot fatals are the same class one plane over**: `dp_enrollment.go` still `logFatalf`s on a DP node-key at-rest failure and on DP client construction, from `startDataPlane`, on the same pre-proxy boot path. NOT closed by CHAOS-71 — one concern per change, and the DP posture question (*may a node that cannot reach its CP serve traffic at all?*) is a genuinely different decision, with a real argument on both sides (a DP serves last-good config, so degrading is defensible; a DP that never enrolled has no config to serve). | GAP (open, recorded) | M | `dp_enrollment.go:277,300` |
+| CL-24 | **A crash-looping CP boot minted and persisted a fresh CLUSTER CA before dying** — `initClusterCA` runs before the bind, so on a node with an EPHEMERAL data volume each iteration would mint a different trust root (§18's *"a retry MUST NEVER MINT"* hazard, for the root that authenticates every DP to the CP). Idempotent on a persistent volume, and the crash loop that reached it is gone (CL-22), so the reachable path is closed; the minting POLICY is unchanged. Observed in CHAOS-71's reproduction. | GAP (open, recorded — latent) | L/M | `main.go` `enableControlPlane` → `initClusterCA` ordering |
 
 ### 2.4 Storage / Filesystem / Persistence / Configuration
 
@@ -8281,3 +8296,939 @@ the sweep happens to be editing.
   from the local-account delete path, which the roster backstop already covers;
   it becomes live the moment user-level revocation is wired to anything else.
   Recorded as **AU-19**, not fixed inside a sweep about durability.
+
+---
+
+## 41. CHAOS-71 — The Control Plane's gRPC listener, and which plane may kill which
+
+**Id allocated at the START of the sweep**, per the governance note in §0 — in a
+committed placeholder row, before any code was written. The branch first took
+`CHAOS-73` because ids 67–72 were allocated across open sweeps in one pass (see
+the CHAOS-70 revision-log row) and only 70 had merged. On the owner's
+open-PR cleanup (#1556 made canonical; #1534/#1546/#1571/#1578 closed in its
+favour) it was **renumbered to `CHAOS-71` in merge order**: the next free id on
+main, and the id the closed #1534 sweep of this same domain held. Its gates
+that were ported from #1534 keep their `TestChaos71_` names.
+
+### 41.1 Why this path, and why now
+
+This sweep did not pick its own target. `CLAUDE.md`'s CHAOS-66 note names it
+verbatim as the remaining one: *"the CP gRPC bind (`cluster_startup.go`) is the
+closest unexamined analogue"*. §33 (CHAOS-57) closed the shape for the admin UI
+listener and recorded SOCKS5 as still open; §36 (CHAOS-66) closed SOCKS5 and
+recorded this. Three sweeps, one rule, each naming the next.
+
+The progression matters because the severity grows at each step:
+
+| Sweep | What killed what |
+|---|---|
+| §33 | the **management** plane killed the **data** plane |
+| §36 | a **secondary, opt-in** data plane killed the **primary** one |
+| **§41** | the **cluster** plane killed this node's data plane, management plane and health endpoints, before any of them existed |
+
+### 41.2 The finding
+
+The Control Plane boot path had exactly one error branch:
+
+```go
+if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
+        logFatalf("ControlPlane gRPC: %v", err)   // ← os.Exit(1)
+}
+```
+
+reached from `initCluster`, which `main.go` runs at line 228 — **before**
+`initSOCKS5` (254), `startAdminUI` (269) and `buildAndStartProxyServer` (271).
+So every way the cluster plane's listener could fail to come up terminated the
+appliance with no proxy, no SOCKS5, no admin UI and no health endpoint.
+
+**Reproduced against the real binary, both triggers.**
+
+```
+# 1. the gRPC address is already bound
+ControlPlane: config v1791151952 published
+ClusterCA: generated new cluster CA (expires 2036-10-01)
+ControlPlane gRPC: gRPC listen: listen tcp 127.0.0.1:19443: bind: address already in use
+EXIT CODE: 1
+proxy   http_code=000        ← the HTTP proxy port never listened
+adminui http_code=000        ← the admin UI port never listened
+
+# 2. the mTLS material cannot be loaded (a cert-manager/certbot rotation window)
+ControlPlane gRPC: gRPC TLS: tls: failed to find any PEM data in key input
+EXIT CODE: 1
+```
+
+Neither trigger is visible to the check that looks like it should catch them,
+and **here that is sharper than in §33/§36**: `validatePortCollisions` compares
+the proxy, UI and SOCKS5 ports to *each other*, and the Control Plane gRPC
+address is not even among the three it knows about — so it is unchecked in both
+directions. Under `restart: unless-stopped` each is an unattended crash loop
+recoverable only with shell access.
+
+"It exits, so it fails closed" is wrong for §33's reason and must not be
+re-argued: process death picks **no** posture, it delegates the choice to the
+topology. An explicit-proxy fleet loses all egress; a PAC/WPAD fleet with a
+`DIRECT` fallback, or a transparent deployment, goes UNFILTERED.
+
+### 41.3 The asymmetry is the finding — and it is a governance point
+
+The **same function**, `enableControlPlane`, with the **same error**, already
+had a non-fatal caller. `apiClusterMode` (ui_cluster.go) hands it to the live
+admin API, where a bind failure is returned as `409 Conflict` and the appliance
+keeps running; the function's own doc comment says *"Safe to call at runtime
+from the admin API"*. One caller treats an unbindable socket as a recoverable
+error with an HTTP status; the other treats it as grounds to terminate an
+in-line security gateway.
+
+That is the shape §31 (CHAOS-62) found for `enableLogStore` — fatal on the boot
+path, an API error on the live one — and §40 (CHAOS-70) found for
+`apiSetupComplete`, where the durability rule was applied to the one-time path
+and not its sibling. **The rule to carry forward: when one caller of a function
+can report a fault and another can only exit, the exit is the one that needs
+the argument — and "it is the boot path" is not that argument.**
+
+### 41.4 A third defect, with no fatal to blame
+
+Independent of the bind, the listener's death was **silent and terminal**:
+
+```go
+go func() {
+        if err := srv.Serve(ln); err != nil {
+                logger.Printf("ControlPlane gRPC error: %v", err)
+        }
+}()
+```
+
+One log line, no rebind — and `clusterRole.role` stayed `"control-plane"` with
+`clusterRole.grpcAddr` still set, because both are written after a successful
+bind and never cleared. `GET /api/cluster/status` therefore reported a healthy
+Control Plane, with its listening address, forever, on a node with no listener.
+
+There was **no health plane for this listener at all** — no metric, no
+`/health` field, no `/ready` row, no operator-contract row, no alert. It was the
+only listener in the appliance without one (compare `admin_ui_health.go`,
+`socks5_health.go`, `readyz_dp_health.go`). PX-18 in miniature: probes green on
+a dead listener.
+
+A fourth, smaller one rode along: `StopControlPlaneGRPC` read
+`clusterRole.grpcSrv` with **no lock**. Latent while that field was written
+exactly once per process; a real data race the moment anything rebinds. The
+handle now lives on the supervisor under its own mutex and the global-handle
+entry point is gone.
+
+### 41.5 What shipped
+
+`cp_grpc_bind.go` owns bind → serve → rebind; `cp_grpc_health.go` is the
+observability plane. Five rules, borrowed wholesale from CHAOS-54/55/57/66
+rather than invented as a fourth dialect: no bind path is fatal **on the boot
+path**; retry is RATE-bounded and never COUNT-bounded; recovery is declared on
+OBSERVED evidence only; the sleep is INTERRUPTIBLE; reason classes are BOUNDED
+and matched via `errors.As` on `syscall.Errno`.
+
+**Plus one rule this plane needs that the other two did not: the CP role is a
+CLAIM, and it is only true while the socket is real.** The pre-change code
+carried the comment *"Only set role after gRPC is successfully started"*, and
+that invariant is preserved rather than traded for availability — while the bind
+is failing the node stays `standalone`, so every `role == "control-plane"` gate
+reports what is true. A supervisor that claimed the role optimistically would
+have fixed the crash loop by replacing it with the operational lie of §41.4.
+
+The HA leadership resume rides the same rule: it moved from a statement after
+`enableControlPlane` into the `onActivated` callback, so this node never asserts
+a term it cannot exercise (a "leader" no Data Plane can reach cannot serve
+`HASync`). On the happy path — the bind succeeds on the first attempt, i.e.
+every healthy boot — the callback runs synchronously and the ordering is
+byte-identical. Deferring does not *close* the split-brain window (RISK-001 /
+ADR-0004 own that, and the fence closes it properly); it declines to open a
+second one.
+
+Verified against the fixed binary, same reproduction:
+
+```
+proxy  http_code=200        ← the data plane came up
+health http_code=200
+/health  cp_grpc = "rebinding"
+culvert_cp_grpc_up 0 / _bind_failures_total 3 / _bind_backoff_seconds 4
+# …port released, no restart:
+ControlPlane: gRPC listener bound and serving again on 127.0.0.1:19443 (2 suppressed bind-failure log line(s))
+/health  cp_grpc = "ready"
+```
+
+Surfaces reuse the existing vocabulary: a `cp_grpc_listener` contract row, a
+**report-only** `/ready cp_grpc` row, a fixed 5-value `/health cp_grpc` field,
+and `culvert_cp_grpc_{up,unavailable,bind_failures_total,binds_total,bind_backoff_seconds}`
+— emitted **only** on a node that asked to be a Control Plane (the CHAOS-54
+rule: a flat `up 0` from every standalone proxy and every DP in the fleet is
+indistinguishable from a broken CP, and the paging rule is `== 0`).
+
+The readiness row is report-only and that is **load-bearing** — the strongest
+case in the set: a CP whose gRPC listener cannot bind is proxying its *own*
+traffic perfectly, so gating the default verdict would eject a healthy gateway
+from the load balancer because the plane that serves config to *other* nodes is
+down, converting a fleet-management outage into the traffic outage the change
+exists to prevent.
+
+`cp_grpc_listener_down` is a **new** alert event, and the cost is recorded rather
+than waved away: a new name is silently unsubscribed on every configured
+webhook. §36 avoided one by reusing `socks5_listener_down`; there is no existing
+event for this plane, and folding it into `admin_ui_unavailable` would page for
+one subsystem under another's name with the wrong operator action attached. §33
+minted `admin_ui_unavailable` for the same reason. The name was first drafted
+as `cp_grpc_unavailable` and renamed to `cp_grpc_listener_down` on owner review
+to match the `<contract-row>_down` convention (`socks5_listener_down`,
+`mcp_gateway_down`, `upstream_pool_down`); the legacy webhook editor
+(`static/index.html`) lists it as a checkbox, which closes the GUI-parity gap.
+
+One thing the retry forced, and it is the kind of detail a rebind loop always
+exposes: **`cpServerOption` had to become silent.** It emitted
+`ControlPlane: gRPC %s (mTLS)` itself, which was correct while it was called
+once per process and became one line per attempt forever the moment the
+listener acquired a loop — beside a failure line that is carefully rate
+limited. The mode is returned instead and logged once per observed bind. *A
+mitigation for a crash loop must not itself be a log flood.*
+
+### 41.6 Gates, and what mutation testing changed
+
+`cp_grpc_bind_chaos_test.go` — 22 gates: 15 defect gates, 5 controls and 2
+structural walls. **Fifteen mutations were each verified failing against the
+gate that targets them**, including the reintroduced fatal (which kills the test
+binary mid-run and takes the package with it — the §33/§36 property that makes
+the defect unreintroducible-and-green).
+
+Three gates exist only because mutation testing proved an earlier version was
+insufficient, and each is a transferable lesson:
+
+* **The panic guard's WIRING needed a structural wall.** The behavioural gate
+  drives both recorders directly and asserts each produces the right state and
+  remedy — and says nothing about which one the guard *calls*. Swapping them
+  (`noteCPGRPCServeEnded` for `noteCPGRPCSupervisorDown`) left it **green**,
+  while a panicked supervisor is then reported as an ordinary rebinding
+  listener whose remedy promises an automatic recovery that cannot happen. This
+  is CHAOS-66's round-2 finding reproduced exactly, in a sweep that had read it
+  — which is the strongest available argument that *a gate on the recorders is
+  never a gate on the call site*.
+* **The HA wall needed to pin the HANDOVER, not just the ordering.** The first
+  version checked that `ResumeAsLeader` sits textually before the activation
+  call. A mutation that kept the closure, passed `nil` in its place and then
+  called it as a bare statement **passed** — the defect wearing the deferral's
+  own vocabulary. The wall now pins the identity of the argument and rejects a
+  direct invocation.
+* **A timing gate must be able to SEE its defect.** The shutdown-promptness gate
+  allowed 3 s, and the first jittered backoff at the floor is 0.8–1.2 s, so a
+  `time.Sleep(wait)` with no interrupt **passed**. The gate now escalates the
+  backoff to ~2 s before stopping and bounds Stop at 400 ms — a ~4x margin over
+  the defect and ~1000x over what an interruptible Stop actually costs. Same
+  standing rule as §40's two self-calibration findings: *a behavioural gate that
+  passes against the defect is worse than no gate.*
+
+The sweep's own gates also found a **live bug in the fix**:
+`activateControlPlaneAfterBind` reached `appLifecycleCtx.Done()` directly, and
+that context is nil in every one-shot command path and in the test binary. The
+pre-change expression was identical and unreachable from any test; the moment it
+ran on the **supervisor goroutine** it became a panic that killed the listener
+permanently and reported it terminal. It now goes through the in-tree
+`resolveLifecycleCtx()`. The self-heal gate is what caught it.
+
+The first draft also **split the activation** — the starter's caller activated a
+first-attempt bind and the supervisor activated any later one, two code paths
+for one state transition differing only in which held the activation lock. Its
+own control gate caught it (a bind driven through `startControlPlaneListener`
+claimed no role at all, because the half that would have done so lived in a
+caller the gate was not going through). There is now exactly one writer of that
+transition.
+
+**And collapsing them opened a WINDOW, which the same control gate caught one
+round later — under `-race` only.** With one activation path in the supervisor,
+`markFirstAttempt` still sat immediately after the bind was recorded, so
+`startControlPlaneListener` could return — letting `activateControlPlane` log
+*"ControlPlane: enabled"* and hand control back to `main.go`, which goes
+straight on to Data-Plane wiring, the admin UI and the proxy — while
+`clusterRole.role` was still `standalone` and the HA leadership resume had not
+run. Microseconds wide, and the same class of lie this change exists to remove,
+so the fix is to REMOVE the window (release the starter only after activation
+completes), not to report it — §36's rule, which refused to add a "pending"
+state for the same reason.
+
+**The gate that found it could not be trusted to keep finding it**, and that is
+the transferable part. Re-running the mutation afterwards it passed **3/3 under
+`-race` and 3/3 without**: whether the starter's goroutine wins is pure
+scheduling, so the control gate caught the defect once by luck. A gate that
+passes against the defect is worse than no gate, and a gate that can flake gets
+muted. The ordering is therefore pinned by CONSTRUCTION in
+`TestChaos71_DefectStarterIsReleasedOnlyAfterActivation` — `onActivated` blocks
+and the starter must not have returned while it is blocked, which fails every
+time against the defect, with and without `-race`, and cannot flake against the
+fix because the gate controls the schedule instead of racing it. It carries the
+other half too (the starter must still return once activation completes), so a
+"fix" that simply never releases it — a boot that hangs before the proxy
+listener starts, strictly worse than the defect — cannot pass.
+
+### 41.6b Governance: the collision problem is not confined to the CHAOS id
+
+This sweep allocated its `CHAOS-` id in a committed placeholder row as §0
+requires, and then **collided anyway — on the ROW id.** The first draft of the
+three new cluster rows below took `CL-9`, `CL-10` and `CL-11`, all three of
+which were already in use: `CL-1`…`CL-13` belong to
+`roadmap/CLUSTER-RUNTIME-DISCOVERY.md` (and `CL-9` additionally names a whole
+plan file, `roadmap/CL-9-METRICS-IMPLEMENTATION-PLAN.md`), while `CL-20`/`CL-21`
+are §30's. They were caught only because a grep for the ids happened to be run
+before commit; nothing in the build would have rejected them, and this document
+would have ended up with two different `CL-11`s — one a DP-connection race, one
+a cluster-CA minting hazard.
+
+§0's remedy is written for the `CHAOS-` namespace only, and that is the gap:
+**the per-domain row ids (`PX-`, `CA-`, `HA-`, `CL-`, `AU-`, `ST-`, `WK-`) are
+allocated by the same "take the next free number" habit, across the same
+concurrent sweeps, with the same absence of a ledger — and they are spread over
+more files than the `CHAOS-` ids are, so a collision in them is HARDER to spot,
+not easier.** The rows were remapped to `CL-22`…`CL-24`.
+
+Two cheap conventions follow, recorded here rather than applied unilaterally
+because they touch every sweep's habits:
+
+1. A sweep that adds register rows should grep the whole tree for its chosen
+   prefix (`grep -rhoE '\bCL-[0-9]+\b' --include='*.md' --include='*.go' . |
+   sort -u -V`) before writing them, exactly as it now claims its `CHAOS-` id —
+   it is one command and it is what caught this.
+2. Row ids should be allocated from the END of the observed range, not the first
+   apparent gap. "The next free number" is what produced this collision: `CL-9`
+   looked free in THIS file because no `CL-` row had ever been added to it.
+
+### 41.7 Deliberately left, recorded rather than silently skipped
+
+* **`logFatalf("Proxy error")` (main.go) is untouched and correct.** The proxy
+  IS the product; a gateway that cannot serve must exit loudly rather than
+  linger as a black hole. The asymmetry is the whole point of all three sweeps.
+* **`armHALease`'s fatal (cluster_startup.go) is untouched and correct**, and
+  the structural wall carries a single, argued allowance for it with a
+  not-vacuous check that fails if it ever moves or is removed. Its own comment
+  has the argument: a malformed fence config that fell back to legacy would be
+  *"an invisible safety downgrade"* — the operator asked for fencing and would
+  not get it. That is a fault whose only safe resolution is refusing to run,
+  which is exactly the test this sweep applies to the listener, and the listener
+  fails it.
+* **Register row CL-23 (NEW, open): the Data Plane's two boot fatals.**
+  `dp_enrollment.go` still `logFatalf`s on a DP node-key at-rest failure and on
+  a DP client construction failure, from `startDataPlane`, which `loadCluster`
+  reaches on the same pre-proxy boot path. Same class one plane over, and
+  **not** touched here: one concern per change, and the DP posture question —
+  *may a node that cannot reach its Control Plane serve traffic at all?* — is a
+  genuinely different decision from this one, with a real argument on both
+  sides (a DP serves last-good config, so degrading is defensible; but a DP
+  that never enrolled has no config to serve).
+* **Register row R-F stays open.** The three boot-path data-file loads
+  (`catStore`, blocklist, policy) remain fatal, defensibly so since they are
+  policy-load-bearing.
+* **A crash-looping boot minted and persisted a fresh cluster CA before dying.**
+  Observed in the reproduction (`ClusterCA: generated new cluster CA`): the
+  preparation runs before the bind, so on a node with an **ephemeral** data
+  volume each crash-loop iteration would mint a different trust root — the
+  hazard §18's `rootca_recovery.go` guards with *"a retry MUST NEVER MINT"*.
+  Idempotent on a persistent volume (the next boot loads it), and the crash loop
+  itself is now gone, which removes the reachable path. Recorded as **CL-24**,
+  not fixed inside this sweep: the fix belongs with the cluster-CA minting
+  policy, not with the listener.
+
+### 41.8 Owner review (open-PR cleanup): what the canonical variant had to absorb
+
+#1556 was made the canonical fix for this domain and #1534/#1546/#1571/#1578
+were closed in its favour. The owner decision named the changes below as
+required before merge; each is now in the tree.
+
+* **Id in merge order.** `CHAOS-73` → `CHAOS-71` (see the §41 header).
+* **Alert name.** `cp_grpc_unavailable` → `cp_grpc_listener_down`, matching the
+  `<contract-row>_down` convention (`socks5_listener_down`,
+  `mcp_gateway_down`, `upstream_pool_down`). The `culvert_cp_grpc_unavailable`
+  GAUGE keeps its name: it is the metric half of the alertable pair, not the
+  event.
+* **GUI parity.** The legacy webhook editor (`static/index.html`) lists
+  `cp_grpc_listener_down` beside the other `_down` events. The React frontend
+  has no webhook-event list, so there is nothing to mirror there.
+* **The fence must not vouch for a dark leader.** After an HA promote, a dead
+  listener used to leave `leaseRenewOnce` renewing — so the fence kept the
+  standby out indefinitely on behalf of a leader that could serve neither
+  `HASync` nor config. `leaseRenewOnce` now consults
+  `cpGRPCLeaseRenewWithheld`, which reuses the plane's ONE unavailability
+  predicate (configured, not serving, not stopped, failing ≥ 30 s or the
+  supervisor gone), and WITHHOLDS the renewal. The confirmed window is then
+  charged exactly as a transport failure is (`fenceIfLeaseWindowElapsed`, same
+  write margin), so the node self-fences before the backend lease can lapse and
+  the standby acquires through its ordinary fence-gated promotion. A listener
+  serving again inside the window resumes renewal. Withholding can only END
+  authority sooner, never extend it. Gate:
+  `TestChaos71_HADarkLeaderStopsRenewingTheFence` (deterministic: injected
+  listener clock, `halease.Fake` clock, keepalive loop stopped, window collapsed
+  by assignment), plus the negative control
+  `TestChaos71_HANonCPLeaderKeepsRenewing`.
+* **Ported from #1534.** `TestChaos71_EnableControlPlaneDoesNotDeadlockWithHAEnabled`,
+  `TestChaos71_Wall_NoCurrentConfigSnapshotUnderTheRoleLock` (re-modelled to
+  track RELEASE as well as acquire, because `activateControlPlane` takes the
+  role lock for its `alreadyCP` check and releases it before publishing — the
+  position-only scanner would have flagged a correct function), and
+  `TestChaos71_ListenFailureDoesNotLeakTheGRPCServer` (adapted to
+  `buildControlPlaneServer`). Two HA-transition gates are new:
+  `TestChaos71_HAPromoteBindFailureLeavesTheNodeStandby` (a promote whose
+  listener cannot bind leaves a retryable standby, no role, no supervisor; the
+  retry after the port frees promotes and publishes a list naming the node) and
+  `TestChaos71_HABootOnActivatedRunsOnceAcrossRebinds`.
+* **Ported from #1618, filed as CHAOS-71 riders** (CHAOS-72 is a different
+  finding, #1611): the promote-deadlock rider and the address-republish rider.
+  `cluster_promote_deadlock_chaos_test.go`, adapted to this supervisor, and the
+  address REPUBLISH: once the role is committed, the CP address list is
+  published with the role lock released, only if it changed (now a merge onto
+  the latest committed snapshot — see the commitActivation item below) — the pre-bind
+  publish cannot name this node, and on a promotion it names only the dead
+  leader, which `updateDPAddresses` would then install by REPLACING a DP's list.
+  #1618's DP-side cadence/backoff ladder and janitor deliberately stay in #1618.
+* **Backoff reset after a successful serve.** The first draft never reset the
+  rebind backoff. That bounded the flapping socket correctly but charged a
+  listener that served for days and then lost its socket once with whatever
+  ceiling an earlier outage had reached. `cpGRPCBackoffAfterServe` resets to the
+  1 s floor after a serve that stayed up for `cpGRPCServeStableAfter` (2× the
+  30 s ceiling), so a socket that dies within one ceiling period of every bind
+  still never earns a reset. Gate: `TestChaos71_BackoffResetsOnlyAfterAStableServe`.
+
+* **Activation is asynchronous, so it is ONE re-deciding step
+  (`commitActivation`, `cp_grpc_activation.go`).** Codex's review of the
+  merged head found five faces of one root cause — a retried bind can land
+  long after boot and raced everything that changed since:
+  (a) shutdown began after `adopt` and the HA resume still ran after
+  `globalHA.Stop` was joined; (b) a delayed bind overwrote an established
+  `data-plane` role; (c) the address republish was a full
+  `CurrentConfigSnapshot()` that could roll back an admin publish committed in
+  between; (d) its error was discarded, so a promotion reported success while
+  DPs kept only the dead leader's address; (e) a refused runtime activation
+  left the health plane `configured`. The ordering now: under `clusterRoleMu`
+  abort on stop/shutdown or any role other than none/standalone/our own claim
+  (a refused role is terminal, reason `role_conflict`, alerted); commit; merge
+  the address list onto the latest COMMITTED snapshot with a version
+  compare-and-swap under the store's own commit lock
+  (`ConfigStore.UpdateCPAddresses` — the same `s.mu` and the same commit-time
+  gates every publish uses, no second lock); a rejected publish rolls the role
+  back and is a retried failure (`address_publish_rejected`); `onActivated` runs
+  last behind `cpActivationGateMu`, which the `ha-stop` hook closes before
+  `globalHA.Stop`. A refused runtime activation calls
+  `noteCPGRPCActivationRejected` (unconfigured again, counters kept). Gates in
+  `cp_grpc_activation_chaos_test.go`, one per face, each verified failing with
+  its guard removed. (The residual this round first recorded — a full
+  publish built before the role commit and committed after the address merge
+  dropping the address — is closed in the fourth round by making the CP
+  address list owned by `UpdateCPAddressesFrom`; see (d) below. Other snapshot
+  fields remain last-writer-wins across publishers, as before this PR.)
+* **One role arbiter (Codex review of `ac965a0`).** The mirror of (b): with CP
+  and DP wiring both present and the first CP bind failing, the async retry
+  could claim the role BEFORE boot reached `startDataPlane`, whose UNLOCKED
+  writes then replaced role and gRPC address with DP values while the CP
+  listener, heartbeat monitor and HA leadership stayed live. Every write of
+  `clusterRole.role` / `.grpcAddr` (and the identity fields that travel with
+  them) now lives in `cluster_role_arbiter.go`, under `clusterRoleMu`, with one
+  rule in both orders: **an already-claimed role wins and the second claimant
+  is refused loudly** (latched conflict, `cluster_posture` FAIL; a refused CP
+  claim also stops its supervisor with `role_conflict` and alerts). Silently
+  switching an established role is the dangerous outcome, so refusal is the
+  conservative default; WHICH role should win when both are configured is an
+  owner decision, recorded as an open question. Gates: both interleavings
+  (`TestChaos71_ClusterRoleArbiter_*`) and a structural wall that no production
+  file writes the role outside the arbiter
+  (`TestChaos71_Wall_ClusterRoleIsWrittenOnlyByTheArbiter`), each verified
+  failing with its guard removed.
+* **Fourth review round (Codex + CodeRabbit on `4044722`).**
+  (a) A `Serve` that returns on a fatal Accept error leaves the Data Planes'
+  established transports open — only `Server.Stop` closes them — so the loop
+  now stops the retired server before rebinding (`retireCPGRPCServer`); not on
+  the Stop path, whose graceful drain owns it. (b) The serve-end and
+  bind-failure paths now share ONE recorder (`noteCPGRPCListenFailure`) and
+  ONE failure-and-wait step (`failAndWait`): the threshold clamp and the alert
+  latch can no longer drift between them (the serve-end sleep could reach 36 s
+  and never page). (c) The arbiter now also owns READS: one locked
+  `clusterRoleSnapshot()`; a wall fails on any direct production access to
+  `clusterRole`/`clusterRoleMu` outside it (the dynamic `-race` gate is a
+  backstop — the detector's per-goroutine shadow lets a later locked read hide
+  an earlier unlocked one, so the wall is the deterministic guard). (d) Once a
+  Control Plane is active, the CP address list is OWNED by
+  `UpdateCPAddressesFrom` (re-computed on every CAS attempt): a full publish
+  keeps the committed list and then reconciles from the source, so a snapshot
+  captured before a delayed bind can never publish the stale list, even for
+  one version. (e) `leaseAutoPromote` refuses while this node's listener is
+  dark — the promote/fence flap recorded as a residual above is closed for
+  the AUTO path. (f) The address publish moved inside the activation gate with
+  `onActivated`, so a node whose shutdown has begun never advertises itself.
+  `handleMetrics`' CP block moved to `writeCPGRPCMetrics` and
+  `apiClusterTokenCreate`'s validation to `validateEnrollmentTokenRequest` to
+  stay within the lint budgets of the functions this PR touches.
+* **Fifth review round: the exit edges as ONE table.** Codex's round on
+  `d4917d9` found three more exit edges of the same lifecycle (a panic between
+  adopt and Serve left the server, the socket and the role claimed; a terminal
+  failure after a paged recoverable episode was swallowed by the shared alert
+  latch; the owned-list substitution ran after the wire-size validation). Four
+  rounds of one-edge-at-a-time patches is the finding: the supervisor's state
+  machine is now written down on `cpListenerSupervisor.run` — every exit edge
+  with what it must RELEASE and what it must SIGNAL — and encoded as one
+  table-driven gate, `TestChaos71_SupervisorExitEdgeTable`, that drives each
+  edge deterministically and asserts both columns. The fixes are structural,
+  not per-edge: a per-attempt record (`cpAttempt`) released by ONE
+  `releaseAttempt` on every edge (stop+close before Serve, retire after a serve
+  ended, leave to Stop's drain while stopping), a panic edge
+  (`abandonAfterPanic`) that also restores the role this supervisor first
+  replaced and republishes the address list when the fleet was told this node
+  is a CP, a TERMINAL alert latch separate from the recoverable one (the
+  SOCKS5 plane's escalation rule), and a full publish that substitutes the
+  owned list BEFORE validating and commits only what it validated.
+* **No snapshot publish under `HAState.mu` (Codex P1 4301857115, on the
+  listener-only head after the split).** `setTopologyLocked` ran the CP
+  address republish synchronously under `h.mu`, right after a lease grant. A
+  large permitted snapshot (a marshal of up to the wire budget plus an O(N)
+  blocklist delta) could outlast a 3 s TTL's roughly 2 s trusted window
+  before the keepalive started or a renewal could take `h.mu`. The first
+  renewal then found the lease expired and self-fenced, and every
+  re-promotion repeated the same path.
+
+  The class rule: no snapshot marshal or commit runs while `h.mu` is held,
+  and lease renewal never waits on publication.
+  - `setTopologyLocked` now only records the change (`topologyRepublish`).
+  - Every caller runs `republishTopology` after releasing `h.mu`, and an
+    authority-gaining transition runs it after starting the keepalive.
+  - The republish derives from the live topology on every compare-and-swap
+    attempt, through the owned-publish path (latch, retry, once-per-episode
+    page).
+
+  Nothing depended on the publish being synchronous under the lock:
+  - The epoch is stamped at commit from the lock-free mirror.
+  - Ordering against activation is the publish's own compare-and-swap.
+  - Promote's refusal on a rejected address publish is the activation
+    publish inside `onPromote`, which never ran under `h.mu`, and is kept.
+
+  Gates:
+  - `TestChaos71_SlowTopologyPublishDoesNotCostTheLease`: an enable whose
+    republish takes longer than a 3 s TTL keeps a renewed lease and does not
+    self-fence.
+  - `TestChaos71_Wall_NoSnapshotPublishUnderTheHALock`: no `*Locked`
+    `HAState` method, and no call inside an `h.mu` or `globalHA.mu` critical
+    section, reaches `commitPublish`, `validateSnapshotForPublish` or
+    `commitLocked`. The by-name call graph follows package-level function
+    seams.
+  - `TestChaos71_HATransitionsRepublishTheCPAddressList` now also fails if a
+    transition returns with its republish only recorded.
+
+  Five mutations each fail a gate.
+* **A terminal exit keeps address ownership until its withdrawal commits
+  (Codex P2 4302158678).** After a panic, the publish of the list without
+  this node had its error discarded, and `exitTerminal` then released
+  ownership and reset the pending record. A rejected withdrawal (snapshot
+  validation, or every commit attempt lost) started a retry loop that found
+  no source and exited clean. Data Planes kept a dead CP address that nothing
+  reconciled, in a process that survived the panic.
+
+  The class rule: a terminal exit never drops address ownership while a
+  withdrawal is uncommitted.
+  - `exitTerminal` withdraws the node (contained) whenever the fleet was told
+    about it, on every terminal edge: the panic edges and `role_conflict`.
+  - `withdrawCPAddress` turns the source into a withdrawal source (the live
+    list without this node) and publishes it through the owned path, so a
+    failure is pending, paged once per episode and retried.
+  - Ownership is released only once the committed list no longer names the
+    node: at once in `exitTerminal`, otherwise by the next successful owned
+    publish or retry (`completeCPAddressWithdrawal`). A withdrawal that never
+    recorded an outcome is latched pending, so a retry owns it. An HA
+    republish during a withdrawal derives from the withdrawal source. A new
+    owner (`setCPAddressSource`) ends the withdrawal.
+  - The latch keeps its single writer (`noteCPAddrPublish`), and nothing new
+    publishes under `HAState.mu`.
+
+  Gates:
+  - `TestChaos71_TerminalExitKeepsAddressOwnershipUntilTheWithdrawalCommits`
+    (the real supervisor): the withdrawal is rejected, the fault persists
+    through a retry, the fault clears, and the retry commits and releases.
+  - `TestChaos71_TerminalExitWithACommittedWithdrawalReleasesAtOnce` (control).
+  - `TestChaos71_NewOwnerEndsAPendingWithdrawal`,
+    `TestChaos71_InterruptedWithdrawalIsLatchedForRetry` and
+    `TestChaos71_HARepublishDuringAWithdrawalNeverReAddsTheNode`.
+  - The exit-edge table's ownership column now says "released after the
+    withdrawal commits" for the published terminal rows, and it gains
+    `panic_with_a_rejected_withdrawal` (kept as a pending withdrawal).
+
+  Seven mutations each fail a gate, including the old release-on-failure.
+
+  Follow-up (Codex P2 4302464278): whether to withdraw was decided by a
+  supervisor flag (`everPublished`) that only the activation publish set. A
+  listener that activated with HA off (a no-op publish) and was then
+  published by `EnableAsLeader` or a resume through `republishTopology`
+  skipped the withdrawal and released ownership. The flag is gone. Both
+  decisions now read the committed list: `beginCPAddressWithdrawal` (does
+  `published` hold, and does the snapshot name the node) and the ownership
+  step `releaseCPAddressSourceAfterWithdrawal(addr)`. The ownership step
+  keeps ownership whenever that list names the node, and installs and latches
+  the withdrawal if no publish started it. `published` is set by
+  `commitLocked`, the one commit path. A snapshot seeded from a peer is not
+  this store's commit, and is not carried into one.
+
+  Gates:
+  - `TestChaos71_TerminalExitWithdrawsANodeAnHATransitionPublished` (commits;
+    and rejected, then recovers).
+  - `TestChaos71_TerminalReleaseDecidesFromTheCommittedList`.
+  - The exit-edge row `panic_after_an_HA_transition_published_the_node`.
+
+  The flag-based decision fails these gates, whether it is restored in
+  `exitTerminal`, in the ownership step, or in both.
+* **Sixteenth review round — the address latch is part of the
+  generation-guarded publish record.** An address publish that found the list
+  already current cleared the rounds-14/15 latch (`addrRejectPaged`) in
+  `commitPublish`'s up-to-date branch, under `s.mu`, with no publish
+  generation. When topology B's publish failed and armed the latch while
+  topology A was mid-publish, A's stale "up to date" erased it. B's next retry
+  paged again, and B's page queued before the webhooks loaded was dropped at
+  the flush. This was the second follow-on from the round-13 latch. The class
+  is the latch as separate state that the generation does not guard.
+
+  The whole address-rejection latch now lives in `cpAddrPublishState`, beside
+  `gen` and under `addrPubMu`. That covers the error text behind
+  `LastPublishError`, the page-once latch and the episode number.
+  `noteCPAddrPublish` is its single writer: a success or an up-to-date list ends
+  the episode only if no failure has latched since the publish captured its
+  generation. A failure opens the episode and returns the page decision to its
+  caller, and `pageCPAddrRejection` delivers it (queued before the startup
+  flush, valid while `cpAddrRejectEpisodeOpen(episode)`). `resetCPAddrPublish`
+  ends the episode on an ownership change and keeps the episode counter, so a
+  released owner's queued page cannot match the next owner's episode.
+
+  `commitPublish` and `rejectPublish` no longer touch the address latch. The
+  activation publish (`cpPublishCPAddresses`) now goes through
+  `publishOwnedCPAddresses` as well, so every address publish is recorded.
+
+  Gates:
+  - `TestChaos71_StaleUpToDateKeepsANewerRejectionLatch_Direct` and `_Queued`.
+    B fails while A builds, or between A's up-to-date decision and A's
+    record. B's pending state, latch and `LastPublishError` survive, the queued
+    page is delivered once at the flush, and B's retries stay silent.
+  - `TestChaos71_QueuedPageOfAReplacedOwnerIsDropped`.
+  - `TestChaos71_Wall_AddressRejectionLatchHasOneWriter`: the latch fields
+    appear only in the writer, the reset and the episode read, and the error
+    text is assigned only by the writer.
+  - `TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded`, which no longer
+    exempts the activation publish.
+
+  Five mutations each fail a gate: an unconditional clear, the old up-to-date
+  clear, a page that bypasses the record, an activation that bypasses the
+  recording path, and a reset that forgets the episode counter.
+* **Fifteenth review round — the address latch arms only with a deliverable
+  page.** A persisted leader's boot-time address rejection runs in
+  `initCluster`, before `initPersistentAdminState` loads the webhooks. The
+  round-14 latch armed while the page went into an empty store, so every
+  later retry stayed silent.
+
+  Before the startup flush the page now queues through
+  `deferStartupAlertWhile`, the predicate this PR already uses for
+  `cp_grpc_listener_down`. Its predicate is `addrRejectEpisodeOpen(episode)`,
+  so the flush delivers it once and only if the episode is still open. After
+  the flush it fires at once. The latch arms together with a queued or
+  dispatched page.
+
+  The PR's other alert, `cp_grpc_listener_down` (recoverable, terminal and
+  role_conflict), already queued before the flush. The full-kind rejection
+  page predates this PR and is unchanged; a boot-time full rejection still
+  reaches an empty store, as on main, and remains a follow-up.
+
+  Gates: `TestChaos71_BootAddressRejectionIsPagedOnceAfterTheWebhooksLoad`
+  (no page before the load, exactly one delivered at the flush, retries
+  silent before and after) and
+  `TestChaos71_BootAddressRejectionResolvedBeforeTheFlushIsDropped` (no late
+  page; a new episode after the flush pages at once). Three mutations each
+  fail a gate.
+* **Fourteenth review round — one page per address-rejection episode.** A
+  persistently oversized owned address republish is retried every ≤30 s by
+  the pending-republish loop. Every rejection went through `rejectPublish`
+  and fired `config_snapshot_rejected` again, and with the webhook dedupe
+  window also at 30 s that paged roughly every 30 s forever. The listener
+  supervisor's activation re-runs the same address publish on every rebind,
+  which is the same class.
+
+  The address-kind rejection now pages once per episode
+  (`ConfigStore.addrRejectPaged`): the first rejection pages, so fail-closed
+  visibility stays, and later ones in the same episode only log. The pending
+  state still counts every attempt. The episode ends when an address publish
+  succeeds or finds the list current, or when ownership is released or
+  replaced, and the next failure pages again. Full publishes are operator
+  actions, never retried in a loop, and still page on each rejection.
+
+  Gates: `TestChaos71_AddressRejectionPagesOncePerEpisode` (N retries plus
+  repeated activation publishes give one page; success then a new failure
+  gives one more; a superseding owner and a release each open a new episode)
+  and `TestChaos71_FullPublishRejectionsStillPageEach`. Four mutations each
+  fail a gate, including the negative control that suppresses the first page.
+* **Thirteenth review round.**
+
+  (a) **The HA resume no longer runs under the activation gate.** The
+  delayed-bind `onActivated` (the leadership resume) ran under
+  `cpActivationGateMu`. Its lease acquisition can wait up to
+  `haResumeGhostWait` (45 s), and the `ha-stop` hook that takes the gate is
+  abandoned by the shutdown watchdog after about 11 s. The resume could then
+  acquire a lease and start HA work after the listener had stopped. This was
+  the second shutdown race on this path, so the class is fixed:
+  - **Outside the gate.** The gate now covers only the address publish, and
+    `commitActivation` runs `onActivated` after releasing it.
+  - **A permanent HA shutdown latch.** `HAState.BeginShutdown`, set by
+    `ha-stop` before `Stop`, gives the resume its own shutdown safety.
+    - No new acquire round starts after it.
+    - The ghost and unreachable-backend waits select on its channel.
+    - Under `HAState.mu`, the resume re-checks it before taking any role, for
+      the unguarded resume too.
+    - Keepalive, recovery and standby entry refuse to start after it.
+  - **No lease release.** A grant whose resume then aborts is left to its TTL:
+    ADR-0005 S1 gives the Provider no Release primitive, and adding one is a
+    policy decision this PR does not make.
+
+  Gates:
+  - `TestChaos71_ShutdownInsideTheGhostWaitAbortsTheResume`: SIGTERM inside a
+    real own-ghost wait; returns within 1 s, takes no role, starts no
+    keepalive, and leaves the ghost key untouched;
+  - `TestChaos71_ShutdownAfterTheGrantTakesNoRole`;
+  - `TestChaos71_NoLeaseIsAcquiredOnceShutdownBegan`;
+  - the walls `TestChaos71_Wall_NoHALeaseAcquisitionUnderTheActivationGate`
+    (by-name call graph from every gate holder) and
+    `TestChaos71_WallTheHAStopHookLatchesShutdownBeforeStop`.
+
+  The earlier "onActivated holds the gate" subtest is inverted to "runs
+  outside the gate".
+
+  (b) **role_conflict pages as a local configuration conflict.** It no longer
+  reuses the fleet-outage text. Its `cp_grpc_listener_down` text and its
+  contract row name the CP and DP wiring, say the Data Plane claimed the role
+  first, deny a fleet outage and send the operator to fix the local config,
+  not to restart. It keeps the same event type; a dedicated one is still an
+  open owner question. Gate: `TestChaos71_RoleConflictPagesAsALocalConfigConflict`.
+  Seven mutations each fail a gate.
+* **Twelfth review round.**
+
+  (a) **The boot resume is revalidated.** A delayed bind's resume ran
+  check-then-`ResumeAsLeader` from a config loaded earlier, so an admin HA
+  enable that landed during the seconds-long lease acquisition was
+  overwritten and re-persisted. A lock across the acquisition would block the
+  admin path for seconds, and it would order against `cpActivationGateMu` (the
+  resume runs inside it, while an admin promote can reach activation). The
+  resume therefore revalidates instead (`ResumeAsLeaderIfUnclaimed`): after
+  the acquisition it re-reads the persisted config, and then, under
+  `HAState.mu` — atomic with every HA transition, since `setTopologyLocked`
+  writes under it — it applies only if no HA role is held. Gates:
+  `TestChaos71_BootResumeLosesToAnAdminHAEnableDuringAcquisition` (each check
+  alone), `TestChaos71_BootResumeRevalidatesThePersistedConfig` and
+  `TestChaos71_BootResumeAppliesWhenNothingRaced`.
+
+  (b) **Terminal exits release CP address ownership.** The asynchronous
+  `role_conflict` exit (a Data Plane claimed first) kept `cpAddrSource`, so
+  the DP was reported as an active CP. The earlier "harmless" call was wrong,
+  because the diagnostic itself was false. Both terminal exits now go through
+  `exitTerminal`, which releases ownership and then records the terminal
+  state. The panic path republishes the list first, while still owning it.
+  The exit-edge table gains an address-ownership column that EVERY row must
+  state, and the wall `TestChaos71_Wall_TerminalExitsGoThroughExitTerminal`
+  pins the single terminal path.
+
+  (c) `culvert_cp_grpc_bind_backoff_seconds` reads 0 while serving,
+  stabilizing included. The internal value is kept for the flap policy
+  (`TestChaos71_BackoffGaugeReadsZeroWhileServing`).
+
+  Two existing walls were updated to the new structure at the same strength:
+  the panic guard may reach the terminal recorder through `exitTerminal`
+  only if `exitTerminal` calls it, and the boot resume must go through
+  `ResumeAsLeaderIfUnclaimed`. Five mutations each fail a gate.
+* **Eleventh review round.**
+
+  (a) **Flap damping.** Every bind marked the episode recovered before `Serve`
+  ran. A Serve that died at once (a fatal accept loop) therefore started a fresh
+  episode each cycle, so the 30 s threshold, the page and the lease withholding
+  never accumulated, and a lease-mode leader kept renewing while serving
+  nothing.
+
+  A bind no longer ends the episode. It marks the listener serving and stamps
+  `boundAt`. The episode ends only once that serve has lasted
+  `cpGRPCServeStableAfter`, the window that already defines a successful serve
+  for the backoff reset, so "recovered" keeps one meaning. The window is 60 s:
+  twice the backoff ceiling, and longer than the 30 s unavailability threshold.
+
+  The end is evaluated on the injected health clock by every recorder and
+  reader, under the plane's lock (`cpGRPCEndEpisodeIfStableLocked`). There is
+  no timer and no goroutine. Until then a serve-end continues the SAME
+  episode: `firstFailure`, the alert latch and the consecutive count are kept.
+  The snapshot reports `Stabilizing`, and the row stays OK with that message.
+  `/health` keeps its five values.
+
+  Gates: `TestChaos71_FlappingListenerAccumulatesOneEpisode` (the flap crosses
+  the threshold, pages once and withholds the lease; a stable serve closes the
+  episode) and `TestChaos71_FailureAfterAStableServeStartsANewEpisode`.
+
+  (b) **Generation on the pending republish.** A retry that published
+  topology A cleared the pending state even if topology B's publish had failed
+  in between, so B was never retried. Every failure latch now bumps
+  `cpAddrPublishState.gen`. A publish captures `gen` before it starts and
+  clears only if `gen` is unchanged; otherwise the retry loop goes round again
+  from the live source. Gate:
+  `TestChaos71_StaleRetrySuccessDoesNotClearANewerFailure`, the exact
+  interleaving.
+
+  Neither fix adds a publish or commit path, or a lifecycle exit. Five
+  mutations each fail a gate.
+* **Tenth review round — standard optimistic concurrency.** The single
+  commit path still had two partial guards.
+  - **Full-publish validity check.** It compared only `CPAddresses`, so a full
+    publish validated at epoch 0 could commit over a concurrent promotion's
+    restamp at epoch E. DPs that saw E rejected it.
+  - **Private version counter.** It was not folded with replicated snapshots.
+    A self-fenced ex-leader at v100 that resynced the new leader's v200 would
+    republish at v101 on re-promotion (the no-op `onPromote` never re-runs
+    `armVersionPersistence`), and DPs at v200 read "unchanged".
+
+  Fix:
+  - Every attempt records the committed base it built from: counter, snapshot
+    version, published, owned. Under the lock it commits only if the committed
+    state is still exactly that base, and only if the fence epoch is the one it
+    stamped. Otherwise it rebuilds and revalidates within the bounded retry,
+    then `rejectPublish`.
+  - `seedReplicatedSnapshot` folds the seeded version into the counter, and
+    `commitLocked` takes `max(counter, committed version) + 1`.
+  - A refused **synchronous** activation (admin activate, HA promote) now
+    releases CP address-list ownership (`releaseCPAddressSource`: the source,
+    the pending state and the address latch). The resilient boot path keeps
+    ownership for its retries. Both are new rows in the exit-edge table and on
+    `cpListenerSupervisor.run`.
+
+  Gates:
+  - `TestChaos71_EveryCommitIsBasedOnTheVersionItValidated` (both paths:
+    rebuild onto a competing commit, never below a seeded version);
+  - `TestChaos71_CommitCarriesTheEpochCurrentAtCommit`;
+  - `TestChaos71_FullPublishCannotOverwriteAPromotionRestamp` (through the
+    real DP ratchet);
+  - `TestChaos71_ConcurrentPublishesAndRestampsEndOnTheCurrentEpoch` (-race);
+  - `TestChaos71_AddressPublishRebuildsOntoASeedBelowTheCounter`;
+  - `TestChaos71_ResyncThenRepromoteNeverRewindsTheVersion` (v200 vs v100);
+  - `TestChaos71_ReleaseCPAddressSourceClearsOwnershipState`.
+
+  Six mutations each fail a gate. One of them is the old counter-only CAS,
+  which misses a seed below the counter.
+* **Ninth review round — one commit path.** Rounds 4, 5, 7 and now 8 each
+  found the address-only publish (`UpdateCPAddressesFrom`) skipping an
+  invariant the full path kept. Codex's latest two:
+  - it kept the previous snapshot's fencing epoch, so after `EnableAsLeader`
+    took a new grant, a DP that learned the epoch on heartbeat rejected the
+    snapshot in `dpObserveEpoch`;
+  - `commitLocked` cleared the full-publish rejection latch on an address-only
+    commit, hiding the fleet-freeze banner while the fleet stayed on stale
+    policy.
+
+  Fixed structurally. Both paths are now `publishPlan`s handed to ONE function,
+  `commitPublish`, which builds from the committed view, stamps the CURRENT
+  fence epoch, validates outside the lock, re-checks the plan under it,
+  commits, and records sizes under the commit lock. The rejection latch is
+  keyed by `publishKind`: full-publish errors clear only on a full success,
+  address errors only on an address success. `LastPublishError` reports the
+  full latch first. An address publish whose list is unchanged but whose stamp
+  is stale (a promotion or a fresh grant) is restamped.
+
+  The epoch is read lock-free from `HAState.fenceEpoch`, a mirror of
+  `CurrentEpoch` written only by `syncFenceEpochLocked`, because the topology
+  writer publishes while holding `h.mu`.
+
+  Gates:
+  - `TestChaos71_EveryCommitPathKeepsTheCommitInvariants`: one table run
+    against both paths, covering epoch == the current fence epoch, version
+    strictly increasing, sizes recorded, and the other kind's latch kept;
+  - `TestChaos71_FullRejectionStaysVisibleAcrossAnAddressCommit`;
+  - `TestChaos71_EnableAsLeaderPublishesTheNewFenceEpoch`: a real fake-lease
+    grant through the real DP ratchet;
+  - `TestChaos71_FenceEpochMirrorFollowsTheLease`;
+  - the wall `TestChaos71_Wall_OnlyCommitPublishCommits` (`commitLocked` has
+    one caller, and the mirror has one writer).
+
+  **A queued listener-down page outlived its episode.** The startup queue
+  now carries a per-alert validity predicate (`deferStartupAlertWhile`),
+  re-checked at the flush. A nil predicate means a fact and is always
+  delivered. The CP producer numbers its failure episodes and queues with
+  `cpGRPCEpisodeOpen(episode)`, so a bind, a refused activation, or shutdown
+  before the webhooks load drops the stale page.
+  `TestChaos71_QueuedListenerDownIsDroppedOnceTheEpisodeRecovered` and
+  `TestChaos71_StartupAlertQueueRevalidatesEveryQueuedAlert` gate it. Ten
+  mutations each fail a gate.
+* **Eighth review round.** (a) **A failed topology republish was silent.**
+  `setTopologyLocked` discarded `reconcileCPAddressesFrom`'s error, so a list
+  that would push a near-budget snapshot past `snapshotWireBudget`, or that
+  lost the commit race every attempt, left Data Planes on a stale list while
+  the transition reported success. Every owned republish (HA transitions, the
+  reconcile after a full publish, the retry loop) now goes through
+  `publishOwnedCPAddresses` (`cp_addr_publish.go`). On a failure it latches a
+  per-store pending state, reported by the new `cp_address_list` contract row
+  (FAIL; WARN for a commit race), and starts ONE retry loop. The loop
+  republishes from the live source with 1–30 s backoff until it succeeds,
+  stops on shutdown via the lifecycle context, and decides to exit under the
+  same lock a new failure latches under. Commit-race exhaustion now also goes
+  through `rejectPublish`.
+
+  The error policy is the same for both transition kinds: **the transition is
+  never rolled back.** Safety transitions (self-fence, standby entry) keep
+  fencing. Authority-gaining ones (enable, resume, promote) keep leadership,
+  per ADR-0005: authority is the fence's, and the list is a failover hint.
+  Refusing leadership over the list would turn a sync-size condition that does
+  not clear on its own into a leaderless cluster retrying promotion.
+
+  Gates:
+  - `TestChaos71_AuthorityGainingTransitionWithARejectedRepublishStaysLeaderAndRetries`
+    (enable, and resume after a delayed bind) and
+    `TestChaos71_SafetyTransitionWithARejectedRepublishIsNeverRolledBack`
+    (standby entry), both against a near-budget snapshot;
+  - `TestChaos71_CPAddrCommitRaceIsPendingAndWarned`;
+  - the wall `TestChaos71_Wall_OwnedCPAddressPublishesAreRecorded` (no
+    unrecorded `UpdateCPAddressesFrom` caller).
+
+  (b) **Tagged errors are classified before errnos.** An unreadable TLS file is
+  a wrapped `EACCES` under `errCPGRPCTLSMaterial`, and the errno check ran
+  first, so the outage got the bind-port advice. The classifier is now one
+  ordered table, `cpGRPCReasonRules`: tags, then errnos, then timeout.
+  `TestChaos71_CPGRPCReasonTable` checks every class, with each tag wrapping
+  every known errno. `classifyAdminUIListenError` on main has the same
+  ordering; it is recorded here and not changed in this PR.
+* **Seventh review round — the CP address list follows the HA topology by
+  construction.** A recovered persisted leader whose bind was delayed
+  published its address list BEFORE `onActivated` resumed HA, and nothing
+  republished after, so Data Planes held a list with no standby address. The
+  class, not the call order, is fixed: `HAState.role` and `peerAddr` — the two
+  fields `buildCPAddressList` derives from — now have ONE writer,
+  `setTopologyLocked` (`ha_topology.go`), which republishes from the new
+  values under `h.mu` whenever an active Control Plane owns the list. Enable,
+  resume, standby entry, promote and self-fence all go through it (no HA
+  disable transition exists; the setter treats an empty role as HA off).
+  `TestChaos71_Wall_HATopologyHasOneWriter` (AST) pins the single writer and
+  `TestChaos71_HATransitionsRepublishTheCPAddressList` drives every
+  transition, the delayed-bind-then-resume path first, asserting the
+  published list equals `buildCPAddressList()` after each. Mutations: a
+  setter that skips the republish, and a direct field write in
+  `ResumeAsLeader` or `selfFence`, each fail a gate. Lock order:
+  `cpActivationGateMu → HAState.mu → clusterRoleMu → ConfigStore.mu`; the
+  derivation takes its inputs as arguments, so nothing re-enters `h.mu`.
+* **Sixth review round.** (a) **A self-fenced standby kept serving config.**
+  ADR-0005 keeps a demoted leader's CP gRPC server running and fences its
+  WRITES (S3 issuance gating) — `enterStandbyResync` says so — but its READS
+  were ungated, and standby resync replaces the snapshot without advancing
+  `ConfigStore.version`, so a DP at the old version got "unchanged" forever
+  and never failed over. Keeping the ADR's choice (the server stays up), every
+  ConfigService method is now registered through `gatedUnary` with an explicit
+  entry in `cpRPCPolicies`; on a non-leader (HA on) it refuses with a
+  RETRIABLE `Unavailable`, which the DP counts as a poll failure, so its
+  address failover runs. All nine methods are leader-gated (the three
+  issuance sinks additionally keep `haIssuanceAllowed`); an unclassified
+  method fails closed. Wall: `TestChaos71_Wall_EveryCPRPCHasAnHAServingPolicy`.
+  Self-fencing does not stop the supervisor, so it adds no edge to the exit
+  table. (b) **Pre-flush pages were lost.** The supervisor starts in
+  `initCluster`, before the webhooks load, and its latches are fire-once;
+  `fireCPGRPCListenerAlert` now queues through `deferStartupAlert` until the
+  startup flush. It is the only new alert producer in this PR that can fire
+  that early (`ha_self_fenced` via withholding needs 30 s of darkness plus the
+  confirmed window). (c) CodeRabbit: a full publish that loses the owned-list
+  race `cpAddrMergeAttempts` times now rejects through `rejectPublish` instead
+  of committing an unvalidated list.
+* **CodeRabbit (HA config at bind time).** The boot resume closed over the HA
+  config read at boot; with the retrying supervisor it can run minutes later
+  and restore a leader the operator had since disabled or flipped to standby.
+  `resumeLeadershipIfStillPersisted` re-reads it and also skips when the
+  process already holds an HA role. `clusterRole.grpcSrv` (no readers left,
+  stale after a serve ended) was removed.
+
+Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
+listener is dark is still allowed (break-glass by design); it will withhold and
+fence again until the listener serves.

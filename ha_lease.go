@@ -64,6 +64,7 @@ func (h *HAState) SetLeaseProvider(p halease.Provider, candidateID string) {
 	h.mu.Lock()
 	h.lease = p
 	h.leaseCandidateID = candidateID
+	h.syncFenceEpochLocked()
 	h.mu.Unlock()
 }
 
@@ -124,7 +125,7 @@ func (h *HAState) acquireLeaseAttempt(reason string) (granted bool, st halease.S
 		return false, st, nil
 	}
 	h.mu.Lock()
-	h.leaseEpoch = st.Epoch
+	h.setLeaseEpochLocked(st.Epoch)
 	h.leaseConfirmedAt = time.Now()
 	h.leaseValidFor = st.ValidFor
 	h.mu.Unlock()
@@ -139,7 +140,7 @@ func (h *HAState) startLeaseKeepalive() {
 	// h.stopping: Stop() is joining — a fresh keepalive spawned now (e.g. a
 	// tracked standby loop promoting mid-shutdown) would hold a channel the
 	// in-flight stopLoops already missed, deadlocking the join.
-	if h.lease == nil || h.leaseEpoch == 0 || h.leaseStopCh != nil || h.stopping {
+	if h.lease == nil || h.leaseEpoch == 0 || h.leaseStopCh != nil || h.stopping || h.shutdown {
 		h.mu.Unlock()
 		return
 	}
@@ -247,8 +248,26 @@ func (h *HAState) fenceIfLeaseWindowElapsed(reason string) bool {
 	return false
 }
 
+// haLeaseRenewWithheld reports whether this leader must STOP renewing its
+// fencing lease, and why. Package-level seam over the CHAOS-71 listener health
+// plane (cpGRPCLeaseRenewWithheld) so the decision has one owner.
+var haLeaseRenewWithheld = cpGRPCLeaseRenewWithheld
+
 // leaseRenewOnce performs one keepalive round. Returns true when this node
 // self-fenced (the loop must exit).
+//
+// CHAOS-71 self-fence: the fence must not vouch for a DARK leader. A leader
+// whose Control Plane gRPC listener has been unavailable past the listener
+// plane's 30 s threshold (cpGRPCUnavailableAfter) cannot serve HASync to its
+// standby or config to its Data Planes, yet a healthy keepalive would keep the
+// lease — and with it the standby's promotion — locked to it indefinitely. So
+// the round WITHHOLDS the renewal: the last confirmed window is charged exactly
+// as a transport failure is (fenceIfLeaseWindowElapsed, same write margin), the
+// node self-fences before the backend lease can lapse, and the standby then
+// acquires a free lease through its ordinary fence-gated promotion. If the
+// listener serves again while the confirmed window still covers us, the next
+// round simply renews — nothing was given up that a rebind cannot restore.
+// Withholding never EXTENDS authority: it can only end it sooner.
 func (h *HAState) leaseRenewOnce() (fenced bool) {
 	h.mu.RLock()
 	p, id, epoch := h.lease, h.leaseCandidateID, h.leaseEpoch
@@ -256,6 +275,12 @@ func (h *HAState) leaseRenewOnce() (fenced bool) {
 	h.mu.RUnlock()
 	if p == nil || epoch == 0 {
 		return false
+	}
+	if reason, withhold := haLeaseRenewWithheld(); withhold {
+		return h.withholdLeaseRenewal(reason)
+	}
+	if h.leaseRenewWithheld.CompareAndSwap(true, false) {
+		logger.Printf("HA: Control Plane gRPC listener is serving again — resuming fencing-lease renewal (epoch=%d)", epoch)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), haLeaseOpTimeout)
 	ok, validNow, err := p.Renew(ctx, id, epoch)
@@ -283,6 +308,22 @@ func (h *HAState) leaseRenewOnce() (fenced bool) {
 	}
 }
 
+// withholdLeaseRenewal is the CHAOS-71 branch of leaseRenewOnce: skip the
+// renewal and self-fence once the last CONFIRMED validity window (minus the
+// write margin) has run out. Logs once per withholding episode.
+func (h *HAState) withholdLeaseRenewal(reason string) (fenced bool) {
+	if h.leaseRenewWithheld.CompareAndSwap(false, true) {
+		logger.Printf("HA: WITHHOLDING fencing-lease renewal — %s; a leader no Data Plane or standby can reach "+
+			"must not keep the fence, so this node will self-fence when its confirmed window ends unless the "+
+			"listener serves again first", sanitizeLog(reason))
+	}
+	if h.fenceIfLeaseWindowElapsed("fencing lease deliberately not renewed: " + reason) {
+		h.leaseRenewWithheld.Store(false)
+		return true
+	}
+	return false
+}
+
 // selfFence demotes this leader in-process to a read-only standby (ADR-0005
 // S2): role persisted, write authority gone (leaseEpoch=0), promote guard
 // re-armed. S4 then re-enters standby-resync against the S0-recorded
@@ -294,10 +335,10 @@ func (h *HAState) selfFence(reason string) {
 		h.mu.Unlock()
 		return
 	}
-	h.role = "standby"
+	h.setTopologyLocked("standby", h.peerAddr, haTransitionSelfFence)
 	h.since = time.Now()
 	fencedEpoch := h.leaseEpoch // capture the epoch being fenced before it is zeroed
-	h.leaseEpoch = 0
+	h.setLeaseEpochLocked(0)
 	// CLOSE the keepalive stop channel rather than just nil it: when the
 	// loop's own renew round fenced, it exits by returning anyway — but a
 	// fence driven from OUTSIDE the loop (tests exercising leaseRenewOnce,
@@ -325,6 +366,7 @@ func (h *HAState) selfFence(reason string) {
 	globalHAFailoverRing.Load().record("leader", "standby", "self-fence: "+reason, fencedEpoch, time.Now())
 	h.mu.Unlock()
 	h.promoted.Store(false) // a future (fence-gated) promotion is legitimate
+	h.republishTopology()
 
 	logger.Printf("HA: SELF-FENCED — demoted to read-only standby: %s", sanitizeLog(reason))
 	go alerts.Fire("ha_self_fenced", alerts.Payload{

@@ -102,11 +102,20 @@ var fireStorageWriteAlert = func(detail string) {
 	if !globalAlertStore.HasSubscriber("storage_write_failed") {
 		return
 	}
-	go fireAlert("storage_write_failed", AlertPayload{
-		Detail: detail,
-		Source: "storage",
+	goStorageWriteAlert(detail, func() {
+		fireAlert("storage_write_failed", AlertPayload{
+			Detail: detail,
+			Source: "storage",
+		})
 	})
 }
+
+// goStorageWriteAlert launches one storage_write_failed delivery on its own
+// goroutine. It is a package-level seam so a test can count launches through
+// the REAL fireStorageWriteAlert gate exactly, without sampling the
+// process-global goroutine count. detail is passed so a test can tell its own
+// launch from one another goroutine's failing write caused.
+var goStorageWriteAlert = func(_ string, deliver func()) { go deliver() }
 
 // storageEverFailed short-circuits the success observer until the first
 // failure, so the success path stays a single atomic load on a healthy node.

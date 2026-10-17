@@ -1364,6 +1364,9 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-71: Control Plane gRPC listener health (cp_grpc_health.go).
+	writeCPGRPCMetrics(w)
+
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
 	// only for a DestCountry rule on a node with a GeoIP database, and a block

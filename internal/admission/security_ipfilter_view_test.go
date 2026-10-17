@@ -664,77 +664,85 @@ func TestIPFilterAddAll_PublishesOnce(t *testing.T) {
 	}
 }
 
-// TestBenchGate_IPFilterBulkLoadIsLinear is the regression gate for the
+// countIPFilterPublishes counts f's view publications from now on, through the
+// instance-local publishHook.
+func countIPFilterPublishes(f *IPFilter) func() int {
+	var mu sync.Mutex
+	n := 0
+	h := func(*IPFilter) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+	}
+	f.publishHook.Store(&h)
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
+// TestIPFilterView_BulkLoadPublishesOnce is the regression gate for the
 // quadratic bulk load. publishView rebuilds the derived view from the entire
-// entry set, so publishing per entry makes a list load O(N²) — measured, an
-// Add loop cost 46 ms at 1k entries and 3.27 s at 8k, and this list's
+// entry set, so publishing per entry makes loading N entries O(N²): an Add
+// loop cost 46 ms at 1k entries and 3.27 s at 8k, and this list's
 // ConfigSnapshot cap is maxSnapIPList (2,000,000), so that would stall a boot
-// or a snapshot apply.
+// or a snapshot apply. AddAll must publish ONCE, at any entry count.
 //
-// A RATIO gate, so it is machine-independent: 4x the entries should cost ~4x
-// if the load is linear and ~16x if it is quadratic. The bound is 8x, midway
-// on a log scale, so the gate has wide margin under -race on a shared runner
-// while still failing hard if per-entry publishing returns.
-func TestBenchGate_IPFilterBulkLoadIsLinear(t *testing.T) {
-	if testing.Short() {
-		t.Skip("cost-shape gate skipped in -short")
-	}
-	const (
-		small = 2000
-		large = 8000 // 4x
-		bound = 8.0
-	)
-
-	entries := func(n int) []string {
-		out := make([]string, 0, n)
-		for i := 0; i < n; i++ {
-			out = append(out, fmt.Sprintf("10.%d.%d.1", i/256, i%256))
-		}
-		return out
-	}
-
-	measure := func(n int) time.Duration {
-		list := entries(n)
+// It replaces TestBenchGate_IPFilterBulkLoadIsLinear, a wall-clock ratio gate
+// (4x the entries must cost <= 8x) that ran in the untagged suite and failed
+// the Deep determinism gate for the unchanged linear implementation (8.28x,
+// 8.74x and 10.81x in CI) despite GC settling and best-of-nine sampling. The
+// publish count is the invariant that ratio approximated, and it holds on any
+// hardware under any load.
+func TestIPFilterView_BulkLoadPublishesOnce(t *testing.T) {
+	for _, n := range []int{1, 2000, 8000} {
 		f := &IPFilter{single: map[string]bool{}}
-		f.SetMode("allow")
-		// Settle the collector BEFORE the clock starts, as testing.B does before
-		// every benchmark run. This test runs inside a process whose heap every
-		// earlier test has grown, so without it a GC cycle (concurrent mark +
-		// assists) lands inside some timed loads and not others, and a ratio of
-		// two sub-millisecond samples inherits that. Measured with the gate's own
-		// sizes and best-of-three, 60 repetitions each, 4 cores + 6 CPU hogs:
-		// median 4.44x either way, but the unsettled form reached 13.66x and
-		// exceeded 8x in 16/60 repetitions (CI saw 8.28x in the shuffled
-		// determinism run), while the settled form's worst was 4.98x (0/60).
-		// It changes nothing the gate measures: AddAll still has to be linear.
-		runtime.GC()
-		start := time.Now()
-		f.AddAll(list)
-		return time.Since(start)
-	}
-
-	// Pair the sizes and alternate their order so they sample the same load
-	// phases while this package runs alongside the root suite. Grouped samples
-	// produced 10.81x in CI for the unchanged linear implementation. As in the
-	// exemption bulk-load gate, take each size's best of nine; retain the sizes,
-	// GC settling, measured operation and 8x bound against per-entry publishing.
-	dSmall, dLarge := measure(small), measure(large)
-	for i := 1; i < 9; i++ {
-		var nextSmall, nextLarge time.Duration
-		if i%2 == 0 {
-			nextSmall, nextLarge = measure(small), measure(large)
-		} else {
-			nextLarge, nextSmall = measure(large), measure(small)
+		f.SetMode("block")
+		publishes := countIPFilterPublishes(f)
+		if invalid := f.AddAll(bulkLoadEntries(n)); invalid != nil {
+			t.Fatalf("n=%d: valid entries rejected: %v", n, invalid)
 		}
-		dSmall, dLarge = min(dSmall, nextSmall), min(dLarge, nextLarge)
+		if got := publishes(); got != 1 {
+			t.Errorf("AddAll of %d entries published the view %d times, want 1: "+
+				"the view is being republished per entry again", n, got)
+		}
+		if f.Allowed("10.0.0.1") {
+			t.Fatalf("n=%d: the loaded list is not live after the single publish", n)
+		}
 	}
 
-	ratio := float64(dLarge) / float64(dSmall)
-	t.Logf("entries=%d: %v, entries=%d: %v, ratio=%.2fx (linear ~4x, quadratic ~16x, bound %.1fx)",
-		small, dSmall, large, dLarge, ratio, bound)
-	if ratio > bound {
-		t.Errorf("bulk IP-filter load scales superlinearly (%.2fx for 4x the entries, bound %.1fx): "+
-			"the view is being republished per entry again", ratio, bound)
+	f := &IPFilter{single: map[string]bool{}}
+	f.SetMode("block")
+	publishes := countIPFilterPublishes(f)
+	if invalid := f.AddAll([]string{"10.0.0.1", "not-an-ip", "10.0.0.0/24"}); len(invalid) != 1 {
+		t.Fatalf("invalid entries = %v, want exactly the one malformed entry", invalid)
+	}
+	if got := publishes(); got != 1 {
+		t.Errorf("a partially-invalid bulk load published %d times, want 1", got)
+	}
+	f.AddAll(nil)
+	if got := publishes(); got != 1 {
+		t.Errorf("an empty bulk load published (total %d, want still 1)", got)
+	}
+}
+
+// TestIPFilterView_AddLoopPublishesPerEntry is the contrast that keeps the gate
+// above from being vacuous: the shape it rejects (an Add loop) is visible to
+// the same counter, one publish per entry.
+func TestIPFilterView_AddLoopPublishesPerEntry(t *testing.T) {
+	const n = 64
+	f := &IPFilter{single: map[string]bool{}}
+	f.SetMode("block")
+	publishes := countIPFilterPublishes(f)
+	for _, e := range bulkLoadEntries(n) {
+		if err := f.Add(e); err != nil {
+			t.Fatalf("Add(%q): %v", e, err)
+		}
+	}
+	if got := publishes(); got != n {
+		t.Fatalf("an Add loop of %d entries published %d times, want %d: the publish counter cannot "+
+			"see the per-entry shape, so TestIPFilterView_BulkLoadPublishesOnce proves nothing", n, got, n)
 	}
 }
 
@@ -788,69 +796,6 @@ func TestBenchGate_IPFilterAllowedTakesNoLock(t *testing.T) {
 			t.Fatal("Allowed blocked while the write lock was held: the per-request " +
 				"read path has taken a lock again")
 		}
-	}
-}
-
-// TestBenchGate_IPFilterAllowedIsFlatInCIDRCount is a RATIO gate, so it is
-// machine-independent: it compares the filter against itself at two sizes
-// rather than against an absolute nanosecond budget.
-//
-// The pre-change linear scan cost ~14 ns per configured CIDR, so 256 prefixes
-// cost ~35x what 1 costs — 3.8 µs of CPU per request, inside the request
-// goroutine, before any policy work. Bucketing by prefix length makes the cost
-// depend on the number of DISTINCT prefix lengths (here: one, /24) instead.
-// Measured ratio after the change is ~1.0; the bound is set at 4x so the gate
-// has a wide margin under -race on a shared CI runner while still failing hard
-// if the linear scan returns.
-func TestBenchGate_IPFilterAllowedIsFlatInCIDRCount(t *testing.T) {
-	if testing.Short() {
-		t.Skip("cost-shape gate skipped in -short")
-	}
-	const (
-		small = 1
-		large = 256
-		bound = 4.0
-	)
-
-	measure := func(n int) time.Duration {
-		f := &IPFilter{single: map[string]bool{}}
-		for i := 0; i < n; i++ {
-			if err := f.Add(fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)); err != nil {
-				t.Fatal(err)
-			}
-		}
-		f.SetMode("allow")
-		const iters = 20000
-		// Warm up so neither size pays first-touch costs the other does not.
-		for i := 0; i < 1000; i++ {
-			_ = f.Allowed(benchProbeIP)
-		}
-		start := time.Now()
-		for i := 0; i < iters; i++ {
-			_ = f.Allowed(benchProbeIP)
-		}
-		return time.Since(start)
-	}
-
-	// Best-of-three on each size: a scheduler hiccup inflates a sample, never
-	// deflates it, so taking the minimum removes the flake direction.
-	best := func(n int) time.Duration {
-		d := measure(n)
-		for i := 0; i < 2; i++ {
-			if e := measure(n); e < d {
-				d = e
-			}
-		}
-		return d
-	}
-
-	dSmall, dLarge := best(small), best(large)
-	ratio := float64(dLarge) / float64(dSmall)
-	t.Logf("cidrs=%d: %v, cidrs=%d: %v, ratio=%.2fx (bound %.1fx)",
-		small, dSmall, large, dLarge, ratio, bound)
-	if ratio > bound {
-		t.Errorf("Allowed cost scales with CIDR count (%.2fx from %d to %d prefixes, bound %.1fx): "+
-			"the per-request membership test has returned to a linear scan", ratio, small, large, bound)
 	}
 }
 

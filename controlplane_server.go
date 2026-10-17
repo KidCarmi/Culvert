@@ -446,7 +446,7 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 		CertPEM: string(certPEM),
 		CAPEM:   string(globalClusterCA.CACertPEM()),
 		NodeID:  req.NodeID,
-		CPAddr:  clusterRole.grpcAddr,
+		CPAddr:  clusterRoleSnapshot().grpcAddr,
 		Epoch:   globalHA.CurrentEpoch(), // ADR-0005 S3: seed the DP's epoch ratchet
 	}
 	b, _ := json.Marshal(resp)
@@ -871,30 +871,69 @@ var clusterInsecure bool
 
 // cpServerOption returns the gRPC server option for the Control Plane based on
 // available TLS certs or the --cluster-insecure flag.
-func cpServerOption(addr, certFile, keyFile, caFile string) (grpc.ServerOption, error) {
+//
+// CHAOS-71 made this function SILENT and it must stay that way. It used to
+// emit "ControlPlane: gRPC %s (mTLS)" (or the insecure WARN) itself, which was
+// correct while it was called exactly once per process and became a log flood
+// the moment the listener acquired a rebind loop — one line per attempt,
+// forever, defeating the rate-limited failure line beside it. The transport
+// mode is returned instead and logged ONCE per OBSERVED bind by
+// logControlPlaneTransport. Same rule as everywhere else in this sweep: the log
+// carries the signal, the counter carries the magnitude, and a mitigation for a
+// crash loop must not itself be one.
+//
+// It is also called on EVERY attempt rather than once, which is deliberate and
+// load-bearing: re-reading the operator-supplied mTLS pair from disk each time
+// is what lets a cert-manager/certbot rotation that briefly truncated the files
+// self-heal with no restart (§33 rule 4).
+func cpServerOption(certFile, keyFile, caFile string) (grpc.ServerOption, error) {
+	opt, _, err := cpServerOptionMode(certFile, keyFile, caFile)
+	return opt, err
+}
+
+// cpServerOptionMode is cpServerOption plus the BOUNDED transport-mode label
+// ("mtls" or "insecure") for the once-per-bind log line.
+//
+// It deliberately does NOT take the listen address. It used to, only to log it,
+// and once CHAOS-71 moved that line out to logControlPlaneTransport (so the
+// rebind loop does not emit one per attempt) the parameter had no reader —
+// caught by `unparam`. The address belongs to the supervisor, which owns the
+// once-per-observed-bind log line.
+func cpServerOptionMode(certFile, keyFile, caFile string) (grpc.ServerOption, string, error) {
 	switch {
 	case certFile != "" && keyFile != "":
 		creds, err := buildServerTLS(certFile, keyFile, caFile)
 		if err != nil {
-			return nil, fmt.Errorf("gRPC TLS: %w", err)
+			return nil, "", fmt.Errorf("gRPC TLS: %w", err)
 		}
-		logger.Printf("ControlPlane: gRPC %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
-		return grpc.Creds(creds), nil
+		return grpc.Creds(creds), "mtls", nil
 	case clusterInsecure:
-		logWarnf("ControlPlane: gRPC %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
-		return grpc.EmptyServerOption{}, nil
+		return grpc.EmptyServerOption{}, "insecure", nil
 	default:
-		return nil, fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
+		return nil, "", fmt.Errorf("TLS certificates required for Control Plane (use --cluster-insecure to override for development)")
 	}
 }
 
-func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
-	serverOpt, err := cpServerOption(addr, certFile, keyFile, caFile)
-	if err != nil {
-		return err
+// logControlPlaneTransport emits the once-per-bind transport line that
+// cpServerOption used to emit per attempt.
+func logControlPlaneTransport(addr, mode string) {
+	if mode == "insecure" {
+		logWarnf("ControlPlane: gRPC %s (insecure — all cluster data unencrypted!)", strings.ReplaceAll(addr, "\n", ""))
+		return
 	}
+	logger.Printf("ControlPlane: gRPC %s (mTLS)", strings.ReplaceAll(addr, "\n", ""))
+}
 
-	srv := grpc.NewServer(
+// newControlPlaneGRPCServer constructs the Control Plane gRPC server with the
+// cluster frame budgets. Split out of the old StartControlPlaneGRPC by
+// CHAOS-71 so the bind can be retried without re-deriving the options, and so
+// the construction carries no globals and no goroutine (cp_grpc_bind.go owns
+// the lifecycle; the caller registers the service and serves).
+//
+// The frame-budget reasoning below is unchanged from the original and is load-
+// bearing for enterprise-scale snapshots.
+func newControlPlaneGRPCServer(serverOpt grpc.ServerOption) *grpc.Server {
+	return grpc.NewServer(
 		serverOpt,
 		// Match the DP client's frame budget so an enterprise-scale
 		// ConfigSnapshot (2 M blocked hosts + IP list + URL categories) fits
@@ -914,21 +953,6 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		grpc.MaxRecvMsgSize(maxClusterInboundMsgSize),
 		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
 	)
-	registerConfigService(srv)
-
-	lc := net.ListenConfig{}
-	ln, err := lc.Listen(context.Background(), "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("gRPC listen: %w", err)
-	}
-	clusterRole.grpcSrv = srv
-
-	go func() {
-		if err := srv.Serve(ln); err != nil {
-			logger.Printf("ControlPlane gRPC error: %v", err)
-		}
-	}()
-	return nil
 }
 
 // registerConfigService registers the hand-rolled ConfigService (JSON over
@@ -949,15 +973,15 @@ func registerConfigService(srv grpc.ServiceRegistrar) {
 		ServiceName: configServiceName,
 		HandlerType: (*controlPlaneServer)(nil),
 		Methods: []grpc.MethodDesc{
-			{MethodName: "GetConfig", Handler: wrapUnary(svc.GetConfig)},
-			{MethodName: "GetConfigDelta", Handler: wrapUnary(svc.GetConfigDelta)},
-			{MethodName: "PushMetrics", Handler: wrapUnary(svc.PushMetrics)},
-			{MethodName: "Enroll", Handler: wrapUnary(svc.Enroll)},
-			{MethodName: "SyncRateLimits", Handler: wrapUnary(svc.SyncRateLimits)},
-			{MethodName: "SyncRevocations", Handler: wrapUnary(svc.SyncRevocations)},
-			{MethodName: "PushAuditEvents", Handler: wrapUnary(svc.PushAuditEvents)},
-			{MethodName: "RenewCert", Handler: wrapUnary(svc.RenewCert)},
-			{MethodName: "HASync", Handler: wrapUnary(svc.HASync)},
+			{MethodName: "GetConfig", Handler: gatedUnary("GetConfig", svc.GetConfig)},
+			{MethodName: "GetConfigDelta", Handler: gatedUnary("GetConfigDelta", svc.GetConfigDelta)},
+			{MethodName: "PushMetrics", Handler: gatedUnary("PushMetrics", svc.PushMetrics)},
+			{MethodName: "Enroll", Handler: gatedUnary("Enroll", svc.Enroll)},
+			{MethodName: "SyncRateLimits", Handler: gatedUnary("SyncRateLimits", svc.SyncRateLimits)},
+			{MethodName: "SyncRevocations", Handler: gatedUnary("SyncRevocations", svc.SyncRevocations)},
+			{MethodName: "PushAuditEvents", Handler: gatedUnary("PushAuditEvents", svc.PushAuditEvents)},
+			{MethodName: "RenewCert", Handler: gatedUnary("RenewCert", svc.RenewCert)},
+			{MethodName: "HASync", Handler: gatedUnary("HASync", svc.HASync)},
 		},
 		Streams: []grpc.StreamDesc{},
 	}, nil)
@@ -972,9 +996,18 @@ func registerConfigService(srv grpc.ServiceRegistrar) {
 // still completes the graceful path. CHAOS-56.
 const cpGRPCGracefulStopBudget = 8 * time.Second
 
-// StopControlPlaneGRPC stops the gRPC server, draining in-flight RPCs, and
-// force-closes anything still holding a transport once the graceful budget is
-// spent. Called during SIGTERM/SIGINT shutdown.
+// stopControlPlaneServer stops one gRPC server instance, draining in-flight
+// RPCs, and force-closes anything still holding a transport once the graceful
+// budget is spent.
+//
+// Two callers, both via the supervisor (cp_grpc_bind.go): the SIGTERM/SIGINT
+// shutdown hook, and the supervisor tearing down a server it lost the adopt
+// race for. CHAOS-71 removed the previous entry point, `StopControlPlaneGRPC`,
+// which read `clusterRole.grpcSrv` with NO lock — latent while that field was
+// written exactly once per process, a REAL data race the moment the listener
+// acquired a rebind loop. Do not reintroduce a global-handle variant: the
+// supervisor owns the handle under its own mutex and is the only thing that
+// knows which generation is current.
 //
 // CHAOS-56 — GracefulStop used to be called bare, from the early shutdown
 // phase, which ran under context.Background() and was documented as "not
@@ -1009,11 +1042,7 @@ const cpGRPCGracefulStopBudget = 8 * time.Second
 // restart already exercises. The budget is above the 6s idle-drain figure so a
 // fleet of merely-unresponsive peers still drains gracefully; it is the
 // unbounded active-stream case the force-close exists for.
-func StopControlPlaneGRPC() {
-	srv := clusterRole.grpcSrv
-	if srv == nil {
-		return
-	}
+func stopControlPlaneServer(srv *grpc.Server) {
 	logger.Printf("ControlPlane: graceful gRPC shutdown...")
 	if gracefulStopBounded(srv, cpGRPCGracefulStopBudget) {
 		logger.Printf("ControlPlane: gRPC stopped")
@@ -1024,7 +1053,7 @@ func StopControlPlaneGRPC() {
 
 // gracefulStopBounded runs srv.GracefulStop under a budget and falls back to
 // srv.Stop when it expires. Reports whether the graceful drain completed
-// within the budget. Split out from StopControlPlaneGRPC so the bound is
+// within the budget. Split out from stopControlPlaneServer so the bound is
 // testable against a real wedged stream without touching the clusterRole
 // global. CHAOS-56.
 //
@@ -1077,6 +1106,70 @@ func gracefulStopBounded(srv *grpc.Server, budget time.Duration) bool {
 }
 
 // wrapUnary adapts our JSON handler signature to grpc.methodHandler.
+// cpRPCPolicy is one ConfigService method's HA serving policy.
+type cpRPCPolicy struct {
+	leaderGated bool
+	why         string
+}
+
+// cpRPCPolicies classifies EVERY ConfigService method (CHAOS-71, Codex review
+// of #1556). TestChaos71_Wall_EveryCPRPCHasAnHAServingPolicy pins that each
+// registered method has an entry and is registered through gatedUnary.
+//
+// Why leader-gating is needed at all: ADR-0005 keeps a demoted leader's CP
+// gRPC server running (enterStandbyResync: "a demoted leader's CP gRPC server
+// never stopped") and fences its WRITES with role-gated issuance (S3). But its
+// READS were ungated: after a self-fence (now including the CHAOS-71 dark-
+// listener withholding) the supervisor can rebind, and a standby answering
+// GetConfig/GetConfigDelta keeps Data Planes on it — standby resync replaces
+// the snapshot WITHOUT advancing ConfigStore.version, so a DP at the old
+// version gets "unchanged" forever and never fails over to the new leader.
+// Every DP-facing method therefore refuses on a non-leader with a RETRIABLE
+// Unavailable, which the DP counts as a poll failure, so its address failover
+// runs. The ADR's choice — keep the server, fence the plane — is preserved.
+var cpRPCPolicies = map[string]cpRPCPolicy{
+	"GetConfig":       {true, "config served by a standby would pin DPs to a non-advancing version"},
+	"GetConfigDelta":  {true, "a delta success resets the DP failure streak exactly like GetConfig"},
+	"PushMetrics":     {true, "a standby accepting heartbeats would report DPs connected to a node that cannot manage them"},
+	"SyncRateLimits":  {true, "cluster rate-limit state must converge on the leader, not a standby"},
+	"PushAuditEvents": {true, "audit events accepted by a standby are not on the leader's record"},
+	"HASync":          {true, "only the leader may serve replication bundles (the puller's epoch check is lease-mode only)"},
+	"Enroll":          {true, "issuance — additionally haIssuanceAllowed inside the handler (ADR-0005 S3)"},
+	"RenewCert":       {true, "issuance — additionally haIssuanceAllowed inside the handler (ADR-0005 S3)"},
+	"SyncRevocations": {true, "cluster-state write — additionally haIssuanceAllowed inside the handler (ADR-0005 S3)"},
+}
+
+// haServingAllowed is the leader gate for ConfigService reads and writes:
+// standalone (HA off) serves; with HA on only the leader does. A node whose
+// persisted HA intent could not be read is not "HA off": it serves nothing
+// leader-gated until a read decides it (ha_intent.go).
+func haServingAllowed() (ok bool, reason string) {
+	if reason, gated := globalHA.intentGate(); gated {
+		return false, reason
+	}
+	st := globalHA.Status()
+	if !st.Enabled || st.Role == "leader" {
+		return true, ""
+	}
+	return false, fmt.Sprintf("this node is not the HA leader (role %q) — fail over to the leader", st.Role)
+}
+
+// gatedUnary wraps a ConfigService handler with its HA serving policy. An
+// unclassified method fails CLOSED (gated): a new RPC is never served by a
+// standby by omission.
+func gatedUnary(method string, fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
+	inner := wrapUnary(fn)
+	if p, ok := cpRPCPolicies[method]; ok && !p.leaderGated {
+		return inner
+	}
+	return func(srv any, ctx context.Context, dec func(any) error, ic grpc.UnaryServerInterceptor) (any, error) {
+		if ok, reason := haServingAllowed(); !ok {
+			return nil, status.Errorf(codes.Unavailable, "%s refused: %s", method, reason)
+		}
+		return inner(srv, ctx, dec, ic)
+	}
+}
+
 func wrapUnary(fn func(context.Context, json.RawMessage) (json.RawMessage, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
 	return func(_ any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
 		var raw json.RawMessage
