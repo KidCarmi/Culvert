@@ -65,21 +65,36 @@ device-read mean). 3 reboots each, same bytes, one runner.
 | containerd read volume (MiB) | 51.2 | 51.2 | 1.00 |
 | docker read volume (MiB) | 116.3 | 116.3 | 1.00 |
 
-**Every phase grows with latency; the bytes read do not.** Recovery is
-latency-bound reads end to end — the pre-kernel firmware/initrd read is the
-single largest block, then the container-engine and stack phases. The
-containerd metadata→next-plugin gap scales almost exactly with latency (×2.50),
-confirming it is a read burst (ASTRA's ESXi 11.5 s is the same gap at higher
-per-read latency). The only product-side levers are therefore **fewer bytes
-read** in those phases (initrd size for pre-kernel — the `MODULES=list` target,
-deferred pending per-hypervisor proof; container-layer reads for engine/stack);
-per-read latency itself is infrastructure.
-
+Every phase grows with latency and the bytes read stay constant, so recovery is
+latency-sensitive. **This step changed read AND write delay together (12→30 ms
+read, 3→15 ms write), so it does NOT by itself isolate read cost or rule out
+CPU/scheduling/metadata work** — see the read/write isolation below, which does.
 Caveat: the dm-delay lab is cache=none + direct-I/O, so every read pays the full
-injected latency — a PESSIMISTIC bound. Real ESXi does readahead/caching, which
-is why ASTRA's 141 s at a ~30 ms device mean sits BELOW the lab's 227 s at
-`esxi30`. The comparison proves latency-sensitivity and phase distribution, not
-an absolute ESXi number.
+injected latency (a pessimistic bound, not a demonstrated model of ESXi
+caching); it proves latency-sensitivity and phase distribution, not an absolute
+ESXi number or the original stall's cause.
+
+## Read/write isolation (candidate 6248daf7, retained bytes)
+
+To separate read cost from write cost, the same OVA was run holding one delay
+fixed while varying the other (lab run 39037503405, 3 reboots per profile):
+
+| Profile | read / write (ms) | recovery (s, ×3 avg) | effect vs baseline |
+|---|---|---|---|
+| r12w3 (baseline, 120 s gate) | 12 / 3 | 107.6 | — |
+| r30w3 (read varied, write held 3) | 30 / 3 | 217.9 | +110 s / +18 ms read ≈ **6.1 s/ms** |
+| r12w15 (write varied, read held 12) | 12 / 15 | 115.6 | +8 s / +12 ms write ≈ **0.67 s/ms** |
+
+**Read latency dominates write by ~9× per ms** (110 s vs 8 s total effect). By
+phase, the read arm vs the write arm: pre-kernel +66.5 s / +1.1 s; kernel
++5.9 / +0.3; containerd metadata→plugin gap +2.0 / +0.04 (a read burst, shown
+by its own split — not by matching ESXi's 11.5 s); docker +2.5 / +0.9; stack
+resume +5.0 / +0.8. The early-boot `/proc/diskstats` sampler recorded
+**~774 MiB read / ~28 MiB written per boot (≈27:1)**, consistent with the read
+dominance. This isolates read vs write IN THE LAB; it does not establish the
+ESXi stall's cause. The product-side read levers are initrd size (pre-kernel —
+`MODULES=list`, deferred) and read-ahead/batching + container-layer reads for
+the engine/stack phases; per-read latency is infrastructure.
 
 ## What ships
 
