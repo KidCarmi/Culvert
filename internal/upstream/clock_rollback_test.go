@@ -85,7 +85,19 @@ func TestChaos71_BreakerRecoveryIsBoundedFromTheStep(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if elapsed := time.Since(start); elapsed < timeout {
-		t.Fatalf("breaker recovered in %v, before a full reset timeout (%v) had been served from the step", elapsed, timeout)
+
+	// openedAt is a UnixMilli stamp, so time.UnixMilli truncates the re-anchor
+	// instant DOWN by up to 1ms and recovery can legitimately land that much
+	// before the nominal timeout. Measured worst case over 40 -race runs:
+	// -791µs. The first version of this gate asserted `elapsed >= timeout`,
+	// which is stricter than the mechanism's own resolution — it passed locally
+	// and turned CI's `Race · non-root packages` shard red. The tolerance is the
+	// stamp resolution, not slack: the property under test is that the re-anchor
+	// serves a FULL timeout rather than half-opening instantly (0ms vs ~300ms),
+	// which 1ms cannot mask.
+	const stampResolution = time.Millisecond
+	if elapsed := time.Since(start); elapsed < timeout-stampResolution {
+		t.Fatalf("breaker recovered in %v, before a full reset timeout (%v, less the %v UnixMilli "+
+			"stamp resolution) had been served from the step", elapsed, timeout, stampResolution)
 	}
 }

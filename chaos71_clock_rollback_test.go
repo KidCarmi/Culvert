@@ -16,8 +16,24 @@ package main
 // that exists to END a degraded state never fires again until the wall clock
 // catches back up — which, after a step of hours, means hours.
 //
-// THE WHOLE CLASS, enumerated at this revision. Seventeen interval comparisons
-// in the tree are derived from an int64 stamp:
+// THE WHOLE CLASS, enumerated at this revision. TWENTY-TWO interval comparisons
+// in the tree are derived from an int64 stamp.
+//
+// The first version of this header claimed SEVENTEEN and called the inventory
+// exhaustive. That was wrong, and Codex rejected it on PR #1650 (P2). The cause
+// was the SEARCH, not an oversight about any one site: the original grep
+// required the subtraction to sit syntactically beside the time call
+// (`UnixNano() - x`), so it missed the far more common two-step form
+//
+//	now := time.Now().UnixNano()
+//	... now - last ...
+//
+// which is how five further gates are written. One of those five compares
+// against a bare literal (policy.go, `>= 300`), so even a generalised
+// `int64(<duration>)` search missed it; finding it took walking every file that
+// seeds an int64 from a time call. The lesson is recorded in §8c of the review
+// doc: an inventory is only as exhaustive as the shapes its search can express,
+// so state the shape you searched for, not that you looked everywhere.
 //
 //	ALREADY GUARDED (8) — the controls for the class, re-checked here:
 //	  internal/scanner/scanner.go     budgetRemaining      elapsed < 0 -> full budget
@@ -28,14 +44,20 @@ package main
 //	  proxy_host_bounds.go            oversize log window  d >= 0 && ...
 //	  request_tracing_bounds.go       bounds log window    d >= 0 && ...
 //
-//	UNGUARDED, CLOSED BY THIS SWEEP (7) — every one a recovery bound or the
-//	only operator signal for a degraded state:
+//	UNGUARDED, CLOSED BY THE FIRST PASS (7) — recovery bounds and signals:
 //	  proxy_tunnel.go                 tunnel idle reaper        CK-1
 //	  internal/upstream/upstream.go   parent-proxy breaker      CK-2
 //	  cdr_breaker.go                  Sluice/CDR breaker        CK-3
 //	  readyz_dp_health.go             DP readiness grace        CK-4
 //	  roster_persist_durability.go x2 durability log gates      CK-5
 //	  internal/ocsp/ocsp.go           responder-cap log gate    CK-5
+//
+//	UNGUARDED, MISSED BY THE FIRST SEARCH, CLOSED HERE (5) — all CK-9:
+//	  crashguard.go                   crash-evidence throttle   (Codex)
+//	  internal/secscan/secscan.go     scanner degraded log      (Codex)
+//	  internal/yara/yara.go           YARA degraded log         (Codex)
+//	  cdr_proxy.go                    Sluice call-error log     (found re-sweeping)
+//	  policy.go                       file-profile block warn   (found re-sweeping)
 //
 //	UNGUARDED, DELIBERATELY LEFT (2) — CK-8, recorded with its fix shape in
 //	docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md §7:
@@ -44,6 +66,8 @@ package main
 //
 // A new bound added on an int64 stamp is not structurally stopped from
 // repeating this; CK-7 records the lint/AST option and why it is not trivial.
+// CK-9 is the argument FOR building it: a convention applied by hand across 22
+// sites in one repository was wrong at 5 of them.
 //
 // FAULT INJECTION. A backward step of Δ is observationally identical to a stamp
 // Δ in the FUTURE, because the stamp was written before the step and is read
@@ -395,5 +419,137 @@ func TestChaos71_RosterGateNeverMovesItsStampBackwards(t *testing.T) {
 	noteRosterPersistBestEffort("backup codes", errors.New("read-only file system"))
 	if got := rosterPersistLogLast.Load(); got < winner {
 		t.Fatalf("rosterPersistLogLast moved backwards: %d < %d", got, winner)
+	}
+}
+
+// ─── CK-9: the five sites the first sweep's search MISSED ────────────────────
+//
+// Codex (PR #1650, P2) rejected the first write-up's claim of an exhaustive
+// inventory and named three live comparisons with the same defect. It was right,
+// and the cause was the SEARCH, not an oversight about any one site: the
+// original grep required the subtraction to sit syntactically next to the time
+// call (`UnixNano() - x`), so it saw none of the far more common two-step form
+//
+//	now := time.Now().UnixNano()
+//	... now - last ...
+//
+// Re-running the sweep on the generalised shape found Codex's three plus two
+// more it had not named (cdr_proxy.go, and policy.go — which compares against a
+// bare literal 300, so even the generalised int64(...)-cast search missed it and
+// it took walking every file that seeds an int64 from a time call).
+//
+// All five are log/evidence gates, so the fault is the CK-5 one: a backward step
+// suppresses the notice for the whole step. crashguard is the sharpest, because
+// crash evidence is the one record an operator cannot reconstruct afterwards.
+
+// TestChaos71_CrashThrottleSurvivesABackwardClockStep is the DEFECT gate for the
+// crash-evidence throttle. Pre-fix a backward step makes recordCrash return
+// before updating lastCrash or emitting the stack-bearing log and audit entry,
+// so every subsequent same-component crash is silently lost.
+func TestChaos71_CrashThrottleSurvivesABackwardClockStep(t *testing.T) {
+	const component = "chaos71-probe"
+	crashThrottleMu.Lock()
+	prev, had := crashThrottleLast[component]
+	crashThrottleMu.Unlock()
+	t.Cleanup(func() {
+		crashThrottleMu.Lock()
+		if had {
+			crashThrottleLast[component] = prev
+		} else {
+			delete(crashThrottleLast, component)
+		}
+		crashThrottleMu.Unlock()
+	})
+
+	// Stamped before a one-hour backward step, so it reads an hour ahead.
+	crashThrottleMu.Lock()
+	crashThrottleLast[component] = time.Now().Add(clockStepBack).UnixNano()
+	crashThrottleMu.Unlock()
+
+	if !crashThrottleAllow(component) {
+		t.Fatal("crashThrottleAllow suppressed a crash after a backward clock step — " +
+			"recordCrash returns before the stack-bearing log and audit entry, so crash " +
+			"evidence is lost for the duration of the step")
+	}
+}
+
+// TestChaos71_CrashThrottleStillThrottles is the CONTROL: the per-second gate
+// still collapses a flood on a sane clock.
+func TestChaos71_CrashThrottleStillThrottles(t *testing.T) {
+	const component = "chaos71-probe-control"
+	t.Cleanup(func() {
+		crashThrottleMu.Lock()
+		delete(crashThrottleLast, component)
+		crashThrottleMu.Unlock()
+	})
+	if !crashThrottleAllow(component) {
+		t.Fatal("first crash of a component was throttled")
+	}
+	if crashThrottleAllow(component) {
+		t.Fatal("second crash inside crashThrottleEvery was allowed — the throttle stopped throttling")
+	}
+}
+
+// TestChaos71_CrashThrottleIgnoresAConcurrentClaimantsStamp is the CONTROL for
+// the other side of the symmetric window: a stamp marginally ahead is a
+// concurrent claimant, not a clock step, and must still throttle.
+func TestChaos71_CrashThrottleIgnoresAConcurrentClaimantsStamp(t *testing.T) {
+	const component = "chaos71-probe-ahead"
+	t.Cleanup(func() {
+		crashThrottleMu.Lock()
+		delete(crashThrottleLast, component)
+		crashThrottleMu.Unlock()
+	})
+	crashThrottleMu.Lock()
+	crashThrottleLast[component] = time.Now().Add(50 * time.Microsecond).UnixNano()
+	crashThrottleMu.Unlock()
+	if crashThrottleAllow(component) {
+		t.Fatal("a stamp microseconds ahead was treated as a clock rollback; it is a concurrent claimant")
+	}
+}
+
+// TestChaos71_CDRCallErrorLogSurvivesABackwardClockStep is the DEFECT gate for
+// the Sluice call-error line.
+func TestChaos71_CDRCallErrorLogSurvivesABackwardClockStep(t *testing.T) {
+	prev := cdrCallErrorLogAt.Load()
+	t.Cleanup(func() { cdrCallErrorLogAt.Store(prev) })
+
+	cdrCallErrorLogAt.Store(time.Now().Add(clockStepBack).UnixNano())
+	before := cdrCallErrorLogAt.Load()
+	noteCDRCallError(errors.New("sanitize failed"))
+	if got := cdrCallErrorLogAt.Load(); got == before {
+		t.Fatal("noteCDRCallError did not claim the interval after a backward clock step — " +
+			"the Sluice call-error line stays suppressed until the clock catches up")
+	}
+}
+
+// TestChaos71_FileProfileUnresolvedLogSurvivesABackwardClockStep is the DEFECT
+// gate for policy.go's fail-closed file-profile warning. It is the site that
+// compares against a bare literal, which is why the generalised search missed it
+// too.
+func TestChaos71_FileProfileUnresolvedLogSurvivesABackwardClockStep(t *testing.T) {
+	prev := atomic.LoadInt64(&fileProfileUnresolvedLastLog)
+	t.Cleanup(func() { atomic.StoreInt64(&fileProfileUnresolvedLastLog, prev) })
+
+	future := time.Now().Add(clockStepBack).Unix() // SECONDS, not nanos
+	atomic.StoreInt64(&fileProfileUnresolvedLastLog, future)
+	noteFileProfileUnresolvedBlock("prof-1", "Chaos71 Probe")
+	if got := atomic.LoadInt64(&fileProfileUnresolvedLastLog); got == future {
+		t.Fatal("noteFileProfileUnresolvedBlock did not claim the interval after a backward clock " +
+			"step — the only notice that a rule is blocking file transactions stays suppressed")
+	}
+}
+
+// TestChaos71_FileProfileUnresolvedLogStillRateLimits is the CONTROL.
+func TestChaos71_FileProfileUnresolvedLogStillRateLimits(t *testing.T) {
+	prev := atomic.LoadInt64(&fileProfileUnresolvedLastLog)
+	t.Cleanup(func() { atomic.StoreInt64(&fileProfileUnresolvedLastLog, prev) })
+
+	atomic.StoreInt64(&fileProfileUnresolvedLastLog, 0)
+	noteFileProfileUnresolvedBlock("prof-1", "Chaos71 Probe") // claims the interval
+	claimed := atomic.LoadInt64(&fileProfileUnresolvedLastLog)
+	noteFileProfileUnresolvedBlock("prof-1", "Chaos71 Probe") // must be suppressed
+	if got := atomic.LoadInt64(&fileProfileUnresolvedLastLog); got != claimed {
+		t.Fatalf("the 5-minute gate re-claimed immediately (%d -> %d): it stopped rate limiting", claimed, got)
 	}
 }

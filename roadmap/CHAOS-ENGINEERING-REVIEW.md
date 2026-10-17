@@ -8304,12 +8304,14 @@ that interval negative, so every `elapsed >= limit` test is false and a bound
 whose job is to END a degraded state never fires again until the clock catches
 up. Nothing errors, nothing is counted, nothing is logged.
 
-Seventeen such comparisons exist. **Eight were already guarded** (`internal/scanner`
-`budgetRemaining`, `internal/admission` `engine.go`, `internal/mcp/canary`
-`windowOpenLocked` ×2, `internal/mcp/rollout` `elapsed`, `store.go`
-`advanceLocked`, `proxy_host_bounds.go`, `request_tracing_bounds.go`) — the rule
-was adopted, written into a comment and shipped. **Seven were not, and each of
-those seven was a recovery bound or the sole operator signal for one.**
+**Twenty-two** such comparisons exist. **Eight were already guarded**
+(`internal/scanner` `budgetRemaining`, `internal/admission` `engine.go`,
+`internal/mcp/canary` `windowOpenLocked` ×2, `internal/mcp/rollout` `elapsed`,
+`store.go` `advanceLocked`, `proxy_host_bounds.go`, `request_tracing_bounds.go`)
+— the rule was adopted, written into a comment and shipped. **Twelve were not:**
+seven recovery bounds or sole operator signals (CK-1…CK-5) and five evidence/log
+gates (CK-9) that this sweep's first inventory MISSED and a second review round
+surfaced.
 
 ### Register rows
 
@@ -8386,7 +8388,34 @@ an interval guards the wrong thing — a negative interval means the two reading
 are out of order, which concurrency produces with no clock involved. Compare
 against the quantity's natural scale, or leave the wall clock entirely.**
 
-**Gates.** 10 defect + 8 control = 18, all ten defect gates verified FAILING
+**Second review round (Codex, P2) — see CK-9 above. Its lesson is about method:
+an inventory is only as exhaustive as the shapes its search can express.** This
+sweep said "seventeen comparisons" as if it had counted a closed set, when it had
+counted the matches of three regexes. The honest claim names the shape searched
+for and admits what it cannot reach. It is also the strongest argument for CK-7:
+a convention applied by hand across twenty-two sites was wrong at five of them,
+and what caught it was a different reader, not a check.
+
+- **CK-9 (P2, CLOSED) — the inventory was not exhaustive, and the SEARCH was
+  why.** Codex rejected §1's exhaustiveness claim and named `crashguard.go:167`,
+  `internal/secscan/secscan.go:828` and `internal/yara/yara.go:643`. Correct on
+  all three, and the cause was the search: the first sweep grepped for the
+  subtraction sitting syntactically beside the time call (`UnixNano() -`,
+  `time.Since(time.Unix(`), which cannot match the far more common two-step form
+  `now := time.Now().UnixNano()` … `now - prev`. Re-sweeping the generalised
+  shape found Codex's three plus **two more it had not named**: `cdr_proxy.go`
+  (Sluice call-error log) and `policy.go` (file-profile unresolved-block
+  warning). `policy.go` compares against a bare literal in Unix SECONDS, so even
+  the generalised `int64(<duration>)` search missed it — it took enumerating
+  every file that seeds an int64 from a time call. **`crashguard.go` is the
+  sharpest member of the whole sweep:** after one crash and a backward step,
+  `recordCrash` returns before updating `lastCrash` and before emitting the
+  stack-bearing log and audit entry, for every subsequent same-component crash —
+  and crash evidence is the one record an operator cannot reconstruct. All five
+  take the symmetric-window rule (absolute interval), four via
+  `time.Duration(d).Abs()` and `policy.go` by explicit negation.
+
+**Gates.** 15 defect + 15 control = 30, all fifteen defect gates verified FAILING
 against the pre-fix tree. Fault injection is deterministic and needs no host
 clock: a backward step of Δ is observationally identical to a stamp Δ in the
 FUTURE, because the stamp is written before the step and read after it. The
@@ -8424,6 +8453,21 @@ the fix cannot degrade into an instant probe flood.
 - **NTP failure as such is not a fault here.** A clock that never corrects is a
   clock that never steps, which is the benign case for every bound above. The
   fault is the correction, not its absence.
+
+### The flaky gate this sweep shipped and then fixed
+
+`Race · non-root packages` went red, and the first reading was "red on a
+superseded head". That was wrong. Reproducing the shard locally showed
+`TestChaos71_BreakerRecoveryIsBoundedFromTheStep` failing: `openedAt` is a
+`UnixMilli` stamp, so truncation moves the re-anchor instant down by up to 1ms
+and recovery lands that much before the nominal timeout (measured worst case over
+40 `-race` runs: −791µs). The GATE was stricter than the resolution of the clock
+it read. Fixed by tolerating exactly the stamp resolution — the property under
+test, a full timeout versus an instant half-open, is 0ms versus ~300ms and cannot
+be masked by 1ms. **Two rules out of it: a timing gate must be no stricter than
+the resolution of the clock it reads; and "red on a superseded head" is not a
+diagnosis when the check ran against code still in the PR — reproduce it, because
+the local shard is the authority, not the head SHA.**
 
 ### The process lesson
 

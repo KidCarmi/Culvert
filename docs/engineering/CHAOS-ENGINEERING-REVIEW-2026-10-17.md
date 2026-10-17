@@ -28,11 +28,18 @@ step. The immunity ends the moment a stamp is stored as an `int64`:
 `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild a `time.Time` with **no**
 monotonic reading, so the subtraction falls back to the wall clock.
 
-The tree holds **seventeen** such interval comparisons. Eight were already
-guarded. **Seven were not, and every one of those seven was either the recovery
-bound for a degraded state or the only operator signal for one** — they are what
-this sweep closes. The remaining two are a fail-closed budget window, recorded
-below as CK-8 and deliberately not changed here.
+The tree holds **twenty-two** such interval comparisons. Eight were already
+guarded. **Twelve were not**: seven are recovery bounds or the only operator
+signal for a degraded state (CK-1…CK-5, below), and five more are evidence and
+log gates found only after review rejected this sweep's first inventory (CK-9,
+§8c). The remaining two are a fail-closed budget window, recorded under CK-8 and
+deliberately not changed here.
+
+> **The first version of this section claimed seventeen and called the inventory
+> exhaustive.** Codex rejected that on PR #1650 and named three live
+> comparisons with the same defect. It was right, and the cause was the
+> *search*, not an oversight about any one site. §8c has the method failure and
+> the five sites; the count above is the corrected one.
 
 A backward wall-clock step is ordinary infrastructure, not an exotic fault: an
 NTP correction after the RTC came up wrong (routine on appliances and VMs), a
@@ -333,10 +340,11 @@ stopped firing. Seven, one per changed decision:
 - `TestChaos71_RosterRateGatesStillSuppressWithinTheInterval` — both gates still
   rate-limit to one line per interval.
 
-**Counts.** 10 defect gates + 8 controls = **18 new gates**, in
-`chaos71_clock_rollback_test.go` (root, 13), `internal/upstream/clock_rollback_test.go` (3)
-and `internal/ocsp/clock_rollback_test.go` (2) — including the four the review
-round in §8b added.
+**Counts.** 15 defect gates + 15 controls = **30 new gates**, in
+`chaos71_clock_rollback_test.go` (root, 19), `internal/upstream/clock_rollback_test.go` (3),
+`internal/ocsp/clock_rollback_test.go` (2), `internal/secscan/clock_rollback_test.go` (3)
+and `internal/yara/clock_rollback_test.go` (3) — including the four added by the
+review round in §8b and the twelve added by §8c.
 
 **Verification run.** `go build ./...` clean; `go vet ./...` clean;
 `gofmt` clean. The 15 gates pass, and pass under `-race` together with the
@@ -445,6 +453,117 @@ two readings are out of order — and concurrency produces that without any cloc
 involvement. Where the quantity being measured has a natural scale (one rate-limit
 interval, one idle window), compare against that scale. Where it can be taken off
 the wall clock entirely, do that instead and there is no sign to test.
+
+---
+
+## 8c. Second review round — the inventory was not exhaustive, and the search was why
+
+Codex (P2) rejected §1's claim of an exhaustive inventory and named three live
+comparisons carrying the same defect: `crashguard.go:167`,
+`internal/secscan/secscan.go:828` and `internal/yara/yara.go:643`. It was right
+on all three.
+
+**The cause was the search, not an oversight about any one site.** The original
+sweep grepped for the subtraction sitting syntactically beside the time call —
+`UnixNano() -`, `.Unix() -`, `time.Since(time.Unix(` — which cannot match the
+far more common two-step form:
+
+```go
+now := time.Now().UnixNano()
+...
+if prev != 0 && now-prev < int64(degradedLogInterval) {
+```
+
+Re-running the sweep on the generalised shape found Codex's three **and two more
+it had not named**:
+
+| Site | Gate | Found by |
+|---|---|---|
+| `crashguard.go` | crash-evidence throttle | Codex |
+| `internal/secscan/secscan.go` | scanner degraded log | Codex |
+| `internal/yara/yara.go` | YARA degraded log | Codex |
+| `cdr_proxy.go` | Sluice call-error log | re-sweeping the generalised shape |
+| `policy.go` | file-profile unresolved-block warning | walking every file that seeds an int64 from a time call |
+
+`policy.go` is the instructive one: it compares against a **bare literal**
+(`now-last >= 300`, in Unix *seconds*), so even the generalised
+`int64(<duration>)` search missed it. Finding it required enumerating every file
+that assigns a `time.Now().Unix*()` into a variable and reading each
+subtraction. Three different searches, three different yields — which is the
+point.
+
+### The sharpest of the five: crash evidence
+
+`crashThrottleAllow` gates `recordCrash`. After one crash of a component and a
+backward step, the negative difference reads as inside the one-second window, so
+`recordCrash` returns **before** updating `lastCrash` and before emitting the
+stack-bearing log and the audit entry — for every subsequent same-component
+crash until the clock catches up. Crash evidence is the one record an operator
+cannot reconstruct after the fact, which makes this a worse instance of the CK-5
+shape than CK-5 itself. The other four are degradation and error notices:
+scanner saturation/abandonment, YARA saturation, Sluice call errors, and the
+fail-closed file-profile block.
+
+All five take the same symmetric-window rule §8b arrived at — compare the
+**absolute** interval, so a step costs at most one suppressed line and a
+concurrent claimant's marginally-future stamp is never read as a clock step.
+Four are nanos and use `time.Duration(d).Abs()`; `policy.go` is in seconds and
+negates explicitly.
+
+### The lesson
+
+**An inventory is only as exhaustive as the shapes its search can express.**
+The first write-up said "seventeen comparisons" as though it had counted a
+closed set, when it had counted *the matches of three regexes*. The honest claim
+would have named the shape searched for and admitted what it could not reach —
+at which point the two-step form is obvious, because it is the form most of this
+tree actually uses.
+
+This is also the strongest argument for **CK-7**, the structural wall recorded
+as a follow-up: a convention applied by hand across twenty-two sites in one
+repository was wrong at five of them, and the review that caught it was a
+different reader, not a check. Until that wall exists, the next bound added on an
+int64 stamp is one more hand-application of a rule nothing enforces.
+
+---
+
+## 8d. The CI red was mine: a gate stricter than the mechanism it measured
+
+`Gate · go test -race (sharded) / Race · non-root packages` went red on the first
+head, and two aggregate checks (`Race · verdict + coverage evidence`,
+`✅ Fast PR Gate — APPROVED`) failed behind it. The job logs available through
+the API carried only post-job cleanup, so the first read of the situation was
+"red on a superseded head" — which was not good enough, and was wrong.
+
+Running the same shard locally (`go test -race ./internal/...`) reproduced it:
+
+```
+--- FAIL: TestChaos71_BreakerRecoveryIsBoundedFromTheStep (0.30s)
+```
+
+**The defect was in the gate, not the fix.** `CircuitBreaker.openedAt` is a
+`UnixMilli` stamp, so `time.UnixMilli` truncates the re-anchor instant DOWN by up
+to one millisecond, and recovery can legitimately land that much before the
+nominal timeout. The gate asserted `elapsed >= timeout` — stricter than the
+resolution of the thing it was measuring. Measured over 40 `-race` runs, the
+worst case was **−791µs**: under 1ms, exactly as truncation predicts.
+
+The tolerance now written into the gate is the stamp resolution, not slack. The
+property under test is that the re-anchor serves a FULL reset timeout instead of
+half-opening instantly — 0ms versus ~300ms — which one millisecond cannot mask.
+Re-stressed at `-count=15` under `-race`, plus the whole `./internal/...` shard.
+
+Two things worth keeping from it:
+
+- **A timing gate must be no stricter than the resolution of the clock it
+  reads.** This one asserted against a nominal duration while measuring a
+  millisecond-truncated stamp, so it was guaranteed to fail some fraction of
+  runs. It passed locally the first time and twice more before CI caught it,
+  which is the signature of this bug class rather than evidence against it.
+- **"Red on a superseded head" is not a diagnosis.** The check had run against
+  code that is still in the PR, so the only honest way to dismiss it was to
+  reproduce it — and reproducing it showed it was ours. Where the log API gives
+  nothing, the local shard is the authority, not the head SHA.
 
 ---
 

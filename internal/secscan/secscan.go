@@ -825,7 +825,13 @@ var (
 func degradedLogAllowed(last *atomic.Int64) bool {
 	now := time.Now().UnixNano()
 	prev := last.Load()
-	if prev != 0 && now-prev < int64(degradedLogInterval) {
+	// CHAOS-71: MAGNITUDE, not sign. A backward wall-clock step makes the
+	// difference negative, and a sign-based test then suppresses the scanner's
+	// degraded line for the whole step — the operator's only notice that scans
+	// are saturating or being abandoned. The absolute interval bounds it to one
+	// window in either direction; a claimant that loses the CAS below still
+	// suppresses, because the CAS is what decides.
+	if prev != 0 && time.Duration(now-prev).Abs() < degradedLogInterval {
 		return false
 	}
 	return last.CompareAndSwap(prev, now)

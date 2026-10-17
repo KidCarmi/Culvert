@@ -526,8 +526,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   bound whose job is to END a degraded state never fired again until the clock
   caught up. Nothing errored, nothing was counted, nothing was logged.
 
-  Seventeen such comparisons exist; eight were already guarded. The seven that
-  were not were each a recovery bound or the only signal for one. The raw-tunnel
+  Twenty-two such comparisons exist; eight were already guarded. Of the twelve
+  that were not, seven were recovery bounds or the only signal for one, and five
+  were evidence and log gates: the crash-evidence throttle (the sharpest, since
+  a backward step made `recordCrash` return before writing the stack-bearing log
+  and audit entry for every subsequent same-component crash, and crash evidence
+  cannot be reconstructed afterwards), the scanner and YARA degraded-log gates,
+  the Sluice call-error line, and the fail-closed file-profile block warning. The raw-tunnel
   idle reaper is the sole limit on a half-open CONNECT tunnel, and because its
   read deadline is monotonic the relay kept waking on schedule and re-arming
   forever — two goroutines, two FDs, a pooled relay buffer and the
