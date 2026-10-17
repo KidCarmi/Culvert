@@ -267,8 +267,11 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// Check session cookie (browser login via login overlay).
 		sess, err := readUISessionCookie(r)
 		if err == nil && sess != nil {
-			// Reject sessions for deleted users (Finding 5.2).
-			if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
+			// Reject a session this plane may not honour: a deleted user
+			// (Finding 5.2) or a portal token replayed under the admin
+			// cookie's name (SEC-UISESSION-AUD-1 — see uiSessionAdmissible,
+			// which owns both halves of the test).
+			if !uiSessionAdmissible(sess) {
 				clearUISessionCookie(w, r)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return

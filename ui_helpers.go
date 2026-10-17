@@ -211,6 +211,10 @@ func validateAccessRule(rule PolicyRule) error {
 	if rule.SubjectMatch != nil {
 		return fmt.Errorf("subjectMatch is not yet enforced on access rules and cannot be set until the access matcher lands")
 	}
+	// Deliberately EXACT, not canonicalPolicyAction: the ingress validator
+	// refuses sloppy input at the door, where there is a caller to tell. The
+	// load gate (policyRulePersistable) is the tolerant one, because it decides
+	// what to do with data already on disk. See canonicalPolicyAction.
 	validActions := map[PolicyAction]bool{
 		ActionAllow: true, ActionDrop: true,
 		ActionBlockPage: true, ActionRedirect: true,

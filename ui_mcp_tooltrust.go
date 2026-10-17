@@ -314,7 +314,12 @@ func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
 // the IP-enriched display string.
 func mcpLivePrincipal(r *http.Request) (string, error) {
 	sess, err := readUISessionCookie(r)
-	if err != nil || sess == nil || sess.Sub == "" {
+	// SEC-UISESSION-AUD-1: the AUDIENCE test, not a bare non-nil check — a
+	// portal token replayed under the admin cookie's name must never supply one
+	// of the two eyes. uiSessionAudience rather than uiSessionAdmissible because
+	// this runs behind uiAuthMiddleware, which has already applied the roster
+	// half; repeating it here would refuse a principal the gate admitted.
+	if err != nil || !uiSessionAudience(sess) || sess.Sub == "" {
 		return "", mcperr.New(mcperr.ReasonApprovalNotAuthorized, "mcp", "live_execution trust requires an authenticated principal")
 	}
 	return sess.Sub, nil

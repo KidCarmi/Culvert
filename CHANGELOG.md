@@ -9,6 +9,133 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- A proxy-user captive-portal session token replayed under the admin UI
+  cookie's name resolved to **`RoleAdmin`** (SEC-UISESSION-AUD-1). `ps_ui_session`
+  and `ps_session` are the same signed token type under the same HMAC key, and
+  the MAC covers the payload — **not the cookie name** — while the payload
+  carries no audience claim. The admin gate's roster-existence test was gated on
+  `Provider == "local"`, the one field that distinguishes the two, so a replayed
+  portal token skipped it; and because the portal minter (`setSessionCookie`)
+  sets no `Role`, the documented empty-role pre-RBAC compatibility branch in
+  `sessionRoleOrReject` then resolved it to admin.
+
+  Any directory user able to complete captive-portal SSO therefore held full
+  control-plane admin — roster and RBAC writes, policy, CA, cluster, CDR, IdP
+  secrets, config-version rollback — with no forgery and no key, since the
+  appliance signs the token itself. It bypassed admin **TOTP** and admin
+  **lockout** entirely, both of which live in the login handler and are never
+  consulted on the cookie path. The IdP callbacks that mint the token are
+  registered on the admin UI mux and sit on the public allowlist, so end-user
+  reach to the admin port is supplied by the SSO feature itself rather than
+  being an extra assumption.
+
+  `uiSessionAdmissible` (`ui_session.go`) is now the one predicate every surface
+  that resolves a ROLE from the cookie uses — `uiAuthMiddleware`,
+  `apiAuthStatus` (which is on the **public** allowlist and had no provider or
+  existence check at all, so it answered `{"loggedIn":true,"role":"admin"}` and
+  the console rendered the whole admin surface), `sseAuthStillValid` and
+  `apiAuthLogout`. `uiSessionAudience` is the audience half alone, for a surface
+  that needs the audience and nothing more because it already runs behind the
+  gate that applied the roster half: `mcpLivePrincipal`, which supplies one of
+  the two eyes for MCP live-execution trust. Behaviour-preserving for every
+  legitimate admin session: `ps_ui_session` has exactly one minter, it hard-codes
+  the provider, and a local session naming no roster account was already
+  refused. Attribution (`sessionAdmin`, `auditActor`) is deliberately not routed
+  through the predicate — it gates nothing, and the identity a refused session
+  claimed is more useful than `unknown`. Two structural walls fail the build if a
+  third minter or an unclassified `readUISessionCookie` consumer appears.
+
+- A read-only **viewer** could read the HA join token and from it obtain the
+  **cluster CA private key** (SEC-HATOKEN-1). `GET /api/cluster/ha` is gated at
+  `RoleViewer` — correctly, it is a dashboard — and on a leader it
+  unconditionally included `deploy_cmd`, which interpolates the live
+  `--ha-token` plus the gRPC address and the CP TLS cert/key/CA paths. That
+  token is the *sole* credential for the `HASync` RPC (`VerifyToken` is the only
+  gate, and the CP listener uses `tls.VerifyClientCertIfGiven`, so no client
+  certificate is required), and `HASync` answers with the exported cluster
+  state, the full published `ConfigSnapshot`, and the cluster CA private key
+  wrapped under PBKDF2 of *that same token*. With that key an attacker mints
+  node certificates the Control Plane trusts and enrolls as a data plane. The
+  field is now suppressed per role rather than by raising the route's `MinRole`,
+  which would have removed the HA panel from operators and viewers.
+
+- Host-header case variation evaded every country-scoped **deny** rule
+  (SEC-GEOHOST-1). `geoHostKey` stripped a port and nothing else — no
+  lowercasing, no IDNA, no trailing-dot trim — while `matchDestNorm` hands the
+  country branch the raw host; its comment claiming country checks "normalize
+  internally" was false, and every other destination matcher (blocklist, urlcat,
+  policy FQDN) already normalized. Each spelling was a distinct host→IP cache
+  key and the warm is off the request path, so every first request missed, the
+  rule did not match, and evaluation fell through to a lower-priority allow. A
+  19-character hostname has ~2^15 spellings, so the supply of misses is
+  unlimited, and DNS is case-insensitive so the connection still reached the
+  blocked destination. `geoHostKey` now returns `hostutil.NormalizeHost`, which
+  is the chokepoint all four call sites share, closing case, trailing-dot and
+  IDN U-label variance at once while passing IP literals through verbatim.
+
+- A matched rule carrying an **action this build does not dispatch** was
+  ALLOWED, and shadowed every deny rule beneath it (SEC-POLICYACTION-1).
+  `applyPolicyDecision`'s `switch match.Action` had no `default:`, so an
+  unrecognized action fell through to the trailing `return "OK", false`: the
+  request proceeded, no decision was recorded, and because the scan is
+  first-match-wins, no lower-priority rule was consulted. One such action on a
+  priority-1 `destFqdn: "*"` rule disabled the whole rulebase under it. `Action`
+  was validated only on the API ingress path, so `PolicyStore.Load` (the
+  operator-managed policy file) and `PolicyStore.ReplaceAll` (the CP→DP snapshot
+  apply and replace-mode import) installed one verbatim — reachable from a
+  mixed-version cluster, a restored backup or a renamed action without any hand
+  editing. Now fail-closed on both sides: `applyPolicyDecision` resolves the
+  action through `canonicalPolicyAction` and blocks when it cannot, and
+  `policyRulePersistable` refuses to install such a rule — both halves, because
+  blocking at dispatch *without* dropping at install would turn a rule that
+  previously allowed into one that blocks and shadows everything beneath it.
+
+  `canonicalPolicyAction` is deliberately tolerant in two ways, neither ever
+  more permissive than the pre-fix fall-through: **case is folded**, because
+  policy files carry lowercase spellings and pre-fix `"allow"` was allowed (it
+  still is, while `"drop"` and `"block_page"` now block where they previously
+  allowed); and **unset is not unrecognized** — an empty action resolves to
+  `Allow`, exactly what the fall-through did, so no deployment's traffic changes
+  direction. The hole being closed is the version-skew case, which is never
+  empty. The API ingress validator keeps its exact-spelling contract, because
+  ingress refuses sloppy input at the door while this decides what to do with
+  data already on disk. The sibling gate in the same engine already behaves this
+  way: `IPFilter.Allowed` denies all traffic on an unrecognized mode.
+
+- An **unauthenticated** `POST /api/auth/logout` wrote attacker-chosen,
+  **unsigned** entries into the persisted and cluster-gossiped revocation list
+  (SEC-REVOKE-1). `apiAuthLogout` discarded `decodeSession`'s error
+  (`sess, _ :=`) and then called `revokeSessionCookie` unconditionally — and
+  that function does its own base64+JSON decode with no signature check, on the
+  stated premise that the "HMAC [was] already verified by decodeSession", which
+  was false on exactly this path. The route is on the public allowlist, so a
+  cookie of the shape `base64({"sub":"…","exp":9999999999}).garbage` inserted a
+  permanent entry (the expiry is attacker-chosen and eviction is lazy-on-expiry)
+  into an unbounded map. `SaveRevocations` then rewrote the whole revocations
+  file on every request — O(n) per insert over a set the caller is growing — and
+  the cluster revocation sync gossiped the entries to every node, which merged
+  and persisted them. The admin server sets no `MaxHeaderBytes`, and the 1 MiB
+  `MaxBytesReader` bounds the body rather than the `Cookie` header, so each of
+  the 60 requests/min/IP the API limiter allows could carry ~1 MiB of
+  permanently retained key. Logout now acts only on an admissible session, which
+  also stops it revoking across audiences; clearing the cookie stays
+  unconditional and the answer stays 200, so a browser holding a junk cookie can
+  still get rid of it and the endpoint is not an oracle.
+
+- A **partial** `POST /api/security` silently disabled the per-IP rate limiter
+  and persisted the change (SEC-SECPARTIAL-1). `rateLimitRPM` was a plain `int`
+  guarded by `if body.RateLimitRPM >= 0`; an absent JSON field decodes to `0`
+  and `0 >= 0` is always true, so every body omitting it called
+  `rl.Configure(0, …)` = disabled, after which `adminSettingsSave` and
+  `saveConfigVersion` made it durable. The endpoint's own published contract
+  declares the body a "Partial update — supply only the fields to change" with
+  `rateLimitRPM` optional, every other field honoured that, and three of the
+  shipped admin UI's buttons send exactly such bodies (`{ipAdd}`, `{ipRemove}`,
+  `{ipFilterMode}`) — so adding one IP to the IP filter turned off proxy rate
+  limiting. The field is now a `*int`, so absence means unchanged and an
+  explicit `0` still disables; a negative value is refused with 400 **before**
+  any field is applied, where it was previously ignored in silence.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
