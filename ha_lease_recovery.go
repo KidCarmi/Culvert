@@ -344,7 +344,13 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 		h.logRecoveryProgress(started, lastLog, suppressed, "acquire not granted (retrying)")
 		return false
 	}
-	h.completeLeaseRecovery(started, *suppressed)
+	if !h.completeLeaseRecovery(started, *suppressed) {
+		// The new epoch could not be committed into the snapshot, so it was not
+		// installed: still read-only, and the loop retries (the grant expires
+		// unkept; a later round acquires afresh).
+		h.logRecoveryProgress(started, lastLog, suppressed, "the config snapshot could not carry the new fencing epoch (retrying)")
+		return false
+	}
 	return true
 }
 
@@ -355,14 +361,24 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 // a landed grant — never on elapsed time (the ca_health.go / storage_health.go
 // rule).
 //
-// Note the ordering: the grant is already installed by the time this runs (that
+// It installs the grant first (installGrantLocked: a snapshot stamped with the
+// new epoch commits, and only then is the epoch advertised); a refused install
+// returns false and the loop retries, still read-only.
+//
+// Note the ordering: the grant is installed at the top of this function (that
 // is what makes WriteAllowed true), and the recovering flag drops a beat later
 // when the loop returns. A scrape landing in between sees write_authority=1
 // with lease_recovering=1. That is deliberate — authority first, bookkeeping
 // second is the safe direction — and it is harmless, because the alertable
 // condition is `unfenced=1 AND recovering=0` and unfenced is already 0 here.
-func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) {
+func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) bool {
 	h.mu.Lock()
+	// The grant is installed — its epoch advertised, write authority back —
+	// only after a snapshot stamped with it commits (ha_epoch_commit.go).
+	if err := h.installGrantLocked(haTransitionRecovery); err != nil {
+		h.mu.Unlock()
+		return false
+	}
 	h.term = termFromEpoch(h.leaseEpoch)
 	epoch := h.leaseEpoch
 	cfg := h.snapshotConfigLocked()
@@ -385,6 +401,7 @@ func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) {
 		Detail: "unfenced leader re-acquired the fencing lease and regained write authority",
 		Source: "ha",
 	})
+	return true
 }
 
 // handleForeignFenceHolder handles the one outcome recovery must never paper

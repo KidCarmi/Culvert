@@ -86,7 +86,23 @@ type HAState struct {
 	// ── Fencing lease (ADR-0005 S2; nil provider = legacy manual mode) ──
 	lease            halease.Provider
 	leaseCandidateID string
-	leaseEpoch       int64 // epoch of our current grant; 0 = not held
+	leaseEpoch       int64 // epoch of our current INSTALLED grant (advertised); 0 = not held
+	// grantEpoch is a grant acquireLeaseAttempt took that is NOT yet
+	// installed: leaseEpoch (and so CurrentEpoch, the heartbeat, issuance,
+	// /healthz and write authority) moves to it only in installGrantLocked,
+	// after a snapshot stamped with it has committed (Codex review of #1556,
+	// ha_epoch_commit.go). 0 = none.
+	grantEpoch int64
+	// stampEpoch is the epoch installGrantLocked is committing: while it is
+	// set the fence mirror (what publishes stamp) reads it, so every commit in
+	// that window carries the new epoch before anything advertises it.
+	stampEpoch int64
+	// epochRefused latches the page for a refused epoch commit, once per
+	// episode (cleared by the next successful install); epochRefusedEpisode
+	// numbers episodes so a page queued before the webhooks load can test at
+	// the flush that its episode is still open.
+	epochRefused        bool
+	epochRefusedEpisode uint64
 	// shutdown is the PROCESS shutdown latch (BeginShutdown, set by the ha-stop
 	// hook before Stop). Unlike stopping it is permanent: a resume still
 	// waiting on the fencing backend when shutdown begins must never take a
@@ -94,12 +110,12 @@ type HAState struct {
 	// closed with it so waits abort at once.
 	shutdown   bool
 	shutdownCh chan struct{}
-	// fenceEpoch mirrors CurrentEpoch (lease == nil ? 0 : leaseEpoch) for
-	// LOCK-FREE readers: a config publish stamps it at commit, and the HA
-	// topology writer publishes while holding h.mu, so the stamp must not
-	// re-enter it. Written only by syncFenceEpochLocked, under h.mu, in the
-	// same critical section as the fields it mirrors
-	// (TestChaos71_Wall_FenceEpochHasOneWriter).
+	// fenceEpoch is the epoch every config publish STAMPS (lease == nil ? 0 :
+	// stampEpoch while an install commits it, else leaseEpoch), for LOCK-FREE
+	// readers: the HA topology writer publishes while holding h.mu, so the
+	// stamp must not re-enter it. Written only by syncFenceEpochLocked, under
+	// h.mu, in the same critical section as the fields it derives from
+	// (TestChaos71_Wall_OnlyCommitPublishCommits).
 	fenceEpoch       atomic.Int64
 	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
 	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
@@ -302,6 +318,13 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 		return "", fmt.Errorf("fencing lease not acquired — cannot enable HA leadership (see logs)")
 	}
 	h.mu.Lock()
+	// The new epoch is committed into the snapshot BEFORE it is advertised or
+	// any role is taken; refused, HA stays off (ha_epoch_commit.go). The new
+	// address list is published afterwards, on its own, by the topology writer.
+	if err := h.installGrantLocked(haTransitionEnable); err != nil {
+		h.mu.Unlock()
+		return "", fmt.Errorf("HA enable refused — the config snapshot could not carry the new fencing epoch: %w", err)
+	}
 	h.setTopologyLocked("leader", peerAddr, haTransitionEnable)
 	h.since = time.Now()
 	h.autoFailover = autoFailover
@@ -432,6 +455,17 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 		h.mu.Unlock()
 		return false
 	}
+	// A grant is installed (its epoch advertised) only after a snapshot
+	// stamped with it commits. Refused, the resume takes the ADR-0005 S2
+	// stance for a resume without a usable fence: the role, read-only (no
+	// write authority, issuance refused) — never a roleless node, whose
+	// standalone sinks are ungated. The refusal is paged once.
+	epochRefused := false
+	if leaseGranted {
+		if err := h.installGrantLocked(haTransitionResume); err != nil {
+			leaseGranted, epochRefused = false, true
+		}
+	}
 	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
 	h.token = cfg.Token
 	h.autoFailover = cfg.AutoFailover
@@ -444,7 +478,27 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	h.stopCh = make(chan struct{})
 	leaseConfigured := h.lease != nil
 	h.mu.Unlock()
-	if leaseConfigured && !leaseGranted {
+	h.reportReadOnlyResume(epochRefused, leaseConfigured && !leaseGranted, foreignHolder)
+	h.startLeaseKeepalive()
+	// Re-persist the SAME values (idempotent; keeps the file canonical).
+	_ = saveHAConfig(cfg)
+	return true
+}
+
+// reportReadOnlyResume reports a resume that took the leader role WITHOUT write
+// authority: epochRefused (the grant was taken but the snapshot could not
+// carry its epoch — no auto-retry, ADR-0005 S2) or unfenced (no grant; the
+// CHAOS-55 recovery loop is armed unless a live foreign holder decided it).
+func (h *HAState) reportReadOnlyResume(epochRefused, unfenced, foreignHolder bool) {
+	if epochRefused {
+		// No auto-retry: ADR-0005 S2 resumes a refused fence read-only with no
+		// retry, and the CHAOS-55 recovery loop is armed only for an UNKNOWN
+		// fence. Recovering this case in-process is S4 follow-up work; until
+		// then a restart after reducing the config resumes normally.
+		logger.Printf("HA: CRITICAL — resumed leader role READ-ONLY: the config snapshot could not be committed with the new " +
+			"fencing epoch, so the epoch is not advertised and write authority is OFF (ADR-0005 S2). Reduce the oversized " +
+			"collection and restart this node to resume with write authority.")
+	} else if unfenced {
 		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF (ADR-0005 S2). " +
 			"Recovery runs in the background (CHAOS-55) — no operator action is required unless it keeps failing.")
 		go alerts.Fire("ha_resume_unfenced", alerts.Payload{
@@ -464,10 +518,6 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 			h.startLeaseRecovery()
 		}
 	}
-	h.startLeaseKeepalive()
-	// Re-persist the SAME values (idempotent; keeps the file canonical).
-	_ = saveHAConfig(cfg)
-	return true
 }
 
 // ── Standby Mode ────────────────────────────────────────────────────────────
@@ -1015,6 +1065,15 @@ func (h *HAState) promote(reason string) {
 	}
 
 	h.mu.Lock()
+	// The new epoch is committed into the snapshot BEFORE it is advertised or
+	// the leader role is taken; refused, this node stays standby, retryable
+	// (ha_epoch_commit.go). The grant is left to its TTL, as above.
+	if err := h.installGrantLocked(haTransitionPromote); err != nil {
+		h.mu.Unlock()
+		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
+		logger.Printf("HA: promote (%s) refused — staying as standby: %v", sanitizeLog(reason), err)
+		return
+	}
 	h.setTopologyLocked("leader", h.peerAddr, haTransitionPromote)
 	h.since = time.Now()
 	if h.lease != nil {

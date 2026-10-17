@@ -87,7 +87,11 @@ func (h *HAState) setTopologyLocked(role, peer, transition string) {
 	// it, and publishOwnedCPAddresses latches the `cp_address_list` pending
 	// state and retries from the live source until it publishes. Why no
 	// transition — authority-gaining included — is refused over it is the
-	// ADR-0005 reasoning in cp_addr_publish.go's header.
+	// ADR-0005 reasoning in cp_addr_publish.go's header. It can be a hint and
+	// nothing more because the fencing epoch never rides in this commit: an
+	// authority-gaining transition has already committed the snapshot stamped
+	// with its new epoch (installGrantLocked, ha_epoch_commit.go) before it
+	// reaches here, so a rejected list leaves the fleet on the right epoch.
 	_ = globalConfigStore.reconcileCPAddressesFrom(transition, func() []string {
 		return cpAddressListFor(enabled, peer, clusterRoleSnapshot().grpcAddr)
 	})
