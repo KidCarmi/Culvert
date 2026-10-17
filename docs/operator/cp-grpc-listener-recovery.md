@@ -169,6 +169,21 @@ instead of reporting success. Because the first bind can land long after boot,
 the leadership resume re-reads the persisted HA config at that moment, and no
 resume runs once shutdown has begun.
 
+If that re-read (or the boot read) **fails**, because `ha_config.json` exists
+but cannot be read or decoded, the node does **not** treat it as "HA disabled".
+Only a missing file or a decoded `enabled: false` means no HA. Until a read
+succeeds, the node is HA-gated:
+- leader-gated Control Plane RPCs answer `Unavailable`;
+- CA issuance and cluster-state writes are refused;
+- `/healthz` returns 503 with `status: "ha_intent_unknown"`.
+
+It retries the read every 1–30 s and stops retrying when shutdown begins.
+`ha_resume_unfenced` pages once per episode if the read keeps failing. Fix the
+file's permissions or contents; the next successful read resumes or ungates the
+node without a restart. The one exception is a file that turns out to record
+this node as a **standby**. The node came up as a plain Control Plane, cannot
+re-enter standby at runtime, and stays gated until it is restarted.
+
 ### Rebind backoff
 
 1 s doubling to 30 s (±20% jitter). It is **not** reset by a bind alone — a

@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -94,6 +96,12 @@ type HAState struct {
 	// closed with it so waits abort at once.
 	shutdown   bool
 	shutdownCh chan struct{}
+	// intent is the "persisted HA intent unknown" gate (ha_intent.go): set
+	// while the persisted HA config exists but cannot be read or decoded, so
+	// this node cannot know whether it leads, stands by or runs without HA.
+	// While set and no HA role is held, every HA-gated sink refuses — "could
+	// not read" is never "HA disabled" (Codex review of #1556).
+	intent haIntentGateState
 	// fenceEpoch mirrors CurrentEpoch (lease == nil ? 0 : leaseEpoch) for
 	// LOCK-FREE readers: a config publish stamps it at commit without taking
 	// h.mu. Written only by syncFenceEpochLocked, under h.mu, in the same
@@ -1219,6 +1227,18 @@ func haRestartAction(cfg *haConfig, loadErr error) string {
 	return "leader"
 }
 
+// haPersistedAction is haRestartAction for every read that DECIDES from the
+// persisted HA intent: it never mistakes "could not read" for "HA disabled".
+// A missing file (HA never configured on this node) and a decoded config are
+// answers; any other read error, or a decode error, is returned as an error
+// and the caller must stay HA-gated (haIntentGate) until a read succeeds.
+func haPersistedAction(cfg *haConfig, loadErr error) (string, error) {
+	if loadErr != nil && !errors.Is(loadErr, fs.ErrNotExist) {
+		return "", loadErr
+	}
+	return haRestartAction(cfg, loadErr), nil
+}
+
 func loadHAConfig() (*haConfig, error) {
 	data, err := os.ReadFile(haConfigPath())
 	if err != nil {
@@ -1292,6 +1312,21 @@ func addRequestLogHealth(resp map[string]any) {
 func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Unknown persisted HA intent is not standalone: 503, so a load balancer
+	// does not route Data Planes to a node that refuses them (ha_intent.go).
+	// The read error itself (it names a data-directory path) is in the log,
+	// not on this endpoint.
+	if _, gated := globalHA.intentGate(); gated {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		resp, _ := json.Marshal(map[string]any{
+			"status": "ha_intent_unknown", "role": "", "leader": false, "write_authority": false,
+			"detail":  "the persisted HA config could not be read; leader-gated requests are refused until it is",
+			"version": version,
+		})
+		_, _ = w.Write(resp)
 		return
 	}
 	status := globalHA.Status()

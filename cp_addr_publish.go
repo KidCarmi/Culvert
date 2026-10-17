@@ -79,6 +79,20 @@ type cpAddrNote struct {
 	startRetry bool   // a failure with no retry loop running: start one
 	page       bool   // this failure opened an episode: page it
 	episode    uint64 // the episode the page belongs to
+	// stale: a failure NOT recorded because another outcome (a success, a
+	// failure or a reset) was recorded after startGen — recordCPAddrOutcome
+	// re-checks it against the live owner and list before trying again.
+	stale bool
+	// dropped: recordCPAddrOutcome discarded a stale failure (logged only).
+	dropped bool
+}
+
+// cpAddrAttempt is the owner and builder the LAST attempt of an owned publish
+// was bound to (updateOwnedCPAddresses may move to a new owner mid-publish),
+// so its failure is judged against what it actually tried to commit.
+type cpAddrAttempt struct {
+	own   cpAddrOwner
+	build func() []string
 }
 
 // cpAddrRetryBackoffMin and cpAddrRetryBackoffMax bound the retry cadence. A
@@ -183,20 +197,84 @@ func (s *ConfigStore) setCPAddrOwnerLocked(src func() []string, withdrawal strin
 // updateOwnedCPAddresses commits own.builder(build) bound to own. When the
 // owner changes first, the caller's build (chosen for the previous owner) is
 // dropped and the publish rebuilds from the NEW owner's source; when nothing
-// owns the list any more it stops with errCPAddrOwnerReleased.
-func (s *ConfigStore) updateOwnedCPAddresses(own cpAddrOwner, build func() []string) (bool, error) {
+// owns the list any more it stops with errCPAddrOwnerReleased. last is the
+// owner and builder of the final attempt.
+func (s *ConfigStore) updateOwnedCPAddresses(own cpAddrOwner, build func() []string) (changed bool, last cpAddrAttempt, err error) {
 	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
 		b := own.builder(build)
 		if b == nil {
-			return false, errCPAddrOwnerReleased
+			return false, cpAddrAttempt{own: own}, errCPAddrOwnerReleased
 		}
-		changed, err := s.updateCPAddressesBound(own, b)
+		last = cpAddrAttempt{own: own, build: b}
+		changed, err = s.updateCPAddressesBound(own, b)
 		if !errors.Is(err, errCPAddrOwnerChanged) {
-			return changed, err
+			return changed, last, err
 		}
 		own, build = s.currentCPAddrOwner(), nil
 	}
-	return false, fmt.Errorf("%w %d times in a row", errCPAddrCommitRace, cpAddrMergeAttempts)
+	return false, last, fmt.Errorf("%w %d times in a row", errCPAddrCommitRace, cpAddrMergeAttempts)
+}
+
+// recordCPAddrOutcome is the ONE way an owned publish's outcome reaches the
+// record (noteCPAddrPublish), and every outcome is checked against what
+// happened since the publish began (Codex review of #1556). A success clears
+// only if nothing was recorded since startGen (noteCPAddrPublish). A failure
+// is latched only while it is still TRUE: the owner its last attempt was bound
+// to still owns the list, the committed list still differs from what that
+// attempt builds now, and no other outcome was recorded between that check
+// and the latch (each check re-reads the generation first; a recording in
+// between makes noteCPAddrPublish report it stale, and the check runs again).
+// Otherwise a newer publish already committed the list, or the owner changed
+// (a withdrawal completed and released it, or a new owner took over): the
+// failure is dropped with a log line — no pending state, no retry, no page.
+func (s *ConfigStore) recordCPAddrOutcome(trigger string, err error, startGen uint64, last cpAddrAttempt) cpAddrNote {
+	if err == nil {
+		return s.noteCPAddrPublish(trigger, nil, startGen)
+	}
+	gen := startGen
+	for range cpAddrMergeAttempts {
+		if why := s.cpAddrFailureMoot(last); why != "" {
+			logger.Printf("ControlPlane: dropped a stale CP address list publish failure on %q (%s): %q", trigger, why, sanitizeLog(err.Error()))
+			return cpAddrNote{dropped: true}
+		}
+		if hook := cpAddrBeforeFailureLatch; hook != nil {
+			hook()
+		}
+		if note := s.noteCPAddrPublish(trigger, err, gen); !note.stale {
+			return note
+		}
+		gen = s.cpAddrPublishGen() // read BEFORE the next check
+	}
+	// Outcomes keep landing: a real failure must not be lost, and the retry
+	// loop clears one that turns out moot.
+	logWarnf("ControlPlane: CP address list publish outcomes kept landing while %q's failure was being recorded — latching it", trigger)
+	return s.noteCPAddrPublish(trigger, err, cpAddrForceLatch)
+}
+
+// cpAddrBeforeFailureLatch, when non-nil, runs between a failure's staleness
+// check and its latch. Test seam only (nil in production): it lands a newer
+// outcome inside that window deterministically.
+var cpAddrBeforeFailureLatch func()
+
+// cpAddrFailureMoot reports why a failed publish's last attempt no longer
+// describes a pending change ("" when it still does): its owner was replaced
+// or released, or the committed list already equals what it builds now.
+// Called with no lock held: the builder takes the HA and cluster-role locks.
+func (s *ConfigStore) cpAddrFailureMoot(last cpAddrAttempt) string {
+	if cur := s.currentCPAddrOwner(); cur.gen != last.own.gen {
+		return "the address-list owner changed since it began"
+	}
+	if last.build == nil {
+		return ""
+	}
+	want := last.build()
+	s.mu.RLock()
+	committed, published := s.snap.CPAddresses, s.published
+	s.mu.RUnlock()
+	if published && slicesEqual(committed, want) {
+		return "a newer publish already committed the list it was publishing"
+	}
+	return ""
 }
 
 // publishOwnedCPAddresses is publishOwnedCPAddressesAs bound to the owner
@@ -214,11 +292,14 @@ func (s *ConfigStore) publishOwnedCPAddresses(trigger string, build func() []str
 // nothing: the release ended the episode.
 func (s *ConfigStore) publishOwnedCPAddressesAs(trigger string, own cpAddrOwner, build func() []string) (bool, error) {
 	gen := s.cpAddrPublishGen()
-	changed, err := s.updateOwnedCPAddresses(own, build)
+	changed, last, err := s.updateOwnedCPAddresses(own, build)
 	if errors.Is(err, errCPAddrOwnerReleased) {
 		return false, nil
 	}
-	note := s.noteCPAddrPublish(trigger, err, gen)
+	note := s.recordCPAddrOutcome(trigger, err, gen, last)
+	if note.dropped {
+		err = nil // moot: the fleet already holds what this publish owed it
+	}
 	if note.page {
 		s.pageCPAddrRejection(note.episode, err)
 	}
@@ -367,9 +448,18 @@ func (s *ConfigStore) releaseCPAddressSourceAfterWithdrawal(addr string) (kept b
 		s.beginCPAddressWithdrawalLocked(addr)
 	}
 	withdrawing := s.cpAddrWithdrawal
+	own := s.cpAddrOwnerLocked()
 	s.mu.Unlock()
 	if !s.cpAddrPublishSnapshot().pending {
-		note := s.noteCPAddrPublish(cpAddrWithdrawalTrigger, errCPAddrWithdrawalInterrupted, s.cpAddrPublishGen())
+		// Owner-checked only (no builder): the committed list was judged
+		// under s.mu just above, and a terminal exit must not run a source
+		// whose publish may be what was interrupted.
+		note := s.recordCPAddrOutcome(cpAddrWithdrawalTrigger, errCPAddrWithdrawalInterrupted, s.cpAddrPublishGen(),
+			cpAddrAttempt{own: own})
+		if note.dropped {
+			s.completeCPAddressWithdrawal() // it committed meanwhile: release
+			return false
+		}
 		if note.page {
 			s.pageCPAddrRejection(note.episode, errCPAddrWithdrawalInterrupted)
 		}
@@ -389,6 +479,12 @@ func (s *ConfigStore) cpAddrPublishGen() uint64 {
 	return s.addrPub.gen
 }
 
+// cpAddrForceLatch is the startGen with which recordCPAddrOutcome makes
+// noteCPAddrPublish latch a failure that kept racing other outcomes,
+// whatever was recorded since (never a real generation: gen counts
+// recordings from zero).
+const cpAddrForceLatch = ^uint64(0)
+
 // noteCPAddrPublish is the SINGLE WRITER of the address-rejection record: it
 // records one owned-publish outcome and tells the caller whether to page and
 // whether to start the retry loop. startGen is the generation the publish
@@ -403,7 +499,7 @@ func (s *ConfigStore) noteCPAddrPublish(trigger string, err error, startGen uint
 	st := &s.addrPub
 	if err == nil {
 		if st.gen != startGen {
-			return cpAddrNote{} // a newer failure latched while this publish ran: not ours to clear
+			return cpAddrNote{} // a newer outcome was recorded while this publish ran: not ours to clear
 		}
 		if st.pending {
 			logger.Printf("ControlPlane: CP address list republished after %d failed attempts (pending since %s, first failed on %q)",
@@ -411,7 +507,13 @@ func (s *ConfigStore) noteCPAddrPublish(trigger string, err error, startGen uint
 		}
 		st.pending, st.attempts, st.trigger, st.reason = false, 0, "", ""
 		st.rejectPaged, st.rejectErr, st.rejectErrTS = false, "", ""
+		st.gen++ // a failure computed before this success is now stale
 		return cpAddrNote{}
+	}
+	if startGen != cpAddrForceLatch && st.gen != startGen {
+		// Another outcome was recorded after this failure's check: it may be
+		// stale now. recordCPAddrOutcome re-checks it before trying again.
+		return cpAddrNote{stale: true}
 	}
 	st.gen++
 	st.rejectErr, st.rejectErrTS = err.Error(), time.Now().UTC().Format(time.RFC3339)
@@ -494,12 +596,9 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 			s.addrPubMu.Unlock()
 			return
 		}
-		gen, published, err := s.retryCPAddrPublishOnce()
-		if note := s.noteCPAddrPublish("retry", err, gen); note.page {
+		note, err := s.retryCPAddrPublishOnce()
+		if note.page {
 			s.pageCPAddrRejection(note.episode, err)
-		}
-		if published {
-			s.completeCPAddressWithdrawal() // a committed withdrawal ends ownership, and with it the episode
 		}
 
 		s.addrPubMu.Lock()
@@ -519,21 +618,28 @@ func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 }
 
 // retryCPAddrPublishOnce is one retry attempt: republish from the CURRENT
-// owner's source, bound to it. It returns the pending-state generation to note
-// the outcome against, whether a bound publish completed, and its error. With
-// nothing owned — before the attempt or released during it — nothing is
+// owner's source, bound to it, and record the outcome (recordCPAddrOutcome).
+// Returns the note and the error (nil for a stale failure that was dropped).
+// With nothing owned — before the attempt or released during it — nothing is
 // pending: a clean outcome at the current generation.
-func (s *ConfigStore) retryCPAddrPublishOnce() (gen uint64, published bool, err error) {
+func (s *ConfigStore) retryCPAddrPublishOnce() (cpAddrNote, error) {
 	own := s.currentCPAddrOwner()
-	gen = s.cpAddrPublishGen()
+	gen := s.cpAddrPublishGen()
 	if !own.owned() {
-		return s.cpAddrPublishGen(), false, nil
+		return s.recordCPAddrOutcome("retry", nil, s.cpAddrPublishGen(), cpAddrAttempt{}), nil
 	}
-	_, err = s.updateOwnedCPAddresses(own, nil)
+	_, last, err := s.updateOwnedCPAddresses(own, nil)
 	if errors.Is(err, errCPAddrOwnerReleased) {
-		return s.cpAddrPublishGen(), false, nil
+		return s.recordCPAddrOutcome("retry", nil, s.cpAddrPublishGen(), cpAddrAttempt{}), nil
 	}
-	return gen, err == nil, err
+	note := s.recordCPAddrOutcome("retry", err, gen, last)
+	if note.dropped {
+		err = nil
+	}
+	if err == nil {
+		s.completeCPAddressWithdrawal() // a committed withdrawal ends ownership, and with it the episode
+	}
+	return note, err
 }
 
 // cpAddrPublishSnapshot returns a copy of the pending-republish record.

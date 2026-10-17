@@ -655,6 +655,9 @@ type clusterInputs struct {
 // HA leader has it exactly when the lease permits. Reporting this — not the raw
 // primitive — keeps /api/diagnose/cluster consistent with /healthz.
 func effectiveWriteAuthority(st HAStatus, leaseWriteAllowed bool) bool {
+	if _, gated := globalHA.intentGate(); gated {
+		return false // unknown persisted HA intent is not standalone (ha_intent.go)
+	}
 	if !st.Enabled {
 		return true
 	}
