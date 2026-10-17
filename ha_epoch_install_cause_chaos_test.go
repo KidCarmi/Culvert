@@ -357,9 +357,7 @@ func TestChaos71_DeactivateControlPlaneUndoesASyncActivation(t *testing.T) {
 	cpActivationMu.Lock()
 	sup := cpSupervisor
 	cpActivationMu.Unlock()
-	globalConfigStore.mu.RLock()
-	owned := globalConfigStore.cpAddrSource != nil
-	globalConfigStore.mu.RUnlock()
+	owned := globalConfigStore.currentCPAddrOwner().src != nil
 	if isCP() || sup != nil || owned {
 		t.Fatalf("after the undo: cp role=%v supervisor=%v address owner=%v, want none", isCP(), sup != nil, owned)
 	}
