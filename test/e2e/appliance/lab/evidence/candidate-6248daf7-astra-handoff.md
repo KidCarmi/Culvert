@@ -156,6 +156,21 @@ NOT the recovery fix. **141.218 s stays OPEN; no closure as "probably storage."*
 4. Only then, a focused engine/provisioning A/B on the dominant phase. Exact
    replacement bytes still require independent ESXi qualification.
 
+**RESULT (lab run 39012697264, DONE):** retained 6248 OVA, 3 reboots each at
+esxi12 (12 ms) and esxi30 (30 ms). Recovery 107.7 s → 226.9 s (×2.11 for a ×2.5
+latency step). Per phase, 12 ms → 30 ms: firmware_gap 46.6→114.3 (×2.45),
+kernel 6.8→12.9, apparmor 2.1→5.1, dbus 0.6→1.4, containerd 1.9→4.6,
+containerd metadata→next-plugin gap 1.40→3.50 (×2.50), docker 2.8→6.3, stack
+resume 16.7→26.8 (×1.60), boot fsck 1.1→2.6. Read VOLUME identical at both
+latencies (containerd 51.2 MiB, docker 116.3 MiB). **Every phase scales with
+latency; bytes read do not — recovery is latency-bound reads end to end.** The
+pre-kernel firmware/initrd read is the largest block, then engine + stack; the
+metadata-gap is a read burst (ASTRA's 11.5 s ESXi, same gap, higher per-read
+latency). Caveat: cache=none dm-delay pays full latency per read (pessimistic),
+so ASTRA's 141 s at ~30 ms sits below the lab's 227 s at esxi30. Levers: fewer
+bytes read (initrd = MODULES=list, deferred; container-layer reads); latency is
+infrastructure. 141.218 s stays OPEN pending ASTRA's ESXi comparison.
+
 **Same-bytes note:** OVA `59d4d371` (artifact 12074562532) is the bytes ASTRA
 already tested — not a new import. A provisioning fix (initramfs / tune2fs /
 e2scrub) changes the OVA disk but KEEPS the same app image (20a547ed) + agent,
