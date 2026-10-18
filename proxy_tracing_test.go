@@ -434,8 +434,32 @@ func TestRequestTracing_SanitisesClientRequestID(t *testing.T) {
 		t.Errorf("returned request id %q still carries CR/LF", got)
 	}
 	// Nothing the client chose survives: the value is replaced wholesale.
-	if strings.Contains(got, "X-Injected") || strings.Contains(got, "abc") || strings.Contains(got, "def") {
-		t.Errorf("client-chosen bytes survived into the request id %q", got)
+	//
+	// Asserted by CHARSET plus the exact pre-fix residual, never by probing
+	// for the payload's own letters. The earlier form did the latter —
+	// `strings.Contains(got, "abc") || strings.Contains(got, "def")` — and
+	// "abc" and "def" are both runs of HEX DIGITS, so it also rejected a
+	// correctly minted id that happened to contain either. Measured against
+	// generateRequestID: 13 769 of 2 000 000 mints contain one, 0.69%, about
+	// 1 in 145; at the determinism lane's -count=2 that is roughly 1 run in
+	// 70. It was caught on PR #1657's Deep gate with the minted id
+	// "b22611caabcb364e", which carries "abc" at index 8.
+	//
+	// A fresh mint is requestIDHexLen lowercase hex digits, so the charset
+	// check alone excludes every client byte that actually matters here: the
+	// letters of "X-Injected", the spaces that would inject extra key=value
+	// tokens into a `{req_id=… identity=… action=…}` decision line, and the
+	// CR/LF and every other C0 byte. The pre-SEC-REQID-1 residual is then
+	// pinned exactly, which is the regression this test exists to catch —
+	// deterministically, where the substring probe was only probabilistic.
+	for _, c := range got {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			t.Errorf("request id %q contains %q, which a freshly minted hex id cannot: a client byte survived", got, c)
+			break
+		}
+	}
+	if got == "abcX-Injected: 1def" {
+		t.Errorf("request id %q is the pre-SEC-REQID-1 residual: the client value is being retained with only CR/LF stripped", got)
 	}
 	if len(got) != requestIDHexLen {
 		t.Errorf("request id = %q (len %d), want a freshly minted %d-char id", got, len(got), requestIDHexLen)

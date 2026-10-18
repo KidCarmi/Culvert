@@ -436,13 +436,29 @@ func TestSetSigningKey_EngineOwnsKeyCopy(t *testing.T) {
 	const payload = "stable-payload"
 	before := mac(payload)
 
-	// Mutate the caller's slice in place, then force the pool to mint a fresh
-	// state (an earlier one may still be cached) and sign again.
-	key[0] ^= 0xFF
 	e := macEngines.Load()
-	for i := 0; i < 64; i++ {
-		_ = mac(payload)
+
+	// Mutate the caller's slice in place. Nothing about the installed engine
+	// may follow it.
+	key[0] ^= 0xFF
+
+	// Assert on the engine's OWN key and on a FRESHLY minted state — not on
+	// repeated mac() calls. Those are served from the pool, so they reuse an
+	// HMAC already primed with the original bytes and would report success
+	// even if newMacEngine had aliased the caller's slice: the earlier form of
+	// this test looped 64 times hoping to force a mint, which sync.Pool gives
+	// no way to do, and was therefore vacuous (CodeRabbit, PR #1657 — verified
+	// by mutation: with the copy removed from newMacEngine, the old form still
+	// passed and this form fails). pool.New IS the mint, so calling it is the
+	// only way to observe what a later Get would build.
+	if e.key[0] == key[0] {
+		t.Fatal("the engine's key followed the caller's mutation — newMacEngine is not copying")
 	}
+	fresh := e.pool.New().(*macState)
+	if got := string(fresh.compute(payload)); got != before {
+		t.Errorf("a freshly minted state signs %q, want %q — the engine builds new states from the caller's mutated bytes", got, before)
+	}
+
 	if got := mac(payload); got != before {
 		t.Errorf("mac changed from %q to %q after the caller mutated its key slice — the engine is not holding its own copy", before, got)
 	}
