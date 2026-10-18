@@ -19,7 +19,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/support"
 )
 
@@ -612,7 +611,7 @@ func writeBundleState(id string, st supportBundleStateFile) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(supportBundleStatePath(id), b, 0o600)
+	return durableSupportWrite(supportBundleStatePath(id), b, 0o600)
 }
 
 // apiSupportBundleApprove marks a PENDING bundle READY for download after an admin
@@ -805,7 +804,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err := writeBundleState(res.BundleID, supportBundleStateFile{State: bundleStatePending, CreatedAt: res.Manifest.CreatedAt, CaseID: caseID}); err != nil {
 		return nil, fmt.Errorf("write state: %w", err)
 	}
-	if err := fileutil.AtomicWrite(filepath.Join(dir, "bundle.csb.tgz"), res.TarGz, 0o600); err != nil {
+	if err := durableSupportWrite(filepath.Join(dir, "bundle.csb.tgz"), res.TarGz, 0o600); err != nil {
 		return nil, fmt.Errorf("write bundle: %w", err)
 	}
 	manifestJSON, err := json.MarshalIndent(res.Manifest, "", "  ")
@@ -820,7 +819,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err != nil {
 		return nil, fmt.Errorf("marshal report: %w", err)
 	}
-	if err := fileutil.AtomicWrite(filepath.Join(dir, support.RedactionReportName), reportJSON, 0o600); err != nil {
+	if err := durableSupportWrite(filepath.Join(dir, support.RedactionReportName), reportJSON, 0o600); err != nil {
 		return nil, fmt.Errorf("write report: %w", err)
 	}
 	// redaction-preview.json is the SERVER-SIDE consent preview: a bounded sample
@@ -832,7 +831,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err != nil {
 		return nil, fmt.Errorf("marshal preview: %w", err)
 	}
-	if err := fileutil.AtomicWrite(filepath.Join(dir, support.RedactionPreviewName), previewJSON, 0o600); err != nil {
+	if err := durableSupportWrite(filepath.Join(dir, support.RedactionPreviewName), previewJSON, 0o600); err != nil {
 		return nil, fmt.Errorf("write preview: %w", err)
 	}
 	// manifest.json is the list/commit marker (listSupportBundles keys on it), so
@@ -840,7 +839,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	// present a half-manifest as a listable bundle, and the fsync of this file
 	// and its parent directory is the barrier that makes the state-first ordering
 	// above survive power loss, not merely a process crash.
-	if err := fileutil.AtomicWrite(filepath.Join(dir, "manifest.json"), manifestJSON, 0o600); err != nil {
+	if err := durableSupportWrite(filepath.Join(dir, "manifest.json"), manifestJSON, 0o600); err != nil {
 		return nil, fmt.Errorf("commit manifest: %w", err)
 	}
 	pruneSupportBundles(supportRetentionKeepVal())

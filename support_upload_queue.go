@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/supportupload"
 )
 
@@ -121,7 +120,7 @@ func saveUploadQueueEntryLocked(e uploadQueueEntry) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(uploadQueuePath(e.BundleID), b, 0o600)
+	return durableSupportWrite(uploadQueuePath(e.BundleID), b, 0o600)
 }
 
 // loadUploadQueueEntryLocked reads one entry. Absent/corrupt ⇒ (zero, false).

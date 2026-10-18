@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/supportupload"
 )
 
@@ -234,7 +233,7 @@ func writeSealedUpload(bundleID string, sealed []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(path, sealed, 0o600)
+	return durableSupportWrite(path, sealed, 0o600)
 }
 
 // removeSealedUpload deletes the sealed blob once an entry reaches a terminal state

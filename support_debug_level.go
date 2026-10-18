@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/support"
 )
 
@@ -136,7 +135,7 @@ func writeDebugLevelStateLocked(st debugLevelState) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(debugLevelStatePath(), b, 0o600)
+	return durableSupportWrite(debugLevelStatePath(), b, 0o600)
 }
 
 // debugLevelWatchdogTick clears an expired elevation and reports whether it did so,

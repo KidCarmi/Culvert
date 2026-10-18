@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/sealbox"
 )
 
@@ -85,7 +84,7 @@ func saveSupportRecipientsLocked(list []supportRecipient) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(supportRecipientsPath(), b, 0o600)
+	return durableSupportWrite(supportRecipientsPath(), b, 0o600)
 }
 
 // listSupportRecipients returns the registry sorted by name (public keys included —
