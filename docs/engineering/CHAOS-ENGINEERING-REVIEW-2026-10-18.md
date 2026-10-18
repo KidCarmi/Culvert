@@ -334,11 +334,28 @@ downloadable; backoff regression tests for the three reported worker gaps.
   (`support_upload_queue.go:163`) and `listSupportBundles` reads `manifest.json`
   by exact name (`ui_support.go:536`). Disk accumulation across repeated crashes
   is the same posture every other `AtomicWrite` call site in the repo already has.
-- **`ErrReplacedNotSynced` reporting.** On a parent-dir fsync failure the target
-  already carries the new content while the caller returns an error (HTTP 500).
-  All six support callers read-modify-write **from disk** with no in-memory
-  cache, so they are already compliant with that error's documented contract
-  (never roll back in-memory state on it) and the operator's retry is idempotent.
+- **`ErrReplacedNotSynced` reporting — found by review, now fixed.** This entry
+  originally claimed the six callers were "already compliant" with that error's
+  contract because they read-modify-write from disk with no in-memory cache.
+  That was true as far as it went and it missed the real divergence, which
+  Codex review caught on this PR: the sentinel is returned only AFTER the
+  rename succeeds, so the state is live and readable, yet
+  `apiSupportBundleApprove` returned 500 and `return`ed BEFORE its
+  `auditEvent`. A bundle could therefore be READY and downloadable — the
+  download gate reads exactly that landed file — while the admin was told the
+  approval failed and nothing recorded who authorized exporting its INTERNAL
+  sections. The same audit-after-save shape covers the
+  `support.upload.config` egress posture flip and the debug-level elevation.
+  Note the direction of the regression: the previous `os.WriteFile` +
+  `os.Rename` pair returned nil whenever the rename succeeded, so it had no
+  error-after-landing case; the chokepoint conversion created one.
+  `durableSupportWrite` ([support_durable_write.go](../../support_durable_write.go))
+  now treats the sentinel as committed for every support writer, while the
+  storage-health plane keeps the signal — `AtomicWrite` notifies the
+  write-failure observer on that branch before returning, so the failure is
+  still counted, logged, alerted and reflected in `storageDegraded()`. Gated by
+  [support_replaced_notsynced_test.go](../../support_replaced_notsynced_test.go),
+  including a negative control that a pre-rename ENOSPC is still an error.
 - The three reported worker gaps and the two reported ordering/posture items
   remain open by design; each is attributed above.
 
@@ -402,7 +419,7 @@ Tested revision: this branch. Toolchain `go1.26.9` (`go.mod` `toolchain` pin),
 | New tests, post-fix | pass |
 | `go test -race -count=1 -run 'TestSupport\|TestStorageWrite\|TestAuditWriteFailure\|TestApiDiagnostics\|TestDPBackoff\|TestDPFailover\|TestDataPlane\|TestControlPlane\|TestCluster\|TestHA' .` | pass (59s) |
 | `python3 docs/agent-context/check.py` | pass (static integrity) |
-| `TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=20m ./...` | see PR body for the result of this run |
+| `TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=20m ./...` | **BLOCKED — environmental, not run to a usable verdict.** 9 `auth_idp_*` / `ui_idp_*` tests fail here with `idp oidc issuer: URL must be https:// and must not point to a private address`. Root cause: this sandbox has no direct DNS, so `example.com` — which those tests pick precisely because it is IANA-reserved and normally resolves public — does not resolve at all, and `validateExternalURL`'s fail-closed check correctly rejects it. Verified **identical on pristine `origin/main`** in a separate worktree, so it is pre-existing and unrelated to this change. CI's determinism job has real DNS and is the authority |
 | `golangci-lint run --new-from-rev=origin/main` | **BLOCKED — not run.** The installed v2.5.0 binary is built with go1.25 and panics type-checking this go1.26 module: `package requires newer Go version go1.26 (application built with go1.25)`. CI installs a matching build. Not worked around, and no gate weakened |
 
 A focused local pass is not aggregate CI approval; `✅ Fast PR Gate` and

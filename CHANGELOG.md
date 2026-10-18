@@ -555,6 +555,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   approval-gate path asserting degradation, exactly one alert, and the inherited
   base-name path-redaction contract (red before at 0 alerts).
 
+- A support durable write that LANDED was reported as a failure, so the HTTP
+  response and the audit trail could contradict the state on disk.
+  `fileutil.AtomicWrite` returns `ErrReplacedNotSynced` only *after* its rename
+  has succeeded — the target already carries the new bytes and every reader sees
+  them; what is unproven is narrower, the rename's durability across an
+  immediate crash. `apiSupportBundleApprove` returns 500 and returns *before*
+  its `auditEvent`, so a bundle could be READY and downloadable (the
+  mandatory-preview download gate reads exactly that landed file) while the
+  admin was told the approval failed and nothing recorded who authorized
+  exporting its INTERNAL sections. The same audit-after-save shape covers the
+  `support.upload.config` egress posture flip and the debug-level elevation, so
+  the fix sits at the writer: `durableSupportWrite` treats the sentinel as
+  committed for every support writer. The storage-health plane keeps the signal
+  — `AtomicWrite` notifies the write-failure observer on that branch before
+  returning, so the failure is still counted, logged, alerted as
+  `storage_write_failed` and reflected in `storageDegraded()`. This divergence
+  arrived with the chokepoint conversion above: the previous `os.WriteFile` +
+  `os.Rename` pair returned nil whenever the rename succeeded and so had no
+  error-after-landing case at all. Found by Codex review on PR #1658. Gates: the
+  unit contract with a negative control that a pre-rename ENOSPC is still an
+  error, plus the handler contract that a landed approval returns 204 and leaves
+  a `support.bundle.approve` entry; both verified failing against the unfixed
+  shape.
+
 - Every Data-Plane → Control-Plane poll failure was charged **twice**
   (CHAOS-72): `backoff()` incremented `failCount` that `pollConfig`'s error path
   had already incremented. Both of the function's documented contracts were
