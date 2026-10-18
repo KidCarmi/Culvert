@@ -360,6 +360,14 @@ func TestChaos71_Wall_SupervisorStopWaitsCoverTheDrain(t *testing.T) {
 		rest = rest[j+1:]
 	}
 
+	// The activation's own wait for an undo in progress is a waiter on a
+	// supervisor stop too: derived, and ahead of its "already running" check.
+	act := cpFuncBody(t, cpReadSource(t, "main.go"), "func activateControlPlane(")
+	await := strings.Index(act, "awaitCPDeactivation(cpListenerStopWait())")
+	if await < 0 || await > strings.Index(act, "already running as control-plane") {
+		t.Error("activateControlPlane does not wait for an undo in progress (awaitCPDeactivation(cpListenerStopWait())) before its \"already running\" check")
+	}
+
 	sites := 0
 	for _, name := range []string{"cp_grpc_bind.go", "cp_grpc_activation.go", "main.go", "cluster_startup.go", "ha.go"} {
 		sites += strings.Count(cpReadSource(t, name), ".releaseActivation()")
