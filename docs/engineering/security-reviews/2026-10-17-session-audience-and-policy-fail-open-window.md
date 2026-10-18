@@ -269,10 +269,24 @@ otherwise. So an admin who opened the Cluster panel and logged out left their
 join token in the DOM — and in the click-to-copy handler — for whoever signed in
 next in that tab.
 
-Two guards close it, both `textContent`: the render path clears on an **absent**
-field, and `applySession` — the one chokepoint both login and `doLogout` go
-through — clears on any non-admin session, so the token cannot outlive the
-session allowed to see it even if the panel is never re-rendered.
+**Three** guards close it, all `textContent`, and it took two review rounds to
+get to three — which is the honest lesson of this finding:
+
+1. The render path clears on an **absent** field (a non-admin loads or refreshes
+   the panel).
+2. `applySession` — the one chokepoint both login and `doLogout` go through —
+   clears on any non-admin session, so the token cannot outlive the session
+   allowed to see it even if the panel is never re-rendered.
+3. The **current role is re-checked at the moment of the write**. `loadHA` is
+   `async`, so an admin response already in flight can resolve *after*
+   `applySession` has switched the tab to a non-admin session, and would write
+   the token straight back into the DOM that `applySession` had just cleared.
+   Guards 1 and 2 do not close that window; only a write-time check does.
+
+Guard 3 came from a second CodeRabbit finding (🟠 Major) on the fix for guard
+1+2, and it was correct: a check on the way in and a check at session change
+still leave a TOCTOU window when the render is asynchronous. Worth recording,
+because the first two guards *looked* complete.
 
 #### Required tests — `ha_deploy_token_role_test.go`
 

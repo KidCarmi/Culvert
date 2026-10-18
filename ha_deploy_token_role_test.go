@@ -191,6 +191,19 @@ func TestSECHATOKEN1_SPAClearsTheDeployCommand(t *testing.T) {
 		t.Error("applySession does not clear ha-deploy-cmd for a non-admin session: " +
 			"a panel left rendered across a logout would keep the join token")
 	}
+	// Guard 3: the CURRENT role is re-checked at the moment of the write.
+	// loadHA is async, so an admin response already in flight can resolve after
+	// applySession has switched the tab to a non-admin session — and would
+	// write the token back into the DOM applySession had just cleared. Guards 1
+	// and 2 do not close that window; only a write-time check does.
+	if !strings.Contains(page, "haIsAdmin && r.deploy_cmd") {
+		t.Error("the deploy_cmd write does not re-check the current role: an admin response " +
+			"resolving after a session change would re-render the join token for the next session")
+	}
+	if !strings.Contains(page, "const haIsAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');") {
+		t.Error("the write-time role check is not the repo's established admin predicate " +
+			"(typeof uiRole !== 'undefined' && uiRole === 'admin')")
+	}
 	// And it must stay textContent — innerHTML here would be an injection sink
 	// for a value that is rendered verbatim.
 	if strings.Contains(page, "haCmd.innerHTML") || strings.Contains(page, "haCmdEl.innerHTML") {

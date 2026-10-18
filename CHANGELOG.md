@@ -63,8 +63,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `<pre id="ha-deploy-cmd">` was only ever *assigned* when a response carried
   `deploy_cmd` and never cleared, so in a single tab an admin who opened the
   Cluster panel and logged out left the join token in the DOM — and in the
-  click-to-copy handler — for whoever signed in next. The render path now clears
-  on an absent field, and `applySession` clears on any non-admin session.
+  click-to-copy handler — for whoever signed in next. Three guards now close it:
+  the render path clears on an absent field, `applySession` clears on any
+  non-admin session, and the write re-checks the current role — `loadHA` is
+  async, so an admin response still in flight could otherwise resolve after the
+  session changed and write the token back into the DOM that had just been
+  cleared.
 
 - Host-header case variation evaded every country-scoped **deny** rule
   (SEC-GEOHOST-1). `geoHostKey` stripped a port and nothing else — no

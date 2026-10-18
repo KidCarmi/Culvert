@@ -19231,15 +19231,26 @@ async function loadHA(isCP) {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';
       }
-      // SEC-HATOKEN-1 (client half). The server now omits deploy_cmd for a
-      // non-admin, but an ABSENT field has to CLEAR this element rather than
-      // leave the previous value rendered: this is a single-page app, so the
-      // <pre> survives a session change in the same tab. Without the else,
-      // an admin who opened the HA panel and logged out left their join token
-      // in the DOM — and in the click-to-copy handler — for whoever signed in
-      // next. textContent, never innerHTML.
+      // SEC-HATOKEN-1 (client half). Three things have to line up here, and
+      // the server omitting deploy_cmd for a non-admin is only the first.
+      //
+      //  - An ABSENT field must CLEAR this element rather than leave the
+      //    previous value rendered. This is a single-page app, so the <pre>
+      //    survives a session change in the same tab; without the else, an
+      //    admin who opened the HA panel and logged out left their join token
+      //    in the DOM — and in the click-to-copy handler — for whoever signed
+      //    in next.
+      //  - The CURRENT role is re-checked at the moment of the write, because
+      //    loadHA is async: an admin response already in flight can resolve
+      //    AFTER applySession has switched the tab to a non-admin session, and
+      //    would otherwise write the token straight back into the DOM that
+      //    applySession had just cleared. Checking only on the way in, or only
+      //    at session change, leaves that window open (CodeRabbit on PR #1651,
+      //    verified — loadHA awaits its fetch).
+      //  - textContent, never innerHTML.
       const haCmd = document.getElementById('ha-deploy-cmd');
-      if (r.deploy_cmd) {
+      const haIsAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
+      if (haIsAdmin && r.deploy_cmd) {
         haCmd.textContent = r.deploy_cmd;
       } else {
         haCmd.textContent = '';
