@@ -53,7 +53,7 @@ func TestDurableSupportWrite_ReplacedNotSyncedIsCommitted(t *testing.T) {
 
 	injectReplacedNotSynced(t)
 	target := filepath.Join(dir, "landed.json")
-	if err := durableSupportWrite(target, []byte(`{"state":"ready"}`), 0o600); err != nil {
+	if err := durableSupportWrite(target, []byte(`{"state":"ready"}`)); err != nil {
 		t.Fatalf("durableSupportWrite returned %v for a write that LANDED — "+
 			"ErrReplacedNotSynced is returned after the rename succeeded, so the "+
 			"caller's response and audit trail would contradict the file on disk", err)
@@ -71,7 +71,7 @@ func TestDurableSupportWrite_ReplacedNotSyncedIsCommitted(t *testing.T) {
 		return errors.New("atomic write: write: no space left on device")
 	}
 	t.Cleanup(func() { supportDurableWriter = prev })
-	if err := durableSupportWrite(filepath.Join(dir, "nope.json"), []byte("x"), 0o600); err == nil {
+	if err := durableSupportWrite(filepath.Join(dir, "nope.json"), []byte("x")); err == nil {
 		t.Error("durableSupportWrite swallowed a genuine write failure; only ErrReplacedNotSynced is committed")
 	}
 }
@@ -122,5 +122,67 @@ func TestSupportBundleApprove_LandedApprovalIsAuditedAndSucceeds(t *testing.T) {
 	if !found {
 		t.Error("no support.bundle.approve audit entry for a bundle that is now READY and downloadable — " +
 			"an export authorization with no record of who authorized it")
+	}
+}
+
+// TestMkdirDurableSupport_SyncsNewEntriesAndKeepsMode covers the directory half:
+// os.MkdirAll makes a directory, but a directory's ENTRY lives in its parent,
+// which AtomicWrite never syncs — so a fully fsynced manifest could still be
+// lost with its whole bundle directory after createSupportBundle returned the
+// id to the operator. Raised by CodeRabbit on PR #1658.
+//
+// fsync is not observable from a test, so this pins what is: the whole missing
+// chain is created with the requested mode, the call is idempotent, and a
+// pre-existing directory is left alone. The sync itself is asserted by
+// construction — syncDirBestEffort is called for each created directory's
+// parent — and tolerates filesystems that cannot fsync a directory.
+func TestMkdirDurableSupport_SyncsNewEntriesAndKeepsMode(t *testing.T) {
+	root := t.TempDir()
+
+	// A multi-level chain, so the ancestor walk is exercised rather than just
+	// the one-new-directory case.
+	deep := filepath.Join(root, "support", "bundles", chaosBundleID)
+	if err := mkdirDurableSupport(deep, 0o700); err != nil {
+		t.Fatalf("mkdirDurableSupport: %v", err)
+	}
+	for p := deep; p != root; p = filepath.Dir(p) {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if !fi.IsDir() {
+			t.Fatalf("%s is not a directory", p)
+		}
+		if got := fi.Mode().Perm(); got != 0o700 {
+			t.Errorf("%s mode = %o, want 700", p, got)
+		}
+	}
+
+	// Idempotent: a second call on an existing chain creates nothing, syncs
+	// nothing, and must not error.
+	if err := mkdirDurableSupport(deep, 0o700); err != nil {
+		t.Fatalf("mkdirDurableSupport on an existing chain: %v", err)
+	}
+
+	// And a durable write into the created directory still works end to end.
+	if err := durableSupportWrite(filepath.Join(deep, "state.json"), []byte(`{"state":"pending"}`)); err != nil {
+		t.Fatalf("durableSupportWrite into the new directory: %v", err)
+	}
+}
+
+// TestDurableSupportWrite_UsesTheDomainMode pins the perm invariant that
+// replaced the per-call-site argument (golangci unparam): support state is 0600,
+// not whatever a caller happened to pass.
+func TestDurableSupportWrite_UsesTheDomainMode(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "state.json")
+	if err := durableSupportWrite(target, []byte("{}")); err != nil {
+		t.Fatalf("durableSupportWrite: %v", err)
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %o, want 600 — support state carries operator/TAC material", got)
 	}
 }

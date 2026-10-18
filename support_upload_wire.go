@@ -230,10 +230,10 @@ func sealAndEnqueueUpload(bundleID, caseID string, now time.Time) (uploadQueueEn
 // the bytes its persisted SHA-256 was computed over.
 func writeSealedUpload(bundleID string, sealed []byte) error {
 	path := sealedUploadPath(bundleID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := mkdirDurableSupport(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return durableSupportWrite(path, sealed, 0o600)
+	return durableSupportWrite(path, sealed)
 }
 
 // removeSealedUpload deletes the sealed blob once an entry reaches a terminal state

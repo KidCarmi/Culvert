@@ -77,14 +77,14 @@ func loadUploadConfigLocked() uploadConfig {
 // fileutil.AtomicWrite chokepoint (fsync file + parent dir, and write failures
 // reach the storage-health plane). Caller holds uploadConfigMu.
 func saveUploadConfigLocked(c uploadConfig) error {
-	if err := os.MkdirAll(filepath.Dir(uploadConfigPath()), 0o700); err != nil {
+	if err := mkdirDurableSupport(filepath.Dir(uploadConfigPath()), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	return durableSupportWrite(uploadConfigPath(), b, 0o600)
+	return durableSupportWrite(uploadConfigPath(), b)
 }
 
 // uploadConfigGet returns the current node-local upload config (fail-closed).

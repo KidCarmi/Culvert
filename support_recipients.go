@@ -77,14 +77,14 @@ func loadSupportRecipientsLocked() []supportRecipient {
 // saveSupportRecipientsLocked durably persists the registry at 0600 through the
 // fileutil.AtomicWrite chokepoint. Caller holds supportRecipientMu.
 func saveSupportRecipientsLocked(list []supportRecipient) error {
-	if err := os.MkdirAll(filepath.Dir(supportRecipientsPath()), 0o700); err != nil {
+	if err := mkdirDurableSupport(filepath.Dir(supportRecipientsPath()), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
 		return err
 	}
-	return durableSupportWrite(supportRecipientsPath(), b, 0o600)
+	return durableSupportWrite(supportRecipientsPath(), b)
 }
 
 // listSupportRecipients returns the registry sorted by name (public keys included —

@@ -113,14 +113,14 @@ func saveUploadQueueEntryLocked(e uploadQueueEntry) error {
 	if !supportBundleIDRe.MatchString(e.BundleID) {
 		return errors.New("invalid bundle id")
 	}
-	if err := os.MkdirAll(uploadQueueDir(), 0o700); err != nil {
+	if err := mkdirDurableSupport(uploadQueueDir(), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
 	}
-	return durableSupportWrite(uploadQueuePath(e.BundleID), b, 0o600)
+	return durableSupportWrite(uploadQueuePath(e.BundleID), b)
 }
 
 // loadUploadQueueEntryLocked reads one entry. Absent/corrupt ⇒ (zero, false).
