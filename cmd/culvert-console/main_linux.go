@@ -36,6 +36,18 @@ func main() {
 // caught mid-syscall against a VT that stopped draining.
 const consoleShutdownGrace = 5 * time.Second
 
+// machineReadableAdvisoryBudget bounds how long the --json/--text snapshot waits
+// for the advisory prerequisites before reporting them not_collected. These
+// outputs are read over SSH under a 3s operator-status gate (the QEMU
+// controller and culvert-access buffer the whole response until the command
+// exits), and the advisory probes are permitted up to 4s on their own — so
+// without this bound a slow advisory probe pushes the machine-readable status
+// past the gate and the operator reads as "not ready" even while mandatory
+// readiness is fine (ASTRA deadline-mismatch finding, PR #1528). The mandatory
+// readiness observations have their own 2s bounds and stay live and fail-closed;
+// this only caps the advisory wait, it does not increase any timeout.
+const machineReadableAdvisoryBudget = 2 * time.Second
+
 // shutdownExitFunc is os.Exit in production; a test replaces it to observe the
 // backstop firing without terminating the test binary.
 var shutdownExitFunc = os.Exit
@@ -76,10 +88,11 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stop()
 	armShutdownExit(ctx, consoleShutdownGrace)
-	collector := applianceconsole.NewCollector(applianceconsole.Sources{
+	sources := applianceconsole.Sources{
 		Prerequisites: collectPrerequisites, RecoveryFile: hostPublic,
 		StateDir: "/var/lib/culvert-appliance/state", BuildFile: "/var/lib/culvert-appliance/build-info.json", NetDir: "/sys/class/net", Probe: runProbe, HostnameFile: "/etc/hostname", ResolverFile: "/run/systemd/resolve/resolv.conf",
-	})
+	}
+	collector := applianceconsole.NewCollector(sources)
 	if *host != "" {
 		if err := runHost(ctx, *host, collector); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -95,7 +108,12 @@ func run() int {
 		return 0
 	}
 	if *jsonOutput || *textOutput {
-		snapshot := collector.Collect(ctx)
+		// Machine-readable status is read over SSH under the 3s operator gate;
+		// bound the advisory diagnostics so a slow/hung advisory probe cannot
+		// push the snapshot past the gate. Mandatory readiness stays live.
+		machineReadable := sources
+		machineReadable.AdvisoryBudget = machineReadableAdvisoryBudget
+		snapshot := applianceconsole.NewCollector(machineReadable).Collect(ctx)
 		if *jsonOutput {
 			if err := json.NewEncoder(os.Stdout).Encode(snapshot); err != nil {
 				return 1

@@ -267,3 +267,106 @@ func TestReadOnlyStatusDoesNotChangeFiles(t *testing.T) {
 		t.Fatal("credential state changed")
 	}
 }
+
+// --- Advisory-prerequisite decoupling (PR #1528, ASTRA deadline-mismatch) ---
+// The machine-readable snapshot must return within the operator status budget
+// even when the advisory prerequisites are slow or hung, must report them
+// not_collected explicitly, and must never let them weaken mandatory readiness.
+
+func advisoryMarker(checks []Check) bool {
+	return len(checks) == 1 && checks[0].State == "not_collected" && checks[0].ID == "advisory_diagnostics"
+}
+
+func TestAdvisorySlowProbeDoesNotGateSnapshot(t *testing.T) {
+	c, _ := fixture(t)
+	c.sources.AdvisoryBudget = 100 * time.Millisecond
+	c.sources.Prerequisites = func(context.Context) []Check {
+		time.Sleep(2 * time.Second) // hung advisory probe
+		return []Check{{ID: "storage:/", State: "ok"}}
+	}
+	start := time.Now()
+	s := c.Collect(context.Background())
+	elapsed := time.Since(start)
+	if elapsed > time.Second {
+		t.Fatalf("advisory probe gated the snapshot: Collect took %s (budget 100ms)", elapsed)
+	}
+	if !advisoryMarker(s.Prerequisites) {
+		t.Fatalf("expected not_collected advisory marker, got %+v", s.Prerequisites)
+	}
+	// Mandatory readiness is unaffected: the fixture's failed unit still drives Phase.
+	if s.Reason != "FIRSTBOOT_FAILED" {
+		t.Fatalf("advisory outcome changed mandatory readiness: %+v", s)
+	}
+}
+
+func TestAdvisoryFastProbeIsIncluded(t *testing.T) {
+	c, _ := fixture(t)
+	c.sources.AdvisoryBudget = time.Second
+	c.sources.Prerequisites = func(context.Context) []Check {
+		return []Check{{ID: "storage:/", State: "ok", Detail: "fine"}}
+	}
+	s := c.Collect(context.Background())
+	if len(s.Prerequisites) != 1 || s.Prerequisites[0].ID != "storage:/" || s.Prerequisites[0].State != "ok" {
+		t.Fatalf("fast advisory checks not included verbatim: %+v", s.Prerequisites)
+	}
+}
+
+func TestAdvisoryBudgetZeroWaitsForFullSet(t *testing.T) {
+	c, _ := fixture(t)
+	c.sources.AdvisoryBudget = 0 // report/terminal path: wait for the full set
+	c.sources.Prerequisites = func(context.Context) []Check {
+		time.Sleep(150 * time.Millisecond)
+		return []Check{{ID: "storage:/", State: "ok"}}
+	}
+	s := c.Collect(context.Background())
+	if len(s.Prerequisites) != 1 || s.Prerequisites[0].ID != "storage:/" {
+		t.Fatalf("zero budget did not wait for the full advisory set: %+v", s.Prerequisites)
+	}
+}
+
+func TestAdvisoryCancellationReturnsPromptly(t *testing.T) {
+	for _, budget := range []time.Duration{0, time.Second} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // already cancelled
+		c, _ := fixture(t)
+		c.sources.AdvisoryBudget = budget
+		c.sources.Prerequisites = func(context.Context) []Check { select {} } // never returns
+		start := time.Now()
+		s := c.Collect(ctx)
+		if time.Since(start) > time.Second {
+			t.Fatalf("budget=%s: cancellation did not return promptly (%s)", budget, time.Since(start))
+		}
+		if !advisoryMarker(s.Prerequisites) {
+			t.Fatalf("budget=%s: expected not_collected on cancellation, got %+v", budget, s.Prerequisites)
+		}
+	}
+}
+
+func TestRequiredProbeFailureStaysFailClosedWithBudget(t *testing.T) {
+	// With advisory bounded, a missing/not-ready required probe must still fail
+	// closed — the fix must not introduce a stale-ready path.
+	c, _ := fixture(t)
+	c.sources.AdvisoryBudget = 100 * time.Millisecond
+	c.sources.Prerequisites = func(context.Context) []Check { return []Check{{ID: "storage:/", State: "ok"}} }
+	// Healthy mandatory EXCEPT readiness absent → must not report ready.
+	c.sources.StateDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(c.sources.StateDir, "complete.done"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.sources.Probe = func(_ context.Context, args []string) string {
+		switch {
+		case args[0] == "/usr/bin/systemctl":
+			return "LoadState=loaded\nActiveState=active\nResult=success\nExecMainStatus=0\nSubState=exited"
+		case strings.Contains(strings.Join(args, " "), "/health"):
+			return "200"
+		case strings.Contains(strings.Join(args, " "), "setup/status"):
+			return "{\"needsSetup\":false}\n200"
+		default: // /ready absent → readiness incomplete
+			return ""
+		}
+	}
+	s := c.Collect(context.Background())
+	if s.Phase == "ready" {
+		t.Fatalf("missing /ready reported ready (fail-open regression): %+v", s)
+	}
+}

@@ -88,6 +88,13 @@ type Sources struct {
 	Probe                       func(context.Context, []string) string
 	Prerequisites               func(context.Context) []Check
 	RecoveryFile                string
+	// AdvisoryBudget bounds how long Collect waits for the advisory
+	// Prerequisites before returning them not_collected. It is measured from
+	// Collect start and is decoupled from the mandatory readiness observations,
+	// so the machine-readable status returns within the operator gate even when
+	// an advisory probe is slow or hung. Zero means wait for the full advisory
+	// set (the report/terminal paths, which are not under the status gate).
+	AdvisoryBudget time.Duration
 }
 
 // Collector owns no persistent state or background workers. Each Collect call
@@ -137,15 +144,21 @@ func (c Collector) observations(ctx context.Context) map[string]string {
 
 // Collect returns a fresh snapshot without changing provisioning or credentials.
 func (c Collector) Collect(ctx context.Context) Snapshot {
-	var checks []Check
-	var diagnostics sync.WaitGroup
+	start := time.Now()
+	// Advisory prerequisites are display-only diagnostics; NOTHING in the
+	// readiness summary depends on them (see summarize*). They must never gate
+	// the machine-readable snapshot past the operator's status budget, so they
+	// run concurrently with the mandatory observations and are awaited only up
+	// to AdvisoryBudget. The buffered channel lets a slow probe finish and be
+	// discarded without leaking. The mandatory observations below stay live and
+	// fail-closed regardless of the advisory outcome.
+	prereq := make(chan []Check, 1)
 	if c.sources.Prerequisites != nil {
-		diagnostics.Go(func() { checks = c.sources.Prerequisites(ctx) })
+		go func() { prereq <- c.sources.Prerequisites(ctx) }()
 	}
 	raw := c.observations(ctx)
-	diagnostics.Wait()
 	s := Snapshot{SchemaVersion: 1, ObservedAt: time.Now().UTC().Format(time.RFC3339), Version: "unknown", Addresses: []string{}, ManagementURLs: []string{}, Firstboot: make(map[string]string)}
-	s.Prerequisites = checks
+	s.Prerequisites = c.awaitPrerequisites(ctx, prereq, start)
 	s.Recovery = readRecovery(c.sources.RecoveryFile)
 	for line := range strings.SplitSeq(raw["unit"], "\n") {
 		key, value, ok := strings.Cut(line, "=")
@@ -169,6 +182,44 @@ func (c Collector) Collect(ctx context.Context) Snapshot {
 	c.readBuild(&s)
 	s.summarize(raw["health"], raw["setup"], raw["ready"])
 	return s
+}
+
+// awaitPrerequisites returns the advisory checks if they arrive within the
+// budget, otherwise an explicit not_collected marker. It never returns stale or
+// fabricated advisory data, and it is independent of the mandatory readiness
+// observations. A zero AdvisoryBudget waits for the full set (report/terminal).
+func (c Collector) awaitPrerequisites(ctx context.Context, prereq <-chan []Check, start time.Time) []Check {
+	if c.sources.Prerequisites == nil {
+		return nil
+	}
+	if c.sources.AdvisoryBudget <= 0 {
+		select {
+		case checks := <-prereq:
+			return checks
+		case <-ctx.Done():
+			return advisoryNotCollected("advisory diagnostics not collected before the status deadline")
+		}
+	}
+	remaining := c.sources.AdvisoryBudget - time.Since(start)
+	if remaining < 0 {
+		remaining = 0
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case checks := <-prereq:
+		return checks
+	case <-timer.C:
+		return advisoryNotCollected("advisory diagnostics exceeded the status budget; run culvert-status for the full report")
+	case <-ctx.Done():
+		return advisoryNotCollected("advisory diagnostics not collected before the status deadline")
+	}
+}
+
+// advisoryNotCollected is the explicit marker that advisory diagnostics were not
+// gathered — never a readiness signal and never confused with a healthy probe.
+func advisoryNotCollected(detail string) []Check {
+	return []Check{{ID: "advisory_diagnostics", State: "not_collected", Detail: detail}}
 }
 
 func (c Collector) steps() []Step {
