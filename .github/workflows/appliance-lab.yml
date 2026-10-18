@@ -37,20 +37,21 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # F-DISK-1 job input: candidate 6248daf7's image (Deep gate run 38961525689,
-  # app manifest sha256:20a547ed…), binding F-DISK evidence to the EXACT app +
-  # agent under qualification (ASTRA 23:00Z: the prior F-DISK artifact named
-  # bad788e source/agent/image and cannot establish F-DISK PASS for 6248). 6248
-  # is a descendant of the bad788e5 lineage, so it carries every badger/
-  # ristretto F-DISK-1 fix (incl. the in-place memtable emptying 5b389f38). The
-  # ORIGINAL bad788e5 image (run 38040017115) stays the retained control in its
-  # own scope. obtain-image.sh falls back to the lab-preserved copy
-  # (lab-source-image-38961525689) if the deep-gate artifact has expired.
-  SOURCE_IMAGE_RUN_ID: "38961525689"
-  SOURCE_IMAGE_TAR_SHA256: d05f2c1d39db4223b9549fb312ba3c4ae0ac5761f7175218926e7f021bb65dfd
+  # Candidate a2b52abc's image (Deep gate run 39134155144, app manifest
+  # sha256:9d30a157…), the operator-status deadline-mismatch fix (bound the
+  # advisory prerequisites so the --json/--text snapshot fits the 3 s operator
+  # gate; mandatory readiness stays live + fail-closed — status.go +
+  # main_linux.go). a2b52abc is 6248daf7 + that console fix and nothing else, so
+  # it carries every badger/ristretto F-DISK-1 fix and the 1.5.4 sidecar. The
+  # console binary changes, so the guest-content fingerprint differs from the
+  # e24eb542 reference by that binary alone (recorded warning, not a gate).
+  # obtain-image.sh falls back to the lab-preserved copy
+  # (lab-source-image-39134155144) if the deep-gate artifact has expired.
+  SOURCE_IMAGE_RUN_ID: "39134155144"
+  SOURCE_IMAGE_TAR_SHA256: 7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it.
-  SOURCE_IMAGE_SHA: 6248daf72a5312e75062e2c2823438911604af7f
+  SOURCE_IMAGE_SHA: a2b52abc206c2ef5a31a16939154a730d50dcdae
 
 jobs:
   guest-boot:
@@ -101,23 +102,30 @@ jobs:
           # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
           # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
           # sidecar delivered > 0).
-          - variant: candidate-6248daf7
+          - variant: candidate-a2b52abc
             provisioning: source
-            # The console-shutdown P1 + boot-UX candidate (ASTRA findings on
-            # a80be4b6): PR #1528 MERGE commit 6248daf7 (head e7535ed9 merged
-            # into base main; binary stamp 1.0.263-candidate.g6248daf72a53), the
-            # commit the deep-gate image (run 38961525689) was built + stamped
-            # from. BUILDS a fresh OVA and runs the FULL qualify: the recovery/
-            # reboot path exercises the culvert-console shutdown fix (no 90s
-            # session-scope stall), and steps 6b/H re-exercise the admin-allowlist
-            # SURVIVAL assertions. Boot-console frame capture (boot-UX hint) and
-            # the sidecar re-proofs run as a SECOND phase against this build's
-            # retained OVA (see [boot-console]/[fp2-isolated]/[sidecar-scan]).
-            source_sha: "6248daf72a5312e75062e2c2823438911604af7f"
-            image_run: "38961525689"
-            image_tar_sha256: "d05f2c1d39db4223b9549fb312ba3c4ae0ac5761f7175218926e7f021bb65dfd"
-            expect_image_id: "sha256:20a547edd3e9db83cd1fa65f734bdeec5fc8f6d077f6f73344a38798a5d9692d"
-            recovery_reboots: "0"
+            # The operator-status deadline-mismatch candidate (ASTRA finding):
+            # PR #1528 head a2b52abc (binary stamp carries g a2b52abc2…), the
+            # commit the deep-gate image (run 39134155144) was built + stamped
+            # from. a2b52abc = 6248daf7 + the console fix only: the --json/--text
+            # snapshot bounds its advisory prerequisites to 2 s so it fits the
+            # operator SSH gate (QEMU 3 s), while mandatory service/health/setup/
+            # policy/CA readiness stays LIVE and fail-closed. BUILDS a fresh OVA
+            # and runs the FULL qualify; the recovery leg (disk=dm, 3 reboots on
+            # the no-latency `fast` profile) exercises the bounded
+            # `gop_within 3 status-json` probe under real reboots — the exact
+            # path the deadline mismatch lived on — and its per-sample evidence
+            # (R-*-operator-probe.jsonl: class/elapsed/exit/phase/reason) is the
+            # rule-4 transport-vs-not-ready split. The console binary changed, so
+            # the guest-content fingerprint differs from the e24eb542 reference
+            # by that binary alone (recorded warning, not a gate).
+            source_sha: "a2b52abc206c2ef5a31a16939154a730d50dcdae"
+            image_run: "39134155144"
+            image_tar_sha256: "7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e"
+            expect_image_id: "sha256:9d30a157cb925de6628db1a9e3e5f70e308cc9b1f8f8a918117a7e8275f3bc16"
+            disk: dm
+            recovery_profiles: "fast:0:0:60"
+            recovery_reboots: "3"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
