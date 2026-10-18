@@ -1308,6 +1308,13 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   # The early-boot I/O sampler's per-boot log (/run, tmpfs → this boot's). Its own
   # file so it is not truncated with the rest of the guest dump.
   gpriv <<<'cat /run/culvert-boot-io.log 2>/dev/null' > "$EV/$tag-bootio.log" 2>/dev/null || true
+  # Assert the effective read-ahead held THROUGH this reboot (the stack is up
+  # here, so this is after engine startup). A mismatch invalidates the arm.
+  if [[ -n "${REC_EXPECT_RA:-}" ]]; then
+    local effra; effra="$(gpriv <<<'r=$(findmnt -no SOURCE / | sed "s#/dev/##; s/[0-9]*$//"); cat /sys/block/$r/queue/read_ahead_kb' 2>/dev/null | tr -dc 0-9)"
+    if [[ "$effra" == "$REC_EXPECT_RA" ]]; then check R "readahead-$name-$i" pass "effective read_ahead_kb=$effra == expected $REC_EXPECT_RA (post-reboot, stack up)"
+    else check R "readahead-$name-$i" fail "INVALID: effective read_ahead_kb=${effra:-?} != expected $REC_EXPECT_RA after reboot $i"; fi
+  fi
   recovery_state "$name" "$i"
   printf '%s\t%s\t%s\t%s\t%s\n' "${REC_VARIANT:-base}" "$name" "$i" "$rec" "$budget" >> "$EV/R-summary.tsv"
 }
@@ -1439,9 +1446,16 @@ apply_variant() { local v="$1" c
   for c in ${v//+/ }; do
     case "$c" in
       ra) gpriv <<EOS || return 1
-printf '%s\n' 'ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="sd*|vd*|nvme*n*", ATTR{queue/read_ahead_kb}="$LAB_RA_KB"' > /etc/udev/rules.d/60-culvert-lab-readahead.rules
+# 99- so this sorts AFTER the shipped 60-culvert-readahead.rules; a 60-lab-
+# name sorted BEFORE it and the shipped 4096 rule ran last and won, so the
+# treatment silently stayed 4096 (run 39046172500 — ASTRA finding). The
+# assertion below is the real guard: last-rule-wins is not relied on.
+printf '%s\n' 'ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="sd*|vd*|nvme*n*", ATTR{queue/read_ahead_kb}="$LAB_RA_KB"' > /etc/udev/rules.d/99-culvert-lab-readahead.rules
 udevadm control --reload && udevadm trigger --subsystem-match=block --action=change && udevadm settle
-echo "ra: \$(for q in /sys/block/sd*/queue/read_ahead_kb /sys/block/vd*/queue/read_ahead_kb; do [ -e "\$q" ] && echo "\$q=\$(cat \$q)"; done | paste -sd' ')"
+root="\$(findmnt -no SOURCE / | sed 's#/dev/##; s/[0-9]*\$//')"
+eff="\$(cat /sys/block/\$root/queue/read_ahead_kb)"
+echo "ra: root=\$root read_ahead_kb=\$eff want=$LAB_RA_KB"
+[ "\$eff" = "$LAB_RA_KB" ] || { echo "ra: FAILED — effective \$eff != $LAB_RA_KB (shipped-rule override not beaten)"; exit 1; }
 EOS
       ;;
       svc) gpriv <<'EOS' || return 1
@@ -1552,6 +1566,16 @@ EOS
     check R "variant-$variant" fail "BLOCKED: could not apply lab variant $variant: $(tail -c 300 "$EV/R-variant-$variant.txt")"
     expected=$((expected + LAB_RECOVERY_REBOOTS * $(wc -w <<<"$LAB_RECOVERY_PROFILES"))); continue; fi
   check R "variant-$variant" info "LAB-ONLY guest change set '$variant' applied: $(tr '\n' ' ' < "$EV/R-variant-$variant.txt" | head -c 300)"
+  # Effective read_ahead_kb the experiment must see (ASTRA finding on run
+  # 39046172500): base = the shipped 4096, the 'ra' component = LAB_RA_KB.
+  # Assert the LIVE value on the real root disk BEFORE any measurement; a
+  # mismatch invalidates this variant and its reboots do not run.
+  REC_EXPECT_RA=4096; for rc in ${variant//+/ }; do [[ "$rc" == ra ]] && REC_EXPECT_RA="$LAB_RA_KB"; done
+  eff_ra="$(gpriv <<<'r=$(findmnt -no SOURCE / | sed "s#/dev/##; s/[0-9]*$//"); cat /sys/block/$r/queue/read_ahead_kb' 2>/dev/null | tr -dc 0-9)"
+  if [[ "$eff_ra" != "$REC_EXPECT_RA" ]]; then
+    check R "readahead-$variant" fail "INVALID: effective read_ahead_kb=${eff_ra:-?} != expected $REC_EXPECT_RA before measurement (variant '$variant')"
+    expected=$((expected + LAB_RECOVERY_REBOOTS * $(wc -w <<<"$LAB_RECOVERY_PROFILES"))); continue; fi
+  check R "readahead-$variant" pass "effective read_ahead_kb=$eff_ra == expected $REC_EXPECT_RA before measurement"
   for prof in $LAB_RECOVERY_PROFILES; do
     IFS=: read -r name r w budget <<<"$prof"
     [[ "$variant" == base ]] || name="$variant-$name"
