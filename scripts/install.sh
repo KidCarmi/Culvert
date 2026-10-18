@@ -1466,7 +1466,12 @@ is_fresh_deployment() {
 secret_already_set() {
   local var="$1" envfile="$2"
   [[ -n "${!var:-}" ]] && return 0
-  [[ -f "$envfile" ]] && grep -Eq "^${var}=.+" "$envfile" 2>/dev/null
+  # "Non-empty" means what docker compose resolves: a value of only CR/blanks
+  # or an empty quote pair ("" / '') is EMPTY there, so it must not count as
+  # configured (the passphrase would never be generated and the CA key would
+  # be persisted unencrypted).
+  [[ -f "$envfile" ]] && tr -d '\r' <"$envfile" 2>/dev/null |
+    grep -Eq "^${var}=[[:space:]]*([^[:space:]\"']|\"[^\"]|'[^'])"
 }
 
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
