@@ -165,11 +165,19 @@ func TestChaos71_AddressPublishIsANoOpWhenUnchangedOrUnpublished(t *testing.T) {
 	if changed, err := s.UpdateCPAddressesFrom(a1); changed || err != nil {
 		t.Fatalf("unpublished store: changed=%v err=%v, want a no-op", changed, err)
 	}
-	if err := s.Update(ConfigSnapshot{CPAddresses: []string{"a:1"}}); err != nil {
+	// A full publish never decides the list (Codex P2 4307107242 on #1556):
+	// the address publish is its only writer, so the seed is full then address.
+	if err := s.Update(ConfigSnapshot{CPAddresses: []string{"ignored:1"}}); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := s.UpdateCPAddressesFrom(a1); changed || err != nil || s.Version() != 1 {
-		t.Fatalf("unchanged list: changed=%v err=%v version=%d, want a no-op at v1", changed, err, s.Version())
+	if got := s.Get().CPAddresses; len(got) != 0 {
+		t.Fatalf("a full publish wrote the CP address list itself: %v", got)
+	}
+	if changed, err := s.UpdateCPAddressesFrom(a1); !changed || err != nil || s.Version() != 2 {
+		t.Fatalf("first address publish: changed=%v err=%v version=%d, want a commit at v2", changed, err, s.Version())
+	}
+	if changed, err := s.UpdateCPAddressesFrom(a1); changed || err != nil || s.Version() != 2 {
+		t.Fatalf("unchanged list: changed=%v err=%v version=%d, want a no-op at v2", changed, err, s.Version())
 	}
 }
 
