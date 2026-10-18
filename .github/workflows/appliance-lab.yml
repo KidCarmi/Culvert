@@ -50,8 +50,11 @@ env:
   SOURCE_IMAGE_RUN_ID: "39134155144"
   SOURCE_IMAGE_TAR_SHA256: 7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e
   # The source those image bytes were built from; the F-DISK job builds its
-  # maintenance agent from here so no lab-branch binary stands in for it.
-  SOURCE_IMAGE_SHA: a2b52abc206c2ef5a31a16939154a730d50dcdae
+  # maintenance agent from here so no lab-branch binary stands in for it. This
+  # is the PR #1528 MERGE commit (head a2b52abc merged into base dec66e1b), the
+  # commit the deep-gate image was version-stamped from (g246cb73d4b62) and the
+  # source build-ova.sh's candidate-source guard requires — NOT the bare head.
+  SOURCE_IMAGE_SHA: 246cb73d4b62d7a4baf2fcb8558ad8622657529a
 
 jobs:
   guest-boot:
@@ -102,12 +105,13 @@ jobs:
           # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
           # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
           # sidecar delivered > 0).
-          - variant: candidate-a2b52abc
+          - variant: candidate-246cb73d
             provisioning: source
             # The operator-status deadline-mismatch candidate (ASTRA finding):
-            # PR #1528 head a2b52abc (binary stamp carries g a2b52abc2…), the
-            # commit the deep-gate image (run 39134155144) was built + stamped
-            # from. a2b52abc = 6248daf7 + the console fix only: the --json/--text
+            # PR #1528 MERGE commit 246cb73d (head a2b52abc merged into base
+            # dec66e1b; binary stamp 1.0.263-candidate.g246cb73d4b62), the commit
+            # the deep-gate image (run 39134155144) was built + stamped from.
+            # a2b52abc = 6248daf7 + the console fix only: the --json/--text
             # snapshot bounds its advisory prerequisites to 2 s so it fits the
             # operator SSH gate (QEMU 3 s), while mandatory service/health/setup/
             # policy/CA readiness stays LIVE and fail-closed. BUILDS a fresh OVA
@@ -119,7 +123,7 @@ jobs:
             # rule-4 transport-vs-not-ready split. The console binary changed, so
             # the guest-content fingerprint differs from the e24eb542 reference
             # by that binary alone (recorded warning, not a gate).
-            source_sha: "a2b52abc206c2ef5a31a16939154a730d50dcdae"
+            source_sha: "246cb73d4b62d7a4baf2fcb8558ad8622657529a"
             image_run: "39134155144"
             image_tar_sha256: "7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e"
             expect_image_id: "sha256:9d30a157cb925de6628db1a9e3e5f70e308cc9b1f8f8a918117a7e8275f3bc16"
