@@ -613,7 +613,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   funnel, now rebinding the engine only when the key actually CHANGED, because
   `applySnapshotSessionSecret` reinstalls the CP-synced secret on every
   snapshot apply whether or not it moved and an unconditional rebind would
-  discard the warm pool on each of those no-ops.
+  discard the warm pool on each of those no-ops. Because the engine now caches
+  the key instead of re-reading it per MAC, `SetSigningKey` also stores a COPY:
+  holding the caller's slice would let a caller that mutated the slice it had
+  installed and then reinstalled it hand that comparison the same bytes on both
+  sides, skipping the rebind — after which cookies from before the rotation
+  would keep verifying and `SigningKey`, which feeds the Control Plane snapshot
+  export, would report a key local verification no longer used. The copy sits on
+  the rebind path, so the no-op reinstall stays allocation-free.
 
   Measured on the development box (Go 1.26, linux/amd64, 4-core Xeon @
   2.80GHz, medians of 3x500k, each pair timed in the SAME run against a
