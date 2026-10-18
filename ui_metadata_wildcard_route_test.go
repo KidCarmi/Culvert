@@ -167,3 +167,82 @@ func TestC2WildcardRoute_UnknownPathStillFallsToTheCatchAll(t *testing.T) {
 		}
 	}
 }
+
+// TestC2WildcardRoute_EncodedSlashResolvesLikeTheMux is the gate for the
+// second half of SEC-C2WILDCARD-1 (Codex P2 + CodeRabbit on PR #1656).
+//
+// *http.ServeMux matches on the ESCAPED path and unescapes each segment on its
+// own, so "%2F" stays INSIDE one wildcard value: it routes
+// "/api/support/bundles/foo%2Fbar" to "{id}" with id="foo/bar". r.URL.Path has
+// already decoded that into a second segment, so resolving from it read as one
+// segment too many, matched nothing, and fell through to the public "/"
+// catch-all — the very loss this index was fixed to prevent, reachable by
+// percent-encoding one character.
+//
+// Verified against go1.26.9's own mux before the fix was written.
+func TestC2WildcardRoute_EncodedSlashResolvesLikeTheMux(t *testing.T) {
+	idx := buildMetadataIndex()
+	cases := []struct {
+		name    string
+		escaped string
+		decoded string
+		want    string
+	}{
+		{
+			name:    "encoded slash stays inside the id",
+			escaped: "/api/support/bundles/foo%2Fbar",
+			decoded: "/api/support/bundles/foo/bar",
+			want:    "/api/support/bundles/{id}",
+		},
+		{
+			name:    "encoded slash in the id of a sub-resource",
+			escaped: "/api/support/bundles/foo%2Fbar/approve",
+			decoded: "/api/support/bundles/foo/bar/approve",
+			want:    "/api/support/bundles/{id}/approve",
+		},
+		{
+			name:    "encoded slash in a recipient name",
+			escaped: "/api/support/recipients/ops%2Fteam",
+			decoded: "/api/support/recipients/ops/team",
+			want:    "/api/support/recipients/{name}",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := idx.LookupEscaped(tc.escaped, tc.decoded)
+			if !ok || got.Path != tc.want {
+				t.Errorf("DEFECT: LookupEscaped(%q) = (%q, public=%v); want %q — "+
+					"an encoded slash must not drop the request onto the public catch-all",
+					tc.escaped, got.Path, got.Public, tc.want)
+			}
+		})
+	}
+}
+
+// TestC2WildcardRoute_EscapedLiteralSegmentStillMatches is the control for the
+// opposite mistake. Matching the RAW escaped text would make ".../appro%76e"
+// miss the "{id}/approve" route and fall back to "/" — the same loss by the
+// other route. The mux unescapes each segment before comparing it to a
+// literal, so this must resolve.
+func TestC2WildcardRoute_EscapedLiteralSegmentStillMatches(t *testing.T) {
+	idx := buildMetadataIndex()
+	got, ok := idx.LookupEscaped(
+		"/api/support/bundles/csb_abc/appro%76e",
+		"/api/support/bundles/csb_abc/approve",
+	)
+	if !ok || got.Path != "/api/support/bundles/{id}/approve" {
+		t.Errorf("LookupEscaped with an escaped literal segment = (%q, %v); want %q",
+			got.Path, ok, "/api/support/bundles/{id}/approve")
+	}
+}
+
+// TestC2WildcardRoute_MalformedEscapeDoesNotMisroute pins the failure
+// direction: an unparsable escape leaves the segment as-is, so the worst case
+// is a miss, never a wrong route.
+func TestC2WildcardRoute_MalformedEscapeDoesNotMisroute(t *testing.T) {
+	idx := buildMetadataIndex()
+	got, ok := idx.LookupEscaped("/api/support/bundles/%zz", "/api/support/bundles/%zz")
+	if ok && got.Path != "/api/support/bundles/{id}" && strings.Contains(got.Path, "{") {
+		t.Errorf("malformed escape resolved to the wrong wildcard route %q", got.Path)
+	}
+}

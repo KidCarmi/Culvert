@@ -117,12 +117,34 @@ only shape a request can actually have.
 
 **Fix.** `buildMetadataIndex` now routes a pattern containing `{` into a
 `wildcard` list of pre-split segments (and keeps it in the exact map, so a
-lookup of the literal still resolves to its own route). `Lookup` tries exact,
+lookup of the literal still resolves to its own route). Resolution tries exact,
 then the most specific wildcard, then the prefix list. Matching uses ServeMux's
 own segment semantics: a literal segment must match byte-for-byte, `{name}`
 matches exactly one **non-empty** segment, `{name...}` matches the trailing
 segments. Most-specific ordering is more segments → more literal segments →
 longer pattern.
+
+**A second half, found in review (Codex P2 and CodeRabbit, independently).**
+The first version of the fix matched segments split from the *decoded*
+`r.URL.Path`, which reopens the same hole for one percent-encoded character.
+Measured against go1.26.9's own mux:
+
+| request target | `r.URL.Path` | mux routes to |
+|---|---|---|
+| `/api/support/bundles/foo%2Fbar` | `/api/support/bundles/foo/bar` | `{id}`, `id="foo/bar"` |
+| `/api/support/bundles/csb_abc/appro%76e` | `…/csb_abc/approve` | `{id}/approve` |
+
+The mux matches on the **escaped** path and unescapes each segment *on its
+own*, so `%2F` stays inside one wildcard value; the decoded path reads as one
+segment too many, matched nothing, and fell through to `"/"` — verified on the
+built index, which answered `("/", public=true)` for all three affected
+shapes. Matching the *raw* escaped text would have been wrong in the opposite
+direction, because `appro%76e` really does reach the literal `approve` route.
+So resolution for a live request now goes through `LookupEscaped`, which
+splits `r.URL.EscapedPath()` and unescapes each segment separately; the
+decoded path still feeds the exact and prefix tiers, leaving their behaviour
+untouched. A malformed escape leaves its segment as-is, so the worst case is a
+miss, never a wrong route.
 
 **Files.** `ui_metadata_enforcement.go`, `ui_metadata_wildcard_route_test.go`.
 
@@ -180,6 +202,15 @@ DELETE metadata entry becomes `AuditExpected: true` with the false
 `saveConfigVersion` is deliberately **not** added — enrollment tokens are
 outside the rollback surface for the reason already recorded on
 `apiClusterTokenCreate`, and rolling one back could resurrect a consumed token.
+
+**The write-failure path, found in review (CodeRabbit, CWE-778).**
+`DeleteToken()` runs before `Save()`, so when the store write fails the token
+is *already* gone from memory — this node has stopped honouring it whatever
+the 500 says, and a later successful `Save()` makes that deletion durable with
+no record of the revocation at all. A distinct `enrollment.token_revoke_unpersisted`
+event now covers that path. The token is **not** restored: putting live
+enrollment material back because a disk write failed is the less safe of the
+two directions, and the 500 already tells the operator to retry.
 
 **Files.** `ui_cluster.go`, `ui_routes_meta.go`, `api/route-classification.yaml`,
 `cluster_token_revoke_audit_test.go`.
@@ -535,11 +566,15 @@ what the C4 divergence check exists to confirm. No path becomes *more*
 permissive. Cost: ≤10 segment comparisons, only on an exact-map miss, replacing
 a full scan of the prefix list for those paths.
 
-**SEC-ENROLLAUDIT-1.** One audit emission on one success path. Status codes,
-response bodies and the store's behaviour are untouched; the 404 and 400 paths
-emit nothing (pinned by two negative controls). The audit ring is bounded, so
-the new entry can evict an older one — which is why both gates assert on unique
-content, never on a length delta.
+**SEC-ENROLLAUDIT-1.** Two audit emissions, one per outcome of the same
+mutation. Status codes, response bodies and the store's behaviour are
+untouched; the 404 and 400 paths emit nothing (pinned by two negative
+controls). The audit ring is bounded, so a new entry can evict an older one —
+which is why every gate asserts on unique content, never on a length delta,
+and why each one mints a **fresh** token hash per invocation: `go test -count=2`
+re-enters a test in the same process, and a fixed hash would let the positive
+assertion match the previous run's entry and pass without the handler emitting
+anything (CodeRabbit).
 
 ---
 
@@ -608,9 +643,11 @@ CI-only. A passing local check is not a passing merge gate.
   merge-order hazards: they get worse, not better, with time, and they are not
   visible to any gate that tests one branch at a time.
 - **The metadata index is still a mirror.** It reproduces ServeMux's resolution
-  in a second implementation. The wildcard half now agrees; the structural
-  answer — asking the mux itself — remains unbuilt, and a future Go routing
-  change could desynchronise them again. A differential test that registers
+  in a second implementation. The wildcard half now agrees, including the
+  escaped-path handling — but that half took two review findings to get right,
+  which is itself the argument. The structural answer — asking the mux itself —
+  remains unbuilt, and a future Go routing change could desynchronise them
+  again. A differential test that registers
   every `uiRoutes` pattern on a real `*http.ServeMux` and compares its
   resolution against `Lookup` for a corpus of concrete paths would close that
   class rather than this instance.

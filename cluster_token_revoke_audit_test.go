@@ -16,12 +16,30 @@ package main
 // delta: the audit ring is bounded and a shuffled full-suite run saturates it.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
 const auditActionTokenRevoked = "enrollment.token_revoked"
+
+// uniqueTokenHash returns a hash no earlier invocation of this test can have
+// used. The audit ring is shared and bounded, and `go test -count=2` (the
+// determinism lane runs exactly that) re-enters every test in the same
+// process — so a FIXED hash lets the positive assertion find the PREVIOUS
+// run's entry and pass without the handler emitting anything. Content has to
+// be unique per invocation for a content-based assertion to mean what it
+// says (CodeRabbit, PR #1656).
+func uniqueTokenHash(t *testing.T, label string) string {
+	t.Helper()
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	return "sec-enrollaudit-1-" + label + "-" + hex.EncodeToString(b[:])
+}
 
 // findAuditByActionObject scans the audit ring for an entry matching both
 // action and object. Content-based per the CLAUDE.md audit-ring pitfall.
@@ -53,7 +71,7 @@ func TestEnrollAudit_TokenRevokeIsAudited(t *testing.T) {
 	t.Cleanup(func() { globalClusterStore = origStore })
 	globalClusterStore = newTestClusterStore(t)
 
-	const hash = "sec-enrollaudit-1-revoked-hash"
+	hash := uniqueTokenHash(t, "revoked")
 	globalClusterStore.mu.Lock()
 	globalClusterStore.st.Tokens[hash] = &EnrollToken{TokenHash: hash}
 	globalClusterStore.mu.Unlock()
@@ -83,7 +101,7 @@ func TestEnrollAudit_FailedRevokeIsNotAudited(t *testing.T) {
 	t.Cleanup(func() { globalClusterStore = origStore })
 	globalClusterStore = newTestClusterStore(t)
 
-	const hash = "sec-enrollaudit-1-absent-hash"
+	hash := uniqueTokenHash(t, "absent")
 	if w := deleteClusterToken(t, hash); w.Code != http.StatusNotFound {
 		t.Fatalf("DELETE of an absent token returned %d, want 404; body: %s", w.Code, w.Body.String())
 	}
@@ -139,5 +157,38 @@ func TestEnrollAudit_RouteMetadataDeclaresTheAudit(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("/api/cluster/tokens not present in uiRoutes")
+	}
+}
+
+// TestEnrollAudit_UnpersistedRevokeIsAudited covers the write-failure half
+// (CWE-778; CodeRabbit, PR #1656). DeleteToken has already removed the token
+// from the in-memory store by the time Save fails, so this node has stopped
+// honouring it whatever the 500 says — and a later successful Save makes that
+// deletion durable. A distinct action keeps the two outcomes apart in the
+// trail rather than letting a failed write go unrecorded.
+func TestEnrollAudit_UnpersistedRevokeIsAudited(t *testing.T) {
+	origStore := globalClusterStore
+	t.Cleanup(func() { globalClusterStore = origStore })
+
+	hash := uniqueTokenHash(t, "unpersisted")
+	// A store whose path cannot be written, so Save() fails — the same shape
+	// TestClusterTokenDelete_SaveError uses.
+	globalClusterStore = &ClusterStore{
+		path: "/nonexistent/dir/cluster.json",
+		st: ClusterState{
+			Nodes:   make(map[string]*EnrolledNode),
+			Tokens:  map[string]*EnrollToken{hash: {TokenHash: hash}},
+			Revoked: []RevokedCert{},
+		},
+	}
+
+	if w := deleteClusterToken(t, hash); w.Code != http.StatusInternalServerError {
+		t.Fatalf("DELETE with a failing Save returned %d, want 500; body: %s", w.Code, w.Body.String())
+	}
+	if _, ok := findAuditByActionObject(t, auditActionTokenRevoked, hash); ok {
+		t.Errorf("a revocation that did not persist must NOT record %q", auditActionTokenRevoked)
+	}
+	if _, ok := findAuditByActionObject(t, "enrollment.token_revoke_unpersisted", hash); !ok {
+		t.Errorf("DEFECT: the failed write left no audit record for %q", hash)
 	}
 }

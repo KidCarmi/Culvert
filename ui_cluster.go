@@ -139,6 +139,17 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 		}
 		if err := globalClusterStore.Save(); err != nil {
 			logger.Printf("ClusterDB save error: %v", err)
+			// The token is ALREADY gone from the in-memory store — DeleteToken
+			// ran above — so this node has stopped honouring it whatever the
+			// response says, and a later successful Save persists that
+			// deletion. Answering 500 with no record at all would leave the
+			// only durable trace of the revocation on the next unrelated
+			// write (CWE-778; CodeRabbit, PR #1656). The token is NOT restored
+			// here: putting live enrollment material back because a disk write
+			// failed is the less safe of the two directions, and the 500
+			// already tells the operator to retry.
+			auditEvent(r, "enrollment.token_revoke_unpersisted", sanitizeLog(tokenHash),
+				"cluster enrollment token revoked in memory but the store write failed")
 			http.Error(w, "failed to persist token deletion", http.StatusInternalServerError)
 			return
 		}

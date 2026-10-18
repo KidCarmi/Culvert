@@ -35,6 +35,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   each `{…}` segment and were verified failing against the pre-fix index, where
   10 of 10 routes resolve to `"/"` with `public=true`.
 
+  Resolution for a live request goes through the ESCAPED path. `*http.ServeMux`
+  matches on `EscapedPath()` and unescapes each segment on its own, so a `%2F`
+  stays inside one wildcard value — it routes
+  `/api/support/bundles/foo%2Fbar` to `{id}` with `id="foo/bar"`, while
+  `r.URL.Path` has already turned that into a second segment. Resolving from
+  the decoded path therefore reopened the same hole for one percent-encoded
+  character, which the built index confirmed by answering `("/", public=true)`
+  for all three affected shapes. Matching the raw escaped text would be wrong
+  in the other direction, because `appro%76e` really does reach the literal
+  `approve` route, so each segment is unescaped separately; a malformed escape
+  is left as-is, making the worst case a miss rather than a wrong route. The
+  decoded path still feeds the exact and prefix tiers unchanged.
+
 - Revoking a cluster **enrollment token** left no audit record
   (SEC-ENROLLAUDIT-1). `DELETE /api/cluster/tokens` destroys cluster trust
   material, yet it was the one mutation on that route with no `auditEvent`: the
@@ -48,9 +61,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   persisted, so a record cannot claim a revocation that did not survive the
   write; the metadata and the manifest declare it. `saveConfigVersion` is
   deliberately still absent — enrollment tokens are outside the rollback
-  surface. Gates include two negative controls (a 404 and a 400 must audit
-  nothing) and assert on unique entry content, never a length delta, because
-  the audit ring is bounded.
+  surface. The write-failure path is covered too: `DeleteToken()` runs before
+  `Save()`, so a failed store write leaves the token already gone from memory
+  — this node has stopped honouring it whatever the 500 says, and a later
+  successful save makes the deletion durable — which now records a distinct
+  `enrollment.token_revoke_unpersisted` event rather than nothing. The token is
+  not restored; putting live enrollment material back because a disk write
+  failed is the less safe direction, and the 500 already says to retry.
+  Gates include two negative controls (a 404 and a 400 must audit nothing),
+  assert on unique entry content rather than a length delta because the audit
+  ring is bounded, and mint a fresh token hash per invocation so a `-count=2`
+  run cannot satisfy the positive assertion from the previous run's entry.
 
   Both findings were recorded as R2 and R4 in the 2026-10-17 review and are
   closed here. Full analysis, plus a review of the 28 open pull requests —

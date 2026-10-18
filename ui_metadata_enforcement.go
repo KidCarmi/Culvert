@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -205,12 +206,46 @@ func isWildcardSegment(s string) bool {
 	return len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}'
 }
 
-// matches reports whether path belongs to this wildcard pattern, using the
-// same segment semantics as *http.ServeMux: a "{name}" placeholder matches
-// exactly one NON-EMPTY segment, "{name...}" matches one or more trailing
-// segments, and every literal segment must match byte-for-byte.
-func (w wildcardRoute) matches(path string) bool {
-	got := patternSegments(path)
+// requestSegments splits a request path into the segments *http.ServeMux
+// matches against: the ESCAPED path, split on "/", with each segment
+// unescaped ON ITS OWN.
+//
+// Doing it in that order is the whole point, and both halves are load-bearing
+// (verified against go1.26.9's mux):
+//
+//   - Splitting the DECODED r.URL.Path is wrong, because %2F has already
+//     become a "/" there. The mux routes "/api/support/bundles/foo%2Fbar" to
+//     "/api/support/bundles/{id}" with id="foo/bar", while the decoded path
+//     reads as five segments and matched nothing here — falling through to
+//     the public "/" catch-all, which is exactly the SEC-C2WILDCARD-1 hole
+//     this index exists to close (Codex P2 + CodeRabbit, PR #1656).
+//   - Matching the RAW escaped text is also wrong, in the other direction: the
+//     mux unescapes each segment before comparing it to a literal, so
+//     ".../csb_abc/appro%76e" really does reach the "{id}/approve" route. A
+//     raw comparison would miss it and fall back to "/" — the same loss, via
+//     the opposite mistake.
+//
+// A segment whose escaping is malformed is left as-is rather than dropped:
+// the worst case is a miss, never a wrong route.
+func requestSegments(escapedPath string) []string {
+	segs := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
+	for i, seg := range segs {
+		if !strings.Contains(seg, "%") {
+			continue
+		}
+		if unescaped, err := url.PathUnescape(seg); err == nil {
+			segs[i] = unescaped
+		}
+	}
+	return segs
+}
+
+// matches reports whether the already-split request segments belong to this
+// wildcard pattern, using the same semantics as *http.ServeMux: a "{name}"
+// placeholder matches exactly one NON-EMPTY segment, "{name...}" matches one
+// or more trailing segments, and every literal segment must match
+// byte-for-byte.
+func (w wildcardRoute) matches(got []string) bool {
 	for i, seg := range w.segs {
 		if isWildcardSegment(seg) && strings.HasSuffix(seg, "...}") {
 			// Trailing multi-segment wildcard: everything left must be
@@ -308,12 +343,31 @@ func literalSegCount(segs []string) int {
 //
 // Returns (zero, false) for unknown paths. Callers MUST NOT block the
 // request on a miss — see c2EvaluateAndLog.
+//
+// This form splits path itself, which is right for a caller holding a plain
+// path (a pattern literal, a test case, a recorded decision). A caller
+// resolving a LIVE request must use LookupEscaped instead, so an encoded
+// slash is matched the way the mux matches it.
 func (idx *metadataIndex) Lookup(path string) (uiRouteMetadata, bool) {
+	return idx.lookup(path, patternSegments(path))
+}
+
+// LookupEscaped resolves a live request from the same input *http.ServeMux
+// uses: r.URL.EscapedPath() for segment matching, with the decoded r.URL.Path
+// kept for the exact and prefix tiers so their existing behaviour is
+// untouched. See requestSegments for why the escaped form is required.
+func (idx *metadataIndex) LookupEscaped(escapedPath, decodedPath string) (uiRouteMetadata, bool) {
+	return idx.lookup(decodedPath, requestSegments(escapedPath))
+}
+
+// lookup is the shared resolution order. path feeds the exact and prefix
+// tiers; segs feeds the wildcard tier.
+func (idx *metadataIndex) lookup(path string, segs []string) (uiRouteMetadata, bool) {
 	if m, ok := idx.exact[path]; ok {
 		return m, true
 	}
 	for _, w := range idx.wildcard {
-		if w.matches(path) {
+		if w.matches(segs) {
 			return w.meta, true
 		}
 	}
@@ -384,7 +438,7 @@ type c2Decision struct {
 func c2Evaluate(r *http.Request, idx *metadataIndex) c2Decision {
 	d := c2Decision{Path: r.URL.Path, Method: r.Method, SessionRole: uiRole(r)}
 
-	meta, found := idx.Lookup(r.URL.Path)
+	meta, found := idx.LookupEscaped(r.URL.EscapedPath(), r.URL.Path)
 	if !found {
 		d.Reason = "no metadata entry"
 		return d
