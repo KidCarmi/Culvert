@@ -431,19 +431,19 @@ func resumePersistedStill(guard func() bool) bool {
 // resumeClaimedLocked is a resume's second check, under h.mu and so atomic with
 // every HA transition and with BeginShutdown: shutdown wins for EVERY resume,
 // and for a guarded resume an HA role set meanwhile wins too. A claimed resume
-// abandons the staged grant it took (grant, 0 = none) in the same critical
+// abandons the staged grant it took (took) in the same critical
 // section (clearLeaseGrantLocked), so no exit leaves a grant staged or its
 // epoch stamped (Codex review of #1556). Caller holds h.mu (write).
-func (h *HAState) resumeClaimedLocked(guard func() bool, grant int64) bool {
+func (h *HAState) resumeClaimedLocked(guard func() bool, took bool) bool {
 	if h.shutdown {
-		h.clearLeaseGrantLocked(grant)
+		h.clearLeaseGrantLocked(took)
 		logger.Printf("HA: process shutdown began during the leadership resume — not taking the leader role")
 		return true
 	}
 	if guard == nil || h.role == "" {
 		return false
 	}
-	h.clearLeaseGrantLocked(grant)
+	h.clearLeaseGrantLocked(took)
 	logger.Printf("HA: an HA transition claimed this node (role %q) during the resume's lease acquisition — not resuming leadership from the older persisted config", h.role)
 	return true
 }
@@ -469,7 +469,7 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// foreign holder (handleForeignFenceHolder) and otherwise completes the
 	// interrupted resume.
 	leaseGranted, foreignHolder := h.acquireLeaseForResume()
-	grant := h.grantedLeaseEpoch(leaseGranted)
+	took := leaseGranted // whether this resume staged a grant it must install or abandon
 	// A grant taken by a resume that then aborts (revalidation failed,
 	// shutdown, or a live HA transition) is left unkept and expires after its
 	// TTL — the bounded stall ADR-0005 documents; the Provider deliberately has
@@ -478,12 +478,12 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// abandonGrantLocked, Codex review of #1556): an abandoned epoch is never
 	// installed, stamped or renewed by a node that holds no role.
 	if !resumePersistedStill(guard) {
-		h.clearLeaseGrant(grant)
+		h.clearLeaseGrant(took)
 		return false
 	}
 	if !leaseGranted && h.leaseConfigured() && foreignHolder {
 		h.mu.Lock()
-		if h.resumeClaimedLocked(guard, grant) {
+		if h.resumeClaimedLocked(guard, took) {
 			h.mu.Unlock()
 			return false
 		}
@@ -508,13 +508,13 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	if leaseGranted {
 		var aborted bool
 		var err error
-		if epoch, aborted, err = h.commitResumeGrant(guard, grant); aborted {
+		if epoch, aborted, err = h.commitResumeGrant(guard, took); aborted {
 			return false
 		}
 		leaseGranted, epochRefused = resumeInstallOutcome(err)
 	}
 	h.mu.Lock()
-	if h.resumeClaimedLocked(guard, grant) {
+	if h.resumeClaimedLocked(guard, took) {
 		h.mu.Unlock()
 		return false
 	}
@@ -545,9 +545,9 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 // an early claim check (abandoning the grant if the resume lost), the
 // keepalive on the staged grant, then the stamped commit. aborted: the resume
 // must not proceed; err: commitGrant's failure, for resumeInstallOutcome.
-func (h *HAState) commitResumeGrant(guard func() bool, grant int64) (epoch int64, aborted bool, err error) {
+func (h *HAState) commitResumeGrant(guard func() bool, took bool) (epoch int64, aborted bool, err error) {
 	h.mu.Lock()
-	aborted = h.resumeClaimedLocked(guard, grant) // abandons the staged grant when it returns true
+	aborted = h.resumeClaimedLocked(guard, took) // abandons the staged grant when it returns true
 	h.mu.Unlock()
 	if aborted {
 		return 0, true, nil

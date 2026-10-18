@@ -48,46 +48,34 @@ func (h *HAState) setLeaseEpochLocked(epoch int64) {
 	h.syncFenceEpochLocked()
 }
 
-// grantedLeaseEpoch is the epoch of the grant an acquisition just took, or 0
-// when it took none (denied, unknown, or legacy mode). An acquisition only
-// STAGES its grant (grantEpoch): nothing advertises it until exposeGrantLocked
-// installs it. Read right after a granted acquire: while that grant is live
-// every other Acquire is denied, so no other path can have staged another.
-func (h *HAState) grantedLeaseEpoch(granted bool) int64 {
-	if !granted {
-		return 0
-	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.grantEpoch
-}
-
-// clearLeaseGrantLocked abandons the STAGED grant (epoch) that an acquisition
-// took but its caller is not installing: a resume whose revalidation failed,
+// clearLeaseGrantLocked abandons the STAGED grant an acquisition took (took)
+// when its caller is not installing it: a resume whose revalidation failed,
 // or a resume claimed by shutdown or a live HA transition (Codex review of
 // #1556, P1 4306890528). It folds #1556's clear into this branch's one
 // abandonment, abandonGrantLocked: the staged epoch, any stamp an install was
 // committing with it (reverted under the store lock) and the keepalive that
 // renewed it. Because an acquisition only stages, the abandoned epoch was
-// never advertised (CurrentEpoch, the heartbeat, issuance, write authority).
+// never advertised (CurrentEpoch, the heartbeat, issuance, write authority),
+// and the caller needs no copy of it: nothing outside the grant owners reads
+// a staged epoch (TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit).
 //
-// A no-op unless epoch is still this process's staged grant (0, legacy mode,
-// already abandoned or installed meanwhile), so it never abandons a grant some
-// other transition staged. The lease itself is NOT released — ADR-0005 S1
-// gives the Provider no Release, so the grant runs out its TTL (the
-// documented bounded stall). Caller holds h.mu (write), so the clear is atomic
-// with the caller's decision.
-func (h *HAState) clearLeaseGrantLocked(epoch int64) {
-	if h.lease == nil || epoch == 0 || h.grantEpoch != epoch {
+// took keys the clear to the caller's own grant: while that grant is live
+// every other Acquire is denied, so no other transition can have staged one.
+// A no-op when the acquisition took none or in legacy mode. The lease itself
+// is NOT released — ADR-0005 S1 gives the Provider no Release, so the grant
+// runs out its TTL (the documented bounded stall). Caller holds h.mu (write),
+// so the clear is atomic with the caller's decision.
+func (h *HAState) clearLeaseGrantLocked(took bool) {
+	if h.lease == nil || !took {
 		return
 	}
 	h.abandonGrantLocked()
 }
 
 // clearLeaseGrant is clearLeaseGrantLocked for a decision taken without h.mu.
-func (h *HAState) clearLeaseGrant(epoch int64) {
+func (h *HAState) clearLeaseGrant(took bool) {
 	h.mu.Lock()
-	h.clearLeaseGrantLocked(epoch)
+	h.clearLeaseGrantLocked(took)
 	h.mu.Unlock()
 }
 

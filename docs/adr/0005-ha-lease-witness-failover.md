@@ -166,7 +166,9 @@ This note amends S3's stamping in one case and leaves the S3 rule itself unchang
     a guarded resume whose revalidation fails, a resume claimed by shutdown or
     by an HA transition, a failed promote, and a recovery that shutdown
     overtakes. #1556's clear (`clearLeaseGrantLocked`, Codex P1 4306890528
-    on #1556) folds into that abandonment, keyed by the staged epoch.
+    on #1556) folds into that abandonment. It is keyed to whether the
+    caller's own acquisition took a grant, and never reads the staged epoch:
+    only the grant owners may read it.
     Pinned by `ha_lease_grant_clear_chaos_test.go`.
 
 ### 2026-07-03 — S5 SHIPPED: operator wiring (flags/YAML/compose/GUI/runbook) — PROGRAM COMPLETE
