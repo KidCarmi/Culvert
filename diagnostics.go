@@ -193,6 +193,9 @@ func buildOperatorContract() OperatorContract {
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
+	// Auth Exempt kill switch (break-glass) left engaged. Contributes nothing
+	// while released, so a normal appliance's report is unchanged.
+	checks = append(checks, authExemptKillSwitchDiagnostics()...)
 	// LDAP profile hygiene diagnostics (ADR-0027). Report-only; contribute
 	// nothing when no LDAP profiles exist.
 	checks = append(checks, authLDAPProfileDiagnostics()...)
@@ -1786,6 +1789,32 @@ func authExemptDiagnostics(rules []PolicyRule, defaultAction PolicyAction) []Ope
 		})
 	}
 	return checks
+}
+
+// authExemptKillSwitchDiagnostics surfaces the Auth Exempt break-glass kill
+// switch on the operator contract. While engaged, every Exempt decision (scoped
+// rules and the Open default) is forced to "authentication required", so
+// clients that rely on an exemption (agents, probes, unattended hosts) are
+// challenged. The runtime toggle does not survive a restart and the env layer
+// cannot be released without one; neither is visible outside the Auth Policy
+// page. Report-only: it reads the same state the gate consults and changes
+// nothing. Returns nil while released.
+func authExemptKillSwitchDiagnostics() []OperatorContractCheck {
+	envOn := authBypassDisabled()
+	rtOn := authExemptDisabledRuntimeState()
+	if !envOn && !rtOn {
+		return nil
+	}
+	action := "Release the kill switch under Authentication Policy once the incident is resolved; exemptions resume immediately."
+	if envOn {
+		action = "CULVERT_AUTHBYPASS_DISABLE is set: unset it and restart to restore exemptions. The runtime toggle under Authentication Policy cannot override it."
+	}
+	return []OperatorContractCheck{{
+		Code:           "auth_exempt_kill_switch_engaged",
+		Status:         diagWarn,
+		Message:        "Auth Exempt kill switch is engaged — exempt rules and the Open default are forced to require authentication; clients relying on an exemption will be challenged (CredentialRequired/SSORequired and policy decisions are unaffected)",
+		OperatorAction: action,
+	}}
 }
 
 // authCredentialRequiredDiagnostics reports operator risks for CredentialRequired
