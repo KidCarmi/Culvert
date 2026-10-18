@@ -66,10 +66,31 @@ func SetSigningKey(key []byte) {
 	// rebind would throw away the warm pool on each of those no-ops.
 	// Constant-time compare: both sides are server-owned secrets, so this is
 	// hygiene rather than a defended oracle, and it costs 32 bytes of work.
-	rebind := subtle.ConstantTimeCompare(key, signingKey) != 1
-	signingKey = key
-	if rebind {
-		macEngines.Store(newMacEngine(key))
+	//
+	// The comparison is only MEANINGFUL because signingKey is a copy this
+	// package owns, which is why the copy below is on the rebind path rather
+	// than at the top of the function. Were signingKey the caller's slice, a
+	// caller that mutated the slice it had installed and then reinstalled it
+	// would hand this compare the same mutated bytes on BOTH sides: equal, so
+	// no rebind — and from then on SigningKey, and the CP snapshot export
+	// reading through it, would report the new key while the engine still
+	// signed with the old one. Cookies issued before that "rotation" would keep
+	// verifying and an exported key would disagree with local verification.
+	// Both halves were reproduced against the tree and are pinned by
+	// TestSetSigningKey_CopiesKeyOnInstall (CodeRabbit, PR #1657). Only the
+	// pooling makes this reachable at all: the per-call hmac.New form re-read
+	// signingKey on every MAC and could not drift.
+	//
+	// Copying here and not above also keeps the no-op reinstall allocation-free,
+	// which is the property TestBenchGate_UnchangedKeyKeepsPoolWarm measures.
+	if subtle.ConstantTimeCompare(key, signingKey) != 1 {
+		// make+copy, not append([]byte(nil), key...): appending no elements to
+		// a nil slice yields nil, which would turn an installed EMPTY key into
+		// an absent one and change what SigningKey reports.
+		installed := make([]byte, len(key))
+		copy(installed, key)
+		signingKey = installed
+		macEngines.Store(newMacEngine(installed))
 	}
 	signingKeyMu.Unlock()
 }
@@ -511,11 +532,11 @@ type macEngine struct {
 func newMacEngine(key []byte) *macEngine {
 	// The engine owns a COPY. Every state it mints later must be primed with
 	// the same bytes as the ones already pooled, and the old per-call form
-	// re-read the caller's slice on every MAC, so without the copy a caller
-	// that mutated the key in place after installing it would leave the pool
-	// holding two different keys at once. SetSigningKey's callers all hand
-	// over freshly decoded bytes they then drop, so this is belt-and-braces —
-	// it just makes the invariant the engine's own, not theirs.
+	// re-read the key on every MAC, so without the copy a mutation after
+	// install would leave the pool holding two different keys at once.
+	// SetSigningKey now hands over a slice this package already owns, so this
+	// is belt-and-braces there — it keeps the invariant true for any future
+	// caller of newMacEngine rather than resting on the funnel's discipline.
 	e := &macEngine{key: append([]byte(nil), key...)}
 	e.pool.New = func() any { return &macState{h: hmac.New(sha256.New, e.key)} }
 	return e
@@ -530,9 +551,11 @@ func newMacEngine(key []byte) *macEngine {
 // signing under the new one. The DP config-sync path replaces the key at
 // runtime while requests are in flight, which is exactly that race.
 //
-// The key is bound at install time rather than re-read per call, so the engine
-// keeps its own copy (see newMacEngine) and SigningKey keeps handing readers
-// theirs; no key slice outside this package backs a live HMAC state.
+// The key is bound at install time rather than re-read per call, so both the
+// stored key and the engine are copies this package owns (see SetSigningKey and
+// newMacEngine) and SigningKey keeps handing readers theirs. No slice a caller
+// still holds backs the stored key or a live HMAC state, so the two can never
+// drift apart.
 var macEngines atomic.Pointer[macEngine]
 
 func init() { macEngines.Store(newMacEngine(nil)) }

@@ -469,3 +469,62 @@ func TestSetSigningKey_EngineOwnsKeyCopy(t *testing.T) {
 		t.Error("macEqual stopped accepting the signature the installed key produces")
 	}
 }
+
+// TestSetSigningKey_CopiesKeyOnInstall pins the ownership rule at the install
+// funnel, which is a different invariant from the engine's own copy above.
+//
+// The engine binds its key when it is built, so the dangerous case is a caller
+// that mutates the slice it ALREADY installed and then reinstalls it: if
+// signingKey were that same slice, the rebind comparison would see the mutated
+// bytes on BOTH sides, call it unchanged, and skip the rebind. From then on
+// SigningKey — and the CP snapshot export reading through it — reports the new
+// key while the engine still signs with the old one. Two things break at once:
+// cookies issued before the "rotation" keep verifying, and an exported key
+// disagrees with local verification.
+//
+// Both halves were reproduced against the tree before SetSigningKey took its
+// copy (CodeRabbit, PR #1657); this test is the regression. Note that it is
+// only reachable because the engine caches the key — the per-call hmac.New form
+// re-read signingKey on every MAC and could not drift — so it guards a hazard
+// the pooling introduced, not a pre-existing one.
+func TestSetSigningKey_CopiesKeyOnInstall(t *testing.T) {
+	prev := SigningKey()
+	t.Cleanup(func() { SetSigningKey(prev) })
+
+	key := testKey("install copy")
+	SetSigningKey(key)
+
+	const payload = "rotation-payload"
+	sigBefore := mac(payload)
+
+	// The caller mutates the very slice it installed, then reinstalls it.
+	key[0] ^= 0xFF
+	SetSigningKey(key)
+
+	sigAfter := mac(payload)
+	if sigAfter == sigBefore {
+		t.Error("the engine did not rotate: a cookie signed under the superseded key still verifies, because the rebind comparison saw the caller's mutation on both sides")
+	}
+	if !macEqual(payload, sigAfter) {
+		t.Error("macEqual disagrees with mac under the freshly installed key")
+	}
+	if macEqual(payload, sigBefore) {
+		t.Error("macEqual still accepts the signature from before the rotation")
+	}
+
+	// Local verification must agree with what SigningKey reports, since that
+	// is what the CP snapshot export publishes to the rest of the cluster.
+	exported := SigningKey()
+	independent := newMacEngine(exported)
+	fresh := independent.pool.New().(*macState)
+	if got := string(fresh.compute(payload)); got != sigAfter {
+		t.Errorf("a MAC under the exported key is %q but local verification produces %q — the stored key and the engine have drifted apart", got, sigAfter)
+	}
+
+	// And the stored key must not be the caller's slice: mutating it again
+	// changes nothing anyone can observe.
+	key[1] ^= 0xFF
+	if got := mac(payload); got != sigAfter {
+		t.Errorf("mac changed to %q after a further mutation of the caller's slice; the stored key is still aliased", got)
+	}
+}
