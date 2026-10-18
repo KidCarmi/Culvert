@@ -175,13 +175,16 @@ rewrite:
 ```
 Core        -port 8080  -ui-port 9090  -socks5-port 0  -config <file>
 TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
-Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
-Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
-Logging     -logfile  -log-max-mb 50  -request-log-max-mb 100  -audit-log  -syslog
+Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8  -trust-forwarded-headers
+Filtering   -blocklist  -policy  -ip-filter-mode allow|block  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
+Logging     -logfile  -log-max-mb 50  -request-log <file>  -request-log-max-mb 100  -audit-log  -syslog  -syslog-format rfc3164|rfc5424
+CDR         -cdr-enabled  -cdr-endpoint  -cdr-fail-mode open|closed  -cdr-default-profile  -cdr-default-mode  -cdr-timeout-sec  -cdr-max-file-size-mb  -cdr-server-fingerprint  -cdr-certs-dir
 Metrics     -metrics-token  -rate-limit  -otlp-endpoint <url>
 Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
+
+> Run `culvert -h` for the authoritative, complete flag list (HA, cluster, backup/restore and one-shot commands are omitted above). A flag overrides its YAML equivalent; see [`config.example.yaml`](config.example.yaml).
 
 > In the shipped Docker image, persistence paths such as `/data/ca.bundle` and `/data/ui_users.json` are supplied by the compose command line, not by binary flag defaults.
 
