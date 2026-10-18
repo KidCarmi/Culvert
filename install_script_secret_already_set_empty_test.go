@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +50,20 @@ func TestInstallScript_SecretAlreadySet_EmptyValuesAreNotSet(t *testing.T) {
 				t.Fatalf("secret_already_set(%q) = %v, want %v", tc.content, got, tc.want)
 			}
 		})
+	}
+}
+
+// A large .env must not turn a successful early-exit match into a SIGPIPE
+// failure of the upstream reader under the installer's `set -o pipefail`.
+func TestInstallScript_SecretAlreadySet_LargeEnvUnderPipefail(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	envfile := filepath.Join(t.TempDir(), ".env")
+	content := "CULVERT_CA_PASSPHRASE=abcdef123456\n" + strings.Repeat("# filler line to exceed the pipe buffer\n", 1<<20)
+	if err := os.WriteFile(envfile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "set -euo pipefail\nunset CULVERT_CA_PASSPHRASE\n" + fn + "\nsecret_already_set CULVERT_CA_PASSPHRASE \"$1\"\n"
+	if err := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", envfile).Run(); err != nil { // #nosec G204 -- fixed test script
+		t.Fatalf("secret_already_set on a large .env with a leading match = %v, want success", err)
 	}
 }
