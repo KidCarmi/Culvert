@@ -8869,6 +8869,49 @@ required before merge; each is now in the tree.
 
   The flag-based decision fails these gates, whether it is restored in
   `exitTerminal`, in the ownership step, or in both.
+* **A full publish never decides the CP address list (Codex P2
+  4307107242).** A terminal exit withdrew a dead Control Plane, committed the
+  removal and released ownership. A later ordinary
+  `publishCurrentConfigSnapshot()` rebuilt `CPAddresses` from the enabled HA
+  state (`buildCPAddressList` in `CurrentConfigSnapshot`). With the list no
+  longer owned, `Update` committed that list verbatim and re-added the dead
+  endpoint, and nothing owned or retried its removal. A full publish
+  captured before the withdrawal did the same after its CAS retry.
+
+  The list now has exactly one writer, the owned address publish
+  (`updateCPAddressesBound`, bound to the ownership generation):
+  - `Update`'s full-kind plan sets `cand.CPAddresses =
+    cur.snap.CPAddresses` unconditionally, owned or not. It reads the
+    committed view inside the CAS, so a retry after a withdrawal carries the
+    post-withdrawal list. While the list is owned, the post-commit reconcile
+    applies the owner's list, as before.
+  - `CurrentConfigSnapshot` carries the committed list
+    (`committedCPAddresses`) instead of deriving one from HA state. Every
+    caller of `Update(CurrentConfigSnapshot())` is covered: admin publishes,
+    the configuration-version restore, enrollment and activation.
+  - An unowned node's list changes only through ownership (activation or an
+    HA transition's reconcile), never through the full-publish fallback.
+    `committedView.owned` and `ownsList` had no remaining reader and are
+    removed.
+  - `seedReplicatedSnapshot` installs a replicated leader's committed
+    snapshot wholesale. That is a carry-forward, not a decision.
+
+  Gates:
+  - `TestChaos71_FullPublishAfterAReleaseKeepsTheWithdrawnAddressOut` (a).
+  - `TestChaos71_FullPublishCapturedBeforeTheWithdrawalKeepsItOut` (b).
+  - `TestChaos71_OwnedFullPublishCarriesTheOwnersList` (c, the owned
+    control).
+  - `TestChaos71_Wall_CPAddressesHaveOneWriter` extends the owner-generation
+    wall. A production write of `CPAddresses` outside
+    `updateCPAddressesBound` must carry the committed list forward. Every
+    full-kind plan carries it as an unconditional top-level statement.
+    `buildCPAddressList` reaches only the owned path.
+  - `TestChaos71_AddressPublishIsANoOpWhenUnchangedOrUnpublished` now seeds
+    its list through the address publish.
+
+  Three mutations each fail (a) and the wall: restoring `Update`'s
+  owned-only substitution (which also fails (b)), restoring the HA-state
+  derivation in `CurrentConfigSnapshot`, and both together.
 * **An uninstalled fencing grant is cleared (Codex P1 4306890528).** A
   guarded boot resume acquired epoch E. Its post-acquisition revalidation
   then found `ha_config.json` removed or disabled, and the return left

@@ -144,7 +144,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   did not install (the HA config changed during the acquisition, shutdown
   began, another HA transition claimed the node, or the promotion failed) no
   longer leaves the node advertising that epoch with no role; the lease still
-  runs out its TTL.
+  runs out its TTL. An ordinary config publish no longer re-adds a Control
+  Plane address that a terminal listener exit withdrew: a full publish now
+  always carries the committed address list, and only the owned address
+  publish changes it.
 
 ### Security
 

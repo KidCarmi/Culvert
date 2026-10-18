@@ -612,21 +612,27 @@ var dpControlPlanePollFailing atomic.Bool
 // clear signal (fail-open on new threats). The CP's own local proxying is
 // unaffected (its stores already hold the data); only distribution is gated.
 func (s *ConfigStore) Update(snap ConfigSnapshot) error {
-	// CHAOS-71 (CodeRabbit review of #1556): a full publish built its snapshot
-	// — CPAddresses included — BEFORE reaching here, so it can predate a delayed
-	// CP activation that has since published the new address list. Once a
-	// source owns the list, a full publish carries the COMMITTED list instead;
-	// a legitimate change is applied by the reconcile below. The substitution
-	// precedes validation, and commitPublish commits only onto the version it
-	// built from, so what commits is exactly what passed the wire-size gate
-	// (Codex review of #1556).
+	// CHAOS-71: a full publish NEVER decides the CP address list. The list has
+	// exactly one writer, the owned address publish (updateCPAddressesBound,
+	// bound to the ownership generation); a full publish carries the COMMITTED
+	// list forward unchanged, owned or not.
+	//
+	// The snapshot was built BEFORE reaching here, so its CPAddresses can
+	// predate a delayed CP activation that has since published a new list
+	// (CodeRabbit review of #1556) — or a terminal exit that withdrew a dead
+	// Control Plane and released ownership, after which a list derived from HA
+	// state would re-add that endpoint with nothing left to remove it (Codex
+	// P2 4307107242). The carry-forward is read from the committed view inside
+	// the CAS: commitPublish commits only onto the exact base it built from,
+	// so a retry after a withdrawal rebuilds from the post-withdrawal list. It
+	// precedes validation, so what commits is exactly what passed the
+	// wire-size gate. A legitimate change while owned is applied by the
+	// reconcile below; an unowned node's list changes only through ownership.
 	_, err := s.commitPublish(publishPlan{
 		kind: publishFull,
 		build: func(cur committedView) (ConfigSnapshot, publishAct) {
 			cand := snap
-			if cur.ownsList() {
-				cand.CPAddresses = cur.snap.CPAddresses
-			}
+			cand.CPAddresses = cur.snap.CPAddresses
 			return cand, publishCommit
 		},
 		beforeCommit: func() {
@@ -789,11 +795,8 @@ type committedView struct {
 	snap      ConfigSnapshot
 	version   int64
 	published bool
-	owned     bool   // an active Control Plane owns the CP address list
 	ownerGen  uint64 // the ownership generation (cpAddrOwnerGen) at this read
 }
-
-func (v committedView) ownsList() bool { return v.owned && v.published }
 
 // publishPlan is the per-kind part of a publish; commitPublish is the rest.
 type publishPlan struct {
@@ -837,7 +840,7 @@ func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
 		s.mu.RLock()
 		own := s.cpAddrOwnerLocked()
-		cur := committedView{snap: s.snap, version: s.version, published: s.published, owned: own.owned(), ownerGen: own.gen}
+		cur := committedView{snap: s.snap, version: s.version, published: s.published, ownerGen: own.gen}
 		s.mu.RUnlock()
 
 		epoch := publishFenceEpoch()
@@ -1142,6 +1145,13 @@ func (s *ConfigStore) seedReplicatedSnapshot(snap ConfigSnapshot) {
 		s.version = snap.Version
 	}
 	s.mu.Unlock()
+}
+
+// committedCPAddresses is the committed snapshot's CP address list.
+func (s *ConfigStore) committedCPAddresses() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snap.CPAddresses
 }
 
 // Get returns the current snapshot.
@@ -1789,8 +1799,11 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	snap.DPIPatterns = dpiScanner.List()
 	snap.MaxConnsPerIP = connLimiter.MaxPerIP()
 
-	// HA: include all CP addresses so DPs auto-discover failover targets.
-	snap.CPAddresses = buildCPAddressList()
+	// HA: the CP addresses DPs auto-discover failover targets from. Carried
+	// from the COMMITTED snapshot, never derived from HA state here: the owned
+	// address publish is the list's only writer, and Update substitutes the
+	// committed list again inside its CAS (Codex P2 4307107242 on #1556).
+	snap.CPAddresses = globalConfigStore.committedCPAddresses()
 
 	// PAC exclusions + profiles/pools. All three are WireWipeCapable: force
 	// non-nil so an admin-cleared empty state serializes as [] and reaches
