@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/supportupload"
 )
 
@@ -106,9 +107,9 @@ func uploadQueuePath(bundleID string) string {
 	return filepath.Join(uploadQueueDir(), bundleID+".json")
 }
 
-// saveUploadQueueEntryLocked atomically persists one entry at 0600. Caller holds
-// uploadQueueMu. The bundle id is validated against supportBundleIDRe so the
-// filename can never traverse.
+// saveUploadQueueEntryLocked durably persists one entry at 0600 through the
+// fileutil.AtomicWrite chokepoint. Caller holds uploadQueueMu. The bundle id is
+// validated against supportBundleIDRe so the filename can never traverse.
 func saveUploadQueueEntryLocked(e uploadQueueEntry) error {
 	if !supportBundleIDRe.MatchString(e.BundleID) {
 		return errors.New("invalid bundle id")
@@ -120,11 +121,7 @@ func saveUploadQueueEntryLocked(e uploadQueueEntry) error {
 	if err != nil {
 		return err
 	}
-	tmp := uploadQueuePath(e.BundleID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, uploadQueuePath(e.BundleID))
+	return fileutil.AtomicWrite(uploadQueuePath(e.BundleID), b, 0o600)
 }
 
 // loadUploadQueueEntryLocked reads one entry. Absent/corrupt ⇒ (zero, false).

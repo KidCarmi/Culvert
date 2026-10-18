@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // support_upload.go — M6 Secure Upload, PR-1 (the zero-egress SPINE).
@@ -73,8 +75,9 @@ func loadUploadConfigLocked() uploadConfig {
 	return c
 }
 
-// saveUploadConfigLocked atomically persists the config at 0600. Caller holds
-// uploadConfigMu.
+// saveUploadConfigLocked durably persists the config at 0600 through the
+// fileutil.AtomicWrite chokepoint (fsync file + parent dir, and write failures
+// reach the storage-health plane). Caller holds uploadConfigMu.
 func saveUploadConfigLocked(c uploadConfig) error {
 	if err := os.MkdirAll(filepath.Dir(uploadConfigPath()), 0o700); err != nil {
 		return err
@@ -83,11 +86,7 @@ func saveUploadConfigLocked(c uploadConfig) error {
 	if err != nil {
 		return err
 	}
-	tmp := uploadConfigPath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, uploadConfigPath())
+	return fileutil.AtomicWrite(uploadConfigPath(), b, 0o600)
 }
 
 // uploadConfigGet returns the current node-local upload config (fail-closed).

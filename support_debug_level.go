@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/support"
 )
 
@@ -124,7 +125,8 @@ func clearDebugLevel() error {
 	return nil
 }
 
-// writeDebugLevelStateLocked persists atomically via tmp+rename. Caller holds the mutex.
+// writeDebugLevelStateLocked durably persists the elevation through the
+// fileutil.AtomicWrite chokepoint. Caller holds the mutex.
 func writeDebugLevelStateLocked(st debugLevelState) error {
 	dir := filepath.Dir(debugLevelStatePath())
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -134,11 +136,7 @@ func writeDebugLevelStateLocked(st debugLevelState) error {
 	if err != nil {
 		return err
 	}
-	tmp := debugLevelStatePath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, debugLevelStatePath())
+	return fileutil.AtomicWrite(debugLevelStatePath(), b, 0o600)
 }
 
 // debugLevelWatchdogTick clears an expired elevation and reports whether it did so,

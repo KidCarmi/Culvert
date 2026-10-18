@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/sealbox"
 )
 
@@ -74,8 +75,8 @@ func loadSupportRecipientsLocked() []supportRecipient {
 	return list
 }
 
-// saveSupportRecipientsLocked atomically persists the registry at 0600. Caller
-// holds supportRecipientMu.
+// saveSupportRecipientsLocked durably persists the registry at 0600 through the
+// fileutil.AtomicWrite chokepoint. Caller holds supportRecipientMu.
 func saveSupportRecipientsLocked(list []supportRecipient) error {
 	if err := os.MkdirAll(filepath.Dir(supportRecipientsPath()), 0o700); err != nil {
 		return err
@@ -84,11 +85,7 @@ func saveSupportRecipientsLocked(list []supportRecipient) error {
 	if err != nil {
 		return err
 	}
-	tmp := supportRecipientsPath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, supportRecipientsPath())
+	return fileutil.AtomicWrite(supportRecipientsPath(), b, 0o600)
 }
 
 // listSupportRecipients returns the registry sorted by name (public keys included —
