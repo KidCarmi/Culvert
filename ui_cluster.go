@@ -142,6 +142,24 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 			http.Error(w, "failed to persist token deletion", http.StatusInternalServerError)
 			return
 		}
+		// SEC-ENROLLAUDIT-1. Destroying cluster trust material was the one
+		// mutation on this route with no audit record: the POST that MINTS a
+		// token audits (apiClusterTokenCreate), and so does node revocation
+		// (apiClusterRevoke), but the DELETE that revokes a token left no
+		// trace of who removed it or when. The route metadata declared
+		// "audit delegated" for this method, which was true of POST and had
+		// no delegate at all here, so C2c's runtime audit-gap check could not
+		// notice either. Emitted only after the store has persisted, so the
+		// record cannot claim a revocation that did not survive the write.
+		//
+		// The hash comes from the query string, so it is sanitised like any
+		// other untrusted value (CWE-117) even though DeleteToken only
+		// returns true for a hash already in the store.
+		auditEvent(r, "enrollment.token_revoked", sanitizeLog(tokenHash),
+			"cluster enrollment token revoked")
+		// No saveConfigVersion: enrollment tokens are deliberately outside
+		// the rollback surface, for the reason recorded on
+		// apiClusterTokenCreate below.
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
