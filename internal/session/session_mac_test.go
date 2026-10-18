@@ -16,12 +16,11 @@ package session
 //     one, which the key-rotation-under-load test decides (run with -race).
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +45,28 @@ func legacyMacEqual(data, sig string) bool {
 	return hmac.Equal([]byte(sig), []byte(expected))
 }
 
+// testKey returns a deterministic 32-byte signing key for label.
+//
+// Derived by hashing the label rather than by filling a slice from loop
+// indices: an int→byte conversion of an expression a linter cannot bound is a
+// gosec G115 finding (two were reported against the first revision of these
+// tests, on `byte(i*31 + j)` and `byte(0xC0 | (i & 0x0F))` — both in range in
+// fact, neither provably so to the analyzer), and labels read better at the
+// call sites than arithmetic anyway. Distinct labels give unrelated keys; the
+// same label always gives the same bytes in a FRESH slice, which is exactly
+// what the no-op-reinstall and key-mutation tests need.
+func testKey(label string) []byte {
+	sum := sha256.Sum256([]byte("culvert internal/session test key: " + label))
+	return sum[:]
+}
+
+// testKeyOverBlock returns a deterministic key LONGER than one SHA-256 block
+// — the key shape HMAC hashes down before deriving ipad/opad, and therefore a
+// distinct path worth crossing against every payload shape.
+func testKeyOverBlock(label string) []byte {
+	return bytes.Repeat(testKey(label), 7)[:200]
+}
+
 // macPayloads covers the shapes the engine branches on: empty, short, the
 // realistic cookie payload, exactly at the inline-buffer bound, one byte over
 // it (the conversion fallback) and far over it.
@@ -68,20 +89,12 @@ func macPayloads() map[string]string {
 // state the legacy form also signed under), short, the canonical 32 bytes, and
 // longer than one SHA-256 block (which HMAC hashes down first).
 func macKeys() map[string][]byte {
-	long := make([]byte, 200)
-	for i := range long {
-		long[i] = byte(i * 7)
-	}
-	k32 := make([]byte, 32)
-	for i := range k32 {
-		k32[i] = byte(i + 1)
-	}
 	return map[string][]byte{
 		"nil":        nil,
 		"empty":      {},
 		"short":      []byte("k"),
-		"32 bytes":   k32,
-		"over block": long,
+		"32 bytes":   testKey("32 bytes"),
+		"over block": testKeyOverBlock("over block"),
 	}
 }
 
@@ -160,11 +173,7 @@ func TestMacEncodedLen_MatchesEncoding(t *testing.T) {
 // cleanup, for tests that already own the restore.
 func withKey32(t *testing.T) {
 	t.Helper()
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-	SetSigningKey(key)
+	SetSigningKey(testKey("k32"))
 }
 
 // TestMacEngine_KeyRotationUnderLoad is the pooling-specific hazard: states
@@ -182,11 +191,7 @@ func TestMacEngine_KeyRotationUnderLoad(t *testing.T) {
 	const keys = 8
 	keyring := make([][]byte, keys)
 	for i := range keyring {
-		k := make([]byte, 32)
-		for j := range k {
-			k[j] = byte(i*31 + j)
-		}
-		keyring[i] = k
+		keyring[i] = testKey(fmt.Sprintf("rotation ring %d", i))
 	}
 
 	// The signature of one fixed payload under each key, captured serially by
@@ -200,11 +205,7 @@ func TestMacEngine_KeyRotationUnderLoad(t *testing.T) {
 
 	// A signature under a key that is NEVER installed. No concurrently
 	// rotating engine may accept it, whatever the race decides.
-	foreign := make([]byte, 32)
-	for i := range foreign {
-		foreign[i] = 0xA0 | byte(i)
-	}
-	SetSigningKey(foreign)
+	SetSigningKey(testKey("never installed"))
 	foreignSig := legacyMAC(payload)
 	if _, clash := want[foreignSig]; clash {
 		t.Fatal("foreign key collided with the keyring; pick different test keys")
@@ -310,11 +311,7 @@ func TestDecode_SurvivesKeyRotation(t *testing.T) {
 		t.Fatalf("Decode under the issuing key: %v", err)
 	}
 
-	other := make([]byte, 32)
-	for i := range other {
-		other[i] = byte(200 - i)
-	}
-	SetSigningKey(other)
+	SetSigningKey(testKey("rotated to"))
 	if _, err := Decode(tok); err == nil {
 		t.Fatal("Decode accepted a cookie signed under the superseded key")
 	} else if !strings.Contains(err.Error(), "invalid signature") {
@@ -349,11 +346,7 @@ func TestMacState_DoesNotRetainOversizePayload(t *testing.T) {
 func FuzzMacEqual(f *testing.F) {
 	prev := SigningKey()
 	f.Cleanup(func() { SetSigningKey(prev) })
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-	SetSigningKey(key)
+	SetSigningKey(testKey("fuzz"))
 
 	for _, p := range macPayloads() {
 		f.Add(p, legacyMAC(p))
@@ -381,17 +374,12 @@ func TestSetSigningKey_RebindsOnlyOnChange(t *testing.T) {
 	prev := SigningKey()
 	t.Cleanup(func() { SetSigningKey(prev) })
 
-	first := make([]byte, 32)
-	for i := range first {
-		first[i] = byte(i + 1)
-	}
+	first := testKey("rebind")
 	SetSigningKey(first)
 	eng := macEngines.Load()
 
 	// Same bytes, different slice: no rebind.
-	again := make([]byte, len(first))
-	copy(again, first)
-	SetSigningKey(again)
+	SetSigningKey(testKey("rebind"))
 	if got := macEngines.Load(); got != eng {
 		t.Error("reinstalling an unchanged key rebound the MAC engine and discarded the warm pool")
 	}
@@ -400,8 +388,7 @@ func TestSetSigningKey_RebindsOnlyOnChange(t *testing.T) {
 	}
 
 	// Different bytes: rebind.
-	changed := make([]byte, len(first))
-	copy(changed, first)
+	changed := testKey("rebind")
 	changed[31] ^= 0xFF
 	SetSigningKey(changed)
 	if got := macEngines.Load(); got == eng {
@@ -443,10 +430,7 @@ func TestSetSigningKey_EngineOwnsKeyCopy(t *testing.T) {
 	prev := SigningKey()
 	t.Cleanup(func() { SetSigningKey(prev) })
 
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
+	key := testKey("owns copy")
 	SetSigningKey(key)
 
 	const payload = "stable-payload"
@@ -467,95 +451,5 @@ func TestSetSigningKey_EngineOwnsKeyCopy(t *testing.T) {
 	}
 	if !macEqual(payload, before) {
 		t.Error("macEqual stopped accepting the signature the installed key produces")
-	}
-}
-
-// legacyDecode is Decode with the ONE changed line put back: the per-call
-// hmac.New comparison instead of macEqual. Everything else — the dot split,
-// the revocation lookups, the base64 payload decode, the json unmarshal, the
-// expiry check — is the current body verbatim, so benchmarking the two side by
-// side in one run isolates the MAC step's share of a whole verify.
-//
-// Kept beside the other oracles rather than in the benchmark file because this
-// test also asserts it still decides what Decode decides.
-func legacyDecode(raw string) (*Session, error) {
-	dot := strings.LastIndex(raw, ".")
-	if dot < 0 {
-		return nil, fmt.Errorf("session: malformed cookie")
-	}
-	b64, sig := raw[:dot], raw[dot+1:]
-	if !legacyMacEqual(b64, sig) {
-		return nil, fmt.Errorf("session: invalid signature")
-	}
-	if Revoked.IsRevoked(b64) {
-		return nil, fmt.Errorf("session: revoked")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(b64)
-	if err != nil {
-		return nil, fmt.Errorf("session: base64 decode: %w", err)
-	}
-	var s Session
-	if err := json.Unmarshal(payload, &s); err != nil {
-		return nil, fmt.Errorf("session: json decode: %w", err)
-	}
-	if time.Now().Unix() > s.Exp {
-		return nil, fmt.Errorf("session: expired")
-	}
-	if s.Sub != "" && Revoked.IsUserRevoked(s.Sub) {
-		return nil, fmt.Errorf("session: user revoked")
-	}
-	return &s, nil
-}
-
-// TestDecode_MatchesLegacyDecode keeps the end-to-end oracle honest: if Decode
-// and legacyDecode ever diverge, the benchmark comparison built on them is
-// measuring two different functions.
-func TestDecode_MatchesLegacyDecode(t *testing.T) {
-	withFreshSigningKey(t)
-	withFreshRevocationList(t)
-
-	valid, err := Encode(&Session{
-		Sub:    "alice@example.com",
-		Groups: []string{"engineering"},
-		Exp:    time.Now().Add(time.Hour).Unix(),
-		Jti:    "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
-	})
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	expired, err := Encode(&Session{Sub: "bob", Exp: time.Now().Add(-time.Hour).Unix()})
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-
-	cases := map[string]string{
-		"valid":            valid,
-		"expired":          expired,
-		"no dot":           "nodothere",
-		"bad signature":    valid[:len(valid)-1] + "~",
-		"empty":            "",
-		"dot only":         ".",
-		"bad base64":       "!!!." + MAC("!!!"),
-		"not json":         base64.RawURLEncoding.EncodeToString([]byte("plain")) + "." + MAC(base64.RawURLEncoding.EncodeToString([]byte("plain"))),
-		"truncated sig":    valid[:len(valid)-1],
-		"signature only":   "." + MAC(""),
-		"foreign envelope": "a.b.c",
-	}
-	for name, raw := range cases {
-		gotSess, gotErr := Decode(raw)
-		wantSess, wantErr := legacyDecode(raw)
-		if (gotErr == nil) != (wantErr == nil) {
-			t.Errorf("%s: Decode err = %v, legacyDecode err = %v", name, gotErr, wantErr)
-			continue
-		}
-		if gotErr != nil {
-			if gotErr.Error() != wantErr.Error() {
-				t.Errorf("%s: Decode err = %q, legacyDecode err = %q", name, gotErr, wantErr)
-			}
-			continue
-		}
-		if !reflect.DeepEqual(gotSess, wantSess) {
-			t.Errorf("%s: Decode = %+v, legacyDecode = %+v", name, gotSess, wantSess)
-		}
 	}
 }

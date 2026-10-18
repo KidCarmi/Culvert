@@ -203,29 +203,46 @@ func withBenchRevocationList(b *testing.B) {
 	b.Cleanup(Revoked.SwapForTest())
 }
 
-// BenchmarkDecodeLegacyMac is BenchmarkDecode with the one changed line put
-// back (legacyDecode in session_mac_test.go). Measured in the same run as
-// BenchmarkDecode, it is the end-to-end before/after pair: the difference is
-// the MAC step and nothing else.
+// BenchmarkDecodeLegacyMac reconstructs the pre-change cost of one verify
+// WITHOUT copying Decode's body. A verbatim copy did that, and `dupl`
+// correctly objected to a 35-line clone of production logic living in a test
+// — a clone that would also have to be kept in sync by hand.
+//
+// The reconstruction is exact where it counts: the current verify step
+// allocates nothing, so `legacy MAC + current Decode` allocates precisely what
+// Decode allocated before the engine — the 26 allocs/op and 1648 B/op the gate
+// compares against — out of two calls instead of a clone.
+//
+// It is NOT a timing oracle. ns/op here also pays one extra (allocation-free)
+// macEqual, so it overstates the old wall time by about that call. The gate
+// keys on allocations, which this measures exactly; the timing comparison
+// belongs to BenchmarkMacVerify vs BenchmarkMacVerifyLegacy, which isolate the
+// step that actually changed.
 func BenchmarkDecodeLegacyMac(b *testing.B) {
-	token, _, _ := benchSessionToken(b)
+	token, payload, sig := benchSessionToken(b)
 	withBenchRevocationList(b)
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := legacyDecode(token); err != nil {
-			b.Fatalf("legacyDecode: %v", err)
+		if !legacyMacEqual(payload, sig) {
+			b.Fatal("signature rejected")
+		}
+		if _, err := Decode(token); err != nil {
+			b.Fatalf("Decode: %v", err)
 		}
 	}
 }
 
 func BenchmarkDecodeLegacyMacParallel(b *testing.B) {
-	token, _, _ := benchSessionToken(b)
+	token, payload, sig := benchSessionToken(b)
 	withBenchRevocationList(b)
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			if _, err := legacyDecode(token); err != nil {
-				b.Fatalf("legacyDecode: %v", err)
+			if !legacyMacEqual(payload, sig) {
+				b.Fatal("signature rejected")
+			}
+			if _, err := Decode(token); err != nil {
+				b.Fatalf("Decode: %v", err)
 			}
 		}
 	})
