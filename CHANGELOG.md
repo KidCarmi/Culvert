@@ -140,6 +140,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   for an HA config that cannot be read at boot and the read-only
   leader-resume page are now queued until the alert webhooks load, so they
   are no longer lost at boot; each is dropped if its condition cleared first.
+  A fencing grant that a leader resume, promotion or lease recovery took but
+  did not install (the HA config changed during the acquisition, shutdown
+  began, another HA transition claimed the node, or the promotion failed) no
+  longer leaves the node advertising that epoch with no role; the lease still
+  runs out its TTL.
 
 ### Security
 

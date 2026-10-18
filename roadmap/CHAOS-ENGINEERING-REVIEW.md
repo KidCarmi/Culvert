@@ -8869,6 +8869,51 @@ required before merge; each is now in the tree.
 
   The flag-based decision fails these gates, whether it is restored in
   `exitTerminal`, in the ownership step, or in both.
+* **An uninstalled fencing grant is cleared (Codex P1 4306890528).** A
+  guarded boot resume acquired epoch E. Its post-acquisition revalidation
+  then found `ha_config.json` removed or disabled, and the return left
+  `leaseEpoch`/`fenceEpoch` = E with no role and no keepalive. The retry
+  decided "no HA" and cleared the intent gate, so issuance was allowed while
+  `CurrentEpoch()` advertised the abandoned E. Heartbeats and enrollment
+  could ratchet Data Planes to an epoch no committed snapshot carries.
+
+  `clearLeaseGrantLocked(epoch)` is now the one clear for a grant that was
+  taken but not installed. It zeroes the epoch, its lock-free mirror, the
+  confirmed validity and any keepalive handle under `h.mu`. It is a no-op
+  unless `epoch` is still the local grant. No lease is released: ADR-0005 has
+  no Release, so the grant runs out its TTL. Every exit after an Acquire now
+  installs or clears:
+  - `resumeAsLeader`: a failed revalidation clears the grant.
+    `resumeClaimedLocked` clears it in the same critical section that decides
+    a shutdown or a claim by a live HA transition. This covers both
+    `ResumeAsLeader` and `ResumeAsLeaderIfUnclaimed`.
+  - `promote`: an `onPromote` error or contained panic clears the grant.
+  - `completeLeaseRecovery`: the leader role and the shutdown latch are
+    re-checked under `h.mu`. A recovery grant that lost its role installs
+    nothing, clears the grant and re-persists no leader config.
+  - `EnableAsLeader` has no exit after its Acquire other than the install.
+
+  Gates:
+  - `TestChaos71_RevalidationAbortAfterTheGrantClearsTheEpoch` (config
+    removed, config disabled): the epoch is 0, there is no write authority,
+    issuance is refused while gated, and after the retry decides "no HA" a
+    config publish carries the unchanged stamp. The backend still holds the
+    unkept grant.
+  - `TestChaos71_ClaimedResumeAfterTheGrantClearsTheEpoch`: shutdown after
+    the grant (guarded and unguarded resume), and a standby join claiming
+    the node.
+  - `TestChaos71_FailedPromotionAfterTheGrantClearsTheEpoch` and
+    `TestChaos71_RecoveryGrantWithoutTheLeaderRoleClearsTheEpoch`.
+  - `TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared` (AST, by-name
+    call graph). Every function that takes a grant through an acquisition
+    helper must, on each exit after the acquisition, be dominated by
+    `startLeaseKeepalive` or by a call that reaches `clearLeaseGrantLocked`,
+    unless the exit is a branch on which no grant was taken. The takers are
+    an exact list. Only `acquireLeaseAttempt` calls the lease `Acquire`.
+
+  Nine mutations each fail a gate: dropping any one of the six clears,
+  dropping the recovery re-check, a helper that leaves the lock-free mirror
+  set, and a no-op helper.
 * **HA-intent pages wait for the webhooks (Codex P2 4303320660).** When
   `ha_config.json` was unreadable at boot and the activation callback's
   re-read also failed, `noteIntentUnreadable` armed the episode's page-once

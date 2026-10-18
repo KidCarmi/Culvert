@@ -384,16 +384,20 @@ func resumePersistedStill(guard func() bool) bool {
 
 // resumeClaimedLocked is a resume's second check, under h.mu and so atomic with
 // every HA transition and with BeginShutdown: shutdown wins for EVERY resume,
-// and for a guarded resume an HA role set meanwhile wins too. Caller holds
+// and for a guarded resume an HA role set meanwhile wins too. A claimed resume
+// clears the grant it took (grant, 0 = none) in the same critical section, so
+// no exit leaves a half-installed grant (Codex review of #1556). Caller holds
 // h.mu (write).
-func (h *HAState) resumeClaimedLocked(guard func() bool) bool {
+func (h *HAState) resumeClaimedLocked(guard func() bool, grant int64) bool {
 	if h.shutdown {
+		h.clearLeaseGrantLocked(grant)
 		logger.Printf("HA: process shutdown began during the leadership resume — not taking the leader role")
 		return true
 	}
 	if guard == nil || h.role == "" {
 		return false
 	}
+	h.clearLeaseGrantLocked(grant)
 	logger.Printf("HA: an HA transition claimed this node (role %q) during the resume's lease acquisition — not resuming leadership from the older persisted config", h.role)
 	return true
 }
@@ -419,15 +423,20 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// foreign holder (handleForeignFenceHolder) and otherwise completes the
 	// interrupted resume.
 	leaseGranted, foreignHolder := h.acquireLeaseForResume()
+	grant := h.grantedLeaseEpoch(leaseGranted)
+	// A grant taken by a resume that then aborts (revalidation failed,
+	// shutdown, or a live HA transition) is left unkept and expires after its
+	// TTL — the bounded stall ADR-0005 documents; the Provider deliberately has
+	// no Release primitive. Its LOCAL state is cleared on every such exit
+	// (clearLeaseGrantLocked, Codex review of #1556): an abandoned epoch must
+	// not stay advertised by a node that holds no role.
 	if !resumePersistedStill(guard) {
+		h.clearLeaseGrant(grant)
 		return false
 	}
-	// A grant taken by a resume that then aborts (shutdown, or a live HA
-	// transition) is left unkept and expires after its TTL — the bounded stall
-	// ADR-0005 documents; the Provider deliberately has no Release primitive.
 	if !leaseGranted && h.leaseConfigured() && foreignHolder {
 		h.mu.Lock()
-		if h.resumeClaimedLocked(guard) {
+		if h.resumeClaimedLocked(guard, grant) {
 			h.mu.Unlock()
 			return false
 		}
@@ -440,7 +449,7 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 		}
 	}
 	h.mu.Lock()
-	if h.resumeClaimedLocked(guard) {
+	if h.resumeClaimedLocked(guard, grant) {
 		h.mu.Unlock()
 		return false
 	}
@@ -1003,6 +1012,10 @@ func (h *HAState) promote(reason string) {
 		logger.Printf("HA: promote (%s) blocked by the fencing lease — staying as standby", sanitizeLog(reason))
 		return
 	}
+	// The grant's local state is cleared if the promotion fails below (the
+	// lease itself still runs out its TTL): a standby must not keep
+	// advertising an epoch it does not exercise (Codex review of #1556).
+	grant := h.grantedLeaseEpoch(true)
 
 	logger.Printf("HA: promoting to leader (%s)", reason)
 	// CHAOS-25: onPromote starts the CP gRPC server — foreign, failure-prone
@@ -1016,11 +1029,13 @@ func (h *HAState) promote(reason string) {
 	// role-gated, so a standby holding an unrenewed grant issues nothing.
 	var promoteErr error
 	if runGuarded(haPromoteComponent, func() { promoteErr = pc.onPromote() }) {
+		h.clearLeaseGrant(grant)
 		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
 		logger.Printf("HA: promote panicked and was contained — staying as standby (retryable)")
 		return
 	}
 	if promoteErr != nil {
+		h.clearLeaseGrant(grant)
 		h.promoted.Store(false) // allow a later retry
 		logger.Printf("HA: promote failed: %v — staying as standby", promoteErr)
 		return
