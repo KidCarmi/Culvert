@@ -234,6 +234,26 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # fails (255); 127 would mean timeout could not run the command at all.
   local prc=0; ( LAB_HOST=127.0.0.1; SSH_OPTS=(-p 1 -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET); gop_within 5 status-json ) >/dev/null 2>&1 || prc=$?
   if [[ $prc == 255 ]]; then log "selftest ok: bounded operator probe executes ssh (closed port -> 255)"; else log "selftest FAILED: bounded operator probe exit $prc (127 = the probe never ran)"; rc=1; fi
+  # The operator-probe classifier must tell a TRANSPORT fault (the 3 s gate
+  # firing, ssh refused) apart from a PRODUCT that answered "not ready", and
+  # redact the host from stderr (ASTRA rule 4). Driven offline with crafted
+  # stdout/stderr + exit codes; no VM.
+  cpcase() { local sf="$d/cp-status.json" ef="$d/cp-err.txt" out="$d/cp.jsonl"; : > "$out"
+    printf '%s' "$2" > "$sf"; printf '%s' "$3" > "$ef"
+    local got; got="$(LAB_HOST=10.9.9.9; rec_classify_probe "$sf" "$ef" "$1" 1234.5 7 42.0 "$LAB_HOST" "$out")"
+    local kl="${got%%$'\t'*}"
+    if [[ "$kl" == "$4" ]]; then log "selftest ok: probe class $5 -> $kl"; else log "selftest FAILED: probe class $5 -> $kl (want $4)"; rc=1; fi
+    if [[ -n "$6" ]] && ! grep -q "$6" "$out"; then log "selftest FAILED: probe $5 JSONL missing $6"; rc=1; fi
+    if [[ -n "$7" ]] && grep -q "$7" "$out"; then log "selftest FAILED: probe $5 leaked $7 into JSONL"; rc=1; fi
+    return 0; }
+  # args: RC STATUS ERR CLASS LABEL MUST-BE-PRESENT MUST-BE-ABSENT(redaction)
+  cpcase 124 '' 'ssh: connect to host 10.9.9.9 port 22: Connection timed out' timeout timeout-gate '"timed_out": true' '10.9.9.9'
+  cpcase 255 '' 'ssh: connect to host 10.9.9.9 port 22: Connection refused' ssh_transport ssh-refused '"transport_ok": false' '10.9.9.9'
+  cpcase 0 'this is not json' '' bad_json bad-json '"class": "bad_json"' ''
+  cpcase 0 '{"phase":"running","reason":"FIRSTBOOT_RUNNING"}' '' not_ready product-running '"phase": "running"' ''
+  cpcase 0 '{"phase":"provisioned","reason":"READINESS_INCOMPLETE"}' '' not_ready readiness-incomplete '"reason": "READINESS_INCOMPLETE"' ''
+  cpcase 0 '{"phase":"ready","reason":"HEALTH_CHECKS_PASSED"}' '' ready ready '"class": "ready"' ''
+  unset -f cpcase
   # The console-marks watcher runs in the background for up to an hour; the
   # caller captures its pid with $(...), which must return at once (run
   # 37363074909 lost ~60 min per reboot waiting for the watcher to exit).
@@ -1224,8 +1244,83 @@ with open(out, "w") as o:
                 o.write("%.2f\t%s\n" % (now - t0, re.sub(r"[^ -~]", "", line)[:140])); o.flush()
 PY
 echo $!; }
+# rec_operator_probe TAG SAMPLE OFF — the bounded operator status-json probe,
+# WITH the evidence that tells a transport failure apart from a product that
+# answered "not ready" (ASTRA deadline-mismatch review, rule 4). The old call
+# collapsed ssh-refused, the 3 s deadline firing, unparseable output and a
+# genuine phase!=ready into one `pp=no`, so a re-qualify run could not say
+# whether the operator gate or the product was the cause. This times the
+# `gop_within 3 status-json` call and keeps: the exit code (124 = the 3 s
+# deadline killed it, 255 = ssh transport), elapsed ms, redacted stderr and the
+# UNIQUE stdout (length + sha256), plus the product's own parsed phase/reason.
+# Classification, most-specific first:
+#   timeout        the 3 s gate fired (hung/slow transport, or a wedged product)
+#   ssh_transport  ssh itself failed (refused/reset/auth) before any answer
+#   cmd_error:<rc> the command ran and exited non-zero for another reason
+#   bad_json       answered on the wire but the body did not parse
+#   not_ready      valid JSON, phase != ready (the PRODUCT is not ready yet)
+#   ready          valid JSON, phase == ready
+# Only `ready` is a healthy sample; every other class resets the streak
+# (unchanged, fail-closed — a transport fault is never read as ready). It
+# appends one JSONL record per sample to $EV/$TAG-operator-probe.jsonl and
+# echoes `class<TAB>phase<TAB>reason` for the sample loop.
+# rec_classify_probe STATUS ERR RC ELAPSED_MS SAMPLE OFF HOST OUT — the pure
+# classifier + evidence writer, split out of rec_operator_probe so the
+# self-test can drive every class offline (no VM; ASTRA rule 3). It appends one
+# JSONL record to OUT and echoes `class<TAB>phase<TAB>reason`.
+rec_classify_probe() { python3 - "$@" <<'PY'
+import hashlib, json, re, sys
+status, errf, rc, elapsed_ms, sample, off, host, out = sys.argv[1:9]
+rc = int(rc); elapsed_ms = float(elapsed_ms)
+raw = open(status, "rb").read()
+err = open(errf, "rb").read().decode("utf-8", "replace")
+# Redact: the lab host/IP and any dotted-quad literal, then printable ASCII
+# only, capped — ssh stderr can carry host and key hints.
+err = err.replace(host, "<host>")
+err = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", err)
+err = re.sub(r"[^ -~]", " ", err).strip()[:200]
+phase = reason = message = ""
+parsed = False
+if raw.strip():
+    try:
+        d = json.loads(raw)
+        phase, reason, message = str(d.get("phase", "")), str(d.get("reason", "")), str(d.get("message", ""))
+        parsed = True
+    except Exception:
+        parsed = False
+if rc == 124:
+    klass = "timeout"
+elif rc == 255:
+    klass = "ssh_transport"
+elif rc != 0:
+    klass = "cmd_error:%d" % rc
+elif not parsed:
+    klass = "bad_json"
+elif phase == "ready":
+    klass = "ready"
+else:
+    klass = "not_ready"
+rec = {"sample": int(sample), "offset_s": float(off), "elapsed_ms": elapsed_ms,
+       "exit_code": rc, "timed_out": rc == 124, "class": klass,
+       "transport_ok": rc == 0 and parsed, "phase": phase, "reason": reason,
+       "message": message, "stdout_len": len(raw),
+       "stdout_sha256": hashlib.sha256(raw).hexdigest()[:16], "stderr": err}
+with open(out, "a") as o:
+    o.write(json.dumps(rec, sort_keys=True) + "\n")
+print("%s\t%s\t%s" % (klass, phase or "-", reason or "-"))
+PY
+}
+rec_operator_probe() { local tag="$1" sample="$2" off="$3" rc=0 t_a t_b ems
+  t_a="$(mono_raw)"
+  gop_within 3 status-json > "$WORK/rec-status.json" 2> "$WORK/rec-status.err" || rc=$?
+  t_b="$(mono_raw)"
+  ems="$(python3 -c 'import sys;print(round((float(sys.argv[1])-float(sys.argv[2]))*1000,1))' "$t_b" "$t_a")"
+  rec_classify_probe "$WORK/rec-status.json" "$WORK/rec-status.err" "$rc" "$ems" \
+    "$sample" "$off" "$LAB_HOST" "$EV/$tag-operator-probe.jsonl"
+}
 recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   local k0 acc t0 st0 st1 ok=0 samples=0 s_start s s_prev="" pr pt pa pp dur gap why marks_pid
+  local pp_class pp_phase pp_reason soff
   local tk="" ts_ready="" ts_traffic="" ts_av="" ts_phase="" first_joint="" end="" bk_pid=""
   k0="$(grep -ac 'Linux version' "$WORK/console.log" || true)"
   st0="$(host_disk_stat)"
@@ -1245,7 +1340,7 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   if [[ -z "$acc" ]]; then kill "$marks_pid" 2>/dev/null; check R "recovery-$name-$i" fail "the maintenance reboot was not accepted (no authenticated acceptance marker): $(tail -c 300 "$EV/$tag-reboot.txt")"; return 1; fi
   local lag; lag="$(python3 -c 'import sys,time; print("%.6f" % (time.time()-float(sys.argv[1])))' "$acc")"
   t0="$(python3 -c 'import sys; print("%.6f" % (float(sys.argv[1]) - float(sys.argv[2])))' "$t0" "$lag")"
-  printf 'sample_start_s\tsample_end_s\tduration_s\tstart_gap_s\tready_clamav\ttraffic\teicar\tphase\tcounted\n' > "$EV/$tag-samples.tsv"
+  printf 'sample_start_s\tsample_end_s\tduration_s\tstart_gap_s\tready_clamav\ttraffic\teicar\top_class\top_detail\tcounted\n' > "$EV/$tag-samples.tsv"
   while :; do
     qemu_alive || { kill "$marks_pid" 2>/dev/null; check R "recovery-$name-$i" fail "qemu exited during the reboot"; return 1; }
     s_start="$(mono)"
@@ -1259,7 +1354,13 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     if rec_traffic; then pt=ok; else pt=no; fi
     s="$(mono)"; [[ $pt == ok && -z "$ts_traffic" ]] && ts_traffic="$s"
     pa="$(eicar_verdict)"; s="$(mono)"; [[ $pa == av && -z "$ts_av" ]] && ts_av="$s"
-    if gop_within 3 status-json > "$WORK/rec-status.json" 2>/dev/null && [[ "$(status_field "$WORK/rec-status.json" phase)" == ready ]]; then pp=ok; else pp=no; fi
+    soff="$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s_start" "$t0")"
+    # The bounded operator probe, with per-sample evidence that separates a
+    # transport fault (timeout/ssh) from a product that answered "not ready"
+    # (ASTRA rule 4). Only class=ready is healthy; every other class keeps pp=no
+    # so the streak still resets fail-closed.
+    IFS=$'\t' read -r pp_class pp_phase pp_reason < <(rec_operator_probe "$tag" "$samples" "$soff")
+    if [[ "$pp_class" == ready ]]; then pp=ok; else pp=no; fi
     s="$(mono)"; [[ $pp == ok && -z "$ts_phase" ]] && ts_phase="$s"
     # Declared cadence: a sample counts only if it completed within 5 s and
     # started at most 5.5 s after the previous one. Overruns are retained in
@@ -1270,8 +1371,8 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.0 else 1)' "$dur" || why=overrun-duration
     [[ "$gap" == first ]] || python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.5 else 1)' "$gap" || why=overrun-gap
     [[ $pr == ok && $pt == ok && $pa == av && $pp == ok ]] || why=no
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s_start" "$t0")" \
-      "$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s" "$t0")" "$dur" "$gap" "$pr" "$pt" "$pa" "$pp" "$why" >> "$EV/$tag-samples.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$soff" \
+      "$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s" "$t0")" "$dur" "$gap" "$pr" "$pt" "$pa" "$pp_class" "$pp_phase:$pp_reason" "$why" >> "$EV/$tag-samples.tsv"
     s_prev="$s_start"
     if [[ $why == yes ]]; then
       ok=$((ok+1)); (( ok == 1 )) && first_joint="$s"
@@ -1292,17 +1393,36 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   local rec; rec="$(python3 "$HERE/recovery-timeline.py" "$t0" "$tk" "$ts_ready" "$ts_traffic" "$ts_av" "$ts_phase" "$first_joint" "$end" \
     "$st0" "$st1" "$budget" "$acc" "$lag" "$samples" "$EV/$tag-timeline.json")"
   local tl; tl="$(python3 "$HERE/recovery-timeline.py" --describe "$EV/$tag-timeline.json")"
-  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered (3 consecutive joint samples) within ${LAB_RECOVERY_TIMEOUT}s: $tl"; recovery_guest "$tag"; return 1; fi
+  # Operator-probe class breakdown (ASTRA rule 4): put the transport-vs-
+  # product-not-ready split on the check line, not only in the artifact, so a
+  # failed recovery immediately says whether the operator gate or the product
+  # was the cause.
+  local opsum; opsum="$(python3 - "$EV/$tag-operator-probe.jsonl" <<'PY'
+import collections, json, sys
+try: rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+except FileNotFoundError: rows = []
+if not rows:
+    print("operator-probe: none"); raise SystemExit
+c = collections.Counter(r["class"] for r in rows)
+mx = max(r["elapsed_ms"] for r in rows)
+transport = sum(n for k, n in c.items() if k in ("timeout", "ssh_transport") or k.startswith("cmd_error"))
+nr = [r for r in rows if r["class"] == "not_ready"]
+last = " last-not-ready=%s/%s" % (nr[-1].get("phase") or "-", nr[-1].get("reason") or "-") if nr else ""
+print("operator-probe: %s; transport-faults=%d; max-probe=%.0fms%s" % (
+    ", ".join("%s=%d" % (k, n) for k, n in sorted(c.items())), transport, mx, last))
+PY
+)"
+  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered (3 consecutive joint samples) within ${LAB_RECOVERY_TIMEOUT}s: $tl; $opsum"; recovery_guest "$tag"; return 1; fi
   local recd; recd="$(printf '%.1f' "$rec")"
   if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
-    check R "recovery-$name-$i" pass "recovered in ${recd}s (budget ${budget}s; unrounded $rec): $tl"
+    check R "recovery-$name-$i" pass "recovered in ${recd}s (budget ${budget}s; unrounded $rec): $tl; $opsum"
   else
     # Still a FAIL. The excess read service time over the injected delay
     # (r ms, from cmd_recovery's profile) says how much of it is the runner's
     # disk: >1 ms means re-measure on one runner, interleaved A/B, before
     # calling it the candidate (evidence/candidate-91e05872-recovery-causation.md).
     local ex; ex="$(python3 "$HERE/recovery-timeline.py" --svc-excess "$EV/$tag-timeline.json" "${r:-0}")"
-    check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl; host read service ${ex} ms/request above the injected ${r:-0} ms$(python3 -c 'import sys; print("" if float(sys.argv[1]) <= 1 else " — runner disk slower than the profile: attribute only after a same-runner A/B")' "$ex" 2>/dev/null)"
+    check R "recovery-$name-$i" fail "recovered in ${recd}s — OVER the ${budget}s budget (unrounded $rec): $tl; $opsum; host read service ${ex} ms/request above the injected ${r:-0} ms$(python3 -c 'import sys; print("" if float(sys.argv[1]) <= 1 else " — runner disk slower than the profile: attribute only after a same-runner A/B")' "$ex" 2>/dev/null)"
   fi
   recovery_guest "$tag"
   # The early-boot I/O sampler's per-boot log (/run, tmpfs → this boot's). Its own
