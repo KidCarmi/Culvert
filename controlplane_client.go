@@ -81,9 +81,19 @@ type DataPlaneClient struct {
 
 // backoff sleeps for an exponentially increasing duration after consecutive
 // Control Plane failures: 2s, 4s, 8s, … capped at 60s.
+//
+// failCount is owned by the CALLER. Every call site is inside pollConfig's
+// error path, which has already charged this failure (`c.failCount++`), so
+// incrementing here too double-counted every failure: the delay schedule ran
+// 4s, 16s, 60s (ceiling on the 3rd failure instead of the 6th) and the
+// `failCount < 3` failover guard below tripped on the SECOND consecutive
+// failure, contradicting its own "only after 3 consecutive failures" contract
+// and churning a whole DP fleet off a healthy CP after one transient blip.
 func (c *DataPlaneClient) backoff(ctx context.Context) {
-	c.failCount++
-	delay := time.Duration(1<<min(c.failCount, 6)) * time.Second // 2s…64s
+	// max(…,1) keeps the documented 2s FLOOR even when the caller's streak is 0,
+	// which is the state failover() leaves behind when it switches CP and its
+	// immediate retry then fails.
+	delay := time.Duration(1<<min(max(c.failCount, 1), 6)) * time.Second // 2s…64s
 	if delay > 60*time.Second {
 		delay = 60 * time.Second
 	}
