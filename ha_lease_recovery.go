@@ -432,15 +432,17 @@ func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) bool 
 }
 
 // recoveryDisarmedLocked reports whether the state that armed recovery (an
-// unfenced leader) is gone; if so it abandons the recovered, staged grant,
-// which then lapses unkept. Caller holds h.mu (write).
+// unfenced leader) is gone, or process shutdown began; if so it abandons the
+// recovered, staged grant, which then lapses unkept: no epoch is installed
+// and no leader config re-persisted (Codex review of #1556). Caller holds
+// h.mu (write).
 func (h *HAState) recoveryDisarmedLocked() bool {
-	if h.role == "leader" && h.leaseEpoch == 0 {
+	if h.role == "leader" && h.leaseEpoch == 0 && !h.shutdown {
 		return false
 	}
 	h.abandonGrantLocked()
 	logger.Printf("HA: lease recovery stands down — this node's HA state changed while the fence was being re-acquired "+
-		"(role %q); the recovered grant is not installed and lapses unkept", sanitizeLog(h.role))
+		"(role %q, shutting down %v); the recovered grant is not installed and lapses unkept", sanitizeLog(h.role), h.shutdown)
 	return true
 }
 

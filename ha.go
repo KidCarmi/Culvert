@@ -430,16 +430,20 @@ func resumePersistedStill(guard func() bool) bool {
 
 // resumeClaimedLocked is a resume's second check, under h.mu and so atomic with
 // every HA transition and with BeginShutdown: shutdown wins for EVERY resume,
-// and for a guarded resume an HA role set meanwhile wins too. Caller holds
-// h.mu (write).
-func (h *HAState) resumeClaimedLocked(guard func() bool) bool {
+// and for a guarded resume an HA role set meanwhile wins too. A claimed resume
+// abandons the staged grant it took (grant, 0 = none) in the same critical
+// section (clearLeaseGrantLocked), so no exit leaves a grant staged or its
+// epoch stamped (Codex review of #1556). Caller holds h.mu (write).
+func (h *HAState) resumeClaimedLocked(guard func() bool, grant int64) bool {
 	if h.shutdown {
+		h.clearLeaseGrantLocked(grant)
 		logger.Printf("HA: process shutdown began during the leadership resume — not taking the leader role")
 		return true
 	}
 	if guard == nil || h.role == "" {
 		return false
 	}
+	h.clearLeaseGrantLocked(grant)
 	logger.Printf("HA: an HA transition claimed this node (role %q) during the resume's lease acquisition — not resuming leadership from the older persisted config", h.role)
 	return true
 }
@@ -465,16 +469,21 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// foreign holder (handleForeignFenceHolder) and otherwise completes the
 	// interrupted resume.
 	leaseGranted, foreignHolder := h.acquireLeaseForResume()
+	grant := h.grantedLeaseEpoch(leaseGranted)
+	// A grant taken by a resume that then aborts (revalidation failed,
+	// shutdown, or a live HA transition) is left unkept and expires after its
+	// TTL — the bounded stall ADR-0005 documents; the Provider deliberately has
+	// no Release primitive. The grant is only STAGED here (nothing advertises
+	// it), and every such exit abandons it (clearLeaseGrantLocked →
+	// abandonGrantLocked, Codex review of #1556): an abandoned epoch is never
+	// installed, stamped or renewed by a node that holds no role.
 	if !resumePersistedStill(guard) {
-		h.dropStagedGrant()
+		h.clearLeaseGrant(grant)
 		return false
 	}
-	// A grant taken by a resume that then aborts (shutdown, or a live HA
-	// transition) is left unkept and expires after its TTL — the bounded stall
-	// ADR-0005 documents; the Provider deliberately has no Release primitive.
 	if !leaseGranted && h.leaseConfigured() && foreignHolder {
 		h.mu.Lock()
-		if h.resumeClaimedLocked(guard) {
+		if h.resumeClaimedLocked(guard, grant) {
 			h.mu.Unlock()
 			return false
 		}
@@ -499,14 +508,13 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	if leaseGranted {
 		var aborted bool
 		var err error
-		if epoch, aborted, err = h.commitResumeGrant(guard); aborted {
+		if epoch, aborted, err = h.commitResumeGrant(guard, grant); aborted {
 			return false
 		}
 		leaseGranted, epochRefused = resumeInstallOutcome(err)
 	}
 	h.mu.Lock()
-	if h.resumeClaimedLocked(guard) {
-		h.abandonGrantLocked()
+	if h.resumeClaimedLocked(guard, grant) {
 		h.mu.Unlock()
 		return false
 	}
@@ -537,12 +545,9 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 // an early claim check (abandoning the grant if the resume lost), the
 // keepalive on the staged grant, then the stamped commit. aborted: the resume
 // must not proceed; err: commitGrant's failure, for resumeInstallOutcome.
-func (h *HAState) commitResumeGrant(guard func() bool) (epoch int64, aborted bool, err error) {
+func (h *HAState) commitResumeGrant(guard func() bool, grant int64) (epoch int64, aborted bool, err error) {
 	h.mu.Lock()
-	aborted = h.resumeClaimedLocked(guard)
-	if aborted {
-		h.abandonGrantLocked()
-	}
+	aborted = h.resumeClaimedLocked(guard, grant) // abandons the staged grant when it returns true
 	h.mu.Unlock()
 	if aborted {
 		return 0, true, nil
@@ -586,11 +591,9 @@ func (h *HAState) reportReadOnlyResume(epochRefused, unfenced, foreignHolder boo
 	} else if unfenced {
 		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF (ADR-0005 S2). " +
 			"Recovery runs in the background (CHAOS-55) — no operator action is required unless it keeps failing.")
-		go alerts.Fire("ha_resume_unfenced", alerts.Payload{
-			Event:  "ha_resume_unfenced",
-			Detail: "leader restarted but could not acquire the fencing lease; serving read-only (no write authority)",
-			Source: "ha",
-		})
+		// The boot resume runs inside initCluster, before the webhooks load:
+		// queued until then (pageUnfencedLeader, Codex review of #1556).
+		h.pageUnfencedLeader("leader restarted but could not acquire the fencing lease; serving read-only (no write authority)")
 		// CHAOS-55 / register row HA-7: without this the node stays a
 		// permanently read-only leader — startLeaseKeepalive no-ops on a zero
 		// epoch, so nothing in the process would ever call Acquire again.

@@ -161,6 +161,13 @@ This note amends S3's stamping in one case and leaves the S3 rule itself unchang
     a supervisor stop is derived from the drain budget (`cpListenerStopWait`).
     Pinned by `cp_deactivate_drain_chaos_test.go`.
   - Pinned by `ha_epoch_install_cause_chaos_test.go`.
+  - Every exit after an acquisition either installs the staged grant
+    (`exposeGrantLocked`) or abandons it (`abandonGrantLocked`). That covers
+    a guarded resume whose revalidation fails, a resume claimed by shutdown or
+    by an HA transition, a failed promote, and a recovery that shutdown
+    overtakes. #1556's clear (`clearLeaseGrantLocked`, Codex P1 4306890528
+    on #1556) folds into that abandonment, keyed by the staged epoch.
+    Pinned by `ha_lease_grant_clear_chaos_test.go`.
 
 ### 2026-07-03 — S5 SHIPPED: operator wiring (flags/YAML/compose/GUI/runbook) — PROGRAM COMPLETE
 - **Config surface:** `-ha-etcd-endpoints/-ha-etcd-cert/-ha-etcd-key/-ha-etcd-ca/-ha-lease-ttl`

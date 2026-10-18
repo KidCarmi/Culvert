@@ -9027,6 +9027,100 @@ required before merge; each is now in the tree.
 
   The flag-based decision fails these gates, whether it is restored in
   `exitTerminal`, in the ownership step, or in both.
+* **An uninstalled fencing grant is cleared (Codex P1 4306890528).** A
+  guarded boot resume acquired epoch E. Its post-acquisition revalidation
+  then found `ha_config.json` removed or disabled, and the return left
+  `leaseEpoch`/`fenceEpoch` = E with no role and no keepalive. The retry
+  decided "no HA" and cleared the intent gate, so issuance was allowed while
+  `CurrentEpoch()` advertised the abandoned E. Heartbeats and enrollment
+  could ratchet Data Planes to an epoch no committed snapshot carries.
+
+  `clearLeaseGrantLocked(epoch)` is now the one clear for a grant that was
+  taken but not installed. It zeroes the epoch, its lock-free mirror, the
+  confirmed validity and any keepalive handle under `h.mu`. It is a no-op
+  unless `epoch` is still the local grant. No lease is released: ADR-0005 has
+  no Release, so the grant runs out its TTL. Every exit after an Acquire now
+  installs or clears:
+  - `resumeAsLeader`: a failed revalidation clears the grant.
+    `resumeClaimedLocked` clears it in the same critical section that decides
+    a shutdown or a claim by a live HA transition. This covers both
+    `ResumeAsLeader` and `ResumeAsLeaderIfUnclaimed`.
+  - `promote`: an `onPromote` error or contained panic clears the grant.
+  - `completeLeaseRecovery`: the leader role and the shutdown latch are
+    re-checked under `h.mu`. A recovery grant that lost its role installs
+    nothing, clears the grant and re-persists no leader config.
+  - `EnableAsLeader` has no exit after its Acquire other than the install.
+
+  Gates:
+  - `TestChaos71_RevalidationAbortAfterTheGrantClearsTheEpoch` (config
+    removed, config disabled): the epoch is 0, there is no write authority,
+    issuance is refused while gated, and after the retry decides "no HA" a
+    config publish carries the unchanged stamp. The backend still holds the
+    unkept grant.
+  - `TestChaos71_ClaimedResumeAfterTheGrantClearsTheEpoch`: shutdown after
+    the grant (guarded and unguarded resume), and a standby join claiming
+    the node.
+  - `TestChaos71_FailedPromotionAfterTheGrantClearsTheEpoch` and
+    `TestChaos71_RecoveryGrantWithoutTheLeaderRoleClearsTheEpoch`.
+  - `TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared` (AST, by-name
+    call graph). Every function that takes a grant through an acquisition
+    helper must, on each exit after the acquisition, be dominated by
+    `startLeaseKeepalive` or by a call that reaches `clearLeaseGrantLocked`,
+    unless the exit is a branch on which no grant was taken. The takers are
+    an exact list. Only `acquireLeaseAttempt` calls the lease `Acquire`.
+
+  Nine mutations each fail a gate: dropping any one of the six clears,
+  dropping the recovery re-check, a helper that leaves the lock-free mirror
+  set, and a no-op helper.
+* **HA-intent pages wait for the webhooks (Codex P2 4303320660).** When
+  `ha_config.json` was unreadable at boot and the activation callback's
+  re-read also failed, `noteIntentUnreadable` armed the episode's page-once
+  latch inside `initCluster` and the page fired into an empty webhook store.
+  Every later retry stayed silent while the node stayed HA-gated. This is the
+  round-15 class again.
+
+  `noteHAIntentUnreadable` is now the latch's only caller. It hands the page
+  to `pageHAIntentUnreadable` in the same call, and that function queues it
+  through `deferStartupAlertWhile` before the startup flush. Its predicate is
+  `haIntentEpisodeOpen(episode)`; the episode number survives
+  `clearIntentUnknown`, so a page from an episode that a read decided before
+  the flush is dropped even if a new episode is open then.
+
+  The audit of every page this PR adds or changes that can fire during
+  `initCluster` found one more direct fire: the read-only resume page
+  (`ha_resume_unfenced` from `resumeAsLeader`). This PR moved the boot resume
+  into the listener's activation callback, which runs inside `initCluster`
+  on a healthy boot. It now queues through `pageUnfencedLeader`, valid while
+  the node is a leader without a lease grant, and stays asynchronous after
+  the flush. `cp_grpc_listener_down` (role_conflict included) and the
+  address-kind rejection already queued.
+
+  Two direct fires of the same events predate this PR, are unchanged by it,
+  and are listed wall exceptions with their reasons: the full-kind
+  `config_snapshot_rejected` page (the round-15 follow-up) and the recovery
+  loop's foreign-holder `ha_resume_unfenced` page. `storage_write_failed` is
+  outside the audit: this PR only extracted its launch seam, and its rate
+  gate is main's.
+
+  Gates:
+  - `TestChaos71_BootUnreadableHAIntentIsPagedOnceAfterTheWebhooksLoad`: no
+    page before the load, exactly one at the flush, and retries before and
+    after it stay silent.
+  - `TestChaos71_BootUnreadableHAIntentDecidedBeforeTheFlushIsDropped`: the
+    negative control, including a new episode open at the flush.
+  - `TestChaos71_BootUnfencedResumePageQueuesUntilTheWebhooksLoad`.
+  - `TestChaos71_Wall_StartupCapablePagesQueueUntilTheWebhooksLoad` (AST).
+    No dispatch of the three events may skip the
+    `if !startupAlertsFlushed() { deferStartupAlertWhile(…, pred); return }`
+    guard. Each listed exception must match exactly one dispatch site and
+    carry a reason. The wall's own mutation table is
+    `TestChaos71_Wall_StartupQueueWallCatchesADirectFire`.
+  - `TestChaos71_Wall_HAIntentLatchArmsOnlyWithItsPage`.
+
+  Seven mutations each fail a gate: a direct HA-intent fire, a predicate
+  without the episode check, a direct read-only resume fire, a boot read that
+  arms the latch without the page, a clear that resets the episode counter, a
+  latch armed with no page, and a direct address-kind fire.
 * **Sixteenth review round — the address latch is part of the
   generation-guarded publish record.** An address publish that found the list
   already current cleared the rounds-14/15 latch (`addrRejectPaged`) in
