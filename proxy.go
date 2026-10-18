@@ -1606,7 +1606,17 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// would lose the observation. The Drop branch's recorded status is
 	// deterministic (always POLICY_DROP), so emit it pre-abort here and skip
 	// the duplicate on the normal terminal path below. Enforcement untouched.
-	isDrop := match != nil && match.Rule != nil && match.Action == ActionDrop
+	// SEC-POLICYACTION-1: compare the CANONICAL action, the same value
+	// applyPolicyDecision will dispatch on. A rule stored as "drop" reaches the
+	// Drop branch there, so matching the raw string here would have skipped this
+	// pre-abort observation for exactly that rule and lost it (CodeRabbit on
+	// PR #1651, verified).
+	isDrop := false
+	if match != nil && match.Rule != nil {
+		if canon, known := canonicalPolicyAction(match.Action); known && canon == ActionDrop {
+			isDrop = true
+		}
+	}
 	if isDrop {
 		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "", learnCtx, learnHaveCtx)
 	}

@@ -59,6 +59,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   field is now suppressed per role rather than by raising the route's `MinRole`,
   which would have removed the HA panel from operators and viewers.
 
+  The admin UI needed the same fix on its own side: the HA panel's
+  `<pre id="ha-deploy-cmd">` was only ever *assigned* when a response carried
+  `deploy_cmd` and never cleared, so in a single tab an admin who opened the
+  Cluster panel and logged out left the join token in the DOM — and in the
+  click-to-copy handler — for whoever signed in next. The render path now clears
+  on an absent field, and `applySession` clears on any non-admin session.
+
 - Host-header case variation evaded every country-scoped **deny** rule
   (SEC-GEOHOST-1). `geoHostKey` stripped a port and nothing else — no
   lowercasing, no IDNA, no trailing-dot trim — while `matchDestNorm` hands the

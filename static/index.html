@@ -6454,6 +6454,17 @@ function applySession(user, role) {
   uiRole     = role || '';
   uiUsername = user || '';
 
+  // SEC-HATOKEN-1 (client half). The HA join command is admin-only server-side,
+  // but this is a single-page app: a panel already rendered for an admin keeps
+  // its DOM across a logout and the next sign-in. Clearing here, at the one
+  // chokepoint every session change goes through (login and doLogout both call
+  // it), means the token cannot outlive the session that was allowed to see it
+  // even if the panel is never re-rendered.
+  const haCmdEl = document.getElementById('ha-deploy-cmd');
+  if (haCmdEl && role !== 'admin') {
+    haCmdEl.textContent = '';
+  }
+
   // Topbar info
   const info = document.getElementById('topbar-user-info');
   if (user || role) {
@@ -19220,8 +19231,18 @@ async function loadHA(isCP) {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';
       }
+      // SEC-HATOKEN-1 (client half). The server now omits deploy_cmd for a
+      // non-admin, but an ABSENT field has to CLEAR this element rather than
+      // leave the previous value rendered: this is a single-page app, so the
+      // <pre> survives a session change in the same tab. Without the else,
+      // an admin who opened the HA panel and logged out left their join token
+      // in the DOM — and in the click-to-copy handler — for whoever signed in
+      // next. textContent, never innerHTML.
+      const haCmd = document.getElementById('ha-deploy-cmd');
       if (r.deploy_cmd) {
-        document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
+        haCmd.textContent = r.deploy_cmd;
+      } else {
+        haCmd.textContent = '';
       }
       // Recent role transitions (M5) - newest first, from the bounded ring.
       const fevWrap = document.getElementById('ha-failover-events');

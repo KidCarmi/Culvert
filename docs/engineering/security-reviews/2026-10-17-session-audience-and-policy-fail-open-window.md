@@ -258,6 +258,22 @@ POST path's own `deploy_cmd` is already behind `requireRole(RoleAdmin)` and is
 unchanged. `HasRole` is the fail-closed enrolled-role lattice, so a role from a
 newer build cannot reach the field either.
 
+#### The client half, added in review
+
+The server fix alone does not complete the privilege boundary in a single-page
+app, which **Codex caught on the PR (P1) and I verified**. The HA panel's
+`<pre id="ha-deploy-cmd">` keeps whatever was last written into it across a
+logout and the next sign-in, because `static/index.html` only ever *assigned*
+that element when the response carried `deploy_cmd` and never cleared it
+otherwise. So an admin who opened the Cluster panel and logged out left their
+join token in the DOM — and in the click-to-copy handler — for whoever signed in
+next in that tab.
+
+Two guards close it, both `textContent`: the render path clears on an **absent**
+field, and `applySession` — the one chokepoint both login and `doLogout` go
+through — clears on any non-admin session, so the token cannot outlive the
+session allowed to see it even if the panel is never re-rendered.
+
 #### Required tests — `ha_deploy_token_role_test.go`
 
 Viewer and operator receive 200 with the HA status fields but no `deploy_cmd`,
@@ -265,7 +281,12 @@ no `--ha-token` and no token value (not-vacuous: the panel's own fields must
 still be served, so the fix is a narrowing and not a 403); admin still receives
 a `deploy_cmd` carrying the token; unenrolled roles (`""`, `superuser`, `Admin`,
 `ADMIN`, `root`, `owner`) see nothing; and standby/disabled states emit no token
-to any role.
+to any role. Plus `SPAClearsTheDeployCommand`, a structural gate over
+`static/index.html` for the two client-side guards, with a not-vacuous check
+that the element and its render path still exist and an assertion that the value
+is never written through `innerHTML`. (A static assertion rather than a browser
+test: the browser e2e lane is advisory and does not cover a cross-session DOM
+carry-over; what has to hold is that neither guard is deleted.)
 
 ---
 
@@ -465,6 +486,22 @@ checking a tolerated spelling reaches the same branch its canonical form does,
 so resolution is not a lie told only to the load gate; and
 `ToleratedSpellingsStillInstall` is the availability control — a policy file
 already carrying empty or lowercase actions keeps **all** of its rules.
+
+**A second consumer, found in review.** CodeRabbit pointed out that `proxy.go`
+canonicalises before the dispatch switch but a *second* site — the pre-abort
+policy-learning observation — still compared `match.Action` directly with
+`ActionDrop`. Verified and correct: a rule stored as `"drop"` reaches the Drop
+branch in the dispatch, so the raw comparison would have skipped that
+observation for exactly that rule and lost it (the Drop branch's HTTP/2 fallback
+aborts via `panic(http.ErrAbortHandler)` before `applyPolicyDecision` returns,
+which is why the observation is emitted there at all). It now canonicalises too.
+An observability gap rather than a security one, but one this change introduced.
+
+**And a second fixture.** `ui_import_preview_e2e_test.go` built its import
+fixture with a per-rule `"action":"deny"` — like `"block"`, not a Culvert action
+at all, surviving only because of this fail-open. It now uses `Block_Page`. That
+failure appeared only in the advisory browser-e2e lane, which the local root
+suite does not execute, so CI caught it rather than the pre-push checks.
 
 ---
 
@@ -757,6 +794,16 @@ note, and in-tree fixtures use the shape today
 (`config_import_preview_test.go` seeds `PolicyRule{Name: "keep-me"}`), so it is
 recorded rather than folded in here.
 
+**A related operator-experience gap, also worth a follow-up.** The install gate
+uses the warn-and-skip this function already applies elsewhere, which is
+fail-closed and loud in the log — but on the **config-import** path it means an
+import carrying an unrecognised action answers success while silently dropping
+that rule. Two in-tree fixtures used such values (`"block"`, `"deny"`), weak
+evidence that hand-written or older exported import JSON may too. Refusing the
+import with a 400 naming the offending rule would be a better answer than
+dropping it quietly; that is a change to the import contract rather than a
+security fix, so it is recorded here instead.
+
 ### R7 — Non-minimal punycode re-canonicalisation (Informational)
 
 There is a class of pure-ASCII, DNS-valid hosts where
@@ -957,6 +1004,16 @@ the roster-endpoint gate ran against a pre-fix tree its successful delete left
 `"bob"` user-revoked and a later positive control failed for the wrong reason.
 The audience suite now swaps the revocation list per test
 (`conventions.md`, global-test cleanup).
+
+**What CI caught that the local run did not**, recorded because it marks the
+limit of the pre-push checks: the `golangci-lint` gate (three findings in the
+new test files — the local binary predates the required toolchain and bails out
+before analysing anything) and the advisory `Admin-UI RBAC` browser-e2e lane
+(the `"action":"deny"` import fixture above, which the local root suite does not
+execute). Both are fixed; `staticcheck`'s failure on the first head was the same
+unused function `golangci-lint` reported, and cleared with it. `AegisDiff`
+reported `ERROR` on both heads with "All LLM providers exhausted … 404 from
+api.groq.com" — its own provider outage, no finding, and not a blocking check.
 
 Not run, and therefore not claimed: the hosted Fast/Deep gates, CodeQL, the
 benchgate lane, the frontend verify gates and the coverage floor. A passing

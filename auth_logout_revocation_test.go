@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -46,7 +47,7 @@ func forgedCookieValue(sub string, exp int64) string {
 
 func postLogout(t *testing.T, cookie string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/auth/logout", http.NoBody)
 	if cookie != "" {
 		req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: cookie}) // #nosec G124 -- request-side test cookie
 	}

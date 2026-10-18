@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +49,7 @@ func haLeaderWithToken(t *testing.T) {
 // uiAuthMiddleware injects it.
 func getClusterHAAs(t *testing.T, role UIRole) (code int, body string) {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/cluster/ha", http.NoBody)
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
 	rec := httptest.NewRecorder()
 	apiClusterHA(rec, r)
@@ -141,5 +143,57 @@ func TestSECHATOKEN1_StandbyAndDisabledEmitNoToken(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ─── The client half (SEC-HATOKEN-1) ────────────────────────────────────────
+
+// TestSECHATOKEN1_SPAClearsTheDeployCommand is a structural gate on
+// static/index.html, because the server fix alone does not complete the
+// privilege boundary in a single-page app.
+//
+// The admin UI is one long-lived tab: the HA panel's <pre id="ha-deploy-cmd">
+// keeps whatever was last written into it across a logout and the next sign-in.
+// The render path used to ASSIGN that element only when the response carried
+// deploy_cmd and never cleared it otherwise, so an admin who opened the Cluster
+// panel and logged out left their join token in the DOM — and in the
+// click-to-copy handler — for whoever signed in next (Codex P1 on PR #1651,
+// verified). Two guards close it: the render path clears on an ABSENT field,
+// and applySession clears on any non-admin session.
+//
+// A static assertion rather than a browser test: the browser e2e lane is
+// advisory and does not cover a cross-session DOM carry-over, and what has to
+// hold here is that neither guard is deleted.
+func TestSECHATOKEN1_SPAClearsTheDeployCommand(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "static", "index.html"))
+	if err != nil {
+		t.Fatalf("read static/index.html: %v", err)
+	}
+	page := string(data)
+
+	// Not-vacuous: the element and its render path must still exist, or the
+	// assertions below would pass against a page that no longer has the panel.
+	if !strings.Contains(page, `id="ha-deploy-cmd"`) {
+		t.Fatal("ha-deploy-cmd element is gone — this gate no longer proves anything")
+	}
+	if !strings.Contains(page, "haCmd.textContent = r.deploy_cmd;") {
+		t.Fatal("the deploy_cmd render path has changed shape — re-check both guards by hand")
+	}
+
+	// Guard 1: an absent field clears, rather than leaving the previous value.
+	if !strings.Contains(page, "haCmd.textContent = '';") {
+		t.Error("the render path does not CLEAR ha-deploy-cmd when the response omits deploy_cmd: " +
+			"a viewer's panel would keep the previous admin's join token")
+	}
+	// Guard 2: a non-admin session clears it even if the panel is never
+	// re-rendered.
+	if !strings.Contains(page, "haCmdEl.textContent = '';") {
+		t.Error("applySession does not clear ha-deploy-cmd for a non-admin session: " +
+			"a panel left rendered across a logout would keep the join token")
+	}
+	// And it must stay textContent — innerHTML here would be an injection sink
+	// for a value that is rendered verbatim.
+	if strings.Contains(page, "haCmd.innerHTML") || strings.Contains(page, "haCmdEl.innerHTML") {
+		t.Error("ha-deploy-cmd is written through innerHTML; it must be textContent")
 	}
 }

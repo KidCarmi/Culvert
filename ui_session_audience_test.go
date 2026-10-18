@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -81,7 +82,7 @@ func driveUISession(t *testing.T, value string) (code int, role UIRole, reached 
 	h := uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached, role = true, uiRole(r)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/stats", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -141,7 +142,7 @@ func TestSECUISESSIONAUD1_PortalTokenIsRefusedByTheAdminRosterEndpoint(t *testin
 		{http.MethodGet, "/api/auth/users"},
 		{http.MethodDelete, "/api/auth/users?username=bob"},
 	} {
-		req := httptest.NewRequest(tc.method, tc.target, http.NoBody)
+		req := httptest.NewRequestWithContext(context.Background(), tc.method, tc.target, http.NoBody)
 		req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -293,7 +294,7 @@ func TestSECUISESSIONAUD1_AuthStatusDoesNotReportAPortalTokenAsAdmin(t *testing.
 	audienceEnv(t)
 
 	status := func(value string) map[string]any {
-		req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/status", http.NoBody)
 		req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
 		rec := httptest.NewRecorder()
 		apiAuthStatus(rec, req)
@@ -326,7 +327,7 @@ func TestSECUISESSIONAUD1_SSERevalidationRejectsAPortalToken(t *testing.T) {
 	audienceEnv(t)
 
 	req := func(value string) *http.Request {
-		r := httptest.NewRequest(http.MethodGet, "/api/events", http.NoBody)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/events", http.NoBody)
 		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
 		return r
 	}
@@ -346,7 +347,7 @@ func TestSECUISESSIONAUD1_MCPLivePrincipalRejectsAPortalToken(t *testing.T) {
 	audienceEnv(t)
 
 	req := func(value string) *http.Request {
-		r := httptest.NewRequest(http.MethodPost, "/api/mcp/tool-trust/decision", http.NoBody)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/mcp/tool-trust/decision", http.NoBody)
 		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
 		return r
 	}

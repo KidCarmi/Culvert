@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -51,7 +52,7 @@ func TestSECPOLICYACTION1_UnknownActionBlocksAndIsTerminal(t *testing.T) {
 			rule := &PolicyRule{Priority: 1, Name: "probe-unknown-action", DestFQDN: "*", Action: action}
 			match := &PolicyMatch{Rule: rule, Action: action, MatchedConditions: "destFQDN=*"}
 
-			r := httptest.NewRequest(http.MethodGet, "http://blocked.example.com/", http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://blocked.example.com/", http.NoBody)
 			r.Host = "blocked.example.com"
 			w := httptest.NewRecorder()
 
@@ -93,7 +94,7 @@ func TestSECPOLICYACTION1_KnownActionsStillDispatchUnchanged(t *testing.T) {
 			}
 			match := &PolicyMatch{Rule: rule, Action: tc.action, MatchedConditions: "destFQDN=*"}
 
-			r := httptest.NewRequest(http.MethodGet, "http://dest.example.com/", http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://dest.example.com/", http.NoBody)
 			r.Host = "dest.example.com"
 			w := httptest.NewRecorder()
 
@@ -231,7 +232,7 @@ func TestSECPOLICYACTION1_ResolvedActionsDispatchToTheirBranch(t *testing.T) {
 				RedirectURL: "https://portal.example.com/notice",
 			}
 			match := &PolicyMatch{Rule: rule, Action: tc.stored, MatchedConditions: "destFQDN=*"}
-			r := httptest.NewRequest(http.MethodGet, "http://dest.example.com/", http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://dest.example.com/", http.NoBody)
 			r.Host = "dest.example.com"
 			w := httptest.NewRecorder()
 
