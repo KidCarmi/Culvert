@@ -2,6 +2,14 @@
 # Loaded once, before cmd_qualify; all referenced sources belong to the freeze.
 : "${ESXI_BIND:?controller LAN address required}"
 
+# Bind both lifecycle hooks to the exact candidate before any reboot dispatch.
+ESXI_SHUTDOWN_HELPER=''
+case ${ESXI_ENGINE_SOURCE:-} in
+  6248daf72a5312e75062e2c2823438911604af7f) ESXI_SHUTDOWN_HELPER=lifecycle-shutdown.py ;;
+  246cb73d4b62d7a4baf2fcb8558ad8622657529a) ESXI_SHUTDOWN_HELPER=lifecycle-shutdown-246.py ;;
+esac
+readonly ESXI_SHUTDOWN_HELPER
+
 esxi_p1_stage() {
   local extra=()
   if [[ $1 == network-before && ${ESXI_CONTINUE_UNDISPATCHED:-0} == 1 ]]; then
@@ -15,11 +23,11 @@ lab_before_reboot() {
   local suffix=''
   [[ ${ESXI_CONTINUE_UNDISPATCHED:-0} != 1 ]] || suffix='-continuation'
   esxi_p1_stage network-before > "$EV/p1-${ESXI_P1_CAMPAIGN:-initial}-network-before-controller$suffix.txt" 2>&1
-  if [[ ${ESXI_ENGINE_SOURCE:-} == 6248daf72a5312e75062e2c2823438911604af7f ]]; then
+  if [[ -n $ESXI_SHUTDOWN_HELPER ]]; then
     # Observe the actual authenticated ancestor chain. Do not replace the
     # shared lifecycle's nested sudo/bash maintenance command with execv.
     ( set -o noclobber
-      python3 "$ADAPTER_HERE/lifecycle-shutdown.py" before | gpriv --timeout 60 > "$SEC/lifecycle-shutdown-before.json"
+      python3 "$ADAPTER_HERE/$ESXI_SHUTDOWN_HELPER" before | gpriv --timeout 60 > "$SEC/lifecycle-shutdown-before.json"
     )
   fi
   python3 "$ADAPTER_HERE/timing-diagnostic.py" observe --scope "$ESXI_SCOPE" \
@@ -46,11 +54,11 @@ assert any(r['event']=='all_services_returned_after_failure' for r in rows)
 PY
   then check ESXi independent-reboot-timing pass 'TCP, proxy health and ready operator status returned after independently observed failures; timestamped samples retained.'
   else check ESXi independent-reboot-timing fail 'Independent readiness timing incomplete; preserve all observations.'; fi
-  if [[ ${ESXI_ENGINE_SOURCE:-} == 6248daf72a5312e75062e2c2823438911604af7f ]]; then
+  if [[ -n $ESXI_SHUTDOWN_HELPER ]]; then
     if ! ( set -o noclobber
-      python3 "$ADAPTER_HERE/lifecycle-shutdown.py" after --before "$SEC/lifecycle-shutdown-before.json" \
+      python3 "$ADAPTER_HERE/$ESXI_SHUTDOWN_HELPER" after --before "$SEC/lifecycle-shutdown-before.json" \
         | gpriv --timeout 60 > "$SEC/lifecycle-shutdown-after.json"
-    ) || ! python3 "$ADAPTER_HERE/lifecycle-shutdown.py" verify \
+    ) || ! python3 "$ADAPTER_HERE/$ESXI_SHUTDOWN_HELPER" verify \
       --before "$SEC/lifecycle-shutdown-before.json" --after "$SEC/lifecycle-shutdown-after.json" \
       --timing "$EV/timing-maintenance.jsonl" --output "$EV/lifecycle-shutdown-verdict.json"; then
       check ESXi original-console-shutdown fail 'Original local session teardown or120s observed recovery unproven; no retry.'

@@ -9,7 +9,7 @@ esxi_engine_surface() {
   }
   cmd_engine_surface
   local -a supplemental=()
-  if [[ ${ESXI_ENGINE_SOURCE:?explicit engine candidate required} == 91e05872dfe5f96c94ec725b8b2dc2b1002116ab || ${ESXI_ENGINE_SOURCE} == 72c827b7f59f4e43ff2a813241be9029f58f23a9 || ${ESXI_ENGINE_SOURCE} == bad788e54ffef2a2f8490ba27ebfe027a2a6eb11 || ${ESXI_ENGINE_SOURCE} == 9e34452677d77f574f5c3c08ba23ea897d8e17cb || ${ESXI_ENGINE_SOURCE} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 || ${ESXI_ENGINE_SOURCE} == 6248daf72a5312e75062e2c2823438911604af7f ]]; then
+  if [[ ${ESXI_ENGINE_SOURCE:?explicit engine candidate required} == 91e05872dfe5f96c94ec725b8b2dc2b1002116ab || ${ESXI_ENGINE_SOURCE} == 72c827b7f59f4e43ff2a813241be9029f58f23a9 || ${ESXI_ENGINE_SOURCE} == bad788e54ffef2a2f8490ba27ebfe027a2a6eb11 || ${ESXI_ENGINE_SOURCE} == 9e34452677d77f574f5c3c08ba23ea897d8e17cb || ${ESXI_ENGINE_SOURCE} == a80be4b61ff7f2f069cf81ede1eebe6945d65306 || ${ESXI_ENGINE_SOURCE} == 6248daf72a5312e75062e2c2823438911604af7f || ${ESXI_ENGINE_SOURCE:-} == 246cb73d4b62d7a4baf2fcb8558ad8622657529a ]]; then
     # Separate immutable evidence keeps the shared collector's bytes and output
     # unchanged while binding its reviewed-list counts to the shipped source.
     if ! gpriv --timeout 30 > "$EV/E-engine-inventory.txt" <<'CULVERT_ENGINE_INVENTORY'

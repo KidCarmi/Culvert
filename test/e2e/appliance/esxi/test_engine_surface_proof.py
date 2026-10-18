@@ -57,18 +57,22 @@ def fixture(source=proof.LEGACY):
 
 
 class EngineSurfaceProofTests(unittest.TestCase):
-    def test_authenticated_collector_payload_and_local_parser_dispatch(self):
+    def test_246_authenticated_inventory_and_collector_dispatch(self):
+        self.test_authenticated_collector_payload_and_local_parser_dispatch(
+            '246cb73d4b62d7a4baf2fcb8558ad8622657529a')
+
+    def test_authenticated_collector_payload_and_local_parser_dispatch(self, source=E91):
         bash = 'C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else shutil.which('bash')
         if not bash:
             self.skipTest('Bash required for transport dispatch regression')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'fixture.txt').write_text('\n'.join(line for line in fixture(E91).splitlines()
+            (root / 'fixture.txt').write_text('\n'.join(line for line in fixture(source).splitlines()
                 if not line.startswith('net-reviewed-file ')), encoding='utf-8')
-            (root / 'inventory.txt').write_text('net-reviewed-file ' + proof.PROFILES[E91]['net_reviewed_sha256'] + '\n')
+            (root / 'inventory.txt').write_text('net-reviewed-file ' + proof.PROFILES[source]['net_reviewed_sha256'] + '\n')
             env = {k: v for k, v in os.environ.items() if not k.startswith(('LAB_', 'ESXI_'))}
             env.update(LAB_DIR=root.as_posix(), LAB_EXTERNAL='1', LAB_LIBRARY_ONLY='1',
-                       ESXI_ENGINE_SURFACE='1', ESXI_ENGINE_SOURCE=E91, TEST_PYTHON=sys.executable,
+                       ESXI_ENGINE_SURFACE='1', ESXI_ENGINE_SOURCE=source, TEST_PYTHON=sys.executable,
                        ADAPTER_HERE=HERE.as_posix())
             script = '''
 source "$1"
