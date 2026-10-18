@@ -83,6 +83,11 @@ func TestSupportPersistence_RoutesThroughDurableChokepoint(t *testing.T) {
 	dataDir = t.TempDir()
 	t.Cleanup(func() { dataDir = prev })
 
+	// This test REPLACES the production success observer, so a background
+	// goroutine's failing write during the test would latch storageEverFailed
+	// without a matching success ever being recorded — leaving storage degraded
+	// for a shuffled sibling. Reset the process-global record on both ends.
+	withCleanStorageWriteHealth(t)
 	rec := observeDurableWrites(t)
 
 	// writeBundleState is the only one of these that does not MkdirAll its own
