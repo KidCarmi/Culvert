@@ -70,6 +70,31 @@ class CandidateReconciliationTests(unittest.TestCase):
     def test_9e344_exact_profile_helpers_and_engine_controls(self):
         self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').E9E344)
 
+    def test_246_exact_profile_helpers_and_engine_controls(self):
+        self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').E246)
+
+    def test_246_shutdown_proof_keeps_historical_binding_and_guards(self):
+        ids = load('candidate-identities')
+        old, new = load('lifecycle-shutdown'), load('lifecycle-shutdown-246')
+        self.assertEqual(old.SOURCE, ids.E6248)
+        self.assertEqual(new.SOURCE, ids.E246)
+        expected = (HERE / 'lifecycle-shutdown.py').read_text().replace(
+            old.SOURCE, new.SOURCE).replace(old.IMAGE, new.IMAGE)
+        self.assertEqual((HERE / 'lifecycle-shutdown-246.py').read_text(), expected)
+        self.assertEqual(new.IMAGE, ids.source_profile(ids.E246)['image_id'])
+        before = {'source': new.SOURCE, 'image': new.IMAGE,
+                  'boot': '11111111-1111-4111-8111-111111111111',
+                  'scope': 'session-27.scope', 'monotonic_us': 1000000, 'culvert_uid': 1000,
+                  'ancestors': [{'comm': 'culvert-console', 'uid': 1000,
+                                 'scope': 'session-27.scope', 'tty_nr': 1025},
+                                {'comm': 'sudo'}, {'comm': 'bash'}]}
+        new.validate_before(before)
+        for patch in ({'source': old.SOURCE}, {'image': old.IMAGE}, {'ancestors': []}):
+            with self.assertRaises(ValueError):
+                new.validate_before(dict(before, **patch))
+        with self.assertRaises(ValueError):
+            old.validate_before(before)
+
     def test_6248_exact_profile_helpers_and_engine_controls(self):
         self.test_72_profile_and_engine_pins_match_product_and_build_evidence(load('candidate-identities').E6248)
 
@@ -103,7 +128,7 @@ class CandidateReconciliationTests(unittest.TestCase):
         self.assertNotEqual(load('import-observer-continuation').SOURCE,ids.E91)
     def test_only_complete_reviewed_artifact_combinations_are_admitted(self):
         identities = load('candidate-identities')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248, identities.E246):
             scope = identities.source_profile(source)
             self.assertEqual(identities.scope_profile(scope), scope)
             for field in ('source_sha', 'ova_sha256', 'image_id'):
@@ -117,7 +142,7 @@ class CandidateReconciliationTests(unittest.TestCase):
 
     def test_real_fixture_bytes_unchanged_and_provenance_names_selected_source(self):
         identities, fixture = load('candidate-identities'), load('prepare-signed-fixture')
-        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248):
+        for source in (identities.B579, identities.D698, identities.E2E3, identities.CD8, identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248, identities.E246):
             provenance = fixture.verify_sources(source)
             self.assertEqual(provenance['source_revision'], source)
             self.assertEqual({k: v['sha256'] for k, v in provenance['files'].items()}, identities.FIXTURE_HASHES)

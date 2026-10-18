@@ -36,7 +36,7 @@ HISTORY_SOURCE = '7e53720d06f525f4e5fdbfec42f52840d5b734e2'
 ALLOWLIST_SOURCE = '9e34452677d77f574f5c3c08ba23ea897d8e17cb'
 ALLOWLIST_MARKER_SOURCE = 'a80be4b61ff7f2f069cf81ede1eebe6945d65306'
 ALLOWLIST_MARKER = 'allowlist-survives-marker.example'
-ALLOWLIST_REQUIRED = {ALLOWLIST_SOURCE: ('example.com',), ALLOWLIST_MARKER_SOURCE: ('example.com', ALLOWLIST_MARKER), '6248daf72a5312e75062e2c2823438911604af7f': ('example.com', ALLOWLIST_MARKER)}
+ALLOWLIST_REQUIRED = {ALLOWLIST_SOURCE: ('example.com',), ALLOWLIST_MARKER_SOURCE: ('example.com', ALLOWLIST_MARKER), '6248daf72a5312e75062e2c2823438911604af7f': ('example.com', ALLOWLIST_MARKER), '246cb73d4b62d7a4baf2fcb8558ad8622657529a': ('example.com', ALLOWLIST_MARKER)}
 EXPORT_NAMES = ('recovery.tar.gz.enc', 'recovery-secrets.json', 'archive-metadata.json',
                 'backup-passphrase', 'admin-pass', 'source-owned.json', 'provenance.json', 'source-observation.json')
 HISTORY_NAMES = ('history.cvst', 'history-passphrase', 'rotated-log-passphrase')
@@ -240,7 +240,7 @@ def run(args):
     identities = importlib.util.module_from_spec(profile_spec); profile_spec.loader.exec_module(identities)
     source = identities.scope_profile(lab.c)['source_sha']
     history = getattr(args, 'history', False)
-    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248), 'History qualification requires a reviewed history-capable candidate.')
+    require(not history or source in (identities.E7E, identities.E7C, identities.E91, identities.E72, identities.EBAD788, identities.E9E344, identities.EA80BE, identities.E6248, identities.E246), 'History qualification requires a reviewed history-capable candidate.')
     require(lab.c['source_sha'] == source and lab.c['max_vms'] == 1)
     console.b.module.validate_scope(lab.c)
     escrow = private_escrow(args.escrow, lab.run)
