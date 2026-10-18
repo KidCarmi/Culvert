@@ -591,6 +591,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- Session-cookie verification no longer builds HMAC state per request. The
+  signed cookie is the FIRST credential arm `resolveRequestAuth` tries, so
+  `session.Decode` runs on the proxy authentication hot path and not just the
+  admin UI — every authenticated proxied request verified one MAC. Building the
+  state, not hashing the ~250-byte payload, dominated that step:
+  `crypto/hmac.New` costs five allocations (the HMAC struct, the ipad and opad
+  blocks, an inner and an outer `sha256.Digest`), and the old form paid them per
+  request plus a payload copy for `Write`, a digest for `Sum(nil)`, two for
+  `EncodeToString`, and two more for the `[]byte` conversions `hmac.Equal`
+  needed — nine allocations in `mac` alone, each with a named owner under
+  `-memprofilerate=1`.
+
+  HMAC state is explicitly reusable (`Reset` re-primes the inner hash with
+  ipad), so it is now built ONCE per signing key and recycled through a pool
+  published atomically beside the key, and the digest is summed and
+  base64url-encoded through inline buffers so the verify path compares bytes
+  without ever materialising the expected signature as a string. The hashing is
+  untouched — same key, same two block compressions, same alphabet,
+  byte-identical output — and `SetSigningKey` remains the single install
+  funnel, now rebinding the engine only when the key actually CHANGED, because
+  `applySnapshotSessionSecret` reinstalls the CP-synced secret on every
+  snapshot apply whether or not it moved and an unconditional rebind would
+  discard the warm pool on each of those no-ops.
+
+  Measured on the development box (Go 1.26, linux/amd64, 4-core Xeon @
+  2.80GHz, medians of 3x500k, each pair timed in the SAME run against a
+  verbatim copy of the replaced form): the verify step 2 196 → 1 254 ns and 9
+  allocations / 896 B → ZERO; four-way parallel 1 035 → 361 ns; a whole
+  `Decode` 6 134 → 4 903 ns, 26 → 17 allocations, 1 648 → 752 B; four-way
+  parallel 2 393 → 1 583 ns. What remains in `Decode` is the base64 payload
+  decode and `encoding/json`'s unmarshal into `Session`, deliberately left
+  alone. The size of the timing win depends on how expensive the runner's
+  allocator is relative to SHA-256, so the gate asserts the structural
+  property instead — the verify step builds no HMAC state, no digest and no
+  expected-signature string — and extends the zero bound to the reject path,
+  so an unauthenticated client cannot drive allocation by replaying garbage
+  cookies. Equivalence is pinned by a differential test (five key shapes x ten
+  payload shapes x ten signature shapes, plus an end-to-end `Decode` oracle)
+  and a fuzz target; the pooling-specific hazards — key rotation under
+  concurrent verification, no-op reinstall keeping the pool, a real rotation
+  swapping it, the engine owning its key copy — have their own tests.
+
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
   `hostutil.NormalizeHostStrict` already had an already-canonical fast path
