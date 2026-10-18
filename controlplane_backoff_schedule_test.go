@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // controlplane_backoff_schedule_test.go — CHAOS: the DP→CP retry schedule and
@@ -77,11 +78,10 @@ func TestDPBackoff_SuccessResetsTheStreak(t *testing.T) {
 }
 
 // TestDPFailover_NotBeforeThreeConsecutiveFailures pins the threshold stated at
-// pollConfig's guard. failover() walks c.addrs and calls connect(), which a
-// test-constructed client cannot do, so it returns false and pollConfig backs
-// off — the observable we assert on is WHETHER failover was reached, via the
-// activeIdx/failCount bookkeeping failover() performs only on success, plus the
-// streak itself, which failover() resets to 0 when it succeeds.
+// pollConfig's guard. failover() walks c.addrs and calls connect(); a grpc dial
+// is lazy, so connect() SUCCEEDS for a test-constructed client even with no
+// server listening. The observable is therefore the bookkeeping failover()
+// performs only on success: activeIdx advances and the streak is reset to 0.
 func TestDPFailover_NotBeforeThreeConsecutiveFailures(t *testing.T) {
 	c, ctx := failingDPClient(t, []string{"cp-1:9443", "cp-2:9443"})
 
@@ -119,17 +119,47 @@ func TestDPFailover_NotBeforeThreeConsecutiveFailures(t *testing.T) {
 	}
 }
 
-// TestDPBackoff_FloorHoldsWithAClearedStreak pins the 2s floor on the one path
-// that reaches backoff() with failCount==0: failover() switched CP, reset the
-// streak, and its immediate retry failed. Without the floor that slot backs off
-// 1s, below the documented minimum.
-func TestDPBackoff_FloorHoldsWithAClearedStreak(t *testing.T) {
+// TestDPBackoff_Schedule pins the documented curve itself — "2s, 4s, 8s, …
+// capped at 60s" — including the floor on the one path that reaches backoff()
+// with failCount==0: failover() switched CP, reset the streak, and its
+// immediate retry failed.
+//
+// This asserts controlPlaneBackoffDelay rather than driving backoff(), because
+// backoff() observes its delay only through a select that the cancelled test
+// context short-circuits. An earlier version of this test called backoff() and
+// checked only that failCount was unmodified, so it would have passed with the
+// floor regressed to 1s — or the whole curve collapsed to zero. Raised by
+// CodeRabbit on PR #1658; the lesson is this PR's own thesis, that a signal
+// which cannot fail is worse than no signal.
+func TestDPBackoff_Schedule(t *testing.T) {
+	for _, tc := range []struct {
+		failCount int
+		want      time.Duration
+		why       string
+	}{
+		{0, 2 * time.Second, "cleared streak (post-failover retry) must honour the 2s floor, not 1s"},
+		{1, 2 * time.Second, "first consecutive failure"},
+		{2, 4 * time.Second, "second"},
+		{3, 8 * time.Second, "third"},
+		{4, 16 * time.Second, "fourth"},
+		{5, 32 * time.Second, "fifth"},
+		{6, 60 * time.Second, "sixth reaches the ceiling (64s clamped to 60s)"},
+		{9, 60 * time.Second, "and stays there"},
+	} {
+		if got := controlPlaneBackoffDelay(tc.failCount); got != tc.want {
+			t.Errorf("controlPlaneBackoffDelay(%d) = %s, want %s — %s", tc.failCount, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestDPBackoff_DoesNotMutateTheStreak keeps the ownership half: failCount is
+// charged by pollConfig, and backoff() only reads it. The double charge this PR
+// removed lived exactly here.
+func TestDPBackoff_DoesNotMutateTheStreak(t *testing.T) {
 	c, ctx := failingDPClient(t, []string{"cp-1:9443", "cp-2:9443"})
-	c.failCount = 0
-	// backoff() must not sleep (ctx is cancelled) and must not mutate the streak:
-	// the caller owns it.
-	c.backoff(ctx)
-	if c.failCount != 0 {
-		t.Errorf("backoff() mutated failCount to %d — the caller owns the streak", c.failCount)
+	c.failCount = 2
+	c.backoff(ctx) // ctx is already cancelled, so this does not sleep
+	if c.failCount != 2 {
+		t.Errorf("backoff() changed failCount to %d, want 2 — the caller owns the streak", c.failCount)
 	}
 }
