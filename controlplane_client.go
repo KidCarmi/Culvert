@@ -289,6 +289,13 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 		raw, err = c.call(ctx, methodGetConfig, reqBody)
 		if err != nil {
 			dpMarkCPPollFailing()
+			// Charge this failure too. failover() zeroed the streak for the NEW
+			// CP, and backoff() only reads it, so without this the retry's
+			// failure went uncounted and the new CP got a fourth failed request
+			// before the next failover instead of a third. The old
+			// double-charging backoff() happened to cover this path; removing
+			// that increment exposed it. Raised by CodeRabbit on PR #1658.
+			c.failCount++
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
 			return nil, false

@@ -104,18 +104,16 @@ func TestDPFailover_NotBeforeThreeConsecutiveFailures(t *testing.T) {
 	}
 	// The 3rd consecutive failure is the first one permitted to attempt failover.
 	// A test-constructed client's connect() is a lazy grpc dial and succeeds, so
-	// failover() advances activeIdx and resets the streak to 0 — both are the
-	// observable that failover was actually reached on THIS failure and not an
-	// earlier one.
+	// failover() advances activeIdx — that is the observable proving failover was
+	// reached on THIS failure and not an earlier one. The streak itself is not a
+	// useful signal here: failover() zeroes it and the immediate retry then
+	// charges it back, which TestDPFailover_RetryFailureIsCharged pins.
 	if _, ok := c.pollConfig(ctx); ok {
 		t.Fatal("poll 3 unexpectedly succeeded")
 	}
 	if c.activeIdx != 1 {
 		t.Errorf("activeIdx=%d after the 3rd consecutive failure, want 1 — failover "+
 			"must be attempted on the 3rd failure", c.activeIdx)
-	}
-	if c.failCount != 0 {
-		t.Errorf("failCount=%d after a successful failover, want 0", c.failCount)
 	}
 }
 
@@ -161,5 +159,33 @@ func TestDPBackoff_DoesNotMutateTheStreak(t *testing.T) {
 	c.backoff(ctx) // ctx is already cancelled, so this does not sleep
 	if c.failCount != 2 {
 		t.Errorf("backoff() changed failCount to %d, want 2 — the caller owns the streak", c.failCount)
+	}
+}
+
+// TestDPFailover_RetryFailureIsCharged pins the streak across a failover.
+//
+// failover() zeroes failCount for the new CP, and backoff() only reads it, so
+// the immediate retry's failure has to be charged by pollConfig itself. Without
+// that the new CP silently gets a FOURTH failed request before the next
+// failover instead of a third — the old double-charging backoff() happened to
+// cover this path, and removing that increment exposed it. Raised by CodeRabbit
+// on PR #1658.
+func TestDPFailover_RetryFailureIsCharged(t *testing.T) {
+	c, ctx := failingDPClient(t, []string{"cp-1:9443", "cp-2:9443"})
+
+	// Three consecutive failures: the third reaches failover, which succeeds on
+	// a lazy dial, zeroes the streak, and then retries — and that retry fails
+	// too, because every call through this client fails.
+	for i := 1; i <= 3; i++ {
+		if _, ok := c.pollConfig(ctx); ok {
+			t.Fatalf("poll %d unexpectedly succeeded", i)
+		}
+	}
+	if c.activeIdx != 1 {
+		t.Fatalf("activeIdx=%d want 1 — failover must have been reached on the 3rd failure", c.activeIdx)
+	}
+	if c.failCount != 1 {
+		t.Errorf("failCount=%d after the post-failover retry failed, want 1 — an uncharged "+
+			"retry failure gives the new CP an extra chance before the next failover", c.failCount)
 	}
 }

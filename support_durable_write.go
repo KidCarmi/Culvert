@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -73,10 +74,27 @@ func durableSupportWrite(path string, data []byte) error {
 //
 // Only the parents of directories this call actually creates are synced, so the
 // common case — the parent already exists and MkdirAll is a no-op — costs one
-// stat and no fsync. Sync errors follow AtomicWrite's posture: a filesystem that
-// cannot fsync a directory (EINVAL/ENOTSUP/EOPNOTSUPP) has already given every
-// guarantee it has, and an unopenable directory is skipped rather than failing a
-// create that succeeded.
+// stat and no fsync.
+//
+// A hard sync error FAILS the call. An earlier revision only logged it, which
+// CodeRabbit correctly flagged on PR #1658: reporting success after EIO is the
+// "claims durable when it isn't" shape this whole change exists to remove, and
+// createSupportBundle would have handed an operator a bundle id whose directory
+// entry was never committed. AtomicWrite does the same thing — a non-exempt
+// parent-dir sync error comes back as ErrReplacedNotSynced, it is not swallowed
+// — so an earlier comment here claiming to "follow AtomicWrite's posture" while
+// only logging was simply wrong about what that posture is.
+//
+// Two exemptions are kept, both AtomicWrite's: a directory that cannot be OPENED
+// is skipped (opening one is not portable), and EINVAL/ENOTSUP/EOPNOTSUPP mean
+// the filesystem cannot fsync a directory at all and has already given every
+// guarantee it has.
+//
+// On failure the directories THIS call created are removed, deepest first, so a
+// failed create leaves nothing behind — the no-partial-write invariant
+// createSupportBundle documents. Only what this call created is touched; a
+// pre-existing directory is never removed, which is the creation guard the same
+// review asked for.
 func mkdirDurableSupport(dir string, perm os.FileMode) error {
 	// Record the chain MkdirAll will have to create, deepest first.
 	var missing []string
@@ -96,16 +114,23 @@ func mkdirDurableSupport(dir string, perm os.FileMode) error {
 	// shallowest first, so an outer entry is never durable before the inner one
 	// it will come to contain.
 	for i := len(missing) - 1; i >= 0; i-- {
-		syncDirBestEffort(filepath.Dir(missing[i]))
+		if err := syncDirEntry(filepath.Dir(missing[i])); err != nil {
+			for _, created := range missing { // deepest first
+				_ = os.Remove(created) //nolint:errcheck // best-effort unwind on a failing volume
+			}
+			return fmt.Errorf("mkdir %s: parent dir fsync: %w", dir, err)
+		}
 	}
 	return nil
 }
 
-// syncDirBestEffort fsyncs a directory, tolerating the filesystems that cannot.
-func syncDirBestEffort(dir string) {
+// syncDirEntry fsyncs a directory so entries created in it become durable. It
+// returns nil for the two conditions AtomicWrite also treats as "nothing more
+// this filesystem can offer", and the real error otherwise.
+func syncDirEntry(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		return // not portable to open a directory everywhere; nothing more to offer
+		return nil // opening a directory is not portable; AtomicWrite skips it too
 	}
 	syncErr := d.Sync()
 	_ = d.Close() //nolint:errcheck // read-only handle; Sync above is the signal
@@ -114,5 +139,7 @@ func syncDirBestEffort(dir string) {
 		!errors.Is(syncErr, syscall.ENOTSUP) &&
 		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
 		logger.Printf("Support: directory fsync failed for %q: %v", sanitizeLog(filepath.Base(dir)), sanitizeLog(syncErr.Error()))
+		return syncErr
 	}
+	return nil
 }

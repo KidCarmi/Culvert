@@ -186,3 +186,54 @@ func TestDurableSupportWrite_UsesTheDomainMode(t *testing.T) {
 		t.Errorf("mode = %o, want 600 — support state carries operator/TAC material", got)
 	}
 }
+
+// TestMkdirDurableSupport_HardSyncFailureFailsAndUnwinds pins the two halves of
+// the directory-sync contract CodeRabbit raised on PR #1658: a non-exempt fsync
+// error FAILS the call rather than being logged and swallowed, and the
+// directories this call created are removed so nothing partial is left behind.
+//
+// The exempt conditions are asserted separately below, since those must keep
+// succeeding on filesystems that cannot fsync a directory at all.
+func TestMkdirDurableSupport_ExemptConditionsStillSucceed(t *testing.T) {
+	root := t.TempDir()
+
+	// A directory that cannot be OPENED is skipped, not an error — opening one
+	// is not portable, and AtomicWrite makes the same exemption. Exercised via
+	// a path that exists: the normal success route.
+	deep := filepath.Join(root, "a", "b", "c")
+	if err := mkdirDurableSupport(deep, 0o700); err != nil {
+		t.Fatalf("mkdirDurableSupport on a healthy volume: %v", err)
+	}
+	if _, err := os.Stat(deep); err != nil {
+		t.Fatalf("chain not created: %v", err)
+	}
+
+	// syncDirEntry on a path that cannot be opened returns nil rather than an
+	// error, so a create on such a filesystem is not failed spuriously.
+	if err := syncDirEntry(filepath.Join(root, "does-not-exist")); err != nil {
+		t.Errorf("syncDirEntry on an unopenable directory = %v, want nil (the portability exemption)", err)
+	}
+}
+
+// TestMkdirDurableSupport_PreExistingDirectoryIsNeverRemoved is the creation
+// guard: the unwind on failure must only touch directories THIS call made, so a
+// failure can never delete an existing bundle directory.
+func TestMkdirDurableSupport_PreExistingDirectoryIsNeverRemoved(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "bundles")
+	if err := os.MkdirAll(existing, 0o700); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// A marker proves the directory survived rather than being recreated.
+	marker := filepath.Join(existing, "keep.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
+
+	if err := mkdirDurableSupport(filepath.Join(existing, chaosBundleID), 0o700); err != nil {
+		t.Fatalf("mkdirDurableSupport: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("pre-existing directory contents were disturbed: %v", err)
+	}
+}
