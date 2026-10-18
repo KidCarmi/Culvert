@@ -41,6 +41,9 @@ func newHAIntentHarness(t *testing.T) *haIntentHarness {
 	t.Helper()
 	tempHADir(t)
 	cpWithGlobalHARole(t, "", "")
+	// Steady state: the webhooks are loaded, so a page is a direct fire. The
+	// boot-ordering tests (ha_intent_startup_alert_chaos_test.go) reset this.
+	cpStartupAlertsLoaded(t, true)
 	globalHA.clearIntentUnknown()
 	t.Cleanup(globalHA.clearIntentUnknown)
 	h := &haIntentHarness{t: t, parked: make(chan struct{}), gate: make(chan bool), done: make(chan struct{})}

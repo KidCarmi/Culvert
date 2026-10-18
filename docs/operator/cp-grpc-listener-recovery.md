@@ -178,7 +178,9 @@ succeeds, the node is HA-gated:
 - `/healthz` returns 503 with `status: "ha_intent_unknown"`.
 
 It retries the read every 1–30 s and stops retrying when shutdown begins.
-`ha_resume_unfenced` pages once per episode if the read keeps failing. Fix the
+`ha_resume_unfenced` pages once per episode if the read keeps failing. A page
+raised at boot, before the alert webhooks load, is delivered when they load,
+unless a read has decided the intent by then. Fix the
 file's permissions or contents; the next successful read resumes or ungates the
 node without a restart. The one exception is a file that turns out to record
 this node as a **standby**. The node came up as a plain Control Plane, cannot

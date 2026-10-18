@@ -459,11 +459,9 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	if leaseConfigured && !leaseGranted {
 		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF (ADR-0005 S2). " +
 			"Recovery runs in the background (CHAOS-55) — no operator action is required unless it keeps failing.")
-		go alerts.Fire("ha_resume_unfenced", alerts.Payload{
-			Event:  "ha_resume_unfenced",
-			Detail: "leader restarted but could not acquire the fencing lease; serving read-only (no write authority)",
-			Source: "ha",
-		})
+		// The boot resume runs inside initCluster, before the webhooks load:
+		// queued until then (pageUnfencedLeader, Codex review of #1556).
+		h.pageUnfencedLeader("leader restarted but could not acquire the fencing lease; serving read-only (no write authority)")
 		// CHAOS-55 / register row HA-7: without this the node stays a
 		// permanently read-only leader — startLeaseKeepalive no-ops on a zero
 		// epoch, so nothing in the process would ever call Acquire again.

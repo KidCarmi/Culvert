@@ -8869,6 +8869,55 @@ required before merge; each is now in the tree.
 
   The flag-based decision fails these gates, whether it is restored in
   `exitTerminal`, in the ownership step, or in both.
+* **HA-intent pages wait for the webhooks (Codex P2 4303320660).** When
+  `ha_config.json` was unreadable at boot and the activation callback's
+  re-read also failed, `noteIntentUnreadable` armed the episode's page-once
+  latch inside `initCluster` and the page fired into an empty webhook store.
+  Every later retry stayed silent while the node stayed HA-gated. This is the
+  round-15 class again.
+
+  `noteHAIntentUnreadable` is now the latch's only caller. It hands the page
+  to `pageHAIntentUnreadable` in the same call, and that function queues it
+  through `deferStartupAlertWhile` before the startup flush. Its predicate is
+  `haIntentEpisodeOpen(episode)`; the episode number survives
+  `clearIntentUnknown`, so a page from an episode that a read decided before
+  the flush is dropped even if a new episode is open then.
+
+  The audit of every page this PR adds or changes that can fire during
+  `initCluster` found one more direct fire: the read-only resume page
+  (`ha_resume_unfenced` from `resumeAsLeader`). This PR moved the boot resume
+  into the listener's activation callback, which runs inside `initCluster`
+  on a healthy boot. It now queues through `pageUnfencedLeader`, valid while
+  the node is a leader without a lease grant, and stays asynchronous after
+  the flush. `cp_grpc_listener_down` (role_conflict included) and the
+  address-kind rejection already queued.
+
+  Two direct fires of the same events predate this PR, are unchanged by it,
+  and are listed wall exceptions with their reasons: the full-kind
+  `config_snapshot_rejected` page (the round-15 follow-up) and the recovery
+  loop's foreign-holder `ha_resume_unfenced` page. `storage_write_failed` is
+  outside the audit: this PR only extracted its launch seam, and its rate
+  gate is main's.
+
+  Gates:
+  - `TestChaos71_BootUnreadableHAIntentIsPagedOnceAfterTheWebhooksLoad`: no
+    page before the load, exactly one at the flush, and retries before and
+    after it stay silent.
+  - `TestChaos71_BootUnreadableHAIntentDecidedBeforeTheFlushIsDropped`: the
+    negative control, including a new episode open at the flush.
+  - `TestChaos71_BootUnfencedResumePageQueuesUntilTheWebhooksLoad`.
+  - `TestChaos71_Wall_StartupCapablePagesQueueUntilTheWebhooksLoad` (AST).
+    No dispatch of the three events may skip the
+    `if !startupAlertsFlushed() { deferStartupAlertWhile(…, pred); return }`
+    guard. Each listed exception must match exactly one dispatch site and
+    carry a reason. The wall's own mutation table is
+    `TestChaos71_Wall_StartupQueueWallCatchesADirectFire`.
+  - `TestChaos71_Wall_HAIntentLatchArmsOnlyWithItsPage`.
+
+  Seven mutations each fail a gate: a direct HA-intent fire, a predicate
+  without the episode check, a direct read-only resume fire, a boot read that
+  arms the latch without the page, a clear that resets the episode counter, a
+  latch armed with no page, and a direct address-kind fire.
 * **Sixteenth review round — the address latch is part of the
   generation-guarded publish record.** An address publish that found the list
   already current cleared the rounds-14/15 latch (`addrRejectPaged`) in

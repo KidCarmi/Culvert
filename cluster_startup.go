@@ -89,7 +89,7 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 		// Standby or leader cannot be told apart: never come up as an ungated
 		// Control Plane. The node is HA-gated from here, and the deferred
 		// resume re-reads (and retries) once the listener binds (ha_intent.go).
-		globalHA.noteIntentUnreadable(unreadable)
+		noteHAIntentUnreadable(unreadable)
 		logWarnf("HA: %s could not be read at boot (%q) — leader-gated RPCs and CA issuance stay refused until it can be; the read is retried once the Control Plane listener binds",
 			haConfigFile, sanitizeLog(unreadable.Error()))
 	}
@@ -256,9 +256,7 @@ var errHAIntentNotRevalidated = errors.New("the persisted HA config was not conf
 // haIntentStillUnknown gates the node on an undecided read, logs it, and
 // pages once per episode if it keeps failing.
 func haIntentStillUnknown(err error) {
-	if globalHA.noteIntentUnreadable(err) {
-		pageHAIntentUnreadable(err)
-	}
+	noteHAIntentUnreadable(err)
 	logWarnf("HA: the persisted HA intent in %s could not be decided on the Control Plane listener's bind (%q) — "+
 		"leader-gated RPCs and CA issuance stay refused; retrying", haConfigFile, sanitizeLog(err.Error()))
 }

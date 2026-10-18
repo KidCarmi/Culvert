@@ -136,7 +136,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   activation (409) now leaves the listener health plane unconfigured instead
   of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
   a serve that stayed up for 60 s, so a one-off socket loss after a long
-  healthy run is not charged the 30 s ceiling.
+  healthy run is not charged the 30 s ceiling. The `ha_resume_unfenced` page
+  for an HA config that cannot be read at boot and the read-only
+  leader-resume page are now queued until the alert webhooks load, so they
+  are no longer lost at boot; each is dropped if its condition cleared first.
 
 ### Security
 

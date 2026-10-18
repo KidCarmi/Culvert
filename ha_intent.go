@@ -31,33 +31,63 @@ import (
 type haIntentGateState struct {
 	reason   string // non-empty while the persisted intent is unknown
 	attempts int    // failed reads in this episode
-	paged    bool   // this episode has been paged
+	paged    bool   // this episode's page has been queued or dispatched
+	// episode numbers the episodes. It survives clearIntentUnknown, so a page
+	// queued before the startup flush is delivered only while ITS episode is
+	// still the open one (haIntentEpisodeOpen).
+	episode uint64
 }
 
 // haIntentPageAfter is how many failed reads in one episode page: one
 // transient failure that the first retry clears is logged, not paged.
 const haIntentPageAfter = 2
 
+// noteHAIntentUnreadable records a failed read of the persisted HA intent on
+// globalHA and pages the episode once it keeps failing. It is the ONLY caller
+// of noteIntentUnreadable (TestChaos71_Wall_HAIntentLatchArmsOnlyWithItsPage):
+// the once-per-episode latch is armed only here, in the same call that hands
+// the page to pageHAIntentUnreadable — which queues it until the webhooks load
+// or dispatches it — so the latch never silences an episode whose one page
+// went nowhere (Codex review of #1556, P2 4303320660).
+func noteHAIntentUnreadable(err error) {
+	if page, episode := globalHA.noteIntentUnreadable(err); page {
+		pageHAIntentUnreadable(err, episode)
+	}
+}
+
 // noteIntentUnreadable records a failed read of the persisted HA intent and
-// reports whether this episode should page now (once per episode).
-func (h *HAState) noteIntentUnreadable(err error) (page bool) {
+// reports whether this episode should page now (once per episode), and which
+// episode it is. Call it through noteHAIntentUnreadable.
+func (h *HAState) noteIntentUnreadable(err error) (page bool, episode uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	g := &h.intent
+	if g.reason == "" {
+		g.episode++ // a new episode
+	}
 	g.reason = err.Error()
 	g.attempts++
 	if g.attempts >= haIntentPageAfter && !g.paged {
 		g.paged = true
-		return true
+		return true, g.episode
 	}
-	return false
+	return false, g.episode
 }
 
-// clearIntentUnknown ends the episode: a read decided the intent.
+// clearIntentUnknown ends the episode: a read decided the intent. The episode
+// number is kept, so the next episode gets a new one.
 func (h *HAState) clearIntentUnknown() {
 	h.mu.Lock()
-	h.intent = haIntentGateState{}
+	h.intent = haIntentGateState{episode: h.intent.episode}
 	h.mu.Unlock()
+}
+
+// haIntentEpisodeOpen reports whether episode is still the open one and still
+// gates the node (no HA role taken meanwhile) — the condition its page reports.
+func (h *HAState) haIntentEpisodeOpen(episode uint64) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.intent.reason != "" && h.intent.episode == episode && h.role == ""
 }
 
 // intentUnknown reports whether the gate is set (whatever the role).
@@ -95,11 +125,49 @@ var haIntentRetrySpawn = func(loop func()) { go loop() }
 // pageHAIntentUnreadable pages a persisted-intent episode that keeps failing.
 // The event is the existing ha_resume_unfenced: the leadership resume could
 // not complete and the node serves without write authority.
-func pageHAIntentUnreadable(err error) {
-	fireAlert("ha_resume_unfenced", AlertPayload{
+//
+// STARTUP ORDERING (Codex review of #1556, P2 4303320660): the boot read and
+// the activation callback's first re-read both run inside initCluster, before
+// initPersistentAdminState loads the persisted webhooks, so a page fired then
+// fanned out to an empty store while the latch silenced every retry. Before
+// the startup flush it queues, delivered only while its episode is still open
+// (a read that decided the intent before the webhooks loaded drops it); after
+// the flush it fires at once.
+func pageHAIntentUnreadable(err error, episode uint64) {
+	payload := AlertPayload{
 		Event:  "ha_resume_unfenced",
 		Source: "ha",
 		Detail: "the persisted HA config could not be read during the leadership resume (" + err.Error() +
 			"); leader-gated RPCs and CA issuance stay refused (no write authority) and the read is retried",
-	})
+	}
+	if !startupAlertsFlushed() {
+		deferStartupAlertWhile("ha_resume_unfenced", payload, func() bool { return globalHA.haIntentEpisodeOpen(episode) })
+		return
+	}
+	fireAlert("ha_resume_unfenced", payload)
+}
+
+// pageUnfencedLeader is the read-only resume page: an ha_resume_unfenced page
+// about a leader that resumed the role WITHOUT the fencing lease
+// (resumeAsLeader). This PR moved the boot resume into the Control Plane
+// listener's activation callback, which on a healthy boot runs inside
+// initCluster, before the webhooks load. Before the startup flush the page
+// queues, delivered only while this node is still an unfenced leader; after
+// the flush it is delivered asynchronously, as before: the resume is an HA
+// transition path that must not wait on a webhook dispatch.
+func (h *HAState) pageUnfencedLeader(detail string) {
+	payload := AlertPayload{Event: "ha_resume_unfenced", Detail: detail, Source: "ha"}
+	if !startupAlertsFlushed() {
+		deferStartupAlertWhile("ha_resume_unfenced", payload, h.unfencedLeader)
+		return
+	}
+	go fireAlert("ha_resume_unfenced", payload)
+}
+
+// unfencedLeader reports whether this node holds the leader role without a
+// fencing-lease grant: the read-only state an unfenced page reports.
+func (h *HAState) unfencedLeader() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.role == "leader" && h.lease != nil && h.leaseEpoch == 0
 }
