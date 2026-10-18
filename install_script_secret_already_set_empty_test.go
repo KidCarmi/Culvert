@@ -63,7 +63,8 @@ func TestInstallScript_SecretAlreadySet_LargeEnvUnderPipefail(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := "set -euo pipefail\nunset CULVERT_CA_PASSPHRASE\n" + fn + "\nsecret_already_set CULVERT_CA_PASSPHRASE \"$1\"\n"
-	if err := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", envfile).Run(); err != nil { // #nosec G204 -- fixed test script
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", envfile) // #nosec G204 -- fixed test script
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("secret_already_set on a large .env with a leading match = %v, want success", err)
 	}
 }
