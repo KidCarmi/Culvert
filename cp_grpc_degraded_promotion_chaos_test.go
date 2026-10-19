@@ -96,6 +96,45 @@ func TestChaos71_PromotionCommitsAddressesWhileRewriteIdentityDegraded(t *testin
 	}
 }
 
+// TestChaos71_FencedPromotionRestampsTheEpochWhileRewriteIdentityDegraded —
+// the same P1 (4314031064) on the fenced path #1645 adds. With a fencing
+// lease, a promote first commits the COMMITTED snapshot restamped with its new
+// epoch (RestampFenceEpoch, publishEpoch) and only then advertises it. That
+// candidate captures no live state, exactly like the address-only one, so the
+// rewrite-identity latch must not refuse it: refusing it left the node standby
+// on every promote until a restart. Mutation check: routing publishEpoch
+// through Gate 0 (validatePublishCandidate) fails this gate.
+func TestChaos71_FencedPromotionRestampsTheEpochWhileRewriteIdentityDegraded(t *testing.T) {
+	const myAddr = "10.0.0.2:50051"
+	h, f, pages := cpEpochHarness(t, myAddr)
+	cpEnterStandby(t, h, myAddr)
+	committed := globalConfigStore.Get()
+	cpLatchRewriteDegradation(t)
+	want := cpNextGrantEpoch(t, f)
+
+	if err := h.PromoteManually(); err != nil {
+		t.Fatalf("fenced promotion failed while rewrite identity was degraded: %v — an unrelated "+
+			"rewrite-persistence fault disabled HA failover", err)
+	}
+	if st := h.Status(); st.Role != "leader" {
+		t.Fatalf("role after the promotion = %q, want leader", st.Role)
+	}
+	cpAssertEpochServable(t, h, want)
+	got := globalConfigStore.Get()
+	if !slicesEqual(got.BlockedHosts, committed.BlockedHosts) {
+		t.Errorf("the epoch restamp changed the committed content: BlockedHosts %d → %d entries",
+			len(committed.BlockedHosts), len(got.BlockedHosts))
+	}
+	if p := pages(); len(p) != 0 {
+		t.Errorf("a promote whose restamp is exempt from Gate 0 paged: %+v", p)
+	}
+	// Full publishes are still refused while the latch is set.
+	if err := globalConfigStore.Update(CurrentConfigSnapshot()); err == nil ||
+		!strings.Contains(err.Error(), "rewrite management identity degraded") {
+		t.Errorf("full publish after the promotion: err = %v, want the Gate 0 refusal", err)
+	}
+}
+
 // TestChaos71_RewriteDegradationStillRefusesFullPublishes is the other half of
 // the P1 fix, on a bare store: with the latch set a full publish is refused and
 // commits nothing, while an address-only publish commits onto the committed

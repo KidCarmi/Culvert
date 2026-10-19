@@ -344,7 +344,14 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 		h.logRecoveryProgress(started, lastLog, suppressed, "acquire not granted (retrying)")
 		return false
 	}
-	h.completeLeaseRecovery(started, *suppressed, st.Epoch)
+	if !h.completeLeaseRecovery(started, *suppressed) {
+		// The new epoch could not be committed into the snapshot (or the
+		// grant was lost first), so it was not installed: still read-only, and
+		// the loop retries (the grant expires unkept; a later round acquires
+		// afresh).
+		h.logRecoveryProgress(started, lastLog, suppressed, "the config snapshot could not carry the new fencing epoch (retrying)")
+		return false
+	}
 	return true
 }
 
@@ -355,27 +362,50 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 // a landed grant — never on elapsed time (the ca_health.go / storage_health.go
 // rule).
 //
-// Note the ordering: the grant is already installed by the time this runs (that
+// It installs the grant first (commitGrant, then exposeGrantLocked: a
+// snapshot stamped with the new epoch commits, and only then is the epoch
+// advertised); a refused install returns false and the loop retries, still
+// read-only.
+//
+// Note the ordering: the grant is installed at the top of this function (that
 // is what makes WriteAllowed true), and the recovering flag drops a beat later
 // when the loop returns. A scrape landing in between sees write_authority=1
 // with lease_recovering=1. That is deliberate — authority first, bookkeeping
 // second is the safe direction — and it is harmless, because the alertable
 // condition is `unfenced=1 AND recovering=0` and unfenced is already 0 here.
 //
-// The leader role is re-checked under h.mu, atomically with the install: the
-// acquisition ran without the lock, and a recovery whose role went away
-// meanwhile (or that shutdown overtook) must not re-persist a leader config or
-// keep the grant's epoch advertised — it clears the grant's local state
-// instead (clearLeaseGrantLocked, Codex review of #1556) and the loop exits.
-func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int, grant int64) {
+// It reports whether the loop is done: the grant was installed, or the state
+// that armed recovery is gone. leaseRecoveryAttempt read that state (an
+// unfenced leader) BEFORE its Acquire, and the Acquire and the commit both
+// block; an HA transition landing meanwhile (a re-entry into standby, a fence
+// taken by another path) must not have a recovered epoch installed over it.
+// So it is re-checked under h.mu before the commit (no snapshot is stamped
+// for a state that is gone) and again atomically with the exposure, and a
+// grant recovered for a state that no longer exists is abandoned unexposed.
+func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) bool {
 	h.mu.Lock()
-	if h.role != "leader" || h.shutdown || h.leaseEpoch != grant {
-		h.clearLeaseGrantLocked(grant)
-		role := h.role
+	disarmed := h.recoveryDisarmedLocked()
+	h.mu.Unlock()
+	if disarmed {
+		return true
+	}
+	// The grant is installed — its epoch advertised, write authority back —
+	// only after a snapshot stamped with it commits, outside h.mu, while the
+	// keepalive renews the staged grant (ha_epoch_commit.go).
+	h.startLeaseKeepalive()
+	staged, err := h.commitGrant(haTransitionRecovery)
+	if err != nil {
+		return false
+	}
+	h.mu.Lock()
+	if h.recoveryDisarmedLocked() {
 		h.mu.Unlock()
-		logger.Printf("HA: lease recovery's grant (epoch=%d) is not installed — the node no longer holds the leader role (role %q) or is shutting down",
-			grant, role)
-		return
+		return true
+	}
+	if page, err := h.exposeGrantLocked(haTransitionRecovery, staged); err != nil {
+		h.mu.Unlock()
+		page.dispatch() // off h.mu (haDeferredPage)
+		return false
 	}
 	h.term = termFromEpoch(h.leaseEpoch)
 	epoch := h.leaseEpoch
@@ -399,6 +429,22 @@ func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int, grant
 		Detail: "unfenced leader re-acquired the fencing lease and regained write authority",
 		Source: "ha",
 	})
+	return true
+}
+
+// recoveryDisarmedLocked reports whether the state that armed recovery (an
+// unfenced leader) is gone, or process shutdown began; if so it abandons the
+// recovered, staged grant, which then lapses unkept: no epoch is installed
+// and no leader config re-persisted (Codex review of #1556). Caller holds
+// h.mu (write).
+func (h *HAState) recoveryDisarmedLocked() bool {
+	if h.role == "leader" && h.leaseEpoch == 0 && !h.shutdown {
+		return false
+	}
+	h.abandonGrantLocked()
+	logger.Printf("HA: lease recovery stands down — this node's HA state changed while the fence was being re-acquired "+
+		"(role %q, shutting down %v); the recovered grant is not installed and lapses unkept", sanitizeLog(h.role), h.shutdown)
+	return true
 }
 
 // handleForeignFenceHolder handles the one outcome recovery must never paper
