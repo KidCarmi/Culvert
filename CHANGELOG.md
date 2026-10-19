@@ -72,6 +72,29 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Distributed rate limiting could admit a request over the cluster-wide limit
+  whenever a Control Plane broadcast landed in the middle of a decision.
+  `AllowClusterAware` samples its clock before taking the shard lock and hands
+  that instant to `FreshCount`; the gossip loop's `ApplyRemoteCounts` stamps
+  the broadcast with its own `time.Now()`. A broadcast applied between the two
+  steps therefore carried a stamp a few microseconds *ahead* of the decision's
+  clock, `FreshCount` computed a negative age, and CHAOS-61's clock-rollback
+  rule zeroed the remote half of the decision — the node decided on its local
+  count alone and admitted (observed in CI as
+  `TestDistributedAdmission_ProductionWiring` admitting the SOCKS5 leg, 6 local
+  + 2 remote against a limit of 8, with gossip every millisecond).
+  `ClusterFreshness` never had the defect because it loads the stamp and then
+  reads the clock, so diagnostics reported "fresh" while enforcement treated
+  the same instant as stale. `FreshCount` now re-reads the clock once, only on
+  a negative age and after the stamp was loaded: a stamp still in the future
+  against that read is a genuine rollback and stays stale (all 17 CHAOS-61
+  gates unchanged); one that merely postdates the caller's clock is fresh. The
+  steady-state hot path takes no extra clock read. Gates:
+  `internal/admission/cluster_ratelimit_inflight_broadcast_test.go`
+  (deterministic injected-clock gate RED on the previous code; an end-to-end
+  gate through `AllowClusterAware` that caught 2 fail-open admissions in 5000
+  on the previous code; and the rollback control).
+
 - The Control Plane → data-plane snapshot apply replaced the IP filter by
   storing a freshly built filter into the package-level `ipf` handle, which
   `proxy.go` and `socks5.go` read on every request with no synchronization
