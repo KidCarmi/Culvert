@@ -69,7 +69,11 @@ func buildCategoryPolicyStore(n int) *PolicyStore {
 
 func BenchmarkPolicyEvaluate_CategoryRules(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
-	for _, n := range []int{10, 50, 200} {
+	// rules=1 is the boundary the normalization hoist is weakest at — with one
+	// category rule the per-rule saving is a single probe, so it is where the
+	// scratch's own bookkeeping is most visible. It is measured rather than
+	// argued about.
+	for _, n := range []int{1, 10, 50, 200} {
 		ps := buildCategoryPolicyStore(n)
 		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
@@ -99,13 +103,38 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic(b *testing.B) {
 	}
 }
 
-// BenchmarkPolicyEvaluate_CategoryGroupRulesParallel measures the same scan
-// under concurrency. The fusion takes catStore's RLock once per rule, so a
-// per-rule lookup also multiplies lock traffic by the rule count on every
-// core serving traffic.
-func BenchmarkPolicyEvaluate_CategoryGroupRulesParallel(b *testing.B) {
+// BenchmarkPolicyEvaluate_CategoryRulesParallel is the production-shaped
+// instrument for the destination-host normalization hoist, and the one to read
+// instead of a tight single-probe loop.
+//
+// The micro-benchmark urlcat.BenchmarkStoreMatchesHostNorm_Parallel measures
+// nothing but the membership probe, so at 4 cores every core does nothing but
+// acquire catStore's RLock — the maximally contended case no gateway is in,
+// where removing CPU work from the op simply moves the bottleneck onto the lock
+// and the saving is masked (measured: hoisted 167.8 ns vs the normalizing
+// wrapper 162.4 ns at -cpu 4, i.e. equal throughput). That is this repo's
+// standing methodology note from the topHosts work — speeding one component
+// only raises the arrival rate at the next contended one — so the scan, which
+// separates each probe with real per-rule work, is the honest denominator.
+// (That catStore RLock measurement predates the urlcat forward read view; the
+// probe now takes no lock, see below.)
+//
+// It is also the end-to-end instrument for the urlcat forward read view
+// (internal/urlcat forwardView). It is deliberately the DestCategory path and
+// not the category-GROUP one. matchesCategory reaches catStore.MatchesHostNorm /
+// MatchesHostAdminNorm once per category-scoped rule and nothing else
+// contended, so this benchmark isolates that cost.
+// BenchmarkPolicyEvaluate_CategoryGroupRulesParallel below adds
+// catgroup.Store.GetByName, whose own per-rule RLock dominates it — a profile
+// of that benchmark on a tree carrying the view puts 91.9% of samples in
+// GetByName with 68.6% in its RLock atomic, so it measures that ceiling rather
+// than this one. Read this benchmark for this change, and that one for the
+// catgroup finding it exposes.
+//
+//	go test -run '^$' -bench 'CategoryRulesParallel' -benchmem -cpu 1,2,4 .
+func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
-	ps := buildCategoryGroupPolicyStore(50)
+	ps := buildCategoryPolicyStore(50)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -117,22 +146,13 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesParallel(b *testing.B) {
 	})
 }
 
-// BenchmarkPolicyEvaluate_CategoryRulesParallel measures the plain
-// DestCategory scan under concurrency — the end-to-end instrument for the
-// urlcat forward read view (internal/urlcat forwardView).
-//
-// It is deliberately the DestCategory path and not the category-GROUP one.
-// matchesCategory reaches catStore.MatchesHost / MatchesHostAdmin once per
-// category-scoped rule and nothing else contended, so this benchmark isolates
-// that cost. BenchmarkPolicyEvaluate_CategoryGroupRulesParallel below adds
-// catgroup.Store.GetByName, whose own per-rule RLock dominates it — a profile
-// of that benchmark on a tree carrying the view puts 91.9% of samples in
-// GetByName with 68.6% in its RLock atomic, so it measures that ceiling rather
-// than this one. Read this benchmark for this change, and that one for the
-// catgroup finding it exposes.
-func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
+// BenchmarkPolicyEvaluate_CategoryGroupRulesParallel measures the same scan
+// under concurrency. The fusion takes catStore's RLock once per rule, so a
+// per-rule lookup also multiplies lock traffic by the rule count on every
+// core serving traffic.
+func BenchmarkPolicyEvaluate_CategoryGroupRulesParallel(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
-	ps := buildCategoryPolicyStore(50)
+	ps := buildCategoryGroupPolicyStore(50)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
