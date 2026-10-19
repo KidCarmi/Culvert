@@ -26,7 +26,9 @@ var guardedOnlyHelpers = map[string]string{
 // noBadgerAccess are exported methods that must never touch badger at all.
 // Each carries the reason it needs no guard.
 var noBadgerAccess = map[string]string{
-	"LookupFaults": "reads three atomics; must stay answerable on a dead store",
+	"LookupFaults":             "reads three atomics; must stay answerable on a dead store",
+	"SetBulkWriteFaultForTest": "test seam; assigns the writeFault func field, never touches badger",
+	"ForceDegradedForTest":     "test seam; latches the degraded atomic via noteMemFault, never touches badger",
 }
 
 // communityDBMethods parses the package's non-test sources and returns every

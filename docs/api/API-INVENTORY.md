@@ -5,9 +5,9 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate).
 This file is generated and drift-checked; the totals below are counted from the manifest, not asserted by hand.
 
-- **Total method-entries:** 371
-- **Documented:** 359
-- **Exempt:** 12 (all `intentionally-undocumented` non-REST surfaces)
+- **Total method-entries:** 379
+- **Documented:** 366
+- **Exempt:** 13 (all `intentionally-undocumented` non-REST surfaces)
 
 ## Intentionally-undocumented (non-REST) surfaces
 
@@ -23,6 +23,7 @@ This file is generated and drift-checked; the totals below are counted from the 
 | * | `/auth/logout` | non-rest-surface |
 | * | `/auth/oidc/callback` | non-rest-surface |
 | POST | `/auth/saml/callback` | non-rest-surface |
+| GET | `/auth/saml/complete` | non-rest-surface |
 | GET | `/auth/saml/metadata` | non-rest-surface |
 | GET | `/auth/select` | non-rest-surface |
 
@@ -30,17 +31,17 @@ This file is generated and drift-checked; the totals below are counted from the 
 
 | Domain | Entries | Documented |
 |---|---|---|
-| auth | 21 | 15 |
+| auth | 26 | 19 |
 | cdr | 14 | 14 |
 | cluster | 36 | 35 |
-| dashboard | 13 | 12 |
+| dashboard | 14 | 13 |
 | governance | 1 | 1 |
 | mcp | 36 | 36 |
 | observability | 2 | 2 |
 | pac | 23 | 23 |
 | policy | 87 | 87 |
 | release | 6 | 6 |
-| security | 51 | 51 |
+| security | 53 | 53 |
 | settings | 31 | 31 |
 | setup | 2 | 2 |
 | static | 4 | 0 |

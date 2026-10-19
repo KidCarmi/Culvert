@@ -1,6 +1,25 @@
 .github
 .golangci.yml
 .dockerignore
+# Local credentials, lab artifacts and assistant caches never enter builders.
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+**/.tools
+**/.codex
+**/.claude
+**/.ssh
+**/.aws
+**/.azure
+**/.kube
+**/.npmrc
+**/.netrc
+**/__pycache__
+**/*.ova
+**/*.vmdk
+**/*.qcow2
+**/*.credential.xml
 deploy
 # docker-compose*.yml stays IN the build context: the Dockerfile copies the
 # compose files into the /app/deploy bundle for source-free installs.

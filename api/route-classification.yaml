@@ -1183,6 +1183,46 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/sso-ip-binding"
+    method: "GET"
+    handler: "apiSSOSurrogate"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/sso-ip-binding"
+    method: "PUT"
+    handler: "apiSSOSurrogate"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/sso-ip-binding/bindings"
+    method: "GET"
+    handler: "apiSSOSurrogateBindings"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/sso-ip-binding/bindings"
+    method: "DELETE"
+    handler: "apiSSOSurrogateBindings"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/policy-learning"
     method: "GET"
     handler: "apiPolicyLearningStatus"
@@ -1733,6 +1773,16 @@ routes:
     audit_expected: false
     danger_level: medium
     documented: true
+  - route: "/api/logs/history/export"
+    method: "POST"
+    handler: "apiLogsHistoryExport"
+    domain: "dashboard"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/logs/purge"
     method: "POST"
     handler: "apiLogsPurge"
@@ -2277,6 +2327,26 @@ routes:
   - route: "/api/security"
     method: "POST"
     handler: "apiSecurity"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/security-scan/av-settings"
+    method: "GET"
+    handler: "apiSecAVSettings"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/security-scan/av-settings"
+    method: "PUT"
+    handler: "apiSecAVSettings"
     domain: "security"
     visibility: admin-supported
     min_role: "admin"
@@ -3378,6 +3448,21 @@ routes:
     exemption:
       owner: platform-team
       reason: browser SAML callback (public redirect); not a JSON admin API
+      security_class: non-rest-surface
+      expires: *baseline
+  - route: "/auth/saml/complete"
+    method: "GET"
+    handler: "authSAMLComplete"
+    domain: "auth"
+    visibility: intentionally-undocumented
+    min_role: "public"
+    mutating: false
+    audit_expected: false
+    danger_level: medium
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: browser SAML login completion (binding check + session); not a JSON admin API
       security_class: non-rest-surface
       expires: *baseline
   - route: "/auth/saml/metadata"

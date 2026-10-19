@@ -1,0 +1,39 @@
+# PCRE2 linkage and JIT use in clamav/clamav:1.4.6 (pinned digest sha256:57deb108...).
+# Every ELF in the exported image filesystem was checked with nm -D --undefined-only (binutils, 2026-10-03).
+
+## ELF files importing any pcre2 symbol
+/usr/lib/libclamav.so.12.0.3  pcre2 imports=16  pcre2_jit imports=0
+/usr/lib/libpcre2-posix.so.3.0.8  pcre2 imports=7  pcre2_jit imports=0 (POSIX shim; nothing in the image links it)
+/usr/sbin/clamd  pcre2 imports=0  (reaches pcre2 only through libclamav)
+
+## libclamav.so.12.0.3 — the complete list of pcre2 symbols it imports
+U pcre2_code_free_8
+U pcre2_compile_8
+U pcre2_compile_context_create_8
+U pcre2_compile_context_free_8
+U pcre2_general_context_create_8
+U pcre2_general_context_free_8
+U pcre2_get_error_message_8
+U pcre2_get_ovector_pointer_8
+U pcre2_match_8
+U pcre2_match_context_create_8
+U pcre2_match_context_free_8
+U pcre2_match_data_create_from_pattern_8
+U pcre2_match_data_free_8
+U pcre2_pattern_info_8
+U pcre2_set_match_limit_8
+U pcre2_set_recursion_limit_8
+
+## libpcre2-8.so.0 (10.48-r0) — JIT support is compiled in (exported, unused by libclamav)
+T pcre2_jit_compile_8
+T pcre2_jit_free_unused_memory_8
+T pcre2_jit_match_8
+T pcre2_jit_stack_assign_8
+T pcre2_jit_stack_create_8
+T pcre2_jit_stack_free_8
+
+## No runtime lookup: strings in libclamav contain no 'pcre2_jit' name for dlsym to resolve
+strings libclamav.so.12.0.3 | grep -c pcre2_jit = 0
+(The 'JIT' strings in libclamav belong to ClamAV's own LLVM bytecode-signature JIT, not PCRE2.)
+
+## The Debian 13 variant (clamav/clamav:1.4.6-debian) imports the identical 16 symbols, also no pcre2_jit.

@@ -158,22 +158,58 @@ type Syncer struct {
 	consecutiveFailures atomic.Int64
 
 	// lastFailure is the BOUNDED reason class for the most recent failed
-	// round ("download", "write", "" when clean) — never a raw error string,
+	// round ("download", "disk_space", "disk_space_unknown", "write", "" when
+	// clean) — never a raw error string,
 	// which would carry the feed URL into any surface that consumes it.
 	lastFailure atomic.Value // stores string
 
 	// loop tracks the goroutine Start launches, so Wait can join it after the
 	// caller cancels Start's context.
 	loop sync.WaitGroup
+
+	// freeBytes reports the free space on the filesystem holding the store,
+	// or nil when unknown. See SetFreeSpaceProbe.
+	freeBytes func() (uint64, error)
 }
 
 // Bounded reason classes for a failed round. The verbose cause goes to the log.
 // "download" covers the whole fetch-and-parse stage (downloadAndParse), which
 // is a single failure mode for the operator: the tarball did not arrive intact.
 const (
-	failDownload = "download"
-	failWrite    = "write"
+	failDownload         = "download"
+	failDiskSpace        = "disk_space"
+	failDiskSpaceUnknown = "disk_space_unknown"
+	failWrite            = "write"
 )
+
+// FailDiskSpace and FailDiskSpaceUnknown are the two reason classes for a
+// deferred bulk write, exported so the diagnostics row can name them.
+const (
+	FailDiskSpace        = failDiskSpace
+	FailDiskSpaceUnknown = failDiskSpaceUnknown
+)
+
+// Free space a bulk write must find before it starts. BadgerDB backs its
+// memtable and value log with SPARSELY-truncated mmapped files
+// (ristretto z.OpenMmapFile), so a write into a page the filesystem cannot
+// allocate is not an error return but a SIGBUS that kills the whole gateway —
+// measured on a full disk mid-sync (`logFile.writeEntry` → `memclr`, fatal
+// fault). Refusing to START the write below a floor turns the common case — a
+// volume that was already nearly full when the 24h round came due — into a
+// counted, bounded failure while the last-good store keeps serving. It does
+// NOT cover a disk that fills DURING the write; nothing above badger can.
+const (
+	syncFreeFloor     = 512 << 20 // fixed headroom: memtables, flush, compaction
+	syncBytesPerEntry = 256       // per-entry allowance across WAL, vlog and SST
+)
+
+// syncSpaceNeeded is the free space a write of n entries must find.
+func syncSpaceNeeded(n int) uint64 {
+	if n <= 0 {
+		return syncFreeFloor
+	}
+	return syncFreeFloor + uint64(n)*syncBytesPerEntry // #nosec G115 -- n > 0 checked above
+}
 
 // Backoff bounds for a failed UT1 round. The steady-state interval is 24h, so
 // a bare ticker meant one transient fetch error froze category coverage for a
@@ -181,6 +217,27 @@ const (
 const (
 	syncRetryMin = 15 * time.Minute
 	syncRetryMax = 2 * time.Hour
+)
+
+// F-DISK-RECOVERY-1: a BulkWrite onto a full disk can fault on a badger-internal
+// goroutine (latching the store degraded) while the outer call never returns, or
+// block inside badger retrying a write that will never complete. Either way the
+// sync must be surfaced as a failure WITHOUT waiting for BulkWrite to return.
+// writeBulkWatched polls the store's degraded latch (the fast path for the
+// faulting case — a contained fault latches within ~1s) and backstops it with a
+// stall deadline. They are vars, not consts, so a test can shrink them.
+var (
+	bulkWriteDegradedPoll = 500 * time.Millisecond
+	bulkWriteStallTimeout = 90 * time.Second
+)
+
+// bulkWriteOutcome is why writeBulkWatched stopped waiting on a BulkWrite.
+type bulkWriteOutcome int
+
+const (
+	bulkWriteReturned         bulkWriteOutcome = iota // BulkWrite returned (err is its result)
+	bulkWriteDegradedMidWrite                         // the store latched degraded; BulkWrite abandoned
+	bulkWriteStalled                                  // neither returned nor degraded within the deadline
 )
 
 // Health is a consistent snapshot of the UT1 syncer's state for the metrics
@@ -231,11 +288,44 @@ func New(db *catdb.CommunityDB, feedURL string, syncInterval time.Duration) *Syn
 	fs.lastSync.Store(time.Time{})
 	fs.lastAttempt.Store(time.Time{})
 	fs.lastFailure.Store("")
+	// A completed import outlives the process that ran it: restore its time
+	// and size from the store's completion record, so a restart does not
+	// report a synced store as never synced (F-FEED-1).
+	if rec, ok := fs.importRecord(); ok {
+		fs.lastSync.Store(rec.CompletedAt)
+		fs.totalDomains.Store(rec.Entries)
+	}
 	return fs
 }
 
+// importRecord returns the store's completion record when it is valid AND
+// names this syncer's feed.
+func (fs *Syncer) importRecord() (catdb.SyncRecord, bool) {
+	if fs.db == nil {
+		return catdb.SyncRecord{}, false
+	}
+	rec, err := fs.db.ImportRecord()
+	if err != nil || rec.FeedURL != fs.feedURL {
+		return catdb.SyncRecord{}, false
+	}
+	return rec, true
+}
+
+// ImportComplete reports whether the store holds a whole, durably certified
+// import of this syncer's feed. False for a never-synced store, a legacy
+// store written before completion records existed, an interrupted import,
+// a damaged record, and a store imported from a different feed.
+func (fs *Syncer) ImportComplete() bool {
+	_, ok := fs.importRecord()
+	return ok
+}
+
 // Start launches the background sync goroutine.
-// An immediate sync is performed on first start when the DB is empty.
+// An immediate sync is performed on start unless the store holds a complete,
+// certified import of this feed (ImportComplete). Keying it on "the store is
+// empty" left a partially imported store unsynced for a full interval: an
+// import cut off by a container recreate during first boot left SOME keys,
+// so the next process skipped its startup sync (F-FEED-1, PR #1528).
 //
 // The loop is a feedsched.Scheduler, not a bare 24-hour ticker. Two reasons,
 // both reachable without any infrastructure fault:
@@ -273,7 +363,7 @@ func (fs *Syncer) schedulerConfig() feedsched.Config {
 		Interval:   func() time.Duration { return fs.syncInterval },
 		BackoffMin: syncRetryMin,
 		BackoffMax: syncRetryMax,
-		RunNow:     func() bool { return fs.db.Stats() == 0 },
+		RunNow:     func() bool { return !fs.ImportComplete() },
 		// CHAOS-24: Sync streams and parses a remote gzip tarball (UT1 mirror).
 		// Guard the ROUND so a malformed/hostile archive costs one sync window
 		// rather than terminating an in-line gateway; the last-good BadgerDB
@@ -289,6 +379,36 @@ func (fs *Syncer) schedulerConfig() feedsched.Config {
 		},
 	}
 }
+
+// SetFreeSpaceProbe installs the free-space probe for the store's filesystem.
+// An installed probe is AUTHORITATIVE: when it cannot measure, the write is
+// deferred exactly like a write that would not fit — a guess is not a
+// measurement, and a wrong guess here is a SIGBUS. Only an ABSENT probe (a
+// compatibility platform that cannot measure at all) lets the write proceed
+// unmeasured.
+func (fs *Syncer) SetFreeSpaceProbe(probe func() (uint64, error)) { fs.freeBytes = probe }
+
+// spaceRefusal reports the bounded class and the reason a write of n entries
+// must not start, or ("", "") when it may.
+func (fs *Syncer) spaceRefusal(n int) (class, why string) {
+	if fs.freeBytes == nil {
+		return "", ""
+	}
+	free, err := fs.freeBytes()
+	if err != nil {
+		return failDiskSpaceUnknown, "free space on the store's filesystem could not be measured"
+	}
+	need := syncSpaceNeeded(n)
+	if free >= need {
+		return "", ""
+	}
+	return failDiskSpace, fmt.Sprintf("%d MiB free, a %d-entry write needs about %d MiB", free>>20, n, need>>20)
+}
+
+// StoreEmpty reports whether the community store holds no entries — on a
+// deferred first sync that means NO community category coverage yet, which
+// the diagnostics row must say rather than imply the previous data serves.
+func (fs *Syncer) StoreEmpty() bool { return fs.db == nil || !fs.db.HasEntries() }
 
 // Sync downloads the UT1 tarball, parses all mapped categories, and performs a
 // bulk write into CommunityDB. The previous DB contents remain readable during
@@ -320,16 +440,61 @@ func (fs *Syncer) syncRound() bool {
 		obs.Printf("FeedSync: download/parse failed: %v", err)
 		return false
 	}
+	if len(entries) == 0 {
+		// Nothing to certify: a feed with no mapped domains is a broken
+		// download, never a successful sync of an empty list.
+		fs.noteFailure(failDownload)
+		obs.Printf("FeedSync: the feed carried no mapped domains; nothing imported")
+		return false
+	}
+	if class, why := fs.spaceRefusal(len(entries)); class != "" {
+		fs.noteFailure(class)
+		coverage := "the previous category data keeps serving"
+		if fs.StoreEmpty() {
+			coverage = "no community category data is loaded yet (admin-managed categories only)"
+		}
+		obs.Printf("FeedSync: write REFUSED (%s): %s; %s", class, why, coverage)
+		return false
+	}
 	obs.Printf("FeedSync: parsed %d domain entries, writing to BadgerDB…", len(entries))
 
-	if err := fs.db.BulkWrite(entries); err != nil {
+	// Withdraw the old certificate before any data moves, then write, then
+	// certify. Only a fully written AND fsynced import is ever reported (or
+	// remembered across a restart) as synced.
+	if err := fs.db.BeginImport(); err != nil {
 		fs.noteFailure(failWrite)
-		obs.Printf("FeedSync: bulk write failed: %v", err)
+		obs.Printf("FeedSync: could not begin the import: %v", err)
+		return false
+	}
+	switch outcome, werr := fs.writeBulkWatched(entries); outcome {
+	case bulkWriteReturned:
+		if werr != nil {
+			fs.noteFailure(failWrite)
+			obs.Printf("FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): %v", werr)
+			return false
+		}
+	case bulkWriteDegradedMidWrite:
+		// The store latched a contained memory fault mid-write; the import is a
+		// failure even though BulkWrite has not returned (F-DISK-RECOVERY-1). The
+		// import-pending marker from BeginImport quarantines+rebuilds on the next
+		// boot; this round is surfaced truthfully now.
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: bulk write did not complete — the community category store latched degraded after a contained memory fault mid-write (import NOT complete; the store is rebuilt on the next start)")
+		return false
+	case bulkWriteStalled:
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: bulk write stalled past %s without returning (import NOT complete; the store is rebuilt on the next start)", bulkWriteStallTimeout)
+		return false
+	}
+	rec := catdb.SyncRecord{FeedURL: fs.feedURL, Entries: int64(len(entries)), CompletedAt: time.Now().UTC()}
+	if err := fs.db.CompleteImport(rec); err != nil {
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: import written but could not be certified durable (it is retried): %v", err)
 		return false
 	}
 
-	fs.lastSync.Store(time.Now())
-	fs.totalDomains.Store(int64(len(entries)))
+	fs.lastSync.Store(rec.CompletedAt)
+	fs.totalDomains.Store(rec.Entries)
 	fs.consecutiveFailures.Store(0)
 	fs.lastFailure.Store("")
 	obs.Printf("FeedSync: sync complete: %d domains in %s", len(entries), time.Since(start).Round(time.Second))
@@ -344,6 +509,43 @@ func (fs *Syncer) storeDegraded() bool {
 	}
 	_, _, degraded := fs.db.LookupFaults()
 	return degraded
+}
+
+// writeBulkWatched runs BulkWrite in a goroutine and returns as soon as EITHER
+// it returns, OR the store latches degraded (a contained memory fault on a
+// badger-internal goroutine while the outer call blocks), OR a stall deadline
+// elapses — so a sync that cannot complete is surfaced as a failure even when
+// BulkWrite never returns (F-DISK-RECOVERY-1 req 4).
+//
+// A BulkWrite still running when this returns degraded/stalled is ABANDONED. The
+// store has latched degraded (access refuses every further write), and it is
+// quarantined+rebuilt on the next boot via the import-pending marker, so the
+// abandoned goroutine's mid-write state is thrown away. badger's WriteBatch.Flush
+// takes no context, so there is no clean cancellation; abandoning is the only way
+// to report a write that never returns, and a stalled import holding a goroutine
+// and a badger write transaction indefinitely is itself a resource the appliance
+// should not carry. The channel is buffered so the goroutine never blocks on send
+// after this returns.
+func (fs *Syncer) writeBulkWatched(entries map[string]string) (bulkWriteOutcome, error) {
+	done := make(chan error, 1)
+	go func() { done <- fs.db.BulkWrite(entries) }()
+
+	poll := time.NewTicker(bulkWriteDegradedPoll)
+	defer poll.Stop()
+	stall := time.NewTimer(bulkWriteStallTimeout)
+	defer stall.Stop()
+	for {
+		select {
+		case err := <-done:
+			return bulkWriteReturned, err
+		case <-poll.C:
+			if fs.storeDegraded() {
+				return bulkWriteDegradedMidWrite, nil
+			}
+		case <-stall.C:
+			return bulkWriteStalled, nil
+		}
+	}
 }
 
 // noteFailure records one failed round: the cumulative counter the metrics

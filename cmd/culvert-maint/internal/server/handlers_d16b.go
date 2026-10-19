@@ -62,6 +62,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -137,7 +138,11 @@ func readPassphraseFromEnv(ref string) (string, error) {
 // `passhprase_ref`) fails loudly rather than silently disabling
 // encryption.
 func decodeJSONBody(r *http.Request, dst interface{}) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, maxBodyBytes)
+	return decodeJSONBodyLimit(r, dst, maxBodyBytes)
+}
+
+func decodeJSONBodyLimit(r *http.Request, dst interface{}, limit int64) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -207,7 +212,7 @@ func admissionJournalRecord(opID, kind, actor string, params map[string]interfac
 	return rec
 }
 
-//nolint:cyclop // single-pass admission flow; splitting hides the dedup→build→spawn ordering
+//nolint:cyclop,funlen // single-pass admission flow; splitting hides the dedup→lock→build→spawn ordering
 func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, buildStages func() ([]ops.FlowStage, *opError), opts ...startOpt) (*ops.Op, bool, *opError) {
 	var cfg startCfg
 	for _, o := range opts {
@@ -256,6 +261,20 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		// vars, files) are no longer present.
 		return op, true, nil
 	}
+	// Host maintenance lock (shared with culvert-os-update): a state-changing
+	// op holds it until the flow ends; while OS/engine maintenance holds it,
+	// the op is refused before anything runs. A lock that cannot be opened
+	// at all (state dir unreadable) does not block the agent — logged, the
+	// in-memory lock still serializes agent ops.
+	hostRelease, herr := s.takeHostLock(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey)
+	if herr != nil {
+		return nil, false, herr
+	}
+	defer func() {
+		if hostRelease != nil {
+			hostRelease()
+		}
+	}()
 	// Newly admitted op — deliver the op_id to the caller (so late-bound
 	// stage closures can stamp it onto sub-action audit events) BEFORE
 	// building stages, then late-bound stage construction.
@@ -300,9 +319,14 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	// op flow finishes.
 	slotRelease := releaseSlot
 	releaseSlot = nil
+	hostLock := hostRelease
+	hostRelease = nil // the goroutine owns it now: released when the flow ends
 	s.goOp(func() {
 		if slotRelease != nil {
 			defer slotRelease()
+		}
+		if hostLock != nil {
+			defer hostLock()
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.Cfg.OperationTimeout)
 		defer cancel()
@@ -552,7 +576,12 @@ type backupListEntry struct {
 }
 
 func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer auth.PeerInfo) {
+	// One correlated timing line per listing, whatever the outcome
+	// (backup_list_timing.go).
+	tm := newBackupListTiming(r.Header.Get(headerCorrelation))
+	defer tm.log(r.Context())
 	if s.opts.Runner == nil {
+		tm.outcome = "runner_not_wired"
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "runner_not_wired"})
 		return
 	}
@@ -560,8 +589,16 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	// array on stdout; the agent unmarshals it (so a malformed CLI
 	// output produces a clean 500 rather than corrupting the Content-
 	// Type contract) and re-encodes via writeJSON.
+	tm.composeAt = time.Now()
 	res, err := s.opts.Runner.ComposeBackupList(r.Context())
+	tm.composeDur = time.Since(tm.composeAt)
+	if res != nil {
+		tm.stderr = res.Stderr
+	}
 	if err != nil {
+		if r.Context().Err() != nil {
+			tm.outcome = "runner_canceled"
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"error":  "list_backups_failed",
 			"detail": err.Error(),
@@ -570,6 +607,7 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	}
 	var entries []backupListEntry
 	if jerr := json.Unmarshal(res.Stdout, &entries); jerr != nil {
+		tm.outcome = "parse_error"
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"error":  "list_backups_parse_failed",
 			"detail": jerr.Error(),
@@ -580,6 +618,7 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	if entries == nil {
 		entries = []backupListEntry{}
 	}
+	tm.entries = len(entries)
 	// Per-entry shape validation. The cli is trusted enough that we
 	// accept its output, but a buggy or compromised cli could emit
 	// entries that would mislead the operator (path traversal in
@@ -587,12 +626,14 @@ func (s *Server) handleBackupList(w http.ResponseWriter, r *http.Request, peer a
 	// filename), so we surface a clean 500 rather than serve them
 	// up with the agent's stamp of approval.
 	if verr := validateBackupListEntries(entries, s.opts.Cfg.AllowedBackupDir); verr != nil {
+		tm.outcome = "invalid_entry"
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"error":  "list_backups_invalid_entry",
 			"detail": verr.Error(),
 		})
 		return
 	}
+	tm.outcome = backupListOutcomeOK
 	writeJSON(w, http.StatusOK, entries)
 	_ = peer
 }
@@ -900,3 +941,34 @@ var (
 	_ = audit.OutcomeStarted
 	_ = health.Probe{}
 )
+
+// takeHostLock acquires the host maintenance lock for a state-changing op
+// (nil release for other kinds). While culvert-os-update holds it the op is
+// refused (409) and its admission recorded as failed. A lock that cannot be
+// opened, or an unreadable shutdown fence, refuses admission. A pending
+// shutdown remains fenced after the power helper has released its flock.
+func (s *Server) takeHostLock(opID, kind, actor string, params map[string]interface{}, idemKey string) (func(), *opError) {
+	if !ops.IsStateChanging(kind) {
+		return nil, nil
+	}
+	rel, busy, err := acquireHostMaintenanceLock(s.opts.StateDir)
+	switch {
+	case busy:
+		s.recordAdmissionFailure(opID, kind, actor, params, idemKey, "host_maintenance_in_progress")
+		return nil, augmentErrorWithOp(&opError{Status: http.StatusConflict, Body: map[string]string{
+			"error":  "host_maintenance_in_progress",
+			"detail": "host maintenance is running or shutdown is pending in this boot; retry after maintenance or reboot recovery completes",
+		}}, opID)
+	case err != nil:
+		// Indeterminate is not "free": admitting here would let a retag or
+		// stack recreate run under an engine upgrade or reboot, the exact
+		// overlap the shared lock exists to prevent (Codex P1, PR #1528).
+		log.Printf("culvert-maint: ERROR host maintenance lock unavailable (%v); refusing the operation", err)
+		s.recordAdmissionFailure(opID, kind, actor, params, idemKey, "host_maintenance_lock_unavailable")
+		return nil, augmentErrorWithOp(&opError{Status: http.StatusServiceUnavailable, Body: map[string]string{
+			"error":  "host_maintenance_lock_unavailable",
+			"detail": "host maintenance lock or pending shutdown fence is unavailable; inspect ownership, permissions and pending shutdown state before retrying",
+		}}, opID)
+	}
+	return rel, nil
+}

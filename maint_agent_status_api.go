@@ -108,15 +108,41 @@ func apiMaintAgentStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	maintAgentStatusCache.mu.Lock()
-	defer maintAgentStatusCache.mu.Unlock()
-	if maintAgentStatusCache.payload != nil && time.Since(maintAgentStatusCache.at) < maintAgentStatusCacheTTL {
-		jsonOK(w, maintAgentStatusCache.payload)
-		return
+	// Encode OUTSIDE the cache lock (a viewer that stops reading must not pin
+	// it — the backups listing's rule).
+	jsonOK(w, maintAgentStatusPayload(r.Context()))
+}
+
+// agentReadFailureTTL is how long an UNAVAILABLE agent read is reused. It is
+// short, so a recovered agent is reported within seconds rather than after
+// the full TTL, while single-flight still bounds the host to one read at a
+// time (a down agent is re-asked at most every few seconds).
+const agentReadFailureTTL = 3 * time.Second
+
+// agentReadTTL picks the reuse window for a cached agent payload.
+func agentReadTTL(payload map[string]any, ok time.Duration) time.Duration {
+	if avail, _ := payload["available"].(bool); !avail {
+		return agentReadFailureTTL
 	}
-	out := buildMaintAgentStatusPayload(r.Context())
-	maintAgentStatusCache.payload, maintAgentStatusCache.at = out, time.Now()
-	jsonOK(w, out)
+	return ok
+}
+
+// maintAgentStatusPayload returns the cached status inside its TTL, else
+// performs ONE agent read under the cache lock (single-flight). The read runs
+// on a context DETACHED from the requester (still bounded by the read's own
+// 10 s timeout): the result is shared by every viewer, so one viewer closing
+// its connection must not turn it into a cached "unavailable" for all of them
+// (ASTRA review of f37a2a39 — reproduced against b579).
+func maintAgentStatusPayload(ctx context.Context) map[string]any {
+	c := &maintAgentStatusCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.payload != nil && time.Since(c.at) < agentReadTTL(c.payload, maintAgentStatusCacheTTL) {
+		return c.payload
+	}
+	out := buildMaintAgentStatusPayload(context.WithoutCancel(ctx))
+	c.payload, c.at = out, time.Now()
+	return out
 }
 
 // buildMaintAgentStatusPayload performs one agent status read and shapes the

@@ -68,36 +68,56 @@ const backupsAgentReadBound = 1 << 20 // 1 MiB
 // list_backups.go) the agent's --list-backups CLI already emits and the
 // agent itself already shape-validates before returning it.
 func fetchAgentBackups(ctx context.Context, ep AgentEndpoint) ([]backupListEntry, error) {
+	return fetchAgentBackupsTraced(ctx, ep, newBackupListTrace())
+}
+
+// fetchAgentBackupsTraced is fetchAgentBackups with the correlated timing
+// line (backups_list_trace.go): the id goes to the agent, and exactly one
+// BACKUP_LIST line is logged whatever the outcome.
+func fetchAgentBackupsTraced(ctx context.Context, ep AgentEndpoint, tr *backupListTrace) (entries []backupListEntry, err error) {
+	tr.outcome = "error"
+	defer func() {
+		tr.entries = len(entries)
+		tr.log()
+	}()
 	u, err := url.Parse(ep.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse agent base URL: %w", err)
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/v1/backups"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
+	req, err := http.NewRequestWithContext(tr.withClientTrace(ctx), http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set(headerMaintCorrelation, tr.corr)
 	client := ep.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		tr.end, tr.outcome = time.Now(), classifyAgentFetchError(ctx, err)
 		return nil, fmt.Errorf("maintenance agent unreachable: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	tr.status = resp.StatusCode
 	data, err := io.ReadAll(io.LimitReader(resp.Body, backupsAgentReadBound))
+	tr.end = time.Now()
 	if err != nil {
+		tr.outcome = "read_" + classifyAgentFetchError(ctx, err)
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		tr.outcome = "agent_http_error"
 		return nil, fmt.Errorf("maintenance agent returned HTTP %d", resp.StatusCode)
 	}
-	var entries []backupListEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	var list []backupListEntry
+	if err := json.Unmarshal(data, &list); err != nil {
+		tr.outcome = "parse_error"
 		return nil, fmt.Errorf("parse agent response: %w", err)
 	}
-	return entries, nil
+	tr.outcome = "ok"
+	return list, nil
 }
 
 func registerBackupsRoutes(mux *http.ServeMux) {
@@ -117,6 +137,7 @@ var backupsCache struct {
 	mu      sync.Mutex
 	at      time.Time
 	payload map[string]any
+	corr    string // correlation id of the fetch that produced payload
 }
 
 const backupsCacheTTL = 15 * time.Second
@@ -162,7 +183,10 @@ func apiBackupsList(w http.ResponseWriter, r *http.Request) {
 func backupsListingPayload(ctx context.Context) map[string]any {
 	backupsCache.mu.Lock()
 	defer backupsCache.mu.Unlock()
-	if backupsCache.payload != nil && time.Since(backupsCache.at) < backupsCacheTTL {
+	if backupsCache.payload != nil && time.Since(backupsCache.at) < agentReadTTL(backupsCache.payload, backupsCacheTTL) {
+		if avail, _ := backupsCache.payload["available"].(bool); !avail {
+			logCachedBackupsNegative(backupsCache.corr, backupsCache.at)
+		}
 		return backupsCache.payload
 	}
 	// Stamp the FETCH START, not its return: the agent scans the directory
@@ -171,8 +195,12 @@ func backupsListingPayload(ctx context.Context) map[string]any {
 	// invalidation compares this stamp against finished_at, so it must never
 	// claim a snapshot is newer than it can prove.
 	start := time.Now()
-	out := buildBackupsPayload(ctx)
-	backupsCache.payload, backupsCache.at = out, start
+	// Detached from the requester (bounded by the fetch's own timeout): the
+	// listing is shared, so one viewer's disconnect must not be cached as
+	// "agent unavailable" for everyone.
+	tr := newBackupListTrace()
+	out := buildBackupsPayload(context.WithoutCancel(ctx), tr)
+	backupsCache.payload, backupsCache.at, backupsCache.corr = out, start, tr.corr
 	return out
 }
 
@@ -182,9 +210,10 @@ func backupsListingPayload(ctx context.Context) map[string]any {
 // throws on any non-2xx, which would blank the panel exactly while the
 // operator is diagnosing the agent (review P2; mirrors the not-configured
 // branch that already behaved this way).
-func buildBackupsPayload(ctx context.Context) map[string]any {
+func buildBackupsPayload(ctx context.Context, tr *backupListTrace) map[string]any {
 	ep, ok := resolveLocalMaintAgentEndpoint()
 	if !ok {
+		tr.corr = "not_configured" // no fetch, so no agent-side line to correlate
 		return map[string]any{
 			"available": false,
 			"reason":    "maintenance agent not configured",
@@ -192,7 +221,7 @@ func buildBackupsPayload(ctx context.Context) map[string]any {
 	}
 	fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	entries, err := fetchAgentBackups(fctx, ep)
+	entries, err := fetchAgentBackupsTraced(fctx, ep, tr)
 	if err != nil {
 		return map[string]any{
 			"available": false,

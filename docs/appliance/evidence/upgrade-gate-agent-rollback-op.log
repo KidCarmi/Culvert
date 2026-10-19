@@ -1,0 +1,28 @@
+2026-10-03T10:36:53.637495639Z	agent	NOTE	op_id=01M40ND502SFVPD74F4TX6DCE8 kind=rollbacks.create actor=uid=0,user=root — started
+2026-10-03T10:36:53.637507052Z	capture_before	START
+2026-10-03T10:36:53.890672943Z	capture_before	out	capture_before: prior_digests=sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1,sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1,sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1 baseline: 503 503 Service Unavailable preserved=[setup_complete,session_secret,ca] failing=[clamav,policy_loaded,policy_posture]
+2026-10-03T10:36:53.890684885Z	capture_before	END succeeded
+2026-10-03T10:36:53.890689595Z	rollback_pull	START
+2026-10-03T10:36:53.963884511Z	rollback_pull	out	rollback_pull: skipped (image present locally)
+2026-10-03T10:36:53.963899951Z	rollback_pull	END succeeded
+2026-10-03T10:36:53.963905713Z	rollback_restart	START
+2026-10-03T10:36:55.525857311Z	rollback_restart	err	 Container proj-origin-allowed-1 Running 
+2026-10-03T10:36:55.525876972Z	rollback_restart	err	 Container proj-origin-blocked-1 Running 
+2026-10-03T10:36:55.525879045Z	rollback_restart	err	 Container culvert-clamav Running 
+2026-10-03T10:36:55.525880682Z	rollback_restart	err	 Container culvert Recreate 
+2026-10-03T10:36:55.525882142Z	rollback_restart	err	 Container culvert Recreated 
+2026-10-03T10:36:55.525883549Z	rollback_restart	err	 Container culvert-clamav Waiting 
+2026-10-03T10:36:55.525884888Z	rollback_restart	err	 Container culvert-clamav Healthy 
+2026-10-03T10:36:55.525886326Z	rollback_restart	err	 Container culvert Starting 
+2026-10-03T10:36:55.525887949Z	rollback_restart	err	 Container culvert Started 
+2026-10-03T10:36:55.525891214Z	rollback_restart	END succeeded
+2026-10-03T10:36:55.525896904Z	rollback_health	START
+2026-10-03T10:36:57.531794547Z	rollback_health	out	ready=true ready_detail="503 503 Service Unavailable tolerated: failing [clamav,policy_loaded]; /ready was already non-2xx and no row that was ok broke after 2 attempt(s) in 2.005s" health=true health_detail="200 200 OK" not_restored=[setup_complete] duration=2.005875881s
+2026-10-03T10:36:57.531815521Z	rollback_health	END succeeded
+2026-10-03T10:36:57.531820789Z	rollback_verify	START
+2026-10-03T10:36:57.744453935Z	rollback_verify	out	verify: running_digests=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f
+2026-10-03T10:36:57.744467593Z	rollback_verify	END succeeded
+2026-10-03T10:36:57.74447361Z	report	START
+2026-10-03T10:36:57.744482823Z	report	out	rollback mode=image target_ref="127.0.0.1:5055/culvert@sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f" prior_digests=sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1,sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1,sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1 running_after=sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f,sha256:f714e55b7b6708442af164accb082a3c3c89a79ecd37934931af3b166a4f448f health=[ready=true ready_detail="503 503 Service Unavailable tolerated: failing [clamav,policy_loaded]; /ready was already non-2xx and no row that was ok broke after 2 attempt(s) in 2.005s" health=true health_detail="200 200 OK" not_restored=[setup_complete] duration=2.005875881s]
+2026-10-03T10:36:57.744485067Z	report	END succeeded
+2026-10-03T10:36:57.746555374Z	agent	NOTE	op finished succeeded

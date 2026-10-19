@@ -1,0 +1,381 @@
+{
+  "schema_version": 1,
+  "purpose": "Vendor-inspired local recovery worker and prerequisite diagnostics; development overlay, not full OVA qualification",
+  "runtime_source_sha": "b4cc8b00c4f671408ffa74ab5d6c66023d2f8c40",
+  "additional_authorization_tests_sha": "e7833534037e5388e51c978904d0383c4953df08",
+  "baseline": {
+    "ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+    "source_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+    "image_source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+    "provisioning_drift": true
+  },
+  "lab_limits": {
+    "vm_count": 1,
+    "vcpus": 2,
+    "ram_mib": 4096,
+    "thin_disk_gib": 40
+  },
+  "hashes": {
+    "culvert-console": "9b7a34ebd6fc7442495c24808cea55059cd49014536f3565c57bbf558eacb302",
+    "culvert-console-host.service": "a4b8f59590cc8163c8b70eddd8e7e6a02fa4703f99dbefa8eba1342538523e7c"
+  },
+  "validation": {
+    "runtime_ci": "https://github.com/KidCarmi/Culvert/actions/runs/37184403252",
+    "authorization_tests_ci": "https://github.com/KidCarmi/Culvert/actions/runs/37184866359",
+    "ci_result": "PASS: shuffled race tests twice, vet, root store faults, fuzz, static compiler, installer faults, degraded CLI",
+    "runtime_fuzz_executions": 179073,
+    "lint": "PASS: zero findings in all three changed Go packages",
+    "native_tests": "PASS: all three Go packages twice; storage tests as root; four-file installer faults and repeated installation",
+    "pam_and_terminal": "PASS: wrong-password rejection, real PAM login/logout, shell echo restoration, trusted journal UID/correlation, output-canary exclusion",
+    "independent_code_review": "No blocking findings in the final reviewed integration; not a completed product security assessment",
+    "native": {
+      "vm": "culvert-esxi-5950cf58bc69",
+      "runtime_sha": "b4cc8b00c4f671408ffa74ab5d6c66023d2f8c40",
+      "initial_guest_ip_wait": "FAIL: no usable VMware Tools IP within 150 seconds",
+      "checks": {
+        "readonly_diagnostics_and_public_permissions": {
+          "checks": [
+            {
+              "id": "storage:/",
+              "state": "ok",
+              "detail": "Available 36502 MiB / 38608 MiB; free inodes 5024635 / 5111808"
+            },
+            {
+              "id": "storage:/var/lib/docker",
+              "state": "ok",
+              "detail": "Available 36502 MiB / 38608 MiB; free inodes 5024635 / 5111808"
+            },
+            {
+              "id": "storage:/var/lib/culvert-appliance",
+              "state": "ok",
+              "detail": "Available 36502 MiB / 38608 MiB; free inodes 5024635 / 5111808"
+            },
+            {
+              "id": "storage:/var/log/journal",
+              "state": "ok",
+              "detail": "Available 36502 MiB / 38608 MiB; free inodes 5024635 / 5111808"
+            },
+            {
+              "id": "clock",
+              "state": "ok",
+              "detail": "Host reports synchronized clock; independent time accuracy not verified"
+            },
+            {
+              "id": "configured_dns",
+              "state": "not_configured",
+              "detail": "No valid configured FQDN; no external DNS target queried"
+            },
+            {
+              "id": "setup_certificate",
+              "state": "unknown",
+              "detail": "Setup listener certificate unavailable"
+            }
+          ],
+          "history_available": true
+        },
+        "disconnect_worker_crash_and_timed_rollback": {
+          "operation": "b47874d3e5db331ddd997a040098934e",
+          "original_file_restored": true
+        },
+        "explicit_confirmation": {
+          "operation": "8f7d5c6bcbeb4d6d59ae7f8a9f92ac85",
+          "preserved_dhcp6": "true"
+        },
+        "pending_static_change_rolled_back_after_reboot": {
+          "before": {
+            "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+            "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+            "file": "01a52d3fccfd18500b36addaf07ae104a547660f0d6489f2260c6c1be613eb6d  /etc/netplan/60-culvert.yaml\n600\n",
+            "operation": "1e0a263c96bd398ea3ad50619f47a567"
+          },
+          "after": {
+            "boot": "bb23c6ac-9e76-4f4b-979c-fc35374d8d91",
+            "machine": "3fd6b6b5cedd480081f19d8fdc25f157"
+          },
+          "original_file_restored": true
+        },
+        "four_public_views_live_buffer": "PASS",
+        "failed_firstboot_display": "PASS (live terminal buffer)",
+        "mismatched_terminal_rejected": "PASS",
+        "root_poweroff": {
+          "ssh_returncode": 0,
+          "state": "PASS"
+        }
+      },
+      "before_reboot": {
+        "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+        "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+        "file": "01a52d3fccfd18500b36addaf07ae104a547660f0d6489f2260c6c1be613eb6d  /etc/netplan/60-culvert.yaml\n600\n",
+        "operation": "1e0a263c96bd398ea3ad50619f47a567"
+      },
+      "installed_hashes": "9b7a34ebd6fc7442495c24808cea55059cd49014536f3565c57bbf558eacb302  /opt/culvert-appliance/bin/culvert-console\na4b8f59590cc8163c8b70eddd8e7e6a02fa4703f99dbefa8eba1342538523e7c  /etc/systemd/system/culvert-console-host.service\n",
+      "result": "PASS",
+      "views_snapshot": {
+        "prerequisites": [
+          {
+            "id": "storage:/",
+            "state": "ok",
+            "detail": "Available 36523 MiB / 38608 MiB; free inodes 5024622 / 5111808"
+          },
+          {
+            "id": "storage:/var/lib/docker",
+            "state": "ok",
+            "detail": "Available 36523 MiB / 38608 MiB; free inodes 5024622 / 5111808"
+          },
+          {
+            "id": "storage:/var/lib/culvert-appliance",
+            "state": "ok",
+            "detail": "Available 36523 MiB / 38608 MiB; free inodes 5024622 / 5111808"
+          },
+          {
+            "id": "storage:/var/log/journal",
+            "state": "ok",
+            "detail": "Available 36523 MiB / 38608 MiB; free inodes 5024622 / 5111808"
+          },
+          {
+            "id": "clock",
+            "state": "ok",
+            "detail": "Host reports synchronized clock; independent time accuracy not verified"
+          },
+          {
+            "id": "configured_dns",
+            "state": "not_configured",
+            "detail": "No valid configured FQDN; no external DNS target queried"
+          },
+          {
+            "id": "setup_certificate",
+            "state": "unknown",
+            "detail": "Setup listener certificate unavailable"
+          }
+        ],
+        "recovery": {
+          "version": 1,
+          "records": [
+            {
+              "id": "5764f43e484c0ec231731b21852ad811",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T06:54:51Z",
+              "observation": "activating/start result=success exit=0 markers=ovf,console,images"
+            },
+            {
+              "id": "8c8e3996f5b883a15ffbe3cc819687fc",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T06:55:38Z",
+              "observation": "activating/auto-restart result=exit-code exit=1 markers=ovf,console,images"
+            },
+            {
+              "id": "b72f797acf843639bcc5572d9f48e50d",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T06:57:35Z",
+              "observation": "activating/start result=success exit=0 markers=ovf,console,images"
+            },
+            {
+              "id": "259b13ea246743e1b4caa61c00d8c4fe",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T06:57:51Z",
+              "observation": "activating/auto-restart result=exit-code exit=1 markers=ovf,console,images"
+            },
+            {
+              "id": "b47874d3e5db331ddd997a040098934e",
+              "action": "network",
+              "phase": "rolled_back",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T06:59:36Z"
+            },
+            {
+              "id": "e4251f40807ff83f4722213cf744ddc9",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T06:59:43Z",
+              "observation": "activating/start result=success exit=0 markers=ovf,console,images"
+            },
+            {
+              "id": "ff51823c7bc7084a85f41ec8077c22f9",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T06:59:59Z",
+              "observation": "activating/auto-restart result=exit-code exit=1 markers=ovf,console,images"
+            },
+            {
+              "id": "8f7d5c6bcbeb4d6d59ae7f8a9f92ac85",
+              "action": "network",
+              "phase": "confirmed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T07:01:39Z"
+            },
+            {
+              "id": "1e0a263c96bd398ea3ad50619f47a567",
+              "action": "network",
+              "phase": "rolled_back",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T07:01:44Z"
+            },
+            {
+              "id": "c6a16d69b3e8fdec23e10c32a3d57237",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "b49a4119-b404-442e-ad41-06f2f8baff16",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T07:01:45Z",
+              "observation": "activating/start result=success exit=0 markers=ovf,console,images"
+            },
+            {
+              "id": "6bea8d7f8d0ac5375f3ac20e06768d17",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "bb23c6ac-9e76-4f4b-979c-fc35374d8d91",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T07:05:08Z",
+              "observation": "inactive/dead result=success exit=0 markers=ovf,console,images"
+            },
+            {
+              "id": "c3fed727f0ae6e6bb0e4e0dec633df07",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "bb23c6ac-9e76-4f4b-979c-fc35374d8d91",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T07:08:20Z",
+              "observation": "activating/start result=success exit=0 markers=ovf,console,images"
+            },
+            {
+              "id": "dca71096234dcba4ad03129556584cd4",
+              "action": "firstboot_observation",
+              "phase": "observed",
+              "boot": "bb23c6ac-9e76-4f4b-979c-fc35374d8d91",
+              "machine": "3fd6b6b5cedd480081f19d8fdc25f157",
+              "at": "2026-10-04T07:09:35Z",
+              "observation": "activating/auto-restart result=exit-code exit=1 markers=ovf,console,images"
+            }
+          ],
+          "network_id": "1e0a263c96bd398ea3ad50619f47a567",
+          "network_phase": "rolled_back",
+          "available": true
+        },
+        "hostname": "culvert-esxi-5950cf58bc69",
+        "interfaces": [
+          {
+            "name": "ens32",
+            "link": "UP",
+            "addresses": [
+              "192.168.1.209/24"
+            ]
+          }
+        ],
+        "ipv6_gateway": "unknown",
+        "gateway": "192.168.1.1 (ens32)",
+        "dns": [
+          "192.168.1.1"
+        ],
+        "setup_status": "unknown",
+        "management_available": false,
+        "schema_version": 1,
+        "observed_at": "2026-10-04T07:11:35Z",
+        "version": "dev-candidate.78e1bc566e80",
+        "candidate": true,
+        "addresses": [
+          "192.168.1.209"
+        ],
+        "management_urls": [
+          "https://192.168.1.209:9090"
+        ],
+        "network": "address_assigned",
+        "firstboot": {
+          "ActiveState": "activating",
+          "ExecMainStatus": "1",
+          "Job": "",
+          "LoadState": "loaded",
+          "NRestarts": "1",
+          "Result": "exit-code",
+          "SubState": "auto-restart"
+        },
+        "steps": [
+          {
+            "id": "ovf",
+            "label": "Network configuration",
+            "state": "recorded"
+          },
+          {
+            "id": "console",
+            "label": "Console access",
+            "state": "recorded"
+          },
+          {
+            "id": "images",
+            "label": "Application images",
+            "state": "recorded"
+          },
+          {
+            "id": "install",
+            "label": "Service installation",
+            "state": "not_recorded"
+          },
+          {
+            "id": "agent",
+            "label": "Maintenance agent",
+            "state": "not_recorded"
+          },
+          {
+            "id": "complete",
+            "label": "Provisioning complete",
+            "state": "not_recorded"
+          }
+        ],
+        "phase": "failed",
+        "reason": "FIRSTBOOT_FAILED",
+        "message": "Provisioning failed; open diagnostics.",
+        "application_responding": false,
+        "administrator_enrolled": false,
+        "traffic_verified": false
+      }
+    }
+  },
+  "retained_attempts": [
+    {
+      "result": "FAIL",
+      "detail": "Initial guest-IP discovery had no usable VMware Tools address within 150 seconds; later bounded retry reached the guest. Cause unproven."
+    },
+    {
+      "result": "REFUSED_BEFORE_QUEUE",
+      "runtime": "a2ab6afdd69e690f88cc20ab0e6db830b8490d18",
+      "detail": "Default appliance enables DHCPv6; initial IPv4-only guard refused it. b4cc8b00 preserves and rechecks the existing DHCPv6 flag; native merged-Netplan observation confirmed true was retained."
+    },
+    {
+      "result": "FAIL",
+      "detail": "First PAM helper attempt rejected the negative password but did not observe the authenticated menu. A later setup attempt failed at chpasswd without retaining diagnostic stderr. Subsequent read-only check showed sudo -n true worked. State-driven password-prompt wait and a final bounded retry passed; the original failures remain unclassified."
+    }
+  ],
+  "limits": [
+    "Manual console overlay on the recorded older OVA; no new fully integrated OVA was qualified.",
+    "Reboot recovery passed within the helper 300-second window; cold-boot access latency remains unresolved and is not a product SLA.",
+    "Static IPv6, virtual interfaces and complex Netplan layouts are refused. DHCPv6 preservation is supported; IPv6 connectivity was not qualified.",
+    "Network confirmation is operator acknowledgement, not proof of browser/proxy reachability. Live TLS certificate and configured-FQDN checks were unavailable/not configured on this baseline; deterministic Go tests cover their interpretation.",
+    "Permanent worker stoppage, damaged or unwritable storage, failed Netplan and external privileged edits can prevent automatic restoration. Backups/state remain and success is not fabricated.",
+    "Only managed transactions share the lock. Legacy culvert-net/root writers require coordination; conflicts preserve external files until explicit operator resolution.",
+    "Poweroff returned zero and ESXi observed poweredOff; its post-dispatch record could not be read after shutdown. Durable pre-action save ordering is covered by root-store and fault tests.",
+    "Full appliance readiness/enforcement, integrated OVA qualification, separate maintenance-reboot defect and completed security review remain open."
+  ],
+  "cleanup": {
+    "vm_deleted": true,
+    "remaining_owned_vms": 0,
+    "private_run_files_removed": true
+  }
+}

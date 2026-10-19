@@ -1,0 +1,349 @@
+== E1-full-disk-alone 2026-10-03T12:05:45Z
+/dev/loop0       1992552 1976160         8 100% /home/runner/work/_temp/appliance-enospc/mnt
+culvert Up 22 seconds (healthy)
+culvert-origin-blocked-1 Up 28 seconds
+culvert-clamav Up 28 seconds (healthy)
+culvert-origin-allowed-1 Up 28 seconds
+status=exited restarting=false restarts=1 oom=false exit=2 err=failed to set up container networking: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json2562579832: no space left on device started=2026-10-03T12:05:22.508656695Z
+-- proxy crash head (first panic/fatal/signal line + 30)
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fc581300000 pc=0x490ffe]
+
+goroutine 216 gp=0x214f0b8be000 m=8 mp=0x214ef8fa3008 [running]:
+runtime.throw({0x176b0eb?, 0x214f0b93a2d0?})
+	runtime/panic.go:1229 +0x48 fp=0x214f0374b9e0 sp=0x214f0374b9b0 pc=0x4890a8
+runtime.sigpanic()
+	runtime/signal_unix.go:928 +0x10a fp=0x214f0374ba40 sp=0x214f0374b9e0 pc=0x48b0ea
+runtime.memmove()
+	runtime/memmove_amd64.s:212 +0x19e fp=0x214f0374ba48 sp=0x214f0374ba40 pc=0x490ffe
+github.com/dgraph-io/badger/v4.(*logFile).writeEntry(_, _, _, {{0x0}, {0x7fff36095d8a, 0xf}, {0x7fff36095d8a, 0xf}, 0x0, 0x1, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:330 +0xd5 fp=0x214f0374baa0 sp=0x214f0374ba48 pc=0xd29555
+github.com/dgraph-io/badger/v4.(*memTable).Put(0x214ef8d729c0, {0x214f1aead800, 0x20, 0x20}, {0x40, 0x0, 0x0, {0x214f19ec0178, 0x5, 0x8}, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:183 +0x1c5 fp=0x214f0374bdf0 sp=0x214f0374baa0 pc=0xd28585
+github.com/dgraph-io/badger/v4.(*DB).writeToLSM(0x214ef8c6f208, 0x214f14f19200)
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:836 +0x2ac fp=0x214f0374bec0 sp=0x214f0374bdf0 pc=0xd0080c
+github.com/dgraph-io/badger/v4.(*DB).writeRequests(0x214ef8c6f208, {0x214f0b536050, 0x1, 0xa})
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:902 +0x1e8 fp=0x214f0374bf58 sp=0x214f0374bec0 pc=0xd00a88
+-- proxy log
+[Culvert] 2026/10/03 12:05:23 release catalog: Sigstore identity signature VERIFIED
+[Culvert] 2026/10/03 12:05:23 release catalog: Sigstore identity signature VERIFIED
+[Culvert] 2026/10/03 12:05:23 release management enabled: proxy_repo="ghcr.io/kidcarmi/culvert" verify=enforce schemes=sigstore local_agent=/run/culvert-maint/culvert-maint.sock
+[Culvert] 2026/10/03 12:05:23 FrontendV2: disabled (set CULVERT_EXPERIMENTAL_UI=1 to enable the experimental /app preview)
+[Culvert] 2026/10/03 12:05:23 UITLS: detected Cloudflare public IP: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: detected AWS-checkip public IP: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: detected public IP via container fallback: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: self-signed cert SANs: IPs=[127.0.0.1 ::1 10.214.0.5 52.186.174.179] DNS=[localhost 09bdf34dafb7]
+[Culvert] 2026/10/03 12:05:23 Proxy: http://localhost:8080
+[Culvert] 2026/10/03 12:05:23 UITLS: https://localhost:9090 (self-signed)
+[Culvert] 2026/10/03 12:05:24 First-time setup: admin user "enospcadmin" created
+[Culvert] 2026/10/03 12:05:24 Auth: default authentication = Open unmatched traffic (defaultAuthOutcome=Exempt)
+[Culvert] 2026/10/03 12:05:24 UI: default authentication set to "Exempt"
+[Culvert] 2026/10/03 12:05:24 UI: default policy action set to "deny"
+[Culvert] 2026/10/03 12:05:24 UI: policy rule added priority=10 name="qual-allow-origin" action="Allow"
+[Culvert] 2026/10/03 12:05:25 AUTH_DEFAULT_EXEMPT (open, no rule) 172.17.0.1 -> "origin-allowed" {req_id=5ed3a2147a21d64b}
+[Culvert] 2026/10/03 12:05:25 POLICY_ALLOW rule="qual-allow-origin" pri=10 172.17.0.1 GET "origin-allowed" [destFQDN=origin-allowed] {req_id=5ed3a2147a21d64b identity= rule=qual-allow-origin action=allow}
+[Culvert] 2026/10/03 12:05:25 WARN SecurityScan: ClamAV error (connect_failed): clamav: connect: dial tcp 10.214.0.2:3310: connect: connection refused — forwarding UNSCANNED (fail-open); total 1
+[Culvert] 2026/10/03 12:05:25 AUTH_DEFAULT_EXEMPT (open, no rule) 172.17.0.1 -> "origin-blocked" {req_id=18b4daf96e576558}
+[Culvert] 2026/10/03 12:05:25 POLICY_DEFAULT_DENY 172.17.0.1 GET "origin-blocked" {req_id=18b4daf96e576558 identity= action=deny}
+[Culvert] 2026/10/03 12:05:25 FeedSync: parsed 2570579 domain entries, writing to BadgerDB…
+unexpected fault address 0x7fc581300000
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fc581300000 pc=0x490ffe]
+
+goroutine 216 gp=0x214f0b8be000 m=8 mp=0x214ef8fa3008 [running]:
+runtime.throw({0x176b0eb?, 0x214f0b93a2d0?})
+	runtime/panic.go:1229 +0x48 fp=0x214f0374b9e0 sp=0x214f0374b9b0 pc=0x4890a8
+runtime.sigpanic()
+	runtime/signal_unix.go:928 +0x10a fp=0x214f0374ba40 sp=0x214f0374b9e0 pc=0x48b0ea
+runtime.memmove()
+	runtime/memmove_amd64.s:212 +0x19e fp=0x214f0374ba48 sp=0x214f0374ba40 pc=0x490ffe
+github.com/dgraph-io/badger/v4.(*logFile).writeEntry(_, _, _, {{0x0}, {0x7fff36095d8a, 0xf}, {0x7fff36095d8a, 0xf}, 0x0, 0x1, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:330 +0xd5 fp=0x214f0374baa0 sp=0x214f0374ba48 pc=0xd29555
+github.com/dgraph-io/badger/v4.(*memTable).Put(0x214ef8d729c0, {0x214f1aead800, 0x20, 0x20}, {0x40, 0x0, 0x0, {0x214f19ec0178, 0x5, 0x8}, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:183 +0x1c5 fp=0x214f0374bdf0 sp=0x214f0374baa0 pc=0xd28585
+github.com/dgraph-io/badger/v4.(*DB).writeToLSM(0x214ef8c6f208, 0x214f14f19200)
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:836 +0x2ac fp=0x214f0374bec0 sp=0x214f0374bdf0 pc=0xd0080c
+github.com/dgraph-io/badger/v4.(*DB).writeRequests(0x214ef8c6f208, {0x214f0b536050, 0x1, 0xa})
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:902 +0x1e8 fp=0x214f0374bf58 sp=0x214f0374bec0 pc=0xd00a88
+-- /data usage
+
+Run 'docker run --help' for more information
+docker: Error response from daemon: failed to create prepare snapshot dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-1115367934/work: no space left on device
+-- bounded dockerd log
+time="2026-10-03T12:05:30.525995598Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526082531Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526131793Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526193789Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526245956Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526370569Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526421404Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526493799Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526539405Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526604316Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526676962Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526764255Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526814038Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526860024Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526908454Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526957576Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.527009443Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.527826911Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.530845063Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.533844378Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.536840187Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.538390776Z" level=info msg="received task-delete event from containerd" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-10-03T12:05:30.538491571Z" level=info msg="shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.538523070Z" level=info msg="cleaning up after shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.538768188Z" level=info msg="cleaning up dead shim" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.539851173Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.640104141Z" level=info msg="restarting container" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da exitCode=2 exitedAt="2026-10-03 12:05:30.528129212 +0000 UTC" manualRestart=false restartCount=1 restartPolicy="{unless-stopped 0}"
+time="2026-10-03T12:05:30.643595526Z" level=error msg="failed to process event" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da error="write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json3920625110: no space
+time="2026-10-03T12:05:30.662111599Z" level=info msg="connecting to shim 09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da" address="unix:///run/containerd/s/c1669ed7ebba5c8c290413e4fd2dc55639c5a0bab7058ec461e312a9e4b12a22" namespace=moby protocol=ttrpc version=3
+time="2026-10-03T12:05:30.723336954Z" level=info msg="sbJoin: gwep4 ''->'47d7992de1b7', gwep6 ''->''" eid=47d7992de1b7 ep=culvert net=culvert_default nid=cb931934e006
+time="2026-10-03T12:05:30.771773776Z" level=info msg="shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.771894381Z" level=info msg="cleaning up after shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.771940374Z" level=info msg="received task-delete event from containerd" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-10-03T12:05:30.771991452Z" level=info msg="cleaning up dead shim" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.784069469Z" level=error msg="09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da: failed saving state on start failure: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-config.v2.json1365494868: no space lef
+time="2026-10-03T12:05:30.784653499Z" level=error msg="09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da cleanup: failed to delete container from containerd: NotFound: container \"09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da\" in namespace \"moby\": not found"
+time="2026-10-03T12:05:30.864994502Z" level=error msg="restartmanger wait error: failed to set up container networking: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json2562579832: no space left on device"
+time="2026-10-03T12:05:45.527639043Z" level=warning msg="Error decoding log file" error="unexpected EOF"
+time="2026-10-03T12:05:45.646076196Z" level=error msg="Error saving dying container to disk: invalid output path: stat /var/lib/docker/containers/ba532345db068035373bdac83e9e5cccc2b8bac3b48d9b40340e4cd721146aed: no such file or directory"
+time="2026-10-03T12:05:45.646400481Z" level=error msg="Handler for POST /containers/create returned error" error-response="failed to create prepare snapshot dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-1115367934/work: no space left on device" met
+== E1-health-failed 2026-10-03T12:05:48Z
+/dev/loop0       1992552 1976168         0 100% /home/runner/work/_temp/appliance-enospc/mnt
+culvert Up 25 seconds (healthy)
+culvert-origin-blocked-1 Up 31 seconds
+culvert-clamav Up 31 seconds (healthy)
+culvert-origin-allowed-1 Up 31 seconds
+status=exited restarting=false restarts=1 oom=false exit=2 err=failed to set up container networking: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json2562579832: no space left on device started=2026-10-03T12:05:22.508656695Z
+-- proxy crash head (first panic/fatal/signal line + 30)
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fc581300000 pc=0x490ffe]
+
+goroutine 216 gp=0x214f0b8be000 m=8 mp=0x214ef8fa3008 [running]:
+runtime.throw({0x176b0eb?, 0x214f0b93a2d0?})
+	runtime/panic.go:1229 +0x48 fp=0x214f0374b9e0 sp=0x214f0374b9b0 pc=0x4890a8
+runtime.sigpanic()
+	runtime/signal_unix.go:928 +0x10a fp=0x214f0374ba40 sp=0x214f0374b9e0 pc=0x48b0ea
+runtime.memmove()
+	runtime/memmove_amd64.s:212 +0x19e fp=0x214f0374ba48 sp=0x214f0374ba40 pc=0x490ffe
+github.com/dgraph-io/badger/v4.(*logFile).writeEntry(_, _, _, {{0x0}, {0x7fff36095d8a, 0xf}, {0x7fff36095d8a, 0xf}, 0x0, 0x1, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:330 +0xd5 fp=0x214f0374baa0 sp=0x214f0374ba48 pc=0xd29555
+github.com/dgraph-io/badger/v4.(*memTable).Put(0x214ef8d729c0, {0x214f1aead800, 0x20, 0x20}, {0x40, 0x0, 0x0, {0x214f19ec0178, 0x5, 0x8}, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:183 +0x1c5 fp=0x214f0374bdf0 sp=0x214f0374baa0 pc=0xd28585
+github.com/dgraph-io/badger/v4.(*DB).writeToLSM(0x214ef8c6f208, 0x214f14f19200)
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:836 +0x2ac fp=0x214f0374bec0 sp=0x214f0374bdf0 pc=0xd0080c
+github.com/dgraph-io/badger/v4.(*DB).writeRequests(0x214ef8c6f208, {0x214f0b536050, 0x1, 0xa})
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:902 +0x1e8 fp=0x214f0374bf58 sp=0x214f0374bec0 pc=0xd00a88
+[Culvert] 2026/10/03 12:05:22 MemoryBackstop: no finite container memory limit detected; soft limit not set (set GOMEMLIMIT to enable)
+[Culvert] 2026/10/03 12:05:22 Loader: ui_users.json: file "/data/ui_users.json" missing — caller may bootstrap defaults (D1.2-flag-F1)
+[Culvert] 2026/10/03 12:05:22 Audit: persisting to /data/audit.jsonl
+[Culvert] 2026/10/03 12:05:22 RequestLog: persisting to /data/requests.jsonl (max 100 MB)
+[Culvert] 2026/10/03 12:05:22 LogStore: off (enable from the admin UI, or set log_store_path)
+[Culvert] 2026/10/03 12:05:22 GeoIP: loaded /app/GeoLite2-Country.mmdb
+[Culvert] 2026/10/03 12:05:22 WARNING: base_url not set — OIDC/SAML callbacks will use request Host header. Set proxy.base_url in config for reliable IdP redirects.
+[Culvert] 2026/10/03 12:05:22 IdP: loaded from /data/idp_profiles.json (0 profiles)
+[Culvert] 2026/10/03 12:05:22 Metrics: /metrics open (set -metrics-token to restrict)
+[Culvert] 2026/10/03 12:05:22 Blocklist not found at /data/blocklist.txt — starting with empty list
+[Culvert] 2026/10/03 12:05:22 SSLCA: Root CA ready (persisted at /data/ca.bundle, encrypted=true)
+[Culvert] 2026/10/03 12:05:22 Policy: 0 rule(s) loaded from /data/policy.json
+[Culvert] 2026/10/03 12:05:22 URLCat: 27 categories loaded from categories.json
+-- proxy log
+[Culvert] 2026/10/03 12:05:23 release catalog: Sigstore identity signature VERIFIED
+[Culvert] 2026/10/03 12:05:23 release catalog: Sigstore identity signature VERIFIED
+[Culvert] 2026/10/03 12:05:23 release management enabled: proxy_repo="ghcr.io/kidcarmi/culvert" verify=enforce schemes=sigstore local_agent=/run/culvert-maint/culvert-maint.sock
+[Culvert] 2026/10/03 12:05:23 FrontendV2: disabled (set CULVERT_EXPERIMENTAL_UI=1 to enable the experimental /app preview)
+[Culvert] 2026/10/03 12:05:23 UITLS: detected Cloudflare public IP: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: detected AWS-checkip public IP: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: detected public IP via container fallback: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: self-signed cert SANs: IPs=[127.0.0.1 ::1 10.214.0.5 52.186.174.179] DNS=[localhost 09bdf34dafb7]
+[Culvert] 2026/10/03 12:05:23 Proxy: http://localhost:8080
+[Culvert] 2026/10/03 12:05:23 UITLS: https://localhost:9090 (self-signed)
+[Culvert] 2026/10/03 12:05:24 First-time setup: admin user "enospcadmin" created
+[Culvert] 2026/10/03 12:05:24 Auth: default authentication = Open unmatched traffic (defaultAuthOutcome=Exempt)
+[Culvert] 2026/10/03 12:05:24 UI: default authentication set to "Exempt"
+[Culvert] 2026/10/03 12:05:24 UI: default policy action set to "deny"
+[Culvert] 2026/10/03 12:05:24 UI: policy rule added priority=10 name="qual-allow-origin" action="Allow"
+[Culvert] 2026/10/03 12:05:25 AUTH_DEFAULT_EXEMPT (open, no rule) 172.17.0.1 -> "origin-allowed" {req_id=5ed3a2147a21d64b}
+[Culvert] 2026/10/03 12:05:25 POLICY_ALLOW rule="qual-allow-origin" pri=10 172.17.0.1 GET "origin-allowed" [destFQDN=origin-allowed] {req_id=5ed3a2147a21d64b identity= rule=qual-allow-origin action=allow}
+[Culvert] 2026/10/03 12:05:25 WARN SecurityScan: ClamAV error (connect_failed): clamav: connect: dial tcp 10.214.0.2:3310: connect: connection refused — forwarding UNSCANNED (fail-open); total 1
+[Culvert] 2026/10/03 12:05:25 AUTH_DEFAULT_EXEMPT (open, no rule) 172.17.0.1 -> "origin-blocked" {req_id=18b4daf96e576558}
+[Culvert] 2026/10/03 12:05:25 POLICY_DEFAULT_DENY 172.17.0.1 GET "origin-blocked" {req_id=18b4daf96e576558 identity= action=deny}
+[Culvert] 2026/10/03 12:05:25 FeedSync: parsed 2570579 domain entries, writing to BadgerDB…
+unexpected fault address 0x7fc581300000
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fc581300000 pc=0x490ffe]
+
+goroutine 216 gp=0x214f0b8be000 m=8 mp=0x214ef8fa3008 [running]:
+runtime.throw({0x176b0eb?, 0x214f0b93a2d0?})
+	runtime/panic.go:1229 +0x48 fp=0x214f0374b9e0 sp=0x214f0374b9b0 pc=0x4890a8
+runtime.sigpanic()
+	runtime/signal_unix.go:928 +0x10a fp=0x214f0374ba40 sp=0x214f0374b9e0 pc=0x48b0ea
+runtime.memmove()
+	runtime/memmove_amd64.s:212 +0x19e fp=0x214f0374ba48 sp=0x214f0374ba40 pc=0x490ffe
+github.com/dgraph-io/badger/v4.(*logFile).writeEntry(_, _, _, {{0x0}, {0x7fff36095d8a, 0xf}, {0x7fff36095d8a, 0xf}, 0x0, 0x1, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:330 +0xd5 fp=0x214f0374baa0 sp=0x214f0374ba48 pc=0xd29555
+github.com/dgraph-io/badger/v4.(*memTable).Put(0x214ef8d729c0, {0x214f1aead800, 0x20, 0x20}, {0x40, 0x0, 0x0, {0x214f19ec0178, 0x5, 0x8}, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:183 +0x1c5 fp=0x214f0374bdf0 sp=0x214f0374baa0 pc=0xd28585
+github.com/dgraph-io/badger/v4.(*DB).writeToLSM(0x214ef8c6f208, 0x214f14f19200)
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:836 +0x2ac fp=0x214f0374bec0 sp=0x214f0374bdf0 pc=0xd0080c
+github.com/dgraph-io/badger/v4.(*DB).writeRequests(0x214ef8c6f208, {0x214f0b536050, 0x1, 0xa})
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:902 +0x1e8 fp=0x214f0374bf58 sp=0x214f0374bec0 pc=0xd00a88
+-- /data usage
+
+Run 'docker run --help' for more information
+docker: Error response from daemon: failed to create prepare snapshot dir: failed to create temp dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-2059561436: no space left on device
+-- bounded dockerd log
+time="2026-10-03T12:05:30.526193789Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526245956Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526370569Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526421404Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526493799Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526539405Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526604316Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526676962Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526764255Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526814038Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526860024Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526908454Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526957576Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.527009443Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.527826911Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.530845063Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.533844378Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.536840187Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.538390776Z" level=info msg="received task-delete event from containerd" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-10-03T12:05:30.538491571Z" level=info msg="shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.538523070Z" level=info msg="cleaning up after shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.538768188Z" level=info msg="cleaning up dead shim" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.539851173Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.640104141Z" level=info msg="restarting container" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da exitCode=2 exitedAt="2026-10-03 12:05:30.528129212 +0000 UTC" manualRestart=false restartCount=1 restartPolicy="{unless-stopped 0}"
+time="2026-10-03T12:05:30.643595526Z" level=error msg="failed to process event" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da error="write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json3920625110: no space
+time="2026-10-03T12:05:30.662111599Z" level=info msg="connecting to shim 09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da" address="unix:///run/containerd/s/c1669ed7ebba5c8c290413e4fd2dc55639c5a0bab7058ec461e312a9e4b12a22" namespace=moby protocol=ttrpc version=3
+time="2026-10-03T12:05:30.723336954Z" level=info msg="sbJoin: gwep4 ''->'47d7992de1b7', gwep6 ''->''" eid=47d7992de1b7 ep=culvert net=culvert_default nid=cb931934e006
+time="2026-10-03T12:05:30.771773776Z" level=info msg="shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.771894381Z" level=info msg="cleaning up after shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.771940374Z" level=info msg="received task-delete event from containerd" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-10-03T12:05:30.771991452Z" level=info msg="cleaning up dead shim" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.784069469Z" level=error msg="09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da: failed saving state on start failure: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-config.v2.json1365494868: no space lef
+time="2026-10-03T12:05:30.784653499Z" level=error msg="09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da cleanup: failed to delete container from containerd: NotFound: container \"09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da\" in namespace \"moby\": not found"
+time="2026-10-03T12:05:30.864994502Z" level=error msg="restartmanger wait error: failed to set up container networking: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json2562579832: no space left on device"
+time="2026-10-03T12:05:45.527639043Z" level=warning msg="Error decoding log file" error="unexpected EOF"
+time="2026-10-03T12:05:45.646076196Z" level=error msg="Error saving dying container to disk: invalid output path: stat /var/lib/docker/containers/ba532345db068035373bdac83e9e5cccc2b8bac3b48d9b40340e4cd721146aed: no such file or directory"
+time="2026-10-03T12:05:45.646400481Z" level=error msg="Handler for POST /containers/create returned error" error-response="failed to create prepare snapshot dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-1115367934/work: no space left on device" met
+time="2026-10-03T12:05:48.296916287Z" level=warning msg="Error decoding log file" error="unexpected EOF"
+time="2026-10-03T12:05:48.411690139Z" level=error msg="Error saving dying container to disk: invalid output path: stat /var/lib/docker/containers/62550243c63e658f6e9ce441dd08117c5991e86329be5c16735641a7a736f8f5: no such file or directory"
+time="2026-10-03T12:05:48.412168509Z" level=error msg="Handler for POST /containers/create returned error" error-response="failed to create prepare snapshot dir: failed to create temp dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-2059561436: no spa
+== E1-after-wait 2026-10-03T12:07:18Z
+/dev/loop0       1992552 1976168         0 100% /home/runner/work/_temp/appliance-enospc/mnt
+culvert Up About a minute (healthy)
+culvert-origin-blocked-1 Up 2 minutes
+culvert-clamav Up 2 minutes (healthy)
+culvert-origin-allowed-1 Up 2 minutes
+status=exited restarting=false restarts=1 oom=false exit=2 err=failed to set up container networking: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json2562579832: no space left on device started=2026-10-03T12:05:22.508656695Z
+-- proxy crash head (first panic/fatal/signal line + 30)
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fc581300000 pc=0x490ffe]
+
+goroutine 216 gp=0x214f0b8be000 m=8 mp=0x214ef8fa3008 [running]:
+runtime.throw({0x176b0eb?, 0x214f0b93a2d0?})
+	runtime/panic.go:1229 +0x48 fp=0x214f0374b9e0 sp=0x214f0374b9b0 pc=0x4890a8
+runtime.sigpanic()
+	runtime/signal_unix.go:928 +0x10a fp=0x214f0374ba40 sp=0x214f0374b9e0 pc=0x48b0ea
+runtime.memmove()
+	runtime/memmove_amd64.s:212 +0x19e fp=0x214f0374ba48 sp=0x214f0374ba40 pc=0x490ffe
+github.com/dgraph-io/badger/v4.(*logFile).writeEntry(_, _, _, {{0x0}, {0x7fff36095d8a, 0xf}, {0x7fff36095d8a, 0xf}, 0x0, 0x1, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:330 +0xd5 fp=0x214f0374baa0 sp=0x214f0374ba48 pc=0xd29555
+github.com/dgraph-io/badger/v4.(*memTable).Put(0x214ef8d729c0, {0x214f1aead800, 0x20, 0x20}, {0x40, 0x0, 0x0, {0x214f19ec0178, 0x5, 0x8}, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:183 +0x1c5 fp=0x214f0374bdf0 sp=0x214f0374baa0 pc=0xd28585
+github.com/dgraph-io/badger/v4.(*DB).writeToLSM(0x214ef8c6f208, 0x214f14f19200)
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:836 +0x2ac fp=0x214f0374bec0 sp=0x214f0374bdf0 pc=0xd0080c
+github.com/dgraph-io/badger/v4.(*DB).writeRequests(0x214ef8c6f208, {0x214f0b536050, 0x1, 0xa})
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:902 +0x1e8 fp=0x214f0374bf58 sp=0x214f0374bec0 pc=0xd00a88
+-- proxy log
+[Culvert] 2026/10/03 12:05:23 release catalog: Sigstore identity signature VERIFIED
+[Culvert] 2026/10/03 12:05:23 release catalog: Sigstore identity signature VERIFIED
+[Culvert] 2026/10/03 12:05:23 release management enabled: proxy_repo="ghcr.io/kidcarmi/culvert" verify=enforce schemes=sigstore local_agent=/run/culvert-maint/culvert-maint.sock
+[Culvert] 2026/10/03 12:05:23 FrontendV2: disabled (set CULVERT_EXPERIMENTAL_UI=1 to enable the experimental /app preview)
+[Culvert] 2026/10/03 12:05:23 UITLS: detected Cloudflare public IP: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: detected AWS-checkip public IP: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: detected public IP via container fallback: 52.186.174.179
+[Culvert] 2026/10/03 12:05:23 UITLS: self-signed cert SANs: IPs=[127.0.0.1 ::1 10.214.0.5 52.186.174.179] DNS=[localhost 09bdf34dafb7]
+[Culvert] 2026/10/03 12:05:23 Proxy: http://localhost:8080
+[Culvert] 2026/10/03 12:05:23 UITLS: https://localhost:9090 (self-signed)
+[Culvert] 2026/10/03 12:05:24 First-time setup: admin user "enospcadmin" created
+[Culvert] 2026/10/03 12:05:24 Auth: default authentication = Open unmatched traffic (defaultAuthOutcome=Exempt)
+[Culvert] 2026/10/03 12:05:24 UI: default authentication set to "Exempt"
+[Culvert] 2026/10/03 12:05:24 UI: default policy action set to "deny"
+[Culvert] 2026/10/03 12:05:24 UI: policy rule added priority=10 name="qual-allow-origin" action="Allow"
+[Culvert] 2026/10/03 12:05:25 AUTH_DEFAULT_EXEMPT (open, no rule) 172.17.0.1 -> "origin-allowed" {req_id=5ed3a2147a21d64b}
+[Culvert] 2026/10/03 12:05:25 POLICY_ALLOW rule="qual-allow-origin" pri=10 172.17.0.1 GET "origin-allowed" [destFQDN=origin-allowed] {req_id=5ed3a2147a21d64b identity= rule=qual-allow-origin action=allow}
+[Culvert] 2026/10/03 12:05:25 WARN SecurityScan: ClamAV error (connect_failed): clamav: connect: dial tcp 10.214.0.2:3310: connect: connection refused — forwarding UNSCANNED (fail-open); total 1
+[Culvert] 2026/10/03 12:05:25 AUTH_DEFAULT_EXEMPT (open, no rule) 172.17.0.1 -> "origin-blocked" {req_id=18b4daf96e576558}
+[Culvert] 2026/10/03 12:05:25 POLICY_DEFAULT_DENY 172.17.0.1 GET "origin-blocked" {req_id=18b4daf96e576558 identity= action=deny}
+[Culvert] 2026/10/03 12:05:25 FeedSync: parsed 2570579 domain entries, writing to BadgerDB…
+unexpected fault address 0x7fc581300000
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fc581300000 pc=0x490ffe]
+
+goroutine 216 gp=0x214f0b8be000 m=8 mp=0x214ef8fa3008 [running]:
+runtime.throw({0x176b0eb?, 0x214f0b93a2d0?})
+	runtime/panic.go:1229 +0x48 fp=0x214f0374b9e0 sp=0x214f0374b9b0 pc=0x4890a8
+runtime.sigpanic()
+	runtime/signal_unix.go:928 +0x10a fp=0x214f0374ba40 sp=0x214f0374b9e0 pc=0x48b0ea
+runtime.memmove()
+	runtime/memmove_amd64.s:212 +0x19e fp=0x214f0374ba48 sp=0x214f0374ba40 pc=0x490ffe
+github.com/dgraph-io/badger/v4.(*logFile).writeEntry(_, _, _, {{0x0}, {0x7fff36095d8a, 0xf}, {0x7fff36095d8a, 0xf}, 0x0, 0x1, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:330 +0xd5 fp=0x214f0374baa0 sp=0x214f0374ba48 pc=0xd29555
+github.com/dgraph-io/badger/v4.(*memTable).Put(0x214ef8d729c0, {0x214f1aead800, 0x20, 0x20}, {0x40, 0x0, 0x0, {0x214f19ec0178, 0x5, 0x8}, ...})
+	github.com/dgraph-io/badger/v4@v4.9.6/memtable.go:183 +0x1c5 fp=0x214f0374bdf0 sp=0x214f0374baa0 pc=0xd28585
+github.com/dgraph-io/badger/v4.(*DB).writeToLSM(0x214ef8c6f208, 0x214f14f19200)
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:836 +0x2ac fp=0x214f0374bec0 sp=0x214f0374bdf0 pc=0xd0080c
+github.com/dgraph-io/badger/v4.(*DB).writeRequests(0x214ef8c6f208, {0x214f0b536050, 0x1, 0xa})
+	github.com/dgraph-io/badger/v4@v4.9.6/db.go:902 +0x1e8 fp=0x214f0374bf58 sp=0x214f0374bec0 pc=0xd00a88
+-- /data usage
+
+Run 'docker run --help' for more information
+docker: Error response from daemon: failed to create prepare snapshot dir: failed to create temp dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-642828732: no space left on device
+-- bounded dockerd log
+time="2026-10-03T12:05:30.526421404Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526493799Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526539405Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526604316Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526676962Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526764255Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526814038Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526860024Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526908454Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.526957576Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.527009443Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.527826911Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.530845063Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.533844378Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.536840187Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.538390776Z" level=info msg="received task-delete event from containerd" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-10-03T12:05:30.538491571Z" level=info msg="shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.538523070Z" level=info msg="cleaning up after shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.538768188Z" level=info msg="cleaning up dead shim" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.539851173Z" level=error msg="Error writing log message" driver=json-file error="error writing log entry: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da-json.l
+time="2026-10-03T12:05:30.640104141Z" level=info msg="restarting container" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da exitCode=2 exitedAt="2026-10-03 12:05:30.528129212 +0000 UTC" manualRestart=false restartCount=1 restartPolicy="{unless-stopped 0}"
+time="2026-10-03T12:05:30.643595526Z" level=error msg="failed to process event" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da error="write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json3920625110: no space
+time="2026-10-03T12:05:30.662111599Z" level=info msg="connecting to shim 09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da" address="unix:///run/containerd/s/c1669ed7ebba5c8c290413e4fd2dc55639c5a0bab7058ec461e312a9e4b12a22" namespace=moby protocol=ttrpc version=3
+time="2026-10-03T12:05:30.723336954Z" level=info msg="sbJoin: gwep4 ''->'47d7992de1b7', gwep6 ''->''" eid=47d7992de1b7 ep=culvert net=culvert_default nid=cb931934e006
+time="2026-10-03T12:05:30.771773776Z" level=info msg="shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.771894381Z" level=info msg="cleaning up after shim disconnected" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.771940374Z" level=info msg="received task-delete event from containerd" container=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-10-03T12:05:30.771991452Z" level=info msg="cleaning up dead shim" id=09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da namespace=moby
+time="2026-10-03T12:05:30.784069469Z" level=error msg="09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da: failed saving state on start failure: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-config.v2.json1365494868: no space lef
+time="2026-10-03T12:05:30.784653499Z" level=error msg="09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da cleanup: failed to delete container from containerd: NotFound: container \"09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da\" in namespace \"moby\": not found"
+time="2026-10-03T12:05:30.864994502Z" level=error msg="restartmanger wait error: failed to set up container networking: write /var/lib/docker/containers/09bdf34dafb7c6c6effa494671453eb6ea51042de146efbea643f7ab39d9a8da/.tmp-hostconfig.json2562579832: no space left on device"
+time="2026-10-03T12:05:45.527639043Z" level=warning msg="Error decoding log file" error="unexpected EOF"
+time="2026-10-03T12:05:45.646076196Z" level=error msg="Error saving dying container to disk: invalid output path: stat /var/lib/docker/containers/ba532345db068035373bdac83e9e5cccc2b8bac3b48d9b40340e4cd721146aed: no such file or directory"
+time="2026-10-03T12:05:45.646400481Z" level=error msg="Handler for POST /containers/create returned error" error-response="failed to create prepare snapshot dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-1115367934/work: no space left on device" met
+time="2026-10-03T12:05:48.296916287Z" level=warning msg="Error decoding log file" error="unexpected EOF"
+time="2026-10-03T12:05:48.411690139Z" level=error msg="Error saving dying container to disk: invalid output path: stat /var/lib/docker/containers/62550243c63e658f6e9ce441dd08117c5991e86329be5c16735641a7a736f8f5: no such file or directory"
+time="2026-10-03T12:05:48.412168509Z" level=error msg="Handler for POST /containers/create returned error" error-response="failed to create prepare snapshot dir: failed to create temp dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-2059561436: no spa
+time="2026-10-03T12:07:18.973105205Z" level=warning msg="Error decoding log file" error="unexpected EOF"
+time="2026-10-03T12:07:19.091082929Z" level=error msg="Error saving dying container to disk: invalid output path: stat /var/lib/docker/containers/e21a03e70b0eb8bc0e780849853c4014dad485d39ad011200ac27eedb302b888: no such file or directory"
+time="2026-10-03T12:07:19.091382699Z" level=error msg="Handler for POST /containers/create returned error" error-response="failed to create prepare snapshot dir: failed to create temp dir: mkdir /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/new-642828732: no spac

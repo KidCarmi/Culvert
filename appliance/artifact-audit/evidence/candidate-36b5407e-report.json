@@ -1,0 +1,636 @@
+{
+  "schema_version": 1,
+  "status": "inspection_completed_with_limits",
+  "findings_are_indicators": true,
+  "limitations": [
+    "allocated named files only; no deleted files/free space/slack recovery",
+    "pattern matching cannot prove absence of arbitrary encoded or encrypted secrets",
+    "symlinks/device nodes not followed; artifact content never executed",
+    "initramfs/cpio and arbitrary nested non-container compression not decoded"
+  ],
+  "artifact_sha256": "7bd09aaac19ab0525654d2863d4382bf0415e0ac75e2b55aee8a424a9df6bca1",
+  "partitions": [
+    {
+      "number": 1,
+      "size": 41874865152,
+      "type": "0fc63daf-8483-4772-8e79-3d69d8477de4",
+      "filesystem": "ExtFilesystem"
+    },
+    {
+      "number": 14,
+      "size": 4193792,
+      "type": "21686148-6449-6e6f-744e-656564454649",
+      "filesystem": "not_decoded"
+    },
+    {
+      "number": 15,
+      "size": 111148544,
+      "type": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+      "filesystem": "FatFilesystem"
+    },
+    {
+      "number": 16,
+      "size": 957349888,
+      "type": "bc13c2ff-59e6-4262-a352-b275fd6f7172",
+      "filesystem": "ExtFilesystem"
+    }
+  ],
+  "counts": {
+    "filesystem_nonregular_entries": 6541,
+    "entries": 71975,
+    "bytes": 2531599989,
+    "regular_files_scanned": 71975,
+    "archive_nonregular_entries": 1778,
+    "container_blob_digests_verified": 27,
+    "archive_links_not_followed": 1453,
+    "container_attestation_descriptors": 2
+  },
+  "findings": [
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/prepare-guest.log",
+      "category": "nonempty_log_or_history"
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/bb8f3f05ac26520550371e308ae6deee15c0f8ae6943bcd1698f58c14f0ad513",
+      "category": "private_key_pem_marker",
+      "sha256": "bb8f3f05ac26520550371e308ae6deee15c0f8ae6943bcd1698f58c14f0ad513"
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/bb8f3f05ac26520550371e308ae6deee15c0f8ae6943bcd1698f58c14f0ad513::app/culvert",
+      "category": "private_key_pem_marker",
+      "sha256": "db8c3520a0d334a4006b4cbe2317616adbeb56efab0a8ecba3e14dc3a7b892ab"
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/e4f4692be7db804a26862586bbd342eafc64cde16d6dc6f2175bf7876d9b831c",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "e4f4692be7db804a26862586bbd342eafc64cde16d6dc6f2175bf7876d9b831c"
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/e4f4692be7db804a26862586bbd342eafc64cde16d6dc6f2175bf7876d9b831c::app/deploy/packaging/sudoers/culvert-maint",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "5aaaddc8dc49c3839f73b2a666320c12c523d00c359be5b971240e5ebbe49cf7"
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/f521e3871fc1cb59e4bb2884e80bdb0b4f3a6bef53d0e5ca5d3f3525243d615b::usr/lib/libunistring.so.5.2.1",
+      "category": "provider_credential_pattern",
+      "sha256": "62fe5110253cb5ba3a1673e33097b0bca9903b5e016ed50aca4977bd9b905009"
+    },
+    {
+      "path": "partition-1:/usr/share/pastebin.d/paste.centos.org.conf",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "2ea16c378bd638eca09e1fd034921c132004cc10b96f5cd70a80da2a65c7e299"
+    },
+    {
+      "path": "partition-1:/usr/share/bash-completion/completions/_mount.linux",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "26600d5c1c1847bbb3e278849b440af5b04deb857c9873548a8e0da2d121afaa"
+    },
+    {
+      "path": "partition-1:/usr/share/lintian/overrides/base-passwd",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "090c479775fcd5cb1be8c2a827070a2cc0fcb0eaa25426a1b57a16165e996c2e"
+    },
+    {
+      "path": "partition-1:/usr/share/lintian/overrides/passwd",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "6353b1cbf1d0bb27dbb21bad36d9c820e4a64dc4398a50db31591f8a5099f8d0"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/cloud-init/examples/cloud-config-ansible-managed.txt",
+      "category": "private_key_pem_marker",
+      "sha256": "efcd102bc1a4144888b3b445f4dcb251782392d74a7f3903eaeead3baf5b06e5"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/cloud-init/examples/cloud-config-chef-oneiric.txt",
+      "category": "private_key_pem_marker",
+      "sha256": "05f631c67bae569c395b4ee53ec334bd37b3b013926f11b1b28abb85754b0845"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/cloud-init/examples/cloud-config-chef.txt",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "264477ca312864294891fcd5ca791a5a607b62f47c60361e736c0980ecec9414"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/cloud-init/examples/cloud-config-chef.txt",
+      "category": "private_key_pem_marker",
+      "sha256": "264477ca312864294891fcd5ca791a5a607b62f47c60361e736c0980ecec9414"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/cloud-init/examples/cloud-config-ssh-keys.txt",
+      "category": "private_key_pem_marker",
+      "sha256": "4e3801b1b3b6565aba5661517d41b0776d77a9ec4992e07cb775ea36c0cf922c"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/cloud-init/examples/cloud-config.txt",
+      "category": "private_key_pem_marker",
+      "sha256": "b53b66e3004e573dfd760f32f90c9d8ce38929fce03eadb5e2ec37b3fda59934"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/polkitd/examples/50-local-allow.rules",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "b9e08107b66d4b0c73ae614645de63f78aebf8b6f6c67e3a4d80c22131f2638b"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/needrestart/examples/needrestart-nagios",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "3fd51ef4f2adff357c1feaf1bbf302f44265ccbebf1fccacf3ff1aaa718253ad"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/sudo/examples/sudoers",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "dcf943c4b04ceed69a41a990b28adf9f9679ade670934d6196267949a4ff70c4"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/netplan/examples/wpa3_enterprise.yaml",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "a86645ff2c7f1379f188c94ce5d9e3af57e40f9307156b509e166fbb6f88419c"
+    },
+    {
+      "path": "partition-1:/usr/share/doc/netplan/examples/wpa_enterprise.yaml",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "bda236f5f22a1cf65e399fff0db0fc6bb30e673cbb15aa363ad974c81882ba02"
+    },
+    {
+      "path": "partition-1:/usr/sbin/sshd",
+      "category": "private_key_pem_marker",
+      "sha256": "f30333b455e6fe10536d544992ea3dfa87cc1d83b8af7945a815c86f8b4f6f6d"
+    },
+    {
+      "path": "partition-1:/usr/lib/snapd/snap-bootstrap",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "55bf09c37663edcdc0c949621d5ea58e29978ab3db5114fa621314de3c73d272"
+    },
+    {
+      "path": "partition-1:/usr/lib/snapd/snapd",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "77a0b7dfb351a17f47e74aaa6df45b055cb5d786bbcf26cf325b1614ba333a04"
+    },
+    {
+      "path": "partition-1:/usr/lib/file/magic.mgc",
+      "category": "private_key_pem_marker",
+      "sha256": "72a25195a2623fe160e926bf20952b6b74b29d6c91e0174a5fa062f02beee1aa"
+    },
+    {
+      "path": "partition-1:/usr/lib/openssh/ssh-keysign",
+      "category": "private_key_pem_marker",
+      "sha256": "7a7bf85b1dbe297da7508fc389d1ff27c54678d502e83214a7f9040d86ac4022"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/sos/report/plugins/pulpcore.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "86bef0f2490c51ae75d7999bb6add11e107cff0d9407c2c69aa6a721ffab01ae"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/sos/report/plugins/rhc.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "a07ccadbba7d6f18c444678c9b53abef2d5727288832e4e3602ea437dc69de3f"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/sos/report/plugins/ovirt.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "1f9fefd7446a89c5b7c1d138460da7e87cd6beac136b58eb5a59a5f940784e17"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/sos/report/plugins/iscsi.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "d7c417e078a390ee89d91d24d823793f7b2d4dab1cc7dff321c56f82ee6fcefb"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/sos/collector/transports/control_persist.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "69832d5db325d4b50448d948bf577d39923066789b72d6bd8899a90c58155421"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/kms/2014-11-01/examples-1.json",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "4e06a14e5d6e058887231bfade6c7268273ee5cf7140aa1b5873e10e2a38c777"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/sts/2011-06-15/examples-1.json",
+      "category": "provider_credential_pattern",
+      "sha256": "c83fc27073767fdb7d3e5190e4dcce25a09871c7b118fa289db056d93e0e31c9"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/sts/2011-06-15/service-2.json",
+      "category": "provider_credential_pattern",
+      "sha256": "7f2348c6056c33865ce1735e0d91abe3f077cfbfc48336f38efd1d25b8530613"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/secretsmanager/2017-10-17/examples-1.json",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "dcb298c7fb9ce3ca970c5c7b9bc714da5f17072ab5c2edbc8797ce820ae60c22"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/iam/2010-05-08/examples-1.json",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "4f912aac51590625652fd76c37e4f90e78a05355273125df555c012b4d005ab5"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/iam/2010-05-08/examples-1.json",
+      "category": "private_key_pem_marker",
+      "sha256": "4f912aac51590625652fd76c37e4f90e78a05355273125df555c012b4d005ab5"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/iam/2010-05-08/examples-1.json",
+      "category": "provider_credential_pattern",
+      "sha256": "4f912aac51590625652fd76c37e4f90e78a05355273125df555c012b4d005ab5"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/rds/2014-10-31/examples-1.json",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "3dafc3a5ba3ca60d0ef6b6513c4b855ec827cd3e9752a21fc07a576ae4277343"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/botocore/data/rds/2014-10-31/service-2.json",
+      "category": "provider_credential_pattern",
+      "sha256": "26814905a74b7054402c3ee09f031b4da5cfcab172ace40ab7c693cd8076e15b"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/launchpadlib/launchpad.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "fcd3c850c41035d950264697fbd5247acdf317fbf0353f8552cd216024455c4e"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/launchpadlib/testing/helpers.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "890a194a6469ebcd4d5579090e8e2286ab3920ccb69b3a4d04d33ee139dc2b42"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/parameters.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "054183dcdfc7f6905172d518103083eddc2772a8dc1efee15b565c1cc31025be"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/request_validator.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "0598f5394460421fecc46e5a81b4a92d37a8fc8571bd852aa832a4a001aa09b3"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/tokens.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "44c718ec5e1f080a3165bc9450337d7a5fc1fd7469e042eb637a63e5ac00d43a"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/__pycache__/parameters.cpython-312.pyc",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "0216e59634281e5c2f5c8061a7e9fb47567e7857894453097e8af14bfad6d3e7"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/__pycache__/request_validator.cpython-312.pyc",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "d67ac9514484221fe059a8f0defacc4391b2987d10910762b44607aa8a3d0238"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/__pycache__/tokens.cpython-312.pyc",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "afc6addd24068e55bcca53c707a64a29fd9c6fa729c7da6334acf79266a2f649"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/endpoints/resource.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "be95e8a2f829981c98f88b96d0f0dc712e482461681622d58cb2d4a461665d7e"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/endpoints/__pycache__/resource.cpython-312.pyc",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "f350bf5f7e4483e150aec35e7cc645bad806a934f35716ff30d0c5ccf040de0a"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/oauthlib/oauth2/rfc6749/clients/base.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "e995ba7b07f849d4b604119cfab66e9dfb0661a94ea9eb9c4e834df23f1fee57"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/httplib2/__init__.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "562de10fdd589a8d988926173b3dbc591697f21f142dd409e614411dbcb6a5c0"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/cloudinit/url_helper.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "570f99246ddad65409a5e18596389674db3e3d62f955ff35186694f07b555bdc"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/cloudinit/sources/DataSourceCloudStack.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "b88ee56b5c89a40b4af96a775fc4075da6cd8b0e0730a3a9a4ad8501a86576e8"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/cloudinit/reporting/handlers.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "3bee5d093ecf84df388e897219220bcfa5b3fe4913b1687cab65ac576329898a"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/boto3/examples/cloudfront.rst",
+      "category": "provider_credential_pattern",
+      "sha256": "2beb01599c682e30010991eba8066ce7b71879fc0f9838abd37a66e8f13f9a1e"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/words/protocols/jabber/component.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "5ccae5eacdb4c8034d4a3a948db0c4f3bdf16348e969cf8fb42c75aae2d7fb32"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/words/protocols/jabber/__pycache__/component.cpython-312.pyc",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "1599ca50bbdc46ae35d7fcbb4d0d68af7e836c36eebd5c21d0ec0498a28bd1c2"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/test/key.pem.no_trailing_newline",
+      "category": "private_key_pem_marker",
+      "sha256": "380626aa2b5e4a799153f2c8faf6f38f080765fe0b2ab59c7865bf6167f26604"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/test/server.pem",
+      "category": "private_key_pem_marker",
+      "sha256": "a681b6146651477236c7c50f318fd3f397af3b015f1830a3b9d6dcd7027eb049"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/test/test_ftp.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "d9e55b49853d22ca422465e865c596ce39170cb97c2ef797776c695952256df4"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/mail/test/test_pop3.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "058c5aee06ab3f8ae3be84fe37b87710e674a6700096a24593ee9b46e54e83ba"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/test/keydata.py",
+      "category": "private_key_pem_marker",
+      "sha256": "051e191cfb8f08c209bf7c7fc1f4776e3d17102ae012206983cc392bb1f88fef"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/test/test_ckeygen.py",
+      "category": "private_key_pem_marker",
+      "sha256": "e1315223ca6a42228502a7f3c2cde93a567fd005e68e6510f6ee064939ab21af"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/test/test_keys.py",
+      "category": "private_key_pem_marker",
+      "sha256": "596d587fff700bbe04c652dfda6c7c868877e7893f4fe5e97d11e056cf778e2e"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/test/__pycache__/keydata.cpython-312.pyc",
+      "category": "private_key_pem_marker",
+      "sha256": "32b327f7392be87cb677180c1e5fe728f07997a0c95d0f6f167122613f71b340"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/test/__pycache__/test_ckeygen.cpython-312.pyc",
+      "category": "private_key_pem_marker",
+      "sha256": "ef345805825d9a08fe56176ab9ea4f3e9c7c154021507901f4b16cf5e2e36de5"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/test/__pycache__/test_keys.cpython-312.pyc",
+      "category": "private_key_pem_marker",
+      "sha256": "1b2163a0b7149f9b225809373703a072127ec2a9ded5adb477126571438a316c"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/ssh/keys.py",
+      "category": "private_key_pem_marker",
+      "sha256": "790b32df6ad535fe61193f3b250c0ebc1b663910727832ad184e854963d85781"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/twisted/conch/ssh/__pycache__/keys.cpython-312.pyc",
+      "category": "private_key_pem_marker",
+      "sha256": "a897dd9251bfc9e777fb58e432ee555b236349fa484618317b15d2957936337d"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/urllib3/connection.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "470683be25f74bf9781a6a884d04001982ed46dc8e79edc4d4e6243ba26bc771"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/urllib3/connectionpool.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "576d2852bfc99cadc1852e0a609b98cb4d243f5c6619a5a02a71f29dc69e9ddb"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/cryptography/hazmat/_oid.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "83184c1caa6ef57b22eae1c2199ffeb2860c5e3fe2cce2056b18d42966c23de1"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/cryptography/hazmat/primitives/serialization/ssh.py",
+      "category": "private_key_pem_marker",
+      "sha256": "68b0982cf6375b591eadf0b069d9f9698373c1cc08425f5ced172c07c08a7ee7"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/cryptography/hazmat/primitives/serialization/__pycache__/ssh.cpython-312.pyc",
+      "category": "private_key_pem_marker",
+      "sha256": "1f65076a0c0cd3df799aa775a68ab80db90fc580c747fbcb9ccc8046f4477893"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/cryptography/hazmat/backends/openssl/backend.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "30000304c7c0e20235bc145095932d75a0d0862bcb0f97d35fc322f3ec2c6672"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3/dist-packages/lazr/restfulclient/authorize/oauth.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "0943365b8c393ed601b67038c8f48eba4e288b280ad4941ca63d78e7af867948"
+    },
+    {
+      "path": "partition-1:/usr/lib/python3.12/urllib/request.py",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "96ae4b051b87eb7694da24f5fa75bf3931486b49b755699934bf15ab0ca5829d"
+    },
+    {
+      "path": "partition-1:/usr/lib/x86_64-linux-gnu/libgnutls.so.30.37.1",
+      "category": "private_key_pem_marker",
+      "sha256": "ddbae2995750875c07bc218d12a062d73f8250678f54dedda7e9be5068781c98"
+    },
+    {
+      "path": "partition-1:/usr/lib/x86_64-linux-gnu/libunistring.so.5.0.0",
+      "category": "provider_credential_pattern",
+      "sha256": "7bcf825cd449892db5105ad2aed91dcf94a27b796426600c765720c584c54dd1"
+    },
+    {
+      "path": "partition-1:/usr/lib/x86_64-linux-gnu/libssh.so.4.9.6",
+      "category": "private_key_pem_marker",
+      "sha256": "b82bd54edb908605b8142be1a6d242df65501af0e9bb7581cc36ebf4d8a5ecfd"
+    },
+    {
+      "path": "partition-1:/usr/lib/x86_64-linux-gnu/libgio-2.0.so.0.8000.0",
+      "category": "private_key_pem_marker",
+      "sha256": "d72a56593ae024d868cb7b494f7e48c76e90e4ced9498ab4da2eb3bece85bda3"
+    },
+    {
+      "path": "partition-1:/usr/bin/ssh",
+      "category": "private_key_pem_marker",
+      "sha256": "31430165113e51a046f3b9fa2a60ec98e073cc6c0411a081b3b1d76ed6a4eb6a"
+    },
+    {
+      "path": "partition-1:/usr/bin/ssh-keygen",
+      "category": "private_key_pem_marker",
+      "sha256": "5175ddce2146fc8a03ab8e1ef25a1b0382dd3cb209484f7ae11ac782171c0d04"
+    },
+    {
+      "path": "partition-1:/usr/bin/ssh-add",
+      "category": "private_key_pem_marker",
+      "sha256": "d8f8bc11af29c8f61b545191c981b1ea9d1c6c2bfdf61f4841ad5588af783067"
+    },
+    {
+      "path": "partition-1:/usr/bin/snap",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "2c827fbd330bd1e993bc022c9de085c2b61b351500b02e8236b6e54996e59eed"
+    },
+    {
+      "path": "partition-1:/opt/culvert-appliance/bin/culvert-firstboot",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "3d8aba353666d6281d46548cf5be30f54db9c171f70fcdcaf769229e395ee4a1"
+    },
+    {
+      "path": "partition-1:/opt/culvert-appliance/bin/culvert-console",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "fadfe020c7b6e6f68d8c631d9705a68fd5bd2522574281f65b2ac7dbdd14d41c"
+    },
+    {
+      "path": "partition-1:/opt/culvert-appliance/provision/culvert-firstboot.sh",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "3d8aba353666d6281d46548cf5be30f54db9c171f70fcdcaf769229e395ee4a1"
+    },
+    {
+      "path": "partition-1:/opt/culvert-appliance/console/culvert-console",
+      "category": "literal_credential_assignment_indicator",
+      "sha256": "fadfe020c7b6e6f68d8c631d9705a68fd5bd2522574281f65b2ac7dbdd14d41c"
+    }
+  ],
+  "gaps": [
+    {
+      "path": "partition-14",
+      "category": "non_filesystem_or_unsupported_partition"
+    },
+    {
+      "path": "partition-16:/initrd.img-6.8.0-142-generic",
+      "category": "initramfs_cpio_payload_not_recursively_decoded"
+    }
+  ],
+  "archives": [
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/050223daf15688092ced170125fb5d3856e959f76d8b33f149c97a54a912a5e4",
+      "members": 3
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/3020fd58adc7506fec634f82275776bbc6d281589cf5c422f58b5b6bf046d2d8",
+      "members": 1
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/628e51d74f71d953e200a5980757f9eba0a29e4fa904743669c0b64e32617188",
+      "members": 4
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711::lib/apk/db/scripts.tar.gz",
+      "members": 7
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+      "members": 515
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/8473a813b489b966ded05e97ac3a6d3aae8b273eb832d668b0396c618f1ec082",
+      "members": 2
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/a0ce02deef6fe8274d7005508a5582011e4abb8fc4a0378ff93fac5b85c5763b",
+      "members": 4
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/b24eb86b67dbe07b6e86a5841a9cb86f4306acae59275bfd9afa41a9740d6c64::lib/apk/db/scripts.tar.gz",
+      "members": 9
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/b24eb86b67dbe07b6e86a5841a9cb86f4306acae59275bfd9afa41a9740d6c64",
+      "members": 1044
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/bb8f3f05ac26520550371e308ae6deee15c0f8ae6943bcd1698f58c14f0ad513",
+      "members": 2
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/da84548ad38a243ba5eb78a589c032ebb0212adcdc4341307baaee1ebf679276",
+      "members": 2
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/e4f4692be7db804a26862586bbd342eafc64cde16d6dc6f2175bf7876d9b831c",
+      "members": 10
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz::blobs/sha256/f94b14b400a7568a35992298d73419eafcb8b7633f51b77e54bf88b33ab7eddc",
+      "members": 2
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/culvert.tar.gz",
+      "members": 18
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/01d1c784b59e05a411a9c7ae8416808c48d1b05871b324dd0a0771238d886eed",
+      "members": 9
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/4eb587af903b26f91ef6be5bc819807fe08aba90c0ecfc172957f7ce027c8a98",
+      "members": 4
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/57ca85041bd5c3608be33ec530ba38c32ff5bb1dd4c658b7f4f6591558e9f229",
+      "members": 44
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/6175c2b81f58ea01e7ef07a5d7e4970fe16b9e9b29c30a5f76607d0d01db29c5",
+      "members": 1
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5::lib/apk/db/scripts.tar.gz",
+      "members": 7
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/e2de96513ba9eb53b431787ec8a65cdde380ac4772a3e4c4b714dcfde2a102b5",
+      "members": 515
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/f521e3871fc1cb59e4bb2884e80bdb0b4f3a6bef53d0e5ca5d3f3525243d615b::lib/apk/db/scripts.tar.gz",
+      "members": 7
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/f521e3871fc1cb59e4bb2884e80bdb0b4f3a6bef53d0e5ca5d3f3525243d615b",
+      "members": 750
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz::blobs/sha256/f8f651a6b68f6bb2f34fcb2b4970d373a4c57a634eb19c513c9d9e10ac1e21c9",
+      "members": 1
+    },
+    {
+      "path": "partition-1:/var/lib/culvert-appliance/images/clamav.tar.gz",
+      "members": 19
+    },
+    {
+      "path": "partition-1:/usr/share/usb_modeswitch/configPack.tar.gz",
+      "members": 513
+    }
+  ],
+  "expected_container_layers": 18,
+  "decoded_referenced_layers": 18,
+  "tool_sha256": "778c0c5428f4507b86ad7010c1cf905ab5da8730126414032db96bcb792adab9",
+  "dependencies": {
+    "cffi": "2.1.1",
+    "cryptography": "50.0.2",
+    "defusedxml": "0.7.1",
+    "dissect.cstruct": "4.7",
+    "dissect.database": "1.1",
+    "dissect.eventlog": "3.11",
+    "dissect.evidence": "3.13",
+    "dissect.extfs": "3.15",
+    "dissect.fat": "3.13",
+    "dissect.hypervisor": "3.21",
+    "dissect.ntfs": "3.16",
+    "dissect.regf": "3.14",
+    "dissect.target": "3.25.1",
+    "dissect.util": "3.25.dev9",
+    "dissect.volume": "3.18",
+    "flow.record": "3.21",
+    "msgpack": "1.2.3",
+    "pycparser": "3.0",
+    "structlog": "26.1.0",
+    "tzdata": "2026.5"
+  }
+}

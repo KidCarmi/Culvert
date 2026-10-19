@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -39,6 +40,15 @@ import (
 //	                              digest). Set it to the REAL pushed manifest-list
 //	                              digest so dispatch's verify-by-digest matches the
 //	                              running container after the flip.
+//	CULVERT_E2E_SEED_CARRY        colon-separated catalog dirs published EARLIER
+//	                              with the same key: every release in them older
+//	                              than this one is carried byte-identical
+//	                              (release_lineage.go — the production carry,
+//	                              enforce-mode verification first). Unset ⇒ a
+//	                              single-entry (pre-lineage) catalog.
+//	CULVERT_E2E_SEED_AGENT_KEYRING  file to write the maintenance agent's
+//	                              release_trust_keys keyring ({"key_id":"<b64>"}),
+//	                              the same PUBLIC key in the agent's format.
 func TestE2ESeedSignedCatalog(t *testing.T) {
 	outDir := strings.TrimSpace(os.Getenv("CULVERT_E2E_SEED_OUT"))
 	keysFile := strings.TrimSpace(os.Getenv("CULVERT_E2E_SEED_KEYS"))
@@ -70,11 +80,6 @@ func TestE2ESeedSignedCatalog(t *testing.T) {
 			Channels:   []Channel{ChannelRecommended},
 		}},
 	}
-	bundle, err := generateReleaseCatalog(spec)
-	if err != nil {
-		t.Fatalf("generateReleaseCatalog: %v", err)
-	}
-
 	// Stable key across re-seeds: the CP is started ONCE with this key's pubkey as
 	// its trust root, so an upgrade (v2) signed by a different key would be
 	// rejected. Persist the private seed and reuse it on later seeds.
@@ -82,6 +87,28 @@ func TestE2ESeedSignedCatalog(t *testing.T) {
 	pub := priv.Public().(ed25519.PublicKey)
 
 	const keyID = "e2e-catalog"
+	if carry := strings.TrimSpace(os.Getenv("CULVERT_E2E_SEED_CARRY")); carry != "" {
+		trust, err := NewTrustStore([]TrustKey{{KeyID: keyID, Alg: catalogSigAlg, PublicKey: pub}}, VerifyEnforce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var srcs []lineageSource
+		for _, d := range strings.Split(carry, ":") {
+			if d = strings.TrimSpace(d); d != "" {
+				srcs = append(srcs, lineageSource{Dir: d})
+			}
+		}
+		carried, err := collectVerifiedPredecessors(srcs, trust, imageRepo, "", versionID, nil)
+		if err != nil {
+			t.Fatalf("release lineage: %v", err)
+		}
+		spec.Carried = carried
+		t.Logf("carrying %d predecessor(s): %s", len(carried), carriedVersions(carried))
+	}
+	bundle, err := generateReleaseCatalog(spec)
+	if err != nil {
+		t.Fatalf("generateReleaseCatalog: %v", err)
+	}
 	sigEnv := sigEnvelopeBytes(t, catalogSigAlg, keyID, ed25519.Sign(priv, bundle.Index))
 	if err := writeReleaseBundle(outDir, bundle, sigEnv); err != nil {
 		t.Fatalf("writeReleaseBundle: %v", err)
@@ -91,6 +118,15 @@ func TestE2ESeedSignedCatalog(t *testing.T) {
 		keyID, catalogSigAlg, base64.StdEncoding.EncodeToString(pub))
 	if err := os.WriteFile(keysFile, []byte(keysJSON), 0o600); err != nil {
 		t.Fatalf("write keys file: %v", err)
+	}
+	if ring := strings.TrimSpace(os.Getenv("CULVERT_E2E_SEED_AGENT_KEYRING")); ring != "" {
+		b, err := json.Marshal(map[string][]byte{keyID: pub})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ring, b, 0o600); err != nil {
+			t.Fatalf("write agent keyring: %v", err)
+		}
 	}
 	t.Logf("seeded signed catalog into %s (catalog_version=%d, version_id=%s, expires=%s)",
 		outDir, version, versionID, expires)
@@ -137,4 +173,103 @@ func envIntOr(t *testing.T, key string, def int) int {
 		t.Fatalf("%s must be an int: %v", key, err)
 	}
 	return n
+}
+
+// TestE2EEmitAgentRequest is the companion CI helper for the direct-agent
+// checks of the appliance-catalog-update E2E. It loads a seeded catalog through
+// the REAL verifier (enforce, the seed key), runs the REAL dispatch planner for
+// the running image, and writes an agent request body derived from it:
+//
+//	CULVERT_E2E_REQ_CATALOG  seeded catalog dir (required)
+//	CULVERT_E2E_REQ_KEYS     the seed's trust-keys JSON (required)
+//	CULVERT_E2E_REQ_REPO     proxy repo (required)
+//	CULVERT_E2E_REQ_RUNNING  the running pinned ref (required)
+//	CULVERT_E2E_REQ_OUT      output file (required)
+//	CULVERT_E2E_REQ_MODE     planned      the apply body the planner builds
+//	                         no-prior     the same body without prior_release_proof
+//	                         prior=<id>   the body with ANOTHER release's proof as
+//	                                      the baseline (a mismatched baseline)
+//	                         rollback=<id> a standalone image-rollback body to
+//	                                      release <id>, with the running release's
+//	                                      proof as the baseline
+//
+// It never signs anything: every proof is the catalog's own signed bytes.
+func TestE2EEmitAgentRequest(t *testing.T) {
+	dir := strings.TrimSpace(os.Getenv("CULVERT_E2E_REQ_CATALOG"))
+	if dir == "" {
+		t.Skip("set CULVERT_E2E_REQ_CATALOG (+_KEYS/_REPO/_RUNNING/_OUT/_MODE) to emit an agent request")
+	}
+	keysRaw, err := os.ReadFile(os.Getenv("CULVERT_E2E_REQ_KEYS")) // #nosec G304 -- CI helper input
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := parseReleaseCatalogTrustKeys(string(keysRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust, err := NewTrustStore(keys, VerifyEnforce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := LoadVerifiedCatalog(&dirCatalogSource{dir: dir}, trust)
+	if err != nil {
+		t.Fatalf("catalog failed verification: %v", err)
+	}
+	repo, running := os.Getenv("CULVERT_E2E_REQ_REPO"), os.Getenv("CULVERT_E2E_REQ_RUNNING")
+	mode := envOr("CULVERT_E2E_REQ_MODE", "planned")
+	var body any
+	if id, ok := strings.CutPrefix(mode, "rollback="); ok {
+		body = e2eRollbackRequest(t, cat, id, running)
+	} else {
+		body = e2eApplyRequest(t, cat, repo, running, mode)
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(os.Getenv("CULVERT_E2E_REQ_OUT"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("wrote %s request (%d bytes)", mode, len(b))
+}
+
+// e2eRollbackRequest builds a standalone image-rollback body to release id,
+// with the running release's catalog proof as the observed baseline.
+func e2eRollbackRequest(t *testing.T, cat *Catalog, id, running string) map[string]any {
+	t.Helper()
+	rel, found := cat.byReleaseID[id]
+	cur, known := cat.Lookup(running)
+	if !found || !known {
+		t.Fatalf("rollback: target %q found=%v, running %q listed=%v", id, found, running, known)
+	}
+	return map[string]any{"mode": "image", "image_ref": rel.PinnedRef,
+		"release_proof": cat.releaseProof(id), "prior_release_proof": cat.releaseProof(cur.ReleaseID)}
+}
+
+// e2eApplyRequest runs the REAL dispatch planner and returns its apply body,
+// optionally with the baseline proof removed or replaced (see the modes).
+func e2eApplyRequest(t *testing.T, cat *Catalog, repo, running, mode string) UpgradeApplyRequest {
+	t.Helper()
+	d, err := NewDispatcher(e2eCatalogProvider{cat: cat}, DispatchConfig{ProxyRepo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := d.Plan(DispatchTarget{Channel: ChannelRecommended}, []string{running}, DispatchOptions{})
+	if plan.Outcome != OutcomePlan {
+		t.Fatalf("planner did not plan an apply: outcome=%v kind=%v reason=%v", plan.Outcome, plan.Kind, plan.Reason)
+	}
+	req := plan.Apply
+	switch {
+	case mode == "planned":
+	case mode == "no-prior":
+		req.PriorReleaseProof = nil
+	case strings.HasPrefix(mode, "prior="):
+		other := strings.TrimPrefix(mode, "prior=")
+		if req.PriorReleaseProof = cat.releaseProof(other); req.PriorReleaseProof == nil {
+			t.Fatalf("no proof for %q in the catalog", other)
+		}
+	default:
+		t.Fatalf("unknown CULVERT_E2E_REQ_MODE %q", mode)
+	}
+	return req
 }

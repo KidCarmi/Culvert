@@ -51,6 +51,9 @@ const (
 	// TriggerRuntimeFault means a previous run contained a memory fault on the
 	// store's mapped tables after a healthy open (CHAOS-74).
 	TriggerRuntimeFault = storeguard.TriggerRuntimeFault
+	// TriggerInterruptedImport means a previous run began a bulk import and never
+	// certified it complete; the partial store is rebuilt (F-DISK-RECOVERY-1).
+	TriggerInterruptedImport = storeguard.TriggerInterruptedImport
 )
 
 // communityStorePolicy is deliberately EMPTY: this store is never opened with an

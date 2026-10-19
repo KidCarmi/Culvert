@@ -1,0 +1,331 @@
+{
+ "schema": "culvert-guest-os-scan/1",
+ "scanner": "trivy 0.75.0 (vm, raw image converted from the build's qcow2; --scanners vuln)",
+ "artifact": "culvert-appliance-1.0.259-ubuntu-24.04.ova / sha256:87c9b32f28686d200522859c07d86e75e128ed6daa9b3b33f348728f51e81382",
+ "os": {
+  "Family": "ubuntu",
+  "Name": "24.04"
+ },
+ "results": [
+  {
+   "target": "/scan/guest.raw (ubuntu 24.04)",
+   "type": "ubuntu",
+   "total_entries": 26636,
+   "distinct_cves": 3850,
+   "status": {
+    "affected": 26603,
+    "fixed": 33
+   },
+   "severity": {
+    "MEDIUM": 24050,
+    "LOW": 1408,
+    "HIGH": 1143,
+    "CRITICAL": 35
+   },
+   "fix_available": [
+    {
+     "pkg": "dracut-install",
+     "installed": "060+5-1ubuntu3.3",
+     "fixed": "060+5-1ubuntu3.4",
+     "id": "CVE-2026-15816",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "dracut-install",
+     "installed": "060+5-1ubuntu3.3",
+     "fixed": "060+5-1ubuntu3.4",
+     "id": "CVE-2026-6893",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libevent-core-2.1-7t64",
+     "installed": "2.1.12-stable-9ubuntu2.1",
+     "fixed": "2.1.12-stable-9ubuntu2.2",
+     "id": "CVE-2026-63388",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomdec",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84384",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomdec",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84447",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomdec",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84448",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomdec",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84449",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomenc",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84384",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomenc",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84447",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomenc",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84448",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif-plugin-aomenc",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84449",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif1",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84384",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif1",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84447",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif1",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84448",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libheif1",
+     "installed": "1.17.6-1ubuntu4.8",
+     "fixed": "1.17.6-1ubuntu4.9",
+     "id": "CVE-2026-84449",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "libssl3t64",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-35189",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "libssl3t64",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-54872",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "libssl3t64",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-75805",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "libssl3t64",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-75806",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "libssl3t64",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-77696",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "libssl3t64",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-84782",
+     "severity": "HIGH"
+    },
+    {
+     "pkg": "libxpm4",
+     "installed": "1:3.5.17-1ubuntu0.24.04.1",
+     "fixed": "1:3.5.17-1ubuntu0.24.04.2",
+     "id": "CVE-2026-94287",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "openssl",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-35189",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "openssl",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-54872",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "openssl",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-75805",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "openssl",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-75806",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "openssl",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-77696",
+     "severity": "LOW"
+    },
+    {
+     "pkg": "openssl",
+     "installed": "3.0.13-0ubuntu3.15",
+     "fixed": "3.0.13-0ubuntu3.16",
+     "id": "CVE-2026-84782",
+     "severity": "HIGH"
+    },
+    {
+     "pkg": "python3-jwt",
+     "installed": "2.7.0-1ubuntu0.1",
+     "fixed": "2.7.0-1ubuntu0.2",
+     "id": "CVE-2026-48522",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "python3-jwt",
+     "installed": "2.7.0-1ubuntu0.1",
+     "fixed": "2.7.0-1ubuntu0.2",
+     "id": "CVE-2026-48524",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "python3-jwt",
+     "installed": "2.7.0-1ubuntu0.1",
+     "fixed": "2.7.0-1ubuntu0.2",
+     "id": "CVE-2026-48525",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "python3-jwt",
+     "installed": "2.7.0-1ubuntu0.1",
+     "fixed": "2.7.0-1ubuntu0.2",
+     "id": "CVE-2026-48526",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "python3-requests",
+     "installed": "2.31.0+dfsg-1ubuntu1.1",
+     "fixed": "2.31.0+dfsg-1ubuntu1.2",
+     "id": "CVE-2026-25645",
+     "severity": "LOW"
+    }
+   ]
+  },
+  {
+   "target": "usr/bin/docker",
+   "type": "gobinary",
+   "total_entries": 0,
+   "distinct_cves": 0,
+   "status": {},
+   "severity": {},
+   "fix_available": []
+  },
+  {
+   "target": "usr/bin/docker-proxy",
+   "type": "gobinary",
+   "total_entries": 0,
+   "distinct_cves": 0,
+   "status": {},
+   "severity": {},
+   "fix_available": []
+  },
+  {
+   "target": "usr/bin/dockerd",
+   "type": "gobinary",
+   "total_entries": 2,
+   "distinct_cves": 2,
+   "status": {
+    "fixed": 1,
+    "affected": 1
+   },
+   "severity": {
+    "LOW": 1,
+    "UNKNOWN": 1
+   },
+   "fix_available": [
+    {
+     "pkg": "github.com/cilium/ebpf",
+     "installed": "v0.17.3",
+     "fixed": "0.22.0",
+     "id": "CVE-2026-10722",
+     "severity": "LOW"
+    }
+   ]
+  },
+  {
+   "target": "usr/libexec/docker/cli-plugins/docker-compose",
+   "type": "gobinary",
+   "total_entries": 3,
+   "distinct_cves": 3,
+   "status": {
+    "fixed": 2,
+    "affected": 1
+   },
+   "severity": {
+    "MEDIUM": 2,
+    "UNKNOWN": 1
+   },
+   "fix_available": [
+    {
+     "pkg": "github.com/containerd/containerd/v2",
+     "installed": "v2.3.4",
+     "fixed": "2.0.13, 2.2.9, 2.3.6, 2.4.1",
+     "id": "CVE-2026-53493",
+     "severity": "MEDIUM"
+    },
+    {
+     "pkg": "github.com/containerd/containerd/v2",
+     "installed": "v2.3.4",
+     "fixed": "2.0.12, 2.2.8, 2.3.5",
+     "id": "CVE-2026-53495",
+     "severity": "MEDIUM"
+    }
+   ]
+  }
+ ]
+}

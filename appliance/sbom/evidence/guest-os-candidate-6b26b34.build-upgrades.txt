@@ -1,0 +1,14 @@
+# guest packages upgraded at build time from snapshot 20261002T120000Z (old -> new)
+dracut-install 060+5-1ubuntu3.3 -> 060+5-1ubuntu3.4
+libevent-core-2.1-7t64:amd64 2.1.12-stable-9ubuntu2.1 -> 2.1.12-stable-9ubuntu2.2
+libheif-plugin-aomdec:amd64 1.17.6-1ubuntu4.8 -> 1.17.6-1ubuntu4.9
+libheif-plugin-aomenc:amd64 1.17.6-1ubuntu4.8 -> 1.17.6-1ubuntu4.9
+libheif1:amd64 1.17.6-1ubuntu4.8 -> 1.17.6-1ubuntu4.9
+libssl3t64:amd64 3.0.13-0ubuntu3.15 -> 3.0.13-0ubuntu3.16
+libxpm4:amd64 1:3.5.17-1ubuntu0.24.04.1 -> 1:3.5.17-1ubuntu0.24.04.2
+linux-libc-dev:amd64 6.8.0-142.142 -> 6.8.0-146.146
+linux-tools-common 6.8.0-142.142 -> 6.8.0-146.146
+openssl 3.0.13-0ubuntu3.15 -> 3.0.13-0ubuntu3.16
+python3-jwt 2.7.0-1ubuntu0.1 -> 2.7.0-1ubuntu0.2
+python3-requests 2.31.0+dfsg-1ubuntu1.1 -> 2.31.0+dfsg-1ubuntu1.2
+sosreport 4.10.2-0ubuntu0~24.04.1 -> 4.11.2-0ubuntu0~24.04.1

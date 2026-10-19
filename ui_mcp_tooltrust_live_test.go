@@ -25,7 +25,26 @@ func mcpReqLive(method, target string, role UIRole, body, sub string) *httptest.
 		r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
 	}
 	if sub != "" {
-		tok, err := encodeSession(&Session{Sub: sub, Role: string(role), Provider: "local", Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti()})
+		// The canonical UI principal must exist in the local roster. Keep this
+		// request fixture scoped so it cannot alter another test's accounts.
+		fixtureCfg := cfg
+		fixtureCfg.mu.Lock()
+		previous := fixtureCfg.uiUsers[sub]
+		if fixtureCfg.uiUsers == nil {
+			fixtureCfg.uiUsers = make(map[string]*uiAdminUser)
+		}
+		fixtureCfg.uiUsers[sub] = &uiAdminUser{role: role}
+		fixtureCfg.mu.Unlock()
+		defer func() {
+			fixtureCfg.mu.Lock()
+			defer fixtureCfg.mu.Unlock()
+			if previous == nil {
+				delete(fixtureCfg.uiUsers, sub)
+			} else {
+				fixtureCfg.uiUsers[sub] = previous
+			}
+		}()
+		tok, err := encodeSession(&Session{Sub: sub, Role: string(role), Provider: "local", Audience: uiSessionAudience, Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti()})
 		if err == nil {
 			r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: tok}) // #nosec G124 -- request-side session-cookie fixture sent TO the handler; Secure/HttpOnly/SameSite are response attributes, irrelevant here
 		}

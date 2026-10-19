@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -268,13 +269,21 @@ type c2Decision struct {
 	SessionRole  UIRole
 	RequiredRole UIRole
 	MetaPath     string // the metadata Path that matched (may differ from request path under prefix routes)
+
+	// logPath / logMethod are the request path and method for LOG LINES only,
+	// CR/LF-scrubbed at the read site (repo convention, proxy.go: the barrier
+	// CodeQL's go/log-injection query recognises sits where the client value
+	// is read). Path/Method stay raw because route matching needs them.
+	logPath, logMethod string
 }
 
 // c2Evaluate computes the metadata-driven decision for a request.
 // Pure function over (request, index) — no logging, no counters, no
 // side effects. Used by both c2EvaluateAndLog and the test suite.
 func c2Evaluate(r *http.Request, idx *metadataIndex) c2Decision {
-	d := c2Decision{Path: r.URL.Path, Method: r.Method, SessionRole: uiRole(r)}
+	d := c2Decision{Path: r.URL.Path, Method: r.Method, SessionRole: uiRole(r),
+		logPath:   strings.ReplaceAll(strings.ReplaceAll(r.URL.Path, "\n", "_"), "\r", "_"),
+		logMethod: strings.ReplaceAll(strings.ReplaceAll(r.Method, "\n", "_"), "\r", "_")}
 
 	meta, found := idx.Lookup(r.URL.Path)
 	if !found {
@@ -327,13 +336,21 @@ func c2EvaluateAndLog(r *http.Request, idx *metadataIndex) c2Decision {
 	case !d.Matched && d.MetaPath == "":
 		// Missing metadata entry entirely.
 		c2ShadowMissingMetaTotal.Add(1)
+		logPath := sanitizeLog(d.logPath)
+		logMethod := sanitizeLog(d.logMethod)
 		logger.Printf("C2: no metadata for path=%q method=%q (drift between helpers and uiRoutes)",
-			d.Path, d.Method)
+			logPath, logMethod)
 	case !d.Matched && d.MetaPath != "":
 		// Path resolved but method had no policy.
 		c2ShadowNoPolicyTotal.Add(1)
+		// The inline ReplaceAll at the call site is the barrier CodeQL's
+		// go/log-injection query recognises (repo convention): the values reach
+		// here through a struct, where it does not follow sanitizeLog.
+		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logPath), "\n", "_"), "\r", "_")
+		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logMethod), "\n", "_"), "\r", "_")
+		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 		logger.Printf("C2: no method policy for path=%q method=%q meta_path=%q",
-			d.Path, d.Method, d.MetaPath)
+			logPath, logMethod, logMetaPath)
 	case d.WouldDeny:
 		c2ShadowWouldDenyTotal.Add(1)
 		// Log emission deferred to the middleware so the message can
@@ -454,14 +471,22 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 		if d.WouldDeny {
 			if c2Mode() == c2ModeEnforce {
 				c2EnforceDeniedTotal.Add(1)
+				logPath := sanitizeLog(d.logPath)
+				logMethod := sanitizeLog(d.logMethod)
+				logRole := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(string(d.SessionRole)), "\n", "_"), "\r", "_")
+				logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 				logger.Printf("C2-enforce: DENIED path=%q method=%q session_role=%q required=%q meta_path=%q",
-					d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
+					logPath, logMethod, logRole, d.RequiredRole, logMetaPath)
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			// Shadow mode — record the dry-run decision.
+			logPath := sanitizeLog(d.logPath)
+			logMethod := sanitizeLog(d.logMethod)
+			logRole := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(string(d.SessionRole)), "\n", "_"), "\r", "_")
+			logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
 			logger.Printf("C2-shadow: WOULD-DENY path=%q method=%q session_role=%q required=%q meta_path=%q",
-				d.Path, d.Method, d.SessionRole, d.RequiredRole, d.MetaPath)
+				logPath, logMethod, logRole, d.RequiredRole, logMetaPath)
 		}
 
 		// C4 — inject the C2-evaluated MinRole into the request context
@@ -502,8 +527,17 @@ func uiMetadataEnforcement(next http.Handler) http.Handler {
 			return
 		}
 		c2AuditMissingTotal.Add(1)
-		logger.Printf("C2: audit missing for route=%q method=%q meta_path=%q status=%d",
-			d.Path, d.Method, d.MetaPath, status)
+		// The inline ReplaceAll at the call site is the barrier CodeQL's
+		// go/log-injection query recognises (repo convention): the values reach
+		// here through a struct, where it does not follow sanitizeLog. The
+		// status is the handler's WriteHeader argument (for the MCP surface it
+		// is derived from upstream responses), so it gets the same barrier.
+		logPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logPath), "\n", "_"), "\r", "_")
+		logMethod := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.logMethod), "\n", "_"), "\r", "_")
+		logMetaPath := strings.ReplaceAll(strings.ReplaceAll(sanitizeLog(d.MetaPath), "\n", "_"), "\r", "_")
+		logStatus := strings.ReplaceAll(strings.ReplaceAll(strconv.Itoa(status), "\n", "_"), "\r", "_")
+		logger.Printf("C2: audit missing for route=%q method=%q meta_path=%q status=%s",
+			logPath, logMethod, logMetaPath, logStatus)
 	})
 }
 

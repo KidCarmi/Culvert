@@ -1,0 +1,59 @@
+#!/bin/sh
+# Keep the boot-console status line and key hint visible in the REAL root.
+#
+# culvert-splash-message sets the line in the initramfs, but once the real
+# root's plymouth-start takes the splash over the line is gone, leaving the
+# ~50 s service-start wait as title + dots with no status, no key hint and no
+# warning when a service fails (owner report, #1528). This runs after
+# plymouth-start and re-asserts the line, refreshing it so a theme redraw on
+# boot progress cannot drop it, and switches to a failure warning if a unit
+# has failed. It exits by itself when Plymouth quits (the console menu starts),
+# so it needs no explicit stop. Best-effort throughout; a machine with no
+# display never reaches here (ExecCondition=culvert-has-display on the unit).
+#
+# /bin/sh is dash on Ubuntu: POSIX only. ASCII only — the console is VGA text
+# (nomodeset), where non-ASCII (an em dash) does not render.
+set -u
+command -v plymouth >/dev/null 2>&1 || exit 0
+ok='Starting system services  -  Esc: boot messages'
+
+# failed_units_summary prints the first failed unit's name plus a "(+N more)"
+# count when several have failed, bounded for the 80-column VGA text console
+# (ASCII only, nomodeset). A generic "a service failed" told the operator
+# nothing actionable (#1528 ASTRA: the failed unit was journal-proven but its
+# NAME was absent from the progress frame); naming the unit points them at the
+# right `journalctl -u <unit>` / Alt+F12 log. Best-effort: on any error or no
+# names it prints nothing and the caller falls back to the generic warning.
+failed_units_summary() {
+    _u=$(systemctl list-units --state=failed --no-legend --plain --no-pager 2>/dev/null \
+        | awk '{print $1}' | grep -c .)
+    _first=$(systemctl list-units --state=failed --no-legend --plain --no-pager 2>/dev/null \
+        | awk 'NR==1{print $1}')
+    [ -n "$_first" ] || return 0
+    # Bound the unit name to 40 chars so the line + key hint stays within 80.
+    _first=$(printf '%.40s' "$_first")
+    if [ "${_u:-0}" -gt 1 ]; then
+        printf '%s (+%s more)' "$_first" "$((_u - 1))"
+    else
+        printf '%s' "$_first"
+    fi
+}
+
+while plymouth --ping 2>/dev/null; do
+    # is-system-running reports "degraded" once any unit has failed; "starting"
+    # during the ordinary wait. Anything else (or no systemctl) keeps the hint.
+    if [ "$(systemctl is-system-running 2>/dev/null)" = degraded ]; then
+        units=$(failed_units_summary)
+        if [ -n "$units" ]; then
+            msg="Service failed: $units  -  Esc or Alt+F12: boot log"
+        else
+            # Degraded but the unit list is momentarily unavailable: still warn.
+            msg='A service failed to start  -  Esc or Alt+F12: boot log'
+        fi
+    else
+        msg=$ok
+    fi
+    plymouth display-message --text="$msg" 2>/dev/null || true
+    sleep 2
+done
+exit 0

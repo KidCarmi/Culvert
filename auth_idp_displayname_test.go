@@ -64,11 +64,15 @@ func TestAuthSelectProvider_RendersDisplayNameNotMachineKey(t *testing.T) {
 	t.Cleanup(func() { idpRegistry = orig })
 	// Type is load-bearing since ADR-0027: the selection screen iterates
 	// EnabledInteractiveProviders(), which filters on IdPType.Interactive().
+	// Two providers: with exactly one, /auth/select continues straight to it
+	// and renders no selection screen at all.
 	profile := &IdPProfile{ID: "a1b2c3d4e5f6", Name: "Corporate Okta", Type: IdPTypeOIDC, Enabled: true}
+	other := &IdPProfile{ID: "f6e5d4c3b2a1", Name: "Partner SAML", Type: IdPTypeSAML, Enabled: true}
 	idpRegistry = &IdPRegistry{
-		profiles: []*IdPProfile{profile},
+		profiles: []*IdPProfile{profile, other},
 		live: map[string]IdentityProvider{
 			profile.ID: &labeledTestProvider{machineKey: "oidc:" + profile.ID, label: profile.Name},
+			other.ID:   &labeledTestProvider{machineKey: "saml:" + other.ID, label: other.Name},
 		},
 	}
 

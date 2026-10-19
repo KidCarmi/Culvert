@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/KidCarmi/Culvert/internal/feedsync"
 	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
@@ -175,6 +176,14 @@ func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 			OperatorAction: "Check the data volume holding the community category store for I/O errors and space; see server logs for the reported cause.",
 		}
 	}
+	// A deferred community sync (F-FEED-1): the store is available and intact,
+	// but the feed import did not complete because the data filesystem is below
+	// the free-space floor (or that free space could not be measured). Reported
+	// after the runtime-fault rows above (an active memory/IO fault is the more
+	// urgent root cause) and before the recovery/healthy rows below.
+	if c, ok := checkCategoryFeedDeferral(); ok {
+		return c
+	}
 	if h.Recovered {
 		return OperatorContractCheck{
 			Code:   "category_feed_db",
@@ -198,4 +207,35 @@ func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 		Status:  diagOK,
 		Message: "community category store loaded",
 	}
+}
+
+// checkCategoryFeedDeferral reports a category sync the free-space guard
+// deferred (internal/feedsync): below the floor, or free space that could not
+// be measured. A bulk badger write onto a full filesystem SIGBUSes the
+// process (readiness report F-DISK-1), so the write is not attempted; the row
+// says which cause, and whether earlier data is serving or there is none yet.
+func checkCategoryFeedDeferral() (OperatorContractCheck, bool) {
+	sy := globalUT1FeedSyncer
+	if sy == nil {
+		return OperatorContractCheck{}, false
+	}
+	var cause string
+	switch sy.Health().LastFailure {
+	case feedsync.FailDiskSpace:
+		cause = "the data filesystem is below the free-space floor for the write"
+	case feedsync.FailDiskSpaceUnknown:
+		cause = "free space on the data filesystem could not be measured"
+	default:
+		return OperatorContractCheck{}, false
+	}
+	coverage := "the previously synced community categories keep serving"
+	if sy.StoreEmpty() {
+		coverage = "no community category data is loaded yet — category matching uses the admin-managed list only"
+	}
+	return OperatorContractCheck{
+		Code:           "category_feed_db",
+		Status:         diagWarn,
+		Message:        "community category sync deferred: " + cause + "; " + coverage,
+		OperatorAction: "Free space on the filesystem holding the data volume (keep at least 2 GiB free), or fix why it cannot be measured; the sync retries on its own schedule.",
+	}, true
 }
