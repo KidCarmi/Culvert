@@ -433,7 +433,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 						authenticatedIdentity = sid.Email
 					}
 					authenticatedGroups = sid.Groups
-					authenticatedSource = "sso-ip:" + sid.Provider
+					authenticatedSource = ssoIPSourcePrefix + sid.Provider
 				case d.Outcome == OutcomeExempt && d.Rule != nil:
 					// ── 3a. No credentials — SCOPED Exempt rule (Rule != nil) ────
 					// An explicitly matched auth/exempt rule waives the challenge
