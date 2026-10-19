@@ -52,11 +52,15 @@ env:
   SOURCE_IMAGE_TAR_SHA256: 6caf36dba5240fb2977ae52191139ddfbe080314d258080766d0ab9270da622a
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it. This
-  # is the PR #1528 MERGE commit (head 8d3ca1c7 merged into base 31b4c9d5), the
-  # commit the deep-gate image was version-stamped from (the binary embeds
-  # 041d200db4f4) and the source build-ova.sh's candidate-source guard
-  # requires — NOT the bare head.
-  SOURCE_IMAGE_SHA: 041d200db4f45cf480a0c50fdf0f5d9a1ffc208c
+  # is the PR #1528 HEAD commit 8d3ca1c7, the commit the deep-gate image's
+  # VERSION stamp names (v1.0.268-candidate.g8d3ca1c75c4e) and the commit
+  # build-ova.sh's candidate-source guard requires: build-ova checks the image
+  # VERSION stamp (.github/scripts/pr-candidate-version.sh, head-sha based) AND
+  # that --candidate-source == the provisioning checkout's HEAD, so both must be
+  # the head. GitHub built the image from the ephemeral merge ref 041d200d, but
+  # that merge tree is byte-identical to the head tree (git: both 8847c37f), so
+  # provisioning + the agent built from the head match the image's source.
+  SOURCE_IMAGE_SHA: 8d3ca1c75c4ed504e3e7baf1af6a4335a4b940b9
 
 jobs:
   guest-boot:
@@ -107,13 +111,17 @@ jobs:
           # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
           # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
           # sidecar delivered > 0).
-          - variant: candidate-041d200d
+          - variant: candidate-8d3ca1c7
             provisioning: source
-            # The #1528-closeout candidate: PR MERGE commit 041d200d (head
-            # 8d3ca1c7 merged into base 31b4c9d5; binary stamp
-            # v1.0.268-candidate.g8d3ca1c75c4e, build-vcs 041d200db4f4), the
-            # commit the deep-gate image (run 39287948530) was built + stamped
-            # from. 8d3ca1c7 = a2b52abc (the prior candidate) + the SSO
+            # The #1528-closeout candidate: PR HEAD commit 8d3ca1c7 (binary
+            # VERSION stamp v1.0.268-candidate.g8d3ca1c75c4e), the commit the
+            # deep-gate image (run 39287948530) was version-stamped from and the
+            # commit build-ova.sh's candidate-source guard requires (it checks
+            # the VERSION stamp AND source==provisioning-checkout, both the
+            # head). GitHub built the image from the ephemeral merge ref
+            # 041d200d, whose tree is byte-identical to the head tree (git: both
+            # 8847c37f), so the agent built here from the head matches the
+            # image's source. 8d3ca1c7 = a2b52abc (the prior candidate) + the SSO
             # bare-provider vs sso-ip:<provider> source-contract fix + the
             # boot-progress failed-unit-name fix + origin/main merged in
             # (CHAOS-71 CP-gRPC listener recovery, CHAOS-74 catdb runtime
@@ -129,7 +137,7 @@ jobs:
             # transport-vs-not-ready split. Guest-content fingerprint differs
             # from the e24eb542 reference by the changed binaries (recorded
             # warning, not a gate).
-            source_sha: "041d200db4f45cf480a0c50fdf0f5d9a1ffc208c"
+            source_sha: "8d3ca1c75c4ed504e3e7baf1af6a4335a4b940b9"
             image_run: "39287948530"
             image_tar_sha256: "6caf36dba5240fb2977ae52191139ddfbe080314d258080766d0ab9270da622a"
             expect_image_id: "sha256:d6dfa590e06d7c3f9ef859449110520623927e949c7ba35247b21fd79329896b"
