@@ -69,7 +69,7 @@ func chaos77FreshArtifactCache(t *testing.T) {
 // unauthenticated, no cache validators — and returns the artifact body.
 func servedPAC(t *testing.T) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/proxy.pac", nil)
+	req := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
 	req.Host = "gateway.corp.example:8080"
 	rec := httptest.NewRecorder()
 	servePACFile(rec, req)
@@ -132,9 +132,13 @@ func TestChaos77_FailedPACSaveIsNotServedToTheFleet(t *testing.T) {
 	// A change that never committed must leave no audit record claiming it
 	// did. Asserted on unique entry content, never a ring length delta (the
 	// audit ring is bounded and shuffled runs saturate it).
-	for _, e := range auditGet() {
-		if strings.Contains(e.Detail, badHost) || strings.Contains(e.After, badHost) {
-			t.Errorf("audit entry claims a PAC change that never committed: action=%q detail=%q", e.Action, e.Detail)
+	// Index-based: AuditEntry is 136 bytes, over gocritic rangeValCopy's
+	// threshold, and conventions.md asks for index-based range over a copy.
+	entries := auditGet()
+	for i := range entries {
+		if strings.Contains(entries[i].Detail, badHost) || strings.Contains(entries[i].After, badHost) {
+			t.Errorf("audit entry claims a PAC change that never committed: action=%q detail=%q",
+				entries[i].Action, entries[i].Detail)
 		}
 	}
 }
@@ -240,7 +244,7 @@ func TestChaos77_ClockRollbackCannotHoldTheFleetOnASupersededPAC(t *testing.T) {
 			}
 
 			// That client revalidates with If-Modified-Since only.
-			req := httptest.NewRequest(http.MethodGet, "/proxy.pac", nil)
+			req := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
 			req.Host = "gateway.corp.example:8080"
 			req.Header.Set("If-Modified-Since", cached.UTC().Format(http.TimeFormat))
 			rec := httptest.NewRecorder()
@@ -259,7 +263,7 @@ func TestChaos77_ClockRollbackCannotHoldTheFleetOnASupersededPAC(t *testing.T) {
 
 			// Negative control: an UNCHANGED artifact must still revalidate
 			// to 304, or the fix would have simply disabled PAC caching.
-			req2 := httptest.NewRequest(http.MethodGet, "/proxy.pac", nil)
+			req2 := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
 			req2.Host = "gateway.corp.example:8080"
 			req2.Header.Set("If-Modified-Since", pacStore.ModTime().UTC().Format(http.TimeFormat))
 			rec2 := httptest.NewRecorder()
