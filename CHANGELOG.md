@@ -374,6 +374,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **`cdr.fail_mode: closed` was not enforced when CDR was unavailable — the
+  one case it exists for.** `cdrErrorOutcome` has always applied the setting
+  to a Sluice that *answers* with an error, but the unavailable path — every
+  instance's circuit breaker open, or no instance enrolled — returned an
+  unconditional `cdrPassSkipped("SKIPPED")` from both the proxy-side liveness
+  gate (`runCDRStage`) and the picker inside `safeCDRSanitize`, and
+  `runCDRStage` forwards a pass. So a fail-CLOSED deployment delivered every
+  document **unsanitized** for as long as no instance was available, while
+  `/api/cdr/*` and the startup banner still reported CDR enabled and
+  fail-closed. The in-code contract said otherwise at both sites ("the
+  caller's fail_mode then decides", "callers treat nil as skip CDR and apply
+  fail_mode"), and so did the runbook — `docs/OPERATIONS.md` §6 tells an
+  operator to switch to fail-open "to keep traffic flowing while you fix the
+  engine", advice that was a no-op because fail-closed already kept it
+  flowing.
+
+  The gap was reachable, not merely theoretical: the breaker opens after
+  `FailureThreshold` consecutive failures (default 5) and stays open for
+  `ResetTimeout` (default 30 s), so anything able to make Sluice fail that
+  often — a crafted document class that errors the engine, resource pressure,
+  a network fault — opened a 30 s window in which nothing was scanned, and
+  could hold it open by repeating, with only one probe per window getting
+  through. The refused documents themselves were still blocked, so the
+  attacker's own failing requests did not reveal the open window.
+
+  Both sites now route through `cdrUnavailableOutcome`, which applies
+  `fail_mode`: fail-closed refuses the document with reason `cdr_unavailable`
+  through the same emission as a verdict-driven block (extracted as
+  `cdrEmitStageBlock`, so the two cannot drift), counts it in
+  `culvert_cdr_fail_closed_total`, and leaves the breaker untouched — the
+  refusal takes no reservation, so it cannot strand a half-open probe
+  (CHAOS-72). A **disabled** CDR never blocks, whatever `fail_mode` says: an
+  empty pool is also what "off" looks like to the picker. Fail-OPEN
+  deployments — the default, and any explicit `fail_mode: open` — are
+  unchanged down to the counters the skip path does not touch.
+
+  `cdr_fail_closed_unavailable_test.go` pins both halves: every `fail_mode`
+  spelling `CDRFailOpen` folds (`CLOSED`, `Closed`, padded), the two
+  disabled-CDR negative controls, a healthy instance under fail-closed still
+  returning its verdict, the `runCDRStage` gate blocking the tunnel and
+  writing one block page, the fail-open gate forwarding the original bytes
+  with no counter movement, and 24 concurrent refusals under `-race` that
+  leave the breaker open with no stale probe.
+
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
   `Allow()` hands out a half-open probe reservation that only

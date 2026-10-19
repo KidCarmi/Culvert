@@ -467,6 +467,13 @@ If Sluice is enrolled but reporting unhealthy:
    traffic flowing while you fix the engine; remember to revert once
    resolved.
 
+Under `fail-closed`, an unavailable engine is a refusal, not a bypass: while
+no instance is available — every circuit breaker open, or none enrolled — each
+inspected document is blocked with reason `cdr_unavailable`, counted in
+`culvert_cdr_fail_closed_total`, and logged as `CDR_BLOCKED`. That is the
+posture `fail-closed` asks for, and it is why step 4 exists. A **disabled**
+CDR never blocks, whatever fail-mode is left in the config.
+
 ---
 
 ## 7. Cluster `cluster-insecure` warning
