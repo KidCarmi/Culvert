@@ -190,7 +190,12 @@ func contractRenderViolations(idx *contractIndex) (violations []string, writerCa
 //   - exactly one write to the response of any kind (jsonOK, json.Marshal /
 //     MarshalIndent, any .Encode / .Write / .WriteString, fmt.Fprint*);
 //   - that write is an unconditional top-level statement of the form
-//     jsonOK(w, redactContractForRole(full, <role>.HasRole(RoleAdmin)));
+//     jsonOK(w, redactContractForRole(full, uiRole(r).HasRole(RoleAdmin))),
+//     where r is the writer's own *http.Request parameter — the gate's
+//     receiver is the REQUEST's role, never a constant such as
+//     RoleAdmin.HasRole(RoleAdmin) or any other expression (Codex P2, #1545);
+//   - the request parameter is never reassigned, so uiRole(r) reads the role
+//     the auth middleware put on the incoming request;
 //   - the contract parameter is referenced exactly once — as that call's
 //     first argument — so the unredacted value cannot be used anywhere else.
 func writerViolations(fn *contractFunc) []string {
@@ -203,9 +208,17 @@ func writerViolations(fn *contractFunc) []string {
 	if param == "" {
 		return append(out, where+" has no OperatorContract parameter")
 	}
-	if !hasTopLevelRedactedWrite(fn.Decl.Body, param) {
+	req := requestParamName(fn.Decl)
+	if req == "" {
+		return append(out, where+" has no *http.Request parameter to take the caller's role from")
+	}
+	if !hasTopLevelRedactedWrite(fn.Decl.Body, param, req) {
 		out = append(out, where+" does not unconditionally serialize "+
-			"jsonOK(w, redactContractForRole("+param+", <role>.HasRole(RoleAdmin)))")
+			"jsonOK(w, redactContractForRole("+param+", uiRole("+req+").HasRole(RoleAdmin)))")
+	}
+	if identAssigned(fn.Decl.Body, req) {
+		out = append(out, fmt.Sprintf("%s reassigns the request %q, so uiRole(%s) may not be the "+
+			"caller's role", where, req, req))
 	}
 	if n := identUses(fn.Decl.Body, param); n != 1 {
 		out = append(out, fmt.Sprintf("%s references the unredacted %q %d times, want exactly 1 "+
@@ -244,21 +257,21 @@ func isRawWriteCall(call *ast.CallExpr) bool {
 }
 
 // hasTopLevelRedactedWrite reports whether body has, as a direct statement,
-// jsonOK(w, redactContractForRole(param, <x>.HasRole(RoleAdmin))).
-func hasTopLevelRedactedWrite(body *ast.BlockStmt, param string) bool {
+// jsonOK(w, redactContractForRole(param, uiRole(req).HasRole(RoleAdmin))).
+func hasTopLevelRedactedWrite(body *ast.BlockStmt, param, req string) bool {
 	for _, st := range body.List {
 		es, ok := st.(*ast.ExprStmt)
 		if !ok {
 			continue
 		}
-		if call, ok := isCallTo(es.X, "jsonOK"); ok && len(call.Args) == 2 && isAdminGatedRedaction(call.Args[1], param) {
+		if call, ok := isCallTo(es.X, "jsonOK"); ok && len(call.Args) == 2 && isAdminGatedRedaction(call.Args[1], param, req) {
 			return true
 		}
 	}
 	return false
 }
 
-func isAdminGatedRedaction(e ast.Expr, param string) bool {
+func isAdminGatedRedaction(e ast.Expr, param, req string) bool {
 	red, ok := isCallTo(e, "redactContractForRole")
 	if !ok || len(red.Args) != 2 {
 		return false
@@ -272,7 +285,57 @@ func isAdminGatedRedaction(e ast.Expr, param string) bool {
 	}
 	sel, ok := gate.Fun.(*ast.SelectorExpr)
 	arg, ok2 := gate.Args[0].(*ast.Ident)
-	return ok && ok2 && sel.Sel.Name == "HasRole" && arg.Name == "RoleAdmin"
+	if !ok || !ok2 || sel.Sel.Name != "HasRole" || arg.Name != "RoleAdmin" {
+		return false
+	}
+	// The receiver must be exactly uiRole(req): the role the auth middleware
+	// resolved for THIS request. A constant receiver (RoleAdmin.HasRole(...))
+	// or any other expression would un-redact for every caller.
+	recv, ok := isCallTo(sel.X, "uiRole")
+	if !ok || len(recv.Args) != 1 {
+		return false
+	}
+	reqArg, ok := recv.Args[0].(*ast.Ident)
+	return ok && reqArg.Name == req
+}
+
+// requestParamName is the name of fd's *http.Request parameter, or "".
+func requestParamName(fd *ast.FuncDecl) string {
+	if fd.Type.Params == nil {
+		return ""
+	}
+	for _, p := range fd.Type.Params.List {
+		star, ok := p.Type.(*ast.StarExpr)
+		if !ok || len(p.Names) != 1 {
+			continue
+		}
+		sel, ok := star.X.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Request" {
+			continue
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "http" {
+			return p.Names[0].Name
+		}
+	}
+	return ""
+}
+
+// identAssigned reports whether body assigns to name (=, :=, op=) anywhere.
+func identAssigned(body *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range as.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // contractParamName is the name of fd's OperatorContract parameter, or "".
@@ -502,6 +565,11 @@ func TestWall_OperatorContractRenderer_NegativeControls(t *testing.T) {
 		"conditional write of full":                    "if r.URL.Query().Get(\"raw\") != \"\" {\n\t\tjsonOK(w, full)\n\t}\n\t" + redacted,
 		"writes full directly":                         "jsonOK(w, full)",
 		"raw write of a marshalled full":               redacted + "\n\tb, _ := json.Marshal(full)\n\t_, _ = w.Write(b)",
+		// Codex P2, #1545: the gate's receiver must be the REQUEST's role.
+		"constant admin receiver":            "jsonOK(w, redactContractForRole(full, RoleAdmin.HasRole(RoleAdmin)))",
+		"receiver not the request role":      "jsonOK(w, redactContractForRole(full, UIRole(\"admin\").HasRole(RoleAdmin)))",
+		"role taken from another request":    "jsonOK(w, redactContractForRole(full, uiRole(new(http.Request)).HasRole(RoleAdmin)))",
+		"request reassigned before the gate": "r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))\n\t" + redacted,
 	} {
 		mutated := base.clone()
 		mutated.replaceOnce(t, "diagnostics.go", redacted, repl)
@@ -524,15 +592,48 @@ var (
 	rosterCounterVars     = []string{"rosterPersistRefused", "rosterPersistBestEffort", "rosterNotDurable"}
 )
 
-// rosterRowExceptions are the reachable functions allowed to read a roster
-// primitive, with the reason. Anything else reachable from
-// buildOperatorContract that reads one fails the wall.
-var rosterRowExceptions = map[string]string{
-	"checkOversizeConfiguredUsernames": "the admin_username_length row; redacted in redactContractForRole",
-	"collectAdminUsernames":            "feeds admin_username_length; redacted in redactContractForRole",
-	"hasCredentialCapableProvider": "reads cfg.GetUser() only as a BOOLEAN existence probe; renders no " +
-		"name, role, count or second-factor posture",
+// rosterKind is how a classified roster reader's result may travel.
+type rosterKind int
+
+const (
+	// rosterRedactedRow builds an operator-contract row from roster state. Its
+	// Code constant must be classified in redactContractForRole, and any other
+	// function that consumes the row is itself a roster consumer.
+	rosterRedactedRow rosterKind = iota + 1
+	// rosterInput returns roster data (not a row) to a row builder. Every
+	// caller is a roster consumer and must be classified in turn.
+	rosterInput
+	// rosterProbe reads the roster but returns only a fact reviewed as safe
+	// below admin, so its callers are NOT roster consumers.
+	rosterProbe
+)
+
+type rosterClass struct {
+	Kind   rosterKind
+	Code   string // rosterRedactedRow only: the code constant redactContractForRole must reference
+	Reason string
 }
+
+// rosterRowExceptions classifies every function reachable from
+// buildOperatorContract that reads a roster primitive OR consumes (calls or
+// references) another roster reader whose kind is not rosterProbe. Anything
+// else reachable that does either fails the wall (Codex P2, PR #1545: a new
+// check calling collectAdminUsernames() and rendering len(inv.names) used to
+// pass every wall without being redacted). buildOperatorContract itself is the
+// aggregation root: its result is redacted by writeOperatorContract (wall 1).
+var rosterRowExceptions = map[string]rosterClass{
+	"checkOversizeConfiguredUsernames": {Kind: rosterRedactedRow, Code: "adminUsernameLengthCode",
+		Reason: "the admin_username_length row"},
+	"collectAdminUsernames": {Kind: rosterInput,
+		Reason: "the inventory checkOversizeConfiguredUsernames renders; every consumer is classified"},
+	"hasCredentialCapableProvider": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
+		"existence probe; renders no name, role, count or second-factor posture"},
+}
+
+const (
+	rosterContractRoot = "buildOperatorContract"
+	rosterRedactor     = "redactContractForRole"
+)
 
 // contractReachable returns every function reachable from
 // buildOperatorContract. Over-approximates on purpose: a referenced
@@ -541,7 +642,7 @@ var rosterRowExceptions = map[string]string{
 // value or called through any receiver is still followed.
 func contractReachable(idx *contractIndex) map[*contractFunc]bool {
 	seen := map[*contractFunc]bool{}
-	queue := append([]*contractFunc(nil), idx.byName["buildOperatorContract"]...)
+	queue := append([]*contractFunc(nil), idx.byName[rosterContractRoot]...)
 	for len(queue) > 0 {
 		fn := queue[0]
 		queue = queue[1:]
@@ -549,17 +650,24 @@ func contractReachable(idx *contractIndex) map[*contractFunc]bool {
 			continue
 		}
 		seen[fn] = true
-		ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.SelectorExpr:
-				queue = append(queue, idx.methods[x.Sel.Name]...)
-			case *ast.Ident:
-				queue = append(queue, idx.byName[x.Name]...)
-			}
-			return true
-		})
+		queue = append(queue, contractRefs(idx, fn)...)
 	}
 	return seen
+}
+
+// contractRefs is fn's over-approximated callee set (see contractReachable).
+func contractRefs(idx *contractIndex, fn *contractFunc) []*contractFunc {
+	var refs []*contractFunc
+	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			refs = append(refs, idx.methods[x.Sel.Name]...)
+		case *ast.Ident:
+			refs = append(refs, idx.byName[x.Name]...)
+		}
+		return true
+	})
+	return refs
 }
 
 // rosterPrimitiveIn returns the first roster primitive fn reads, or "".
@@ -590,25 +698,113 @@ func rosterPrimitiveIn(fn *contractFunc) string {
 	return found
 }
 
-// rosterRowViolations reports reachable, unclassified roster readers, plus
-// how many classified ones were seen (for the not-vacuous check).
+// rosterTaint maps every reachable function that touches roster state to how
+// it does: it reads a primitive directly, or — transitively, to a fixpoint —
+// it references a reachable function that does, unless that callee is a
+// classified rosterProbe. Iteration follows idx.funcs so messages are stable.
+func rosterTaint(idx *contractIndex, reachable map[*contractFunc]bool) map[*contractFunc]string {
+	taint := map[*contractFunc]string{}
+	refs := map[*contractFunc][]*contractFunc{}
+	for _, fn := range idx.funcs {
+		if !reachable[fn] {
+			continue
+		}
+		refs[fn] = contractRefs(idx, fn)
+		if p := rosterPrimitiveIn(fn); p != "" {
+			taint[fn] = "reads " + p
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, fn := range idx.funcs {
+			if _, done := taint[fn]; done || !reachable[fn] {
+				continue
+			}
+			for _, callee := range refs[fn] {
+				if _, tainted := taint[callee]; !tainted || rosterRowExceptions[callee.Key].Kind == rosterProbe {
+					continue
+				}
+				taint[fn] = "consumes roster reader " + callee.Key
+				changed = true
+				break
+			}
+		}
+	}
+	return taint
+}
+
+// rosterRowViolations reports reachable roster readers and consumers that are
+// not classified, classified rows that redactContractForRole does not handle,
+// and stale classifications; plus how many classified readers were seen (for
+// the not-vacuous check).
 func rosterRowViolations(idx *contractIndex) (violations []string, classifiedSeen int) {
-	for fn := range contractReachable(idx) {
-		prim := rosterPrimitiveIn(fn)
-		if prim == "" {
+	reachable := contractReachable(idx)
+	taint := rosterTaint(idx, reachable)
+	var redactor *contractFunc
+	if rs := idx.byName[rosterRedactor]; len(rs) == 1 {
+		redactor = rs[0]
+	} else {
+		violations = append(violations, fmt.Sprintf("%s: found %d declarations, want exactly 1", rosterRedactor, len(rs)))
+	}
+	seenKeys := map[string]bool{}
+	for _, fn := range idx.funcs {
+		how, tainted := taint[fn]
+		if !reachable[fn] || fn.Key == rosterContractRoot {
 			continue
 		}
-		if _, ok := rosterRowExceptions[fn.Key]; ok {
+		class, classified := rosterRowExceptions[fn.Key]
+		if classified {
+			seenKeys[fn.Key] = true
+		}
+		switch {
+		case !tainted && classified:
+			violations = append(violations, fn.File+": "+fn.Key+" is classified in rosterRowExceptions but "+
+				"neither reads nor consumes roster state; remove the stale entry")
+		case !tainted:
+		case !classified:
+			violations = append(violations, fn.File+": "+fn.Key+" "+how+" and is reachable from "+
+				"buildOperatorContract, so its row rides the viewer-readable operator contract. Redact it in "+
+				"redactContractForRole (with a gate beside TestApiDiagnostics_UsernameRowDetailIsAdminOnly) and "+
+				"classify it in rosterRowExceptions, or record there why its detail is safe below admin")
+		default:
 			classifiedSeen++
-			continue
+			violations = append(violations, rosterClassViolations(fn, class, redactor)...)
 		}
-		violations = append(violations, fn.File+": "+fn.Key+" reads "+prim+" and is reachable from "+
-			"buildOperatorContract, so its row rides the viewer-readable operator contract. Redact it in "+
-			"redactContractForRole (with a gate beside TestApiDiagnostics_UsernameRowDetailIsAdminOnly) and "+
-			"classify it in rosterRowExceptions, or record there why its detail is safe below admin")
+	}
+	for key := range rosterRowExceptions {
+		if !seenKeys[key] {
+			violations = append(violations, key+" is classified in rosterRowExceptions but is not reachable "+
+				"from buildOperatorContract; remove or rename the stale entry")
+		}
 	}
 	sort.Strings(violations)
 	return violations, classifiedSeen
+}
+
+// rosterClassViolations checks that a classified reader's entry is coherent:
+// a reason is recorded and a redacted row is actually classified by the
+// redactor under the code the row renders.
+func rosterClassViolations(fn *contractFunc, class rosterClass, redactor *contractFunc) []string {
+	where := fn.File + ": " + fn.Key
+	var out []string
+	if strings.TrimSpace(class.Reason) == "" {
+		out = append(out, where+" is classified in rosterRowExceptions without a reason")
+	}
+	switch class.Kind {
+	case rosterRedactedRow:
+		if class.Code == "" || identUses(fn.Decl.Body, class.Code) == 0 {
+			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but does not render "+
+				"that code", where, class.Code))
+		}
+		if redactor != nil && (class.Code == "" || identUses(redactor.Decl.Body, class.Code) == 0) {
+			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but %s does not "+
+				"classify that code, so the row reaches viewers unredacted", where, class.Code, rosterRedactor))
+		}
+	case rosterInput, rosterProbe:
+	default:
+		out = append(out, where+" has an unknown rosterRowExceptions kind")
+	}
+	return out
 }
 
 // TestWall_RosterDerivedDiagnosticsAreEnumerated scans EVERY root-package
@@ -656,6 +852,68 @@ func TestWall_RosterDerivedDiagnostics_NegativeControl(t *testing.T) {
 	}
 }
 
+// rosterViolationFor reports whether violations name want.
+func rosterViolationFor(violations []string, want string) bool {
+	for _, v := range violations {
+		if strings.Contains(v, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWall_RosterConsumers_NegativeControls proves the wall follows roster
+// state through its classified producers (Codex P2, PR #1545): a reachable
+// consumer of collectAdminUsernames or of the redacted row is not exempt just
+// because the function it calls is classified, and a classified row is
+// accepted only while redactContractForRole actually handles its code.
+func TestWall_RosterConsumers_NegativeControls(t *testing.T) {
+	base := loadContractSources(t)
+	wire := func(srcs contractSources, check string) {
+		srcs.replaceOnce(t, "diagnostics.go", "\t\tcheckStorage(),\n", "\t\tcheckStorage(),\n\t\t"+check+"(),\n")
+	}
+	const hdr = "package main\n\nimport \"fmt\"\n\n"
+	for name, tc := range map[string]struct{ src, check, want string }{
+		"renders a count from collectAdminUsernames": {
+			src: hdr + "func checkFixtureRosterCount() OperatorContractCheck {\n" +
+				"\tinv := collectAdminUsernames()\n" +
+				"\treturn OperatorContractCheck{Code: \"fixture_roster_count\", Status: diagWarn,\n" +
+				"\t\tMessage: fmt.Sprintf(\"%d admin accounts\", len(inv.names))}\n}\n",
+			check: "checkFixtureRosterCount", want: "checkFixtureRosterCount consumes roster reader collectAdminUsernames",
+		},
+		"re-codes the redacted row": {
+			src: hdr + "func checkFixtureRecodedRow() OperatorContractCheck {\n" +
+				"\tc := checkOversizeConfiguredUsernames()\n\tc.Code = \"fixture_recoded\"\n" +
+				"\treturn OperatorContractCheck{Code: c.Code, Status: c.Status, Message: fmt.Sprint(c.Message)}\n}\n",
+			check: "checkFixtureRecodedRow", want: "checkFixtureRecodedRow consumes roster reader checkOversizeConfiguredUsernames",
+		},
+		"consumes through an unclassified helper": {
+			src: hdr + "func fixtureRosterSize() int { return len(collectAdminUsernames().names) }\n\n" +
+				"func checkFixtureViaHelper() OperatorContractCheck {\n" +
+				"\treturn OperatorContractCheck{Code: \"fixture_via_helper\", Status: diagWarn,\n" +
+				"\t\tMessage: fmt.Sprintf(\"%d\", fixtureRosterSize())}\n}\n",
+			check: "checkFixtureViaHelper", want: "checkFixtureViaHelper consumes roster reader fixtureRosterSize",
+		},
+	} {
+		srcs := base.clone()
+		srcs["zz_fixture_roster_consumer.go"] = []byte(tc.src)
+		wire(srcs, tc.check)
+		if v, _ := rosterRowViolations(parseContractSources(t, srcs)); !rosterViolationFor(v, tc.want) {
+			t.Errorf("%s: passed the wall; want a violation containing %q, got %q", name, tc.want, v)
+		}
+	}
+
+	// The redactor stops classifying the row's code: the classification alone
+	// must not keep the wall green.
+	unredacted := base.clone()
+	unredacted.replaceOnce(t, "diagnostics.go", "if checks[i].Code != adminUsernameLengthCode {",
+		"if checks[i].Code != \"fixture_other_code\" {")
+	if v, _ := rosterRowViolations(parseContractSources(t, unredacted)); !rosterViolationFor(v,
+		"checkOversizeConfiguredUsernames is classified as a redacted row") {
+		t.Errorf("a classified row that redactContractForRole no longer handles passed the wall; violations=%q", v)
+	}
+}
+
 // ─── wall 3: roster-row producers only feed the contract ─────────────────────
 
 // rosterRowProducers are the functions that BUILD a roster-derived row (or its
@@ -666,9 +924,20 @@ func TestWall_RosterDerivedDiagnostics_NegativeControl(t *testing.T) {
 // redactContractForRole entirely (CodeRabbit, PR #1545). Boolean probes such
 // as hasCredentialCapableProvider are deliberately NOT producers: they render
 // no roster value and have legitimate callers on the proxy path.
-var rosterRowProducers = map[string]bool{
-	"checkOversizeConfiguredUsernames": true,
-	"collectAdminUsernames":            true,
+//
+// The set is DERIVED from rosterRowExceptions (every redacted row and roster
+// input), so classifying a new roster consumer for wall 2 also confines it
+// here.
+var rosterRowProducers = rosterProducerKeys()
+
+func rosterProducerKeys() map[string]bool {
+	keys := map[string]bool{}
+	for k, c := range rosterRowExceptions {
+		if c.Kind == rosterRedactedRow || c.Kind == rosterInput {
+			keys[k] = true
+		}
+	}
+	return keys
 }
 
 // rosterProducerCallerExceptions are callers outside the contract walk that
