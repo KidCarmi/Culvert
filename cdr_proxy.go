@@ -251,11 +251,11 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	ms := time.Since(t0).Milliseconds()
 	if err != nil {
 		if !IsFileTooLarge(err) {
-			cdrMarkOutcome(instanceName, true)
+			cdrMarkOutcome(instanceName, resv, true)
 		}
 		return cdrHandleCallError(err, profile, modeStr, ms, cfg)
 	}
-	return cdrClassifyResult(res, instanceName, profile, modeStr, ms, hashHex, epoch, cfg)
+	return cdrClassifyResult(res, instanceName, resv, profile, modeStr, ms, hashHex, epoch, cfg)
 }
 
 // cdrGateOversize returns SKIPPED_OVERSIZE when body is over the
@@ -332,20 +332,20 @@ func cdrCallContext(ctx context.Context, cfg CDRConfig) (context.Context, contex
 // appropriate cdrRunResult, marks the CB, and caches the decision
 // where safe.  Split out of safeCDRSanitize to keep that function's
 // cyclomatic under the linter threshold.
-func cdrClassifyResult(res *cdrRunSanitizeResult, instance, profile, mode string, ms int64, hashHex string, epoch int64, cfg CDRConfig) *cdrRunResult {
+func cdrClassifyResult(res *cdrRunSanitizeResult, instance string, resv cdrProbeReservation, profile, mode string, ms int64, hashHex string, epoch int64, cfg CDRConfig) *cdrRunResult {
 	switch res.Status {
 	case pb.Status_CLEAN:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
 			status: "CLEAN", profile: profile, mode: mode,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
 		})
 		return cdrPassClean(profile, mode, nil, ms, false)
 	case pb.Status_SANITIZED:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		return cdrSwapResult(res.SanitizedData, res.Threats, profile, mode, ms)
 	case pb.Status_BLOCKED:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		reason := res.ErrorMessage
 		if reason == "" {
 			reason = "cdr_blocked"
@@ -357,18 +357,18 @@ func cdrClassifyResult(res *cdrRunSanitizeResult, instance, profile, mode string
 		})
 		return cdrBlockResult(reason, res.Threats, profile, mode, ms, false)
 	case pb.Status_UNSUPPORTED:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
 			status: "UNSUPPORTED", profile: profile, mode: mode,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
 		})
 		return cdrPassUnsupported(profile, mode, ms, false)
 	case pb.Status_ERROR:
-		cdrMarkOutcome(instance, true)
+		cdrMarkOutcome(instance, resv, true)
 		return cdrErrorOutcome(res.ErrorMessage, profile, mode, ms, cfg)
 	}
 	// Unknown status — defensive.  Treat like ERROR.
-	cdrMarkOutcome(instance, true)
+	cdrMarkOutcome(instance, resv, true)
 	return cdrErrorOutcome(fmt.Sprintf("unknown_status_%d", res.Status), profile, mode, ms, cfg)
 }
 

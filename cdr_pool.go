@@ -320,16 +320,19 @@ var promLabelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 // cdrMarkOutcome reports an instance's outcome to its circuit breaker.
 // `isFailure` is the caller's classification (transport / ERROR status
 // count; CLEAN / SANITIZED / BLOCKED / UNSUPPORTED / file_too_large
-// do NOT count as failures).
-func cdrMarkOutcome(instanceName string, isFailure bool) {
+// do NOT count as failures). resv is the reservation the RPC ran under
+// (from cdrPickPooledReserved): the breaker drops an outcome whose
+// reservation was superseded, so a reclaimed probe's late report cannot
+// override the probe that replaced it.
+func cdrMarkOutcome(instanceName string, resv cdrProbeReservation, isFailure bool) {
 	pc := cdrPool.Get(instanceName)
 	if pc == nil {
 		return
 	}
 	if isFailure {
-		pc.Breaker.OnFailure()
+		pc.Breaker.OnFailure(resv)
 	} else {
-		pc.Breaker.OnSuccess()
+		pc.Breaker.OnSuccess(resv)
 	}
 }
 

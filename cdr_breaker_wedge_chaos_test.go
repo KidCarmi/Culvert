@@ -47,7 +47,7 @@ func wedgeBreaker(t *testing.T, cfg cdrBreakerConfig) (breaker *cdrCircuitBreake
 func tripOpen(t *testing.T, b *cdrCircuitBreaker) {
 	t.Helper()
 	for i := 0; i < b.cfg.FailureThreshold; i++ {
-		b.OnFailure()
+		b.OnFailure(cdrProbeReservation{})
 	}
 	if b.State() != cbStateOpen {
 		t.Fatalf("breaker state = %s after %d failures, want open",
@@ -89,14 +89,16 @@ func TestCDRBreaker_AbandonedProbeDoesNotWedgeHalfOpenForever(t *testing.T) {
 	}
 
 	// And it must keep recovering, not heal exactly once.
+	var probe cdrProbeReservation
 	for i := 0; i < 3; i++ {
 		advance(b.cfg.HalfOpenProbeTimeout + time.Second)
-		if !b.Allow() {
+		var ok bool
+		if ok, probe = b.Reserve(); !ok {
 			t.Fatalf("round %d: breaker stopped re-arming abandoned probes", i)
 		}
 	}
-	// A real outcome still closes it.
-	b.OnSuccess()
+	// A real outcome from the current probe still closes it.
+	b.OnSuccess(probe)
 	if b.State() != cbStateClosed {
 		t.Fatalf("state = %s after OnSuccess, want closed", breakerStateName(b.State()))
 	}
@@ -234,7 +236,7 @@ func TestCDRBreaker_BudgetSurvivesConcurrentDenials(t *testing.T) {
 			return now
 		})
 		for i := 0; i < b.cfg.FailureThreshold; i++ {
-			b.OnFailure()
+			b.OnFailure(cdrProbeReservation{})
 		}
 		clockMu.Lock()
 		now = now.Add(b.cfg.ResetTimeout + time.Second)
@@ -320,7 +322,7 @@ func TestCDRHotPath_LivenessGateLeavesProbeForTheRealCall(t *testing.T) {
 	b := pc.Breaker
 	now := time.Now()
 	b.setNowFn(func() time.Time { return now })
-	b.OnSuccess() // no-op on a closed breaker; Pick() reserves nothing
+	b.OnSuccess(cdrProbeReservation{}) // no-op on a closed breaker; Pick() reserves nothing
 
 	tripOpen(t, b)
 	now = now.Add(b.cfg.ResetTimeout + time.Second)
@@ -335,12 +337,13 @@ func TestCDRHotPath_LivenessGateLeavesProbeForTheRealCall(t *testing.T) {
 			"the probe must be left for the call that can record an outcome", n)
 	}
 	// The real selector now gets it, and can report the outcome.
-	if got, _ := cdrPickPooledReserved(); got == nil {
+	got, probe := cdrPickPooledReserved()
+	if got == nil {
 		t.Fatal("cdrPickPooledReserved() == nil right after the gate said CDR was usable: " +
 			"the recovery probe was consumed by the gate, so every file would " +
 			"silently skip sanitization")
 	}
-	b.OnSuccess()
+	b.OnSuccess(probe)
 	if b.State() != cbStateClosed {
 		t.Fatalf("state = %s after a successful probe, want closed", breakerStateName(b.State()))
 	}

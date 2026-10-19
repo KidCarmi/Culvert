@@ -1302,14 +1302,14 @@ func apiCDRTest(w http.ResponseWriter, r *http.Request) {
 	res, err := pooled.Client.Sanitize(ctx, header, bytes.NewReader(body))
 	if err != nil {
 		if !IsFileTooLarge(err) {
-			cdrMarkOutcome(pooled.Name, true)
+			cdrMarkOutcome(pooled.Name, resv, true)
 		}
 		http.Error(w, fmt.Sprintf("Sanitize failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	// The same classification the proxy path applies (cdrClassifyResult): an
 	// engine ERROR or an unknown status is an instance failure.
-	cdrMarkOutcome(pooled.Name, cdrStatusIsInstanceFailure(res.Status))
+	cdrMarkOutcome(pooled.Name, resv, cdrStatusIsInstanceFailure(res.Status))
 
 	auditEventDiff(r, "cdr.test", filename,
 		fmt.Sprintf("size=%d status=%s threats=%d duration_ms=%d",

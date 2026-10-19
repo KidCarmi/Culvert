@@ -224,7 +224,7 @@ func TestCDRBreaker_ReleaseIsNeutralAndGenerationScoped(t *testing.T) {
 	}
 
 	// After an outcome, Release is a no-op.
-	b.OnSuccess()
+	b.OnSuccess(fresh)
 	b.Release(fresh)
 	if b.State() != cbStateClosed || b.halfOpenTried.Load() != 0 {
 		t.Fatalf("Release after OnSuccess disturbed the closed breaker: %s, held %d",

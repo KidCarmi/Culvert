@@ -9,6 +9,11 @@ package main
 //   half-open ─(probe success)────────> closed
 //   half-open ─(probe failure)────────> open  (reset timer starts fresh)
 //
+// Every outcome carries the reservation it was earned under, so a probe the
+// wedge escape reclaimed (or a request admitted before the breaker opened)
+// cannot decide a half-open episode it is not the probe of.  All timers run on
+// a monotonic clock.
+//
 // Thread-safe.  Every state transition runs under one per-breaker mutex
 // (see the concurrency contract on cdrCircuitBreaker); the critical sections
 // are a few loads and stores and never span the RPC.
@@ -166,8 +171,14 @@ type cdrCircuitBreaker struct {
 
 	mu sync.Mutex
 
-	state         atomic.Int32
-	openedAt      atomic.Int64 // UnixNano when state transitioned to open
+	state atomic.Int32
+	// openedAt is the WALL-clock UnixNano of the last transition to open. It
+	// is for display (Stats, /api/cdr/instances) only and must never feed a
+	// timer decision: see openedMono.
+	openedAt atomic.Int64
+	// openedMono is the same instant on the breaker's MONOTONIC clock
+	// (monoNow); the ResetTimeout comparison reads only this.
+	openedMono    atomic.Int64
 	consecFails   atomic.Int64
 	halfOpenTried atomic.Int32 // probes currently being served in half-open
 	// halfOpenGen identifies the current half-open budget. It is bumped on
@@ -175,24 +186,42 @@ type cdrCircuitBreaker struct {
 	// half-open, so a reservation from an earlier budget can never be released
 	// into a later one. It is never 0 while state is half-open.
 	halfOpenGen atomic.Int64
-	// halfOpenLastAt is UnixNano of the newest reservation taken from the
-	// current budget (or of the arm, before any). The wedge escape measures
-	// staleness from HERE, not from the arm: once Release can hand a slot
-	// back, one budget hosts several sequential reservations, and measuring
-	// from the arm time would reclaim a probe taken moments ago.
+	// halfOpenLastAt is the monotonic stamp (monoNow) of the newest
+	// reservation taken from the current budget (or of the arm, before any).
+	// The wedge escape measures staleness from HERE, not from the arm: once
+	// Release can hand a slot back, one budget hosts several sequential
+	// reservations, and measuring from the arm time would reclaim a probe
+	// taken moments ago.
 	halfOpenLastAt atomic.Int64
 	// staleProbes counts half-open budgets re-armed because a reserved probe
 	// never reported an outcome. Non-zero means some caller is taking a
 	// reservation it cannot release — surfaced in Stats for exactly that.
 	staleProbes atomic.Int64
+	// staleOutcomes counts outcomes dropped because their reservation was
+	// superseded (see outcomeIsCurrentLocked) — typically the late report of
+	// a probe the wedge escape reclaimed.
+	staleOutcomes atomic.Int64
 
 	// totalOpens counts state transitions into open for observability.
 	totalOpens atomic.Int64
 	totalTrips atomic.Int64 // Reserve denials while open / budget exhausted
 
-	// nowFn is injectable for tests — defaults to time.Now().
-	nowMu sync.RWMutex
-	nowFn func() time.Time
+	// Two injectable clocks (tests only swap them):
+	//
+	//   nowFn  — the WALL clock; it only stamps openedAt for display.
+	//   monoFn — MONOTONIC elapsed time; every timer decision (ResetTimeout,
+	//            HalfOpenProbeTimeout) reads only this.
+	//
+	// They are separate because a probe's own deadline runs on Go's monotonic
+	// clock (context.WithTimeout). Measuring probe age as a difference of
+	// UnixNano wall readings let a forward wall-clock step (NTP correction,
+	// VM resume) of HalfOpenProbeTimeout declare a still-live probe stale and
+	// admit a replacement (PR #1611 review); a backward step could equally
+	// hold an open breaker open, or a wedged budget wedged, for the size of
+	// the step.
+	nowMu  sync.RWMutex
+	nowFn  func() time.Time
+	monoFn func() time.Duration
 }
 
 // newCDRCircuitBreaker returns a breaker initialised in the closed state.
@@ -200,10 +229,12 @@ func newCDRCircuitBreaker(cfg cdrBreakerConfig) *cdrCircuitBreaker {
 	b := &cdrCircuitBreaker{cfg: cfg.withDefaults()}
 	b.state.Store(cbStateClosed)
 	b.nowFn = time.Now
+	epoch := time.Now() // carries a monotonic reading
+	b.monoFn = func() time.Duration { return time.Since(epoch) }
 	return b
 }
 
-// now returns the injectable current time.
+// now returns the injectable wall-clock time (display stamps only).
 func (b *cdrCircuitBreaker) now() time.Time {
 	b.nowMu.RLock()
 	fn := b.nowFn
@@ -211,10 +242,31 @@ func (b *cdrCircuitBreaker) now() time.Time {
 	return fn()
 }
 
-// setNowFn swaps the clock (tests only).
+// monoNow returns the breaker's monotonic clock reading in nanoseconds. Only
+// differences of two monoNow readings are meaningful.
+func (b *cdrCircuitBreaker) monoNow() int64 {
+	b.nowMu.RLock()
+	fn := b.monoFn
+	b.nowMu.RUnlock()
+	return int64(fn())
+}
+
+// cdrBreakerTestClockRef anchors setNowFn's derived monotonic clock. Any fixed
+// instant works, since only differences are compared.
+var cdrBreakerTestClockRef = time.Unix(0, 0)
+
+// setNowFn swaps in ONE test clock that drives both the wall and the
+// monotonic clock, so advancing it simulates real elapsed time (tests only).
+// To step the wall clock independently of elapsed time, use setClocks.
 func (b *cdrCircuitBreaker) setNowFn(fn func() time.Time) {
+	b.setClocks(fn, func() time.Duration { return fn().Sub(cdrBreakerTestClockRef) })
+}
+
+// setClocks swaps the wall and monotonic clocks independently (tests only).
+func (b *cdrCircuitBreaker) setClocks(wall func() time.Time, mono func() time.Duration) {
 	b.nowMu.Lock()
-	b.nowFn = fn
+	b.nowFn = wall
+	b.monoFn = mono
 	b.nowMu.Unlock()
 }
 
@@ -224,7 +276,8 @@ func (b *cdrCircuitBreaker) State() int32 {
 }
 
 // cdrProbeReservation identifies a half-open probe slot handed out by
-// Reserve, so Release can return exactly that slot. gen is the half-open
+// Reserve, so Release can return exactly that slot and an outcome can be
+// attributed to exactly the episode it was taken in. gen is the half-open
 // budget the slot came from; zero means "no half-open slot was taken" (closed
 // state), and Release of it is a no-op.
 type cdrProbeReservation struct {
@@ -251,12 +304,12 @@ func (b *cdrCircuitBreaker) Allow() bool {
 func (b *cdrCircuitBreaker) Reserve() (bool, cdrProbeReservation) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	now := b.now().UnixNano()
+	now := b.monoNow()
 	switch b.state.Load() {
 	case cbStateClosed:
 		return true, cdrProbeReservation{}
 	case cbStateOpen:
-		if now-b.openedAt.Load() < int64(b.cfg.ResetTimeout) {
+		if now-b.openedMono.Load() < int64(b.cfg.ResetTimeout) {
 			b.totalTrips.Add(1)
 			return false, cdrProbeReservation{}
 		}
@@ -329,11 +382,43 @@ func (b *cdrCircuitBreaker) Release(r cdrProbeReservation) {
 	}
 }
 
-// OnSuccess records a successful call.  In closed state, resets the
-// failure counter.  In half-open state, transitions back to closed.
-func (b *cdrCircuitBreaker) OnSuccess() {
+// outcomeIsCurrentLocked reports whether an outcome recorded against r still
+// belongs to the breaker's current episode. Caller holds mu.
+//
+//   - In half-open, only a reservation from the CURRENT budget decides the
+//     episode. A reservation from an earlier budget belongs to a probe the
+//     wedge escape already reclaimed and replaced; a closed-state reservation
+//     (gen 0) belongs to a request admitted before the breaker opened.
+//     Neither is the probe, and either one's late report used to override
+//     the probe actually running: a late failure reopened the breaker under
+//     the replacement (a fail-open window by default), a late success closed
+//     it past the probe budget.
+//   - Outside half-open, only a closed-state reservation counts. A half-open
+//     reservation's episode has already ended (an outcome or Reset retired
+//     its generation), so its report is superseded.
+//
+// Dropped outcomes are counted in staleOutcomes.
+func (b *cdrCircuitBreaker) outcomeIsCurrentLocked(r cdrProbeReservation) bool {
+	current := r.gen == 0
+	if b.state.Load() == cbStateHalfOpen {
+		current = r.gen != 0 && r.gen == b.halfOpenGen.Load()
+	}
+	if !current {
+		b.staleOutcomes.Add(1)
+	}
+	return current
+}
+
+// OnSuccess records a successful call made under reservation r.  In closed
+// state, resets the failure counter.  In half-open state, transitions back to
+// closed.  A superseded reservation's outcome is dropped
+// (outcomeIsCurrentLocked).
+func (b *cdrCircuitBreaker) OnSuccess(r cdrProbeReservation) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.outcomeIsCurrentLocked(r) {
+		return
+	}
 	b.consecFails.Store(0)
 	if b.state.Load() == cbStateHalfOpen {
 		b.leaveHalfOpenLocked()
@@ -341,11 +426,16 @@ func (b *cdrCircuitBreaker) OnSuccess() {
 	}
 }
 
-// OnFailure records a failure.  In closed state, may trip the breaker.
-// In half-open state, returns straight to open with a fresh timer.
-func (b *cdrCircuitBreaker) OnFailure() {
+// OnFailure records a failure of a call made under reservation r.  In closed
+// state, may trip the breaker.  In half-open state, returns straight to open
+// with a fresh timer.  A superseded reservation's outcome is dropped
+// (outcomeIsCurrentLocked).
+func (b *cdrCircuitBreaker) OnFailure(r cdrProbeReservation) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.outcomeIsCurrentLocked(r) {
+		return
+	}
 	switch b.state.Load() {
 	case cbStateClosed:
 		if b.consecFails.Add(1) >= int64(b.cfg.FailureThreshold) {
@@ -369,10 +459,11 @@ func (b *cdrCircuitBreaker) leaveHalfOpenLocked() {
 	b.halfOpenLastAt.Store(0)
 }
 
-// openLocked publishes the open state with a fresh reset timer. openedAt is
+// openLocked publishes the open state with a fresh reset timer. The stamps are
 // written before the state so a lock-free State() reader that sees open also
 // has its timer (Reserve itself reads both under mu). Caller holds mu.
 func (b *cdrCircuitBreaker) openLocked() {
+	b.openedMono.Store(b.monoNow())
 	b.openedAt.Store(b.now().UnixNano())
 	b.totalOpens.Add(1)
 	b.state.Store(cbStateOpen)
@@ -389,6 +480,7 @@ func (b *cdrCircuitBreaker) Reset() {
 	b.consecFails.Store(0)
 	b.halfOpenTried.Store(0)
 	b.openedAt.Store(0)
+	b.openedMono.Store(0)
 }
 
 // Available reports whether Reserve would currently admit a request, WITHOUT
@@ -402,12 +494,12 @@ func (b *cdrCircuitBreaker) Reset() {
 func (b *cdrCircuitBreaker) Available() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	now := b.now().UnixNano()
+	now := b.monoNow()
 	switch b.state.Load() {
 	case cbStateClosed:
 		return true
 	case cbStateOpen:
-		return now-b.openedAt.Load() >= int64(b.cfg.ResetTimeout)
+		return now-b.openedMono.Load() >= int64(b.cfg.ResetTimeout)
 	case cbStateHalfOpen:
 		if b.halfOpenTried.Load() < b.cfg.HalfOpenProbes {
 			return true
@@ -429,18 +521,23 @@ type cdrBreakerStats struct {
 	// never reported an outcome. Any non-zero value is a bug signal: some
 	// caller is taking a reservation it cannot release.
 	StaleProbes int64 `json:"staleProbes"`
+	// StaleOutcomes counts outcomes dropped because their reservation was
+	// superseded — the late report of a reclaimed probe, or of a request
+	// admitted before the breaker opened.
+	StaleOutcomes int64 `json:"staleOutcomes"`
 }
 
 // Stats returns a snapshot of current breaker state. Each field is a single
 // lock-free read, so the snapshot as a whole is advisory (observability only).
 func (b *cdrCircuitBreaker) Stats() cdrBreakerStats {
 	return cdrBreakerStats{
-		State:       breakerStateName(b.state.Load()),
-		ConsecFails: b.consecFails.Load(),
-		TotalOpens:  b.totalOpens.Load(),
-		TotalTrips:  b.totalTrips.Load(),
-		OpenedAt:    b.openedAt.Load(),
-		StaleProbes: b.staleProbes.Load(),
+		State:         breakerStateName(b.state.Load()),
+		ConsecFails:   b.consecFails.Load(),
+		TotalOpens:    b.totalOpens.Load(),
+		TotalTrips:    b.totalTrips.Load(),
+		OpenedAt:      b.openedAt.Load(),
+		StaleProbes:   b.staleProbes.Load(),
+		StaleOutcomes: b.staleOutcomes.Load(),
 	}
 }
 

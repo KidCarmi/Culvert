@@ -141,6 +141,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the arm time, so a slot handed back and re-taken is never reclaimed while
   live.
 
+  Probe age and the reset timer now run on a monotonic clock. They had been
+  differences of wall-clock `UnixNano` readings while the probe's own deadline
+  is monotonic, so a forward wall-clock step of `HalfOpenProbeTimeout` (NTP
+  correction, VM resume) declared a live probe stale and admitted a
+  replacement, and a backward step held an open breaker open for the size of
+  the step. Outcomes are also generation-aware: `OnSuccess`/`OnFailure` take
+  the reservation the RPC ran under, and a reservation that no longer belongs
+  to the current episode — a probe the wedge escape reclaimed, or a request
+  admitted before the breaker opened — is dropped and counted as
+  `staleOutcomes` in the breaker stats. Its late failure previously reopened
+  the breaker under the replacement probe (a fail-open window), and its late
+  success closed it past the probe budget. `openedAt` in the stats stays wall
+  time for display.
+
 - Distributed rate limiting could admit a request over the cluster-wide limit
   whenever a Control Plane broadcast landed in the middle of a decision.
   `AllowClusterAware` samples its clock before taking the shard lock and hands

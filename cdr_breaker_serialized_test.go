@@ -137,12 +137,12 @@ func halfOpenWithProbe(t *testing.T) (*cdrCircuitBreaker, *pausingClock, cdrProb
 // for the transition, see the fresh reset timer, be denied, and leave no
 // half-open-without-generation state behind.
 func TestCDRBreaker_FailedProbeCleanupIsAtomicWithReopen(t *testing.T) {
-	b, clk, _ := halfOpenWithProbe(t)
+	b, clk, probe := halfOpenWithProbe(t)
 	clk.advance(b.cfg.ResetTimeout + time.Second) // past ResetTimeout from the old openedAt
 
 	waitEntered := clk.pauseNext()
 	failed := make(chan struct{})
-	go func() { b.OnFailure(); close(failed) }()
+	go func() { b.OnFailure(probe); close(failed) }()
 	waitEntered()
 	assertHeldMidTransition(t, b, "the failed-probe transition")
 
@@ -349,11 +349,11 @@ func runStressWorker(b *cdrCircuitBreaker, clock *atomic.Int64, ledger *stressLe
 			b.Release(r)
 		case 1:
 			ledger.retire(r.gen)
-			b.OnSuccess()
+			b.OnSuccess(r)
 			b.Release(r) // the deferred-release shape: must be a no-op now
 		case 2, 3:
 			ledger.retire(r.gen)
-			b.OnFailure()
+			b.OnFailure(r)
 			b.Release(r)
 		case 4:
 			// Abandoned.
