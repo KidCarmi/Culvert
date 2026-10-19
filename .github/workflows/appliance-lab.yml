@@ -140,7 +140,18 @@ jobs:
             source_sha: "8d3ca1c75c4ed504e3e7baf1af6a4335a4b940b9"
             image_run: "39287948530"
             image_tar_sha256: "6caf36dba5240fb2977ae52191139ddfbe080314d258080766d0ab9270da622a"
-            expect_image_id: "sha256:d6dfa590e06d7c3f9ef859449110520623927e949c7ba35247b21fd79329896b"
+            # The running appliance's image identity is the linux/amd64
+            # MANIFEST digest, which the deep-gate's containerd image store
+            # also uses as the OVA's own index digest (same digest class the
+            # harness reads as the running .Id and the class the prior
+            # candidate's passing pin used). Cold-loading the verified tar
+            # above reports it (run 39306980073: "culvert/candidate:sha-
+            # 8d3ca1c75c4e = sha256:58dd2cce… linux/amd64"), and the OVA
+            # index-digest == registry-baseline check binds it to that tar.
+            # NOT sha256:d6dfa590…, which is the OCI config BLOB digest (seen
+            # as "Copying config sha256:d6dfa590…" during the push) — a
+            # different field, mis-recorded in the first pin.
+            expect_image_id: "sha256:58dd2cce2965d5e4246a50f30564488d1f90fc000597504774a57f98e75750b0"
             disk: dm
             recovery_profiles: "fast:0:0:60"
             recovery_reboots: "3"
