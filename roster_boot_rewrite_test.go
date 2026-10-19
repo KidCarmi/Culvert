@@ -398,6 +398,68 @@ func TestLoadUIUsersFile_UnsupportedExchangeIsUnverified(t *testing.T) {
 	}
 }
 
+// TestLoadUIUsersFile_UncopyableMetadataIsUnverified: when RewriteInPlace
+// cannot copy the roster's extended attributes or ACL (Codex P2 4316064806 on
+// PR #1601) nothing is replaced (same inode, same bytes), one line is logged,
+// and the row is warn/unverified with a remedy that names the save caveat,
+// until a save lands. internal/fileutil's
+// TestRewriteInPlace_UncopyableXattrIsNotExchanged pins the real refusal.
+func TestLoadUIUsersFile_UncopyableMetadataIsUnverified(t *testing.T) {
+	path, user, data := seedRosterFileForBoot(t)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := configuredRosterCfg(t, false)
+	swapCfgForRosterDurability(t, c)
+	prev := rosterRewriteInPlace
+	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo) error {
+		return fmt.Errorf("rewrite in place %s: preserve extended attributes: set %q on the replacement: %w: %w",
+			p, "security.selinux", syscall.EPERM, fileutil.ErrMetadataNotPreservable)
+	}
+	t.Cleanup(func() { rosterRewriteInPlace = prev })
+
+	c.SetUIUsersFile(path)
+	out := captureLogger(t, func() {
+		if err := c.LoadUIUsersFile(); err != nil {
+			t.Fatalf("LoadUIUsersFile: %v", err)
+		}
+	})
+	if after, err := os.Stat(path); err != nil || !os.SameFile(before, after) {
+		t.Errorf("the roster was replaced although its metadata could not be preserved (err %v)", err)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, data) { // #nosec G304 -- test temp path
+		t.Errorf("roster bytes changed: %q", got)
+	}
+	if !loadedHasUser(c, user) {
+		t.Errorf("roster account %q not loaded", user)
+	}
+	row := checkAdminRosterDurability()
+	if row.Status != diagWarn || row.Message != rosterTargetMetadataNotPreservable {
+		t.Errorf("row = %+v, want warn %q", row, rosterTargetMetadataNotPreservable)
+	}
+	if !strings.Contains(row.OperatorAction, "first admin account change") ||
+		!strings.Contains(row.OperatorAction, "re-apply them") {
+		t.Errorf("action = %q, want the first-save remedy and the re-apply caveat", row.OperatorAction)
+	}
+	if strings.Contains(row.Message+row.OperatorAction, path) {
+		t.Errorf("row names the path: %+v", row)
+	}
+	if n := strings.Count(out, "extended attributes or ACL could not be copied"); n != 1 {
+		t.Errorf("logged %d metadata line(s), want exactly 1:\n%s", n, out)
+	}
+	_, viewer := durabilityRowAt(t, RoleViewer)
+	if viewer.Status != diagWarn || viewer.Message != rosterDurabilityViewerNotDurable {
+		t.Errorf("viewer row = %+v, want the fixed not-durable message", viewer)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+	if row := checkAdminRosterDurability(); row.Status != diagOK {
+		t.Errorf("after a landed save: row = %+v, want ok", row)
+	}
+}
+
 // TestLoadUIUsersFile_FailedRestoreIsReportedLoudly: if the exchange back
 // fails, the row and the log both say the newer roster is in a preserved temp
 // file and the roster in use is the older one.

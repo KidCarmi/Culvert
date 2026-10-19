@@ -37,11 +37,23 @@ var rewriteHooks struct {
 // over a concurrent change; the full contract is in rewrite.go.
 func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	const op = "rewrite in place"
+	src, err := targetXattrs(op, path, orig)
+	if err != nil {
+		return err // nothing written
+	}
+	var metaErr error
 	tmp, err := writeTempBeside(op, path, data, orig.Mode().Perm(), func(f *os.File) {
-		preserveOwner(f, orig)
+		preserveOwner(f, orig) // before the attributes: a chown clears security.capability
+		metaErr = preserveXattrs(f, src, orig.Mode().Perm())
 	})
 	if err != nil {
 		return err
+	}
+	if metaErr != nil {
+		// The replacement would not carry the target's security metadata
+		// exactly, so it is never exchanged in: the target is untouched.
+		removeTemp(tmp)
+		return fmt.Errorf("%s %s: %w", op, path, metaErr)
 	}
 	mine, err := os.Lstat(tmp)
 	if err != nil {
@@ -58,7 +70,7 @@ func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	if h := rewriteHooks.afterExchange; h != nil {
 		h(tmp)
 	}
-	if why := displacedDiffers(tmp, data, orig); why != "" {
+	if why := displacedDiffers(tmp, data, orig, src); why != "" {
 		return undoExchange(op, path, tmp, mine, why)
 	}
 	// What was live just before the swap is exactly what the caller loaded,
@@ -101,9 +113,10 @@ func undoExchange(op, path, tmp string, mine os.FileInfo, why string) error {
 }
 
 // displacedDiffers compares the file the exchange displaced (now at tmp) with
-// what the caller loaded: content, mode and owner. "" means identical; any
+// what the caller loaded: content, mode, owner and the extended attributes
+// read from the target before the exchange (src). "" means identical; any
 // doubt is a difference.
-func displacedDiffers(tmp string, data []byte, orig os.FileInfo) string {
+func displacedDiffers(tmp string, data []byte, orig os.FileInfo, src xattrSet) string {
 	// O_NOFOLLOW|O_NONBLOCK: the displaced entry is whatever was at the
 	// target, so it is not trusted to be a regular file.
 	f, err := os.OpenFile(tmp, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- our own temp name beside the caller's path
@@ -124,11 +137,18 @@ func displacedDiffers(tmp string, data []byte, orig os.FileInfo) string {
 	case fi.Size() != int64(len(data)):
 		return "the file displaced from the target differs in size from the loaded content"
 	}
-	got, err := io.ReadAll(io.LimitReader(f, int64(len(data))+1))
+	got, err := readXattrs(int(f.Fd()))
+	if err != nil {
+		return "the extended attributes of the file displaced from the target could not be read for comparison"
+	}
+	if !got.equal(src) {
+		return "the file displaced from the target has different extended attributes (or ACL) than the loaded one"
+	}
+	content, err := io.ReadAll(io.LimitReader(f, int64(len(data))+1))
 	if err != nil {
 		return "the file displaced from the target could not be read for comparison"
 	}
-	if !bytes.Equal(got, data) {
+	if !bytes.Equal(content, data) {
 		return "the file displaced from the target differs from the loaded content"
 	}
 	return ""

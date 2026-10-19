@@ -909,6 +909,16 @@ const rosterTargetRewriteUnsupported = "the configured roster file was not rewri
 	"platform or filesystem cannot replace it without risking a concurrent change, so it is not proven that " +
 	"admin account changes can be saved"
 
+// rosterTargetMetadataNotPreservable is the targetProblem when the boot
+// rewrite was not exchanged in because the roster's extended attributes (a
+// POSIX ACL, an SELinux label, a user.* attribute) could not be copied
+// exactly onto the replacement (Codex P2 4316064806 on PR #1601): a rewrite
+// that strips them would change the file's security posture just because the
+// process started. Nothing was replaced, so the path is unproven.
+const rosterTargetMetadataNotPreservable = "the configured roster file was not rewritten at startup, because its " +
+	"extended attributes or ACL (for example an SELinux label or a POSIX ACL) could not be copied exactly to the " +
+	"replacement, so it is not proven that admin account changes can be saved"
+
 // rosterTargetChangedAtBoot is the targetProblem when the roster changed on
 // disk while it was loaded or rewritten at startup: the newer file was kept,
 // but it is not the roster in use, and no write has been proven.
@@ -981,6 +991,8 @@ func rosterWriteProblem(missing, tried bool, writeErr error) string {
 			"save replaces the link with a regular file"
 	case errors.Is(writeErr, fileutil.ErrRewriteUnsupported):
 		return rosterTargetRewriteUnsupported
+	case errors.Is(writeErr, fileutil.ErrMetadataNotPreservable):
+		return rosterTargetMetadataNotPreservable
 	case errors.Is(writeErr, fileutil.ErrExchangeBackFailed):
 		return rosterTargetRestoreFailed
 	case errors.Is(writeErr, errRosterChangedDuringLoad), errors.Is(writeErr, fileutil.ErrConcurrentChange):
@@ -1057,6 +1069,11 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 		row.OperatorAction = "The first admin account change that is saved proves the file and clears this " +
 			"warning. If that change is refused, fix the admin users file (-ui-users-file) path or its permissions " +
 			"so it names a writable regular file on a persistent volume, restart, and re-apply the change."
+	case rosterTargetMetadataNotPreservable:
+		row.OperatorAction = "Nothing was replaced, so the file's ACL and labels are as they were; the process " +
+			"log line names the attribute or cause. The first admin account change that is saved proves the file " +
+			"and clears this warning, but a save, like any replace, does not carry a file's own ACL or extended " +
+			"attributes over, so re-apply them after it."
 	case rosterTargetChangedAtBoot:
 		row.OperatorAction = "Restart to load the roster file as it now is on disk. Until then, do not make admin " +
 			"account changes: saving one writes the roster in use over the newer file."

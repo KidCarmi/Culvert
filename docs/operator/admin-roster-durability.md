@@ -193,10 +193,11 @@ administrative decision was affected, and therefore what the operator must redo.
    **On Linux, the roster file is rewritten in place once at every boot.**
    After `ui_users.json` loads, Culvert writes the exact bytes it read into a
    temp file beside it, with the file's own permission bits (and owner and
-   group where the process may set them), and atomically **exchanges** that
-   temp file with the roster (`renameat2` `RENAME_EXCHANGE`). The content does
-   not change, but the file gets a **new inode and mtime** at each start, as it
-   does at each save. That write is the row's evidence: it is `ok` only if it
+   group where the process may set them) and **all of its extended
+   attributes**, and atomically **exchanges** that temp file with the roster
+   (`renameat2` `RENAME_EXCHANGE`). The content, permission bits, POSIX ACL,
+   SELinux label and other extended attributes do not change, but the file
+   gets a **new inode and mtime** at each start, as it does at each save. That write is the row's evidence: it is `ok` only if it
    landed, or a later roster save did. Nothing short of a real write to the
    real file can tell: a stat passes on a read-only mount, and a test file
    created and renamed beside the roster passes in a sticky (`1777`) or
@@ -209,8 +210,8 @@ administrative decision was affected, and therefore what the operator must redo.
    **The rewrite never overwrites a newer roster.** Culvert serialises its own
    roster writers, but a configuration manager or an operator can replace the
    file at any moment. After the exchange, Culvert compares the file it
-   displaced with what it loaded (bytes, mode, owner). If they differ, it
-   swaps the newer file straight back, logs one `UIUsers: admin roster
+   displaced with what it loaded (bytes, mode, owner, extended attributes).
+   If they differ, it swaps the newer file straight back, logs one `UIUsers: admin roster
    "<path>" changed on disk while it was loaded at startup` line, and the row
    stays `warn`: the roster **in use** is the one loaded before that change,
    so restart to load the newer file, and make no admin account change until
@@ -220,6 +221,29 @@ administrative decision was affected, and therefore what the operator must redo.
    the roster and restart. A writer that keeps the old file open across the
    exchange and writes through that descriptor afterwards can still lose its
    write, exactly as it can against any save.
+
+   **The rewrite never changes the file's security metadata.** A new inode
+   starts with no extended attributes, so before the exchange Culvert lists
+   every attribute of the roster — the POSIX access ACL
+   (`system.posix_acl_access`), the SELinux label (`security.selinux`),
+   `user.*`, and the `trusted.*` and other `security.*` attributes it can see —
+   and sets each one on the temp file after its `chmod` and `chown` (the ACL
+   and the mode interact). An ACL the temp file inherited from the
+   directory's default ACL, which the roster does not have, is removed. The
+   temp file's attributes and permission bits are then read back and must
+   equal the roster's exactly. After the exchange, the displaced file's
+   attributes (names and values) are part of the comparison above, so an ACL
+   or label changed concurrently is swapped straight back like any other
+   change. If **any** attribute cannot be read or copied (for example a label
+   this process is not allowed to assign: `EPERM`, `EACCES`, `ENOTSUP`),
+   **nothing is replaced**: the temp file is removed, the roster keeps its
+   inode and metadata, one `UIUsers: admin roster "<path>" was not rewritten
+   in place at startup: its extended attributes or ACL could not be copied`
+   line names the attribute, and the row is `warn` (*not proven that admin
+   account changes can be saved*) until the first admin account change is
+   saved. A roster with no extended attributes is rewritten exactly as
+   before. Limit: Linux lists `trusted.*` attributes only to a process with
+   `CAP_SYS_ADMIN`, so a process without it can neither see nor keep them.
 
    **Elsewhere, the roster is not rewritten.** Without an atomic exchange
    (macOS, Windows, other non-Linux platforms, or a Linux kernel or filesystem
@@ -236,8 +260,10 @@ administrative decision was affected, and therefore what the operator must redo.
    not an admin change: no audit entry, configuration version, roster
    counter, storage-health event or alert. A symlinked roster path is not
    rewritten (a save replaces the link with a regular file); point
-   `-ui-users-file` at the real file. Like every save, the new inode does not
-   carry file-level ACLs or extended attributes over.
+   `-ui-users-file` at the real file. Unlike the boot rewrite, an admin
+   account **save** still writes a new file that does not carry the roster's
+   own ACL or extended attributes over (it gets the directory's default ACL,
+   if any, and mode `0600`); re-apply them after a save if you rely on them.
 2. `culvert_admin_roster_persist_failures_total` is climbing, or an operator
    reports a `500` from a user-management action.
 3. Check the process log for `UIUsers: REFUSED` lines — each names the action and
