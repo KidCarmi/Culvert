@@ -39,6 +39,7 @@ func TestCurrentConfigSnapshot_CapturesRateLimitExempt(t *testing.T) {
 }
 
 func TestApplyConfigSnapshot_ReplacesRateLimitExempt(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	snapshotRLExemptions(t)
 	// Pre-existing exemption that the snapshot does NOT contain — apply must
 	// replace, not merge, so this one goes away.
@@ -57,6 +58,7 @@ func TestApplyConfigSnapshot_ReplacesRateLimitExempt(t *testing.T) {
 }
 
 func TestApplyConfigSnapshot_RateLimitExemptNilSkipsEmptyClears(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	snapshotRLExemptions(t)
 	if err := rl.AddExemption("203.0.113.11"); err != nil {
 		t.Fatalf("AddExemption: %v", err)
@@ -87,6 +89,7 @@ func TestValidateConfigSnapshot_RejectsRateLimitExemptOverflow(t *testing.T) {
 // so the DP CLEARS its stale exempt list — not get dropped by `omitempty` and
 // silently treated as nil→skip, leaving the IP exempt until restart.
 func TestConfigSnapshot_EmptyRateLimitExemptSurvivesJSONAndClearsDP(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	snapshotRLExemptions(t)
 
 	// CP side: operator has removed every exemption, then we capture + marshal.

@@ -362,6 +362,7 @@ func TestCPServerOption_Insecure(t *testing.T) {
 // ── applyConfigSnapshot Tests ──────────────────────────────────────────────
 
 func TestApplyConfigSnapshot(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	// Save and restore global state.
 	origBL := bl
 	origIPF := ipf
