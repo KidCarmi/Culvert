@@ -1116,6 +1116,11 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	// same class of process-global and also folds into the aggregate verdict.
 	resetAuthCostHealthForTest()
 	t.Cleanup(resetAuthCostHealthForTest)
+	// CHAOS-71: the Control Plane gRPC listener record is a process-global that
+	// folds into the aggregate verdict via the cp_grpc_listener row, so it joins
+	// the same isolation helper — one rule to remember.
+	resetCPGRPCListenerHealthForTest()
+	t.Cleanup(resetCPGRPCListenerHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version
@@ -1551,6 +1556,10 @@ func TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach(t *testing.T) {
 // way to discover or confirm-fix the condition without reading the process
 // log. This check makes the same evidence a standing GET /api/diagnostics
 // row instead.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	longName := strings.Repeat("a", maxUsernameLen+1)
@@ -1558,7 +1567,7 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 		t.Fatalf("SetUIUser: %v", err)
 	}
 
-	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
 
@@ -1599,8 +1608,18 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 
 // TestApiDiagnostics_UsernameLengthOKByDefault pins the quiet case: an
 // ordinary roster with no oversize usernames reports ok, not warn.
+//
+// The test builds that roster itself. The roster is process-global, and
+// snapshotCfgUIUsers only restores it afterwards, so an account an earlier
+// test left behind used to be part of "the ordinary roster" here (#1563,
+// seed 1792141755409420182: TestSECBASIC1_OversizeUsernameIsBounded's 261-byte
+// account turned this row to warn).
 func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
 	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
 	if err := cfg.SetUIUser("ordinary-admin", "Chaos63-ordinary-1!", RoleAdmin); err != nil {
 		t.Fatalf("SetUIUser: %v", err)
 	}
@@ -1624,6 +1643,10 @@ func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
 // cfg.user when it has no roster entry (DeleteUIUser removes only the map
 // entry), so an oversize legacy name must keep the row at warn rather than
 // falsely reporting the remediation as done.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	longName := strings.Repeat("l", maxUsernameLen+1)
@@ -1635,7 +1658,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 		t.Fatal("precondition: legacy name must still be a configured login name")
 	}
 
-	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
 
@@ -1698,6 +1721,10 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 // mirrors the new name into the roster WITHOUT removing the old key, so the
 // row stays warn until the old name's roster entry is deleted too. The
 // operator_action must therefore name that delete step.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	cfg.mu.Lock()
@@ -1710,7 +1737,7 @@ func TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence(t *testing.T) 
 	}
 
 	get := func() *OperatorContractCheck {
-		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 		w := httptest.NewRecorder()
 		apiDiagnostics(w, r)
 		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
@@ -1784,6 +1811,10 @@ func TestApiDiagnostics_UsernameAboveAccountLimitButWithinLoginBound(t *testing.
 // the replacement, so when an affected account has TOTP the action must say
 // so and forbid deleting the old account first. A non-TOTP account must not
 // carry the caveat.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	longName := strings.Repeat("m", adminUsernameAccountLimit+1)
@@ -1791,7 +1822,7 @@ func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) 
 		t.Fatalf("SetUIUser: %v", err)
 	}
 	get := func() *OperatorContractCheck {
-		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 		w := httptest.NewRecorder()
 		apiDiagnostics(w, r)
 		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
@@ -1817,6 +1848,10 @@ func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) 
 // remediation: VerifyUIUser grants the roster role first, while SetAuth (the
 // Settings replacement) always creates the new name as admin, so following
 // the action without restoring the role would silently elevate the account.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	cfg.mu.Lock()
@@ -1833,7 +1868,7 @@ func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
 	if role, ok := cfg.VerifyUIUser(longName, "Chaos63-role-2!"); !ok || role != RoleViewer {
 		t.Fatalf("precondition: effective role = %q/%v, want viewer", role, ok)
 	}
-	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
 	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")

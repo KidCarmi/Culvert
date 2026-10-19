@@ -274,16 +274,26 @@ func (s *socks5Supervisor) Addr() net.Addr {
 	return cur.Addr()
 }
 
-// adopt publishes srv as the current server, or reports false when Stop has
-// already run — in which case the caller owns closing the listener.
-func (s *socks5Supervisor) adopt(srv *socks5Server) bool {
+// adopt publishes srv as the current server and records the bind, in ONE
+// critical section under s.mu, or reports ok=false when Stop has already run,
+// in which case nothing is recorded and the caller owns closing the listener.
+//
+// One section, because Stop takes s.mu to set stopped and read cur: it either
+// sees no server and no bind, or both. Publication comes first inside it, so
+// whenever the bind is visible (Binds, EverBound, /healthz "ready") Addr() is
+// already non-nil. noteSOCKS5Bound only takes the listener-state mutex; it
+// never blocks and never takes s.mu. The caller must Start srv immediately
+// after this returns, with nothing that can block in between: Stop waits on
+// srv.done, which only the started accept loop closes.
+func (s *socks5Supervisor) adopt(srv *socks5Server) (suppressed int64, recovered, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
-		return false
+		return 0, false, false
 	}
 	s.cur = srv
-	return true
+	suppressed, recovered = noteSOCKS5Bound()
+	return suppressed, recovered, true
 }
 
 // release clears the current server once its accept loop has ended.
@@ -365,35 +375,47 @@ func (s *socks5Supervisor) run() {
 			continue
 		}
 
-		// The success line is emitted AFTER the bind, never before it. The
-		// pre-CHAOS-66 code announced `SOCKS5: socks5://localhost:%d` from a
-		// path that could only be reached by a successful bind, but the admin
-		// UI's equivalent announced a listener that did not exist yet (§33);
-		// keeping the announcement strictly downstream of the evidence is the
-		// rule, not the accident of where it happened to sit.
+		// Publish, record the bind, start, and only then log.
 		//
-		// Publish the server BEFORE recording the bind: every surface the
-		// record feeds (/healthz ready, binds counter, listener_up) must
-		// describe a listener whose address is already readable. Recording
-		// first left a window in which a reader saw "bound" and a nil Addr()
-		// (TestChaos66_ListenerRebindsOnceThePortIsFree, intermittent).
+		//  - adopt publishes the server BEFORE it records the bind, in one
+		//    critical section. noteSOCKS5Bound turns /healthz socks5 "ready",
+		//    the contract row "accepting" and Binds/EverBound on; recording it
+		//    first left a window in which every surface reported a ready
+		//    listener whose Addr() was nil
+		//    (TestChaos66_BindIsRecordedOnlyOnceTheAddressIsPublished). If
+		//    Stop wins, no bind is recorded: the socket never served.
+		//  - The bind is recorded BEFORE the accept loop starts, so a socket
+		//    that dies on its first Accept records DOWN after the bind, and
+		//    noteSOCKS5Bound cannot clear it.
+		//  - Start runs immediately after adopt. Stop waits on srv.done, which
+		//    only the started accept loop closes, so nothing that can block
+		//    (the log line, under logsink backpressure) may sit between
+		//    publication and Start
+		//    (TestChaos66_PublishedServerIsStartedBeforeTheBindIsLogged).
 		srv := newSOCKS5Server(ln)
-		if !s.adopt(srv) {
+		suppressed, recovered, ok := s.adopt(srv)
+		if !ok {
 			// Stop won the race: close the listener we just bound rather than
 			// serving on a socket nobody will ever stop.
 			_ = ln.Close()
 			noteSOCKS5ListenerStopped()
 			return
 		}
-		suppressed, recovered := noteSOCKS5Bound()
+		srv.Start()
 		s.markFirstAttempt() // after the bind is recorded, for the reason above
+
+		// The success line is emitted AFTER the bind, never before it. The
+		// pre-CHAOS-66 code announced `SOCKS5: socks5://localhost:%d` from a
+		// path that could only be reached by a successful bind, but the admin
+		// UI's equivalent announced a listener that did not exist yet (§33);
+		// keeping the announcement strictly downstream of the evidence is the
+		// rule, not the accident of where it happened to sit.
 		if recovered {
 			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
 				s.port, suppressed)
 		} else {
 			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
 		}
-		srv.Start()
 		<-srv.done
 		s.release(srv)
 

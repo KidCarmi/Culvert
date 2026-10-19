@@ -168,8 +168,11 @@ func buildOperatorContract() OperatorContract {
 		checkThreatFeed(),
 		checkRequestHistory(),
 		checkBandwidthQoSEnforcement(),
+		checkFileProfileResolution(),
 		checkSOCKS5Listener(),
 		checkAdminUIListener(),
+		checkCPGRPCListener(),
+		checkCPAddressList(),
 		checkDNSResolution(),
 		checkGeoResolution(),
 		checkRequestLogPersistence(),
@@ -186,9 +189,17 @@ func buildOperatorContract() OperatorContract {
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
 	checks = append(checks, checkClusterCA()...)
+	// Break-glass release-catalog signature mode (permissive/disabled).
+	// Contributes nothing in enforce mode or when release management is not
+	// composed on this node.
+	checks = append(checks, checkReleaseVerifyPosture()...)
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
+	// Signed SaaS feed (stale / degraded / waiting / critical, or an enabled feed
+	// that has never activated and is failing). Contributes nothing when the feed
+	// is healthy, disabled, or serving the embedded baseline without failures.
+	checks = append(checks, checkSaaSFeed()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
@@ -555,10 +566,15 @@ func checkSessionSecret() OperatorContractCheck {
 // (ui_auth.go) all cap names at 64 bytes.
 const adminUsernameAccountLimit = 64
 
+// adminUsernameLengthCode is the operator-contract code for the oversize
+// admin-username row. Named so the role redaction below and the check itself
+// cannot drift apart on a string literal.
+const adminUsernameLengthCode = "admin_username_length"
+
 func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	if cfg == nil {
 		return OperatorContractCheck{
-			Code:    "admin_username_length",
+			Code:    adminUsernameLengthCode,
 			Status:  diagOK,
 			Message: "no admin accounts configured",
 		}
@@ -579,9 +595,9 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	}
 	if n == 0 {
 		return OperatorContractCheck{
-			Code:    "admin_username_length",
+			Code:    adminUsernameLengthCode,
 			Status:  diagOK,
-			Message: "all configured admin usernames are within the login length limit",
+			Message: fmt.Sprintf("all configured admin usernames are within the %d-byte account limit", adminUsernameAccountLimit),
 		}
 	}
 	plural := ""
@@ -590,7 +606,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 	}
 	action := oversizeUsernameAction(inv, totpOversize)
 	return OperatorContractCheck{
-		Code:   "admin_username_length",
+		Code:   adminUsernameLengthCode,
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
 			"the dashboard sign-in form accepts at most %d characters and setup and Admin Users cap new names there "+
@@ -600,6 +616,74 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 			n, plural, adminUsernameAccountLimit, maxLen, adminUsernameAccountLimit),
 		OperatorAction: action,
 	}
+}
+
+// diagnosticsRedactedUsernameMessage is the role-safe form of the oversize
+// admin-username row. It is a CONSTANT and carries no roster-derived value —
+// not the count, not the longest length, not the legacy login's role, not
+// whether any affected account has a second factor enrolled.
+const diagnosticsRedactedUsernameMessage = "one or more admin accounts have a username above the " +
+	"supported account limit; sign in as an admin for the affected count and the remediation steps"
+
+// diagnosticsRedactedAction is the operator_action of every redacted warn/fail
+// row. The contract requires an action on any non-ok row so the GUI can
+// render a hint, but the real remediation is admin-only, so the redacted row
+// carries this FIXED text: it names no account, role, count or second-factor
+// posture and only routes the reader to an administrator.
+const diagnosticsRedactedAction = "Ask an administrator to review this row in Diagnostics; " +
+	"the details and the remediation steps are shown to administrators only."
+
+// redactContractForRole strips admin-roster-derived detail from the operator
+// contract for any caller that is not a proven admin.
+//
+// GET /api/diagnostics is deliberately viewer-readable (a management-plane
+// health surface must not need admin), but the roster that
+// checkOversizeConfiguredUsernames describes is admin-only: GET
+// /api/auth/users is RoleAdmin. Its warn row therefore carried facts a viewer
+// or operator cannot otherwise obtain — how many admin accounts exceed the
+// account limit, the longest name's byte length, whether a legacy single-user
+// login exists and is mirrored into the roster, that login's EFFECTIVE ROLE
+// (interpolated verbatim into the remediation text), and whether at least one
+// affected account has TOTP enrolled. The last is the one with real attacker
+// value: it tells a lower-privileged insider whether a high-value admin
+// account is single-factor, which is exactly the input to choosing a
+// credential-stuffing or phishing target.
+//
+// The row stays VISIBLE at every role — status and code are unchanged, so
+// monitoring and the SPA still see the warn — and only the roster-derived
+// detail is withheld. That matches the operator-contract convention this
+// repository already applies to its viewer-role rows: the identity-backend row
+// "carries the backend name and counts, never the cause", and /readyz uses
+// FIXED detail strings precisely so an unauthenticated or lower-privileged
+// reader cannot fingerprint node state.
+//
+// Fail-closed by construction: the ONLY input that un-redacts is a proven
+// admin, so a future role added below admin, or a caller whose role cannot be
+// resolved, gets the redacted form without this function being revisited.
+func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
+	if isAdmin {
+		return c
+	}
+	// Copy the slice before mutating: the caller's OperatorContract must not be
+	// altered in place, so a redacted render can never leak back into a
+	// subsequent unredacted one through a shared backing array.
+	checks := make([]OperatorContractCheck, len(c.Checks))
+	copy(checks, c.Checks)
+	for i := range checks {
+		if checks[i].Code != adminUsernameLengthCode {
+			continue
+		}
+		// An ok row names nothing about the roster, so leave it exactly as it
+		// is — redacting a healthy row would report a condition that does not
+		// exist and send an operator looking for an account that is fine.
+		if checks[i].Status == diagOK {
+			continue
+		}
+		checks[i].Message = diagnosticsRedactedUsernameMessage
+		checks[i].OperatorAction = diagnosticsRedactedAction
+	}
+	c.Checks = checks
+	return c
 }
 
 // adminUsernameInventory is the de-duplicated set of configured login names
@@ -1165,9 +1249,19 @@ func checkCDR() OperatorContractCheck {
 // is intentionally a WARN, not a FAIL — operators are explicitly allowed to
 // run insecure clusters for development. The warning surfaces the risk.
 func checkClusterPosture() OperatorContractCheck {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	if set, held, refused := clusterRoleConflictState(); set {
+		// CHAOS-71: a refused role claim (cluster_role_arbiter.go). Outranks
+		// the TLS posture: the node is not running the role it was told to.
+		return OperatorContractCheck{
+			Code:    "cluster_posture",
+			Status:  diagFail,
+			Message: fmt.Sprintf("cluster role conflict: the %s role was refused because this node already holds the %s role", refused, held),
+			OperatorAction: "Both Control Plane and Data Plane wiring are configured on this node, and the role claimed first won. " +
+				"Remove the configuration for the role this node should NOT have (-cp-grpc-addr / cluster CP settings, or the " +
+				"-dp-* flags / saved enrollment) and restart the node.",
+		}
+	}
+	role := clusterRoleSnapshot().role
 
 	switch role {
 	case "", "standalone":
@@ -1193,9 +1287,7 @@ func checkClusterPosture() OperatorContractCheck {
 }
 
 func checkSAMLStatePosture() OperatorContractCheck {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	if role == "" || role == "standalone" || !hasLiveSAMLProvider() {
 		return OperatorContractCheck{
 			Code:    "saml_state_posture",
@@ -1943,7 +2035,22 @@ func apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, buildOperatorContract())
+	// The contract is viewer-readable, but one row is derived from the
+	// admin-only roster (GET /api/auth/users is RoleAdmin). Redact that row's
+	// detail for anything below admin — see writeOperatorContract.
+	writeOperatorContract(w, r, buildOperatorContract())
+}
+
+// writeOperatorContract is the ONLY place an OperatorContract is role-redacted
+// and serialized onto an HTTP response (SEC-DIAG-ROSTER-1). A renderer hands
+// it the FULL contract and never touches the redaction itself, so it cannot
+// compute the redacted value and then send the full one by mistake.
+// TestWall_EveryOperatorContractRendererIsClassified enforces this
+// structurally: buildOperatorContract() may only appear as this helper's
+// argument (or in the stated support-bundle exception), and no other
+// production code may pass an OperatorContract to jsonOK or a JSON encoder.
+func writeOperatorContract(w http.ResponseWriter, r *http.Request, full OperatorContract) {
+	jsonOK(w, redactContractForRole(full, uiRole(r).HasRole(RoleAdmin)))
 }
 
 // registerObservabilityRoutes wires the operator-facing observability

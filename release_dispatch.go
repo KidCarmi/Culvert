@@ -234,6 +234,13 @@ type DispatchOptions struct {
 	// here would strand exactly the installs the catalog was introduced for
 	// (dispatch-plan §102-106), so it is a confirmation, not a block.
 	AcknowledgeUnknownCurrent bool
+
+	// OnIdempotencyKey is an OBSERVER, not an operator choice: when set,
+	// DispatchService.Dispatch calls it once with the op's idempotency key
+	// (supplied or service-minted) after planning and BEFORE any apply is
+	// attempted. The planner ignores it. It lets a caller whose worker may die
+	// mid-dispatch still hand back the key that makes a retry safe.
+	OnIdempotencyKey func(key string)
 }
 
 // DefaultDispatchOptions returns the standard options: pre_backup desired,

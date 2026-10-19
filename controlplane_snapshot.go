@@ -266,6 +266,11 @@ const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
 // caught at commit with a named error, exactly like the count gate.
 const maxSnapshotWireBytes = 120 << 20 // 120 MiB
 
+// snapshotWireBudget is the budget validateSnapshotForPublish enforces —
+// maxSnapshotWireBytes in production. A variable only so a gate can exercise
+// the near-limit edge without marshalling a 120 MiB snapshot.
+var snapshotWireBudget = maxSnapshotWireBytes
+
 // maxSnapURLCategoryHosts bounds the AGGREGATE hosts across all url_categories
 // entries. The entry count is small (maxSnapURLCategories), but each entry
 // carries a Hosts list; without this a handful of categories could smuggle
@@ -443,6 +448,11 @@ type ConfigStore struct {
 	// operators via LastPublishError() (diagnose/health).
 	lastPublishErr string
 	lastPublishTS  string
+	// The ADDRESS-publish rejection latch (error text, page-once-per-episode
+	// latch, episode number) is NOT here: it is part of addrPub below, under
+	// the publish generation, written only by noteCPAddrPublish /
+	// resetCPAddrPublish (Codex review of #1556: as store state under s.mu,
+	// a stale up-to-date or commit cleared a newer failure's latch).
 	// published is true once a VALID snapshot has been published at least once.
 	// It stays false if the CP's initial publish was rejected at commit — in
 	// which case s.snap is still the zero ConfigSnapshot and the cluster RPCs
@@ -452,6 +462,33 @@ type ConfigStore struct {
 	// catch up incrementally via GetConfigDelta (T3 P1). The zero value is
 	// ready; a swapped-in test store gets a fresh ring automatically.
 	deltaRing blocklistDeltaRing
+	// cpAddrSource, once set (setCPAddressSource, at Control Plane
+	// activation), makes the CP address list OWNED by UpdateCPAddressesFrom:
+	// a full Update keeps the committed list instead of the one its caller
+	// captured, then reconciles it from this source. Nil on bare/test stores
+	// and on non-CP nodes. Guarded by mu.
+	cpAddrSource func() []string
+	// cpAddrWithdrawal, when non-empty, is the address of a Control Plane
+	// whose supervisor exited terminally while the fleet's list still named
+	// it: cpAddrSource is then a WITHDRAWAL source (the live list without
+	// it), and ownership is released only once a publish from it commits
+	// (cp_addr_publish.go, Codex review of #1556). Cleared by
+	// setCPAddressSource and releaseCPAddressSource. Guarded by mu.
+	cpAddrWithdrawal string
+	// cpAddrOwnerGen is the address-list OWNERSHIP generation: bumped by every
+	// change of cpAddrSource/cpAddrWithdrawal (a new owner, a withdrawal
+	// installed, a release), all of which go through setCPAddrOwnerLocked. A
+	// publish captures it with the source it builds from (cpAddrOwner) and
+	// commits only while it is unchanged (commitPublish), so a source captured
+	// before an ownership change can never commit after it (Codex review of
+	// #1556). Never reset. Guarded by mu.
+	cpAddrOwnerGen uint64
+	// addrPub is the owned address list's pending-republish record
+	// (cp_addr_publish.go): set when an owned republish fails, cleared by the
+	// retry loop or the next success. Guarded by addrPubMu, which is never held
+	// while taking mu.
+	addrPubMu sync.Mutex
+	addrPub   cpAddrPublishState
 }
 
 var globalConfigStore = &ConfigStore{}
@@ -575,6 +612,118 @@ var dpControlPlanePollFailing atomic.Bool
 // clear signal (fail-open on new threats). The CP's own local proxying is
 // unaffected (its stores already hold the data); only distribution is gated.
 func (s *ConfigStore) Update(snap ConfigSnapshot) error {
+	// CHAOS-71: a full publish NEVER decides the CP address list. The list has
+	// exactly one writer, the owned address publish (updateCPAddressesBound,
+	// bound to the ownership generation); a full publish carries the COMMITTED
+	// list forward unchanged, owned or not.
+	//
+	// The snapshot was built BEFORE reaching here, so its CPAddresses can
+	// predate a delayed CP activation that has since published a new list
+	// (CodeRabbit review of #1556) — or a terminal exit that withdrew a dead
+	// Control Plane and released ownership, after which a list derived from HA
+	// state would re-add that endpoint with nothing left to remove it (Codex
+	// P2 4307107242). The carry-forward is read from the committed view inside
+	// the CAS: commitPublish commits only onto the exact base it built from,
+	// so a retry after a withdrawal rebuilds from the post-withdrawal list. It
+	// precedes validation, so what commits is exactly what passed the
+	// wire-size gate. A legitimate change while owned is applied by the
+	// reconcile below; an unowned node's list changes only through ownership.
+	_, err := s.commitPublish(publishPlan{
+		kind: publishFull,
+		build: func(cur committedView) (ConfigSnapshot, publishAct) {
+			cand := snap
+			cand.CPAddresses = cur.snap.CPAddresses
+			return cand, publishCommit
+		},
+		beforeCommit: func() {
+			if hook := configPublishBeforeCommit; hook != nil {
+				hook()
+			}
+		},
+		exhausted: fmt.Errorf("config publish lost the commit race against concurrent publishes %d times in a row", cpAddrMergeAttempts),
+	})
+	if err != nil {
+		return err
+	}
+	if own := s.currentCPAddrOwner(); own.owned() {
+		// Propagate an address change this publish was carrying. A failure is
+		// logged and alerted by rejectPublish and latched pending (with a
+		// retry) by publishOwnedCPAddresses; this publish itself already
+		// succeeded. Bound to the ownership read here: if a withdrawal or a
+		// release lands before it commits, it rebuilds from the new owner or
+		// stops, never committing this owner's list.
+		_, _ = s.publishOwnedCPAddressesAs("config_publish", own, nil)
+	}
+	return nil
+}
+
+// configPublishBeforeCommit, when non-nil, runs between Update's validation and
+// its commit. Test seam only (nil in production): it opens the "owned list
+// changed after validation" window deterministically.
+var configPublishBeforeCommit func()
+
+// reconcileCPAddressesFrom republishes the CP address list from build when
+// this store's list is owned (an active Control Plane set a source); a no-op
+// otherwise, so a standby or a Data Plane never publishes one. A failure is
+// recorded pending and retried (publishOwnedCPAddresses).
+func (s *ConfigStore) reconcileCPAddressesFrom(trigger string, build func() []string) error {
+	own := s.currentCPAddrOwner()
+	if !own.owned() {
+		return nil
+	}
+	// A withdrawal owning the list replaces build (cpAddrOwner.builder): an HA
+	// transition re-derives it from the withdrawal source, never from a
+	// builder that may still name the Control Plane being withdrawn.
+	_, err := s.publishOwnedCPAddressesAs(trigger, own, build)
+	return err
+}
+
+// releaseCPAddressSource gives up ownership of the CP address list: a
+// SYNCHRONOUS activation (admin or promote) that was refused leaves no Control
+// Plane behind, so nothing may keep reporting or reconciling one (Codex review
+// of #1556). The pending-republish state and the address rejection latch go
+// with it; a running retry loop sees no source and exits clean.
+func (s *ConfigStore) releaseCPAddressSource() {
+	s.mu.Lock()
+	s.setCPAddrOwnerLocked(nil, "")
+	s.mu.Unlock()
+	s.resetCPAddrPublish()
+}
+
+// setCPAddressSource hands ownership of the CP address list to build (see
+// cpAddrSource). Called once at Control Plane activation.
+func (s *ConfigStore) setCPAddressSource(build func() []string) {
+	s.mu.Lock()
+	s.setCPAddrOwnerLocked(build, "") // a new owner ends any withdrawal
+	s.mu.Unlock()
+	s.resetCPAddrPublish() // a new owner starts a new episode
+}
+
+// validatePublishCandidate runs the commit-time gates for one publish kind.
+// Returns the RAW error; commitPublish routes it through rejectPublish.
+//
+// A FULL publish passes every gate (validateSnapshotForPublish). An
+// address-only candidate passes the size gates but NOT Gate 0 (Codex P1
+// 4314031064 on #1556): it is the COMMITTED snapshot with only CPAddresses
+// replaced (updateCPAddressesBound, or a same-content restamp), so it carries
+// no rewrite StableID that is not already committed and served; Gate 0 exists
+// to stop a publish that CAPTURES the live, known-ephemeral ones
+// (CurrentConfigSnapshot). Applying the process-global latch to it instead
+// refused every CP activation and HA promotion on a node whose store had
+// already published, rolling the role back on each attempt until a restart —
+// an unrelated rewrite-persistence fault disabling failover. Full publishes
+// are still refused while the latch is set
+// (TestChaos71_RewriteDegradationStillRefusesFullPublishes).
+func validatePublishCandidate(kind publishKind, cand ConfigSnapshot) error {
+	if kind == publishAddresses {
+		return validateSnapshotWireForPublish(cand)
+	}
+	return validateSnapshotForPublish(cand)
+}
+
+// validateSnapshotForPublish runs every commit-time gate a FULL publish passes
+// (Update). Returns the RAW error; the caller routes it through rejectPublish.
+func validateSnapshotForPublish(snap ConfigSnapshot) error {
 	// Gate 0 — rewrite management-identity degradation: while the latch is
 	// set, CurrentConfigSnapshot has captured KNOWN-ephemeral rewrite
 	// StableIDs that must not be distributed to the fleet as authoritative
@@ -583,75 +732,348 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	// alerted, LastPublishError; the fleet stays on the last valid snapshot —
 	// rather than silently omitting or re-minting the rewrite slice.
 	if d := rewriteIdentityDegraded(); d != nil {
-		return s.rejectPublish(fmt.Errorf("rewrite management identity degraded (%s): refusing to publish ephemeral rewrite StableIDs as authoritative fleet identity", d.reason))
+		return fmt.Errorf("rewrite management identity degraded (%s): refusing to publish ephemeral rewrite StableIDs as authoritative fleet identity", d.reason)
 	}
+	return validateSnapshotWireForPublish(snap)
+}
+
+// validateSnapshotWireForPublish is the size gates every publish kind passes:
+// an address-only candidate can still grow the snapshot past the frame.
+func validateSnapshotWireForPublish(snap ConfigSnapshot) error {
 	// Gate 1 — entry counts (fast pre-check).
 	if err := validateConfigSnapshot(snap); err != nil {
-		return s.rejectPublish(err)
+		return err
 	}
 	// Gate 2 — marshaled BYTE budget. Counts can pass while long strings push
 	// the snapshot past the frame; measuring the real wire size here stops a
 	// byte-oversized config from committing and then failing every DP fetch.
 	b, err := json.Marshal(snap)
 	if err != nil {
-		return s.rejectPublish(fmt.Errorf("config snapshot marshal failed: %w", err))
+		return fmt.Errorf("config snapshot marshal failed: %w", err)
 	}
-	if len(b) > maxSnapshotWireBytes {
-		return s.rejectPublish(fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), maxSnapshotWireBytes))
+	if len(b) > snapshotWireBudget {
+		return fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), snapshotWireBudget)
 	}
+	return nil
+}
 
-	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
+// configCommit carries what afterCommit needs from a commit made under s.mu.
+type configCommit struct {
+	base, target       int64
+	epoch              int64
+	oldHosts, newHosts []string
+	subs               []chan struct{}
+}
 
-	s.mu.Lock()
+// commitLocked stamps and installs snap as the published snapshot. Caller
+// holds s.mu (write) and has already validated snap. Called ONLY by
+// commitPublish (TestChaos71_Wall_OnlyCommitPublishCommits). It clears the
+// rejection latch of its OWN kind: an address-only commit carries none of a
+// rejected full publish's policy, so the fleet is still frozen on it (Codex
+// review of #1556).
+func (s *ConfigStore) commitLocked(kind publishKind, snap ConfigSnapshot) configCommit {
 	// Capture the pre-publish blocklist + version for the delta ring. oldHosts
 	// still references the outgoing snapshot's slice (safe — s.snap is replaced,
 	// not mutated in place).
-	oldHosts := s.snap.BlockedHosts
-	base := s.version
-	s.version++
+	c := configCommit{oldHosts: s.snap.BlockedHosts, base: s.version}
+	// Strictly above everything this store has served or been seeded with: the
+	// counter and the committed snapshot's own version (a replicated leader
+	// snapshot is folded in by seedReplicatedSnapshot; the max is the backstop).
+	s.version = max(s.version, s.snap.Version) + 1
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	newHosts := snap.BlockedHosts
-	target, epoch := s.version, snap.Epoch
+	c.newHosts = snap.BlockedHosts
+	c.target, c.epoch = s.version, snap.Epoch
 	s.snap = snap
 	s.published = true
-	s.lastPublishErr = ""
-	s.lastPublishTS = ""
+	s.clearPublishErrLocked(kind)
 	s.persistVersionLocked()
-	subs := append([]chan struct{}{}, s.subs...)
-	s.mu.Unlock()
+	// Claim this commit's delta slot under the commit lock, so the deltas
+	// computed outside it are applied in commit order (afterCommit).
+	s.deltaRing.reserve(c.target)
+	c.subs = append([]chan struct{}{}, s.subs...)
+	return c
+}
 
-	// Record the blocklist delta OUTSIDE the store lock: the O(N) diff +
-	// fingerprint over up to 2 M hosts must not stall config readers/pollers.
-	// Config publishes are admin-action-rate, so the cost is not hot-path.
-	s.deltaRing.record(base, target, oldHosts, newHosts, blocklistSyncedFingerprint(newHosts), epoch)
+// publishKind names which publish path a commit or rejection belongs to. The
+// rejection latch is keyed by it: a full-publish rejection ("the fleet is
+// frozen on stale policy") is cleared only by a successful FULL publish, an
+// address-list rejection only by a successful address publish.
+type publishKind int
 
-	for _, ch := range subs {
+const (
+	publishFull      publishKind = iota // Update: the whole config
+	publishAddresses                    // UpdateCPAddressesFrom: the CP address list only
+)
+
+// publishAct is a plan's verdict on one attempt.
+type publishAct int
+
+const (
+	publishCommit       publishAct = iota // validate and commit the candidate
+	publishUpToDate                       // the committed snapshot already says this
+	publishNotYet                         // nothing published yet: nothing to correct
+	publishOwnerChanged                   // the address-list owner this publish was bound to is gone
+)
+
+// committedView is the committed state one publish attempt builds from, read
+// under s.mu.
+type committedView struct {
+	snap      ConfigSnapshot
+	version   int64
+	published bool
+	ownerGen  uint64 // the ownership generation (cpAddrOwnerGen) at this read
+}
+
+// publishPlan is the per-kind part of a publish; commitPublish is the rest.
+type publishPlan struct {
+	kind publishKind
+	// build derives the candidate from the committed view. Re-run on every
+	// attempt, after the view it builds from was read.
+	build        func(cur committedView) (ConfigSnapshot, publishAct)
+	beforeCommit func() // test seam window between validation and commit
+	exhausted    error  // reported when every attempt lost the race
+}
+
+// publishFenceEpoch is the fencing epoch every publish is stamped with: the
+// node's CURRENT epoch, read lock-free (PublishedFenceEpoch) so a publish
+// never needs HAState.mu (no publish runs under it, and none may wait on it
+// either: TestChaos71_Wall_NoSnapshotPublishUnderTheHALock). It reads the same
+// HAState the CP address list derives from (haTopologySource: globalHA in
+// production). Test seam.
+var publishFenceEpoch = func() int64 { return haTopologySource().PublishedFenceEpoch() }
+
+// commitPublish is the ONE way a snapshot is committed (CHAOS-71, Codex review
+// of #1556). Rounds 4, 5, 7 and 8 of that review each found the address-only
+// path skipping an invariant the full path kept; both now share this, so each
+// invariant holds for every commit by construction:
+//
+//   - Optimistic concurrency, one rule for every kind: an attempt records the
+//     committed version it built from (base) and commits ONLY if, under the
+//     lock, the committed state is still exactly that base. Anything else —
+//     another publish, a replicated snapshot seeded in — means the candidate is
+//     stale: rebuild, revalidate, within the bounded retry; then reject via
+//     rejectPublish. (A partial check let a full publish built before a
+//     promotion's restamp commit over it — Codex review of #1556.)
+//   - Epoch is the fencing epoch CURRENT AT COMMIT: stamped before validation
+//     and re-read under the lock, and a change since is the same stale-base
+//     outcome. A DP that learned a new epoch on heartbeat is never handed a
+//     snapshot carrying the previous one (dpObserveEpoch would reject it).
+//   - What commits is what was validated (outside the lock: a full marshal
+//     must not stall DP pollers), the version strictly exceeds every version
+//     served or seeded (commitLocked), sizes are recorded under the commit
+//     lock, and the rejection latch is keyed by kind.
+func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
+	for attempt := 0; attempt < cpAddrMergeAttempts; attempt++ {
+		s.mu.RLock()
+		own := s.cpAddrOwnerLocked()
+		cur := committedView{snap: s.snap, version: s.version, published: s.published, ownerGen: own.gen}
+		s.mu.RUnlock()
+
+		epoch := publishFenceEpoch()
+		cand, act := p.build(cur)
+		if act == publishUpToDate && cur.snap.Epoch != epoch {
+			// Same content, stale stamp: restamp it (a promotion or a new grant
+			// changes the epoch without changing the list).
+			cand, act = cur.snap, publishCommit
+		}
+		switch act {
+		case publishNotYet:
+			return false, nil
+		case publishOwnerChanged:
+			return false, errCPAddrOwnerChanged // the caller rebuilds from the new owner, or stops
+		case publishUpToDate:
+			// What this kind would publish is already committed. Only the FULL
+			// latch is the store's to clear; the address latch is cleared by
+			// noteCPAddrPublish under the publish generation.
+			s.mu.Lock()
+			s.clearPublishErrLocked(p.kind)
+			s.mu.Unlock()
+			return false, nil
+		}
+		cand.Epoch = epoch
+		if verr := validatePublishCandidate(p.kind, cand); verr != nil {
+			return false, s.rejectPublish(p.kind, verr)
+		}
+		if p.beforeCommit != nil {
+			p.beforeCommit()
+		}
+
+		s.mu.Lock()
+		if !s.committedIsLocked(cur) || publishFenceEpoch() != epoch {
+			s.mu.Unlock()
+			continue // stale base or stale stamp: rebuild, revalidate
+		}
+		c := s.commitLocked(p.kind, cand)
+		recordPublishedSnapshotSizes(cand) // under the commit lock: the record matches the last commit
+		s.mu.Unlock()
+		s.afterCommit(c)
+		return true, nil
+	}
+	// Reported through the ordinary rejection path (logged, alerted, latched).
+	return false, s.rejectPublish(p.kind, p.exhausted)
+}
+
+// committedIsLocked reports whether the committed state is still exactly the
+// base an attempt built from. Caller holds s.mu. Any address-list ownership
+// change (the generation) is a changed base too: the attempt rebuilds, and an
+// attempt bound to the previous owner then stops (publishOwnerChanged).
+func (s *ConfigStore) committedIsLocked(base committedView) bool {
+	return s.version == base.version && s.snap.Version == base.snap.Version &&
+		s.published == base.published && s.cpAddrOwnerGen == base.ownerGen
+}
+
+// clearPublishErrLocked clears the rejection latch of one kind. Caller holds
+// s.mu (write).
+func (s *ConfigStore) clearPublishErrLocked(kind publishKind) {
+	if kind == publishFull {
+		s.lastPublishErr, s.lastPublishTS = "", ""
+		return
+	}
+	// publishAddresses: nothing here — its latch is the address-publish
+	// record's (noteCPAddrPublish), guarded by the publish generation.
+}
+
+// afterCommit records the blocklist delta and notifies subscribers OUTSIDE the
+// store lock: the O(N) diff + fingerprint over up to 2 M hosts must not stall
+// config readers/pollers. Config publishes are admin-action-rate, so the cost
+// is not hot-path. Concurrent commits may finish this in any order; the ring
+// applies their deltas in commit order (the slot commitLocked reserved).
+func (s *ConfigStore) afterCommit(c configCommit) {
+	s.recordCommitDelta(c)
+	for _, ch := range c.subs {
 		select {
 		case ch <- struct{}{}:
 		default:
 		}
 	}
-	logger.Printf("ControlPlane: config v%d published", snap.Version)
-	return nil
+	logger.Printf("ControlPlane: config v%d published", c.target)
+}
+
+// recordCommitDelta computes c's delta and completes its reserved slot. The
+// slot is completed even if the computation panics (as a resync marker), so
+// one failed commit can never stall every later delta behind it.
+func (s *ConfigStore) recordCommitDelta(c configCommit) {
+	d := blocklistDelta{Version: c.target, Base: c.base, Epoch: c.epoch, Resync: true}
+	defer func() { s.deltaRing.complete(d) }()
+	if hook := afterCommitBeforeDelta; hook != nil {
+		hook(c.target)
+	}
+	d = buildBlocklistDelta(c.base, c.target, c.oldHosts, c.newHosts, blocklistSyncedFingerprint(c.newHosts), c.epoch)
+}
+
+// afterCommitBeforeDelta, when non-nil, runs before a commit's delta is
+// computed. Test seam only (nil in production): it makes one commit's delta
+// slow so a later commit's finishes first.
+var afterCommitBeforeDelta func(target int64)
+
+// cpAddrMergeAttempts bounds UpdateCPAddresses' optimistic retries. Publishes
+// are admin-action-rate, so losing the race this many times in a row means
+// something is publishing in a tight loop — reported, not spun on.
+const cpAddrMergeAttempts = 8
+
+// cpAddrMergeBeforeCommit, when non-nil, runs between UpdateCPAddresses'
+// validation and its compare-and-swap commit. Test seam only (nil in
+// production): it lets a gate commit a competing publish inside that window
+// deterministically.
+var cpAddrMergeBeforeCommit func()
+
+// UpdateCPAddressesFrom publishes build() as the fleet's CP address list by
+// MERGING onto the latest COMMITTED snapshot — never onto a snapshot captured
+// earlier (CHAOS-71, Codex review of #1556).
+//
+// build is re-run on EVERY attempt, after reading the version it will
+// compare-and-swap against: a list computed before a role change could
+// otherwise be committed after a fresher one, so each committed list is
+// computed after the commit it replaces. build must not need s.mu (it runs
+// outside it) — buildCPAddressList takes globalHA.mu and clusterRoleMu only.
+//
+// It exists for the Control Plane's post-bind activation. A full
+// Update(CurrentConfigSnapshot()) whose snapshot was built just before an admin
+// publish committed would republish the OLDER state at a higher version merely
+// to add the address list, rolling the admin change back on every Data Plane.
+// Instead this reads (snapshot, version) under the store lock, validates the
+// merged copy with Update's size gates (not its rewrite-identity Gate 0: the
+// merged copy captures no live state; see validatePublishCandidate), and
+// commits only if
+// the version is still the one it read — a compare-and-swap on s.version under
+// the same s.mu every publish commits under, not a second lock. A lost race
+// re-reads and re-merges onto the newer commit.
+//
+// Returns changed=false with no publish when nothing has been published yet
+// (there is no committed snapshot to correct, and the first full publish will
+// carry the address list) or when the committed list already equals addrs. A
+// gate rejection goes through rejectPublish (logged, alerted,
+// LastPublishError) and is RETURNED so activation can refuse to succeed.
+//
+// It is bound to the address-list ownership current at the call; see
+// updateCPAddressesBound.
+func (s *ConfigStore) UpdateCPAddressesFrom(build func() []string) (changed bool, err error) {
+	return s.updateCPAddressesBound(s.currentCPAddrOwner(), build)
+}
+
+// updateCPAddressesBound is UpdateCPAddressesFrom bound to own: build commits
+// only while the ownership generation is still own's, checked on the view
+// every attempt builds from and again, under s.mu, at the commit
+// (committedIsLocked). An ownership change since own was read returns
+// errCPAddrOwnerChanged with nothing committed (Codex review of #1556: a
+// source captured before a withdrawal committed and released ownership
+// re-added the dead Control Plane at a higher version).
+func (s *ConfigStore) updateCPAddressesBound(own cpAddrOwner, build func() []string) (changed bool, err error) {
+	return s.commitPublish(publishPlan{
+		kind: publishAddresses,
+		build: func(cur committedView) (ConfigSnapshot, publishAct) {
+			if cur.ownerGen != own.gen {
+				return ConfigSnapshot{}, publishOwnerChanged
+			}
+			if !cur.published {
+				return ConfigSnapshot{}, publishNotYet
+			}
+			addrs := build()
+			if slicesEqual(cur.snap.CPAddresses, addrs) {
+				return ConfigSnapshot{}, publishUpToDate
+			}
+			merged := cur.snap // shallow copy: published snapshots are never mutated in place
+			merged.CPAddresses = append([]string(nil), addrs...)
+			return merged, publishCommit
+		},
+		beforeCommit: func() {
+			if hook := cpAddrMergeBeforeCommit; hook != nil {
+				hook()
+			}
+		},
+		exhausted: fmt.Errorf("%w %d times in a row", errCPAddrCommitRace, cpAddrMergeAttempts),
+	})
 }
 
 // rejectPublish records a commit-time rejection (count OR byte gate): it does
 // NOT publish, stamps LastPublishError, logs, and fires the operator alert.
 // Returns err so callers can surface it inline too.
-func (s *ConfigStore) rejectPublish(err error) error {
+func (s *ConfigStore) rejectPublish(kind publishKind, err error) error {
 	s.mu.Lock()
-	s.lastPublishErr = err.Error()
-	s.lastPublishTS = time.Now().UTC().Format(time.RFC3339)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	if kind == publishFull {
+		s.lastPublishErr, s.lastPublishTS = err.Error(), ts
+	}
 	curVer := s.version
 	s.mu.Unlock()
+	// The log line still records EVERY rejection (and the pending state counts
+	// each attempt); only the page is latched.
 	logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
-	fireAlert("config_snapshot_rejected", AlertPayload{
+	if kind == publishAddresses {
+		// The address kind's latch and its page (once per episode, queued
+		// before the webhooks load) belong to the generation-guarded record:
+		// the caller's noteCPAddrPublish decides and pageCPAddrRejection
+		// delivers.
+		return err
+	}
+	payload := AlertPayload{
 		Event:  "config_snapshot_rejected",
 		Actor:  "culvert",
 		Source: "cluster",
 		Detail: "config publish rejected at commit: " + err.Error() + " — the cluster stays on the last valid config; reduce the oversized collection to resume sync",
-	})
+	}
+	fireAlert("config_snapshot_rejected", payload)
 	return err
 }
 
@@ -710,10 +1132,19 @@ func (s *ConfigStore) ServableConfig() (ok bool, reason string) {
 // rejected at commit (over-cap), plus the timestamp — empty when the last
 // publish succeeded. Read-only; used by the diagnose/health surface so an
 // operator sees "publish rejected, fleet on stale config" as a named error.
+//
+// The two latches are separate (publishKind): the full one — the fleet is on
+// stale POLICY — wins; otherwise an address-list rejection is reported, since
+// the fleet's failover list is behind.
 func (s *ConfigStore) LastPublishError() (msg, ts string) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.lastPublishErr, s.lastPublishTS
+	msg, ts = s.lastPublishErr, s.lastPublishTS
+	s.mu.RUnlock()
+	if msg != "" {
+		return msg, ts
+	}
+	st := s.cpAddrPublishSnapshot()
+	return st.rejectErr, st.rejectErrTS
 }
 
 // publishCurrentConfigSnapshot publishes the live config to the fleet. Returns
@@ -726,15 +1157,30 @@ func publishCurrentConfigSnapshot() error {
 }
 
 // seedReplicatedSnapshot sets the in-memory snapshot from a replicated HA bundle
-// WITHOUT advancing the version, marking published, or notifying subscribers. Its
-// sole purpose is to give the delta ring a correct oldHosts baseline for the
-// first post-promotion Update (Dur-F4). A promoted standby's version is still
-// established by armVersionPersistence (seeded above the replicated leader
-// version), and distribution is still gated by ServableConfig/published.
+// WITHOUT marking published or notifying subscribers. It gives the delta ring a
+// correct oldHosts baseline for the first post-promotion Update (Dur-F4).
+//
+// It FOLDS the replicated version into the store's counter (never lowering
+// it): the counter is the one source of truth for the next version, and a
+// self-fenced ex-leader that resynced v200 from the new leader while its own
+// counter said v100 would otherwise republish at v101 on re-promotion — the
+// no-op onPromote path never re-runs armVersionPersistence — and DPs at v200
+// would read "unchanged" (Codex review of #1556). Distribution is still gated
+// by ServableConfig/published and, with HA on, by the leader gate.
 func (s *ConfigStore) seedReplicatedSnapshot(snap ConfigSnapshot) {
 	s.mu.Lock()
 	s.snap = snap
+	if snap.Version > s.version {
+		s.version = snap.Version
+	}
 	s.mu.Unlock()
+}
+
+// committedCPAddresses is the committed snapshot's CP address list.
+func (s *ConfigStore) committedCPAddresses() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snap.CPAddresses
 }
 
 // Get returns the current snapshot.
@@ -860,17 +1306,19 @@ func applySnapshotBlocklist(snap ConfigSnapshot) {
 // applySnapshotAdmission applies the IP filter and rate-limit settings before
 // the remaining traffic configuration, shared by full and delta snapshots.
 func applySnapshotAdmission(snap ConfigSnapshot) {
-	// IP filter.
-	newIPF := newIPFilter()
-	newIPF.SetMode(snap.IPFilterMode)
-	// Bulk load: one pass, one view publish. An Add loop is quadratic in the
-	// entry count, and this list's snapshot cap is maxSnapIPList (2,000,000),
-	// so a large allowlist would stall the snapshot apply. Invalid entries are
-	// reported after the lock is released.
-	for _, bad := range newIPF.AddAll(snap.IPList) {
+	// IP filter: replace the live owner's contents IN PLACE. The request path
+	// (proxy.go / socks5.go) reads the ipf composition handle with no
+	// synchronisation, so the previous `ipf = newIPF` swap was a data race on
+	// the first admission gate (RISK-030); the owner already publishes an
+	// immutable view through an atomic pointer, which is the synchronisation
+	// the readers rely on. Replace is one pass, one lock, one view publish: an
+	// Add loop is quadratic in the entry count, and this list's snapshot cap is
+	// maxSnapIPList (2,000,000), so a large allowlist would stall the apply.
+	// Invalid entries are reported after the lock is released. Pinned by
+	// TestRISK030_* (controlplane_snapshot_ipf_race_test.go).
+	for _, bad := range ipf.Replace(snap.IPFilterMode, snap.IPList) {
 		logger.Printf("DataPlane: invalid IP %q: %v", bad.Entry, bad.Err)
 	}
-	ipf = newIPF
 
 	// Rate limiter.
 	if snap.RateLimitRPM != rl.Limit() {
@@ -1382,8 +1830,11 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	snap.DPIPatterns = dpiScanner.List()
 	snap.MaxConnsPerIP = connLimiter.MaxPerIP()
 
-	// HA: include all CP addresses so DPs auto-discover failover targets.
-	snap.CPAddresses = buildCPAddressList()
+	// HA: the CP addresses DPs auto-discover failover targets from. Carried
+	// from the COMMITTED snapshot, never derived from HA state here: the owned
+	// address publish is the list's only writer, and Update substitutes the
+	// committed list again inside its CAS (Codex P2 4307107242 on #1556).
+	snap.CPAddresses = globalConfigStore.committedCPAddresses()
 
 	// PAC exclusions + profiles/pools. All three are WireWipeCapable: force
 	// non-nil so an admin-cleared empty state serializes as [] and reaches
@@ -1466,22 +1917,15 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 // buildCPAddressList returns the list of all CP gRPC addresses for DP failover.
 // Includes this leader's address + the HA standby address (if HA is enabled).
+//
+// haStatus.PeerAddr is the leader's externally reachable address (set during
+// Enable HA); the local listen address is added when it differs. The
+// derivation itself is cpAddressListFor (ha_topology.go), shared with the HA
+// topology writer that republishes on every transition.
 func buildCPAddressList() []string {
-	haStatus := globalHA.Status()
+	haStatus := haTopologySource().Status()
 	if !haStatus.Enabled {
-		return nil // no HA = no address list needed
+		return nil // no HA = no address list needed (clusterRoleMu deliberately not touched)
 	}
-	clusterRoleMu.RLock()
-	myAddr := clusterRole.grpcAddr
-	clusterRoleMu.RUnlock()
-
-	// haStatus.PeerAddr is the leader's externally reachable address (set during Enable HA).
-	// For the leader, we include: [leader_addr, standby_addr]
-	// The leader's reachable addr is stored as peerAddr in the HA state.
-	addrs := []string{haStatus.PeerAddr}
-	// Also include the local listen addr if it's different and looks reachable.
-	if myAddr != "" && myAddr != haStatus.PeerAddr {
-		addrs = append(addrs, myAddr)
-	}
-	return addrs
+	return cpAddressListFor(true, haStatus.PeerAddr, clusterRoleSnapshot().grpcAddr)
 }

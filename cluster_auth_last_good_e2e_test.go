@@ -23,6 +23,7 @@ import (
 )
 
 func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	fixture := newClusterAuthLiveSyncFixture(t)
 	setupProxyTest(t)
 	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
@@ -81,6 +82,7 @@ func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
 }
 
 func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	withClusterAuthLastGoodGlobals(t)
 	setupProxyTest(t)
 
@@ -264,6 +266,7 @@ func (f *clusterAuthLiveSyncFixture) call(ctx context.Context, method string, re
 }
 
 func applyLiveClusterSnapshot(t *testing.T, snap ConfigSnapshot) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	t.Helper()
 	applyExternalAuthSnapshotSettings(snap)
 	if err := syncSnapshotIdPProfiles(snap); err != nil {
@@ -359,6 +362,7 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 }
 
 func TestClusterAuth_LoginURLUsesCachedBaseURL(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	withClusterAuthLastGoodGlobals(t)
 	setupProxyTest(t)
 	snap := ConfigSnapshot{

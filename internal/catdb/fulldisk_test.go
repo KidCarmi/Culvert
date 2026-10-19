@@ -306,7 +306,7 @@ func fullDiskChild(t *testing.T, mnt string) {
 	for _, b := range acked {
 		for _, i := range []int{0, 19999} {
 			k := fmt.Sprintf("host-%07d-%05d.example.test", b, i)
-			if _, ok := db2.getExact(k); !ok {
+			if _, ok, _ := db2.getExact(k); !ok {
 				t.Fatalf("acknowledged entry %s is missing after reopen", k)
 			}
 		}
@@ -343,7 +343,7 @@ func fullDiskCloseChild(t *testing.T, mnt string) {
 	if err != nil {
 		t.Fatalf("reopen after a close on a full disk: %v", err)
 	}
-	if _, ok := db2.getExact("host-0000000-00000.example.test"); !ok {
+	if _, ok, _ := db2.getExact("host-0000000-00000.example.test"); !ok {
 		t.Fatal("an entry committed before the shortage is missing after reopen")
 	}
 	closeWithin(t, db2, 60*time.Second)
@@ -421,7 +421,7 @@ func fullDiskSSTChild(t *testing.T, mnt string) {
 	for _, b := range acked {
 		for _, i := range []int{0, 19999} {
 			k := fmt.Sprintf("host-%07d-%05d.example.test", b, i)
-			if _, ok := db2.getExact(k); !ok {
+			if _, ok, _ := db2.getExact(k); !ok {
 				t.Fatalf("acknowledged entry %s is missing after reopen (the unflushed memtable's WAL was lost)", k)
 			}
 		}

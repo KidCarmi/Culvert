@@ -218,7 +218,7 @@ func (h *HAState) leaseRecoveryActive() bool {
 // stopLoops already missed, deadlocking the join).
 func (h *HAState) startLeaseRecovery() {
 	h.mu.Lock()
-	if h.lease == nil || h.leaseEpoch != 0 || h.role != "leader" || h.leaseRecoveryCh != nil || h.stopping {
+	if h.lease == nil || h.leaseEpoch != 0 || h.role != "leader" || h.leaseRecoveryCh != nil || h.stopping || h.shutdown {
 		h.mu.Unlock()
 		return
 	}
@@ -344,7 +344,7 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 		h.logRecoveryProgress(started, lastLog, suppressed, "acquire not granted (retrying)")
 		return false
 	}
-	h.completeLeaseRecovery(started, *suppressed)
+	h.completeLeaseRecovery(started, *suppressed, st.Epoch)
 	return true
 }
 
@@ -361,8 +361,22 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 // with lease_recovering=1. That is deliberate — authority first, bookkeeping
 // second is the safe direction — and it is harmless, because the alertable
 // condition is `unfenced=1 AND recovering=0` and unfenced is already 0 here.
-func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) {
+//
+// The leader role is re-checked under h.mu, atomically with the install: the
+// acquisition ran without the lock, and a recovery whose role went away
+// meanwhile (or that shutdown overtook) must not re-persist a leader config or
+// keep the grant's epoch advertised — it clears the grant's local state
+// instead (clearLeaseGrantLocked, Codex review of #1556) and the loop exits.
+func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int, grant int64) {
 	h.mu.Lock()
+	if h.role != "leader" || h.shutdown || h.leaseEpoch != grant {
+		h.clearLeaseGrantLocked(grant)
+		role := h.role
+		h.mu.Unlock()
+		logger.Printf("HA: lease recovery's grant (epoch=%d) is not installed — the node no longer holds the leader role (role %q) or is shutting down",
+			grant, role)
+		return
+	}
 	h.term = termFromEpoch(h.leaseEpoch)
 	epoch := h.leaseEpoch
 	cfg := h.snapshotConfigLocked()
