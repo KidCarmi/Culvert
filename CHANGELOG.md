@@ -58,6 +58,115 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The destination host is now canonicalized **once per policy scan** instead of
+  once per category-scoped rule. `urlcat.Store.MatchesHost` /
+  `MatchesHostAdmin` and `effectiveCategoryView.MatchesCategory` each opened
+  with `host = hostutil.NormalizeHost(host)`, and
+  `hostCatScratch.matchesCategory` calls one of them per category-scoped access
+  rule per proxied request — so a scan re-derived the same canonical host once
+  per rule, and **twice** per rule on a signed-feed-armed deployment, where the
+  `catStore` and view matchers normalized independently.
+
+  Decomposing the probe (shipped taxonomy, 3-label uncategorized destination —
+  the clean-traffic case that cannot short-circuit; medians of n=5, 4-core Xeon
+  @2.10GHz, go1.26.8) put `NormalizeHost` at **45.97 ns of a 105.8 ns total,
+  43%** and the largest single term. The per-rule `RLock` previously recorded
+  as this path's open item is ~10.2 ns of it — the fourth-largest term. The
+  scan already held the value: `matchDestNorm` receives a once-per-request
+  `normHost` as a parameter and handed the matchers the *raw* host beside it.
+
+  `hostCatScratch.normHost()` memoizes it lazily (a scan with no
+  category-scoped rule still normalizes nothing) and the three matchers gained
+  `*Norm` entry points taking the canonical host; the old names survive as
+  normalizing wrappers, so every caller outside the scan is unchanged in cost
+  and behaviour. The hoist relies on **no idempotence property** —
+  `NormalizeHost` is not idempotent, since an empty ACE label decodes to
+  nothing (`NormalizeHost("a.xn--") == "a."`, `NormalizeHost("a.") == "a"`) —
+  because every consumer is handed `NormalizeHost(sc.host)`, the same function
+  on the same input the pre-hoist body used. Only *where* it is computed moves,
+  so no matching decision can change.
+
+  The scan entry points already held that value — `accessEvalInput.normHost`,
+  a `normHost :=` one line above the CDR scratch, and `authMatchScratch`'s own
+  memo — so the scratch is **seeded** from it rather than re-deriving it
+  (`newHostCatScratchNorm`), which also collapses the auth path's two memos of
+  one value into one. The seed's contract is `normHost == normalizeHost(host)`,
+  checked at all five production pairs and pinned by a gate that drives the
+  real `Evaluate` with hosts whose raw and canonical forms differ.
+
+  Measured: the per-rule probe **112.6 → 71.0 ns (−37%)**, both arms timed in
+  ONE run. The real `DestCategory` policy scan cannot be timed same-run (that
+  would need two production trees in one binary), so it is an **adjacent pair**
+  — identical command, identical machine state: **1 rule 191.7 → 157.6 ns,
+  10 rules 1035 → 933, 50 rules 2809 → 2519, 200 rules 9617 → 8452**, i.e.
+  **~10–18%**, with **0 allocations preserved on every path**.
+
+  An earlier draft of this entry quoted −28%/−38.6%/−44.3% for that scan.
+  Those were **cross-run and overstated the gain by roughly 3–4x**: the
+  baseline was measured hours before the post arm and this hardware drifted
+  enough to move the same pre-change tree from 17292 ns to 9617 ns at 200
+  rules. Run-to-run drift is up to ~12% even between adjacent pairs, so the
+  claim is the direction and rough magnitude, not a precise percentage.
+
+  One limit recorded rather than rounded away: the gain shrinks with core
+  count (50-rule interleaved parallel scan, same-run: −39.5% at 1 core,
+  −14.8% at 2, −8.7% at 4), because removing CPU work from a probe whose
+  critical section is unchanged moves the bottleneck onto `catStore.mu`. Both
+  arms take exactly the same number of read locks, so they converge under
+  saturation and the hoist is never the slower of the two. (Those figures
+  predate the lock-free membership probe in the next entry; the `*Norm` entry
+  points now read the same published forward view, so neither arm takes
+  `catStore.mu` any more.)
+
+  Relationship to the IDNA memo landed separately in this window: that memo
+  sits strictly BELOW `NormalizeHostStrict`'s already-canonical ASCII fast
+  path, so it makes the *slow* (A-label / U-label) branch cheap and leaves
+  the ASCII branch these figures were measured on untouched. The two are
+  complementary rather than alternatives: the memo collapses a repeat across
+  INDEPENDENT engines, which is the fan-out it was written for, while this
+  hoist removes the repeat inside ONE scan's per-rule loop, where the
+  multiplier is the rule count rather than the engine count. Re-measured on
+  the merged tree, the same-run per-rule probe reproduces at 141.8 → 89.9 ns
+  (−36.6%) against the −37% published here — the absolutes moved because the
+  hardware did, the ratio did not, which is why this entry quotes ratios.
+
+  Equivalence is the deliverable, not the speed: a divergence here is a
+  silently mis-enforced Allow/Deny rule. Both differentials run against
+  **verbatim frozen copies of the pre-hoist bodies** (comparing the new wrapper
+  against the new `Norm` function would be vacuous, since the wrapper is now
+  defined in terms of it), with randomized sweeps, their own not-vacuous
+  checks, and two fuzz targets (299k and 101k executions, no divergence). The
+  regression gate is **structural** because re-introducing a per-rule
+  `NormalizeHost` changes no decision at all — every differential and control
+  keeps passing while the cost silently returns — so
+  `TestWall_PerRuleCategoryMatchersTakeTheHoistedHost` AST-walks
+  `matchesCategory` and requires every membership matcher to be a `*Norm` entry
+  point handed `sc.normHost()`, tracked PER MATCHER rather than as an aggregate
+  count — a count of three is satisfied by three calls to the same entry point,
+  so the aggregate form passed when `MatchesHostAdminNorm` was replaced by a
+  duplicate `MatchesHostNorm`, leaving the admin tier unguarded (verified: the
+  old form returned `ok` against that mutation, the new one fails it).
+
+  A second structural wall pins that every SCAN seeds the memo
+  (`TestWall_ScanEntryPointsSeedTheCanonicalHost`). Swapping
+  `newHostCatScratchNorm` back to the lazy constructor is semantically
+  identical — the scratch then derives the same value itself — so every
+  differential, control, fuzz target and real-`Evaluate` gate keeps passing
+  while the scan canonicalizes the destination twice again. It covers all
+  three scan entry points (access-rule, CDR, Stage-1 auth) rather than the one
+  that was reported; the three single-shot callers hold no precomputed
+  `normHost` and are deliberately excluded.
+
+  Thirteen reintroduced defects were each verified failing — four against the
+  matcher wall, four against the differentials, two against the seeding
+  behaviour, and three against the seeding wall (one per scan entry point).
+
+  A pre-existing asymmetry is confirmed unchanged and now asserted so it is
+  not mistaken for a regression: the forward index keys a pattern without
+  IDNA-normalizing it while a query is normalized, so a unicode pattern is
+  stored verbatim and never matches the A-label form its own queries
+  canonicalize to.
+
 - The per-rule URL-category **membership** probe no longer takes a read lock.
   `urlcat.Store.MatchesHost` / `MatchesHostAdmin` answer "is this host in
   category C?" and are called once per category-scoped access rule per proxied
@@ -343,6 +452,57 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `auth_change_password_reauth_audit_test.go` — 4 defect gates verified failing
   against the pre-fix branch, plus 3 controls, two of them verified failing
   against the obvious wrong fix of auditing unconditionally on entry.
+- An explicitly logged-out session cookie was still accepted for up to one
+  second (SEC-REVEXP-1). Two predicates decided whether a session's lifetime
+  had ended and they disagreed in the fail-open direction: `Decode` accepts
+  while `time.Now().Unix() <= s.Exp`, while the revocation list retained an
+  entry only while `!time.Now().After(exp)`. Every production revocation
+  expiry is a whole second (`revokeSessionCookie` stores `time.Unix(s.Exp, 0)`,
+  `MergeRevocations` stores `time.Unix(e.Expiry, 0)`) and `time.Now()` carries
+  a sub-second remainder, so for the whole wall-clock second numbered `s.Exp`
+  the revocation was evicted — and `delete`d — while the cookie it named was
+  still honoured.
+
+  Reproduced against the real `Decode`: a session with `Exp == time.Now().Unix()`,
+  revoked the way the logout path revokes it, reported `IsRevoked=false` and
+  `Decode err=<nil>`. `ExportRevocations` applied the same test, so the hole
+  also propagated: the entry vanished from the on-disk revocations file and
+  from the next DP→CP gossip export on the same tick. The window is predictable
+  to anyone holding the cookie, because `exp` is in it.
+
+  There is now one oracle (`internal/session/revocation_expiry.go`) and the
+  revocation list is the side that moved, because a revocation must outlive the
+  session it revokes and never the reverse. `Decode` was deliberately left
+  alone: tightening it would shorten every session and change the meaning of
+  the `exp` claim this appliance signs into a cookie. The change can only
+  retain an entry longer — by under one second — and never drop one sooner, so
+  it cannot resurrect a session, refuse a legitimate logout, or unbound the
+  list. Applied at all four sites that decided the question: `IsRevoked`,
+  `IsUserRevoked`, `ExportRevocations` and `MergeRevocations`.
+
+  Gates: 9 new tests in `internal/session/revocation_expiry_test.go` — **7
+  regression gates**, each measured to fail against the pre-fix predicate and
+  pass after it (the differential against `Decode`, the map-level boundary, the
+  persistence and cluster-merge paths, the username-keyed list that gates a
+  deleted account, and a concurrent storm across all five entry points under
+  `-race`), plus **2 controls** that pass under both predicates by design and
+  are therefore not regression evidence: `UnambiguouslyPastEntriesStillEvict`
+  (2 s / 1 min / 24 h old entries still evict — had it flipped, the fix would
+  have made the list an unbounded leak) and `MalformedPeerExpiries` (`Expiry` of
+  `0`, `-1`, `-(1<<40)` refused, none panics — widening retention must not
+  widen what a peer can inject). An earlier revision of this entry claimed all
+  of them failed pre-fix; that was wrong and is corrected here, because
+  presenting a control as a regression gate makes the evidence irreproducible.
+
+  One pre-existing assertion (`TestRevocationList_PastExpiryEvicts`) used a
+  `-1ms` expiry, which is inside the current second and therefore no longer
+  expired; it now uses `-1m` and the boundary it used to straddle is pinned by
+  two of the new gates.
+
+  Review of the rest of the in-flight change set — the IDNA memo, the urlcat
+  lock-free read view, the config BOM fix, and four reported findings against
+  branches this change does not own — is recorded in
+  `docs/engineering/security-reviews/2026-10-11-in-flight-session-and-category-plane-window.md`.
 
 - Distributed rate limiting could admit a request over the cluster-wide limit
   whenever a Control Plane broadcast landed in the middle of a decision.

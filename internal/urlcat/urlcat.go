@@ -1231,13 +1231,43 @@ func lowerASCIIInto(dst []byte, s string) bool {
 
 // MatchesHost checks whether host belongs to the named URL category.
 // Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
-// LOCK-FREE: it probes the published forwardView, never s.mu.
+//
+// It is the NORMALIZING wrapper over MatchesHostNorm: host is canonicalized
+// here and the membership decision is made there. Callers that already hold
+// hostutil.NormalizeHost(host) — the per-request policy scan does, see
+// MatchesHostNorm — should call that directly and skip this.
 func (s *Store) MatchesHost(cat Category, host string) bool {
+	return s.MatchesHostNorm(cat, hostutil.NormalizeHost(host))
+}
+
+// MatchesHostNorm is MatchesHost over a host the CALLER has already run through
+// hostutil.NormalizeHost. It is the per-rule entry point for the policy hot
+// path. LOCK-FREE: it probes the published forwardView, never s.mu.
+//
+// Why it exists: package main's hostCatScratch.matchesCategory
+// (policy_hostcat.go) calls a membership matcher once per category-scoped
+// access rule per proxied request, and MatchesHost re-canonicalized the SAME
+// destination on every one of those calls. Normalization is a pure function of
+// the host, so it is request-invariant — the same class of value as the
+// normalized host, the parsed client IP and the one clock read that Evaluate
+// already hoists out of its rule scan, and the most expensive of them:
+// measured at 45.97 ns against MatchesHost's 105.8 ns total, i.e. 43% of the
+// probe was re-deriving a value the scan already had (that measurement predates
+// forwardView; the RLock it then included was ~10 ns of it).
+//
+// The hoist needs NO idempotence assumption about NormalizeHost, which is what
+// makes it a pure cost change: the value matched against is
+// hostutil.NormalizeHost(host) either way — the same function applied to the
+// same input — so only WHERE it is computed moves. Equivalence is pinned
+// against this file's own wrapper by urlcat_matcheshost_norm_test.go (named
+// shapes + randomized sweep + FuzzMatchesHostNorm), so a future change to
+// either body that breaks the identity fails the build.
+func (s *Store) MatchesHostNorm(cat Category, normHost string) bool {
 	v := s.forward()
 	if v == nil {
 		return false
 	}
-	return matchesHostIn(v.index, cat, host)
+	return matchesHostIn(v.index, cat, normHost)
 }
 
 // MatchesHostAdmin is MatchesHost restricted to admin-created (BuiltIn=false)
@@ -1247,21 +1277,31 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 // activation supersedes it. Same normalization + exact-then-suffix semantics as
 // MatchesHost, and LOCK-FREE on the same contract.
 func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
+	return s.MatchesHostAdminNorm(cat, hostutil.NormalizeHost(host))
+}
+
+// MatchesHostAdminNorm is MatchesHostAdmin over an already-normalized host —
+// the admin-tier twin of MatchesHostNorm, and the entry point the policy scan
+// uses when the signed-feed effective view is armed. See MatchesHostNorm for
+// why the normalization is hoisted to the caller. LOCK-FREE, as MatchesHostNorm.
+func (s *Store) MatchesHostAdminNorm(cat Category, normHost string) bool {
 	v := s.forward()
 	if v == nil {
 		return false
 	}
-	return matchesHostIn(v.adminIndex, cat, host)
+	return matchesHostIn(v.adminIndex, cat, normHost)
 }
 
-// matchesHostIn is the SHARED probe body behind MatchesHost and
-// MatchesHostAdmin: normalize the host, fold the category key without
-// allocating (categoryKey), then exact-then-suffix membership against ONE
-// forward index taken from an already-loaded forwardView. Sharing it keeps the
-// two entry points from drifting apart; idx is immutable (see forwardView), so
-// no lock is needed and none is taken.
-func matchesHostIn(idx map[string]map[string]bool, cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
+// matchesHostIn is the SHARED probe body behind MatchesHostNorm and
+// MatchesHostAdminNorm (and so, through them, MatchesHost and MatchesHostAdmin):
+// fold the category key without allocating (categoryKey), then
+// exact-then-every-suffix membership of the ALREADY-NORMALIZED normHost against
+// ONE forward index taken from an already-loaded forwardView. Sharing it keeps
+// the entry points from drifting apart; idx is immutable (see forwardView), so
+// no lock is needed and none is taken. The walk deliberately does NOT stop at
+// the first key that carries any category — see MatchesHostAdmin's callers and
+// effectiveCategoryView.MatchesCategory, which reproduce the same grammar.
+func matchesHostIn(idx map[string]map[string]bool, cat Category, normHost string) bool {
 	var keyBuf [maxInlineCategoryKey]byte
 	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
 
@@ -1275,12 +1315,12 @@ func matchesHostIn(idx map[string]map[string]bool, cat Category, host string) bo
 		return false
 	}
 	// Exact match.
-	if hostSet[host] {
+	if hostSet[normHost] {
 		return true
 	}
 	// Subdomain match: foo.example.com → check "example.com", "com", etc.
-	for i, ch := range host {
-		if ch == '.' && hostSet[host[i+1:]] {
+	for i, ch := range normHost {
+		if ch == '.' && hostSet[normHost[i+1:]] {
 			return true
 		}
 	}
