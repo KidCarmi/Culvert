@@ -926,6 +926,14 @@ const rosterTargetReplaced = "the configured roster file on disk no longer match
 	"replaced or edited outside Culvert after Culvert last wrote it, and a restart loads the file as it is now, " +
 	"which may restore revoked accounts or credentials, or drop changes made since"
 
+// rosterTargetOwnerChanged is the targetProblem when the roster file still
+// holds exactly what Culvert last wrote, but now belongs to another account in
+// a way that makes the next save's rename be refused (Codex P2 4317730264 on
+// PR #1601): an identical copy installed by someone else, for example
+// root-owned in a sticky directory while Culvert is unprivileged.
+const rosterTargetOwnerChanged = "the configured roster file was replaced by an identical copy owned by another " +
+	"account, so the next admin account change may be refused when it is saved"
+
 // rosterTargetMetadataNotPreservable is the targetProblem when the boot
 // rewrite was not exchanged in because the roster's owner, group, mode bits,
 // inode flags or extended attributes (a POSIX ACL, an SELinux label, a user.*
@@ -1101,6 +1109,10 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 			"Administrators and find what changed it. Then either save an admin account change, which writes the " +
 			"roster in use back over the file, or restart to adopt the file as it is now. Until then, a restart " +
 			"silently switches to the file's accounts and credentials."
+	case rosterTargetOwnerChanged:
+		row.OperatorAction = "Give the admin users file (-ui-users-file) back to the account Culvert runs as " +
+			"(chown), or run Culvert as the file's owner and restart. Until then an admin account change may be " +
+			"refused, and nothing it would have changed is saved."
 	case rosterTargetDisappeared:
 		row.OperatorAction = "Before the next restart, either save an admin account change (any change from " +
 			"Administrators writes the roster in use back and recreates the file) or restore the admin users file " +

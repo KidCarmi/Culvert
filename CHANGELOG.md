@@ -1534,7 +1534,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   accounts are then only in memory and are lost on restart; the next admin
   save recreates it), and so does one replaced or edited outside Culvert after
   Culvert last wrote it (each landed write records the size and SHA-256 of
-  the bytes written; a restart would load the file as it is now). Every
+  the bytes written; a restart would load the file as it is now), and so does
+  an identical copy owned by another account where that makes the next save's
+  rename be refused (a sticky directory, Culvert unprivileged). The check
+  reads the file with no roster lock held, so a stalled volume cannot block
+  admin changes or TOTP logins, and a Culvert save racing it is never reported
+  as a replacement. Every
   `fileutil.AtomicWrite` and the boot rewrite now also report
   `ErrReplacedNotSynced`, rather than success, when the parent directory
   cannot be opened for its `fsync` (for example a `0300` data directory); only

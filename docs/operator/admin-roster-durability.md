@@ -196,7 +196,12 @@ administrative decision was affected, and therefore what the operator must redo.
    restart would load the file as it is now, which may restore revoked
    accounts or credentials or drop changes made since — reconcile, then either
    save an admin account change to write the roster in use back, or restart
-   to adopt the file), or when
+   to adopt the file), when it was **replaced by an identical copy owned by
+   another account** in a way that makes the next save's rename be refused (a
+   sticky directory whose owner is neither Culvert nor root, with Culvert not
+   root and not the new owner: give the file back to Culvert's account, or
+   run Culvert as its owner — an identical re-copy with the same owner, or an
+   owner change in a non-sticky directory, stays `ok`), or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. The counts, the remedy and the degraded login-write

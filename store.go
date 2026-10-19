@@ -887,6 +887,11 @@ type Config struct {
 	// outside Culvert afterwards (roster_disk_identity.go). Reset with the
 	// evidence above.
 	uiUsersWritten rosterWrittenDigest
+	// uiUsersWriteGen brackets every Culvert write to uiUsersFile (odd while
+	// one is in progress) so the row's identity read can run with no lock
+	// held and still tell a Culvert write racing it from an external one
+	// (roster_disk_identity.go). SetUIUsersFile moves it by two.
+	uiUsersWriteGen atomic.Uint64
 
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
 	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
@@ -1512,6 +1517,7 @@ func (c *Config) SetUIUsersFile(path string) {
 	c.uiUsersLoadErr = nil // a new path has not been loaded yet
 	c.uiUsersWriteTried, c.uiUsersWriteErr = false, nil
 	c.uiUsersWritten = rosterWrittenDigest{}
+	c.uiUsersWriteGen.Add(2) // parity kept: a write in progress stays odd
 	c.mu.Unlock()
 }
 
@@ -1538,10 +1544,14 @@ func (c *Config) rosterWriteEvidence() (tried bool, err error) {
 // identity of what is now on disk (rosterWrittenDigest). A save that fails is
 // not recorded here; the refused/degraded counters report it.
 func (c *Config) noteRosterWriteLanded(path string, data []byte) {
+	var owner fileOwnerID
+	if fi, err := os.Lstat(path); err == nil { // the save path already does disk I/O under saveUIUsersMu
+		owner = ownerOf(fi)
+	}
 	c.mu.Lock()
 	if c.uiUsersFile == path {
 		c.uiUsersWriteTried, c.uiUsersWriteErr = true, nil
-		c.uiUsersWritten = digestRosterWrite(path, data)
+		c.uiUsersWritten = digestRosterWrite(path, data, owner)
 	}
 	c.mu.Unlock()
 }
@@ -1601,6 +1611,8 @@ type uiUsersFileEnvelope struct {
 func (c *Config) LoadUIUsersFile() error {
 	c.saveUIUsersMu.Lock()
 	defer c.saveUIUsersMu.Unlock()
+	c.beginRosterWrite() // the boot rewrite (and a quarantine's fresh file) write the roster
+	defer c.endRosterWrite()
 	c.mu.RLock()
 	path := c.uiUsersFile
 	c.mu.RUnlock()
@@ -1616,7 +1628,7 @@ func (c *Config) LoadUIUsersFile() error {
 		c.uiUsersWritten = rosterWrittenDigest{}
 		if tried && writeErr == nil {
 			// The rewrite put exactly the loaded bytes on disk.
-			c.uiUsersWritten = digestRosterWrite(path, loaded.data)
+			c.uiUsersWritten = digestRosterWrite(path, loaded.data, ownerOf(loaded.info))
 		}
 	}
 	c.mu.Unlock()
@@ -1779,6 +1791,8 @@ func (c *Config) SaveUIUsersFile() error {
 // landing between this call and a rollback would persist state the rollback is
 // about to undo.
 func (c *Config) saveUIUsersLocked() error {
+	c.beginRosterWrite()
+	defer c.endRosterWrite()
 	c.mu.RLock()
 	path := c.uiUsersFile
 	// Canonicalize for serialization: an unset in-memory value persists as the
