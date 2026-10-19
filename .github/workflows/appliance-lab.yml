@@ -37,24 +37,26 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # Candidate a2b52abc's image (Deep gate run 39134155144, app manifest
-  # sha256:9d30a157…), the operator-status deadline-mismatch fix (bound the
-  # advisory prerequisites so the --json/--text snapshot fits the 3 s operator
-  # gate; mandatory readiness stays live + fail-closed — status.go +
-  # main_linux.go). a2b52abc is 6248daf7 + that console fix and nothing else, so
-  # it carries every badger/ristretto F-DISK-1 fix and the 1.5.4 sidecar. The
-  # console binary changes, so the guest-content fingerprint differs from the
-  # e24eb542 reference by that binary alone (recorded warning, not a gate).
+  # Candidate 8d3ca1c7's image (Deep gate run 39287948530, version
+  # v1.0.268-candidate.g8d3ca1c75c4e). 8d3ca1c7 = a2b52abc (the prior candidate)
+  # + the SSO bare-provider vs sso-ip:<provider> source-contract fix + the
+  # boot-progress failed-unit-name fix + origin/main merged in (CHAOS-71 CP-gRPC
+  # listener recovery, CHAOS-74 catdb runtime memory-fault containment,
+  # release-dispatch panic containment, SECBASIC roster-leak test fix) + the
+  # corrected Docker fixable-HIGH attribution doc + removal of a redundant
+  # positional socks5 bind-order test superseded by the behavioral CHAOS-66
+  # test. It carries every badger/ristretto F-DISK-1 fix and the 1.5.4 sidecar.
   # obtain-image.sh falls back to the lab-preserved copy
-  # (lab-source-image-39134155144) if the deep-gate artifact has expired.
-  SOURCE_IMAGE_RUN_ID: "39134155144"
-  SOURCE_IMAGE_TAR_SHA256: 7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e
+  # (lab-source-image-39287948530) if the deep-gate artifact has expired.
+  SOURCE_IMAGE_RUN_ID: "39287948530"
+  SOURCE_IMAGE_TAR_SHA256: 6caf36dba5240fb2977ae52191139ddfbe080314d258080766d0ab9270da622a
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it. This
-  # is the PR #1528 MERGE commit (head a2b52abc merged into base dec66e1b), the
-  # commit the deep-gate image was version-stamped from (g246cb73d4b62) and the
-  # source build-ova.sh's candidate-source guard requires — NOT the bare head.
-  SOURCE_IMAGE_SHA: 246cb73d4b62d7a4baf2fcb8558ad8622657529a
+  # is the PR #1528 MERGE commit (head 8d3ca1c7 merged into base 31b4c9d5), the
+  # commit the deep-gate image was version-stamped from (the binary embeds
+  # 041d200db4f4) and the source build-ova.sh's candidate-source guard
+  # requires — NOT the bare head.
+  SOURCE_IMAGE_SHA: 041d200db4f45cf480a0c50fdf0f5d9a1ffc208c
 
 jobs:
   guest-boot:
@@ -105,28 +107,32 @@ jobs:
           # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
           # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
           # sidecar delivered > 0).
-          - variant: candidate-246cb73d
+          - variant: candidate-041d200d
             provisioning: source
-            # The operator-status deadline-mismatch candidate (ASTRA finding):
-            # PR #1528 MERGE commit 246cb73d (head a2b52abc merged into base
-            # dec66e1b; binary stamp 1.0.263-candidate.g246cb73d4b62), the commit
-            # the deep-gate image (run 39134155144) was built + stamped from.
-            # a2b52abc = 6248daf7 + the console fix only: the --json/--text
-            # snapshot bounds its advisory prerequisites to 2 s so it fits the
-            # operator SSH gate (QEMU 3 s), while mandatory service/health/setup/
-            # policy/CA readiness stays LIVE and fail-closed. BUILDS a fresh OVA
-            # and runs the FULL qualify; the recovery leg (disk=dm, 3 reboots on
-            # the no-latency `fast` profile) exercises the bounded
-            # `gop_within 3 status-json` probe under real reboots — the exact
-            # path the deadline mismatch lived on — and its per-sample evidence
-            # (R-*-operator-probe.jsonl: class/elapsed/exit/phase/reason) is the
-            # rule-4 transport-vs-not-ready split. The console binary changed, so
-            # the guest-content fingerprint differs from the e24eb542 reference
-            # by that binary alone (recorded warning, not a gate).
-            source_sha: "246cb73d4b62d7a4baf2fcb8558ad8622657529a"
-            image_run: "39134155144"
-            image_tar_sha256: "7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e"
-            expect_image_id: "sha256:9d30a157cb925de6628db1a9e3e5f70e308cc9b1f8f8a918117a7e8275f3bc16"
+            # The #1528-closeout candidate: PR MERGE commit 041d200d (head
+            # 8d3ca1c7 merged into base 31b4c9d5; binary stamp
+            # v1.0.268-candidate.g8d3ca1c75c4e, build-vcs 041d200db4f4), the
+            # commit the deep-gate image (run 39287948530) was built + stamped
+            # from. 8d3ca1c7 = a2b52abc (the prior candidate) + the SSO
+            # bare-provider vs sso-ip:<provider> source-contract fix + the
+            # boot-progress failed-unit-name fix + origin/main merged in
+            # (CHAOS-71 CP-gRPC listener recovery, CHAOS-74 catdb runtime
+            # memory-fault containment, release-dispatch panic containment,
+            # SECBASIC roster-leak test fix) + the corrected Docker fixable-HIGH
+            # attribution doc + removal of a redundant positional socks5
+            # bind-order test superseded by the behavioral CHAOS-66 test. It
+            # carries every badger/ristretto F-DISK-1 fix and the 1.5.4 sidecar.
+            # BUILDS a fresh OVA and runs the FULL qualify; the recovery leg
+            # (disk=dm, 3 reboots on the no-latency `fast` profile) exercises the
+            # bounded operator status-json probe under real reboots, and its
+            # per-sample evidence (R-*-operator-probe.jsonl) is the rule-4
+            # transport-vs-not-ready split. Guest-content fingerprint differs
+            # from the e24eb542 reference by the changed binaries (recorded
+            # warning, not a gate).
+            source_sha: "041d200db4f45cf480a0c50fdf0f5d9a1ffc208c"
+            image_run: "39287948530"
+            image_tar_sha256: "6caf36dba5240fb2977ae52191139ddfbe080314d258080766d0ab9270da622a"
+            expect_image_id: "sha256:d6dfa590e06d7c3f9ef859449110520623927e949c7ba35247b21fd79329896b"
             disk: dm
             recovery_profiles: "fast:0:0:60"
             recovery_reboots: "3"
@@ -756,7 +762,12 @@ jobs:
   # wrong bytes. Runs on the same untagged pushes as f-disk-1.
   f-disk-agent-identity:
     name: "Lab · F-DISK agent identity: image agent == OVA-bundled agent"
-    if: ${{ contains(github.event.head_commit.message, '[agent-identity]') || (!contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]')) }}
+    # Phase-2 only: this job extracts the agent from an ALREADY-BUILT candidate
+    # OVA (by artifact id) and compares it to the image's agent, so it can only
+    # run once the new candidate OVA exists and OVA_ARTIFACT_ID/OVA_SHA256 below
+    # are repointed to it. On the default (untagged) Phase-1 push guest-boot
+    # builds that OVA; this job then runs on the explicit [agent-identity] tag.
+    if: ${{ contains(github.event.head_commit.message, '[agent-identity]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
