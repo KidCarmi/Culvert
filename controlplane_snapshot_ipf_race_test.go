@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ── RISK-030: the CP→DP snapshot apply must not reassign the IP filter ──────
@@ -54,11 +55,14 @@ func TestRISK030_SnapshotApplyDoesNotRaceRequestPath(t *testing.T) {
 	)
 	var stop atomic.Bool
 	var wrongAllow, wrongDeny, reads atomic.Int64
-	var wg sync.WaitGroup
-	for r := 0; r < 4; r++ {
+	var wg, running sync.WaitGroup
+	const readers = 4
+	for r := 0; r < readers; r++ {
 		wg.Add(1)
+		running.Add(1)
 		go func() {
 			defer wg.Done()
+			first := true
 			for !stop.Load() {
 				if ipf.Allowed(outside) {
 					wrongAllow.Add(1)
@@ -67,17 +71,29 @@ func TestRISK030_SnapshotApplyDoesNotRaceRequestPath(t *testing.T) {
 					wrongDeny.Add(1)
 				}
 				reads.Add(1)
+				if first {
+					first = false
+					running.Done()
+				}
 			}
 		}()
 	}
-	for i := 0; i < 2000; i++ {
+	// Start the applies only once every reader is reading, and keep applying
+	// until the applies have overlapped real reads: 2,000 applies can finish
+	// before a reader is first scheduled on a loaded runner, which used to
+	// fail the gate below without exercising the race at all.
+	running.Wait()
+	base := reads.Load()
+	deadline := time.Now().Add(10 * time.Second)
+	for i := 0; i < 2000 || (reads.Load()-base < 1000 && time.Now().Before(deadline)); i++ {
 		applySnapshotAdmission(snap)
 	}
+	overlapped := reads.Load() - base
 	stop.Store(true)
 	wg.Wait()
 
-	if reads.Load() == 0 {
-		t.Fatal("no concurrent reads happened; the gate exercised nothing")
+	if overlapped == 0 {
+		t.Fatal("no reads overlapped the applies; the gate exercised nothing")
 	}
 	if n := wrongAllow.Load(); n != 0 {
 		t.Errorf("%d request(s) admitted an address outside the allowlist during snapshot apply (fail-open window)", n)
