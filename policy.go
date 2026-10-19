@@ -1801,15 +1801,12 @@ func matchScheduleMemo(s *PolicySchedule, c *scheduleClock) bool {
 	return scheduleTimeMatchMinutes(s.TimeStart, s.TimeEnd, minutes, local)
 }
 
-// scheduleDayMatch is the day-of-week check ("Mon", "Tue" …, case-insensitive).
-// An empty Days list means every day.
-func scheduleDayMatch(days []string, now time.Time) bool {
-	return scheduleDayMatchWeekday(days, now.Weekday())
-}
-
-// scheduleDayMatchWeekday is scheduleDayMatch against an already-derived
-// weekday, so a scan that memoises the weekday does not re-split the instant
-// per rule. Comparison semantics are unchanged.
+// scheduleDayMatchWeekday is the day-of-week check ("Mon", "Tue" …,
+// case-insensitive); an empty Days list means every day. It takes an
+// ALREADY-DERIVED weekday so a scan that memoises it does not re-split the
+// instant per rule; comparison semantics are those of the pre-memo
+// scheduleDayMatch, which took a time.Time and is gone because the memo left it
+// without a caller.
 func scheduleDayMatchWeekday(days []string, wd time.Weekday) bool {
 	if len(days) == 0 {
 		return true
