@@ -330,20 +330,48 @@ if [[ "$SCENARIO" == midwrite ]]; then
   if [[ "$cst" == running && "${v:-unreachable}" != unreachable ]]; then
     freeA="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
     ua="$(through_proxy origin-allowed)"; ub="$(through_proxy origin-blocked)"
+    # Denial reason, retained: capture the blocked response's bounded body so the
+    # record shows WHY the deny happened, not merely that a non-200 came back.
+    ubody="$(curl -sS -m 10 -x http://127.0.0.1:18080 "http://origin-blocked/" 2>/dev/null | head -c 200 | tr -d '\r\n' || true)"
     freeB="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
-    if [[ "$ua" == 200 && "$ub" != 200 && "$ub" != 000 ]]; then
-      check W under-fill-enforcement pass "under fill (free ${freeA}->${freeB}KiB): allowed=$ua blocked=$ub — policy still enforced with the disk full, before any cleanup"
+    # ASTRA hardening: the denial oracle must assert 403 SPECIFICALLY. A 5xx/502
+    # is a crash or a backend failure wearing the clothes of a denial — accepting
+    # "any non-200" let a broken proxy pass as "still enforcing". 403 is the
+    # policy default-deny this run actually returns; anything else (incl. 000,
+    # 407, 5xx) is a failure, not enforcement. Fresh requests + free-space
+    # brackets + denial body retained.
+    if [[ "$ua" == 200 && "$ub" == 403 ]]; then
+      check W under-fill-enforcement pass "under fill (free ${freeA}->${freeB}KiB): allowed=$ua blocked=$ub (deny body: ${ubody:-none}) — default-deny enforced with the disk full, before any cleanup; 403 specifically (a 5xx would be a crash, not a policy denial)"
     else
-      check W under-fill-enforcement fail "under fill (free ${freeA}->${freeB}KiB): allowed=$ua blocked=$ub"
+      check W under-fill-enforcement fail "under fill (free ${freeA}->${freeB}KiB): allowed=$ua blocked=$ub (body: ${ubody:-none}) — expected allowed=200 blocked=403; a 000/407/5xx blocked code is a failure or crash, not policy enforcement"
     fi
-    # Explicit degraded-state observations with allocation/error brackets: the
-    # boot category import hit ENOSPC, so the operator-visible state is a serving
-    # proxy whose category feed did NOT finish importing. Record /health, the
-    # catfeeddb metrics and the bulk-write error together, under fill.
+    # ASTRA Phase-3 rule 1: assert the product TRUTHFULLY surfaces the incomplete
+    # category import — free space, a serving /health and a write-error log do NOT
+    # establish an accurate operator/agent incomplete-import state. The feed's own
+    # completion contract is the oracle (F-FEED-1, internal/feedsync): a sync is
+    # certified complete ONLY after the durable SyncRecord is written, and ONLY
+    # then is culvert_category_feed_last_sync_timestamp_seconds set non-zero
+    # (globalUT1FeedSyncer.Stats()). The boot import was still IN FLIGHT when the
+    # fill landed (guarded above), so under ENOSPC it cannot certify. The
+    # operator-observable truth MUST therefore be last_sync == 0 (NOT certified
+    # complete) AND sync_failures_total >= 1 (the interrupted/refused import is
+    # surfaced as a failure, not silently dropped — the CWE-778 direction). One
+    # scrape, parsed; a product that reported last_sync > 0 here is falsely
+    # certifying a completed sync and FAILS.
     hv="$(health_version 2>/dev/null || echo unreachable)"
-    mfull="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | grep -E '^culvert_catfeeddb_(available|recovered|quarantined_copies) ' | tr '\n' ' ' || true)"
-    werr="$(wlogs | grep -m1 -oE 'bulk write failed[^"]*' || echo 'no bulk-write-failed line')"
-    check W degraded-state-observed info "disk full, pre-cleanup (free ${freeB}KiB): /health version=$hv; category import error: ${werr}; catfeeddb metrics: ${mfull:-none}"
+    metrics="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null || true)"
+    feedm="$(printf '%s\n' "$metrics" | grep -E '^culvert_category_feed_(last_sync_timestamp_seconds|sync_failures_total|entries) ' | tr '\n' ' ')"
+    mfull="$(printf '%s\n' "$metrics" | grep -E '^culvert_catfeeddb_(available|recovered|quarantined_copies) ' | tr '\n' ' ')"
+    lastsync="$(printf '%s\n' "$metrics" | awk '/^culvert_category_feed_last_sync_timestamp_seconds /{print $2}')"
+    failtot="$(printf '%s\n' "$metrics" | awk '/^culvert_category_feed_sync_failures_total /{print $2}')"
+    werr="$(wlogs | grep -m1 -oE 'bulk write failed[^"]*|write REFUSED[^"]*' || echo 'no bulk-write-failed/refused line')"
+    if [[ -z "${lastsync:-}" || -z "${failtot:-}" ]]; then
+      check W degraded-state-truthful fail "category-feed metrics not exposed (last_sync='${lastsync:-}' sync_failures='${failtot:-}'): cannot verify the product surfaces the incomplete import — feed metrics: ${feedm:-none}; catfeeddb: ${mfull:-none}; write error: ${werr}"
+    elif [[ "$lastsync" == 0 && "$failtot" =~ ^[0-9]+$ && "$failtot" -ge 1 ]]; then
+      check W degraded-state-truthful pass "disk full, pre-cleanup (free ${freeB}KiB): import NOT certified complete (last_sync=0) AND the failed import is surfaced (sync_failures_total=$failtot); /health version=$hv; feed metrics: ${feedm:-none}; catfeeddb: ${mfull:-none}; write error: ${werr}"
+    else
+      check W degraded-state-truthful fail "product did NOT truthfully surface the incomplete import: last_sync=${lastsync} (expected 0 = not certified complete), sync_failures_total=${failtot} (expected >=1); /health version=$hv; feed metrics: ${feedm:-none}; catfeeddb: ${mfull:-none}; write error: ${werr}"
+    fi
   fi
   # Recovery procedure (docs/appliance/readiness-report.md F-DISK-1): free
   # space on the data filesystem, then bring the stack back. The FIRST runner

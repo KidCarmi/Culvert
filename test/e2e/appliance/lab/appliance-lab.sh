@@ -282,7 +282,32 @@ sys.exit(0 if ok else 1)
 PY
   }
   if bigstatus; then log "selftest ok: >4096-byte status retained complete + parses (no truncation)"; else log "selftest FAILED: large status payload truncated or unparseable"; rc=1; fi
-  unset -f cpcase bigstatus
+  # ASTRA #1528 negative test: a payload LARGER than the 64 KiB retention cap
+  # must set stdout_overflow=true AND stdout_redacted_parses=false, so the
+  # capture-integrity gate (in cmd_recovery) treats it as a FAILURE rather than
+  # silently exiting success. Proves overflow is detectable as fatal, not just
+  # recorded as metadata.
+  overflowcase() { local sf="$d/cp-ovf.json" ef="$d/cp-ovf.err" out="$d/cp-ovf.jsonl"; : > "$out"; : > "$ef"
+    python3 - "$sf" <<'PY'
+import json, sys
+# ~70,000 chars of non-IP, non-sensitive filler > the 65536 retention cap.
+json.dump({"phase": "ready", "reason": "HEALTH_CHECKS_PASSED",
+           "blob": "x" * 70000}, open(sys.argv[1], "w"))
+PY
+    LAB_HOST=10.9.9.9 rec_classify_probe "$sf" "$ef" 0 1234.5 9 42.0 10.9.9.9 "$out" >/dev/null
+    python3 - "$out" <<'PY'
+import json, sys
+r = json.loads(open(sys.argv[1]).read().strip())
+# Overflow MUST be flagged, the retained payload MUST NOT claim to parse, the
+# retained string is capped at 65536, and stdout_redacted_len records the true
+# (pre-cap) length so the drop is visible.
+ok = (r["stdout_overflow"] is True and r["stdout_redacted_parses"] is False
+      and len(r["stdout_redacted"]) == 65536 and r["stdout_redacted_len"] > 65536)
+sys.exit(0 if ok else 1)
+PY
+  }
+  if overflowcase; then log "selftest ok: >64KiB status flags overflow=true + parses=false (capture-integrity gate catches it)"; else log "selftest FAILED: oversize status did not flag overflow as a capture failure"; rc=1; fi
+  unset -f cpcase bigstatus overflowcase
   # The console-marks watcher runs in the background for up to an hour; the
   # caller captures its pid with $(...), which must return at once (run
   # 37363074909 lost ~60 min per reboot waiting for the watcher to exit).
@@ -1485,6 +1510,30 @@ print("operator-probe: %s; transport-faults=%d; max-probe=%.0fms%s" % (
     ", ".join("%s=%d" % (k, n) for k, n in sorted(c.items())), transport, mx, last))
 PY
 )"
+  # Capture-integrity gate (ASTRA #1528): the sanitized operator-probe records
+  # must be COMPLETE and reparse as JSON. An overflow (retained stdout hit the
+  # 64 KiB cap) or an unparseable redacted payload is a CAPTURE FAILURE in its
+  # own right — independent of, and separate from, the product-readiness class
+  # the probe reports. Metadata flags alone are not failure handling, so this is
+  # a real pass/fail check, not an INFO line.
+  local capint; capint="$(python3 - "$EV/$tag-operator-probe.jsonl" <<'PY'
+import json, sys
+try: rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+except FileNotFoundError: rows = []
+ovf = sum(1 for r in rows if r.get("stdout_overflow") is True)
+nonp = sum(1 for r in rows if r.get("stdout_redacted_parses") is not True)
+print("%d %d %d" % (len(rows), ovf, nonp))
+PY
+)"
+  local cap_n cap_ovf cap_nonp
+  read -r cap_n cap_ovf cap_nonp <<EOF
+$capint
+EOF
+  if [ "${cap_n:-0}" -gt 0 ] && [ "${cap_ovf:-0}" -eq 0 ] && [ "${cap_nonp:-0}" -eq 0 ]; then
+    check R "operator-capture-integrity-$name-$i" pass "$cap_n sanitized records, all complete and reparse (overflow=0 unparseable=0)"
+  else
+    check R "operator-capture-integrity-$name-$i" fail "capture integrity: records=${cap_n:-0} overflow=${cap_ovf:-0} unparseable=${cap_nonp:-0} — overflow or invalid retained JSON is a capture failure, separate from product readiness"
+  fi
   if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered (3 consecutive joint samples) within ${LAB_RECOVERY_TIMEOUT}s: $tl; $opsum"; recovery_guest "$tag"; return 1; fi
   local recd; recd="$(printf '%.1f' "$rec")"
   if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
