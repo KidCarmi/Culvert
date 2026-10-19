@@ -236,6 +236,7 @@ func TestP3S2_Persistence_UnknownProviderRefNotDropped(t *testing.T) {
 }
 
 func TestP3S2_Persistence_RollbackImportClusterPreserveSSO(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	// Rollback.
 	withFreshPolicyStore(t)
 	applyConfigBackup(&configBackup{Version: 1, PolicyRules: []PolicyRule{validSSORule()}})
