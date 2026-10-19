@@ -990,7 +990,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   when no `-ui-users-file` is configured, so admin account deletes, role
   changes and password rotations revert on restart; when the configured file
   failed to load at startup or is not a usable regular-file target (a
-  read-only check); and when admin-roster
+  read-only check); when its directory refused the write test run once at
+  roster load (`fileutil.ProbeAtomicWrite`: AtomicWrite's temp-create and
+  rename on scratch names, never touching the roster), since a readable roster
+  on a read-only mount or a mode-0555 directory passes both stats yet refuses
+  the first mutation; and when admin-roster
   changes were refused or login-time roster writes failed since process
   start. Counts, the remedy and the degraded login-write state are shown to
   admins only. Viewers and operators get a fixed message for "not durable" and

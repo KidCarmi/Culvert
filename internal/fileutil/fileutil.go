@@ -160,6 +160,62 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+// ProbeAtomicWrite reports whether AtomicWrite(path, ...) can land in path's
+// directory right now. It performs every directory operation AtomicWrite
+// depends on — create a unique temp file beside path, write, chmod, fsync,
+// close, and rename it OVER an existing entry — against scratch names of its
+// own, then removes them. A mode check would not do: a read-only mount, an
+// ACL, an SELinux label or a full volume all refuse the write while the mode
+// bits say it is allowed.
+//
+// It never opens, replaces or removes path itself, so it has no effect on the
+// live file, and it does not notify the write observers: a probe is evidence
+// for a health report, not a durable write. A crash mid-probe can leave a
+// scratch file named after path (the same residue an interrupted AtomicWrite
+// leaves). The returned error names the failing stage.
+func ProbeAtomicWrite(path string) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	// The rename target exists beforehand, exactly as the live file does when
+	// AtomicWrite replaces it.
+	target, err := os.CreateTemp(dir, base+".probe.*")
+	if err != nil {
+		return fmt.Errorf("probe atomic write %s: create temp: %w", path, err)
+	}
+	targetName := target.Name()
+	defer func() { _ = os.Remove(targetName) }() // #nosec G104 -- best-effort scratch cleanup
+	if err := target.Close(); err != nil {
+		return fmt.Errorf("probe atomic write %s: close: %w", path, err)
+	}
+
+	f, err := os.CreateTemp(dir, base+".probe.*")
+	if err != nil {
+		return fmt.Errorf("probe atomic write %s: create temp: %w", path, err)
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }() // #nosec G104 -- best-effort; gone after a successful rename
+	if _, err := f.WriteString("probe\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("probe atomic write %s: write: %w", path, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("probe atomic write %s: chmod: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("probe atomic write %s: fsync: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("probe atomic write %s: close: %w", path, err)
+	}
+	if err := os.Rename(tmp, targetName); err != nil {
+		return fmt.Errorf("probe atomic write %s: rename: %w", path, err)
+	}
+	return nil
+}
+
 // ── Predictable-path secret writes (SEC-SECRETWRITE-1) ───────────────────────
 
 // WriteFileExclusive is the safe counterpart to AtomicWrite for the few

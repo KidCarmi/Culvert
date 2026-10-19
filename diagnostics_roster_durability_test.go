@@ -19,7 +19,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 func swapCfgForRosterDurability(t *testing.T, c *Config) {
@@ -40,13 +43,17 @@ func pinRosterDurabilityBaseline(t *testing.T) {
 	t.Helper()
 	cfg.mu.Lock()
 	prevFile, prevErr := cfg.uiUsersFile, cfg.uiUsersLoadErr
+	prevProbed, prevProbeErr := cfg.uiUsersWriteProbed, cfg.uiUsersWriteProbeErr
 	cfg.uiUsersFile = filepath.Join(t.TempDir(), "ui_users.json")
 	cfg.uiUsersLoadErr = nil
+	// A real write test against the fresh directory, as LoadUIUsersFile runs.
+	cfg.uiUsersWriteProbed, cfg.uiUsersWriteProbeErr = true, fileutil.ProbeAtomicWrite(cfg.uiUsersFile)
 	cfg.mu.Unlock()
 	resetRosterPersistCountersForTest()
 	t.Cleanup(func() {
 		cfg.mu.Lock()
 		cfg.uiUsersFile, cfg.uiUsersLoadErr = prevFile, prevErr
+		cfg.uiUsersWriteProbed, cfg.uiUsersWriteProbeErr = prevProbed, prevProbeErr
 		cfg.mu.Unlock()
 		resetRosterPersistCountersForTest()
 	})
@@ -61,6 +68,10 @@ func configuredRosterCfg(t *testing.T, withFile bool) *Config {
 	}
 	if withFile {
 		c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
+		// The boot sequence: load (first run) records the write test.
+		if err := c.LoadUIUsersFile(); err != nil {
+			t.Fatalf("LoadUIUsersFile: %v", err)
+		}
 	}
 	return c
 }
@@ -208,6 +219,16 @@ func TestCheckAdminRosterDurability_UnusableRosterTarget(t *testing.T) {
 		// Deterministic twin of unreadable-file for privileged runners: the
 		// read error a mode-000 file produces, recorded as the load outcome.
 		{"unreadable-file-recorded", setupRosterRecordedReadError, true},
+		// Codex P2 on #1601: readable roster, unwritable directory. Both stats
+		// pass; only the recorded write test can tell. Skipped where the
+		// runner's privileges bypass the mode bits (root, CAP_DAC_OVERRIDE).
+		{"read-only-parent", setupRosterReadOnlyParent, true},
+		// Deterministic twin for privileged runners (CI may run as root): the
+		// write-test failure a read-only mount produces, recorded as the probe
+		// outcome — the same state read-only-parent reaches unprivileged.
+		{"read-only-parent-recorded", setupRosterRecordedProbeFailure, true},
+		// A configured path with no write test is not evidence of durability.
+		{"never-write-tested", setupRosterNeverProbed, true},
 		{"missing-file-first-run", setupRosterFirstRun, false},
 		{"healthy-file", setupRosterHealthyFile, false},
 	}
@@ -264,6 +285,52 @@ func setupRosterRecordedReadError(t *testing.T, c *Config) {
 	c.mu.Unlock()
 }
 
+// setupRosterReadOnlyParent loads a readable roster from a mode-0555
+// directory. It first proves the directory really refuses writes here (else
+// the runner bypasses mode bits, e.g. as root, and the case is skipped in
+// favour of read-only-parent-recorded), and that a real roster save there
+// fails — the write the stat-only check claimed would succeed.
+func setupRosterReadOnlyParent(t *testing.T, c *Config) {
+	p := writeRosterFixture(t)
+	dir := filepath.Dir(p)
+	if err := os.Chmod(dir, 0o555); err != nil { // #nosec G302 -- deliberately read-only fixture dir
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // #nosec G302 -- restore so TempDir cleanup can remove it
+	if f, err := os.CreateTemp(dir, "privcheck.*"); err == nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		t.Skip("runner bypasses directory mode bits (root or CAP_DAC_OVERRIDE); " +
+			"read-only-parent-recorded covers this state")
+	}
+	c.SetUIUsersFile(p)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("precondition: a readable roster in a read-only directory must load, got %v", err)
+	}
+	if err := c.SaveUIUsersFile(); err == nil {
+		t.Fatal("precondition: a roster save in a read-only directory must fail")
+	}
+	if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("precondition: the roster must still stat as a regular file (err %v)", err)
+	}
+}
+
+func setupRosterRecordedProbeFailure(t *testing.T, c *Config) {
+	p := writeRosterFixture(t)
+	c.SetUIUsersFile(p)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("LoadUIUsersFile: %v", err)
+	}
+	c.mu.Lock()
+	c.uiUsersWriteProbed = true
+	c.uiUsersWriteProbeErr = &os.PathError{Op: "open", Path: p + ".probe.1", Err: syscall.EROFS}
+	c.mu.Unlock()
+}
+
+func setupRosterNeverProbed(t *testing.T, c *Config) {
+	c.SetUIUsersFile(writeRosterFixture(t))
+}
+
 func setupRosterFirstRun(t *testing.T, c *Config) {
 	c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
 	if err := c.LoadUIUsersFile(); err != nil {
@@ -312,7 +379,7 @@ func assertRosterTargetRow(t *testing.T, c *Config, name string, warn bool) {
 func TestRosterTargetProblem_IsReadOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "missing")
 	p := filepath.Join(dir, "ui_users.json")
-	if rosterTargetProblem(p, nil) == "" {
+	if rosterTargetProblem(p, nil, true, nil) == "" {
 		t.Fatal("missing parent reported as usable")
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {

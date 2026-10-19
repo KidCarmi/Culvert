@@ -179,7 +179,11 @@ administrative decision was affected, and therefore what the operator must redo.
    configured (changes revert at restart; on a node with no local
    administrator it also names the missing break-glass account), when the
    configured file failed to load at startup or its path is not a usable
-   regular file (a directory, or a missing parent directory), or when
+   regular file (a directory, or a missing parent directory), when its
+   directory refused the write test Culvert runs once when it loads the roster
+   (a temporary file created and renamed beside it, never touching the roster
+   itself — a read-only mount or a non-writable directory fails it even though
+   the roster still reads), or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. The counts, the remedy and the degraded login-write

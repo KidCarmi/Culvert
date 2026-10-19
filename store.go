@@ -870,6 +870,17 @@ type Config struct {
 	// would report a configured-but-unusable roster as persisted.
 	uiUsersLoadErr error
 
+	// uiUsersWriteProbed / uiUsersWriteProbeErr record the write test
+	// LoadUIUsersFile runs in uiUsersFile's directory after a successful load
+	// (fileutil.ProbeAtomicWrite: the temp-create + rename AtomicWrite needs,
+	// on scratch names, never touching the roster). Boot only READS the
+	// roster, so without this the admin_roster_durability row had no evidence
+	// that the first mutation's write can land — a readable roster on a
+	// read-only mount stats exactly like a writable one (Codex P2, PR #1601).
+	// Reset by SetUIUsersFile: a new path has not been probed.
+	uiUsersWriteProbed   bool
+	uiUsersWriteProbeErr error
+
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
 	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
 	// (RLock) while snapshotting the roster, then releases it before the
@@ -1492,6 +1503,7 @@ func (c *Config) SetUIUsersFile(path string) {
 	c.mu.Lock()
 	c.uiUsersFile = path
 	c.uiUsersLoadErr = nil // a new path has not been loaded yet
+	c.uiUsersWriteProbed, c.uiUsersWriteProbeErr = false, nil
 	c.mu.Unlock()
 }
 
@@ -1502,6 +1514,15 @@ func (c *Config) rosterPersistTarget() (path string, loadErr error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.uiUsersFile, c.uiUsersLoadErr
+}
+
+// rosterWriteProbe returns whether the configured roster path's directory has
+// been write-tested since it was set, and that test's outcome (see
+// uiUsersWriteProbed). Read-only; it never runs the probe itself.
+func (c *Config) rosterWriteProbe() (probed bool, err error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersWriteProbed, c.uiUsersWriteProbeErr
 }
 
 // uiUserRecord is the on-disk representation of a UI admin user.
@@ -1537,10 +1558,27 @@ type uiUsersFileEnvelope struct {
 // Silently returns nil if the file does not exist yet (first run). The outcome
 // is recorded (rosterPersistTarget) so diagnostics can report a configured but
 // unusable roster file instead of reading it as persisted.
+//
+// After a successful load of a configured path it also write-tests that
+// path's directory (fileutil.ProbeAtomicWrite) and records the outcome, so the
+// durability row reports a roster as persisting only on evidence that a write
+// can land. The probe never touches the roster file; its failure is not this
+// call's error (the roster loaded, and startup has always continued past an
+// unwritable volume) — it is reported by the row instead.
 func (c *Config) LoadUIUsersFile() error {
 	err := c.loadUIUsersFile()
+	c.mu.RLock()
+	path := c.uiUsersFile
+	c.mu.RUnlock()
+	probed, probeErr := false, error(nil)
+	if err == nil && path != "" {
+		probed, probeErr = true, fileutil.ProbeAtomicWrite(path)
+	}
 	c.mu.Lock()
 	c.uiUsersLoadErr = err
+	if c.uiUsersFile == path { // not re-pointed while probing
+		c.uiUsersWriteProbed, c.uiUsersWriteProbeErr = probed, probeErr
+	}
 	c.mu.Unlock()
 	return err
 }

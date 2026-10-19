@@ -878,8 +878,9 @@ type rosterDurabilityFacts struct {
 	configured bool
 	persisted  bool // a roster file (-ui-users-file) is configured
 	// targetProblem is the admin-only reason a CONFIGURED roster file is
-	// unusable (failed startup load, not a regular file, missing parent);
-	// "" when the target looks usable.
+	// unusable (failed startup load, not a regular file, missing parent, a
+	// directory that refused the startup write test, or no write test yet);
+	// "" only when a write is known to be able to land.
 	targetProblem string
 	localAdmin    bool // a local account can sign in as admin without the IdP
 	notDurable    int64
@@ -888,12 +889,20 @@ type rosterDurabilityFacts struct {
 }
 
 // rosterTargetProblem reports why a configured roster path cannot hold the
-// roster, or "" when it looks usable. READ-ONLY: it stats the target and its
-// parent directory and never creates, opens for writing or modifies anything.
+// roster, or "" when a write to it can land. READ-ONLY: it stats the target
+// and its parent directory and reads the RECORDED write test (probed,
+// probeErr — see Config.rosterWriteProbe); it never creates, opens for
+// writing or modifies anything, so a viewer's GET causes no disk write.
 // A missing file under an existing directory is the supported first-run
 // state (the first save creates it), not a problem. The returned reason never
 // names the path.
-func rosterTargetProblem(path string, loadErr error) string {
+//
+// Existence and file type are not evidence of writability (Codex P2, PR
+// #1601): a readable roster on a read-only bind mount, or in a mode-0555
+// directory, passes both stats, yet AtomicWrite must create a temp file and
+// rename it there, so the first mutation would be refused. "" therefore
+// requires a successful write test since the path was configured.
+func rosterTargetProblem(path string, loadErr error, probed bool, probeErr error) string {
 	if path == "" {
 		return ""
 	}
@@ -905,12 +914,19 @@ func rosterTargetProblem(path string, loadErr error) string {
 	case err == nil && !fi.Mode().IsRegular():
 		return "the configured roster path is not a regular file"
 	case err == nil:
-		return ""
 	case !os.IsNotExist(err):
 		return "the configured roster path cannot be inspected"
+	default:
+		if di, err := os.Stat(filepath.Dir(path)); err != nil || !di.IsDir() {
+			return "the configured roster file's parent directory does not exist"
+		}
 	}
-	if di, err := os.Stat(filepath.Dir(path)); err != nil || !di.IsDir() {
-		return "the configured roster file's parent directory does not exist"
+	switch {
+	case !probed:
+		return "the configured roster file has not been write-tested since it was configured"
+	case probeErr != nil:
+		return "the configured roster file's directory refused a test write at startup (read-only or " +
+			"permission-denied volume)"
 	}
 	return ""
 }
@@ -920,10 +936,11 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 		return rosterDurabilityFacts{}
 	}
 	path, loadErr := cfg.rosterPersistTarget()
+	probed, probeErr := cfg.rosterWriteProbe()
 	return rosterDurabilityFacts{
 		configured:    true,
 		persisted:     path != "",
-		targetProblem: rosterTargetProblem(path, loadErr),
+		targetProblem: rosterTargetProblem(path, loadErr, probed, probeErr),
 		localAdmin:    cfg.hasLocalAdministrator(),
 		notDurable:    rosterNotDurable.Load(),
 		refused:       rosterPersistRefused.Load(),
@@ -936,10 +953,11 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 // evidence lived only in a boot log line (warnRosterNotDurable), a rate-limited
 // per-change line, and the culvert_admin_roster_persist_{failures,degraded}_total
 // counters — none visible to an operator working from the GUI. Report-only: it
-// reads atomics, config fields (including the recorded startup load outcome)
-// and two read-only stats of the roster target; it writes nothing and changes
-// no roster behaviour. This is the ADMIN rendering; redactContractForRole replaces it
-// with adminRow's viewer twin below admin. Counts are since process start.
+// reads atomics, config fields (including the recorded startup load outcome
+// and the recorded startup write test) and two read-only stats of the roster
+// target; it writes nothing and changes no roster behaviour. This is the ADMIN
+// rendering; redactContractForRole replaces it with adminRow's viewer twin
+// below admin. Counts are since process start.
 func checkAdminRosterDurability() OperatorContractCheck {
 	return readRosterDurabilityFacts().adminRow()
 }
