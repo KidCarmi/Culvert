@@ -232,6 +232,14 @@ type cdrCircuitBreaker struct {
 	// superseded (see outcomeIsCurrentLocked) — typically the late report of
 	// a probe the wedge escape reclaimed.
 	staleOutcomes atomic.Int64
+	// episode identifies the breaker's current state episode. It advances on
+	// EVERY state transition (closed->open, open->half-open, half-open->closed
+	// or open, Reset), only through setStateLocked, and starts at 1, so it is
+	// never 0. Every reservation records the episode it was admitted under,
+	// and an outcome counts only for that same episode: a closed-state RPC
+	// still in flight when the breaker tripped and then recovered cannot feed
+	// its failure into the NEW closed episode's threshold.
+	episode atomic.Int64
 
 	// totalOpens counts state transitions into open for observability.
 	totalOpens atomic.Int64
@@ -259,6 +267,7 @@ type cdrCircuitBreaker struct {
 func newCDRCircuitBreaker(cfg cdrBreakerConfig) *cdrCircuitBreaker {
 	b := &cdrCircuitBreaker{cfg: cfg.withDefaults()}
 	b.state.Store(cbStateClosed)
+	b.episode.Store(1)
 	b.nowFn = time.Now
 	epoch := time.Now() // carries a monotonic reading
 	b.monoFn = func() time.Duration { return time.Since(epoch) }
@@ -308,10 +317,13 @@ func (b *cdrCircuitBreaker) State() int32 {
 
 // cdrProbeReservation identifies a half-open probe slot handed out by
 // Reserve, so Release can return exactly that slot and an outcome can be
-// attributed to exactly the episode it was taken in. gen is the half-open
-// budget the slot came from; zero means "no half-open slot was taken" (closed
-// state), and Release of it is a no-op.
+// attributed to exactly the episode it was taken in. ep is the state episode
+// it was admitted under (never 0 for a real reservation, so the zero value
+// matches no episode). gen is the half-open budget the slot came from; zero
+// means "no half-open slot was taken" (closed state), and Release of it is a
+// no-op.
 type cdrProbeReservation struct {
+	ep  int64
 	gen int64
 }
 
@@ -338,7 +350,7 @@ func (b *cdrCircuitBreaker) Reserve() (bool, cdrProbeReservation) {
 	now := b.monoNow()
 	switch b.state.Load() {
 	case cbStateClosed:
-		return true, cdrProbeReservation{}
+		return true, cdrProbeReservation{ep: b.episode.Load()}
 	case cbStateOpen:
 		if now-b.openedMono.Load() < int64(b.cfg.ResetTimeout) {
 			b.totalTrips.Add(1)
@@ -349,7 +361,7 @@ func (b *cdrCircuitBreaker) Reserve() (bool, cdrProbeReservation) {
 	case cbStateHalfOpen:
 		return b.reserveHalfOpenLocked(now)
 	default:
-		return true, cdrProbeReservation{}
+		return true, cdrProbeReservation{ep: b.episode.Load()}
 	}
 }
 
@@ -358,7 +370,15 @@ func (b *cdrCircuitBreaker) armHalfOpenLocked(now int64) {
 	b.halfOpenTried.Store(0)
 	b.halfOpenGen.Add(1)
 	b.halfOpenLastAt.Store(now)
-	b.state.Store(cbStateHalfOpen)
+	b.setStateLocked(cbStateHalfOpen)
+}
+
+// setStateLocked publishes a state transition and starts a new episode, which
+// retires every reservation admitted under the previous one. It is the ONLY
+// writer of state after construction. Caller holds mu.
+func (b *cdrCircuitBreaker) setStateLocked(s int32) {
+	b.episode.Add(1)
+	b.state.Store(s)
 }
 
 // reserveHalfOpenLocked takes one slot of the current budget, or re-arms an
@@ -375,14 +395,14 @@ func (b *cdrCircuitBreaker) reserveHalfOpenLocked(now int64) (bool, cdrProbeRese
 	if b.halfOpenTried.Load() < b.cfg.HalfOpenProbes {
 		b.halfOpenTried.Add(1)
 		b.halfOpenLastAt.Store(now)
-		return true, cdrProbeReservation{gen: b.halfOpenGen.Load()}
+		return true, cdrProbeReservation{ep: b.episode.Load(), gen: b.halfOpenGen.Load()}
 	}
 	if now-b.halfOpenLastAt.Load() >= int64(b.cfg.HalfOpenProbeTimeout) {
 		b.staleProbes.Add(1)
 		b.halfOpenGen.Add(1)
 		b.halfOpenTried.Store(1)
 		b.halfOpenLastAt.Store(now)
-		return true, cdrProbeReservation{gen: b.halfOpenGen.Load()}
+		return true, cdrProbeReservation{ep: b.episode.Load(), gen: b.halfOpenGen.Load()}
 	}
 	b.totalTrips.Add(1)
 	return false, cdrProbeReservation{}
@@ -416,22 +436,23 @@ func (b *cdrCircuitBreaker) Release(r cdrProbeReservation) {
 // outcomeIsCurrentLocked reports whether an outcome recorded against r still
 // belongs to the breaker's current episode. Caller holds mu.
 //
-//   - In half-open, only a reservation from the CURRENT budget decides the
-//     episode. A reservation from an earlier budget belongs to a probe the
-//     wedge escape already reclaimed and replaced; a closed-state reservation
-//     (gen 0) belongs to a request admitted before the breaker opened.
-//     Neither is the probe, and either one's late report used to override
-//     the probe actually running: a late failure reopened the breaker under
-//     the replacement (a fail-open window by default), a late success closed
-//     it past the probe budget.
-//   - Outside half-open, only a closed-state reservation counts. A half-open
-//     reservation's episode has already ended (an outcome or Reset retired
-//     its generation), so its report is superseded.
+//   - The reservation must have been admitted under the CURRENT episode.
+//     Every state transition starts a new one, so a report from any earlier
+//     episode is superseded: a closed-state RPC still in flight when the
+//     breaker tripped, recovered and closed again used to count its late
+//     failure toward the NEW closed episode's threshold (FailureThreshold of
+//     them reopened a just-recovered breaker — fail-open by default), and a
+//     pre-open request's late report used to decide a half-open episode it
+//     was not the probe of.
+//   - In half-open, the reservation must also come from the CURRENT probe
+//     budget. The wedge escape re-arms the budget without a state change; a
+//     reclaimed probe's late failure used to reopen the breaker under its
+//     replacement, and its late success closed it past the probe budget.
 //
-// Dropped outcomes are counted in staleOutcomes.
+// Dropped outcomes are counted in staleOutcomes and change no counter.
 func (b *cdrCircuitBreaker) outcomeIsCurrentLocked(r cdrProbeReservation) bool {
-	current := r.gen == 0
-	if b.state.Load() == cbStateHalfOpen {
+	current := r.ep == b.episode.Load()
+	if current && b.state.Load() == cbStateHalfOpen {
 		current = r.gen != 0 && r.gen == b.halfOpenGen.Load()
 	}
 	if !current {
@@ -453,7 +474,7 @@ func (b *cdrCircuitBreaker) OnSuccess(r cdrProbeReservation) {
 	b.consecFails.Store(0)
 	if b.state.Load() == cbStateHalfOpen {
 		b.leaveHalfOpenLocked()
-		b.state.Store(cbStateClosed)
+		b.setStateLocked(cbStateClosed)
 	}
 }
 
@@ -497,7 +518,7 @@ func (b *cdrCircuitBreaker) openLocked() {
 	b.openedMono.Store(b.monoNow())
 	b.openedAt.Store(b.now().UnixNano())
 	b.totalOpens.Add(1)
-	b.state.Store(cbStateOpen)
+	b.setStateLocked(cbStateOpen)
 }
 
 // Reset forces the breaker back to closed (admin override).
@@ -507,7 +528,7 @@ func (b *cdrCircuitBreaker) Reset() {
 	if b.state.Load() == cbStateHalfOpen {
 		b.leaveHalfOpenLocked()
 	}
-	b.state.Store(cbStateClosed)
+	b.setStateLocked(cbStateClosed)
 	b.consecFails.Store(0)
 	b.halfOpenTried.Store(0)
 	b.openedAt.Store(0)

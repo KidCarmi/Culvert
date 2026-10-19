@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+// cdrReserveForTest takes a reservation in the breaker's CURRENT episode, for
+// a test that records an outcome without issuing a real RPC. An outcome only
+// counts for the episode its reservation was admitted under, so a zero-value
+// reservation would be dropped. Call it while the breaker is closed (Reserve
+// on an open breaker past ResetTimeout would arm half-open).
+func cdrReserveForTest(b *cdrCircuitBreaker) cdrProbeReservation {
+	_, r := b.Reserve()
+	return r
+}
+
 // newTestBreaker builds a breaker with tight defaults and a mock clock
 // whose `now()` returns the shared `current` value.  Tests mutate
 // `current` to simulate time passing.
@@ -32,7 +42,7 @@ func TestBreaker_StartsClosed(t *testing.T) {
 func TestBreaker_OpensAfterThreshold(t *testing.T) {
 	b, _ := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 3})
 	for i := 0; i < 3; i++ {
-		b.OnFailure(cdrProbeReservation{})
+		b.OnFailure(cdrReserveForTest(b))
 	}
 	if b.State() != cbStateOpen {
 		t.Fatalf("state = %d after 3 failures, want open (1)", b.State())
@@ -44,10 +54,10 @@ func TestBreaker_OpensAfterThreshold(t *testing.T) {
 
 func TestBreaker_SuccessResetsFailCounter(t *testing.T) {
 	b, _ := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 3})
-	b.OnFailure(cdrProbeReservation{})
-	b.OnFailure(cdrProbeReservation{})
-	b.OnSuccess(cdrProbeReservation{})
-	b.OnFailure(cdrProbeReservation{}) // 1, not 3 — breaker still closed
+	b.OnFailure(cdrReserveForTest(b))
+	b.OnFailure(cdrReserveForTest(b))
+	b.OnSuccess(cdrReserveForTest(b))
+	b.OnFailure(cdrReserveForTest(b)) // 1, not 3 — breaker still closed
 	if b.State() != cbStateClosed {
 		t.Fatalf("state = %d, want closed — OnSuccess should have reset counter", b.State())
 	}
@@ -55,8 +65,8 @@ func TestBreaker_SuccessResetsFailCounter(t *testing.T) {
 
 func TestBreaker_OpenToHalfOpenAfterTimeout(t *testing.T) {
 	b, now := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 2, ResetTimeout: 10 * time.Second})
-	b.OnFailure(cdrProbeReservation{})
-	b.OnFailure(cdrProbeReservation{})
+	b.OnFailure(cdrReserveForTest(b))
+	b.OnFailure(cdrReserveForTest(b))
 	if b.State() != cbStateOpen {
 		t.Fatal("not opened")
 	}
@@ -77,7 +87,7 @@ func TestBreaker_OpenToHalfOpenAfterTimeout(t *testing.T) {
 
 func TestBreaker_HalfOpenProbeBudget(t *testing.T) {
 	b, now := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 10 * time.Second, HalfOpenProbes: 1})
-	b.OnFailure(cdrProbeReservation{})
+	b.OnFailure(cdrReserveForTest(b))
 	*now = now.Add(11 * time.Second)
 	if !b.Allow() {
 		t.Fatal("first probe should pass")
@@ -89,7 +99,7 @@ func TestBreaker_HalfOpenProbeBudget(t *testing.T) {
 
 func TestBreaker_HalfOpenSuccessClosesBreaker(t *testing.T) {
 	b, now := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 10 * time.Second})
-	b.OnFailure(cdrProbeReservation{})
+	b.OnFailure(cdrReserveForTest(b))
 	*now = now.Add(11 * time.Second)
 	_, probe := b.Reserve() // transition to half-open
 	b.OnSuccess(probe)
@@ -100,7 +110,7 @@ func TestBreaker_HalfOpenSuccessClosesBreaker(t *testing.T) {
 
 func TestBreaker_HalfOpenFailureReopens(t *testing.T) {
 	b, now := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 10 * time.Second})
-	b.OnFailure(cdrProbeReservation{})
+	b.OnFailure(cdrReserveForTest(b))
 	*now = now.Add(11 * time.Second)
 	_, probe := b.Reserve() // → half-open
 	b.OnFailure(probe)
@@ -116,8 +126,8 @@ func TestBreaker_HalfOpenFailureReopens(t *testing.T) {
 
 func TestBreaker_ResetForcesClosed(t *testing.T) {
 	b, _ := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 2})
-	b.OnFailure(cdrProbeReservation{})
-	b.OnFailure(cdrProbeReservation{})
+	b.OnFailure(cdrReserveForTest(b))
+	b.OnFailure(cdrReserveForTest(b))
 	b.Reset()
 	if b.State() != cbStateClosed {
 		t.Fatalf("Reset didn't move to closed: %d", b.State())
@@ -129,10 +139,10 @@ func TestBreaker_ResetForcesClosed(t *testing.T) {
 
 func TestBreaker_StatsCapturesActivity(t *testing.T) {
 	b, now := newTestBreaker(t, cdrBreakerConfig{FailureThreshold: 2, ResetTimeout: 10 * time.Second})
-	b.OnFailure(cdrProbeReservation{})
-	b.OnFailure(cdrProbeReservation{}) // opens
-	_ = b.Allow()                      // trip
-	_ = b.Allow()                      // trip
+	b.OnFailure(cdrReserveForTest(b))
+	b.OnFailure(cdrReserveForTest(b)) // opens
+	_ = b.Allow()                     // trip
+	_ = b.Allow()                     // trip
 	stats := b.Stats()
 	if stats.State != "open" {
 		t.Fatalf("state = %q", stats.State)

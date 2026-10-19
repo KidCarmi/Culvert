@@ -76,7 +76,7 @@ func TestPool_PickSkipsOpenBreaker(t *testing.T) {
 	withTempPool(t, a, b)
 	// Open a's breaker.
 	a.Breaker = newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 5 * 60_000_000_000})
-	a.Breaker.OnFailure(cdrProbeReservation{})
+	a.Breaker.OnFailure(cdrReserveForTest(a.Breaker))
 
 	for i := 0; i < 5; i++ {
 		pc := cdrPool.Pick()
@@ -94,8 +94,8 @@ func TestPool_PickReturnsNilWhenAllOpen(t *testing.T) {
 	withTempPool(t, a, b)
 	a.Breaker = newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 5 * 60_000_000_000})
 	b.Breaker = newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 5 * 60_000_000_000})
-	a.Breaker.OnFailure(cdrProbeReservation{})
-	b.Breaker.OnFailure(cdrProbeReservation{})
+	a.Breaker.OnFailure(cdrReserveForTest(a.Breaker))
+	b.Breaker.OnFailure(cdrReserveForTest(b.Breaker))
 
 	if pc := cdrPool.Pick(); pc != nil {
 		t.Fatalf("all-open pool returned %+v", pc)
@@ -120,7 +120,7 @@ func TestPool_ReplaceCarriesBreakerState(t *testing.T) {
 	defer stopA()
 	// Seed the original breaker with failures so it's in open state.
 	a.Breaker = newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 5 * 60_000_000_000})
-	a.Breaker.OnFailure(cdrProbeReservation{})
+	a.Breaker.OnFailure(cdrReserveForTest(a.Breaker))
 	withTempPool(t, a)
 
 	// Replace with a new pooledClient at same name — simulating a hot
@@ -149,8 +149,8 @@ func TestCDRMarkOutcome_OnFailureTripsBreaker(t *testing.T) {
 	pc.Breaker = newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 2})
 	withTempPool(t, pc)
 
-	cdrMarkOutcome("flaky", cdrProbeReservation{}, true)
-	cdrMarkOutcome("flaky", cdrProbeReservation{}, true)
+	cdrMarkOutcome("flaky", cdrReserveForTest(pc.Breaker), true)
+	cdrMarkOutcome("flaky", cdrReserveForTest(pc.Breaker), true)
 	if pc.Breaker.State() != cbStateOpen {
 		t.Fatalf("breaker did not open after 2 failures; state=%d", pc.Breaker.State())
 	}
@@ -162,10 +162,10 @@ func TestCDRMarkOutcome_OnSuccessResetsFailureCount(t *testing.T) {
 	pc.Breaker = newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 3})
 	withTempPool(t, pc)
 
-	cdrMarkOutcome("ok", cdrProbeReservation{}, true)
-	cdrMarkOutcome("ok", cdrProbeReservation{}, true)
-	cdrMarkOutcome("ok", cdrProbeReservation{}, false) // reset
-	cdrMarkOutcome("ok", cdrProbeReservation{}, true)  // only 1 fail since reset
+	cdrMarkOutcome("ok", cdrReserveForTest(pc.Breaker), true)
+	cdrMarkOutcome("ok", cdrReserveForTest(pc.Breaker), true)
+	cdrMarkOutcome("ok", cdrReserveForTest(pc.Breaker), false) // reset
+	cdrMarkOutcome("ok", cdrReserveForTest(pc.Breaker), true)  // only 1 fail since reset
 	if pc.Breaker.State() != cbStateClosed {
 		t.Fatalf("breaker should still be closed; state=%d", pc.Breaker.State())
 	}
@@ -236,7 +236,7 @@ func TestSafeCDRSanitize_BreakerOpenReturnsSkipped(t *testing.T) {
 	defer stop()
 	// Trip the breaker before the call.
 	pc.Breaker = newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1, ResetTimeout: 5 * 60_000_000_000})
-	pc.Breaker.OnFailure(cdrProbeReservation{})
+	pc.Breaker.OnFailure(cdrReserveForTest(pc.Breaker))
 	withTempPool(t, pc)
 	cdrClientMu.Lock()
 	cdrActiveCfg = CDRConfig{Enabled: true}

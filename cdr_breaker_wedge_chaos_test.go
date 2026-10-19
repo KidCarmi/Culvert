@@ -47,7 +47,7 @@ func wedgeBreaker(t *testing.T, cfg cdrBreakerConfig) (breaker *cdrCircuitBreake
 func tripOpen(t *testing.T, b *cdrCircuitBreaker) {
 	t.Helper()
 	for i := 0; i < b.cfg.FailureThreshold; i++ {
-		b.OnFailure(cdrProbeReservation{})
+		b.OnFailure(cdrReserveForTest(b))
 	}
 	if b.State() != cbStateOpen {
 		t.Fatalf("breaker state = %s after %d failures, want open",
@@ -236,7 +236,7 @@ func TestCDRBreaker_BudgetSurvivesConcurrentDenials(t *testing.T) {
 			return now
 		})
 		for i := 0; i < b.cfg.FailureThreshold; i++ {
-			b.OnFailure(cdrProbeReservation{})
+			b.OnFailure(cdrReserveForTest(b))
 		}
 		clockMu.Lock()
 		now = now.Add(b.cfg.ResetTimeout + time.Second)
@@ -322,7 +322,7 @@ func TestCDRHotPath_LivenessGateLeavesProbeForTheRealCall(t *testing.T) {
 	b := pc.Breaker
 	now := time.Now()
 	b.setNowFn(func() time.Time { return now })
-	b.OnSuccess(cdrProbeReservation{}) // no-op on a closed breaker; Pick() reserves nothing
+	b.OnSuccess(cdrReserveForTest(b)) // closed: resets nothing; Pick() reserves nothing
 
 	tripOpen(t, b)
 	now = now.Add(b.cfg.ResetTimeout + time.Second)

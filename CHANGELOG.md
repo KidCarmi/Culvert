@@ -202,7 +202,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `staleOutcomes` in the breaker stats. Its late failure previously reopened
   the breaker under the replacement probe (a fail-open window), and its late
   success closed it past the probe budget. `openedAt` in the stats stays wall
-  time for display.
+  time for display. The same rule covers closed-state reservations: every
+  reservation records the state episode it was admitted under, the episode
+  advances on every transition (closed→open, open→half-open, half-open→closed
+  or open, `Reset`), and an outcome counts only for its own episode. Without
+  that, closed-state RPCs still in flight when the breaker tripped and then
+  recovered fed their late failures into the new closed episode's threshold,
+  and `FailureThreshold` of them reopened a just-recovered breaker.
 
   `cdr.timeout_sec` is bounded below (30s) but not above, and its conversions
   wrapped instead of saturating. At `9223372036` the deadline fits but

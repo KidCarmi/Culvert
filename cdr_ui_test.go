@@ -235,8 +235,8 @@ func TestApiCDRInstances_ExposesBreakerState(t *testing.T) {
 	_, _ = cdrInstances.Add(CDREnrolledInstance{Name: "unpooled", Endpoint: "sluice-2:8443"})
 
 	breaker := newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 2})
-	breaker.OnFailure(cdrProbeReservation{})
-	breaker.OnFailure(cdrProbeReservation{})
+	breaker.OnFailure(cdrReserveForTest(breaker))
+	breaker.OnFailure(cdrReserveForTest(breaker))
 	cdrPool.replace([]*cdrPooledClient{{Name: "tripped", Breaker: breaker}})
 
 	w := httptest.NewRecorder()

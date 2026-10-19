@@ -41,7 +41,7 @@ func (c *splitClock) stepWall(d time.Duration) { c.wall = c.wall.Add(d) }
 func tripOpenGen0(t *testing.T, b *cdrCircuitBreaker) {
 	t.Helper()
 	for i := 0; i < b.cfg.FailureThreshold; i++ {
-		b.OnFailure(cdrProbeReservation{})
+		b.OnFailure(cdrReserveForTest(b))
 	}
 	if b.State() != cbStateOpen {
 		t.Fatalf("setup: state %s after %d failures, want open", breakerStateName(b.State()), b.cfg.FailureThreshold)
@@ -216,4 +216,98 @@ func TestCDRMarkOutcome_CarriesTheReservation(t *testing.T) {
 	if b.State() != cbStateClosed {
 		t.Fatalf("cdrMarkOutcome of the current probe's success left the breaker %s, want closed", breakerStateName(b.State()))
 	}
+}
+
+// TestCDRBreaker_OldClosedEpisodeFailuresCannotReopenRecoveredBreaker is the
+// closed-state half of the same class (PR #1611, Codex P1 on aa87468). Every
+// closed reservation used to look alike (gen 0), so a burst of closed-state
+// RPCs still in flight when the breaker tripped, recovered and closed again
+// counted its late failures toward the NEW closed episode's threshold:
+// FailureThreshold of them reopened a breaker whose recovery probe had just
+// succeeded, and documents skipped CDR again (fail-open by default).
+func TestCDRBreaker_OldClosedEpisodeFailuresCannotReopenRecoveredBreaker(t *testing.T) {
+	b, clk := newSplitClockBreaker(t, cdrBreakerConfig{})
+	threshold := b.cfg.FailureThreshold
+
+	// 1. A burst of closed-state RPCs is admitted and stays in flight.
+	inFlight := make([]cdrProbeReservation, threshold)
+	for i := range inFlight {
+		ok, r := b.Reserve()
+		if !ok {
+			t.Fatalf("setup: closed Reserve %d denied", i)
+		}
+		inFlight[i] = r
+	}
+	// 2. Other requests trip the breaker.
+	tripOpenGen0(t, b)
+	// 3. The recovery probe succeeds and the breaker closes.
+	clk.elapse(b.cfg.ResetTimeout + time.Second)
+	ok, probe := b.Reserve()
+	if !ok {
+		t.Fatal("setup: recovery probe denied")
+	}
+	b.OnSuccess(probe)
+	if b.State() != cbStateClosed {
+		t.Fatalf("setup: recovery left the breaker %s, want closed", breakerStateName(b.State()))
+	}
+	staleBefore := b.Stats().StaleOutcomes
+
+	// 4. The old closed episode's RPCs now fail, threshold-many of them.
+	for _, r := range inFlight {
+		b.OnFailure(r)
+	}
+
+	// 5. The recovered breaker must stay closed, with no failure counted.
+	if b.State() != cbStateClosed {
+		t.Fatalf("REGRESSION: %d late failures from the pre-trip closed episode reopened a breaker "+
+			"whose recovery probe had succeeded (state %s) — documents skip CDR again",
+			threshold, breakerStateName(b.State()))
+	}
+	if n := b.consecFails.Load(); n != 0 {
+		t.Fatalf("old-episode failures counted toward the new episode's threshold (consecFails %d, want 0)", n)
+	}
+	if n := b.Stats().StaleOutcomes - staleBefore; n != int64(threshold) {
+		t.Fatalf("StaleOutcomes rose by %d, want %d (one per dropped old-episode failure)", n, threshold)
+	}
+
+	// The new episode's own failures still trip it.
+	for i := 0; i < threshold; i++ {
+		b.OnFailure(cdrReserveForTest(b))
+	}
+	if b.State() != cbStateOpen {
+		t.Fatalf("current-episode failures no longer trip the breaker (state %s)", breakerStateName(b.State()))
+	}
+}
+
+// TestCDRBreaker_EveryTransitionStartsANewEpisode pins the structural rule the
+// outcome check relies on: each state transition advances the episode.
+func TestCDRBreaker_EveryTransitionStartsANewEpisode(t *testing.T) {
+	b, clk := newSplitClockBreaker(t, cdrBreakerConfig{FailureThreshold: 1})
+	seen := map[int64]string{}
+	note := func(label string) {
+		t.Helper()
+		ep := b.episode.Load()
+		if ep == 0 {
+			t.Fatalf("%s: episode 0", label)
+		}
+		if prev, dup := seen[ep]; dup {
+			t.Fatalf("%s: episode %d reused from %s — a transition did not advance it", label, ep, prev)
+		}
+		seen[ep] = label
+	}
+	note("closed (new)")
+	b.OnFailure(cdrReserveForTest(b))
+	note("closed->open")
+	clk.elapse(b.cfg.ResetTimeout + time.Second)
+	_, p := b.Reserve()
+	note("open->half-open")
+	b.OnFailure(p)
+	note("half-open->open")
+	clk.elapse(b.cfg.ResetTimeout + time.Second)
+	_, p = b.Reserve()
+	note("open->half-open again")
+	b.OnSuccess(p)
+	note("half-open->closed")
+	b.Reset()
+	note("Reset")
 }
