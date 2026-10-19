@@ -20,6 +20,7 @@ package catdb
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -395,10 +396,32 @@ func (c *CommunityDB) BulkWrite(entries map[string]string) error {
 // only; nil removes it.
 func (c *CommunityDB) SetBulkWriteFaultForTest(fault func(written int) error) { c.writeFault = fault }
 
+// ForceDegradedForTest latches the store degraded exactly as a contained memory
+// fault would, without needing a real SIGBUS. It lets a test drive the
+// feedsync/F-DISK-RECOVERY-1 watchdog path where BulkWrite blocks while the store
+// latches degraded on a badger-internal goroutine. It touches only the latch
+// atomics (via noteMemFault), never badger.
+func (c *CommunityDB) ForceDegradedForTest() { c.noteMemFault() }
+
 // BeginImport durably withdraws the completion record before an import
 // writes any data, so a record can never describe an import that was
 // interrupted: from here until CompleteImport the store is "not certified".
+//
+// F-DISK-RECOVERY-1: it ALSO lays down a durable import-pending intent marker
+// (a sibling file, via storeguard) BEFORE the completion record is touched. The
+// marker is written while the disk still has space — the risky bulk write that
+// can fill it has not started — so recovery never depends on a write to a full
+// filesystem after the failure. If the intent cannot be made durable the import
+// is REFUSED (fail closed): a mid-write interruption would otherwise leave a
+// torn store with no marker to recover it on the next boot. The marker is a
+// storeguard filesystem call, not badger, so it is outside the access/contain
+// guard (the same shape as recordFault) and the guard-wall is unaffected.
 func (c *CommunityDB) BeginImport() error {
+	if c.dir != "" {
+		if err := storeguard.MarkImportPending(c.dir); err != nil {
+			return fmt.Errorf("catdb: refusing to begin import, the import intent could not be made durable: %w", err)
+		}
+	}
 	return c.access(func() error {
 		if err := c.db.Update(func(txn *badger.Txn) error { return txn.Delete(syncRecordKey) }); err != nil {
 			return err
@@ -421,7 +444,7 @@ func (c *CommunityDB) CompleteImport(rec SyncRecord) error {
 	if err != nil {
 		return err
 	}
-	return c.access(func() error {
+	if err := c.access(func() error {
 		if err := c.db.Sync(); err != nil { // the data first
 			return err
 		}
@@ -429,7 +452,21 @@ func (c *CommunityDB) CompleteImport(rec SyncRecord) error {
 			return err
 		}
 		return c.db.Sync()
-	})
+	}); err != nil {
+		return err
+	}
+	// F-DISK-RECOVERY-1: the import is now certified durable, so clear the
+	// import-pending intent — otherwise the next Open would quarantine a
+	// complete, healthy store. Clearing is fsynced; a clear failure is returned
+	// so the caller retries (and re-runs the import), because a stale marker
+	// would cost an unnecessary rebuild on the next boot. The data is safe
+	// either way — this only governs whether the store is kept or rebuilt.
+	if c.dir != "" {
+		if err := storeguard.ClearImportPending(c.dir); err != nil {
+			return fmt.Errorf("catdb: import certified durable but the import-pending marker could not be cleared: %w", err)
+		}
+	}
+	return nil
 }
 
 // ImportRecord returns the completion record when it is present and valid,

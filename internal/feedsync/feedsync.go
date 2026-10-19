@@ -219,6 +219,27 @@ const (
 	syncRetryMax = 2 * time.Hour
 )
 
+// F-DISK-RECOVERY-1: a BulkWrite onto a full disk can fault on a badger-internal
+// goroutine (latching the store degraded) while the outer call never returns, or
+// block inside badger retrying a write that will never complete. Either way the
+// sync must be surfaced as a failure WITHOUT waiting for BulkWrite to return.
+// writeBulkWatched polls the store's degraded latch (the fast path for the
+// faulting case — a contained fault latches within ~1s) and backstops it with a
+// stall deadline. They are vars, not consts, so a test can shrink them.
+var (
+	bulkWriteDegradedPoll = 500 * time.Millisecond
+	bulkWriteStallTimeout = 90 * time.Second
+)
+
+// bulkWriteOutcome is why writeBulkWatched stopped waiting on a BulkWrite.
+type bulkWriteOutcome int
+
+const (
+	bulkWriteReturned         bulkWriteOutcome = iota // BulkWrite returned (err is its result)
+	bulkWriteDegradedMidWrite                         // the store latched degraded; BulkWrite abandoned
+	bulkWriteStalled                                  // neither returned nor degraded within the deadline
+)
+
 // Health is a consistent snapshot of the UT1 syncer's state for the metrics
 // and diagnostics surfaces.
 type Health struct {
@@ -445,9 +466,24 @@ func (fs *Syncer) syncRound() bool {
 		obs.Printf("FeedSync: could not begin the import: %v", err)
 		return false
 	}
-	if err := fs.db.BulkWrite(entries); err != nil {
+	switch outcome, werr := fs.writeBulkWatched(entries); outcome {
+	case bulkWriteReturned:
+		if werr != nil {
+			fs.noteFailure(failWrite)
+			obs.Printf("FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): %v", werr)
+			return false
+		}
+	case bulkWriteDegradedMidWrite:
+		// The store latched a contained memory fault mid-write; the import is a
+		// failure even though BulkWrite has not returned (F-DISK-RECOVERY-1). The
+		// import-pending marker from BeginImport quarantines+rebuilds on the next
+		// boot; this round is surfaced truthfully now.
 		fs.noteFailure(failWrite)
-		obs.Printf("FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): %v", err)
+		obs.Printf("FeedSync: bulk write did not complete — the community category store latched degraded after a contained memory fault mid-write (import NOT complete; the store is rebuilt on the next start)")
+		return false
+	case bulkWriteStalled:
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: bulk write stalled past %s without returning (import NOT complete; the store is rebuilt on the next start)", bulkWriteStallTimeout)
 		return false
 	}
 	rec := catdb.SyncRecord{FeedURL: fs.feedURL, Entries: int64(len(entries)), CompletedAt: time.Now().UTC()}
@@ -473,6 +509,43 @@ func (fs *Syncer) storeDegraded() bool {
 	}
 	_, _, degraded := fs.db.LookupFaults()
 	return degraded
+}
+
+// writeBulkWatched runs BulkWrite in a goroutine and returns as soon as EITHER
+// it returns, OR the store latches degraded (a contained memory fault on a
+// badger-internal goroutine while the outer call blocks), OR a stall deadline
+// elapses — so a sync that cannot complete is surfaced as a failure even when
+// BulkWrite never returns (F-DISK-RECOVERY-1 req 4).
+//
+// A BulkWrite still running when this returns degraded/stalled is ABANDONED. The
+// store has latched degraded (access refuses every further write), and it is
+// quarantined+rebuilt on the next boot via the import-pending marker, so the
+// abandoned goroutine's mid-write state is thrown away. badger's WriteBatch.Flush
+// takes no context, so there is no clean cancellation; abandoning is the only way
+// to report a write that never returns, and a stalled import holding a goroutine
+// and a badger write transaction indefinitely is itself a resource the appliance
+// should not carry. The channel is buffered so the goroutine never blocks on send
+// after this returns.
+func (fs *Syncer) writeBulkWatched(entries map[string]string) (bulkWriteOutcome, error) {
+	done := make(chan error, 1)
+	go func() { done <- fs.db.BulkWrite(entries) }()
+
+	poll := time.NewTicker(bulkWriteDegradedPoll)
+	defer poll.Stop()
+	stall := time.NewTimer(bulkWriteStallTimeout)
+	defer stall.Stop()
+	for {
+		select {
+		case err := <-done:
+			return bulkWriteReturned, err
+		case <-poll.C:
+			if fs.storeDegraded() {
+				return bulkWriteDegradedMidWrite, nil
+			}
+		case <-stall.C:
+			return bulkWriteStalled, nil
+		}
+	}
 }
 
 // noteFailure records one failed round: the cumulative counter the metrics
