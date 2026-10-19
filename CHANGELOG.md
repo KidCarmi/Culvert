@@ -1199,11 +1199,8 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   when no `-ui-users-file` is configured, so admin account deletes, role
   changes and password rotations revert on restart; when the configured file
   failed to load at startup or is not a usable regular-file target (a
-  read-only check); when its directory refused the write test run once at
-  roster load (`fileutil.ProbeAtomicWrite`: AtomicWrite's temp-create and
-  rename on scratch names, never touching the roster), since a readable roster
-  on a read-only mount or a mode-0555 directory passes both stats yet refuses
-  the first mutation; and when admin-roster
+  read-only check); when no write to the roster file has landed since
+  startup; and when admin-roster
   changes were refused or login-time roster writes failed since process
   start. Counts, the remedy and the degraded login-write state are shown to
   admins only. Viewers and operators get a fixed message for "not durable" and
@@ -1211,6 +1208,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
   `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
   Admin Users panel hint and are deliberately absent from `/api/stats`.
+- `ui_users.json` is now **rewritten in place once at every boot**, after it
+  loads: the exact bytes read, the file's own mode (owner and group where the
+  process may set them), through AtomicWrite's temp-file-and-rename
+  (`fileutil.RewriteInPlace`). Content is unchanged, but the file gets a new
+  inode and mtime at each start. This write is the `admin_roster_durability`
+  row's evidence (it is `ok` only if the rewrite or a later save landed),
+  because nothing short of it is exact: a readable roster on a read-only mount
+  passes a stat, and one owned by another user in a sticky (`1777`) or
+  ACL-restricted directory passes a create-and-rename test on scratch files,
+  yet the first admin change's rename over it is refused. A refused rewrite
+  never stops boot (the roster is used read-only, one log line names the
+  cause) and is not an admin mutation: no audit entry, configuration version,
+  roster counter, storage-health event or alert. A symlinked roster path is
+  left alone and reported. A configured roster file that does not exist yet
+  reads `warn` until the first roster save creates it.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

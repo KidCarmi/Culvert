@@ -101,12 +101,47 @@ func noteWriteFailure(path string, err error) error {
 // Every failure branch additionally notifies the write-failure observer
 // (CHAOS-45) so error-discarding callers cannot fail silently.
 func AtomicWrite(path string, data []byte, perm os.FileMode) error {
+	if err := atomicWrite(path, data, perm, nil); err != nil {
+		return noteWriteFailure(path, err)
+	}
+	noteWriteSuccess(path)
+	return nil
+}
+
+// RewriteInPlace replaces path with data through exactly AtomicWrite's
+// sequence (unique temp beside path, write, chmod, fsync, rename over path,
+// parent-directory fsync, with the same errors and the same
+// ErrReplacedNotSynced contract), taking the permission bits from orig, the
+// FileInfo of the file being replaced, and on Unix best-effort preserving its
+// owner and group (chown of the temp before the rename; refused silently when
+// the process may not give a file away, as an unprivileged one may not).
+//
+// It exists for a caller that rewrites a file with the bytes it just read, to
+// obtain exact evidence that a later AtomicWrite to the same target can land:
+// the rename over the real target is the step a sticky or ACL-restricted
+// directory refuses to a non-owner, which no scratch-file test reproduces.
+//
+// Unlike AtomicWrite it does NOT notify the write observers. Such a rewrite
+// persists no new state, so reporting it to the storage-health plane would be
+// wrong in both directions: a failure would count and log as lost persisted
+// state (and consume the storage_write_failed alert gate), and a success would
+// be taken as recovery evidence for an unrelated failing store.
+func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
+	return atomicWrite(path, data, orig.Mode().Perm(), func(f *os.File) {
+		preserveOwner(f, orig)
+	})
+}
+
+// atomicWrite is AtomicWrite's body without the observer notifications.
+// beforeRename, when non-nil, runs on the fully written, fsynced temp file
+// just before it is renamed over path.
+func atomicWrite(path string, data []byte, perm os.FileMode, beforeRename func(*os.File)) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 
 	f, err := os.CreateTemp(dir, base+".tmp.*")
 	if err != nil {
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: create temp: %w", path, err))
+		return fmt.Errorf("atomic write %s: create temp: %w", path, err)
 	}
 	tmp := f.Name()
 	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
@@ -114,32 +149,34 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		cleanup()
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: write: %w", path, err))
+		return fmt.Errorf("atomic write %s: write: %w", path, err)
 	}
 	if err := f.Chmod(perm); err != nil {
 		_ = f.Close()
 		cleanup()
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: chmod: %w", path, err))
+		return fmt.Errorf("atomic write %s: chmod: %w", path, err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		cleanup()
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: fsync: %w", path, err))
+		return fmt.Errorf("atomic write %s: fsync: %w", path, err)
+	}
+	if beforeRename != nil {
+		beforeRename(f)
 	}
 	if err := f.Close(); err != nil {
 		cleanup()
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: close: %w", path, err))
+		return fmt.Errorf("atomic write %s: close: %w", path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		cleanup()
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: rename: %w", path, err))
+		return fmt.Errorf("atomic write %s: rename: %w", path, err)
 	}
 
 	d, err := os.Open(dir)
 	if err != nil {
 		// Best-effort: opening a directory for sync is not portable. The data
 		// is already renamed into place, so this is a successful durable write.
-		noteWriteSuccess(path)
 		return nil
 	}
 	syncErr := d.Sync()
@@ -151,67 +188,10 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 		// Post-rename failure: the target already carries the new content —
 		// mark it so compensating-rollback callers can tell (see
 		// ErrReplacedNotSynced).
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", path, syncErr, ErrReplacedNotSynced))
+		return fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", path, syncErr, ErrReplacedNotSynced)
 	}
 	if closeErr != nil && syncErr == nil {
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w: %w", path, closeErr, ErrReplacedNotSynced))
-	}
-	noteWriteSuccess(path)
-	return nil
-}
-
-// ProbeAtomicWrite reports whether AtomicWrite(path, ...) can land in path's
-// directory right now. It performs every directory operation AtomicWrite
-// depends on — create a unique temp file beside path, write, chmod, fsync,
-// close, and rename it OVER an existing entry — against scratch names of its
-// own, then removes them. A mode check would not do: a read-only mount, an
-// ACL, an SELinux label or a full volume all refuse the write while the mode
-// bits say it is allowed.
-//
-// It never opens, replaces or removes path itself, so it has no effect on the
-// live file, and it does not notify the write observers: a probe is evidence
-// for a health report, not a durable write. A crash mid-probe can leave a
-// scratch file named after path (the same residue an interrupted AtomicWrite
-// leaves). The returned error names the failing stage.
-func ProbeAtomicWrite(path string) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	// The rename target exists beforehand, exactly as the live file does when
-	// AtomicWrite replaces it.
-	target, err := os.CreateTemp(dir, base+".probe.*")
-	if err != nil {
-		return fmt.Errorf("probe atomic write %s: create temp: %w", path, err)
-	}
-	targetName := target.Name()
-	defer func() { _ = os.Remove(targetName) }() // #nosec G104 -- best-effort scratch cleanup
-	if err := target.Close(); err != nil {
-		return fmt.Errorf("probe atomic write %s: close: %w", path, err)
-	}
-
-	f, err := os.CreateTemp(dir, base+".probe.*")
-	if err != nil {
-		return fmt.Errorf("probe atomic write %s: create temp: %w", path, err)
-	}
-	tmp := f.Name()
-	defer func() { _ = os.Remove(tmp) }() // #nosec G104 -- best-effort; gone after a successful rename
-	if _, err := f.WriteString("probe\n"); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("probe atomic write %s: write: %w", path, err)
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("probe atomic write %s: chmod: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("probe atomic write %s: fsync: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("probe atomic write %s: close: %w", path, err)
-	}
-	if err := os.Rename(tmp, targetName); err != nil {
-		return fmt.Errorf("probe atomic write %s: rename: %w", path, err)
+		return fmt.Errorf("atomic write %s: parent dir close: %w: %w", path, closeErr, ErrReplacedNotSynced)
 	}
 	return nil
 }

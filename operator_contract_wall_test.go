@@ -588,7 +588,7 @@ func TestWall_OperatorContractRenderer_NegativeControls(t *testing.T) {
 // a restart) and non-durable mutations are admin-only under the PR #1545
 // policy table.
 var (
-	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser", "hasLocalAdministrator", "rosterPersistTarget", "rosterWriteProbe"}
+	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser", "hasLocalAdministrator", "rosterPersistTarget", "rosterWriteEvidence"}
 	rosterCounterVars     = []string{"rosterPersistRefused", "rosterPersistBestEffort", "rosterNotDurable"}
 )
 

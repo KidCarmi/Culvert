@@ -2,8 +2,11 @@ package fileutil
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -53,30 +56,30 @@ func TestAtomicWrite_BadDirErrors(t *testing.T) {
 	}
 }
 
-// TestProbeAtomicWrite_LeavesTargetAndDirectoryUntouched pins that the probe
-// has no effect on the live file: content, mode and mtime are unchanged, an
-// absent target is not created, and no scratch file is left behind.
-func TestProbeAtomicWrite_LeavesTargetAndDirectoryUntouched(t *testing.T) {
+// TestRewriteInPlace_SameBytesSameModeNewInode pins the boot-rewrite primitive:
+// the content and permission bits are unchanged (a non-0600 mode proves the
+// mode comes from the original, not AtomicWrite's usual caller default), the
+// rename really happened (new inode), and no temp file is left behind.
+func TestRewriteInPlace_SameBytesSameModeNewInode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ui_users.json")
-	if err := ProbeAtomicWrite(path); err != nil {
-		t.Fatalf("probe of a writable dir: %v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("probe created the target (stat err %v)", err)
-	}
-
-	want := []byte(`{"users":[]}`)
+	want := []byte("[{\"username\":\"a\"}]\n") // a legacy bare-array roster, byte for byte
 	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil { // #nosec G302 -- fixture mode under test
 		t.Fatal(err)
 	}
 	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ProbeAtomicWrite(path); err != nil {
-		t.Fatalf("probe beside an existing target: %v", err)
+	sumBefore := sha256.Sum256(want)
+
+	if err := RewriteInPlace(path, want, before); err != nil {
+		t.Fatalf("RewriteInPlace: %v", err)
 	}
+
 	after, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -85,48 +88,98 @@ func TestProbeAtomicWrite_LeavesTargetAndDirectoryUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, want) || after.Mode() != before.Mode() || !after.ModTime().Equal(before.ModTime()) ||
-		!os.SameFile(before, after) {
-		t.Fatalf("probe altered the target: content %q mode %v→%v mtime %v→%v", got, before.Mode(), after.Mode(),
-			before.ModTime(), after.ModTime())
+	if sha256.Sum256(got) != sumBefore {
+		t.Errorf("content changed: %q -> %q", want, got)
+	}
+	if after.Mode() != before.Mode() {
+		t.Errorf("mode changed: %v -> %v", before.Mode(), after.Mode())
+	}
+	if os.SameFile(before, after) {
+		t.Error("same inode after RewriteInPlace: the rename over the target did not happen")
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "ui_users.json" {
+	if len(entries) != 1 {
 		names := make([]string, 0, len(entries))
 		for _, e := range entries {
 			names = append(names, e.Name())
 		}
-		t.Fatalf("probe left scratch files: %q", names)
+		t.Fatalf("RewriteInPlace left files behind: %q", names)
 	}
 }
 
-// TestProbeAtomicWrite_RefusedDirectory: a missing directory always fails; a
-// mode-0555 directory fails unless the runner bypasses mode bits (root or
-// CAP_DAC_OVERRIDE), in which case that half is skipped — and when it does
-// fail, AtomicWrite fails there too, so the probe agrees with the real write.
-func TestProbeAtomicWrite_RefusedDirectory(t *testing.T) {
-	if err := ProbeAtomicWrite(filepath.Join(t.TempDir(), "missing", "f.json")); err == nil {
-		t.Error("probe in a missing directory succeeded")
+// TestRewriteInPlace_NotifiesNoObserver: a content-preserving rewrite is not a
+// store write, so neither outcome reaches the storage-health observers, while
+// AtomicWrite (the control) notifies both.
+func TestRewriteInPlace_NotifiesNoObserver(t *testing.T) {
+	var fails, oks atomic.Int64
+	SetWriteFailureObserver(func(string, error) { fails.Add(1) })
+	SetWriteSuccessObserver(func(string) { oks.Add(1) })
+	t.Cleanup(func() {
+		SetWriteFailureObserver(nil)
+		SetWriteSuccessObserver(nil)
+	})
+
+	path := filepath.Join(t.TempDir(), "f.json")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RewriteInPlace(path, []byte("x"), fi); err != nil {
+		t.Fatalf("RewriteInPlace: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing", "f.json")
+	if err := RewriteInPlace(missing, []byte("x"), fi); err == nil {
+		t.Fatal("RewriteInPlace into a missing directory succeeded")
+	}
+	if fails.Load() != 0 || oks.Load() != 0 {
+		t.Fatalf("RewriteInPlace notified observers: %d failures, %d successes", fails.Load(), oks.Load())
 	}
 
+	if err := AtomicWrite(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AtomicWrite(missing, []byte("x"), 0o600); err == nil {
+		t.Fatal("AtomicWrite into a missing directory succeeded")
+	}
+	if fails.Load() != 1 || oks.Load() != 1 {
+		t.Fatalf("control: AtomicWrite notified %d failures, %d successes; want 1 and 1", fails.Load(), oks.Load())
+	}
+}
+
+// TestRewriteInPlace_FailsLikeAtomicWrite: the same stage refuses both, with
+// the same error shape, and the target is left untouched.
+func TestRewriteInPlace_FailsLikeAtomicWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.json")
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o555); err != nil { // #nosec G302 -- deliberately read-only fixture dir
+	fi, err := os.Stat(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // #nosec G302 -- restore so TempDir cleanup can remove it
-	probeErr := ProbeAtomicWrite(path)
-	writeErr := AtomicWrite(path, []byte("y"), 0o600)
-	if (probeErr == nil) != (writeErr == nil) {
-		t.Fatalf("probe and AtomicWrite disagree: probe %v, write %v", probeErr, writeErr)
+	// Renaming a file over a non-empty directory fails for every uid,
+	// including root, at the rename stage — the stage a sticky directory
+	// refuses to a non-owner.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.MkdirAll(filepath.Join(blocker, "child"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if probeErr == nil {
-		t.Skip("runner bypasses directory mode bits (root or CAP_DAC_OVERRIDE); read-only half not reproducible")
+	rwErr := RewriteInPlace(blocker, []byte("y"), fi)
+	awErr := AtomicWrite(blocker, []byte("y"), 0o600)
+	if rwErr == nil || awErr == nil {
+		t.Fatalf("rename over a non-empty directory succeeded: rewrite %v, atomic %v", rwErr, awErr)
+	}
+	if !strings.Contains(rwErr.Error(), ": rename: ") || !strings.Contains(awErr.Error(), ": rename: ") {
+		t.Errorf("errors do not name the rename stage: rewrite %q, atomic %q", rwErr, awErr)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, []byte("x")) { // #nosec G304 -- test temp path
+		t.Errorf("unrelated target changed: %q", got)
 	}
 }

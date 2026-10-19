@@ -179,17 +179,37 @@ administrative decision was affected, and therefore what the operator must redo.
    configured (changes revert at restart; on a node with no local
    administrator it also names the missing break-glass account), when the
    configured file failed to load at startup or its path is not a usable
-   regular file (a directory, or a missing parent directory), when its
-   directory refused the write test Culvert runs once when it loads the roster
-   (a temporary file created and renamed beside it, never touching the roster
-   itself — a read-only mount or a non-writable directory fails it even though
-   the roster still reads), or when
+   regular file (a directory, or a missing parent directory), when the boot
+   rewrite described below was refused, when no write to the file has landed
+   since startup (a configured file that does not exist yet: the first admin
+   account change creates it and clears the warning), or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. The counts, the remedy and the degraded login-write
    state are shown to **admins only**: a viewer or operator sees a fixed message
    for "not durable" or "a change was refused", and nothing for a degraded
    login-time write (SEC-DIAG-ROSTER-1).
+
+   **The roster file is rewritten in place once at every boot.** After
+   `ui_users.json` loads, Culvert writes the exact bytes it read back onto the
+   same path, with the file's own permission bits (and owner and group where
+   the process may set them), through the same temp-file-and-rename every
+   roster save uses. The content does not change, but the file gets a **new
+   inode and mtime** at each start, as it does at each save. That write is the
+   row's evidence: it is `ok` only if it landed, or a later roster save did.
+   Nothing short of a real write to the real file can tell: a stat passes on a
+   read-only mount, and a test file created and renamed beside the roster
+   passes in a sticky (`1777`) or ACL-restricted directory where the roster
+   belongs to another user — only the rename over *that* file is refused. If
+   the rewrite is refused, boot continues and the roster is used read-only;
+   one `UIUsers: admin roster "<path>" loaded, but could not be rewritten in
+   place at startup` line names the cause, and the row stays `warn` (admins
+   get the fix-path-and-restart remedy) until a write lands. The rewrite is not
+   an admin change: no audit entry, configuration version, roster counter,
+   storage-health event or alert. A symlinked roster path is not rewritten
+   (a save replaces the link with a regular file); point `-ui-users-file` at
+   the real file. Like every save, the rename does not carry file-level ACLs
+   or extended attributes over to the new inode.
 2. `culvert_admin_roster_persist_failures_total` is climbing, or an operator
    reports a `500` from a user-management action.
 3. Check the process log for `UIUsers: REFUSED` lines — each names the action and

@@ -14,6 +14,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,8 +22,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-
-	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 func swapCfgForRosterDurability(t *testing.T, c *Config) {
@@ -36,24 +35,33 @@ func swapCfgForRosterDurability(t *testing.T, c *Config) {
 
 // pinRosterDurabilityBaseline makes the shared cfg's admin_roster_durability
 // row deterministic for a test that expects a default report: a usable
-// roster target (an absent file under an existing directory, the first-run
-// state) and zeroed CHAOS-70 counters, regardless of what an earlier
-// shuffled test left in the process-global cfg. Restored on cleanup.
+// roster target (an existing roster file whose boot rewrite landed) and
+// zeroed CHAOS-70 counters, regardless of what an earlier shuffled test left
+// in the process-global cfg. It deliberately does not LOAD the fixture into
+// the shared cfg (that would merge accounts); it runs the real boot rewrite
+// on it and records that outcome. Restored on cleanup.
 func pinRosterDurabilityBaseline(t *testing.T) {
 	t.Helper()
+	p := writeRosterFixture(t)
+	loaded, err := readRosterFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeErr := rewriteLoadedRoster(p, loaded)
+	if writeErr != nil {
+		t.Fatalf("boot rewrite of a fresh fixture: %v", writeErr)
+	}
 	cfg.mu.Lock()
 	prevFile, prevErr := cfg.uiUsersFile, cfg.uiUsersLoadErr
-	prevProbed, prevProbeErr := cfg.uiUsersWriteProbed, cfg.uiUsersWriteProbeErr
-	cfg.uiUsersFile = filepath.Join(t.TempDir(), "ui_users.json")
-	cfg.uiUsersLoadErr = nil
-	// A real write test against the fresh directory, as LoadUIUsersFile runs.
-	cfg.uiUsersWriteProbed, cfg.uiUsersWriteProbeErr = true, fileutil.ProbeAtomicWrite(cfg.uiUsersFile)
+	prevTried, prevWriteErr := cfg.uiUsersWriteTried, cfg.uiUsersWriteErr
+	cfg.uiUsersFile, cfg.uiUsersLoadErr = p, nil
+	cfg.uiUsersWriteTried, cfg.uiUsersWriteErr = true, writeErr
 	cfg.mu.Unlock()
 	resetRosterPersistCountersForTest()
 	t.Cleanup(func() {
 		cfg.mu.Lock()
 		cfg.uiUsersFile, cfg.uiUsersLoadErr = prevFile, prevErr
-		cfg.uiUsersWriteProbed, cfg.uiUsersWriteProbeErr = prevProbed, prevProbeErr
+		cfg.uiUsersWriteTried, cfg.uiUsersWriteErr = prevTried, prevWriteErr
 		cfg.mu.Unlock()
 		resetRosterPersistCountersForTest()
 	})
@@ -67,8 +75,14 @@ func configuredRosterCfg(t *testing.T, withFile bool) *Config {
 		t.Fatalf("SetAuth: %v", err)
 	}
 	if withFile {
-		c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
-		// The boot sequence: load (first run) records the write test.
+		p := filepath.Join(t.TempDir(), "ui_users.json")
+		c.SetUIUsersFile(p)
+		// A roster an earlier boot saved, then this boot's load, which
+		// rewrites it in place and records that outcome as the evidence.
+		if err := c.SaveUIUsersFile(); err != nil {
+			t.Fatalf("SaveUIUsersFile: %v", err)
+		}
+		c.SetUIUsersFile(p) // a fresh boot: no evidence carried over
 		if err := c.LoadUIUsersFile(); err != nil {
 			t.Fatalf("LoadUIUsersFile: %v", err)
 		}
@@ -220,16 +234,22 @@ func TestCheckAdminRosterDurability_UnusableRosterTarget(t *testing.T) {
 		// read error a mode-000 file produces, recorded as the load outcome.
 		{"unreadable-file-recorded", setupRosterRecordedReadError, true},
 		// Codex P2 on #1601: readable roster, unwritable directory. Both stats
-		// pass; only the recorded write test can tell. Skipped where the
+		// pass; only the real boot rewrite can tell. Skipped where the
 		// runner's privileges bypass the mode bits (root, CAP_DAC_OVERRIDE).
 		{"read-only-parent", setupRosterReadOnlyParent, true},
-		// Deterministic twin for privileged runners (CI may run as root): the
-		// write-test failure a read-only mount produces, recorded as the probe
-		// outcome — the same state read-only-parent reaches unprivileged.
-		{"read-only-parent-recorded", setupRosterRecordedProbeFailure, true},
-		// A configured path with no write test is not evidence of durability.
-		{"never-write-tested", setupRosterNeverProbed, true},
-		{"missing-file-first-run", setupRosterFirstRun, false},
+		// Deterministic twins for privileged runners (CI runs as root): the
+		// real LoadUIUsersFile, with the refusal injected at the rewrite's
+		// write step — EROFS creating the temp (read-only mount), and EPERM
+		// renaming over a file another user owns in a sticky directory
+		// (Codex P2 4313653877: a scratch-file probe passes there).
+		{"read-only-volume-injected", setupRosterInjected(syscall.EROFS, "create temp"), true},
+		{"sticky-dir-non-owner-injected", setupRosterInjected(syscall.EPERM, "rename"), true},
+		// A configured path with no write since it was set is not evidence.
+		{"never-written", setupRosterNeverWritten, true},
+		// Nothing to rewrite at boot, so nothing is proven until a save.
+		{"missing-file-first-run", setupRosterFirstRun, true},
+		{"missing-file-then-saved", setupRosterFirstRunThenSaved, false},
+		{"symlink", setupRosterSymlink, true},
 		{"healthy-file", setupRosterHealthyFile, false},
 	}
 	for _, tc := range cases {
@@ -315,19 +335,29 @@ func setupRosterReadOnlyParent(t *testing.T, c *Config) {
 	}
 }
 
-func setupRosterRecordedProbeFailure(t *testing.T, c *Config) {
-	p := writeRosterFixture(t)
-	c.SetUIUsersFile(p)
-	if err := c.LoadUIUsersFile(); err != nil {
-		t.Fatalf("LoadUIUsersFile: %v", err)
+// injectRosterRewriteFailure makes the boot rewrite's write step fail the way
+// AtomicWrite fails at stage with errno, leaving the file untouched, as the
+// real refusal does. Restored on cleanup.
+func injectRosterRewriteFailure(t *testing.T, errno syscall.Errno, stage string) {
+	t.Helper()
+	prev := rosterRewriteInPlace
+	rosterRewriteInPlace = func(path string, _ []byte, _ os.FileInfo) error {
+		return fmt.Errorf("atomic write %s: %s: %w", path, stage, &os.PathError{Op: stage, Path: path, Err: errno})
 	}
-	c.mu.Lock()
-	c.uiUsersWriteProbed = true
-	c.uiUsersWriteProbeErr = &os.PathError{Op: "open", Path: p + ".probe.1", Err: syscall.EROFS}
-	c.mu.Unlock()
+	t.Cleanup(func() { rosterRewriteInPlace = prev })
 }
 
-func setupRosterNeverProbed(t *testing.T, c *Config) {
+func setupRosterInjected(errno syscall.Errno, stage string) func(t *testing.T, c *Config) {
+	return func(t *testing.T, c *Config) {
+		injectRosterRewriteFailure(t, errno, stage)
+		c.SetUIUsersFile(writeRosterFixture(t))
+		if err := c.LoadUIUsersFile(); err != nil {
+			t.Fatalf("a refused boot rewrite must not fail the load: %v", err)
+		}
+	}
+}
+
+func setupRosterNeverWritten(t *testing.T, c *Config) {
 	c.SetUIUsersFile(writeRosterFixture(t))
 }
 
@@ -335,6 +365,30 @@ func setupRosterFirstRun(t *testing.T, c *Config) {
 	c.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
 	if err := c.LoadUIUsersFile(); err != nil {
 		t.Fatalf("first-run load: %v", err)
+	}
+}
+
+// setupRosterFirstRunThenSaved: the first roster save after a first-run boot
+// creates the file, and that landed write is the evidence.
+func setupRosterFirstRunThenSaved(t *testing.T, c *Config) {
+	setupRosterFirstRun(t, c)
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+}
+
+func setupRosterSymlink(t *testing.T, c *Config) {
+	target := writeRosterFixture(t)
+	link := filepath.Join(t.TempDir(), "ui_users.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	c.SetUIUsersFile(link)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("a symlinked roster must still load: %v", err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the boot rewrite replaced the symlink (err %v)", err)
 	}
 }
 

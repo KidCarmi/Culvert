@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -878,9 +879,9 @@ type rosterDurabilityFacts struct {
 	configured bool
 	persisted  bool // a roster file (-ui-users-file) is configured
 	// targetProblem is the admin-only reason a CONFIGURED roster file is
-	// unusable (failed startup load, not a regular file, missing parent, a
-	// directory that refused the startup write test, or no write test yet);
-	// "" only when a write is known to be able to land.
+	// unusable or unproven (failed startup load, not a regular file, missing
+	// parent, a refused boot rewrite, or no write since it was configured);
+	// "" only when a real write to it has landed.
 	targetProblem string
 	localAdmin    bool // a local account can sign in as admin without the IdP
 	notDurable    int64
@@ -888,45 +889,76 @@ type rosterDurabilityFacts struct {
 	degraded      int64
 }
 
+// rosterTargetFirstWritePending is the targetProblem of a configured roster
+// file that does not exist yet and has not been written since startup: there
+// was nothing to rewrite at boot, so no write has proven the path. Named so
+// adminRow can give it its own remedy (restarting does not create the file).
+const rosterTargetFirstWritePending = "the configured roster file does not exist yet and no roster write has " +
+	"landed since startup, so it is not proven that admin account changes can be saved"
+
 // rosterTargetProblem reports why a configured roster path cannot hold the
-// roster, or "" when a write to it can land. READ-ONLY: it stats the target
-// and its parent directory and reads the RECORDED write test (probed,
-// probeErr — see Config.rosterWriteProbe); it never creates, opens for
-// writing or modifies anything, so a viewer's GET causes no disk write.
-// A missing file under an existing directory is the supported first-run
-// state (the first save creates it), not a problem. The returned reason never
-// names the path.
+// roster, or "" when a write to it is known to land. READ-ONLY: it stats the
+// target and its parent directory and reads the RECORDED write evidence
+// (tried, writeErr — see Config.rosterWriteEvidence); it never creates, opens
+// for writing or modifies anything, so a viewer's GET causes no disk write.
+// The returned reason never names the path.
 //
-// Existence and file type are not evidence of writability (Codex P2, PR
-// #1601): a readable roster on a read-only bind mount, or in a mode-0555
-// directory, passes both stats, yet AtomicWrite must create a temp file and
-// rename it there, so the first mutation would be refused. "" therefore
-// requires a successful write test since the path was configured.
-func rosterTargetProblem(path string, loadErr error, probed bool, probeErr error) string {
+// Existence and file type are not evidence of writability (Codex P2s, PR
+// #1601): a readable roster on a read-only bind mount, in a mode-0555
+// directory, or owned by another user in a sticky directory passes both
+// stats, yet the first mutation's rename over it is refused. "" therefore
+// requires a real write to the real target — the boot rewrite or a later save
+// — to have landed since the path was configured.
+func rosterTargetProblem(path string, loadErr error, tried bool, writeErr error) string {
 	if path == "" {
 		return ""
 	}
 	if loadErr != nil {
 		return "the configured roster file could not be loaded at startup"
 	}
+	missing, problem := rosterTargetStat(path)
+	if problem != "" {
+		return problem
+	}
+	return rosterWriteProblem(missing, tried, writeErr)
+}
+
+// rosterTargetStat stats the roster target: whether it is absent (the
+// supported first-run state, under an existing directory), or why it is not a
+// usable regular-file path.
+func rosterTargetStat(path string) (missing bool, problem string) {
 	fi, err := os.Stat(path)
 	switch {
 	case err == nil && !fi.Mode().IsRegular():
-		return "the configured roster path is not a regular file"
+		return false, "the configured roster path is not a regular file"
 	case err == nil:
+		return false, ""
 	case !os.IsNotExist(err):
-		return "the configured roster path cannot be inspected"
-	default:
-		if di, err := os.Stat(filepath.Dir(path)); err != nil || !di.IsDir() {
-			return "the configured roster file's parent directory does not exist"
-		}
+		return false, "the configured roster path cannot be inspected"
 	}
+	if di, err := os.Stat(filepath.Dir(path)); err != nil || !di.IsDir() {
+		return true, "the configured roster file's parent directory does not exist"
+	}
+	return true, ""
+}
+
+// rosterWriteProblem renders the recorded write evidence.
+func rosterWriteProblem(missing, tried bool, writeErr error) string {
 	switch {
-	case !probed:
-		return "the configured roster file has not been write-tested since it was configured"
-	case probeErr != nil:
-		return "the configured roster file's directory refused a test write at startup (read-only or " +
-			"permission-denied volume)"
+	case !tried && missing:
+		return rosterTargetFirstWritePending
+	case !tried:
+		return "the configured roster file has not been written since it was configured"
+	case errors.Is(writeErr, errRosterIsSymlink):
+		return "the configured roster path is a symbolic link; it was not rewritten at startup because a " +
+			"save replaces the link with a regular file"
+	case errors.Is(writeErr, errRosterChangedDuringLoad):
+		return "the configured roster file changed on disk while it was loaded at startup, so it was not " +
+			"rewritten and no write to it has been proven"
+	case writeErr != nil:
+		return "the configured roster file could not be rewritten in place at startup (a read-only or " +
+			"permission-denied volume, or a directory that does not let this process replace the file, " +
+			"such as a sticky directory where another user owns it)"
 	}
 	return ""
 }
@@ -936,11 +968,11 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 		return rosterDurabilityFacts{}
 	}
 	path, loadErr := cfg.rosterPersistTarget()
-	probed, probeErr := cfg.rosterWriteProbe()
+	tried, writeErr := cfg.rosterWriteEvidence()
 	return rosterDurabilityFacts{
 		configured:    true,
 		persisted:     path != "",
-		targetProblem: rosterTargetProblem(path, loadErr, probed, probeErr),
+		targetProblem: rosterTargetProblem(path, loadErr, tried, writeErr),
 		localAdmin:    cfg.hasLocalAdministrator(),
 		notDurable:    rosterNotDurable.Load(),
 		refused:       rosterPersistRefused.Load(),
@@ -954,7 +986,7 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 // per-change line, and the culvert_admin_roster_persist_{failures,degraded}_total
 // counters — none visible to an operator working from the GUI. Report-only: it
 // reads atomics, config fields (including the recorded startup load outcome
-// and the recorded startup write test) and two read-only stats of the roster
+// and the recorded boot-rewrite/save evidence) and two read-only stats of the roster
 // target; it writes nothing and changes no roster behaviour. This is the ADMIN
 // rendering; redactContractForRole replaces it with adminRow's viewer twin
 // below admin. Counts are since process start.
@@ -969,6 +1001,12 @@ func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
 		row.Message = "initial setup is not complete; there are no admin credentials to persist yet"
 	case !f.persisted:
 		row = f.notDurableAdminRow()
+	case f.targetProblem == rosterTargetFirstWritePending:
+		row.Status = diagWarn
+		row.Message = f.targetProblem
+		row.OperatorAction = "The first admin account change creates the file and clears this warning. If that " +
+			"change is refused, fix the admin users file (-ui-users-file) path or its permissions so it names a " +
+			"writable regular file on a persistent volume, restart, and re-apply the change."
 	case f.targetProblem != "":
 		row.Status = diagWarn
 		row.Message = f.targetProblem + " — admin account deletes, role changes and password rotations " +
