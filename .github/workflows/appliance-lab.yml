@@ -929,6 +929,8 @@ jobs:
   # sha256, the reply, timing and temp free space per conversation. Variants
   # separate the explanations: no-pressure control, serial at a full temp,
   # serial headroom sweep (the appliance runs' shape), 8-way concurrency.
+  # #1528 closeout: the candidate arm is 246cb73d (OVA b2af1c96, sidecar
+  # 32c2be57); the 1.4.6 bad788e5 control is retained to prove F-P2 reproduces.
   fp2-isolated:
     name: "Lab · F-P2 isolated: exact sidecar, temp-dir exhaustion, scripted client · ${{ matrix.label }}"
     if: ${{ contains(github.event.head_commit.message, '[fp2-isolated]') }}
