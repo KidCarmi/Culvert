@@ -742,6 +742,139 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+  # ASTRA/owner round 3 on #1528: F-DISK must qualify the agent the OVA actually
+  # ships, and that identity must be proven from the OVA's own bytes — not from
+  # the image build relationship. The f-disk-1 job above qualifies the agent it
+  # extracts from the source image (culvert:ci-smoke:/app/deploy/bin/culvert-maint).
+  # This job cracks the CANONICAL OVA (artifact 12141566476, sha256 b2af1c96),
+  # extracts /var/lib/culvert-appliance/images/culvert.tar.gz baked inside it,
+  # binds that archive to the OVA's own recorded APP_IMAGE id (guest manifest.env),
+  # pulls /app/deploy/bin/culvert-maint straight out of its amd64 layers, and
+  # FAILS unless its sha256 equals the image-extracted agent f-disk-1 qualifies.
+  # A pass makes f-disk-1's qualification provably OVA-bound; a mismatch means
+  # the image and the OVA diverged and the F-DISK verdict would be against the
+  # wrong bytes. Runs on the same untagged pushes as f-disk-1.
+  f-disk-agent-identity:
+    name: "Lab · F-DISK agent identity: image agent == OVA-bundled agent"
+    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # The canonical #1528 candidate OVA (appliance-lab-ova-candidate-246cb73d,
+      # lab run 39140010708 — the operator-status deadline-fix candidate). Same
+      # pins the ova-sidecar-scan job binds its sidecar against.
+      OVA_ARTIFACT_ID: "12141566476"
+      OVA_SHA256: b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Obtain + load the source image, extract its shipped agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test/e2e/appliance/lab/obtain-image.sh "$RUNNER_TEMP/in"
+          docker load -i "$RUNNER_TEMP/in/culvert-image.tar"
+          cid="$(docker create culvert:ci-smoke)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/app/deploy/bin/culvert-maint" "$RUNNER_TEMP/agent-image"
+          chmod +x "$RUNNER_TEMP/agent-image"
+          sha="$(sha256sum "$RUNNER_TEMP/agent-image" | cut -d' ' -f1)"
+          ver="$("$RUNNER_TEMP/agent-image" --version 2>/dev/null | head -1 | tr -d '\r' || echo unavailable)"
+          gover="$(go version "$RUNNER_TEMP/agent-image" 2>/dev/null | awk '{print $2}' || echo unknown)"
+          echo "AGENT_IMAGE_SHA=$sha" | tee -a "$GITHUB_ENV"
+          echo "AGENT_IMAGE_VER=$ver" | tee -a "$GITHUB_ENV"
+          echo "AGENT_IMAGE_COMPILER=$gover" | tee -a "$GITHUB_ENV"
+      - name: libguestfs (read-only disk access)
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          if [ -f /etc/apt/apt-mirrors.txt ]; then sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt; fi
+          sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
+          W="$RUNNER_TEMP/agentid"; mkdir -p "$W/evidence"; echo "W=$W" >> "$GITHUB_ENV"
+          for _ in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends libguestfs-tools qemu-utils && break
+            sleep 15
+          done
+          sudo chmod 0644 /boot/vmlinuz-*
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+      - name: Canonical OVA → baked culvert.tar.gz (every hop re-hashed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$W"; E="$W/evidence"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OVA_ARTIFACT_ID/zip" > ova.zip
+          unzip -q ova.zip -d ova && rm -f ova.zip
+          ova="$(ls ova/*.ova)"; got="$(sha256sum "$ova" | cut -d' ' -f1)"
+          echo "$got  $(basename "$ova")" | tee "$E/ova.sha256"
+          [ "$got" = "$OVA_SHA256" ] || { echo "::error::OVA sha256 $got, expected $OVA_SHA256"; exit 1; }
+          mkdir x && tar -xf "$ova" -C x && rm -rf ova
+          (cd x && python3 -I - "$(ls *.mf)" <<'PY'
+          import hashlib, re, sys
+          bad = [m.group(1) for line in open(sys.argv[1])
+                 for m in [re.match(r'SHA256\((.+)\)= ([0-9a-f]{64})', line.strip())]
+                 if m and hashlib.sha256(open(m.group(1), 'rb').read()).hexdigest() != m.group(2)]
+          sys.exit("OVA manifest mismatch: " + ",".join(bad) if bad else 0)
+          PY
+          )
+          disk="$(ls "$W"/x/*.vmdk)"
+          sudo env LIBGUESTFS_BACKEND=direct virt-copy-out -a "$disk" /var/lib/culvert-appliance/images/culvert.tar.gz "$W/"
+          sudo env LIBGUESTFS_BACKEND=direct virt-cat -a "$disk" /var/lib/culvert-appliance/manifest.env \
+            | grep -E '^APP_IMAGE_' | tee "$E/guest-manifest-app.env"
+          sudo chown "$(id -u):$(id -g)" "$W/culvert.tar.gz"; rm -rf x
+          gunzip -c culvert.tar.gz > culvert.tar
+          echo "APP_IMAGE_INDEX_DIGEST=$(grep -E '^APP_IMAGE_INDEX_DIGEST=' "$E/guest-manifest-app.env" | cut -d= -f2)" >> "$GITHUB_ENV"
+      - name: Extract the OVA-bundled agent from culvert.tar and compare bytes
+        run: |
+          set -euo pipefail
+          E="$W/evidence"
+          # Bind the OVA's own archive to the id its guest manifest.env records
+          # (re-hashes every blob; kind `either` matches the single-arch docker
+          # image whose Id == config digest), then pull the agent from its layers.
+          test/e2e/appliance/lab/sidecar-scan.sh bind "$W/culvert.tar" "$APP_IMAGE_INDEX_DIGEST" either "$E/app-binding.json"
+          python3 -I - "$W/culvert.tar" "$E/app-binding.json" "$W/agent-ova" <<'PY'
+          import hashlib, io, json, sys, tarfile
+          tar, binding, out = sys.argv[1:4]
+          t = tarfile.open(tar); b = json.load(open(binding))
+          target = "app/deploy/bin/culvert-maint"
+          data = None
+          for d in b["layers"]:
+              raw = t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+              with tarfile.open(fileobj=io.BytesIO(raw)) as lt:
+                  names = {m.name.lstrip("./"): m for m in lt.getmembers()}
+                  if "app/deploy/bin/.wh.culvert-maint" in names:  # layer deletes it
+                      data = None
+                  m = names.get(target)
+                  if m is not None and m.isfile():
+                      data = lt.extractfile(m).read()
+          assert data is not None, "culvert-maint not found in any amd64 layer of the OVA's app image"
+          open(out, "wb").write(data)
+          print(hashlib.sha256(data).hexdigest())
+          PY
+          chmod +x "$W/agent-ova"
+          sha_ova="$(sha256sum "$W/agent-ova" | cut -d' ' -f1)"
+          ver_ova="$("$W/agent-ova" --version 2>/dev/null | head -1 | tr -d '\r' || echo unavailable)"
+          {
+            echo "### F-DISK agent identity"
+            echo "| source | sha256 | version |"
+            echo "|---|---|---|"
+            echo "| image (culvert:ci-smoke:/app/deploy/bin/culvert-maint, compiler $AGENT_IMAGE_COMPILER) | \`$AGENT_IMAGE_SHA\` | $AGENT_IMAGE_VER |"
+            echo "| OVA $OVA_SHA256 → culvert.tar.gz → app id $APP_IMAGE_INDEX_DIGEST → /app/deploy/bin/culvert-maint | \`$sha_ova\` | $ver_ova |"
+          } | tee -a "$GITHUB_STEP_SUMMARY" | tee "$E/agent-identity.md"
+          if [ "$sha_ova" = "$AGENT_IMAGE_SHA" ]; then
+            echo "MATCH: the agent f-disk-1 qualifies is byte-identical to the one bundled in the OVA." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::OVA-bundled agent sha256 $sha_ova != image-extracted agent sha256 $AGENT_IMAGE_SHA — F-DISK would qualify the wrong bytes"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-fdisk-agent-identity
+          path: ${{ env.W }}/evidence/
+          if-no-files-found: warn
+
   # The boot screen as an operator sees it on ESXi (owner report on #1528:
   # kernel text and a wrapped title left on the console). Boots a RETAINED OVA
   # with VMware SVGA and no serial port and records every distinct VGA frame
