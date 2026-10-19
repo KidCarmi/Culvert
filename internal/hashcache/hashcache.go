@@ -175,6 +175,32 @@ func (c *HashCache) Clear() {
 // evictLocked removes all expired entries.  If the map is still at capacity
 // afterward, it drops approximately 25 % of the remaining entries.
 // Must be called with c.mu held for writing.
+//
+// Cost shape (behaviour only; measurements live in
+// roadmap/SCAN-CACHE-EVICTION-COST.md, not here, so they cannot go stale in
+// a production comment):
+//
+//   - It runs on the Set path, synchronously, under the EXCLUSIVE write lock,
+//     on whichever Set arrives when the map is full. While it runs, every
+//     concurrent Get (hits included) waits, not just that one caller.
+//   - The expiry sweep is O(maxSize): proving no entry is expired means
+//     looking at all of them. The 25 % drop then makes room for maxSize/4
+//     inserts, over which one call's cost amortizes.
+//   - It gets SLOWER the more of the cache has expired, because a sweep that
+//     finds expired entries also deletes them. A full cache left idle past its
+//     TTL and then hit by one Set is therefore the worst case, not the busy
+//     steady state.
+//   - cache_size is an operator YAML knob that config validation only FLOORS
+//     (non-positive → 10 000) and never caps, so the lock hold grows with it
+//     and nothing warns the operator.
+//
+// Bounding the hold independently of maxSize means either giving up the "no
+// expired entry survives an eviction" invariant that TestSet_EvictsExpiredFirst
+// pins (an early exit cannot know what it did not look at) or sharding the map.
+// Both change observable behaviour and need their own change and review. A
+// by-value entry layout was measured once with a since-corrected harness;
+// whether to adopt it is undecided pending re-measurement (see the roadmap
+// note).
 func (c *HashCache) evictLocked() {
 	now := time.Now()
 	for k, e := range c.entries {

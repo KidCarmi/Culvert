@@ -115,6 +115,110 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (the support-bundle collector is the one recorded exception: a separate,
   admin-approved trust boundary that writes through the bundle redactor).
 
+- The **rendered audit `Actor` is now bounded** (`boundAuditActor`, applied to
+  every `AuditEntry` at the single audit write chokepoint `addAuditEntry` behind
+  `auditAdd`, `store.go`).
+  `truncateForAudit` was being applied by call sites to the audit **Object**,
+  which made each one look bounded, while `auditEvent` derives the **Actor**
+  independently and rebuilt `name + "@" + ip` from the session with no bound —
+  so a CONFIGURED account name longer than the 64-byte cap (which
+  `-user`/`auth.user` and `--reset-password` can persist, and which is
+  deliberately never refused for its length) was retained full-length in the
+  audit ring. Measured: a 300-byte name produced a 314-byte Actor. Low severity
+  (the name is configured, not attacker-chosen: a retention bound, not an
+  unauthenticated amplifier). Found by Codex review of the
+  `auth.password_change.fail` entry added in this same window, whose first
+  version claimed in its comment that the actor was "still truncated" and whose
+  gate was named `AuditActorIsBounded` while asserting only on `Object`. The
+  bound (`boundAuditIdentity`) keeps a 64-byte prefix plus the original length
+  AND a short SHA-256 digest of the full name, so two distinct oversize accounts
+  stay distinguishable in the trail. **`auditActor` itself stays the full,
+  unbounded principal**: a first version of this fix bounded it, and Codex
+  review showed that is not display-only — the MCP publication and approval
+  handlers cast it to `approval.PrincipalID`, so two distinct admins sharing the
+  bounded prefix and length compared equal and the second one's legitimate
+  four-eyes approval was refused as self-approval. Non-audit consumers (MCP
+  four-eyes and tool-trust, policy learning, CDR receipts, release dispatch,
+  support recipients) therefore keep main's behaviour, and so does the PAC
+  intent's `AuditActor`, which is bounded when its entry is rendered. A second
+  Codex round found that a bound living only in `auditEventDiffID` was bypassed
+  by every producer that builds an `AuditEntry` itself — the release
+  `DispatchService` handed the full `auditActor` straight to `auditAdd` — so the
+  bound moved to the one write chokepoint every producer reaches, the two direct
+  `audit.Add` callers were routed through it, and `TestAuditActorBoundWall`
+  fails if any non-test file in main or `internal/` reaches `audit.Add` another
+  way or `auditAdd` stops pointing at the chokepoint. Gates: `auth_change_password_reauth_audit_test.go` asserts both rendered
+  fields and that `auditActor` is unbounded, with a control requiring an
+  ordinary name to pass through verbatim; `audit_actor_principal_test.go` drives
+  the four-eyes publication flow with two colliding names (verified failing
+  against the bound-at-`auditActor` tree) plus a self-approval control. **The
+  rules: a gate must assert the property it is named for, and a length bound
+  belongs to the rendering, never to a value something compares for identity.**
+
+- The **cluster CA private key** backup completed SEC-SECRETWRITE-1. That sweep
+  was scoped to the four key writers introduced in its own review window, so
+  `backupCAFiles` (`enrollment.go`) — which predates it — still wrote
+  `cluster-ca.key.bak` and `cluster-ca.crt.bak` with `os.WriteFile` on a fully
+  predictable path, with both halves of the same defect reachable: the open
+  follows a symlink planted at the path, and `perm` applies only on *creation*,
+  so a `0666` file pre-created at `cluster-ca.key.bak` receives the key and
+  stays world-readable. The asset is larger than any of the four already fixed —
+  the cluster CA signs every Data Plane node certificate, so disclosure lets an
+  attacker mint a node cert, impersonate a DP to the Control Plane and receive
+  the full `ConfigSnapshot`, which carries `SessionHMAC` and the IdP secrets.
+  Both writes now use `fileutil.AtomicWrite` (random `O_EXCL` temp beside the
+  target, chmod + fsync, rename over it). The POSTURE is unchanged: the
+  plaintext branch is still plaintext (the recorded CA-3 trade) and the
+  encrypted branch already routed through `secret.SealToFile` → `AtomicWrite`;
+  only the primitive changed. Gates: `enrollment_ca_backup_secretwrite_test.go`
+  — 3 defect gates verified failing against the reintroduced `os.WriteFile`
+  shape, plus 4 controls verified failing against a `backupCAFiles` that writes
+  nothing, because deleting the dual-CA overlap recovery copy is the cheapest
+  way to pass every defect gate.
+
+- A **failed re-authentication on the admin plane is now audited**
+  (SEC-REAUTH-AUDIT-1). `POST /api/auth/change-password` re-verifies the
+  caller's current password, and by SEC-BASIC-1's own analysis it is the only
+  credential check in the admin API that consults no lockout — a deliberate
+  trade, since charging `loginLimiter` there would let a session holder lock
+  themselves out of the login flow. But it audited only on SUCCESS, so the one
+  unlocked password oracle was also the only silent one: a caller holding a
+  stolen or hijacked session could guess the account's password at the mutating
+  `apiLimiter`'s rate, indefinitely, with no trace in the compliance record —
+  and the password is durable persistence that outlives the session being
+  revoked (CWE-778 / OWASP A09:2021). The rejection now emits
+  `auth.password_change.fail` with a bounded actor and object, deliberately
+  NOT reusing `auth.password_change.refused` (which `refuseRosterChange` already
+  uses for the persistence refusal — an operator must be able to tell "wrong
+  password" from "the disk failed"). The lockout trade-off is unchanged; this
+  adds the missing EVIDENCE and alters no authentication decision. Gates:
+  `auth_change_password_reauth_audit_test.go` — 4 defect gates verified failing
+  against the pre-fix branch, plus 3 controls, two of them verified failing
+  against the obvious wrong fix of auditing unconditionally on entry.
+
+- Distributed rate limiting could admit a request over the cluster-wide limit
+  whenever a Control Plane broadcast landed in the middle of a decision.
+  `AllowClusterAware` samples its clock before taking the shard lock and hands
+  that instant to `FreshCount`; the gossip loop's `ApplyRemoteCounts` stamps
+  the broadcast with its own `time.Now()`. A broadcast applied between the two
+  steps therefore carried a stamp a few microseconds *ahead* of the decision's
+  clock, `FreshCount` computed a negative age, and CHAOS-61's clock-rollback
+  rule zeroed the remote half of the decision — the node decided on its local
+  count alone and admitted (observed in CI as
+  `TestDistributedAdmission_ProductionWiring` admitting the SOCKS5 leg, 6 local
+  + 2 remote against a limit of 8, with gossip every millisecond).
+  `ClusterFreshness` never had the defect because it loads the stamp and then
+  reads the clock, so diagnostics reported "fresh" while enforcement treated
+  the same instant as stale. `FreshCount` now re-reads the clock once, only on
+  a negative age and after the stamp was loaded: a stamp still in the future
+  against that read is a genuine rollback and stays stale (all 17 CHAOS-61
+  gates unchanged); one that merely postdates the caller's clock is fresh. The
+  steady-state hot path takes no extra clock read. Gates:
+  `internal/admission/cluster_ratelimit_inflight_broadcast_test.go`
+  (deterministic injected-clock gate RED on the previous code; an end-to-end
+  gate through `AllowClusterAware` that caught 2 fail-open admissions in 5000
+  on the previous code; and the rollback control).
+
 - The Control Plane → data-plane snapshot apply replaced the IP filter by
   storing a freshly built filter into the package-level `ipf` handle, which
   `proxy.go` and `socks5.go` read on every request with no synchronization
@@ -193,8 +297,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   rather than dropping the account, and the session resolver splits the compat
   branch so `""` still means admin for pre-RBAC deployments while every other
   unenrolled value is refused with a 401 and a cleared cookie. The clamp is
-  surfaced as `culvert_ui_roster_role_clamped_total` and as
-  `uiRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero.
+  surfaced as `culvert_admin_roster_role_clamped_total` and as
+  `adminRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero. The
+  earlier names `culvert_ui_roster_role_clamped_total` and
+  `uiRosterRoleClamped` (T-64) are still emitted with the same value as
+  deprecated aliases for one release window.
 - An unauthenticated client could park a gateway core for minutes with one
   request by choosing a very long destination host (CHAOS-69, register rows
   PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
@@ -276,6 +383,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   disagree, and an unusable incoming secret never counts as evidence that the
   key changed.
 
+- **The tracing-header bound is now proven over a socket, and one of its stated
+  exposures was not reachable (SEC-REQID-2).** Every SEC-REQID-1 gate drove
+  `httptest.NewRequest` + `Header.Set`, which installs a header value the wire
+  may not be able to deliver — the trap `bootstrap_host_injection_test.go`
+  already exists for, and the reason the Host-header bound carries an empirical
+  wall while these headers carried none. Measured against a real `net/http`
+  server: of 256 byte values, **224 are delivered into a header value verbatim
+  and 32 draw a 400 before the handler runs** — exactly `0x00`–`0x1F` minus
+  `TAB`, plus `0x7F` — because `textproto.ReadMIMEHeader` refuses them, and
+  `setupRequestTracing` has exactly one caller whose request always comes from
+  that parser. So `ESC`, `NUL` and `BEL` never reached a log line by any path,
+  and the claim that they did (in the code comment, this changelog and the
+  operator runbook) came from measuring the function rather than the wire; all
+  three are corrected. The archived agent note still carries it
+  (`docs/agent-context/history/observability-and-alerts.md`), and that copy is
+  hash-frozen by design — all 108 preserved blocks must reconstruct the
+  original `CLAUDE.md` byte for byte — so the correction is recorded in
+  `docs/agent-context/errata.md`, the mechanism that tree provides for a
+  verified conflict in the preserved guide, rather than by editing the
+  archive. The bound is **not** redundant for it: it is
+  load-bearing on 130 delivered byte values — `TAB`, `SPACE` and every byte
+  `0x80`–`0xFF` — and the length half is reachable in full. Seven new gates
+  drive the real `setupRequestTracing` behind a real listener and pin the
+  delivered/refused partition in both directions, so a future Go release that
+  widens what a header value may carry fails the build instead of quietly
+  widening what reaches the forensic log. No behaviour change: bound, charset,
+  counters and emitted bytes are untouched.
+
 - Client-supplied tracing headers reached the process log unbounded
   (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
   second statement in `handleRequest`, ahead of the connection limiter, the IP
@@ -287,9 +422,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
   for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
   but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
-  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
-  forensic log verbatim, and a space could inject extra `key=value` tokens into
-  the decision line's brace block. Nothing bounded the length at all: the proxy
+  `0x20` and `0x7F`. A space or a `TAB` could therefore inject extra `key=value`
+  tokens into the decision line's brace block, and any byte `0x80`–`0xFF` reached
+  the log unchecked. (No other control character was among the reachable cases —
+  see the SEC-REQID-2 entry above, which corrects an earlier version of this
+  paragraph.) Nothing bounded the length at all: the proxy
   listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
   ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
   into the process log — the same amplification CHAOS-63 measured against the
@@ -591,6 +728,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   itself is a repository-settings action an owner must still take; this change
   touches repository content only.
 
+- The MCP live side-effect boundary's pre-send re-ask is documented and its
+  concurrency premise is now pinned. PR #1370 added a second authority re-ask
+  inside the upstream client's TLS dialer, after the handshake and before
+  anything is written — the right place for the check, but net/http runs a dial
+  on its own goroutine (`Transport.queueForDial` → `go dialConnFor`), and that
+  goroutine is not joined to the request. When the caller's context is cancelled
+  while a dial is in flight — an ordinary client disconnect or request timeout —
+  `Call` unwinds at once while the dial goroutine completes its handshake and
+  invokes the hook, so `CallOptions.PreSend` can still be running after `Call`
+  has returned. Reading a refusal back out of variables the hook captured is
+  therefore a data race, and synchronising them removes the race without
+  establishing a hand-off, since a late hook can still write after the only
+  reader has gone; the executor consequently carries the verdict in the returned
+  error instead. That correction shipped with the read-first identity-band change;
+  what is added here is the evidence and the contract it rests on.
+  `TestPreSend_MayStillBeRunningAfterCallReturns` pins the lifetime property
+  deterministically against the real transport — the executor's own gates use a
+  fixture that joins the hook's goroutine, which is exactly the happens-before
+  edge production lacks, so nothing else asserts it — and `CallOptions.PreSend`
+  now states the contract for every future caller: it is a pure predicate whose
+  lifetime is not `Call`'s, so everything a verdict needs in order to be
+  diagnosed belongs on the error. What the gate asserts is the HAZARD, not the
+  schedule: a transport that NARROWS the hook's lifetime by joining its dial
+  goroutine leaves the carrier correct — conservative rather than required — so
+  the gate skips with that finding rather than failing, and only a `Call` that
+  will not return even once the hook is released is a real failure. Asserting
+  that the hook DOES outlive `Call` would have made a safe narrowing look like a
+  regression, and would have reported it as a 30-second deadlock.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
@@ -643,6 +809,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- `GET /api/diagnostics` now carries a `saas_feed` row when the signed SaaS feed
+  is stale, failing to refresh, waiting for authority, or critical. Previously
+  that state was visible only on `/ready` and the Signed SaaS Feed tab, so the
+  one-page health report read as an all-clear. It also reports an enabled feed
+  that has never activated while every refresh fails. The row names the source
+  actually serving and keys its remedy on the failure class. Additive and
+  report-only; no row is emitted when the feed is healthy, disabled or serving
+  the embedded baseline without failures.
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
   line and the digest-pinned `golang:1.26.9-alpine` builder images, index
   `sha256:cdfd4fe2…`, verified against Docker Hub), and `golang.org/x/net`
@@ -715,6 +889,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Performance
+
+- The request log's JSONL persistence gate no longer takes a process-wide
+  mutex on every logged request. `reqlog.Add` runs once per logged request on
+  the proxy request goroutine, and the `enqueue` it calls opened with an
+  unconditional `persistMu.Lock()` purely to read two pointers that are `nil`
+  for the whole life of the process in the **default** configuration — no
+  request-log file is configured, so no drain goroutine is ever started. A
+  `sync.Mutex` Lock/Unlock pair is two atomic read-modify-writes on one shared
+  word, so every request in the process was writing the same cache line to
+  discover that persistence is switched off: a throughput ceiling rather than a
+  constant cost, the same shape already removed from `internal/threatfeed`,
+  `internal/connlimit` and the top-hosts counter. A lock-free `atomic.Bool`
+  gate now short-circuits the disabled path. Measured on a 4-core Xeon @
+  2.80 GHz, both arms in one run, medians of `-count=5`: in `RunParallel` arms
+  (where ns/op is wall time per op across all workers, so a genuinely parallel
+  cost *falls* as cores are added) the gate goes from **15.5 / 28.6 / 74.4 ns**
+  at GOMAXPROCS 1/2/4 — rising 4.8×, because it serialises — to **1.72 / 0.86 /
+  0.43 ns**, halving as the cores double. That is the sharper statement of the
+  defect: the mutex converted a read every core could do at once into a word
+  every core had to take turns owning. One whole logged request goes from
+  **52.2 / 104.1 / 185.5 ns** to **49.0 / 96.1 / 157.4 ns** — ~6% serially,
+  ~15% at four cores, zero allocations either way. No entry, field or byte on
+  any sink changes, and the enabled path is untouched: the shutdown-sweep
+  invariant (every sender registered in the same critical section that
+  published the channel) still holds, because the gate can only short-circuit
+  ahead of that section. `Add` remains flat in core count; the ceiling left is
+  the ring's own lock, which guards real shared state and is recorded on
+  `BenchmarkAddParallel` rather than changed.
 
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
@@ -905,6 +1107,32 @@ endpoints for credentialed parents.
   misses is still the number of `GetCert` calls — but is no longer the same
   thing as the sign count, for which
   `culvert_cert_sign_duration_seconds_count` is exact.
+
+- The per-request policy publication check is O(1) instead of O(rulebase).
+  `PolicyStore.Evaluate` runs on every proxied request, and its first act —
+  `evaluationSnapshot` — scanned the entire rulebase for a rule with a nil
+  counters cell before returning. Production rules always carry one, so the
+  scan never short-circuited: it ran to completion on every request to prove a
+  negative, under the process-wide policy read lock. On a 4-core box the
+  snapshot measured 15.4 ns at 10 rules, 51.3 ns at 100, 524 ns at 1 000 and
+  29 761 ns at 10 000 — superlinear, because the scan is a pointer chase that
+  leaves cache as the rulebase grows. Because it ran *before* evaluation it
+  taxed even requests the engine decides in O(1): a request matching the
+  highest-priority rule cost 465 ns at 10 rules and 30 900 ns at 10 000, so at
+  10 000 rules roughly 98% of `Evaluate` was the pre-scan and 2% was the
+  policy decision. The question the scan was really asking — "has this slice
+  been published?" — is a property of the slice, so it is now answered once
+  per publication instead of once per request: the snapshot is flat at ~13 ns
+  from 10 to 10 000 rules (2 294x at 10 000) and the O(1)-match request is
+  flat at ~390-460 ns (81x at 10 000), with zero allocations throughout.
+  Verdicts are unchanged — pinned by a differential against a verbatim frozen
+  copy of the pre-change body over 400 randomized mutation sequences, by
+  per-mutator immediate-visibility tests, and by a race-detector reader/mutator
+  run; the memo fails safe by construction (any write to the rulebase installs
+  a different slice, so a stale memo costs one scan, never a wrong verdict).
+  Operators with large rulebases see the largest gain; nothing about policy
+  semantics, ordering or default-deny changes.
+
 - The per-request policy decision line is built by appending rather than by
   `logger.Printf`, and the benchmark that measured it was measuring a disabled
   logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied
