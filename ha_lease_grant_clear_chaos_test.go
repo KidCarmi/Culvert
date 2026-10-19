@@ -267,15 +267,19 @@ var leaseAcquireHelpers = map[string]bool{
 var leaseGrantTakers = []string{"EnableAsLeader", "leaseRecoveryAttempt", "promote", "resumeAsLeader"}
 
 // leaseGrantClear is the single clear for an uninstalled grant; leaseGrantInstall
-// is the install's last step (the keepalive).
+// is the install. On the #1645 stack an acquisition only STAGES its grant, so
+// the clear is the staged-grant abandonment (abandonGrantLocked, which
+// clearLeaseGrantLocked folds into) and the install is the exposure
+// (exposeGrantLocked, which abandons on its own refusal). The keepalive is NOT
+// an install marker there: it starts on the staged grant, before the commit.
 const (
-	leaseGrantClear   = "clearLeaseGrantLocked"
-	leaseGrantInstall = "startLeaseKeepalive"
+	leaseGrantClear   = "abandonGrantLocked"
+	leaseGrantInstall = "exposeGrantLocked"
 )
 
 // leaseGrantExits reports, for one grant-taking function, every exit after its
-// acquisition that neither installs (a dominating startLeaseKeepalive) nor
-// reaches clearLeaseGrantLocked, and is not a denied branch (inside an if or
+// acquisition that neither installs (a dominating leaseGrantInstall) nor
+// reaches leaseGrantClear, and is not a denied branch (inside an if or
 // case whose condition negates the grant, or tests the acquisition's error).
 func leaseGrantExits(funcs map[string][]*ast.FuncDecl, fn *ast.FuncDecl) (bad []string, sawAcquire bool) {
 	acq, grantVar, errVar := leaseAcquireSite(fn)
@@ -505,9 +509,9 @@ func leaseDominating(path []ast.Node, acq *ast.CallExpr, grantVar, errVar string
 
 // TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared: every function that
 // takes a fencing grant (calls an acquisition helper) leaves it, on every exit
-// after the acquisition, either installed (startLeaseKeepalive dominates the
+// after the acquisition, either installed (leaseGrantInstall dominates the
 // exit) or cleared (the exit is dominated by a call reaching
-// clearLeaseGrantLocked), unless the exit is a branch on which no grant was
+// leaseGrantClear), unless the exit is a branch on which no grant was
 // taken. The lease Acquire itself is called only by acquireLeaseAttempt.
 func TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared(t *testing.T) {
 	funcs, _ := cpParseFuncsAndGateHolders(t)
@@ -528,7 +532,7 @@ func TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared(t *testing.T) {
 			}
 			takers = append(takers, name)
 			for _, b := range bad {
-				t.Errorf("%s: %s neither installs nor clears the fencing grant it took (clearLeaseGrantLocked)", name, b)
+				t.Errorf("%s: %s neither installs nor clears the fencing grant it took (%s)", name, b, leaseGrantClear)
 			}
 		}
 	}

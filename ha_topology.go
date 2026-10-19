@@ -73,6 +73,7 @@ func (h *HAState) setTopologyLocked(role, peer, transition string) {
 		return
 	}
 	h.role, h.peerAddr = role, peer
+	h.syncFenceEpochLocked() // the stamp derives from the role: the role-less floor ends here
 	if h != haTopologySource() {
 		return
 	}
@@ -92,7 +93,11 @@ func (h *HAState) setTopologyLocked(role, peer, transition string) {
 // `cp_address_list` pending state, pages once per episode and retries from
 // the live source until it publishes. Why no transition — authority-gaining
 // included — is refused over it is the ADR-0005 reasoning in
-// cp_addr_publish.go's header.
+// cp_addr_publish.go's header. It can be a hint and nothing more because the
+// fencing epoch never rides in this commit: an authority-gaining transition
+// has already committed the snapshot stamped with its new epoch
+// (ha_epoch_commit.go) before it reaches here, so a rejected list leaves the
+// fleet on the right epoch.
 //
 // Lock order: the publish takes clusterRoleMu (clusterRoleSnapshot) and
 // ConfigStore.mu, and h.mu only through Status(), never while holding the
