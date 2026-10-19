@@ -178,6 +178,13 @@ This note amends S3's stamping in one case and leaves the S3 rule itself unchang
     caller's own acquisition took a grant, and never reads the staged epoch:
     only the grant owners may read it.
     Pinned by `ha_lease_grant_clear_chaos_test.go`.
+  - No alert is dispatched, or queued for the startup flush, while `HAState.mu` is held
+    (CodeRabbit 4315714615 on #1645). `fireAlert` runs the alert store's `Dispatch`
+    synchronously, under its dedup mutex, so a page under the lock could delay lease
+    renewal and every HA status reader. A producer records its episode and builds the
+    page under the lock (`noteEpochRefusedLocked` returns a `haDeferredPage`), and the
+    caller dispatches it after the unlock, once per episode as before. Pinned by
+    `ha_alert_lock_chaos_test.go`.
 
 ### 2026-07-03 — S5 SHIPPED: operator wiring (flags/YAML/compose/GUI/runbook) — PROGRAM COMPLETE
 - **Config surface:** `-ha-etcd-endpoints/-ha-etcd-cert/-ha-etcd-key/-ha-etcd-ca/-ha-lease-ttl`

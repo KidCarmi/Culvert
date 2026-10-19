@@ -42,7 +42,8 @@ package main
 //     with no role, promote stays standby, lease recovery stays a read-only
 //     leader and retries, and a boot resume takes the ADR-0005 S2 read-only
 //     leader stance (role kept, no write authority, issuance refused). The
-//     refusal pages config_snapshot_rejected once per episode. The staged
+//     refusal pages config_snapshot_rejected once per episode, dispatched
+//     after h.mu is released (haDeferredPage). The staged
 //     grant is left to its TTL: ADR-0005 has no Release primitive.
 //  5. A grant lost AFTER its commit (the keepalive drops it before exposure)
 //     leaves a committed E that nothing advertises. The mirror leaves E for
@@ -152,7 +153,6 @@ func (h *HAState) commitGrant(transition string) (int64, error) {
 		return e, nil
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	// Keep or revert, atomically with every commit (a compare under the store
 	// lock, no marshal): a concurrent publish that committed e already made it
 	// distributable, and the install proceeds.
@@ -161,16 +161,20 @@ func (h *HAState) commitGrant(transition string) (int64, error) {
 		h.syncFenceEpochLocked()
 	}) {
 		h.noteCommittedEpochLocked(e)
+		h.mu.Unlock()
 		return e, nil
 	}
 	if h.grantEpoch != e {
 		// The keepalive dropped the grant while it was committing: whatever
 		// the commit's own error, the cause is the fence, not the snapshot.
 		h.abandonGrantLocked()
+		h.mu.Unlock()
 		return 0, fmt.Errorf("%w: %w", errGrantLost, err)
 	}
-	h.pageEpochRefusedLocked(transition, e, err)
+	page := h.noteEpochRefusedLocked(transition, e, err)
 	h.abandonGrantLocked()
+	h.mu.Unlock()
+	page.dispatch() // off h.mu (TestChaos71_Wall_NoAlertDispatchUnderTheHALock)
 	return 0, err
 }
 
@@ -208,22 +212,25 @@ func haInstallError(transition string, err error) error {
 // the same step, the refusal pages once per episode and the grant is
 // abandoned. Write authority itself stays gated on the confirmed window
 // (WriteAllowed). Caller holds h.mu (write) and has run commitGrant for e.
-func (h *HAState) exposeGrantLocked(transition string, e int64) error {
+//
+// The refusal's page is returned, not sent: the caller dispatches it after
+// releasing h.mu (haDeferredPage; nil when there is nothing to page).
+func (h *HAState) exposeGrantLocked(transition string, e int64) (*haDeferredPage, error) {
 	if h.lease == nil || e == 0 {
-		return nil
+		return nil, nil
 	}
 	if h.grantEpoch != e {
 		h.abandonGrantLocked()
-		return errGrantLost
+		return nil, errGrantLost
 	}
 	if h == haTopologySource() {
 		if !haKeepEpochStampIfCommitted(e, func() {
 			h.stampEpoch = 0
 			h.syncFenceEpochLocked()
 		}) {
-			h.pageEpochRefusedLocked(transition, e, errEpochNotCommitted)
+			page := h.noteEpochRefusedLocked(transition, e, errEpochNotCommitted)
 			h.abandonGrantLocked()
-			return errEpochNotCommitted
+			return page, errEpochNotCommitted
 		}
 		h.noteCommittedEpochLocked(e)
 	}
@@ -231,7 +238,7 @@ func (h *HAState) exposeGrantLocked(transition string, e int64) error {
 	h.epochRefused = false // the refusal episode, if any, ended
 	h.stampEpoch = 0       // the mirror stays e: setLeaseEpochLocked re-derives it from leaseEpoch
 	h.setLeaseEpochLocked(e)
-	return nil
+	return nil, nil
 }
 
 // abandonGrantLocked drops a staged, unexposed grant (its transition failed
@@ -293,30 +300,60 @@ func (h *HAState) heldEpochLocked() int64 {
 	return h.grantEpoch
 }
 
-// pageEpochRefusedLocked logs every refusal and pages the episode's first:
-// queued before the webhooks load (a boot resume runs in initCluster), valid
-// only while the episode is open. Caller holds h.mu.
-func (h *HAState) pageEpochRefusedLocked(transition string, e int64, err error) {
+// noteEpochRefusedLocked logs every refusal, records the refusal episode and
+// builds the episode's first page, which the caller dispatches after
+// releasing h.mu (nil for a refusal in an episode already paged). Caller
+// holds h.mu (write).
+func (h *HAState) noteEpochRefusedLocked(transition string, e int64, err error) *haDeferredPage {
 	logger.Printf("HA: CRITICAL — %s refused: the config snapshot could not be committed with the new fencing epoch %d, "+
 		"so the epoch is NOT advertised and this node takes no write authority on it: %v", transition, e, err)
 	if h.epochRefused {
-		return
+		return nil
 	}
 	h.epochRefused = true
 	h.epochRefusedEpisode++
 	episode := h.epochRefusedEpisode
-	payload := AlertPayload{
-		Event:  "config_snapshot_rejected",
-		Actor:  "culvert",
-		Source: "ha",
-		Detail: fmt.Sprintf("HA %s refused: the config snapshot could not be committed with fencing epoch %d (%v) — "+
-			"the epoch is not advertised and this node has no write authority; reduce the oversized collection", transition, e, err),
+	return &haDeferredPage{
+		event: "config_snapshot_rejected",
+		payload: AlertPayload{
+			Event:  "config_snapshot_rejected",
+			Actor:  "culvert",
+			Source: "ha",
+			Detail: fmt.Sprintf("HA %s refused: the config snapshot could not be committed with fencing epoch %d (%v) — "+
+				"the epoch is not advertised and this node has no write authority; reduce the oversized collection", transition, e, err),
+		},
+		stillValid: func() bool { return h.epochRefusedEpisodeOpen(episode) },
 	}
-	if !startupAlertsFlushed() {
-		deferStartupAlertWhile("config_snapshot_rejected", payload, func() bool { return h.epochRefusedEpisodeOpen(episode) })
+}
+
+// haDeferredPage is an HA page built while h.mu is held — its episode
+// recorded, its payload fixed — and dispatched only after the caller releases
+// h.mu (CodeRabbit 4315714615 on #1645). fireAlert runs the alert store's
+// Dispatch synchronously, under its dedup mutex and with a periodic O(n)
+// expiry scan, so a page sent under h.mu could delay lease renewal and every
+// HA status reader. TestChaos71_Wall_NoAlertDispatchUnderTheHALock pins it.
+type haDeferredPage struct {
+	event   string
+	payload AlertPayload
+	// stillValid is the startup queue's validity test (deferStartupAlertWhile):
+	// a page queued before the webhooks load is delivered at the flush only
+	// while its episode is still open. It takes h.mu itself, so it is
+	// evaluated only off the lock.
+	stillValid func() bool
+}
+
+// dispatch sends the page: queued before the webhooks load (a boot resume runs
+// in initCluster), fired at once after the startup flush. Nil-safe. The caller
+// must NOT hold h.mu.
+func (p *haDeferredPage) dispatch() {
+	if p == nil {
 		return
 	}
-	fireAlert("config_snapshot_rejected", payload)
+	if !startupAlertsFlushed() {
+		deferStartupAlertWhile(p.event, p.payload, p.stillValid)
+		return
+	}
+	fireAlert(p.event, p.payload)
 }
 
 // epochRefusedEpisodeOpen reports whether refusal episode ep is still the

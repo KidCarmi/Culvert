@@ -355,8 +355,9 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 		return "", haInstallError("enable", err)
 	}
 	h.mu.Lock()
-	if err := h.exposeGrantLocked(haTransitionEnable, epoch); err != nil {
+	if page, err := h.exposeGrantLocked(haTransitionEnable, epoch); err != nil {
 		h.mu.Unlock()
+		page.dispatch() // off h.mu (haDeferredPage)
 		return "", haInstallError("enable", err)
 	}
 	h.setTopologyLocked("leader", peerAddr, haTransitionEnable)
@@ -518,8 +519,11 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 		h.mu.Unlock()
 		return false
 	}
+	var refusalPage *haDeferredPage // dispatched after the unlock (haDeferredPage)
 	if leaseGranted {
-		leaseGranted, epochRefused = resumeInstallOutcome(h.exposeGrantLocked(haTransitionResume, epoch))
+		var err error
+		refusalPage, err = h.exposeGrantLocked(haTransitionResume, epoch)
+		leaseGranted, epochRefused = resumeInstallOutcome(err)
 	}
 	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
 	h.token = cfg.Token
@@ -533,6 +537,7 @@ func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	h.stopCh = make(chan struct{})
 	leaseConfigured := h.lease != nil
 	h.mu.Unlock()
+	refusalPage.dispatch()
 	h.reportReadOnlyResume(epochRefused, leaseConfigured && !leaseGranted, foreignHolder)
 	h.startLeaseKeepalive()
 	h.republishTopology() // after the keepalive: renewal never waits on publication
@@ -1171,8 +1176,9 @@ func (h *HAState) promote(reason string) {
 	}
 
 	h.mu.Lock()
-	if err := h.exposeGrantLocked(haTransitionPromote, epoch); err != nil {
+	if page, err := h.exposeGrantLocked(haTransitionPromote, epoch); err != nil {
 		h.mu.Unlock()
+		page.dispatch() // off h.mu (haDeferredPage)
 		// onPromote is transactional (Codex P1 4302926144 on #1645): the
 		// activation it completed is undone BEFORE the once-guard is reset, so
 		// a retry starts from a clean standby — no listener, no claimed

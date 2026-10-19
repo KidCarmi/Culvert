@@ -402,8 +402,9 @@ func (h *HAState) completeLeaseRecovery(started time.Time, suppressed int) bool 
 		h.mu.Unlock()
 		return true
 	}
-	if err := h.exposeGrantLocked(haTransitionRecovery, staged); err != nil {
+	if page, err := h.exposeGrantLocked(haTransitionRecovery, staged); err != nil {
 		h.mu.Unlock()
+		page.dispatch() // off h.mu (haDeferredPage)
 		return false
 	}
 	h.term = termFromEpoch(h.leaseEpoch)
