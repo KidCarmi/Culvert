@@ -412,6 +412,7 @@ func TestClusterStoreImportFullState_CARotationRenewedNodesInitialised(t *testin
 // maps, so the next AddManual or AddException call on a Data Plane node
 // panicked with "assignment to entry in nil map".
 func TestApplyConfigSnapshot_BlocklistMapsInitialised(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origBL := bl
 	t.Cleanup(func() { bl = origBL })
 
