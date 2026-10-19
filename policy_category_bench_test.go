@@ -116,6 +116,20 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic(b *testing.B) {
 // standing methodology note from the topHosts work — speeding one component
 // only raises the arrival rate at the next contended one — so the scan, which
 // separates each probe with real per-rule work, is the honest denominator.
+// (That catStore RLock measurement predates the urlcat forward read view; the
+// probe now takes no lock, see below.)
+//
+// It is also the end-to-end instrument for the urlcat forward read view
+// (internal/urlcat forwardView). It is deliberately the DestCategory path and
+// not the category-GROUP one. matchesCategory reaches catStore.MatchesHostNorm /
+// MatchesHostAdminNorm once per category-scoped rule and nothing else
+// contended, so this benchmark isolates that cost.
+// BenchmarkPolicyEvaluate_CategoryGroupRulesParallel below adds
+// catgroup.Store.GetByName, whose own per-rule RLock dominates it — a profile
+// of that benchmark on a tree carrying the view puts 91.9% of samples in
+// GetByName with 68.6% in its RLock atomic, so it measures that ceiling rather
+// than this one. Read this benchmark for this change, and that one for the
+// catgroup finding it exposes.
 //
 //	go test -run '^$' -bench 'CategoryRulesParallel' -benchmem -cpu 1,2,4 .
 func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {

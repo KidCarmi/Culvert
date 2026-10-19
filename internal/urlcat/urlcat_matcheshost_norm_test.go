@@ -29,65 +29,11 @@ import (
 // style, the repo's _Legacy convention) so the thing measured and the thing
 // proven equivalent can never drift apart.
 
-// legacyMatchesHost is Store.MatchesHost exactly as it stood before the
-// normalization hoist. Do not "simplify" it to call the production code.
-func legacyMatchesHost(s *Store, cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
-	var keyBuf [maxInlineCategoryKey]byte
-	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
-
-	s.mu.RLock()
-	var hostSet map[string]bool
-	if inlineOK {
-		hostSet = s.index[string(inlineKey)]
-	} else {
-		hostSet = s.index[strKey]
-	}
-	s.mu.RUnlock()
-
-	if hostSet == nil {
-		return false
-	}
-	if hostSet[host] {
-		return true
-	}
-	for i, ch := range host {
-		if ch == '.' && hostSet[host[i+1:]] {
-			return true
-		}
-	}
-	return false
-}
-
-// legacyMatchesHostAdmin is Store.MatchesHostAdmin exactly as it stood before
-// the normalization hoist.
-func legacyMatchesHostAdmin(s *Store, cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
-	var keyBuf [maxInlineCategoryKey]byte
-	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
-
-	s.mu.RLock()
-	var hostSet map[string]bool
-	if inlineOK {
-		hostSet = s.adminIndex[string(inlineKey)]
-	} else {
-		hostSet = s.adminIndex[strKey]
-	}
-	s.mu.RUnlock()
-
-	if hostSet == nil {
-		return false
-	}
-	if hostSet[host] {
-		return true
-	}
-	for i, ch := range host {
-		if ch == '.' && hostSet[host[i+1:]] {
-			return true
-		}
-	}
-	return false
-}
+// The oracles are legacyMatchesHost / legacyMatchesHostAdmin in
+// urlcat_forward_view_test.go: the s.mu.RLock'd bodies exactly as they stood
+// before BOTH the forwardView change and the normalization hoist (the two
+// changes replaced the same bodies, so one verbatim copy serves both files).
+// Do not "simplify" them to call the production code.
 
 // assertNormAgrees checks both entry points against their frozen oracles for
 // one (category, host) pair, in BOTH the wrapper form (which still takes a raw
