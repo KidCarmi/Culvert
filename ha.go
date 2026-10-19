@@ -1157,7 +1157,7 @@ func (h *HAState) promote(reason string) {
 	epoch, err := h.commitGrant(haTransitionPromote)
 	if err != nil {
 		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
-		logger.Printf("HA: promote (%s): %v — staying as standby", sanitizeLog(reason), haInstallError("promote", err))
+		logger.Printf("HA: promote (%q): %q — staying as standby", sanitizeLog(reason), sanitizeLog(haInstallError("promote", err).Error()))
 		return
 	}
 

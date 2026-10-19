@@ -306,7 +306,7 @@ func (h *HAState) heldEpochLocked() int64 {
 // holds h.mu (write).
 func (h *HAState) noteEpochRefusedLocked(transition string, e int64, err error) *haDeferredPage {
 	logger.Printf("HA: CRITICAL — %s refused: the config snapshot could not be committed with the new fencing epoch %d, "+
-		"so the epoch is NOT advertised and this node takes no write authority on it: %v", transition, e, err)
+		"so the epoch is NOT advertised and this node takes no write authority on it: %q", transition, e, sanitizeLog(err.Error()))
 	if h.epochRefused {
 		return nil
 	}
