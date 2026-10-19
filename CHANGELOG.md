@@ -673,6 +673,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The request log's JSONL persistence gate no longer takes a process-wide
+  mutex on every logged request. `reqlog.Add` runs once per logged request on
+  the proxy request goroutine, and the `enqueue` it calls opened with an
+  unconditional `persistMu.Lock()` purely to read two pointers that are `nil`
+  for the whole life of the process in the **default** configuration — no
+  request-log file is configured, so no drain goroutine is ever started. A
+  `sync.Mutex` Lock/Unlock pair is two atomic read-modify-writes on one shared
+  word, so every request in the process was writing the same cache line to
+  discover that persistence is switched off: a throughput ceiling rather than a
+  constant cost, the same shape already removed from `internal/threatfeed`,
+  `internal/connlimit` and the top-hosts counter. A lock-free `atomic.Bool`
+  gate now short-circuits the disabled path. Measured on a 4-core Xeon @
+  2.80 GHz, both arms in one run, medians of `-count=5`: in `RunParallel` arms
+  (where ns/op is wall time per op across all workers, so a genuinely parallel
+  cost *falls* as cores are added) the gate goes from **15.5 / 28.6 / 74.4 ns**
+  at GOMAXPROCS 1/2/4 — rising 4.8×, because it serialises — to **1.72 / 0.86 /
+  0.43 ns**, halving as the cores double. That is the sharper statement of the
+  defect: the mutex converted a read every core could do at once into a word
+  every core had to take turns owning. One whole logged request goes from
+  **52.2 / 104.1 / 185.5 ns** to **49.0 / 96.1 / 157.4 ns** — ~6% serially,
+  ~15% at four cores, zero allocations either way. No entry, field or byte on
+  any sink changes, and the enabled path is untouched: the shutdown-sweep
+  invariant (every sender registered in the same critical section that
+  published the channel) still holds, because the gate can only short-circuit
+  ahead of that section. `Add` remains flat in core count; the ceiling left is
+  the ring's own lock, which guards real shared state and is recorded on
+  `BenchmarkAddParallel` rather than changed.
+
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
   `hostutil.NormalizeHostStrict` already had an already-canonical fast path
