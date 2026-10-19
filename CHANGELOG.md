@@ -32,6 +32,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   gate through `AllowClusterAware` that caught 2 fail-open admissions in 5000
   on the previous code; and the rollback control).
 
+- The Control Plane → data-plane snapshot apply replaced the IP filter by
+  storing a freshly built filter into the package-level `ipf` handle, which
+  `proxy.go` and `socks5.go` read on every request with no synchronization
+  (RISK-030). That is a data race on the first admission gate of an inline
+  gateway — undefined behaviour under the Go memory model — reproduced with
+  `go test -race` on main. The apply now replaces the live filter's contents in
+  place through the new `IPFilter.Replace`: one writer lock, one immutable view
+  publish, so a lock-free reader observes the previous configuration or the new
+  one and never an intermediate, and the handle itself is never written after
+  its declaration (the posture `rl` and `bl` already had). No allow/deny verdict
+  changes: a differential gate compares every mode, including the fail-closed
+  corrupt one, against the previous fresh-filter shape. A source wall now
+  rejects any production reassignment of `ipf` or `rl`, and the snapshot test
+  fixtures bind fresh owners into both handles instead of restoring the object
+  the apply mutated. Gates: `controlplane_snapshot_ipf_race_test.go`
+  (`TestRISK030_*`, RED under `-race` against the previous code),
+  `TestIPFilterReplace_*` and the `Replace` republish case in the IPFilter
+  mutator inventory.
+
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
   (SEC-SECRETWRITE-1). Four writers introduced in this window were affected:
