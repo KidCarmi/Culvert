@@ -7,6 +7,55 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A damaged data volume could kill the gateway outright from the proxy request
+  path, with no log line and no containment available (CHAOS-74, §41 of the
+  chaos register). badger v4 reads every `.sst` table through a memory mapping
+  and removed the option to do otherwise, so when the pages behind that mapping
+  stop existing — the file shrinks, the volume detaches, a page fault returns
+  EIO — the read raises SIGBUS. Go delivers that as `fatal error: fault` rather
+  than a panic, so neither `recover()` nor `crashguard.go` could see it. The
+  Layer-2 community category lookup runs on the data path for every request that
+  resolves a host category, which made one damaged table a total, evidence-free
+  outage and, the damage being on disk, a restart loop rather than a recovery.
+
+  Reproduced against the real store and contained with
+  `debug.SetPanicOnFault`, which delivers a fault on mapped memory as a
+  recoverable panic; the guard is armed once per domain walk and re-panics
+  anything that is not a mapping fault, so a genuine bug still reaches
+  `crashguard` instead of being reported as a failing disk. A Linux node that
+  takes such a fault now latches Layer-2 categorisation off and keeps serving on the
+  admin-managed Layer 1, which is the existing posture for a store that never
+  opened. **The policy outcome is unchanged** — an affected host is still
+  "uncategorised", not denied.
+
+  Visibility was the other half. `culvert_catfeeddb_available` promises in its
+  own HELP text to mean "open and serving lookups" but was sourced purely from
+  the boot record, so it reported `1` for a store whose every lookup had stopped
+  answering. It now reports `0` on a latched degradation, alongside two new
+  counters — `culvert_catfeeddb_lookup_errors_total` and
+  `culvert_catfeeddb_memory_faults_total` — and a `category_feed_db` diagnostics
+  row that names the Layer-1-only impact and the restart that re-opens (and
+  quarantines) the store. The fault is recorded durably beside the store
+  (`<store>.faulted`), so that restart quarantines it with trigger
+  `runtime_fault` and re-creates it empty for the feed to re-sync — badger's
+  reopen error for a truncated table is not a recognised corruption signal, and
+  without the record every later start stayed Layer-1-only.
+  `culvert_catfeeddb_memory_faults_total > 0` is the
+  alerting rule to add: it means a node's data volume is damaging a live store.
+
+  Containment is **Linux-only**. A fault is contained only when its address can
+  be shown to lie in one of the store's mapped files, which is checked against
+  `/proc/self/maps`; anything else re-panics. On the Darwin and Windows release
+  binaries a mapping fault keeps the prior behaviour, and the
+  `category_feed_db` row says `runtime fault containment: unavailable on
+  <GOOS>`. Production deployments (Docker/OVA) are Linux.
+
+  Known limit: `SetPanicOnFault` is per-goroutine, so badger's own compaction
+  goroutines remain exposed. This closes the reachable, request-driven exposure,
+  not the class.
+
 ### Performance
 
 - The per-rule URL-category **membership** probe no longer takes a read lock.
@@ -164,6 +213,130 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   Every conversion of the setting (client deadline, call context, breaker
   seed) and the probe-timeout arithmetic now saturate at the largest
   `time.Duration`; accepted values and the configuration surface are unchanged.
+
+- The viewer-readable operator contract rendered **admin-only roster state**
+  (SEC-DIAG-ROSTER-1). `GET /api/diagnostics` is deliberately `RoleViewer` — a
+  management-plane health surface must not require admin — but the oversize
+  admin-username row added in this window became the first contract row derived
+  from the admin roster (`cfg.ListUIUsers`/`GetUser`/`UserHasTOTP`), which
+  `GET /api/auth/users` gates at `RoleAdmin` on every method. With no role
+  filtering in `apiDiagnostics`, a viewer or operator could read the affected
+  account count, the longest username's byte length, that a legacy single-user
+  login exists and is oversize, whether it is mirrored into the roster, that
+  login's effective role interpolated verbatim, and **whether at least one
+  affected account has TOTP enrolled**.
+
+  The second-factor fact is the one with real attacker value: it tells a
+  lower-privileged insider — or a stolen read-only monitoring session — whether
+  a high-value administrator is single-factor, which is precisely the input to
+  choosing a credential-stuffing or phishing target. Before the row existed the
+  only signal was a one-shot boot log line, not reachable through the API at
+  all, so this was a new cross-role flow (CWE-497/CWE-200/CWE-1220,
+  OWASP A01:2021). `TestApiDiagnostics_NoSensitiveValues` did not catch it and
+  is not vacuous — it is a secret-*material* wall (session-secret symbols, PEM,
+  `/data/` paths, long hex runs) and identity metadata was outside its scope.
+
+  `redactContractForRole` now withholds that detail below admin. The row stays
+  **visible** at every role (code, `warn` status and the rolled-up verdict are
+  unchanged, so monitoring and the SPA still see the condition) and only the
+  roster-derived detail is withheld — hiding the row would conceal a live
+  management-plane fault and is pinned by a control. The redacted message is a
+  constant carrying no roster-derived value, an `ok` row is never redacted, and
+  the decision is fail-closed by construction: the only input that un-redacts
+  is a proven admin. No allow/deny decision, proxy path, or admission behaviour
+  changes. **Operator-visible change:** viewers and operators now see this one
+  row without its remediation text; sign in as an admin for the full
+  remediation.
+
+  **Review round (P1):** the first version wired the redaction into
+  `/api/diagnostics` only, while `GET /api/health/explain` renders the same
+  contract at the same viewer floor and returned it raw — a complete bypass
+  through the alternate endpoint. Both renderers are now redacted, and a wall
+  enumerates every caller of `buildOperatorContract` repo-wide so a third
+  renderer fails the build until it is redacted or granted a stated exception
+  (the support-bundle collector is the one recorded exception: a separate,
+  admin-approved trust boundary that writes through the bundle redactor).
+
+- The **rendered audit `Actor` is now bounded** (`boundAuditActor`, applied to
+  every `AuditEntry` at the single audit write chokepoint `addAuditEntry` behind
+  `auditAdd`, `store.go`).
+  `truncateForAudit` was being applied by call sites to the audit **Object**,
+  which made each one look bounded, while `auditEvent` derives the **Actor**
+  independently and rebuilt `name + "@" + ip` from the session with no bound —
+  so a CONFIGURED account name longer than the 64-byte cap (which
+  `-user`/`auth.user` and `--reset-password` can persist, and which is
+  deliberately never refused for its length) was retained full-length in the
+  audit ring. Measured: a 300-byte name produced a 314-byte Actor. Low severity
+  (the name is configured, not attacker-chosen: a retention bound, not an
+  unauthenticated amplifier). Found by Codex review of the
+  `auth.password_change.fail` entry added in this same window, whose first
+  version claimed in its comment that the actor was "still truncated" and whose
+  gate was named `AuditActorIsBounded` while asserting only on `Object`. The
+  bound (`boundAuditIdentity`) keeps a 64-byte prefix plus the original length
+  AND a short SHA-256 digest of the full name, so two distinct oversize accounts
+  stay distinguishable in the trail. **`auditActor` itself stays the full,
+  unbounded principal**: a first version of this fix bounded it, and Codex
+  review showed that is not display-only — the MCP publication and approval
+  handlers cast it to `approval.PrincipalID`, so two distinct admins sharing the
+  bounded prefix and length compared equal and the second one's legitimate
+  four-eyes approval was refused as self-approval. Non-audit consumers (MCP
+  four-eyes and tool-trust, policy learning, CDR receipts, release dispatch,
+  support recipients) therefore keep main's behaviour, and so does the PAC
+  intent's `AuditActor`, which is bounded when its entry is rendered. A second
+  Codex round found that a bound living only in `auditEventDiffID` was bypassed
+  by every producer that builds an `AuditEntry` itself — the release
+  `DispatchService` handed the full `auditActor` straight to `auditAdd` — so the
+  bound moved to the one write chokepoint every producer reaches, the two direct
+  `audit.Add` callers were routed through it, and `TestAuditActorBoundWall`
+  fails if any non-test file in main or `internal/` reaches `audit.Add` another
+  way or `auditAdd` stops pointing at the chokepoint. Gates: `auth_change_password_reauth_audit_test.go` asserts both rendered
+  fields and that `auditActor` is unbounded, with a control requiring an
+  ordinary name to pass through verbatim; `audit_actor_principal_test.go` drives
+  the four-eyes publication flow with two colliding names (verified failing
+  against the bound-at-`auditActor` tree) plus a self-approval control. **The
+  rules: a gate must assert the property it is named for, and a length bound
+  belongs to the rendering, never to a value something compares for identity.**
+
+- The **cluster CA private key** backup completed SEC-SECRETWRITE-1. That sweep
+  was scoped to the four key writers introduced in its own review window, so
+  `backupCAFiles` (`enrollment.go`) — which predates it — still wrote
+  `cluster-ca.key.bak` and `cluster-ca.crt.bak` with `os.WriteFile` on a fully
+  predictable path, with both halves of the same defect reachable: the open
+  follows a symlink planted at the path, and `perm` applies only on *creation*,
+  so a `0666` file pre-created at `cluster-ca.key.bak` receives the key and
+  stays world-readable. The asset is larger than any of the four already fixed —
+  the cluster CA signs every Data Plane node certificate, so disclosure lets an
+  attacker mint a node cert, impersonate a DP to the Control Plane and receive
+  the full `ConfigSnapshot`, which carries `SessionHMAC` and the IdP secrets.
+  Both writes now use `fileutil.AtomicWrite` (random `O_EXCL` temp beside the
+  target, chmod + fsync, rename over it). The POSTURE is unchanged: the
+  plaintext branch is still plaintext (the recorded CA-3 trade) and the
+  encrypted branch already routed through `secret.SealToFile` → `AtomicWrite`;
+  only the primitive changed. Gates: `enrollment_ca_backup_secretwrite_test.go`
+  — 3 defect gates verified failing against the reintroduced `os.WriteFile`
+  shape, plus 4 controls verified failing against a `backupCAFiles` that writes
+  nothing, because deleting the dual-CA overlap recovery copy is the cheapest
+  way to pass every defect gate.
+
+- A **failed re-authentication on the admin plane is now audited**
+  (SEC-REAUTH-AUDIT-1). `POST /api/auth/change-password` re-verifies the
+  caller's current password, and by SEC-BASIC-1's own analysis it is the only
+  credential check in the admin API that consults no lockout — a deliberate
+  trade, since charging `loginLimiter` there would let a session holder lock
+  themselves out of the login flow. But it audited only on SUCCESS, so the one
+  unlocked password oracle was also the only silent one: a caller holding a
+  stolen or hijacked session could guess the account's password at the mutating
+  `apiLimiter`'s rate, indefinitely, with no trace in the compliance record —
+  and the password is durable persistence that outlives the session being
+  revoked (CWE-778 / OWASP A09:2021). The rejection now emits
+  `auth.password_change.fail` with a bounded actor and object, deliberately
+  NOT reusing `auth.password_change.refused` (which `refuseRosterChange` already
+  uses for the persistence refusal — an operator must be able to tell "wrong
+  password" from "the disk failed"). The lockout trade-off is unchanged; this
+  adds the missing EVIDENCE and alters no authentication decision. Gates:
+  `auth_change_password_reauth_audit_test.go` — 4 defect gates verified failing
+  against the pre-fix branch, plus 3 controls, two of them verified failing
+  against the obvious wrong fix of auditing unconditionally on entry.
 
 - Distributed rate limiting could admit a request over the cluster-wide limit
   whenever a Control Plane broadcast landed in the middle of a decision.
