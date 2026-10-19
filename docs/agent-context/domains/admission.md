@@ -49,10 +49,10 @@ go test -race -shuffle=on -count=2 ./internal/admission
 go test -race -run 'Test(AdmissionMigration|DistributedAdmission|Chaos61)_' -count=1 . ./internal/admission
 
 # Tagged gates MUST select both packages and disable result caching.
-go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v . ./internal/admission
+go test -tags benchgate -run 'TestBenchGate_' -count=1 -p 1 -timeout=10m -v . ./internal/admission ./internal/threatfeed
 ```
 
-Snapshot/rollback edits additionally need the linked root integration tests. `TestChaos61_` needs no chaos tag. Most admission `TestBenchGate_` tests are in default-tag files; the two rate-window gates require `benchgate`. Do not infer build tags from test names.
+Snapshot/rollback edits additionally need the linked root integration tests. `TestChaos61_` needs no chaos tag. Most admission `TestBenchGate_` tests are in default-tag files (structural lock and allocation gates). The four wall-clock ratio gates require `benchgate`: the two rate-window gates, `TestBenchGate_IsExemptIsFlatInCIDRCount` and `TestBenchGate_IPFilterAllowedIsFlatInCIDRCount`. Bulk-load linearity is a default-tag publish-count invariant (`TestRLExemptView_BulkLoadPublishesOnce`, `TestIPFilterView_BulkLoadPublishesOnce`), not a timing ratio. Do not infer build tags from test names.
 
 The [coverage script](../../../.github/scripts/coverage-floor.sh) requires global 55% plus function-average per-file floors of 70% for root `security.go`, admission `engine.go` and `freshness.go`, alongside its other floors. Missing implementation files must fail; a package-only percentage is not a substitute. [Migration checks](../../../admission_contract_test.go) protect coverage omissions and both-package CI selectors. Use the [verification workflow](../workflows/verification.md) for wider change-dependent checks and honest completion reporting.
 
