@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // seedRosterFileForBoot writes a roster that an earlier boot saved (through
@@ -253,5 +255,179 @@ func TestLoadUIUsersFile_RewriteSerialisesWithSaves(t *testing.T) {
 	}
 	if err := <-saveDone; err != nil {
 		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+}
+
+// TestLoadUIUsersFile_BootRewriteNeverDestroysAConcurrentChange is the Codex
+// P2 4315243806 gate at the row's level: an external writer replaces the
+// roster after checkRosterUnchanged passed and before the write step runs.
+// saveUIUsersMu cannot stop it. The newer roster must survive on disk, the
+// row must not read "persisting", and one log line must say what happened.
+// Replacing the exchange with a rename, or dropping the compare-and-exchange-
+// back, fails both cases.
+func TestLoadUIUsersFile_BootRewriteNeverDestroysAConcurrentChange(t *testing.T) {
+	cases := map[string]func(t *testing.T, path string, newer []byte){
+		"configuration manager replaces the file": func(t *testing.T, path string, newer []byte) {
+			side := path + ".cm-new"
+			if err := os.WriteFile(side, newer, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(side, path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"operator edits the file in place": func(t *testing.T, path string, newer []byte) {
+			if err := os.WriteFile(path, newer, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, write := range cases {
+		t.Run(name, func(t *testing.T) {
+			path, user, _ := seedRosterFileForBoot(t)
+			newer := []byte(`{"users":[],"default_auth_outcome":"Default"}`) // the revocation of user
+			c := configuredRosterCfg(t, false)
+			swapCfgForRosterDurability(t, c)
+			prev := rosterRewriteInPlace
+			rosterRewriteInPlace = func(p string, d []byte, fi os.FileInfo) error {
+				write(t, p, newer)
+				return prev(p, d, fi)
+			}
+			t.Cleanup(func() { rosterRewriteInPlace = prev })
+
+			c.SetUIUsersFile(path)
+			out := captureLogger(t, func() {
+				if err := c.LoadUIUsersFile(); err != nil {
+					t.Fatalf("LoadUIUsersFile: %v", err)
+				}
+			})
+
+			if got, _ := os.ReadFile(path); !bytes.Equal(got, newer) { // #nosec G304 -- test temp path
+				t.Fatalf("the newer roster was overwritten by the boot rewrite: disk holds %q", got)
+			}
+			if !loadedHasUser(c, user) {
+				t.Errorf("the roster loaded before the change is not the one in use")
+			}
+			if _, werr := c.rosterWriteEvidence(); !errors.Is(werr, fileutil.ErrConcurrentChange) {
+				t.Errorf("evidence error = %v, want ErrConcurrentChange", werr)
+			}
+			row := checkAdminRosterDurability()
+			if row.Status != diagWarn || row.Message != rosterTargetChangedAtBoot {
+				t.Errorf("row = %+v, want warn %q", row, rosterTargetChangedAtBoot)
+			}
+			if !strings.Contains(row.OperatorAction, "Restart") {
+				t.Errorf("action = %q, want the restart-to-load remedy", row.OperatorAction)
+			}
+			if n := strings.Count(out, "changed on disk while it was loaded at startup"); n != 1 {
+				t.Errorf("logged %d concurrent-change line(s), want exactly 1:\n%s", n, out)
+			}
+			if want := fmt.Sprintf("%q", sanitizeLog(path)); !strings.Contains(out, want) {
+				t.Errorf("log does not name the path as %s:\n%s", want, out)
+			}
+			entries, err := os.ReadDir(filepath.Dir(path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Errorf("%d directory entries after the rewrite, want only the roster", len(entries))
+			}
+		})
+	}
+}
+
+// TestLoadUIUsersFile_UnsupportedExchangeIsUnverified: where no atomic
+// exchange exists the roster is not rewritten (same inode, same bytes) and the
+// row is warn/unverified with the first-save remedy, until a save lands.
+func TestLoadUIUsersFile_UnsupportedExchangeIsUnverified(t *testing.T) {
+	path, user, data := seedRosterFileForBoot(t)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := configuredRosterCfg(t, false)
+	swapCfgForRosterDurability(t, c)
+	prev := rosterRewriteInPlace
+	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo) error {
+		return fmt.Errorf("rewrite in place %s: %w", p, fileutil.ErrRewriteUnsupported)
+	}
+	t.Cleanup(func() { rosterRewriteInPlace = prev })
+
+	c.SetUIUsersFile(path)
+	out := captureLogger(t, func() {
+		if err := c.LoadUIUsersFile(); err != nil {
+			t.Fatalf("LoadUIUsersFile: %v", err)
+		}
+	})
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("the roster was replaced although the exchange is unsupported")
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, data) { // #nosec G304 -- test temp path
+		t.Errorf("roster bytes changed: %q", got)
+	}
+	if !loadedHasUser(c, user) {
+		t.Errorf("roster account %q not loaded", user)
+	}
+	row := checkAdminRosterDurability()
+	if row.Status != diagWarn || row.Message != rosterTargetRewriteUnsupported {
+		t.Errorf("row = %+v, want warn %q", row, rosterTargetRewriteUnsupported)
+	}
+	if !strings.Contains(row.OperatorAction, "first admin account change") {
+		t.Errorf("action = %q, want the first-save remedy", row.OperatorAction)
+	}
+	if n := strings.Count(out, "no atomic exchange"); n != 1 {
+		t.Errorf("logged %d unsupported line(s), want exactly 1:\n%s", n, out)
+	}
+	_, viewer := durabilityRowAt(t, RoleViewer)
+	if viewer.Status != diagWarn || viewer.Message != rosterDurabilityViewerNotDurable {
+		t.Errorf("viewer row = %+v, want the fixed not-durable message", viewer)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+	if row := checkAdminRosterDurability(); row.Status != diagOK {
+		t.Errorf("after a landed save: row = %+v, want ok", row)
+	}
+}
+
+// TestLoadUIUsersFile_FailedRestoreIsReportedLoudly: if the exchange back
+// fails, the row and the log both say the newer roster is in a preserved temp
+// file and the roster in use is the older one.
+func TestLoadUIUsersFile_FailedRestoreIsReportedLoudly(t *testing.T) {
+	path, _, _ := seedRosterFileForBoot(t)
+	c := configuredRosterCfg(t, false)
+	swapCfgForRosterDurability(t, c)
+	preserved := path + ".tmp.12345"
+	prev := rosterRewriteInPlace
+	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo) error {
+		return fmt.Errorf("rewrite in place %s: the newer content is preserved at %s: %w", p, preserved,
+			fileutil.ErrExchangeBackFailed)
+	}
+	t.Cleanup(func() { rosterRewriteInPlace = prev })
+
+	c.SetUIUsersFile(path)
+	out := captureLogger(t, func() {
+		if err := c.LoadUIUsersFile(); err != nil {
+			t.Fatalf("LoadUIUsersFile: %v", err)
+		}
+	})
+	row := checkAdminRosterDurability()
+	if row.Status != diagWarn || row.Message != rosterTargetRestoreFailed {
+		t.Errorf("row = %+v, want warn %q", row, rosterTargetRestoreFailed)
+	}
+	if !strings.Contains(row.OperatorAction, "Do not make admin account changes") {
+		t.Errorf("action = %q, want the recover-the-preserved-file remedy", row.OperatorAction)
+	}
+	if strings.Contains(row.Message+row.OperatorAction, path) {
+		t.Errorf("row names the path: %+v", row)
+	}
+	if n := strings.Count(out, "CHANGED ON DISK during the startup rewrite"); n != 1 {
+		t.Errorf("logged %d restore-failure line(s), want exactly 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, sanitizeLog(preserved)) {
+		t.Errorf("log does not name the preserved file %q:\n%s", preserved, out)
 	}
 }

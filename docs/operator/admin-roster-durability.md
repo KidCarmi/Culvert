@@ -190,26 +190,54 @@ administrative decision was affected, and therefore what the operator must redo.
    for "not durable" or "a change was refused", and nothing for a degraded
    login-time write (SEC-DIAG-ROSTER-1).
 
-   **The roster file is rewritten in place once at every boot.** After
-   `ui_users.json` loads, Culvert writes the exact bytes it read back onto the
-   same path, with the file's own permission bits (and owner and group where
-   the process may set them), through the same temp-file-and-rename every
-   roster save uses. The content does not change, but the file gets a **new
-   inode and mtime** at each start, as it does at each save. That write is the
-   row's evidence: it is `ok` only if it landed, or a later roster save did.
-   Nothing short of a real write to the real file can tell: a stat passes on a
-   read-only mount, and a test file created and renamed beside the roster
-   passes in a sticky (`1777`) or ACL-restricted directory where the roster
-   belongs to another user — only the rename over *that* file is refused. If
-   the rewrite is refused, boot continues and the roster is used read-only;
+   **On Linux, the roster file is rewritten in place once at every boot.**
+   After `ui_users.json` loads, Culvert writes the exact bytes it read into a
+   temp file beside it, with the file's own permission bits (and owner and
+   group where the process may set them), and atomically **exchanges** that
+   temp file with the roster (`renameat2` `RENAME_EXCHANGE`). The content does
+   not change, but the file gets a **new inode and mtime** at each start, as it
+   does at each save. That write is the row's evidence: it is `ok` only if it
+   landed, or a later roster save did. Nothing short of a real write to the
+   real file can tell: a stat passes on a read-only mount, and a test file
+   created and renamed beside the roster passes in a sticky (`1777`) or
+   ACL-restricted directory where the roster belongs to another user. The
+   exchange is subject to the same permission checks as the rename every save
+   performs (verified as a non-root user: a root-owned roster in a `1777`
+   directory refuses both with `EPERM`), so a refused exchange is exact
+   evidence that saves will be refused.
+
+   **The rewrite never overwrites a newer roster.** Culvert serialises its own
+   roster writers, but a configuration manager or an operator can replace the
+   file at any moment. After the exchange, Culvert compares the file it
+   displaced with what it loaded (bytes, mode, owner). If they differ, it
+   swaps the newer file straight back, logs one `UIUsers: admin roster
+   "<path>" changed on disk while it was loaded at startup` line, and the row
+   stays `warn`: the roster **in use** is the one loaded before that change,
+   so restart to load the newer file, and make no admin account change until
+   then (a save writes the roster in use over it). If swapping back fails, the
+   newer content is left in a `ui_users.json.tmp.*` file beside the roster —
+   never deleted — and a `CHANGED ON DISK` line names it; move it back over
+   the roster and restart. A writer that keeps the old file open across the
+   exchange and writes through that descriptor afterwards can still lose its
+   write, exactly as it can against any save.
+
+   **Elsewhere, the roster is not rewritten.** Without an atomic exchange
+   (macOS, Windows, other non-Linux platforms, or a Linux kernel or filesystem
+   that rejects `RENAME_EXCHANGE`) a replace could destroy a concurrent change,
+   so Culvert writes nothing at boot, logs one line, and the row is `warn`
+   (*not proven that admin account changes can be saved*) until the first
+   admin account change is saved; if that change is refused, fix the path and
+   restart.
+
+   If the rewrite is refused, boot continues and the roster is used read-only;
    one `UIUsers: admin roster "<path>" loaded, but could not be rewritten in
    place at startup` line names the cause, and the row stays `warn` (admins
-   get the fix-path-and-restart remedy) until a write lands. The rewrite is not
-   an admin change: no audit entry, configuration version, roster counter,
-   storage-health event or alert. A symlinked roster path is not rewritten
-   (a save replaces the link with a regular file); point `-ui-users-file` at
-   the real file. Like every save, the rename does not carry file-level ACLs
-   or extended attributes over to the new inode.
+   get the fix-path-and-restart remedy) until a write lands. The rewrite is
+   not an admin change: no audit entry, configuration version, roster
+   counter, storage-health event or alert. A symlinked roster path is not
+   rewritten (a save replaces the link with a regular file); point
+   `-ui-users-file` at the real file. Like every save, the new inode does not
+   carry file-level ACLs or extended attributes over.
 2. `culvert_admin_roster_persist_failures_total` is climbing, or an operator
    reports a `500` from a user-management action.
 3. Check the process log for `UIUsers: REFUSED` lines — each names the action and

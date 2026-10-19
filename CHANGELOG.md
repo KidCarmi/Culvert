@@ -1307,21 +1307,29 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
   `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
   Admin Users panel hint and are deliberately absent from `/api/stats`.
-- `ui_users.json` is now **rewritten in place once at every boot**, after it
-  loads: the exact bytes read, the file's own mode (owner and group where the
-  process may set them), through AtomicWrite's temp-file-and-rename
-  (`fileutil.RewriteInPlace`). Content is unchanged, but the file gets a new
+- On Linux, `ui_users.json` is now **rewritten in place once at every boot**,
+  after it loads: the exact bytes read, the file's own mode (owner and group
+  where the process may set them), written to a temp file that is atomically
+  exchanged with the roster (`renameat2` `RENAME_EXCHANGE`,
+  `fileutil.RewriteInPlace`). Content is unchanged, but the file gets a new
   inode and mtime at each start. This write is the `admin_roster_durability`
   row's evidence (it is `ok` only if the rewrite or a later save landed),
   because nothing short of it is exact: a readable roster on a read-only mount
   passes a stat, and one owned by another user in a sticky (`1777`) or
   ACL-restricted directory passes a create-and-rename test on scratch files,
-  yet the first admin change's rename over it is refused. A refused rewrite
-  never stops boot (the roster is used read-only, one log line names the
-  cause) and is not an admin mutation: no audit entry, configuration version,
-  roster counter, storage-health event or alert. A symlinked roster path is
-  left alone and reported. A configured roster file that does not exist yet
-  reads `warn` until the first roster save creates it.
+  yet the first admin change's rename over it is refused; the exchange is
+  refused by the same checks. The rewrite **never overwrites a newer roster**:
+  the file the exchange displaced is compared with what was loaded, and a
+  configuration manager's or operator's concurrent change is swapped straight
+  back (row `warn`, restart to load it); if that swap fails, the newer content
+  is kept in a `ui_users.json.tmp.*` file the log names. Without an atomic
+  exchange (non-Linux platforms, or a kernel or filesystem without it) the
+  roster is not rewritten and the row is `warn` until the first admin change
+  is saved. A refused rewrite never stops boot (the roster is used read-only,
+  one log line names the cause) and is not an admin mutation: no audit entry,
+  configuration version, roster counter, storage-health event or alert. A
+  symlinked roster path is left alone and reported. A configured roster file
+  that does not exist yet reads `warn` until the first roster save creates it.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

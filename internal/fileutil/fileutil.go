@@ -1,6 +1,7 @@
 // Package fileutil provides durable filesystem helpers shared by package main
 // and internal/* packages (ADR-0003). It has no dependency on the rest of
-// Culvert (stdlib only).
+// Culvert: the standard library, plus golang.org/x/sys/unix on Linux for the
+// renameat2 exchange RewriteInPlace needs (rewrite_linux.go).
 package fileutil
 
 import (
@@ -101,47 +102,38 @@ func noteWriteFailure(path string, err error) error {
 // Every failure branch additionally notifies the write-failure observer
 // (CHAOS-45) so error-discarding callers cannot fail silently.
 func AtomicWrite(path string, data []byte, perm os.FileMode) error {
-	if err := atomicWrite(path, data, perm, nil); err != nil {
+	if err := atomicWrite(path, data, perm); err != nil {
 		return noteWriteFailure(path, err)
 	}
 	noteWriteSuccess(path)
 	return nil
 }
 
-// RewriteInPlace replaces path with data through exactly AtomicWrite's
-// sequence (unique temp beside path, write, chmod, fsync, rename over path,
-// parent-directory fsync, with the same errors and the same
-// ErrReplacedNotSynced contract), taking the permission bits from orig, the
-// FileInfo of the file being replaced, and on Unix best-effort preserving its
-// owner and group (chown of the temp before the rename; refused silently when
-// the process may not give a file away, as an unprivileged one may not).
-//
-// It exists for a caller that rewrites a file with the bytes it just read, to
-// obtain exact evidence that a later AtomicWrite to the same target can land:
-// the rename over the real target is the step a sticky or ACL-restricted
-// directory refuses to a non-owner, which no scratch-file test reproduces.
-//
-// Unlike AtomicWrite it does NOT notify the write observers. Such a rewrite
-// persists no new state, so reporting it to the storage-health plane would be
-// wrong in both directions: a failure would count and log as lost persisted
-// state (and consume the storage_write_failed alert gate), and a success would
-// be taken as recovery evidence for an unrelated failing store.
-func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
-	return atomicWrite(path, data, orig.Mode().Perm(), func(f *os.File) {
-		preserveOwner(f, orig)
-	})
+// atomicWrite is AtomicWrite's body without the observer notifications.
+func atomicWrite(path string, data []byte, perm os.FileMode) error {
+	const op = "atomic write"
+	tmp, err := writeTempBeside(op, path, data, perm, nil)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp) // #nosec G104 -- best-effort cleanup
+		return fmt.Errorf("%s %s: rename: %w", op, path, err)
+	}
+	return syncParentDir(op, path)
 }
 
-// atomicWrite is AtomicWrite's body without the observer notifications.
-// beforeRename, when non-nil, runs on the fully written, fsynced temp file
-// just before it is renamed over path.
-func atomicWrite(path string, data []byte, perm os.FileMode, beforeRename func(*os.File)) error {
+// writeTempBeside creates a unique temp file in path's directory holding data
+// at perm, fsynced and closed, and returns its name. beforeClose, when
+// non-nil, runs on the fully written, fsynced file just before it is closed.
+// On error nothing is left behind. Errors are prefixed "<op> <path>: <stage>".
+func writeTempBeside(op, path string, data []byte, perm os.FileMode, beforeClose func(*os.File)) (string, error) {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 
 	f, err := os.CreateTemp(dir, base+".tmp.*")
 	if err != nil {
-		return fmt.Errorf("atomic write %s: create temp: %w", path, err)
+		return "", fmt.Errorf("%s %s: create temp: %w", op, path, err)
 	}
 	tmp := f.Name()
 	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
@@ -149,31 +141,33 @@ func atomicWrite(path string, data []byte, perm os.FileMode, beforeRename func(*
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		cleanup()
-		return fmt.Errorf("atomic write %s: write: %w", path, err)
+		return "", fmt.Errorf("%s %s: write: %w", op, path, err)
 	}
 	if err := f.Chmod(perm); err != nil {
 		_ = f.Close()
 		cleanup()
-		return fmt.Errorf("atomic write %s: chmod: %w", path, err)
+		return "", fmt.Errorf("%s %s: chmod: %w", op, path, err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		cleanup()
-		return fmt.Errorf("atomic write %s: fsync: %w", path, err)
+		return "", fmt.Errorf("%s %s: fsync: %w", op, path, err)
 	}
-	if beforeRename != nil {
-		beforeRename(f)
+	if beforeClose != nil {
+		beforeClose(f)
 	}
 	if err := f.Close(); err != nil {
 		cleanup()
-		return fmt.Errorf("atomic write %s: close: %w", path, err)
+		return "", fmt.Errorf("%s %s: close: %w", op, path, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write %s: rename: %w", path, err)
-	}
+	return tmp, nil
+}
 
-	d, err := os.Open(dir)
+// syncParentDir best-effort fsyncs path's directory after a rename into it.
+// A failure the platform reports as unsupported is not an error; any other
+// is returned wrapping ErrReplacedNotSynced (the rename already landed).
+func syncParentDir(op, path string) error {
+	d, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		// Best-effort: opening a directory for sync is not portable. The data
 		// is already renamed into place, so this is a successful durable write.
@@ -188,10 +182,10 @@ func atomicWrite(path string, data []byte, perm os.FileMode, beforeRename func(*
 		// Post-rename failure: the target already carries the new content —
 		// mark it so compensating-rollback callers can tell (see
 		// ErrReplacedNotSynced).
-		return fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", path, syncErr, ErrReplacedNotSynced)
+		return fmt.Errorf("%s %s: parent dir fsync: %w: %w", op, path, syncErr, ErrReplacedNotSynced)
 	}
 	if closeErr != nil && syncErr == nil {
-		return fmt.Errorf("atomic write %s: parent dir close: %w: %w", path, closeErr, ErrReplacedNotSynced)
+		return fmt.Errorf("%s %s: parent dir close: %w: %w", op, path, closeErr, ErrReplacedNotSynced)
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/session"
 	"github.com/KidCarmi/Culvert/internal/upstream"
 )
@@ -896,6 +897,30 @@ type rosterDurabilityFacts struct {
 const rosterTargetFirstWritePending = "the configured roster file does not exist yet and no roster write has " +
 	"landed since startup, so it is not proven that admin account changes can be saved"
 
+// rosterTargetRewriteUnsupported is the targetProblem when the boot rewrite
+// was not attempted because no atomic exchange is available (any non-Linux
+// platform, or a kernel or filesystem without renameat2 RENAME_EXCHANGE): a
+// plain replace could destroy a concurrent external change (Codex P2
+// 4315243806 on PR #1601), so the path stays unproven until a save lands.
+// Same remedy as rosterTargetFirstWritePending: restarting does not help.
+const rosterTargetRewriteUnsupported = "the configured roster file was not rewritten at startup, because this " +
+	"platform or filesystem cannot replace it without risking a concurrent change, so it is not proven that " +
+	"admin account changes can be saved"
+
+// rosterTargetChangedAtBoot is the targetProblem when the roster changed on
+// disk while it was loaded or rewritten at startup: the newer file was kept,
+// but it is not the roster in use, and no write has been proven.
+const rosterTargetChangedAtBoot = "the configured roster file changed on disk while it was loaded at startup; " +
+	"the newer file was kept, but the roster in use is the one loaded before that change, and no write to it " +
+	"has been proven"
+
+// rosterTargetRestoreFailed is the targetProblem when the boot rewrite saw a
+// concurrent change and could not put the newer file back: its content is in
+// a temporary file beside the roster (the process log names it).
+const rosterTargetRestoreFailed = "the configured roster file changed on disk during the startup rewrite and " +
+	"the newer file could not be restored to it: it is preserved in a temporary file beside the roster (named " +
+	"in the process log), and the roster file and the roster in use are the older version"
+
 // rosterTargetProblem reports why a configured roster path cannot hold the
 // roster, or "" when a write to it is known to land. READ-ONLY: it stats the
 // target and its parent directory and reads the RECORDED write evidence
@@ -952,9 +977,12 @@ func rosterWriteProblem(missing, tried bool, writeErr error) string {
 	case errors.Is(writeErr, errRosterIsSymlink):
 		return "the configured roster path is a symbolic link; it was not rewritten at startup because a " +
 			"save replaces the link with a regular file"
-	case errors.Is(writeErr, errRosterChangedDuringLoad):
-		return "the configured roster file changed on disk while it was loaded at startup, so it was not " +
-			"rewritten and no write to it has been proven"
+	case errors.Is(writeErr, fileutil.ErrRewriteUnsupported):
+		return rosterTargetRewriteUnsupported
+	case errors.Is(writeErr, fileutil.ErrExchangeBackFailed):
+		return rosterTargetRestoreFailed
+	case errors.Is(writeErr, errRosterChangedDuringLoad), errors.Is(writeErr, fileutil.ErrConcurrentChange):
+		return rosterTargetChangedAtBoot
 	case writeErr != nil:
 		return "the configured roster file could not be rewritten in place at startup (a read-only or " +
 			"permission-denied volume, or a directory that does not let this process replace the file, " +
@@ -1001,18 +1029,8 @@ func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
 		row.Message = "initial setup is not complete; there are no admin credentials to persist yet"
 	case !f.persisted:
 		row = f.notDurableAdminRow()
-	case f.targetProblem == rosterTargetFirstWritePending:
-		row.Status = diagWarn
-		row.Message = f.targetProblem
-		row.OperatorAction = "The first admin account change creates the file and clears this warning. If that " +
-			"change is refused, fix the admin users file (-ui-users-file) path or its permissions so it names a " +
-			"writable regular file on a persistent volume, restart, and re-apply the change."
 	case f.targetProblem != "":
-		row.Status = diagWarn
-		row.Message = f.targetProblem + " — admin account deletes, role changes and password rotations " +
-			"may not be saved and can be LOST on restart"
-		row.OperatorAction = "Fix the admin users file (-ui-users-file) path or its permissions so it names a " +
-			"writable regular file on a persistent volume, then restart and re-apply any account changes made since boot."
+		row = targetProblemAdminRow(f.targetProblem)
 	case f.refused == 0 && f.degraded == 0:
 		row.Message = "admin roster is persisting to disk"
 	default:
@@ -1024,6 +1042,31 @@ func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
 			"then re-apply the refused change from Administrators — nothing retries it automatically. If login-time " +
 			"writes failed, rotate the affected administrator's TOTP backup codes once the volume is healthy. " +
 			"The counts clear on restart."
+	}
+	return row
+}
+
+// targetProblemAdminRow is the admin rendering of a configured roster file
+// that is unusable or unproven, with the remedy that fits the reason.
+func targetProblemAdminRow(problem string) OperatorContractCheck {
+	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagWarn, Message: problem}
+	switch problem {
+	case rosterTargetFirstWritePending, rosterTargetRewriteUnsupported:
+		row.OperatorAction = "The first admin account change that is saved proves the file and clears this " +
+			"warning. If that change is refused, fix the admin users file (-ui-users-file) path or its permissions " +
+			"so it names a writable regular file on a persistent volume, restart, and re-apply the change."
+	case rosterTargetChangedAtBoot:
+		row.OperatorAction = "Restart to load the roster file as it now is on disk. Until then, do not make admin " +
+			"account changes: saving one writes the roster in use over the newer file."
+	case rosterTargetRestoreFailed:
+		row.OperatorAction = "Do not make admin account changes. Find the preserved ui_users.json.tmp.* file the " +
+			"process log names, check it is the intended roster, move it over the admin users file (-ui-users-file), " +
+			"and restart."
+	default:
+		row.Message = problem + " — admin account deletes, role changes and password rotations " +
+			"may not be saved and can be LOST on restart"
+		row.OperatorAction = "Fix the admin users file (-ui-users-file) path or its permissions so it names a " +
+			"writable regular file on a persistent volume, then restart and re-apply any account changes made since boot."
 	}
 	return row
 }

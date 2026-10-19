@@ -873,8 +873,8 @@ type Config struct {
 	// uiUsersWriteTried / uiUsersWriteErr are the admin_roster_durability
 	// row's ONLY evidence that a write to uiUsersFile can land (Codex P2s on
 	// PR #1601): the outcome of the boot rewrite LoadUIUsersFile performs
-	// after a successful load — the loaded bytes written back onto the real
-	// target through AtomicWrite's own sequence (rewriteLoadedRoster) — and,
+	// after a successful load — the loaded bytes exchanged onto the real
+	// target, never over a concurrent change (rewriteLoadedRoster) — and,
 	// after it, of any roster save that lands. A stat cannot supply this: a
 	// readable roster on a read-only mount, or one owned by another user in a
 	// sticky directory, stats exactly like a writable one, and only the
@@ -1576,8 +1576,11 @@ type uiUsersFileEnvelope struct {
 // once, with the exact bytes it read and the file's own mode
 // (rewriteLoadedRoster), and records the outcome as the durability row's
 // evidence (rosterWriteEvidence). That write is the real thing — the same
-// temp-create and rename over the real target every roster save performs — so
-// the row reports the roster as persisting only when a save could land. It is
+// temp-create a roster save performs, then an atomic exchange with the real
+// target that the same permission checks govern and that is undone if the
+// target changed concurrently — so the row reports the roster as persisting
+// only when a save could land. Where no exchange exists nothing is written
+// and the row stays unverified until a save lands. It is
 // NOT an admin mutation: it changes no roster content, writes no audit entry
 // or configuration version, and notifies no write observer. Its failure is
 // not this call's error: the roster loaded and is served read-only as before,

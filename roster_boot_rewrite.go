@@ -12,8 +12,25 @@ package main
 //
 // So LoadUIUsersFile writes the roster back once, in place, with the exact
 // bytes it just parsed and the file's own mode (owner and group preserved
-// where the process may set them), through fileutil.RewriteInPlace — the
-// AtomicWrite sequence itself. Its outcome is the row's evidence. Exact bytes
+// where the process may set them), through fileutil.RewriteInPlace. Its
+// outcome is the row's evidence.
+//
+// The rewrite must never destroy content it did not load (Codex P2
+// 4315243806 on PR #1601). saveUIUsersMu serialises only Culvert's own
+// writers; an external one (a configuration manager, an operator) can replace
+// the file after checkRosterUnchanged, and a rename would then silently put
+// the older bytes back — undoing a credential rotation, role change or
+// revocation. So RewriteInPlace EXCHANGES its temp file with the roster
+// (Linux renameat2 RENAME_EXCHANGE), compares what it displaced with what was
+// loaded, and swaps a mismatch straight back (ErrConcurrentChange; if that
+// fails, the newer content is left in the temp file and ErrExchangeBackFailed
+// names it). The exchange is subject to rename(2)'s permission checks on the
+// roster, so a refusal is still the evidence a save would be refused. Where
+// there is no exchange (non-Linux, or a kernel or filesystem without it) it
+// writes nothing (ErrRewriteUnsupported) and the row stays "not verified"
+// until the first save lands.
+//
+// Exact bytes
 // rather than SaveUIUsersFile's re-serialisation, because that is not a pure
 // normalisation: it reorders accounts (map iteration), drops unknown fields,
 // converts a legacy bare-array file to the envelope, adds default_auth_outcome
@@ -29,8 +46,8 @@ package main
 // fires no alert of its own either: the row reports the state, and the one log
 // line below says what to fix.
 //
-// The file gets a new inode and mtime at every boot (as at every save). Its
-// content and permission bits do not change.
+// On Linux the file gets a new inode and mtime at every boot (as at every
+// save). Its content and permission bits do not change.
 
 import (
 	"errors"
@@ -60,7 +77,8 @@ var (
 
 // rosterRewriteInPlace is the boot rewrite's write step. A package-level seam
 // so a test can inject the refusal a non-owner gets in a sticky directory or
-// on a read-only mount: CI runs as root, which bypasses both.
+// on a read-only mount (CI runs as root, which bypasses both), an unsupported
+// exchange, or an external write that lands just before the real one.
 var rosterRewriteInPlace = fileutil.RewriteInPlace
 
 // readRosterFile reads path and the FileInfo of exactly the file it read.
@@ -83,18 +101,33 @@ func readRosterFile(path string) (*loadedRosterFile, error) {
 
 // rewriteLoadedRoster writes loaded back onto path and returns the outcome
 // the durability row records. ErrReplacedNotSynced counts as landed, exactly
-// as it does for an admin mutation: the rename happened. A failure is logged
-// once (LoadUIUsersFile runs once per configured path) and never stops boot.
+// as it does for an admin mutation: the exchange happened. Any other outcome
+// is logged once (LoadUIUsersFile runs once per configured path) and never
+// stops boot.
 func rewriteLoadedRoster(path string, loaded *loadedRosterFile) error {
 	err := checkRosterUnchanged(path, loaded)
 	if err == nil {
 		err = rosterRewriteInPlace(path, loaded.data, loaded.info)
 	}
-	if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+	switch {
+	case err == nil:
+	case errors.Is(err, fileutil.ErrReplacedNotSynced):
 		logRosterBootRewrite("rewritten in place at startup, but its directory could not be fsynced afterward", path, err)
 		return nil
-	}
-	if err != nil {
+	case errors.Is(err, fileutil.ErrRewriteUnsupported):
+		logRosterBootRewrite("was not rewritten in place at startup: this platform or filesystem has no atomic "+
+			"exchange, and a plain replace could destroy a concurrent change, so whether admin account changes "+
+			"can be saved is unverified until the first one is", path, err)
+	case errors.Is(err, fileutil.ErrExchangeBackFailed):
+		logRosterBootRewrite("CHANGED ON DISK during the startup rewrite, and the newer file could NOT be "+
+			"restored to the roster path: it is preserved at the temporary path in this message, and the roster "+
+			"file and the roster in use are the OLDER version. Make no admin account changes; move the preserved "+
+			"file over the roster path and restart", path, err)
+	case errors.Is(err, fileutil.ErrConcurrentChange), errors.Is(err, errRosterChangedDuringLoad):
+		logRosterBootRewrite("changed on disk while it was loaded at startup; the newer file was kept and "+
+			"the rewrite is not verified. The roster in use predates that change: restart to load it, and make "+
+			"no admin account change until then (saving one would overwrite it)", path, err)
+	default:
 		logRosterBootRewrite("loaded, but could not be rewritten in place at startup — it is in use read-only, "+
 			"and every admin account change will be REFUSED until the path or its permissions are fixed "+
 			"and the process restarted", path, err)
