@@ -47,20 +47,22 @@ env:
   # positional socks5 bind-order test superseded by the behavioral CHAOS-66
   # test. It carries every badger/ristretto F-DISK-1 fix and the 1.5.4 sidecar.
   # obtain-image.sh falls back to the lab-preserved copy
-  # (lab-source-image-39287948530) if the deep-gate artifact has expired.
-  SOURCE_IMAGE_RUN_ID: "39287948530"
-  SOURCE_IMAGE_TAR_SHA256: 6caf36dba5240fb2977ae52191139ddfbe080314d258080766d0ab9270da622a
+  # (lab-source-image-39336581431) if the deep-gate artifact has expired.
+  SOURCE_IMAGE_RUN_ID: "39336581431"
+  SOURCE_IMAGE_TAR_SHA256: eb9e1d40dfe0a0acb027f1ad775fbb8ee58478cc9080bc4c3626e921abf30c81
   # The source those image bytes were built from; the F-DISK job builds its
   # maintenance agent from here so no lab-branch binary stands in for it. This
-  # is the PR #1528 HEAD commit 8d3ca1c7, the commit the deep-gate image's
-  # VERSION stamp names (v1.0.268-candidate.g8d3ca1c75c4e) and the commit
-  # build-ova.sh's candidate-source guard requires: build-ova checks the image
-  # VERSION stamp (.github/scripts/pr-candidate-version.sh, head-sha based) AND
-  # that --candidate-source == the provisioning checkout's HEAD, so both must be
-  # the head. GitHub built the image from the ephemeral merge ref 041d200d, but
-  # that merge tree is byte-identical to the head tree (git: both 8847c37f), so
-  # provisioning + the agent built from the head match the image's source.
-  SOURCE_IMAGE_SHA: 8d3ca1c75c4ed504e3e7baf1af6a4335a4b940b9
+  # is the PR #1528 HEAD commit 4524311b (F-DISK-RECOVERY-1 head c54e61a3 with
+  # origin/main merged in so the branch is up to date with base), the commit the
+  # deep-gate image's VERSION stamp names (v1.0.269-candidate.g4524311ba974) and
+  # the commit build-ova.sh's candidate-source guard requires: build-ova checks
+  # the image VERSION stamp (.github/scripts/pr-candidate-version.sh, head-sha
+  # based) AND that --candidate-source == the provisioning checkout's HEAD, so
+  # both must be the head. Because the branch is up to date with base, GitHub's
+  # refs/pull/1528/merge resolves to the head itself, so the image was built
+  # from 4524311b directly (stamp g4524311b) — no merge-tree-equivalence
+  # argument needed; provisioning + the agent built from the head match it.
+  SOURCE_IMAGE_SHA: 4524311ba9743abcf9df05e9955e2842eb48168c
 
 jobs:
   guest-boot:
@@ -111,47 +113,47 @@ jobs:
           # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
           # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
           # sidecar delivered > 0).
-          - variant: candidate-8d3ca1c7
+          - variant: candidate-4524311b
             provisioning: source
-            # The #1528-closeout candidate: PR HEAD commit 8d3ca1c7 (binary
-            # VERSION stamp v1.0.268-candidate.g8d3ca1c75c4e), the commit the
-            # deep-gate image (run 39287948530) was version-stamped from and the
+            # The F-DISK-RECOVERY-1 candidate: PR HEAD commit 4524311b (binary
+            # VERSION stamp v1.0.269-candidate.g4524311ba974), the commit the
+            # deep-gate image (run 39336581431) was version-stamped from and the
             # commit build-ova.sh's candidate-source guard requires (it checks
             # the VERSION stamp AND source==provisioning-checkout, both the
-            # head). GitHub built the image from the ephemeral merge ref
-            # 041d200d, whose tree is byte-identical to the head tree (git: both
-            # 8847c37f), so the agent built here from the head matches the
-            # image's source. 8d3ca1c7 = a2b52abc (the prior candidate) + the SSO
-            # bare-provider vs sso-ip:<provider> source-contract fix + the
-            # boot-progress failed-unit-name fix + origin/main merged in
-            # (CHAOS-71 CP-gRPC listener recovery, CHAOS-74 catdb runtime
-            # memory-fault containment, release-dispatch panic containment,
-            # SECBASIC roster-leak test fix) + the corrected Docker fixable-HIGH
-            # attribution doc + removal of a redundant positional socks5
-            # bind-order test superseded by the behavioral CHAOS-66 test. It
-            # carries every badger/ristretto F-DISK-1 fix and the 1.5.4 sidecar.
-            # BUILDS a fresh OVA and runs the FULL qualify; the recovery leg
-            # (disk=dm, 3 reboots on the no-latency `fast` profile) exercises the
-            # bounded operator status-json probe under real reboots, and its
-            # per-sample evidence (R-*-operator-probe.jsonl) is the rule-4
-            # transport-vs-not-ready split. Guest-content fingerprint differs
-            # from the e24eb542 reference by the changed binaries (recorded
-            # warning, not a gate).
-            source_sha: "8d3ca1c75c4ed504e3e7baf1af6a4335a4b940b9"
-            image_run: "39287948530"
-            image_tar_sha256: "6caf36dba5240fb2977ae52191139ddfbe080314d258080766d0ab9270da622a"
+            # head). Because the branch is up to date with base main, GitHub's
+            # refs/pull/1528/merge resolves to the head itself, so the image was
+            # built from 4524311b directly (stamp g4524311b) and the agent built
+            # here from the head matches the image's source — no merge-tree-
+            # equivalence argument needed. 4524311b = c54e61a3 (the F-DISK-
+            # RECOVERY-1 fix) + origin/main merged in (clean; HA/cluster files
+            # only, F-DISK fix byte-identical). c54e61a3 = 8d3ca1c7 (the prior
+            # candidate) + the F-DISK-RECOVERY-1 cross-subsystem fix: a durable
+            # import-pending intent written before any risky badger write
+            # (internal/storeguard/importguard.go, internal/catdb BeginImport/
+            # CompleteImport), interrupted-import quarantine+rebuild on the next
+            # open (storeguard recoverBeforeOpen least-severe third case,
+            # TriggerInterruptedImport), and a feedsync BulkWrite watchdog that
+            # surfaces a contained/stalled mid-write as a sync failure without
+            # waiting for BulkWrite to return. It carries every prior badger/
+            # ristretto F-DISK-1 fix and the 1.5.4 sidecar. BUILDS a fresh OVA
+            # and runs the FULL qualify; the recovery leg (disk=dm, 3 reboots on
+            # the no-latency `fast` profile) exercises the bounded operator
+            # status-json probe under real reboots, and its per-sample evidence
+            # (R-*-operator-probe.jsonl) is the rule-4 transport-vs-not-ready
+            # split. Guest-content fingerprint differs from the e24eb542
+            # reference by the changed binaries (recorded warning, not a gate).
+            source_sha: "4524311ba9743abcf9df05e9955e2842eb48168c"
+            image_run: "39336581431"
+            image_tar_sha256: "eb9e1d40dfe0a0acb027f1ad775fbb8ee58478cc9080bc4c3626e921abf30c81"
             # The running appliance's image identity is the linux/amd64
-            # MANIFEST digest, which the deep-gate's containerd image store
-            # also uses as the OVA's own index digest (same digest class the
-            # harness reads as the running .Id and the class the prior
-            # candidate's passing pin used). Cold-loading the verified tar
-            # above reports it (run 39306980073: "culvert/candidate:sha-
-            # 8d3ca1c75c4e = sha256:58dd2cce… linux/amd64"), and the OVA
-            # index-digest == registry-baseline check binds it to that tar.
-            # NOT sha256:d6dfa590…, which is the OCI config BLOB digest (seen
-            # as "Copying config sha256:d6dfa590…" during the push) — a
-            # different field, mis-recorded in the first pin.
-            expect_image_id: "sha256:58dd2cce2965d5e4246a50f30564488d1f90fc000597504774a57f98e75750b0"
+            # MANIFEST digest (index.json manifests[0].digest), which the
+            # deep-gate's containerd image store also uses as the OVA's own
+            # index digest (same digest class the harness reads as the running
+            # .Id, derived by resolve-lab-pins.sh from the tar's index.json).
+            # NOT the OCI config BLOB digest sha256:fc622ce0…, a different
+            # field — the distinction the 8d3ca1c7 pin recorded (its config
+            # blob was d6dfa590…).
+            expect_image_id: "sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a"
             disk: dm
             recovery_profiles: "fast:0:0:60"
             recovery_reboots: "3"
