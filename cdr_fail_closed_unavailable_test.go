@@ -203,7 +203,7 @@ func (s *stageResponder) blockBeforeResponse(contentType, body string) {
 	s.ct, s.body = contentType, body
 }
 
-func (s *stageResponder) snapshot() (int, string) {
+func (s *stageResponder) snapshot() (calls int, page string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls, s.body
@@ -211,8 +211,8 @@ func (s *stageResponder) snapshot() (int, string) {
 
 func runStageForTest(t *testing.T, br blockResponder, body []byte) cdrStageDecision {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodConnect, "https://files.example.com:443", nil)
-	req := httptest.NewRequest(http.MethodGet, "https://files.example.com/downloads/invoice.docx", nil)
+	r := httptest.NewRequest(http.MethodConnect, "https://files.example.com:443", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "https://files.example.com/downloads/invoice.docx", http.NoBody)
 	return runCDRStage(r, req, body, body, "application/pdf", "", br,
 		"files.example.com", sampleID.ClientIP, sampleID)
 }
