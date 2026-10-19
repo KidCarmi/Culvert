@@ -95,6 +95,38 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-11 — `CHAOS-75` sweep (the release-dispatch plane's detached executor
+goroutines). Id claimed in a committed placeholder row as commit one**, per the
+convention the header above reaches twice independently after ten collisions;
+`CHAOS-74` was the highest id claimed on any open branch, so this one took 75 and
+did not move.
+
+Both dispatch entry points hand the upgrade to a goroutine that outlives its
+request, and neither had a panic tap — so a fault anywhere under
+`DispatchService` killed the proxy data plane, the admin plane and `/healthz`
+together, from one authenticated admin POST. That is the smaller half. The
+worker's only defer was `close(done)`, which fires DURING unwinding, before
+`rep, derr = …` lands, so a panicking worker woke the parked handler on a ZERO
+pair and `respondPreApply` fell through its `switch` to the `default` arm and
+answered **`200 {"status":"ok"}` for an upgrade that never started** — measured
+in **6 of 30** runs against `main` before the process died. The load-bearing
+result is what the obvious fix does: add `runGuarded` and nothing else, and the
+race resolves the WRONG way **10 times out of 10**, because the process now
+survives to deliver the false success — and `ownedAgent(nil, nil)` reads as
+owned, so it also writes an empty terminal over a possibly-running op's status
+slot. So the panic is converted into an explicit FAILED outcome
+(`errDispatchWorkerFailed` → 500) and, only when the agent had already accepted
+the apply, into a `FAILED_NEEDS_ATTN` record over the live `op_id` telling the
+operator to resume rather than re-dispatch; the no-outcome pair is rejected
+ahead of the switch, independently, so a future forgetful writer cannot
+reproduce it. The resume worker is deliberately asymmetric and writes nothing on
+a panic (its newer `dispatch_id` would WIN the slot under the store's ULID
+ordering and clobber the real owner). Left open with the reasoning recorded:
+**WK-22**, the resume authority lives only in an in-memory map although its type
+is documented as persistable, so a restart mid-upgrade loses the `op_id` — where
+it should persist is an owner decision that touches backup and cluster sync, not
+a thing to invent inside a sweep. See §43.
+
 **2026-10-10 — CHAOS-74 sweep (the memory-mapped category store after a
 healthy open). Id claimed in this row, per the convention above**; `CHAOS-70`
 was the highest MERGED id, and 71–73 are taken by sweeps that were still open
@@ -1228,6 +1260,10 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-17 | **The fail-closed scan-timeout refusal was cached with the CONTENT TTL** (1 h default), so seconds of scanner slowness blocked that exact object node-wide, for every user, for an hour after recovery — manual cache flush the only recourse. The ClamAV-error branch two lines above already refuses to cache for exactly this reason. | GAP → **CLOSED** (CHAOS-52: `hashcache.SetTTL` + `scanTimeoutCooldown` 30 s) | M | was: `internal/secscan/secscan.go` `ScanBody` timeout arm; now `SetTTL` — see §20 |
 | WK-18 | **An abandoned scan could overturn the fail-closed verdict.** On finishing, the abandoned goroutine wrote `Clean:true` over the refusal the user had just been served — a cached admission for the rest of the TTL, no counter, no log; whether an object was blocked or served was decided by a race. | GAP → **CLOSED** (CHAOS-52: `publishVerdict` tighten-only — a late BLOCK still publishes, a late CLEAN is discarded and counted; budget enforced from both sides so the `select` coin flip cannot launder an overrun) | **H** | was: `internal/secscan/secscan.go` `scanBodyInner` `cache.Set`; now `publishVerdict`/`noteLateCleanDiscarded` — see §20 |
 | WK-14 | Release-catalog autoseed: stage → read-only verify+freshness+rollback → atomic swap with move-aside `.bak` restore-on-failure; fail-closed, no unsigned auto-download. | ✓ | — | `release_autoseed.go:49-122,100-116` |
+| WK-20 | **The two detached release-dispatch goroutines had no panic tap**, so a fault anywhere under `DispatchService` — planner, agent HTTP client, digest classifier — killed the WHOLE process from one authenticated admin POST: proxy data plane, admin plane and `/healthz` together. Every other detached go-site has carried a guard since CHAOS-24, and this domain's own periodic loops carry one (`refreshLoopTick`/`staleWatchdogTick`, CHAOS-R1); the two goroutines that run the product's highest-consequence operation were the ones left open. | GAP → **CLOSED** (CHAOS-75: `runGuarded` + an explicit FAILED outcome; §43) | **H** | was: `release_api.go:664,830` bare `go func()`; now `recordDispatchPanic`/`runResumeWorker` — see §43 |
+| WK-21 | **`respondPreApply` answered `200 {"status":"ok"}` for a no-outcome dispatch.** The goroutine's only defer was `close(done)`, which fires DURING unwinding — before `rep, derr = …` lands — so a panicking worker woke the parked handler on a zero pair and it fell through the `switch` to the `default` 200. Measured: the false success shipped in **6 of 30** runs against `main` before the process died. **Containment alone makes it 10 of 10** — the obvious fix converts a 20 % race into a permanent, deterministic false success, and `ownedAgent(nil, nil)` additionally reads as owned and writes an empty terminal over another op's record. | GAP → **CLOSED** (CHAOS-75: no-outcome rejected ahead of the switch; the panic becomes `errDispatchWorkerFailed` → 500; §43) | **H** | was: `release_api.go` `respondPreApply` `default` arm — see §43 |
+| WK-22 | **The resume authority is not durable.** `DispatchResumeContext` is documented as "the explicit, persistable record needed to re-poll an in-flight dispatch op after a CP restart", and the only caller keeps it in `dispatchStore`'s in-memory `byAgent` map. A restart mid-upgrade — SIGTERM, OOM, node reboot, or the gateway upgrading itself — loses the `op_id`, and `resolveResumeContext` then has nothing to resolve: recovery degrades to an operator hand-assembling `resume_context` from the `release.dispatch` audit entry. Nothing says so. | GAP (open; needs an owner decision on where it persists — see §43 "deliberately left") | M | `release_api.go` `dispatchStore`, `resolveResumeContext`; contract at `release_dispatch_service.go:43-48` |
+| WK-23 | **No shutdown drain for an in-flight dispatch watch.** `main_shutdown.go` registers 22 hooks and none of them is the release plane, so SIGTERM abandons the watch mid-upgrade with no log, no terminal record and no audit line. Bounded by the agent's own idempotency key (the op continues and a re-poll is safe) and by WK-22 being the same recovery path, so it is recorded with it rather than separately fixed. | GAP (open, low) | L | `main_shutdown.go:230-482` (hook registry), `release_api.go` detached workers |
 
 ---
 
@@ -1249,6 +1285,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | R12 | WK-13 / HA-11 no ticker jitter | Medium (rollout) | Medium (self-DDoS / herd) | **P2** |
 | R13 | ST-8 silent audit-trail loss | Low | Medium-High (compliance) | **CLOSED (silent-loss half)** — see §13 |
 | R14 | HA-9 enrollment nil-deref panic | Low (corrupted state) | Low (RPC-scoped) | **FIXED** |
+| R15 | WK-21 a panicking dispatch worker reports an upgrade that never started as `200 ok` (measured 6/30 pre-fix; **10/10** if the panic is merely contained) | Low-Medium (needs a fault under `DispatchService`; the guard-only state makes it certain) | High (a fleet rollout marks an un-upgraded node done; the CP is also dead at that moment) | **CLOSED** (CHAOS-75) |
+| R16 | WK-20 a panic in either detached release-dispatch worker kills the whole appliance from one admin POST | Low-Medium | Critical (total outage of an in-line appliance — the R1 shape, a different go-site) | **CLOSED** (CHAOS-75) |
+| R17 | WK-22 / WK-23 a restart mid-upgrade loses the `op_id`, so the documented resume path cannot be used | Medium (SIGTERM, OOM, node reboot, or the gateway upgrading itself) | Medium (recovery degrades to hand-assembling `resume_context` from the audit ring) | **P2** (open — owner decision, §43) |
 
 ---
 
@@ -9058,6 +9097,218 @@ its header as AAD so an iteration downgrade cannot authenticate and collapses
 wrong-passphrase and tamper into one opaque error with no oracle; and
 node-local key material is excluded on the pack side *and* refused on the
 restore side.
+
+## 43. CHAOS-75 — The release-dispatch plane's detached workers, and the 200 that outran the crash
+
+**Date:** 2026-10-11 · **Domain:** Updates / release management (the CP-side
+maintenance-agent upgrade dispatch; never previously swept) · **Code:**
+`release_api.go` (`apiReleaseDispatch`, `apiReleaseDispatchResume`,
+`respondPreApply`, new `recordDispatchPanic` / `runResumeWorker`) · **Gates:**
+`release_dispatch_panic_chaos_test.go`
+
+> **Id claimed in a committed placeholder row before any code was written**, per
+> the standing recommendation the revision log reaches twice independently after
+> ten collisions. `CHAOS-74` was the highest id claimed on any open branch, so
+> this sweep took 75 and did not move.
+
+### Executive summary
+
+`POST /api/releases/dispatch` and `.../dispatch/resume` hand the actual upgrade
+to a goroutine that outlives its request. That is correct by design — the 202
+ships as soon as the op is durably recorded, and the watch must then run to
+terminal even if the client disconnects, so the worker holds a detached
+`context.Background()` rather than `r.Context()`.
+
+Neither worker had a panic tap. A fault anywhere under `DispatchService` — the
+planner, the agent HTTP client, the digest classifier — therefore killed the
+**whole process**: the proxy data plane, the admin plane and `/healthz`, from one
+authenticated admin POST. Every other detached go-site in the tree has carried a
+`recoverGoroutine`/`runGuarded` guard since CHAOS-24, and this domain's own
+periodic loops carry one (`refreshLoopTick` / `staleWatchdogTick`, CHAOS-R1). The
+two goroutines that run the highest-consequence operation in the product were
+the ones left open.
+
+**That is the smaller half.** The worker's only defer was `close(done)`, and a
+defer fires *during* unwinding — before `rep, derr = rm.svc.Dispatch(…)` lands.
+So a panicking worker woke the handler, parked in `select`, on a **zero pair**;
+`appliedFlag` was false, so it called `respondPreApply(w, nil, nil)`, which fell
+through the whole `switch` to its `default` arm and answered:
+
+```
+HTTP 200  {"status":"ok"}
+```
+
+for an upgrade that never started. Reproduced against `main` with a fault
+injected into the agent client's pre-apply read:
+
+```
+ZZPROBE STATUS=200 BODY={"status":"ok"}
+panic: zz injected agent-client fault
+FAIL	github.com/KidCarmi/Culvert	0.123s
+```
+
+### The finding inside the finding: containment alone makes it worse
+
+Today that 200 is a **race** — the handler is sprinting against the runtime's
+fatal exit, and the runtime usually wins. Measured over 30 runs against `main`:
+
+| Variant | `200 {"status":"ok"}` for an upgrade that never started | Process survives |
+|---|---|---|
+| `main` (no guard) | **6 / 30** (~20 %, scheduler-dependent) | **no** |
+| guard only — `runGuarded` and nothing else | **10 / 10** | yes |
+| CHAOS-75 | 0 — `500 {"status":"internal_error"}` | yes |
+
+The obvious one-line fix resolves the race the **wrong way, every time**: the
+process survives precisely long enough to deliver a permanent, deterministic
+false success. An operator — or a CP-side orchestrator driving a fleet rollout —
+reads `200 ok`, marks the node upgraded, and moves to the next one.
+
+The guard-only variant has a second defect the measurement exposed. With the
+panic contained and the outcome left at `(nil, nil)`, execution continues into
+the pre-existing `if ownedAgent(rep, derr)` line — and `ownedAgent(nil, nil)`
+returns **true**, because it is written to detect an in-flight rejection or a
+planner refusal, neither of which a zero pair is. So the guard-only fix also
+writes a terminal record with an **empty terminal** over the per-agent status
+slot, which may belong to a concurrently running op (the P2 status-clobber the
+surrounding code exists to avoid). Containing a panic is not the same as knowing
+what the panic means.
+
+### What shipped
+
+Three changes, in increasing order of how much they depend on each other being
+right:
+
+1. **`respondPreApply` rejects a no-outcome pair ahead of the switch.**
+   `DispatchService.Dispatch` returns a report OR an error on every path, so
+   `(nil, nil)` is unreachable by its contract — which is exactly why it must
+   not be answered "ok". It now answers `500 {"status":"internal_error"}`. This
+   is deliberately **independent** of change 2: it holds for any future detached
+   writer that forgets, which panic containment alone would not.
+
+2. **Both workers run under `runGuarded`**, the CHAOS-24 background-worker
+   primitive, whose documented reason for returning `panicked bool` is this exact
+   situation: *"a worker whose safety depends on completing its round must treat
+   a panicking round as a FAILED round, never as a silent success."* The panic
+   lands in the existing crash plane — `culvert_crash_records_total{component}`,
+   a `system`-actor `panic_recovered` audit entry, the bounded `lastCrash` record
+   — under two new fixed labels, `release_dispatch` and `release_resume`. Both
+   come from a fixed enum, which is what the 32-entry `maxCrashLabels` cap is
+   designed to admit; a survey of the tree's guard sites found roughly two dozen
+   labels in use, so the cap is not close, and overflow folds to `other` rather
+   than failing.
+
+3. **The panic is converted into a definite outcome**, which is where the
+   ownership reasoning lives (`recordDispatchPanic`). It splits on whether the
+   agent had already accepted the apply, because the two cases have different
+   owners and different honest answers:
+
+   - **applied** — this dispatch *did* own the single-flight, and
+     `markDispatched` already made its `dispatch_id` the slot owner, so writing
+     the terminal cannot clobber another op. The 202 has shipped, so the status
+     record is the only channel left. It gets `FAILED_NEEDS_ATTN` over the
+     **live `op_id`**, with a detail that tells the operator to *resume*, not
+     re-dispatch: the recorded op_id and idempotency key make a re-poll safe and
+     a second apply not. Leaving the record at `phase=dispatched` would be the
+     silent failure — a phantom in-flight op nobody is watching,
+     indistinguishable from a slow but healthy one.
+   - **not applied** — the panic can land in the pre-apply preflight read, which
+     runs *before* `e.acquire()`, so this dispatch may own nothing. The status
+     slot is left untouched and the HTTP reply, still open, carries the outcome
+     as `errDispatchWorkerFailed` → 500.
+
+   `recordDispatchPanic` always returns that error, so no caller can be handed
+   the zero pair change 1 rejects.
+
+4. **The resume worker is deliberately asymmetric** (`runResumeWorker`): on a
+   panic it writes **nothing** to the status store. A resume starts no op — it
+   only re-polls an existing one — and its `dispatch_id` is *newer* than the
+   running op's, so under `dispatchStore.update`'s ULID ordering any write would
+   **win** the slot and overwrite the real owner's record. A panic cannot tell us
+   whether single-flight was acquired, so leaving the record alone is the safe
+   move: nothing durable was lost, only one observation. The crash counter, the
+   audit entry and a `logger.Printf` line are the operator signal, and the 202
+   already said where to look.
+
+### Gates
+
+`release_dispatch_panic_chaos_test.go`, six tests. Against the pre-fix tree the
+end-to-end ones do not *fail* — they **crash the test binary**, which is the
+finding restated as a gate.
+
+| Gate | Asserts |
+|---|---|
+| `RespondPreApply_NoOutcomeIsNever200` | the zero pair is never 200 and never `status: ok` (negative control on the exact pre-fix body) |
+| `RespondPreApply_WorkerFailedIs500` | the sentinel maps to 500, not to 409 (client-correctable) or 2xx |
+| `DispatchWorkerPanicBeforeApply_Answers500` | process survives; 500 `internal_error`; the injected fault fired exactly once; `culvert_crash_records_total{component="release_dispatch"}` advanced; **no** status-slot write |
+| `DispatchWorkerPanicBeforeApply_DoesNotClobberAnotherOp` | an incumbent record (older `dispatch_id`, `phase=dispatched`) is byte-for-byte intact after a panicking dispatch holding a NEWER id |
+| `DispatchWorkerPanicAfterApply_MarksTerminal` | 202 (the agent did accept); then `FAILED_NEEDS_ATTN`, `verified=false`, the resume-me detail, and the **`op_id` preserved** — it is the resume authority |
+| `ResumeWorkerPanic_ContainedAndDoesNotClobber` | process survives, `release_resume` counter advances, incumbent record untouched |
+
+Assertions read the per-component crash **counter**, never `lastCrash` or the
+audit ring: `recordCrash` throttles the expensive sinks to one per component per
+second and the audit ring is bounded (the convention in
+`docs/agent-context/conventions.md`), while the counter always increments.
+
+**The gates found a latent trap in the shared crash plane on the way in.** They
+passed in isolation and failed under `-shuffle` with `crash counter for
+"release_dispatch" = 0; want > 0`. Not flakiness: `crashCounter.record` folds a
+new label into `other` once the process-global map holds `maxCrashLabels`
+entries, and `TestCrashCounter_OverflowBucket` deliberately saturates it with
+`maxCrashLabels+10` dynamic labels and left it that way for the rest of the
+binary — so **every** later test in the root package that recorded a NEW
+component had its label silently folded and never appeared on
+`culvert_crash_records_total`. Verified directly: after the saturation,
+`recordCrash("release_dispatch", …)` yields `release_dispatch present=false,
+other present=true`. That test now restores on the way out as well as in, and
+these gates take a clean baseline rather than depending on order in either
+direction. It is a test-isolation defect, not a production one — the cap is
+fail-safe in production — but it was silently weakening any future
+per-component crash assertion, which is exactly the signal this sweep adds.
+
+### What is deliberately left
+
+- **WK-22 — the resume authority is not durable, and nothing says so.**
+  `DispatchResumeContext` is documented as *"the explicit, persistable record
+  needed to re-poll an in-flight dispatch op after a CP restart — independent of
+  any in-memory plan"*, and its only caller keeps it in `dispatchStore`'s
+  in-memory `byAgent` map. A restart mid-upgrade — SIGTERM, OOM, node reboot, or
+  the gateway upgrading *itself*, which is the likeliest one — loses the
+  `op_id`; `resolveResumeContext` then has nothing to resolve, and recovery
+  degrades to an operator hand-assembling a `resume_context` body from the
+  `release.dispatch` audit entry. **Not fixed here on purpose.** Where it
+  persists is an owner decision with real consequences — a new state file is a
+  backup input (ST-10) and a cluster-sync question (HA-14 already carries a
+  plaintext-snapshot finding), and the alternative of widening the 202 body so
+  the caller can persist it is an API-contract change. Recorded rather than
+  invented, per the conventions' rule on startup/persistence boundaries.
+- **WK-23 — no shutdown drain for the in-flight watch.** `main_shutdown.go`
+  registers 22 hooks and the release plane is not among them, so SIGTERM
+  abandons the watch with no log, no terminal record and no audit line. Bounded
+  by the agent's idempotency key (the op continues; a re-poll is safe) and by
+  WK-22 being the same recovery path, so it is recorded with it. Fixing the drain
+  without fixing the durability would produce a tidy log line about state the
+  next boot cannot act on.
+- **The crash does not fire a release alert.** A panicking worker reaches the
+  crash plane (counter + audit + log) but not `DispatchService.maybeAlert`, which
+  is the service's own hook and not reachable from the API layer without
+  threading it through. `culvert_crash_records_total{component="release_dispatch"}`
+  is the alertable signal today.
+- **Goroutine-per-POST is unbounded by anything but the admin rate limit.** Each
+  dispatch POST spawns a worker before the per-agent single-flight is consulted,
+  so a flood of admin POSTs piles up workers that each do one preflight read and
+  exit. `RoleAdmin` + the configured-agent resolver bound it in practice; it is
+  not a new finding of this sweep and is not changed.
+
+### Residual risk
+
+Containment converts process death into a reported failure; it does not make the
+underlying fault go away. A **deterministic** panic in the dispatch path now
+yields a repeatable 500 per attempt instead of a crash loop — better, but the
+upgrade plane is still unusable until the fault is fixed, and the only signal
+that it is the *same* fault each time is the crash counter's rate. A panic that
+lands between the agent's accept and the first `markDispatched` leaves the op
+live on the agent with no CP-side record at all; the idempotency key keeps a
+re-dispatch from applying twice, and WK-22 is the durable fix for the record.
 
 ---
 
