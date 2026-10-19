@@ -155,6 +155,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   success closed it past the probe budget. `openedAt` in the stats stays wall
   time for display.
 
+  `cdr.timeout_sec` is bounded below (30s) but not above, and its conversions
+  wrapped instead of saturating. At `9223372036` the deadline fits but
+  deadline + 30s grace wrapped negative, so `HalfOpenProbeTimeout` fell to the
+  90s floor and could reclaim a live probe; one second more and the
+  seconds→duration conversion itself wrapped, giving the Sluice client and the
+  per-call context a negative deadline that expired every `Sanitize` at once.
+  Every conversion of the setting (client deadline, call context, breaker
+  seed) and the probe-timeout arithmetic now saturate at the largest
+  `time.Duration`; accepted values and the configuration surface are unchanged.
+
 - Distributed rate limiting could admit a request over the cluster-wide limit
   whenever a Control Plane broadcast landed in the middle of a decision.
   `AllowClusterAware` samples its clock before taking the shard lock and hands

@@ -23,6 +23,7 @@ package main
 // transitions — orthogonal to transport vs. app errors.
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,9 +102,13 @@ const (
 // may be set arbitrarily high (validCDRTimeoutSec bounds it below at 30s, not
 // above), so the deadline — not ResetTimeout alone — sets the floor. Pure, so
 // the relationship is testable across the whole configurable range.
+//
+// The arithmetic saturates (cdrSaturatingAdd): a plain perFile+grace wrapped
+// negative for a deadline near the Duration maximum, and the result then fell
+// to the 90s floor — centuries short of the deadline it must exceed.
 func cdrHalfOpenProbeTimeout(reset, perFile time.Duration) time.Duration {
-	d := 2 * reset
-	if overDeadline := perFile + cdrHalfOpenProbeGrace; overDeadline > d {
+	d := cdrSaturatingAdd(reset, reset)
+	if overDeadline := cdrSaturatingAdd(perFile, cdrHalfOpenProbeGrace); overDeadline > d {
 		d = overDeadline
 	}
 	if d < cdrHalfOpenProbeTimeoutFloor {
@@ -127,9 +132,35 @@ func cdrHalfOpenProbeTimeout(reset, perFile time.Duration) time.Duration {
 // derivation exists to prevent.
 func cdrConfigPerFileDeadline(cfg CDRConfig) time.Duration {
 	if cfg.TimeoutSec > 0 {
-		return time.Duration(cfg.TimeoutSec) * time.Second
+		return cdrTimeoutSecDuration(cfg.TimeoutSec)
 	}
 	return cdrDefaultTimeout
+}
+
+// cdrMaxDuration is the largest representable time.Duration (~292 years).
+const cdrMaxDuration = time.Duration(math.MaxInt64)
+
+// cdrTimeoutSecDuration converts a positive cdr.timeout_sec to a Duration,
+// saturating at cdrMaxDuration. validCDRTimeoutSec bounds the setting below
+// (30s) but not above, and time.Duration(secs)*time.Second wraps for
+// secs > 9223372036 — to a negative or arbitrary value, which would expire the
+// RPC deadline immediately and collapse the probe timeout to its floor. Every
+// conversion of the setting (client deadline, call context, breaker seed)
+// goes through here so they agree.
+func cdrTimeoutSecDuration(secs int) time.Duration {
+	if int64(secs) > int64(cdrMaxDuration/time.Second) {
+		return cdrMaxDuration
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// cdrSaturatingAdd returns a+b clamped to cdrMaxDuration instead of wrapping.
+// Both operands are non-negative at every call site.
+func cdrSaturatingAdd(a, b time.Duration) time.Duration {
+	if b > 0 && a > cdrMaxDuration-b {
+		return cdrMaxDuration
+	}
+	return a + b
 }
 
 // cdrEffectivePerFileDeadline reports the deadline implied by the currently

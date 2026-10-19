@@ -323,7 +323,7 @@ func cdrCallContext(ctx context.Context, cfg CDRConfig) (context.Context, contex
 	}
 	timeout := 35 * time.Second
 	if cfg.TimeoutSec > 0 {
-		timeout = time.Duration(cfg.TimeoutSec) * time.Second
+		timeout = cdrTimeoutSecDuration(cfg.TimeoutSec)
 	}
 	return context.WithTimeout(ctx, timeout)
 }

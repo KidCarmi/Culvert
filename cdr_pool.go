@@ -416,7 +416,7 @@ func dialEnrolledInstance(inst CDREnrolledInstance, cfg CDRConfig, oldPool []*cd
 		clientCfg.SecondaryValidUntil = time.Unix(inst.RotatedFingerprintUntilUnix, 0)
 	}
 	if cfg.TimeoutSec > 0 {
-		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
+		clientCfg.Timeout = cdrTimeoutSecDuration(cfg.TimeoutSec)
 	}
 	if cfg.ChunkSizeKB > 0 {
 		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
@@ -460,7 +460,7 @@ func dialSingleFromConfig(cfg CDRConfig) (*cdrPooledClient, error) {
 	// Timeout/chunk are independent of the certs; set them first so both the
 	// keyed and keyless NewCDRClient paths below see them.
 	if cfg.TimeoutSec > 0 {
-		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
+		clientCfg.Timeout = cdrTimeoutSecDuration(cfg.TimeoutSec)
 	}
 	if cfg.ChunkSizeKB > 0 {
 		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
