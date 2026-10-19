@@ -95,6 +95,72 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-11 — `CHAOS-75` sweep (the release-dispatch plane's detached executor
+goroutines). Id claimed in a committed placeholder row as commit one**, per the
+convention the header above reaches twice independently after ten collisions;
+`CHAOS-74` was the highest id claimed on any open branch, so this one took 75 and
+did not move.
+
+Both dispatch entry points hand the upgrade to a goroutine that outlives its
+request, and neither had a panic tap — so a fault anywhere under
+`DispatchService` killed the proxy data plane, the admin plane and `/healthz`
+together, from one authenticated admin POST. That is the smaller half. The
+worker's only defer was `close(done)`, which fires DURING unwinding, before
+`rep, derr = …` lands, so a panicking worker woke the parked handler on a ZERO
+pair and `respondPreApply` fell through its `switch` to the `default` arm and
+answered **`200 {"status":"ok"}` for an upgrade that never started** — measured
+in **6 of 30** runs against `main` before the process died. The load-bearing
+result is what the obvious fix does: add `runGuarded` and nothing else, and the
+race resolves the WRONG way **10 times out of 10**, because the process now
+survives to deliver the false success — and `ownedAgent(nil, nil)` reads as
+owned, so it also writes an empty terminal over a possibly-running op's status
+slot. So the panic is converted into an explicit FAILED outcome
+(`errDispatchWorkerFailed` → 500) and, only when the agent had already accepted
+the apply, into a `FAILED_NEEDS_ATTN` record over the live `op_id` telling the
+operator to resume rather than re-dispatch; the no-outcome pair is rejected
+ahead of the switch, independently, so a future forgetful writer cannot
+reproduce it. The resume worker is deliberately asymmetric and writes nothing on
+a panic (its newer `dispatch_id` would WIN the slot under the store's ULID
+ordering and clobber the real owner). Left open with the reasoning recorded:
+**WK-22**, the resume authority lives only in an in-memory map although its type
+is documented as persistable, so a restart mid-upgrade loses the `op_id` — where
+it should persist is an owner decision that touches backup and cluster sync, not
+a thing to invent inside a sweep. See §43.
+
+**2026-10-10 — CHAOS-74 sweep (the memory-mapped category store after a
+healthy open). Id claimed in this row, per the convention above**; `CHAOS-70`
+was the highest MERGED id, and 71–73 are taken by sweeps that were still open
+when this one started (73 is the public logout endpoint, PR #1591), so this
+sweep took 74 and §41. The sweep extends `storeguard` past the boot path it was
+built for. badger v4 reads every `.sst` through a memory mapping and v4 removed
+the option to do otherwise, so when a volume stops supplying those pages the
+read raises SIGBUS — `fatal error: fault`, not a panic, which `recover()` and
+`crashguard.go` cannot see and which leaves no log line. §34.7 (GEO-1) recorded
+exactly this shape and called it the worst in the register, but recorded rather
+than fixed it because it had no reachable caller; this one is reached from
+`policy_hostcat.go:117` on every request that resolves a host category, so one
+damaged table was a total, evidence-free gateway outage plus a restart loop.
+Reproduced against the real store (seed → close → healthy reopen → truncate the
+tables → lookup) and contained with `debug.SetPanicOnFault`, which turns a fault
+on mapped memory into a recoverable panic; the nil-deref/mapping-fault
+discrimination rests on `Addr()`, measured both ways, because the two carry
+identical message text. The second half is visibility: `catdb` now distinguishes
+`ErrKeyNotFound` from a store fault instead of collapsing both into
+"uncategorised", and `culvert_catfeeddb_available` — whose HELP text promises
+"open and serving lookups" while being sourced purely from the boot record —
+stops reporting 1 for a store whose every lookup has stopped answering. The
+policy outcome on a fault is deliberately UNCHANGED (still uncategorised, Layer 1
+authoritative); turning a store fault into a deny is an owner decision, not a
+containment fix. Honest limit, recorded in §41 rather than glossed:
+`SetPanicOnFault` is per-goroutine, so badger's own compaction goroutines stay
+exposed — the fix closes the reachable, request-driven exposure, not the class.
+§42 records three adjacent domains swept alongside and deliberately NOT fixed
+(a `globalSyslog` publication race that can put a 15 s socket write on a request
+goroutine; a forward clock jump that durably destroys the session revocation
+list; and five backup/restore findings including a never-required backup
+passphrase), each with evidence and each stating whether it was measured or
+reasoned.
+
 **2026-10-04 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: the
 Control Plane's gRPC listener, and the third instance of "which plane may kill
 which". `CLAUDE.md`'s CHAOS-66 note names this path explicitly — *"the CP gRPC
@@ -104,8 +170,10 @@ the same shape on two other planes. First claimed on its branch as `CHAOS-73`
 (ids 67–72 were then allocated across open sweeps and only 70 had merged);
 **renumbered to `CHAOS-71` in merge order** when main was brought in — 71 was
 the id this domain's earlier sweep (#1534, closed in favour of this one) held,
-and it is the next free id on main. Findings and gates are written up in §41
-below.**
+and it is the next free id on main. Findings and gates are written up in §44
+below** — written as §41 and renumbered in merge order when main was brought
+in again, because `CHAOS-74` had merged as §41/§42 and the open `CHAOS-75`
+sweep (#1605) holds §43.
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -1114,7 +1182,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | HA-13 | HA-aware CP update handoff uses a **fixed 15s sleep**, never confirms the standby actually promoted before taking the leader down → possible leaderless window; reports success regardless. | GAP | M | `update_cluster.go:593-598,706-746` |
 | HA-14 | Session HMAC / secrets sync: fenced in-band (good), but `persistDPLastGoodConfigSnapshot` writes the whole snapshot **including `SessionHMAC`** as plaintext JSON (0600) — no envelope encryption like the CA key gets. | GAP (at-rest) | M | `controlplane.go:1979-1997,2058-2061` vs DP node-key encrypt `main.go:1757-1760` |
 | HA-15 | Puller "no live holder" reject couples standby replication to a healthy leader lease — a witness outage stalls replication until a holder reappears (intended safety-over-availability; needs a runbook entry). | ✓ (documented) | L | `ha_fencing.go:94-97,83-85` |
-| CL-22 | **CP gRPC listener bind/TLS failure was FATAL on the boot path** — `logFatalf` from `initCluster`, which runs BEFORE the proxy, SOCKS5 and admin UI start, so an occupied gRPC address or an unreadable mTLS pair killed the whole appliance; and a `Serve` that returned after a successful bind was SILENT and TERMINAL while `clusterRole.role`/`grpcAddr` kept reporting a healthy Control Plane. The only listener in the appliance with no health plane at all. | GAP → **CLOSED** (CHAOS-71 §41, `cp_grpc_bind.go` + `cp_grpc_health.go`) | H | `cluster_startup.go:96` (pre-fix); `main.go:228` vs `269`/`271`; `controlplane_server.go` `srv.Serve` goroutine |
+| CL-22 | **CP gRPC listener bind/TLS failure was FATAL on the boot path** — `logFatalf` from `initCluster`, which runs BEFORE the proxy, SOCKS5 and admin UI start, so an occupied gRPC address or an unreadable mTLS pair killed the whole appliance; and a `Serve` that returned after a successful bind was SILENT and TERMINAL while `clusterRole.role`/`grpcAddr` kept reporting a healthy Control Plane. The only listener in the appliance with no health plane at all. | GAP → **CLOSED** (CHAOS-71 §44, `cp_grpc_bind.go` + `cp_grpc_health.go`) | H | `cluster_startup.go:96` (pre-fix); `main.go:228` vs `269`/`271`; `controlplane_server.go` `srv.Serve` goroutine |
 | CL-23 | **The Data Plane's two boot fatals are the same class one plane over**: `dp_enrollment.go` still `logFatalf`s on a DP node-key at-rest failure and on DP client construction, from `startDataPlane`, on the same pre-proxy boot path. NOT closed by CHAOS-71 — one concern per change, and the DP posture question (*may a node that cannot reach its CP serve traffic at all?*) is a genuinely different decision, with a real argument on both sides (a DP serves last-good config, so degrading is defensible; a DP that never enrolled has no config to serve). | GAP (open, recorded) | M | `dp_enrollment.go:277,300` |
 | CL-24 | **A crash-looping CP boot minted and persisted a fresh CLUSTER CA before dying** — `initClusterCA` runs before the bind, so on a node with an EPHEMERAL data volume each iteration would mint a different trust root (§18's *"a retry MUST NEVER MINT"* hazard, for the root that authenticates every DP to the CP). Idempotent on a persistent volume, and the crash loop that reached it is gone (CL-22), so the reachable path is closed; the minting POLICY is unchanged. Observed in CHAOS-71's reproduction. | GAP (open, recorded — latent) | L/M | `main.go` `enableControlPlane` → `initClusterCA` ordering |
 
@@ -1192,6 +1260,10 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-17 | **The fail-closed scan-timeout refusal was cached with the CONTENT TTL** (1 h default), so seconds of scanner slowness blocked that exact object node-wide, for every user, for an hour after recovery — manual cache flush the only recourse. The ClamAV-error branch two lines above already refuses to cache for exactly this reason. | GAP → **CLOSED** (CHAOS-52: `hashcache.SetTTL` + `scanTimeoutCooldown` 30 s) | M | was: `internal/secscan/secscan.go` `ScanBody` timeout arm; now `SetTTL` — see §20 |
 | WK-18 | **An abandoned scan could overturn the fail-closed verdict.** On finishing, the abandoned goroutine wrote `Clean:true` over the refusal the user had just been served — a cached admission for the rest of the TTL, no counter, no log; whether an object was blocked or served was decided by a race. | GAP → **CLOSED** (CHAOS-52: `publishVerdict` tighten-only — a late BLOCK still publishes, a late CLEAN is discarded and counted; budget enforced from both sides so the `select` coin flip cannot launder an overrun) | **H** | was: `internal/secscan/secscan.go` `scanBodyInner` `cache.Set`; now `publishVerdict`/`noteLateCleanDiscarded` — see §20 |
 | WK-14 | Release-catalog autoseed: stage → read-only verify+freshness+rollback → atomic swap with move-aside `.bak` restore-on-failure; fail-closed, no unsigned auto-download. | ✓ | — | `release_autoseed.go:49-122,100-116` |
+| WK-20 | **The two detached release-dispatch goroutines had no panic tap**, so a fault anywhere under `DispatchService` — planner, agent HTTP client, digest classifier — killed the WHOLE process from one authenticated admin POST: proxy data plane, admin plane and `/healthz` together. Every other detached go-site has carried a guard since CHAOS-24, and this domain's own periodic loops carry one (`refreshLoopTick`/`staleWatchdogTick`, CHAOS-R1); the two goroutines that run the product's highest-consequence operation were the ones left open. | GAP → **CLOSED** (CHAOS-75: `runGuarded` + an explicit FAILED outcome; §43) | **H** | was: `release_api.go:664,830` bare `go func()`; now `recordDispatchPanic`/`runResumeWorker` — see §43 |
+| WK-21 | **`respondPreApply` answered `200 {"status":"ok"}` for a no-outcome dispatch.** The goroutine's only defer was `close(done)`, which fires DURING unwinding — before `rep, derr = …` lands — so a panicking worker woke the parked handler on a zero pair and it fell through the `switch` to the `default` 200. Measured: the false success shipped in **6 of 30** runs against `main` before the process died. **Containment alone makes it 10 of 10** — the obvious fix converts a 20 % race into a permanent, deterministic false success, and `ownedAgent(nil, nil)` additionally reads as owned and writes an empty terminal over another op's record. | GAP → **CLOSED** (CHAOS-75: no-outcome rejected ahead of the switch; the panic becomes `errDispatchWorkerFailed` → 500; §43) | **H** | was: `release_api.go` `respondPreApply` `default` arm — see §43 |
+| WK-22 | **The resume authority is not durable.** `DispatchResumeContext` is documented as "the explicit, persistable record needed to re-poll an in-flight dispatch op after a CP restart", and the only caller keeps it in `dispatchStore`'s in-memory `byAgent` map. A restart mid-upgrade — SIGTERM, OOM, node reboot, or the gateway upgrading itself — loses the `op_id`, and `resolveResumeContext` then has nothing to resolve: recovery degrades to an operator hand-assembling `resume_context` from the `release.dispatch` audit entry. Nothing says so. | GAP (open; needs an owner decision on where it persists — see §43 "deliberately left") | M | `release_api.go` `dispatchStore`, `resolveResumeContext`; contract at `release_dispatch_service.go:43-48` |
+| WK-23 | **No shutdown drain for an in-flight dispatch watch.** `main_shutdown.go` registers 22 hooks and none of them is the release plane, so SIGTERM abandons the watch mid-upgrade with no log, no terminal record and no audit line. Bounded by the agent's own idempotency key (the op continues and a re-poll is safe) and by WK-22 being the same recovery path, so it is recorded with it rather than separately fixed. | GAP (open, low) | L | `main_shutdown.go:230-482` (hook registry), `release_api.go` detached workers |
 
 ---
 
@@ -1213,6 +1285,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | R12 | WK-13 / HA-11 no ticker jitter | Medium (rollout) | Medium (self-DDoS / herd) | **P2** |
 | R13 | ST-8 silent audit-trail loss | Low | Medium-High (compliance) | **CLOSED (silent-loss half)** — see §13 |
 | R14 | HA-9 enrollment nil-deref panic | Low (corrupted state) | Low (RPC-scoped) | **FIXED** |
+| R15 | WK-21 a panicking dispatch worker reports an upgrade that never started as `200 ok` (measured 6/30 pre-fix; **10/10** if the panic is merely contained) | Low-Medium (needs a fault under `DispatchService`; the guard-only state makes it certain) | High (a fleet rollout marks an un-upgraded node done; the CP is also dead at that moment) | **CLOSED** (CHAOS-75) |
+| R16 | WK-20 a panic in either detached release-dispatch worker kills the whole appliance from one admin POST | Low-Medium | Critical (total outage of an in-line appliance — the R1 shape, a different go-site) | **CLOSED** (CHAOS-75) |
+| R17 | WK-22 / WK-23 a restart mid-upgrade loses the `op_id`, so the documented resume path cannot be used | Medium (SIGTERM, OOM, node reboot, or the gateway upgrading itself) | Medium (recovery degrades to hand-assembling `resume_context` from the audit ring) | **P2** (open — owner decision, §43) |
 
 ---
 
@@ -8299,7 +8374,945 @@ the sweep happens to be editing.
 
 ---
 
-## 41. CHAOS-71 — The Control Plane's gRPC listener, and which plane may kill which
+## 41. CHAOS-74 — The memory-mapped category store, after a healthy open
+
+**Id claim.** `CHAOS-74` is claimed by this section. `CHAOS-71`–`73` are taken by
+sweeps that were still unmerged when this one opened (`CHAOS-73` is the public
+logout endpoint, PR #1591), and §0's standing warning applies: cite this finding
+by **section number (§41)**, not by id.
+
+### Executive summary
+
+`storeguard` exists because badger can kill this process in a way no caller can
+catch, and it closes that hole **on the boot path**: it refuses to hand badger a
+directory a previous process died inside of (§19, §31). The window it does not
+cover is the one the gateway actually spends its life in — the store is open and
+serving the proxy data path, and the volume underneath it can fail at any point.
+
+In that window a damaged table was not an error. It was `fatal error: fault`.
+
+badger v4 reads an `.sst` through a memory mapping (`table.Table` embeds
+`*z.MmapFile`) and decodes the table index straight out of the mapped region;
+v4 removed the loading-mode option earlier versions offered, so **no
+configuration reads tables through ordinary file I/O instead**. When the pages
+behind that mapping stop existing, touching them raises SIGBUS, which the Go
+runtime delivers as a fatal error rather than a panic. `recover()` cannot see
+it. `crashguard.go` cannot see it. No log line survives it. The process dies.
+
+That is the shape §34.7 (GEO-1) recorded for the GeoIP reader and called the
+worst failure shape in this register, *because containment is not available at
+all*. GEO-1 was recorded rather than fixed for one reason: it had no reachable
+caller. **This one is reached from `policy_hostcat.go:117` on every request that
+resolves a host category.** A single damaged table was therefore a total,
+evidence-free gateway outage, and — since the damage is on disk — a restart loop
+rather than a recovery.
+
+Two things shipped. The fault is now **contained** at the lookup boundary via
+`debug.SetPanicOnFault`, which converts a fault on non-Go memory into a
+recoverable panic; and the store's error handling now **classifies** instead of
+collapsing, so the degradation is counted and surfaced rather than looking like
+an internet full of uncategorised hosts.
+
+Both halves were measured against the real store, not reasoned about.
+
+### What was actually wrong
+
+`catdb.getExact` ended in the shape that hides three different worlds behind one
+answer:
+
+```go
+if err != nil {
+	return "", false
+}
+```
+
+- a **clean miss** — this host is not in the community feed. The overwhelmingly
+  common case, and correct.
+- a **returned error** — `ErrDBClosed`, an I/O error, a read that failed. Served
+  as "uncategorised", counted nowhere, logged nowhere.
+- a **mapping fault** — which never reached this line at all, because the
+  process was already gone.
+
+Measured, pre-fix, against a store seeded with 20 000 entries, closed so the
+memtable flushed to a real `.sst`, reopened cleanly (a *healthy* open — the one
+`catfeeddb_health.go` records as `Available=true`), then truncated underneath the
+live mapping:
+
+```
+unexpected fault address 0x7fe306e8f286
+fatal error: fault
+[signal SIGBUS: bus error code=0x2 addr=0x7fe306e8f286 pc=0x6eb8d5]
+
+github.com/google/flatbuffers/go.GetInt32(...)
+github.com/dgraph-io/badger/v4/fb.(*TableIndex).BloomFilterBytes(...)
+github.com/dgraph-io/badger/v4/table.(*Table).DoesNotHave(...)
+github.com/dgraph-io/badger/v4.(*levelHandler).get(...)
+github.com/dgraph-io/badger/v4.(*Txn).Get(...)
+github.com/KidCarmi/Culvert/internal/catdb.(*CommunityDB).getExact
+	/home/user/Culvert/internal/catdb/catdb.go:94
+```
+
+The fault lands on the **caller's** goroutine — the request goroutine — which is
+what makes containment possible at all.
+
+### The surfaces were blind by construction
+
+§19 built real observability for this store, and all of it describes the **boot**.
+`catFeedDBHealth` is, in its own words, "written once during startup"; `metrics.go`
+sourced `culvert_catfeeddb_available` from that record. So the gauge whose HELP
+text promises
+
+> `1 when the Layer-2 community category store is open and serving lookups`
+
+reported `1` for a store that had stopped serving lookups entirely. Not a missing
+metric — a metric actively asserting the opposite of the truth, which is worse,
+because an alerting rule keyed on it reports healthy.
+
+### Failure scenarios
+
+| # | Fault | Pre-fix behavior | Post-fix behavior |
+|---|---|---|---|
+| 1 | `.sst` truncated/removed under the live mapping (operator reclaiming space on a full volume; a cleanup script; badger's own file management meeting a damaged FS) | `fatal error: fault`, process dies, no log line, restart loop | contained; Layer-2 latches off, Layer 1 serves, counted + warned |
+| 2 | Data volume detaches or is force-unmounted (iSCSI/NFS/EBS detach, `umount -f`) while the store is open | same uncatchable kill on the next cold-key lookup | same containment |
+| 3 | Block-level damage / EIO on a page fault for a cold table block | same | same |
+| 4 | Store returns an error without faulting (`ErrDBClosed`, I/O error) | silently "uncategorised", invisible | counted, logged once, diagnostics row warns |
+| 5 | Host simply not in the feed (`ErrKeyNotFound`) | "uncategorised" — correct | unchanged, and explicitly **not** counted (negative control) |
+| 6 | badger's own **compaction** goroutine touches a damaged table | uncatchable kill | **still an uncatchable kill** — see Residual risk |
+
+Scenarios 1–3 are the same mechanism with different triggers: for an mmap-backed
+store, "the file shrank" and "the device went away" are the two ordinary ways a
+production volume produces SIGBUS, and both are in this register's standing
+simulate list.
+
+### The fix
+
+**`internal/storeguard/faultguard.go` (new).** `ContainFault(storeDir, op) error` arms
+`debug.SetPanicOnFault(true)` on the calling goroutine, runs `op`, restores the
+previous setting, and converts a contained fault into an error wrapping
+`ErrStoreFault`. It sits in `storeguard` because that package is already the
+owner of "surviving a badger directory this process cannot survive"; this is the
+same subject, one lifecycle phase later.
+
+The discrimination is the part worth reviewing. A contained mapping fault and a
+genuine nil-pointer dereference **carry identical message text** — `runtime
+error: invalid memory address or nil pointer dereference` — so the message is
+useless. The runtime attaches an `Addr() uintptr` method only to the error it
+synthesises for a `SetPanicOnFault`-converted fault
+(`runtime.errorAddressString`), which is the documented way to recover the
+faulting address. Measured both ways:
+
+```
+nil deref:  hasAddr=false
+mmap fault: hasAddr=true addr=0x7fd1dafa7286
+```
+
+So `ContainFault` converts only the latter and **re-panics everything else** — a
+bug inside `op` keeps reaching `crashguard` instead of being quietly reported as
+a failing disk. `TestContainFault_NilDerefIsNotAStoreFault` fails if that
+discrimination ever stops holding, which is the gate that keeps this fix from
+becoming a bug-swallower.
+
+`Addr()` is necessary but not sufficient (Codex round 2): a wild non-nil
+`unsafe.Pointer` dereference on the lookup path carries it too. So the faulting
+address must also fall inside a file-backed mapping whose file is under the
+store directory. That is checked against `/proc/self/maps` at recover time,
+which is free because it only runs after a fault has happened. `catdb` passes
+the directory with symlinks resolved at open, because the kernel reports
+resolved paths. The check fails closed: if the maps are unreadable or
+unparseable, the platform is not Linux, or the address is outside the store's
+mappings, the original panic propagates. Gated by
+`TestContainFault_FaultOutsideTheStoreIsRePanicked`,
+`TestContainFault_UnreadableMapsRePanics` (injected reader),
+`TestContainFault_StoreReachedThroughASymlinkIsContained`, `TestParseMapsLine`
+and `TestAddrInStoreMapping_RequiresAPathBoundary`.
+
+**`internal/catdb`.** The guard is armed in `Lookup`, **once for the whole
+domain walk** rather than per point lookup. The walk issues up to four or five
+badger reads for a deep hostname and runs on the proxy data path, so a guard per
+read would pay the defer/recover cost several times per request to protect
+against a fault that makes every one of those reads equally hopeless; one guard
+per walk is the same protection at a fraction of the cost. `getExact` became the
+error-returning leaf — `ErrKeyNotFound` is the only error it reports as a miss,
+everything else aborts the walk and is returned for classification, because
+continuing to walk a store that just failed to answer turns one fault into four.
+`Lookup` then classifies: a contained fault increments `memFaults` and
+**latches `degraded`**; any other error increments `faults`. Once degraded,
+lookups return without arming anything or re-entering badger — the damage is not
+transient, and each retry is another chance to fault on a goroutine that is
+*not* behind the guard. Reporting is once-per-transition, not per lookup: a
+per-request log line here would be a request-volume-driven log flood, which is
+the same class of outage this package exists to prevent.
+
+**The return value on a fault is deliberately unchanged** — still `("", false)`,
+still "uncategorised". Turning a store fault into a deny would change the
+gateway's policy outcome on the data path; that is a different decision with a
+different blast radius, and conventions explicitly withhold authority for a
+runtime policy change from a fix like this one. What changed is that the
+degradation is bounded, survivable and visible. The direction of that trade is
+recorded under Security impact below rather than left implicit.
+
+**Surfaces**, all pre-existing — no new operator vocabulary:
+
+- `catFeedDBState()` now overlays three live counters onto the boot record, so
+  both existing consumers get them without duplication. It stays a
+  side-effect-free read (three atomic loads), per `bandwidth_health.go`'s rule.
+- `culvert_catfeeddb_available` reports **0** when the store has latched
+  degraded, which is what its HELP text already promised.
+- `culvert_catfeeddb_lookup_errors_total` and
+  `culvert_catfeeddb_memory_faults_total` are new counters.
+- the `category_feed_db` diagnostics row warns, names the impact
+  (Layer-1-only) and gives the action (check the volume, restart to re-open and
+  quarantine). Severity reuses §19's rationale — a store that opened and then
+  died has exactly the impact of one that never opened, so `warn`, never `fail`:
+  a `fail` row would take a gateway that is still fully able to serve out of a
+  load-balancer rotation.
+
+### Risk matrix
+
+| Finding | Likelihood | Impact | Pre-fix | Post-fix |
+|---|---|---|---|---|
+| Mapping fault on the data path (§41 scenarios 1–3) | low per node-day, **certain** across a fleet on failing storage | total gateway outage, no evidence, restart loop | **critical** | low (visible degradation) |
+| Silent error-swallow (scenario 4) | medium | Layer-2 control off, invisible | medium | low |
+| `_available` gauge asserting the opposite of the truth | follows the above | alerting reports healthy during an outage | medium | closed |
+| Compaction-goroutine fault (scenario 6) | low | total gateway outage | **critical** | **critical — open**, see below |
+
+### Recovery assessment
+
+- **Automatic:** containment is automatic and immediate. The node keeps serving
+  on Layer 1 (admin-managed, authoritative) with no restart and no operator
+  action. Layer 2 is a derived cache of a downloadable feed, so nothing
+  authoritative is lost.
+- **Manual:** a restart is what re-opens the store, and on restart
+  `storeguard.Open` does the rest — a directory a process died inside of, one
+  badger reports as corrupt, or one whose previous run **recorded a contained
+  fault** (trigger `runtime_fault`) is quarantined and re-created, and the feed
+  re-syncs. So the two halves now compose: §41 keeps the process alive to be
+  restarted, §19 heals the store when it is. The recorded fault is what makes
+  that true — see "Codex round 1" below for why the restart did not heal the
+  store without it.
+- **Degraded-mode duration:** for the life of the process, by design (latched).
+  The diagnostics row says so explicitly rather than implying the store might
+  recover on its own.
+- **Data integrity:** unaffected. No authoritative state lives here. The only
+  write the fix adds is the one-shot `<store>.faulted` sibling marker (atomic
+  temp + fsync + rename), written on the latch transition and never inside the
+  store directory.
+
+### Operational impact
+
+Pre-fix the operator experience was the worst available: a gateway that
+disappeared, with `docker-compose`'s `restart: unless-stopped` turning it into an
+unattended crash-loop, and nothing in the logs — because a fatal fault writes its
+trace to stderr and dies before any sink flushes, and because the only durable
+health record described a boot that had gone fine. Post-fix there is a log line
+naming the volume as the cause, two counters, and a diagnostics row with an
+action. The alerting rule to add is `culvert_catfeeddb_memory_faults_total > 0`,
+which is new and is the signal that a node's data volume is damaging a live
+store.
+
+### Security impact
+
+Honest accounting, in both directions:
+
+- **Improved:** the pre-fix outcome was the whole gateway gone. For an in-line
+  forward proxy that is not merely availability — a gateway that is down is a
+  gateway that is not filtering, and the usual operator response under pressure
+  is to route around it.
+- **Unchanged, and deliberately so:** a degraded Layer 2 means category-keyed
+  rules that depend on the community feed stop matching, and the request is then
+  decided by the remaining rules and the configured default action. This is the
+  **pre-existing** posture for a store that never opened (§19) and for a node
+  started without `-cat-feed-db`; Layer 1 remains authoritative. Per the standing
+  errata the default action is what decides the outcome here, and an operator
+  running with an explicit default is unaffected in the sense that matters.
+  Making a store fault deny is a defensible future posture and is **not** taken
+  here; it is recorded as an owner decision rather than smuggled into a
+  containment fix.
+
+### Required tests (all shipped)
+
+`internal/storeguard/faultguard_test.go` — faults produced with a real
+`syscall.Mmap` of a file truncated to zero, so the primary gate depends on kernel
+behavior and not on badger's internals:
+
+- `TestContainFault_MemoryFaultBecomesError` — the fault becomes
+  `ErrStoreFault`. **This test passing at all is the containment working**: it
+  cannot pass in a process that died.
+- `TestContainFault_NilDerefIsNotAStoreFault` — the negative control on the
+  discriminator described above.
+- `TestContainFault_PassesErrorsAndSuccessThrough` — an ordinary error is not
+  reclassified.
+- `TestContainFault_RestoresPanicOnFault` — no per-goroutine state leaks into a
+  caller with its own setting.
+- `TestOpen_RecordedFaultQuarantinesBeforeOpening` — a recorded fault
+  quarantines before the opener runs and is consumed, so the next start is
+  plain. Negative controls: `TestOpen_RecordedFaultRespectsALiveLockHolder`
+  (the store lock vetoes the move and the marker survives),
+  `TestOpen_RecordedFaultForAMissingStoreIsCleared` and
+  `TestOpen_DirectoryAtFaultMarkerPathIsIgnored`.
+
+`internal/catdb/catdb_fault_test.go` — the end-to-end realism gate:
+
+- `TestLookup_VolumeDamageAfterHealthyOpenIsContained` — seed → close → reopen
+  healthy → truncate the tables → lookup. Asserts the store does not claim a
+  category, the fault is accounted, `degraded` latches, and 50 further lookups
+  do **not** grow the count (proving the latch stops re-entering badger).
+  Deterministic over `-count=5`.
+- `TestLookup_OrdinaryMissIsNotAFault` — misses and the subdomain walk stay
+  clean and uncounted. Without this, counting every uncategorised host would
+  make the new signal worthless.
+- `TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen` — the fault-to-restart
+  path: real fault → close → `OpenResilient` quarantines (`runtime_fault`),
+  re-creates an empty serving store, and a third open is plain.
+
+`catfeeddb_runtime_fault_chaos_test.go` — the surfaces, against a store that has
+taken a **real** contained fault rather than a flag a test set:
+
+- `TestMetrics_CatFeedDBRuntimeDegradationIsVisible` — same healthy boot record,
+  dead store: `_available` flips to 0 and `_memory_faults_total` reports 1.
+- `TestCheckCategoryFeedDB_RuntimeDegradationWarns` — the row warns, keeps its
+  code, names the Layer-1-only impact and the restart.
+- `TestCheckCategoryFeedDB_HealthyStoreTripsNothing` — negative control; a
+  surface that warned unconditionally would otherwise pass every assertion above.
+
+### Residual risk, and what is deliberately left
+
+- **badger's background goroutines remain exposed. This is the honest limit of
+  the fix.** `SetPanicOnFault` is per-goroutine state, so it protects the
+  goroutines that run through `ContainFault` and nothing else. badger's
+  compaction and GC goroutines touch the same mappings, and a damaged table that
+  a compactor reaches first still kills the process with no containment
+  available. What the fix changes is the **reachable, request-driven** exposure —
+  the one that fires on the data path on every request — from an uncatchable
+  kill into a visible degradation. It does not make a badger store on a failing
+  volume safe in general, and this section should not be read as closing that.
+  Closing it properly needs either a store that does not mmap (badger v4 offers
+  no such option) or process-level isolation of the store, both of which are
+  design decisions rather than chaos remediations.
+- **`internal/logstore` has the identical exposure, unfixed.** It is the other
+  badger store (`internal/logstore/logstore.go:352`) and the other
+  `storeguard.Open` consumer, and its read path collapses errors the same way.
+  Its reads are admin-query-driven rather than per-request, so the reachability
+  is lower, but the kill is the same kill. `ContainFault` is deliberately
+  store-agnostic so that fix is a small follow-up; it is not bundled here
+  because it is a second domain and a separate set of gates.
+- **`internal/geoip`** is a third mmap-backed reader. §34.7 records its
+  *reader-lifetime* hazard (munmap on close) and correctly reports that as
+  unreachable today. A **damaged `.mmdb` on a failing volume** is a different
+  trigger reaching the same uncatchable fault, and is not covered by GEO-1's
+  reachability argument. Recorded; `ContainFault` applies there too.
+- **The policy-outcome posture on a store fault** is unchanged and is an owner
+  decision, as set out under Security impact.
+
+### Codex round 1 — the restart did not heal the store
+
+The first cut latched the fault in memory only, and the Recovery assessment
+above claimed the restart would quarantine the store. Measured, it did not: after
+a contained fault on a truncated `.sst`, close and `OpenResilient` returned
+badger's `Opening file ... err: invalid argument while mmapping ... with size: 0`
+with `Trigger=""` and `Quarantined=false`. That message is not in the corruption
+table, and `openGuarded` clears its attempt marker on a returned error, so every
+later start stayed Layer-1-only and never rebuilt the store.
+
+The fix persists the evidence rather than widening the classifier. On the latch
+transition `catdb` calls `storeguard.RecordFault`, which atomically writes a
+`<store>.faulted` sibling; `storeguard.Open` honours it before badger runs, as
+trigger `runtime_fault`, through the same lock-gated `ApplyQuarantine`, and
+clears it only once the directory has been moved aside (or is already gone).
+Adding `invalid argument … mmapping … size: 0` to the corruption table was
+rejected as the primary fix: it names one shape of the damage (a table
+truncated to exactly zero), while the fault the process actually contained —
+partial truncation, an EIO page, a vanished volume — may surface on reopen as
+something else again, or not at all until a later read. The process that took
+the fault is the only one holding the evidence, so it is the one that records
+it, whatever the reopen happens to report. The marker is
+opt-in — only a rebuildable store calls `RecordFault` — so `internal/logstore`
+is unaffected.
+
+### Codex round 2 — the fault origin, and a marker that will not clear
+
+The address-to-mapping discriminator is described under "The fix" above.
+Separately, the clearing step was best-effort. If the quarantine
+succeeded but unlinking `<store>.faulted` failed, a healthy replacement opened
+with the marker still present. The next start would then quarantine that
+healthy replacement, and the one-copy prune could delete the original evidence.
+A marker-removal error other than not-exist now fails the open: the store stays
+unopened, Layer 2 stays off, and the error reaches the caller's startup alert.
+The next start finds the directory gone and retries the clear before creating a
+replacement. Gated by `TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery` and
+`TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery`
+(injected remover).
+
+### Codex round 3 — a symlinked store path, and the non-Linux binaries
+
+**Symlinked path.** With a configured alias such as
+`/var/lib/catdb -> /mnt/data/catdb`, the marker was written beside the alias,
+and the next start's quarantine renamed the symlink itself. badger then created
+a plain directory at the alias, so the rebuilt feed silently left the
+persistent volume and the damaged target was left in place. `catdb` now
+resolves the path through symlinks once, at open (`OpenResilient`, `Open`,
+`QuarantinedCopies`). The marker, the quarantine rename and the rebuild all act
+on the real target, and the alias is never renamed or replaced. Gated by
+`TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget`: after a real
+fault and restart through the alias, the alias is still a symlink to the same
+target, the quarantined copy sits beside the target, and the fresh store lives
+under it. The test fails on the previous head at the marker-location assertion.
+
+**Non-Linux binaries.** The release matrix also publishes Darwin and Windows
+binaries, where `/proc/self/maps` does not exist, so `ContainFault` re-panics
+every fault. That is main's behaviour before this change, so it is not a
+regression, but it is not the Layer-1 fallback this section describes. The
+decision is to make runtime fault containment explicitly **Linux-only**, and
+not to write mach `vm_region` / `VirtualQuery` verifiers: production
+deployments are Linux (Docker/OVA), and those verifiers would be
+platform-specific code CI cannot exercise. `storeguard.FaultContainmentSupported`
+is a compile-time constant. On a non-Linux build the `category_feed_db` row for
+a serving store reports `runtime fault containment: unavailable on <GOOS>`
+(severity unchanged), and `TestContainFault_UnsupportedPlatformRePanics` /
+`TestCheckCategoryFeedDB_ReportsContainmentUnavailableOffLinux` (`!linux` build
+tag) pin the re-panic and the reported status. Everything else in §41 that
+describes containment applies to Linux builds.
+
+### Codex round 4 — a failed rebuild behind an alias, and undurable markers
+
+**Dangling alias after a failed rebuild.** If a recovery quarantined the
+target and then could not create its replacement (ENOSPC), the alias was left
+dangling. `EvalSymlinks` then failed on every later start, so badger was handed
+the alias itself, and `MkdirAll` refused the existing symlink (`file exists`).
+Layer 2 never came back, even after space was freed. That exact error was
+reproduced. `resolveStoreDir` now follows a dangling alias with `os.Readlink`
+(relative links made absolute against the link's directory, at most 8 hops) to
+a missing target whose parent exists, and badger recreates the target there.
+The alias is never replaced. A target whose parent is also missing, such as an
+unmounted volume, is refused, so the store cannot be rebuilt on the wrong
+filesystem. Gated by
+`TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart` (injected
+ENOSPC opener) and `TestDanglingAliasTarget`.
+
+**Directory fsync.** `syncDir` discarded its error, so a failed parent fsync
+after the marker rename let `RecordFault` return nil while the marker could
+still be lost on power loss. The same applied to the unlink in `clearFault`.
+Both now return the fsync failure. For the clear, that error flows into the
+round-2 stop-recovery path, so no replacement is created behind an unlink that
+may not be durable. The attempt-marker fsync in `BeginAttempt` stays
+best-effort by design. Gated by `TestRecordFault_DirectorySyncFailureIsReported`
+and `TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery` (injected
+`markerFS`).
+
+### Codex rounds 5–6 — a torn health snapshot, and containment that leaked past Lookup
+
+**Snapshot order (P3).** The writer adds to `memFaults` and then latches
+`degraded`, but `LookupFaults` loaded `memFaults` first. A scrape racing the
+first fault could therefore report a degraded store with `memory_faults_total
+0`. The reader now loads `degraded` first, and Go's atomics are sequentially
+consistent, so degraded ⇒ memFaults ≥ 1 with no mutex.
+`TestLookupFaults_DegradedImpliesACountedFault` pins the source order of both
+halves (AST check) and stress-tests the invariant under `-race`.
+
+**One choke point (P1).** Only `Lookup` was guarded. After the latch, `Stats`
+(`db.Tables` → `getTableInfo`) and `BulkWrite` still reached the damaged
+database, and the feed syncer calls both from its own goroutine. That was
+reproduced here as `fatal error: fault` / SIGBUS in `getTableInfo`. Every badger
+touch in `CommunityDB` now goes through one accessor, `access`, which refuses
+with `catdb.ErrDegraded` once latched without touching badger. Otherwise it
+runs the operation under `ContainFault`, so a first fault in ANY method latches
+the store instead of killing the process. `Close` goes through `contain`
+(contained, not refused), because it must still release the directory lock.
+What each method returns when degraded:
+
+- `Lookup` returns uncategorised.
+- `Stats` returns 0. The only caller is the syncer's boot-time RunNow probe,
+  and the round that probe triggers refuses before fetching.
+- `BulkWrite` returns `ErrDegraded`.
+
+The syncer checks the latch before downloading, so a degraded store costs no
+50 MB fetch. It charges the round as a bounded `write` failure, so the scheduler
+backs off rather than hot-looping. Gates:
+
+- `TestCommunityDB_EveryBadgerAccessIsGuarded`: an AST/reflection wall.
+  Every `c.db` reference must sit in an `access`/`contain` closure or in a
+  helper reachable only from one, and every exported method must arm the guard
+  or be on a reasoned no-badger allowlist. An unguarded probe method fails it.
+- `TestCommunityDB_DegradedStoreNeverReachesBadger`: no badger handle at all,
+  so any touch would nil-deref.
+- `TestStats_FirstFaultLatchesTheStore`: real truncation, with Stats as the
+  first faulting call. Unguarded, it dies with the reproduced SIGBUS.
+- The latch → Stats/BulkWrite repro inside
+  `TestLookup_VolumeDamageAfterHealthyOpenIsContained`.
+- `TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing`: no
+  download, a `write` failure, a backoff delay, and a live loop that does not
+  spin.
+
+---
+
+## 42. Adjacent domains swept for §41, recorded and not fixed
+
+Three domains were swept alongside §41 because they share its theme — a fault
+that is survivable but invisible, or a guard that protects the wrong half. None
+is fixed here: each is a separate domain with its own gates, and bundling them
+into a containment fix would make one unreviewable change out of four reviewable
+ones. Every item below carries file:line evidence and was checked against
+existing tests before being called a gap.
+
+**Verification status is stated per item and is not uniform.** §41 is measured.
+`OBS-1` and `BKP-4` are read directly off the source and are mechanical.
+`CLK-1`–`CLK-4` and the remaining `BKP-*` items are reasoned from source plus
+documented `time.Time`/stdlib semantics; **no host clock was stepped and no
+archive substitution was executed in this environment**, so they are reported as
+findings to confirm, not as reproductions.
+
+### OBS-1 (recommended first follow-up) — `globalSyslog` is published without synchronization
+
+`syslog.go:38` declares a plain `var globalSyslog *syslogWriter`. It is written
+at runtime from the admin handler goroutine (`syslog.go:65` via `InitSyslog` ←
+`apiSyslogConfig` POST; `ui_config.go:1855` sets it to `nil` on the disable
+branch) and read unsynchronized on the proxy request goroutine at
+`store.go:2398-2399` inside `persistLogEntry`, plus the audit SIEM hook at
+`store.go:417`. 32 non-test references, 2 runtime write sites.
+
+Two consequences. The nil check and the dereference at `store.go:2398-2399` are
+separate unsynchronized loads of the same global, so the disable path can land a
+**nil dereference on the request path**. And `internal/syslog`'s own
+`send()` treats a nil `queue` as "deliver synchronously"
+(`internal/syslog/syslog.go:159-163`), while `NewWriter` sets `queue` *after* the
+struct literal — with no release/acquire edge, a request goroutine can observe a
+non-nil writer whose queue is still zero, fall into the synchronous path, and
+perform a dial plus two socket writes itself. That path's own file documents the
+cost: "~15 s worst case under `s.mu`", with every other logging caller queued
+behind it. That is precisely the proxy-wide stall the async design and
+`TestAsync_WedgedCollectorNeverBlocksCaller` exist to prevent — reachable not
+through the engine but through the pointer holding it.
+
+The fix is mechanical and already idiomatic here: `atomic.Pointer`, read once
+into a local. The codebase does exactly this for every other hot-path-read,
+runtime-reconfigured global — `globalLogStore` (`logstore.go:55`), `logSink`
+(`logger.go:117`), `obs.sink` (`internal/obs/obs.go:18`), and the syslog
+engine's own `panicObserver`. The pointer holding the engine is the one that was
+left plain. Not bundled here only because it touches ~32 sites across a
+different domain; `-race` over a concurrent reconfigure is the gate to add.
+
+### OBS-2 — SIEM and OTLP drop counters are not scrapeable
+
+`syslog.Drops()` (`internal/syslog/syslog.go:361`), OTLP `pushFailures` /
+`droppedSpans` (`internal/otlp/spans.go:66-70`) and the alert plane's
+`RetryDroppedTotal` / `RetryExhaustedTotal` are all counted in-process and
+exposed **only** through their admin JSON endpoints. `culvert_syslog*` and
+`culvert_otlp*` do not exist anywhere in the tree. The local-disk sinks
+(`reqlog`, `logsink`) are scrapeable; the observability *backends* are not.
+
+This is the register's own §1 theme and `internal/otlp/otlp.go:50-53` states the
+standard being missed: "otherwise a broken collector endpoint fails silently
+forever — the only trace is a log line an admin would need to SSH in and grep
+for." The counter was added; it was never wired to the scrape surface. It matters
+most for syslog, because the dropped records include **audit** entries
+(`store.go:417`) — compliance evidence — and the queue drops newest on overflow
+with no log line, so a SIEM gap can persist indefinitely unnoticed.
+
+The export engines themselves were checked and are **sound**: bounded queues
+with counted non-blocking drops, 5 s write deadlines, drain-before-post so no
+mutex is held across `client.Do`, `NewRequestWithContext` plus a client timeout
+on webhooks, and zero hidden or infinite retry anywhere in the domain. A slow
+Prometheus scrape also cannot stall the data path — `metrics.go` renders into a
+`strings.Builder` and touches the socket once, and the hot-path mutators are
+lock-free by construction.
+
+### OBS-3 — the alert retry round is fully serial
+
+`internal/alerts/store.go:1083-1093` delivers the ready retry queue
+sequentially, without taking `webhookSem`. Each attempt is 5 s-bounded and the
+queue caps at 500, so one round is worst-case ~42 minutes, during which the 10 s
+ticker is blocked and no other webhook's retry progresses. Confined to the alert
+plane — the data path is unaffected — but the queue is process-wide, so one
+blackholed endpoint delays every other webhook's alerts, and with `retryMax = 3`
+a real threat alert can exhaust before its turn. Bound the round, or deliver
+concurrently through the semaphore that already exists.
+
+### CLK-1 — a forward clock jump durably destroys the session revocation list
+
+The sharpest of the clock findings, and the one with security impact. Revocation
+expiry is reconstructed from the cookie as `time.Unix(s.Exp, 0)`
+(`session.go:118`), which carries **no monotonic reading** — pure wall clock.
+`ExportRevocations` **deletes** entries it considers expired as a side effect of
+exporting (`internal/session/session.go:186-196`), and `SaveRevocations` calls it
+and then `AtomicWrite`s the survivors (`:269`). So the purge is fsynced.
+`MergeRevocations` drops expired entries on load (`:204-215`), and
+`LoadRevocations` runs **only** at startup (`session_startup.go:30`).
+
+An appliance that boots with a forward-skewed clock (dead RTC battery, VM
+snapshot restore, a bad NTP peer before `makestep` corrects) therefore imports
+zero revocations, and the first logout rewrites `revocations.json` without them;
+in a cluster `revocationSyncLoop` (`controlplane_client.go:599`) publishes the
+pruned set within seconds. Once the clock is corrected **backward**, every
+previously-revoked session cookie is accepted again until its natural `Exp`,
+because `Decode` checks revocation *before* expiry
+(`internal/session/session.go:397` vs `:409`).
+
+The asymmetry is the argument: retaining an expired revocation costs a few bytes
+and nothing else, since `Decode` rejects that session on its own expiry anyway,
+while dropping a live one is an authentication bypass. The remedy that follows is
+to make the durable write non-destructive and to stop letting a single
+wall-clock reading shrink persisted security state. The file's own comment at
+`:264-267` shows the gap precisely — it guards against a *torn* write resurrecting
+revoked cookies, which is the same harm one step removed; this writes a
+well-formed file that is simply missing live entries.
+
+### CLK-2 — admin session lifetime is an absolute wall-clock stamp
+
+`Exp` is minted as `time.Now().Add(getSessionTTL()).Unix()` (`ui_session.go:25`,
+`session.go:139`), stripping the monotonic reading, and checked as
+`time.Now().Unix() > s.Exp` (`internal/session/session.go:409`). There is no
+`iat`, no max-age and no server-side session table. A backward clock jump of Δ
+extends every live admin session by Δ — a host set back a year yields a
+year-long admin session — and with a configured `session_secret` the cookie
+survives restarts. Browser `MaxAge` is no mitigation: it is enforced by the
+client and ignored by `curl`. Forward jumps expire sessions early, which is
+availability-only and benign.
+
+### CLK-3 — TOTP replay counter: the failure direction is already the safe one
+
+Recorded as **correct**, because it is the one worth not "fixing".
+`TOTPLastCounter` is a persisted absolute time-step (`store.go:1463`) and
+`SetTOTPLastCounter` only ever raises it (`store.go:2091-2100`). A forward jump
+followed by a correction therefore rejects **every** TOTP code for the duration
+of the skew — but precisely because the counter is a monotonic high-water mark,
+**no clock movement in either direction reopens the replay window**. It fails
+availability, never security, and break-glass exists (backup codes on the same
+failure path at `ui_auth.go:63-72`, `ClearTOTP`, `--reset-password`). The
+backup/restore analogue is already guarded by `restore.go:961-973`'s
+counter-rollback refusal.
+
+### CLK-4 — a forward-skewed control plane silently stops distributing logouts
+
+`revocationAggregator.MergedExcluding` filters against the CP's own wall clock
+(`controlplane.go:248`, `:256`), so a forward-skewed CP returns nothing and DP
+nodes never learn about logouts performed on peers. Cluster-wide session
+invalidation degrades to per-node, with no log and no metric. Bounded by each DP
+keeping its locally merged copy.
+
+**Already resilient, and not to be "fixed":** account lockout is immune in both
+directions — the deadline is deliberately **not** persisted
+(`internal/lockout/lockout.go:38-39`) and every comparison is
+monotonic-vs-monotonic (`:155`, `:165`, `:177`, `:377`), so a lockout neither
+extends forever on a backward jump nor expires early on a forward one, and an
+admin unlock exists. The same holds for the admin API rate limiter, trusted-IP
+grants, user-level revocation and the credential cache: all in-memory and
+monotonic. Exactly three deadlines survive a restart as absolute wall-clock
+values, and they are CLK-1, CLK-2 and CLK-3.
+
+### BKP-1 — an encrypted-backup passphrase is never *required*
+
+`loadAndMaybeDecrypt` (`restore.go:305-311`) chooses the envelope by magic-byte
+sniff and consults the passphrase **only** in the encrypted branch, so a
+plaintext archive is accepted with the passphrase never examined, and
+`printRestoreSummary` prints no line saying the archive was unencrypted. Anyone
+who can write into the `/backup` volume can therefore substitute a hand-built
+unencrypted tarball; the manifest is self-referential (`restore.go:500-519`), so
+every content check still passes, and neither existing guard fires for a
+substituted `ui_users.json`. A restore would then install an attacker-authored
+admin roster. Since the format carries no other provenance binding, refusing the
+downgrade when a passphrase is set is the only available control — symmetric
+with the KDF-downgrade refusal `backupcrypt` already implements at the header
+level. No test covers passphrase-set-plus-plaintext-archive.
+
+### BKP-2 — the unencrypted backup archive is written world-readable
+
+`backup.go:425` uses `os.Create` (0666 before umask, so typically 0644) with no
+`Chmod` anywhere in the file, while the encrypted writer goes through
+`atomicWriteFile(..., 0o600)` whose `Chmod` makes the mode umask-independent.
+The archive aggregates files that are individually 0600 and contains
+`cluster-ca.key`, `ui_users.json` (password hashes, TOTP secrets) and
+`idp_profiles.json` (OIDC client secrets, LDAP bind credentials). Any local
+account or co-mounted container with read access to `/backup` obtains the
+fleet's MITM-capable CA key. One `0o600`. Partially mitigated by the GUI
+defaulting encryption on. No test asserts the published archive's mode on either
+path.
+
+### BKP-3 — archive memory is not actually bounded
+
+The decompression-bomb guard checks declared entry sizes
+(`restore.go:365-371`) but `restore.go:306` slurps the whole archive with an
+unbounded `os.ReadFile` (≈3× file size peak for the encrypted envelope), and
+entry **count** is uncapped, so N zero-size entries grow the maps unbounded. The
+repository's own pattern two files over is the remedy —
+`release_catalog.go:492-497` uses `io.LimitReader` plus an explicit refusal.
+Compounding: `initMemoryBackstop()` runs at `main.go:215`, *after* the restore
+one-shot at `:198`, so that path has no `GOMEMLIMIT` backstop. Availability only
+— the mutation phase is never reached.
+
+### BKP-4 — the unencrypted writer still uses a fixed `<out>.tmp`
+
+`backup.go:424-425` uses `outPath + ".tmp"` with `os.Create` — no `O_EXCL`, and
+it follows symlinks. The encrypted path deliberately abandoned this pattern and
+pins the abandonment with two tests (`TestBackupEncrypt_NoFixedTmpFile`,
+`…_StaleTmpDoesNotAffect`), the sibling file documenting exactly why. A symlink
+planted at the predictable path redirects an archive carrying the cluster CA
+key; two concurrent backups to the same `outPath` open the same inode and
+interleave, after which the CLI prints success over a corrupt archive. Two-line
+switch to `atomicWriteFile`.
+
+### BKP-5 — `modeFull` silently deletes live artifacts absent from the archive
+
+`stageArtifacts` pass 2 skips every path for which `mode.fromTarball` is true,
+and for `modeFull` that is unconditional (`restore.go:170-172`), so any live
+`/data` file absent from the archive is dropped by the directory swap — never
+reported by `printRestoreSummary` and not covered by either guard. Because
+`policy.json` and `admin_settings.json` are Tier-2 **optional** artifacts
+(`backup.go:77-101`), an archive from a fresh install legitimately contains
+neither, and restoring it onto a configured appliance drops both.
+`admin_settings.json` is where `default_action` persists, and the
+empty-default-plus-zero-rules combination resolves to passthrough — so the wrong
+archive takes the gateway from enforcing to fully permissive, silently. The plan
+should enumerate what a commit will delete, in the shape
+`--accept-dp-reenrollment` already establishes.
+
+### BKP-6 / BKP-7 — recorded, lower severity
+
+No ceiling on the archive-declared PBKDF2 iteration count (`backupcrypt.go:197`
+enforces only a floor, so a declared `0xFFFFFFFF` is ~40 minutes of
+single-core work before the AAD binding fails the open anyway — a cheap header
+check beside the floor that already exists). And `enqueueRetry` fsyncs the whole
+alert retry queue under a process-wide mutex on the producer's goroutine
+(`internal/alerts/store.go:1019-1029`), today bounded because nearly every
+producer is `go fireAlert(...)` — recorded because `pac_metrics.go:129` is a
+client-facing handler one removed `go` away from putting an fsync on the data
+path.
+
+**Pre-existing finding re-confirmed, not re-litigated:** the restore commit
+cannot succeed in the shipped docker-compose topology, because step 6 renames
+`/data`, which is a mount point (`EBUSY`). This is already characterised by its
+own test (`restore_mountpoint_test.go:31`), whose header says so plainly. It
+dominates the DR risk picture and is noted for that reason only. The failure is
+clean — current data is untouched and the stack is brought back up.
+
+**Already resilient in this domain, and the code that provides it:** restore
+validates fully in memory before the first byte is written
+(`runRestoreCommit`, `restore.go:954`), stages into a fresh exclusive directory
+and publishes by rename, so a mid-restore ENOSPC leaves `/data` untouched;
+`fileutil.AtomicWrite` is temp + chmod + fsync + rename + parent fsync with
+cleanup on every branch, and distinguishes a post-rename fsync failure so it
+cannot be mistaken for "nothing was written"; `checkInterruptedRestore`
+(`restore.go:1067`) refuses to boot into an empty `/data` when a `.bak` sibling
+proves a killed commit, and prints both recovery commands; `backupcrypt` binds
+its header as AAD so an iteration downgrade cannot authenticate and collapses
+wrong-passphrase and tamper into one opaque error with no oracle; and
+node-local key material is excluded on the pack side *and* refused on the
+restore side.
+
+## 43. CHAOS-75 — The release-dispatch plane's detached workers, and the 200 that outran the crash
+
+**Date:** 2026-10-11 · **Domain:** Updates / release management (the CP-side
+maintenance-agent upgrade dispatch; never previously swept) · **Code:**
+`release_api.go` (`apiReleaseDispatch`, `apiReleaseDispatchResume`,
+`respondPreApply`, new `recordDispatchPanic` / `runResumeWorker`) · **Gates:**
+`release_dispatch_panic_chaos_test.go`
+
+> **Id claimed in a committed placeholder row before any code was written**, per
+> the standing recommendation the revision log reaches twice independently after
+> ten collisions. `CHAOS-74` was the highest id claimed on any open branch, so
+> this sweep took 75 and did not move.
+
+### Executive summary
+
+`POST /api/releases/dispatch` and `.../dispatch/resume` hand the actual upgrade
+to a goroutine that outlives its request. That is correct by design — the 202
+ships as soon as the op is durably recorded, and the watch must then run to
+terminal even if the client disconnects, so the worker holds a detached
+`context.Background()` rather than `r.Context()`.
+
+Neither worker had a panic tap. A fault anywhere under `DispatchService` — the
+planner, the agent HTTP client, the digest classifier — therefore killed the
+**whole process**: the proxy data plane, the admin plane and `/healthz`, from one
+authenticated admin POST. Every other detached go-site in the tree has carried a
+`recoverGoroutine`/`runGuarded` guard since CHAOS-24, and this domain's own
+periodic loops carry one (`refreshLoopTick` / `staleWatchdogTick`, CHAOS-R1). The
+two goroutines that run the highest-consequence operation in the product were
+the ones left open.
+
+**That is the smaller half.** The worker's only defer was `close(done)`, and a
+defer fires *during* unwinding — before `rep, derr = rm.svc.Dispatch(…)` lands.
+So a panicking worker woke the handler, parked in `select`, on a **zero pair**;
+`appliedFlag` was false, so it called `respondPreApply(w, nil, nil)`, which fell
+through the whole `switch` to its `default` arm and answered:
+
+```
+HTTP 200  {"status":"ok"}
+```
+
+for an upgrade that never started. Reproduced against `main` with a fault
+injected into the agent client's pre-apply read:
+
+```
+ZZPROBE STATUS=200 BODY={"status":"ok"}
+panic: zz injected agent-client fault
+FAIL	github.com/KidCarmi/Culvert	0.123s
+```
+
+### The finding inside the finding: containment alone makes it worse
+
+Today that 200 is a **race** — the handler is sprinting against the runtime's
+fatal exit, and the runtime usually wins. Measured over 30 runs against `main`:
+
+| Variant | `200 {"status":"ok"}` for an upgrade that never started | Process survives |
+|---|---|---|
+| `main` (no guard) | **6 / 30** (~20 %, scheduler-dependent) | **no** |
+| guard only — `runGuarded` and nothing else | **10 / 10** | yes |
+| CHAOS-75 | 0 — `500 {"status":"internal_error"}` | yes |
+
+The obvious one-line fix resolves the race the **wrong way, every time**: the
+process survives precisely long enough to deliver a permanent, deterministic
+false success. An operator — or a CP-side orchestrator driving a fleet rollout —
+reads `200 ok`, marks the node upgraded, and moves to the next one.
+
+The guard-only variant has a second defect the measurement exposed. With the
+panic contained and the outcome left at `(nil, nil)`, execution continues into
+the pre-existing `if ownedAgent(rep, derr)` line — and `ownedAgent(nil, nil)`
+returns **true**, because it is written to detect an in-flight rejection or a
+planner refusal, neither of which a zero pair is. So the guard-only fix also
+writes a terminal record with an **empty terminal** over the per-agent status
+slot, which may belong to a concurrently running op (the P2 status-clobber the
+surrounding code exists to avoid). Containing a panic is not the same as knowing
+what the panic means.
+
+### What shipped
+
+Three changes, in increasing order of how much they depend on each other being
+right:
+
+1. **`respondPreApply` rejects a no-outcome pair ahead of the switch.**
+   `DispatchService.Dispatch` returns a report OR an error on every path, so
+   `(nil, nil)` is unreachable by its contract — which is exactly why it must
+   not be answered "ok". It now answers `500 {"status":"internal_error"}`. This
+   is deliberately **independent** of change 2: it holds for any future detached
+   writer that forgets, which panic containment alone would not.
+
+2. **Both workers run under `runGuarded`**, the CHAOS-24 background-worker
+   primitive, whose documented reason for returning `panicked bool` is this exact
+   situation: *"a worker whose safety depends on completing its round must treat
+   a panicking round as a FAILED round, never as a silent success."* The panic
+   lands in the existing crash plane — `culvert_crash_records_total{component}`,
+   a `system`-actor `panic_recovered` audit entry, the bounded `lastCrash` record
+   — under two new fixed labels, `release_dispatch` and `release_resume`. Both
+   come from a fixed enum, which is what the 32-entry `maxCrashLabels` cap is
+   designed to admit; a survey of the tree's guard sites found roughly two dozen
+   labels in use, so the cap is not close, and overflow folds to `other` rather
+   than failing.
+
+3. **The panic is converted into a definite outcome**, which is where the
+   ownership reasoning lives (`recordDispatchPanic`). It splits on whether the
+   agent had already accepted the apply, because the two cases have different
+   owners and different honest answers:
+
+   - **applied** — this dispatch *did* own the single-flight, and
+     `markDispatched` already made its `dispatch_id` the slot owner, so writing
+     the terminal cannot clobber another op. The 202 has shipped, so the status
+     record is the only channel left. It gets `FAILED_NEEDS_ATTN` over the
+     **live `op_id`**, with a detail that tells the operator to *resume*, not
+     re-dispatch: the recorded op_id and idempotency key make a re-poll safe and
+     a second apply not. Leaving the record at `phase=dispatched` would be the
+     silent failure — a phantom in-flight op nobody is watching,
+     indistinguishable from a slow but healthy one.
+   - **not applied** — the panic can land in the pre-apply preflight read, which
+     runs *before* `e.acquire()`, so this dispatch may own nothing. The status
+     slot is left untouched and the HTTP reply, still open, carries the outcome
+     as `errDispatchWorkerFailed` → 500.
+
+   `recordDispatchPanic` always returns that error, so no caller can be handed
+   the zero pair change 1 rejects.
+
+4. **The resume worker is deliberately asymmetric** (`runResumeWorker`): on a
+   panic it writes **nothing** to the status store. A resume starts no op — it
+   only re-polls an existing one — and its `dispatch_id` is *newer* than the
+   running op's, so under `dispatchStore.update`'s ULID ordering any write would
+   **win** the slot and overwrite the real owner's record. A panic cannot tell us
+   whether single-flight was acquired, so leaving the record alone is the safe
+   move: nothing durable was lost, only one observation. The crash counter, the
+   audit entry and a `logger.Printf` line are the operator signal, and the 202
+   already said where to look.
+
+### Gates
+
+`release_dispatch_panic_chaos_test.go`, six tests. Against the pre-fix tree the
+end-to-end ones do not *fail* — they **crash the test binary**, which is the
+finding restated as a gate.
+
+| Gate | Asserts |
+|---|---|
+| `RespondPreApply_NoOutcomeIsNever200` | the zero pair is never 200 and never `status: ok` (negative control on the exact pre-fix body) |
+| `RespondPreApply_WorkerFailedIs500` | the sentinel maps to 500, not to 409 (client-correctable) or 2xx |
+| `DispatchWorkerPanicBeforeApply_Answers500` | process survives; 500 `internal_error`; the injected fault fired exactly once; `culvert_crash_records_total{component="release_dispatch"}` advanced; **no** status-slot write |
+| `DispatchWorkerPanicBeforeApply_DoesNotClobberAnotherOp` | an incumbent record (older `dispatch_id`, `phase=dispatched`) is byte-for-byte intact after a panicking dispatch holding a NEWER id |
+| `DispatchWorkerPanicAfterApply_MarksTerminal` | 202 (the agent did accept); then `FAILED_NEEDS_ATTN`, `verified=false`, the resume-me detail, and the **`op_id` preserved** — it is the resume authority |
+| `ResumeWorkerPanic_ContainedAndDoesNotClobber` | process survives, `release_resume` counter advances, incumbent record untouched |
+
+Assertions read the per-component crash **counter**, never `lastCrash` or the
+audit ring: `recordCrash` throttles the expensive sinks to one per component per
+second and the audit ring is bounded (the convention in
+`docs/agent-context/conventions.md`), while the counter always increments.
+
+**The gates found a latent trap in the shared crash plane on the way in.** They
+passed in isolation and failed under `-shuffle` with `crash counter for
+"release_dispatch" = 0; want > 0`. Not flakiness: `crashCounter.record` folds a
+new label into `other` once the process-global map holds `maxCrashLabels`
+entries, and `TestCrashCounter_OverflowBucket` deliberately saturates it with
+`maxCrashLabels+10` dynamic labels and left it that way for the rest of the
+binary — so **every** later test in the root package that recorded a NEW
+component had its label silently folded and never appeared on
+`culvert_crash_records_total`. Verified directly: after the saturation,
+`recordCrash("release_dispatch", …)` yields `release_dispatch present=false,
+other present=true`. That test now restores on the way out as well as in, and
+these gates take a clean baseline rather than depending on order in either
+direction. It is a test-isolation defect, not a production one — the cap is
+fail-safe in production — but it was silently weakening any future
+per-component crash assertion, which is exactly the signal this sweep adds.
+
+### What is deliberately left
+
+- **WK-22 — the resume authority is not durable, and nothing says so.**
+  `DispatchResumeContext` is documented as *"the explicit, persistable record
+  needed to re-poll an in-flight dispatch op after a CP restart — independent of
+  any in-memory plan"*, and its only caller keeps it in `dispatchStore`'s
+  in-memory `byAgent` map. A restart mid-upgrade — SIGTERM, OOM, node reboot, or
+  the gateway upgrading *itself*, which is the likeliest one — loses the
+  `op_id`; `resolveResumeContext` then has nothing to resolve, and recovery
+  degrades to an operator hand-assembling a `resume_context` body from the
+  `release.dispatch` audit entry. **Not fixed here on purpose.** Where it
+  persists is an owner decision with real consequences — a new state file is a
+  backup input (ST-10) and a cluster-sync question (HA-14 already carries a
+  plaintext-snapshot finding), and the alternative of widening the 202 body so
+  the caller can persist it is an API-contract change. Recorded rather than
+  invented, per the conventions' rule on startup/persistence boundaries.
+- **WK-23 — no shutdown drain for the in-flight watch.** `main_shutdown.go`
+  registers 22 hooks and the release plane is not among them, so SIGTERM
+  abandons the watch with no log, no terminal record and no audit line. Bounded
+  by the agent's idempotency key (the op continues; a re-poll is safe) and by
+  WK-22 being the same recovery path, so it is recorded with it. Fixing the drain
+  without fixing the durability would produce a tidy log line about state the
+  next boot cannot act on.
+- **The crash does not fire a release alert.** A panicking worker reaches the
+  crash plane (counter + audit + log) but not `DispatchService.maybeAlert`, which
+  is the service's own hook and not reachable from the API layer without
+  threading it through. `culvert_crash_records_total{component="release_dispatch"}`
+  is the alertable signal today.
+- **Goroutine-per-POST is unbounded by anything but the admin rate limit.** Each
+  dispatch POST spawns a worker before the per-agent single-flight is consulted,
+  so a flood of admin POSTs piles up workers that each do one preflight read and
+  exit. `RoleAdmin` + the configured-agent resolver bound it in practice; it is
+  not a new finding of this sweep and is not changed.
+
+### Residual risk
+
+Containment converts process death into a reported failure; it does not make the
+underlying fault go away. A **deterministic** panic in the dispatch path now
+yields a repeatable 500 per attempt instead of a crash loop — better, but the
+upgrade plane is still unusable until the fault is fixed, and the only signal
+that it is the *same* fault each time is the crash counter's rate. A panic that
+lands between the agent's accept and the first `markDispatched` leaves the op
+live on the agent with no CP-side record at all; the idempotency key keeps a
+re-dispatch from applying twice, and WK-22 is the durable fix for the record.
+
+---
+
+## 44. CHAOS-71 — The Control Plane's gRPC listener, and which plane may kill which
 
 **Id allocated at the START of the sweep**, per the governance note in §0 — in a
 committed placeholder row, before any code was written. The branch first took
@@ -8309,8 +9322,11 @@ open-PR cleanup (#1556 made canonical; #1534/#1546/#1571/#1578 closed in its
 favour) it was **renumbered to `CHAOS-71` in merge order**: the next free id on
 main, and the id the closed #1534 sweep of this same domain held. Its gates
 that were ported from #1534 keep their `TestChaos71_` names.
+The section number follows the same rule: written as §41, it became §44 when
+main was brought in after `CHAOS-74` merged as §41/§42 (§43 is held by the
+open `CHAOS-75` sweep, #1605).
 
-### 41.1 Why this path, and why now
+### 44.1 Why this path, and why now
 
 This sweep did not pick its own target. `CLAUDE.md`'s CHAOS-66 note names it
 verbatim as the remaining one: *"the CP gRPC bind (`cluster_startup.go`) is the
@@ -8324,9 +9340,9 @@ The progression matters because the severity grows at each step:
 |---|---|
 | §33 | the **management** plane killed the **data** plane |
 | §36 | a **secondary, opt-in** data plane killed the **primary** one |
-| **§41** | the **cluster** plane killed this node's data plane, management plane and health endpoints, before any of them existed |
+| **§44** | the **cluster** plane killed this node's data plane, management plane and health endpoints, before any of them existed |
 
-### 41.2 The finding
+### 44.2 The finding
 
 The Control Plane boot path had exactly one error branch:
 
@@ -8369,7 +9385,7 @@ re-argued: process death picks **no** posture, it delegates the choice to the
 topology. An explicit-proxy fleet loses all egress; a PAC/WPAD fleet with a
 `DIRECT` fallback, or a transparent deployment, goes UNFILTERED.
 
-### 41.3 The asymmetry is the finding — and it is a governance point
+### 44.3 The asymmetry is the finding — and it is a governance point
 
 The **same function**, `enableControlPlane`, with the **same error**, already
 had a non-fatal caller. `apiClusterMode` (ui_cluster.go) hands it to the live
@@ -8386,7 +9402,7 @@ and not its sibling. **The rule to carry forward: when one caller of a function
 can report a fault and another can only exit, the exit is the one that needs
 the argument — and "it is the boot path" is not that argument.**
 
-### 41.4 A third defect, with no fatal to blame
+### 44.4 A third defect, with no fatal to blame
 
 Independent of the bind, the listener's death was **silent and terminal**:
 
@@ -8415,7 +9431,7 @@ exactly once per process; a real data race the moment anything rebinds. The
 handle now lives on the supervisor under its own mutex and the global-handle
 entry point is gone.
 
-### 41.5 What shipped
+### 44.5 What shipped
 
 `cp_grpc_bind.go` owns bind → serve → rebind; `cp_grpc_health.go` is the
 observability plane. Five rules, borrowed wholesale from CHAOS-54/55/57/66
@@ -8430,7 +9446,7 @@ carried the comment *"Only set role after gRPC is successfully started"*, and
 that invariant is preserved rather than traded for availability — while the bind
 is failing the node stays `standalone`, so every `role == "control-plane"` gate
 reports what is true. A supervisor that claimed the role optimistically would
-have fixed the crash loop by replacing it with the operational lie of §41.4.
+have fixed the crash loop by replacing it with the operational lie of §44.4.
 
 The HA leadership resume rides the same rule: it moved from a statement after
 `enableControlPlane` into the `onActivated` callback, so this node never asserts
@@ -8486,7 +9502,7 @@ listener acquired a loop — beside a failure line that is carefully rate
 limited. The mode is returned instead and logged once per observed bind. *A
 mitigation for a crash loop must not itself be a log flood.*
 
-### 41.6 Gates, and what mutation testing changed
+### 44.6 Gates, and what mutation testing changed
 
 `cp_grpc_bind_chaos_test.go` — 22 gates: 15 defect gates, 5 controls and 2
 structural walls. **Fifteen mutations were each verified failing against the
@@ -8562,7 +9578,7 @@ other half too (the starter must still return once activation completes), so a
 "fix" that simply never releases it — a boot that hangs before the proxy
 listener starts, strictly worse than the defect — cannot pass.
 
-### 41.6b Governance: the collision problem is not confined to the CHAOS id
+### 44.6b Governance: the collision problem is not confined to the CHAOS id
 
 This sweep allocated its `CHAOS-` id in a committed placeholder row as §0
 requires, and then **collided anyway — on the ROW id.** The first draft of the
@@ -8593,7 +9609,7 @@ because they touch every sweep's habits:
    apparent gap. "The next free number" is what produced this collision: `CL-9`
    looked free in THIS file because no `CL-` row had ever been added to it.
 
-### 41.7 Deliberately left, recorded rather than silently skipped
+### 44.7 Deliberately left, recorded rather than silently skipped
 
 * **`logFatalf("Proxy error")` (main.go) is untouched and correct.** The proxy
   IS the product; a gateway that cannot serve must exit loudly rather than
@@ -8628,13 +9644,13 @@ because they touch every sweep's habits:
   not fixed inside this sweep: the fix belongs with the cluster-CA minting
   policy, not with the listener.
 
-### 41.8 Owner review (open-PR cleanup): what the canonical variant had to absorb
+### 44.8 Owner review (open-PR cleanup): what the canonical variant had to absorb
 
 #1556 was made the canonical fix for this domain and #1534/#1546/#1571/#1578
 were closed in its favour. The owner decision named the changes below as
 required before merge; each is now in the tree.
 
-* **Id in merge order.** `CHAOS-73` → `CHAOS-71` (see the §41 header).
+* **Id in merge order.** `CHAOS-73` → `CHAOS-71` (see the §44 header).
 * **Alert name.** `cp_grpc_unavailable` → `cp_grpc_listener_down`, matching the
   `<contract-row>_down` convention (`socks5_listener_down`,
   `mcp_gateway_down`, `upstream_pool_down`). The `culvert_cp_grpc_unavailable`
@@ -9070,6 +10086,98 @@ required before merge; each is now in the tree.
   Three mutations each fail (a) and the wall: restoring `Update`'s
   owned-only substitution (which also fails (b)), restoring the HA-state
   derivation in `CurrentConfigSnapshot`, and both together.
+* **One teardown owner per gRPC server (Codex P2 4313548177).** `Serve`
+  failed on its own while a Data Plane RPC was wedged in its handler, and
+  shutdown closed `stopping` just after the loop's check. The loop then called
+  the synchronous retirement `srv.Stop()` while `cpListenerSupervisor.Stop`
+  was in `GracefulStop()` on the same server. grpc-go v1.83.2's shared
+  `stop()` holds the server mutex across `handlersWG.Wait()`, so once the last
+  transport went the graceful stop parked holding it, the retirement blocked
+  on it, `done` never closed, and the shutdown hook ran to its deadline.
+
+  The class rule: exactly one owner stops a given `*grpc.Server`, decided
+  atomically under the supervisor mutex. The published handle `s.srv` is the
+  claim:
+  - `Stop` takes it in the same critical section that sets `stopped`, and a
+    server already claimed by the loop leaves `Stop` only waiting on `done`;
+  - the loop's `claimTeardown` takes it before any stop; a server `Stop`
+    already took is left to `Stop`'s drain. A server `adopt` never published
+    is the loop's alone;
+  - a loop that claims after shutdown began drains with the same
+    `cpGRPCGracefulStopBudget`, so the bound derivation is unchanged.
+
+  `teardownCPGRPCServer` is the one helper that stops a supervised server.
+
+  Gates:
+  - `TestChaos71_RetirementAndShutdownNeverStopTheSameServer` drives the
+    interleaving through the real supervisor and `stopControlPlaneListener`:
+    wedged handler, forced Accept failure, shutdown injected in the
+    retirement seam, transport closed. Shutdown must finish within the early
+    shutdown budget and `done` must close. With the claim removed it fails
+    3/3 under `-race` on the context deadline.
+  - `TestChaos71_TeardownClaimHasExactlyOneOwner` checks both claim orders
+    and the unpublished case.
+  - `TestChaos71_Wall_SupervisedGRPCServersHaveOneTeardownOwner` (AST): only
+    the helper, the bounded mechanism and the never-published Listen-failure
+    cleanup reference `Stop`/`GracefulStop` on a `*grpc.Server`. The call
+    graph into the helper is exact, and both claim holders claim first. A
+    negative control and a reintroduced direct `a.srv.Stop()` both fail it.
+* **An address-only publish is not refused by rewrite-identity degradation
+  (Codex P1 4314031064).** Gate 0 of the commit-time validator (main's,
+  from #1265) refuses every publish while the rewrite management-identity
+  latch is set, because a full publish captures the live, known-ephemeral
+  rewrite StableIDs. This PR routed the address-only publish through the same
+  validator. That candidate is the committed snapshot with only `CPAddresses`
+  replaced, so it carries no identity that is not already committed. On a
+  store that had already published (a node that led earlier in the process,
+  or the boot path's first publish, which runs before `LoadAdminSettings`
+  can set the latch), every CP activation and HA promotion was refused at
+  the address publish and rolled back until a restart. An unrelated
+  rewrite-persistence fault disabled failover.
+
+  `validatePublishCandidate` applies Gate 0 to full publishes only. Both
+  kinds still pass the count and wire-size gates.
+
+  Gates:
+  - `TestChaos71_PromotionCommitsAddressesWhileRewriteIdentityDegraded`:
+    publish, set the latch, promote. The promotion succeeds, the role holds,
+    the committed list names the node, and the activation's full publish is
+    still refused.
+  - `TestChaos71_RewriteDegradationStillRefusesFullPublishes`, on a bare
+    store: the full publish is refused and commits nothing; the address
+    publish commits onto the committed content and leaves the full kind's
+    rejection latched.
+
+  Routing the address kind through Gate 0 fails both. Exempting the full kind
+  fails both.
+
+  The fencing-epoch restamp #1645 adds (`RestampFenceEpoch`, `publishEpoch`)
+  is the same case and takes the same exemption, found when #1645 brought
+  this fix in: the committed snapshot, content unchanged, with only the epoch
+  replaced. Through Gate 0 it refused every fenced promote while the latch
+  was set, so the node stayed standby until a restart. A promote's first
+  publish is a full one and stays gated (`preflightFirstPublish`). The
+  exemption is a listed kind, never "not full".
+  Gate: `TestChaos71_FencedPromotionRestampsTheEpochWhileRewriteIdentityDegraded`
+  (a fenced promote under the latch leads at the new epoch, the restamp keeps
+  the committed content, a full publish is still refused). Routing the epoch
+  kind through Gate 0 fails it.
+* **A terminal exit records the terminal state before the withdrawal (Codex
+  P2 4314031070).** `exitTerminal` withdrew this node from the committed list
+  first and marked the supervisor down only afterwards. The withdrawal can
+  clone, marshal and delta a snapshot near the wire budget. Throughout that
+  window, after a panic in which `abandonAfterPanic` had already stopped the
+  server, diagnostics reported `Serving=true` and `cpGRPCLeaseRenewWithheld`
+  kept renewing the lease of a leader with no listener and no supervisor,
+  which delayed failover. `noteCPGRPCSupervisorDown` now runs first. The
+  withdrawal, its pending-and-retried rejection path and the
+  ownership-after-withdrawal rule are unchanged.
+
+  Gate: `TestChaos71_TerminalStateIsRecordedBeforeTheWithdrawal`. A seam in
+  the withdrawal asserts that the listener is already down and lease renewal
+  is already withheld, for a panic while a served server is retired and for a
+  panic in the backoff after a serve. Moving the health record back after the
+  withdrawal fails both rows.
 * **An uninstalled fencing grant is cleared (Codex P1 4306890528).** A
   guarded boot resume acquired epoch E. Its post-acquisition revalidation
   then found `ha_config.json` removed or disabled, and the return left

@@ -16,10 +16,11 @@ package main
 // rollback into a 500 "rolled_back_not_durable" (Deep · determinism, seed
 // -test.shuffle 1792171671618181963).
 //
-// RED without the rebind in TestMain. The config-version assertion is
-// order-independent: TestDataDirOverride_RebindsHardcodedDefaults restores
-// the pre-test configVersions OBJECT, so before the fix it stays at
-// /data/config_versions whatever ran first.
+// RED without the rebind in TestMain (the retry queue, registry settings and
+// both CDR paths stay at /data), and RED without initConfigVersioning there
+// (the rebound version store has no directory). The assertions are order-independent:
+// TestDataDirOverride_RebindsHardcodedDefaults restores the pre-test values,
+// so whatever ran first, they read what TestMain bound.
 
 import (
 	"os"

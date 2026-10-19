@@ -77,10 +77,12 @@ func cpAssertStillFenced(t *testing.T, h *HAState, f *halease.Fake) {
 }
 
 // cpPublishPrimitives are the snapshot marshal and commit primitives every
-// publish goes through (commitPublish validates with
-// validateSnapshotForPublish, then commitLocked).
+// publish goes through (commitPublish validates with validatePublishCandidate
+// — validateSnapshotForPublish and/or validateSnapshotWireForPublish — then
+// commitLocked).
 var cpPublishPrimitives = map[string]bool{
-	"commitPublish": true, "validateSnapshotForPublish": true, "commitLocked": true,
+	"commitPublish": true, "validatePublishCandidate": true, "validateSnapshotForPublish": true,
+	"validateSnapshotWireForPublish": true, "commitLocked": true,
 }
 
 // TestChaos71_Wall_NoSnapshotPublishUnderTheHALock: no code path that holds

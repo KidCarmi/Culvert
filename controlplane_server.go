@@ -1006,9 +1006,13 @@ var cpGRPCStopBudget = cpGRPCGracefulStopBudget
 // RPCs, and force-closes anything still holding a transport once the graceful
 // budget is spent.
 //
-// Two callers, both via the supervisor (cp_grpc_bind.go): the SIGTERM/SIGINT
-// shutdown hook, and the supervisor tearing down a server it lost the adopt
-// race for. CHAOS-71 removed the previous entry point, `StopControlPlaneGRPC`,
+// One caller, teardownCPGRPCServer (cp_grpc_bind.go), reached only by the
+// side that holds the server's teardown claim: the SIGTERM/SIGINT shutdown
+// hook through the supervisor's Stop, or the supervisor itself when shutdown
+// arrived after a serve ended but before Stop could claim it. Never both for
+// one server — a second, concurrent stop of a server whose GracefulStop is
+// parked in handlersWG.Wait() blocks on grpc-go's server mutex for as long as
+// the handler is wedged (hazard 2 below). CHAOS-71 removed the previous entry point, `StopControlPlaneGRPC`,
 // which read `clusterRole.grpcSrv` with NO lock — latent while that field was
 // written exactly once per process, a REAL data race the moment the listener
 // acquired a rebind loop. Do not reintroduce a global-handle variant: the

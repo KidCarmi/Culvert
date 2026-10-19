@@ -26,7 +26,7 @@ package main
 //
 //	§33  the MANAGEMENT plane killed the DATA plane.
 //	§36  a SECONDARY, opt-in data plane killed the PRIMARY data plane.
-//	§41  the CLUSTER plane — whose job is serving config to OTHER nodes —
+//	§44  the CLUSTER plane — whose job is serving config to OTHER nodes —
 //	     kills this node's own data plane, management plane and health
 //	     endpoints, before any of them exist.
 //
@@ -215,6 +215,16 @@ type cpListenerSupervisor struct {
 	// refuses under the same lock, so a server created concurrently with Stop is
 	// either stopped by Stop or torn down by the loop — never left serving with
 	// nobody waiting on it.
+	//
+	// srv is also the TEARDOWN CLAIM. A published server has exactly one
+	// teardown owner, decided under mu: whoever takes srv out of this field
+	// (Stop, or the loop's claimTeardown) stops it, and the other side never
+	// calls Stop or GracefulStop on it. Two concurrent stops are not merely
+	// redundant: grpc-go's stop() holds the server mutex across
+	// handlersWG.Wait(), so a GracefulStop parked behind a wedged handler
+	// blocks a concurrent Stop() forever — and when that Stop() was the loop's
+	// retirement, done never closed and shutdown ran to its deadline (Codex
+	// review of #1556).
 	mu       sync.Mutex
 	srv      *grpc.Server
 	stopped  bool
@@ -244,9 +254,10 @@ type cpListenerSupervisor struct {
 
 // cpAttempt is everything ONE bind attempt holds.
 type cpAttempt struct {
-	srv     *grpc.Server
-	ln      net.Listener
-	serving bool // Serve was entered: from then on Serve owns closing ln
+	srv       *grpc.Server
+	ln        net.Listener
+	published bool // adopt published srv: from then on its teardown is CLAIMED (claimTeardown)
+	serving   bool // Serve was entered: from then on Serve owns closing ln
 }
 
 // cpSupervisor is the process-wide handle. Guarded by cpActivationMu.
@@ -335,29 +346,33 @@ func (s *cpListenerSupervisor) markFirstAttempt() {
 
 // Stop interrupts the supervisor, stops the currently bound server if there is
 // one, and waits for the loop to exit — bounded by ctx. Nil-safe and
-// idempotent: only the first call drains the server, so a later one (the
-// shutdown hook joining a deactivation still draining) waits on the same exit
-// instead of starting a second GracefulStop.
+// idempotent: only the call that claims the server (takes it out of s.srv)
+// drains it, so a later one (the shutdown hook joining a deactivation still
+// draining) finds nothing to claim and waits on the same exit instead of
+// starting a second GracefulStop.
 func (s *cpListenerSupervisor) Stop(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
 	s.stopOnce.Do(func() { close(s.stopping) })
 
-	// Set stopped and read srv under ONE lock. adopt takes the same lock, so
-	// either it has already published a server (and we stop it here) or it will
-	// refuse and tear it down itself.
+	// Set stopped and CLAIM srv under ONE lock. adopt takes the same lock, so
+	// either it has already published a server (and we claim it here) or it
+	// will refuse and tear it down itself. Taking srv out of the field is the
+	// claim: a server the loop already claimed for retirement is not here, and
+	// Stop only waits on done — it never enters a second, concurrent stop of
+	// the same server (see the mu comment).
 	s.mu.Lock()
-	first := !s.stopped
 	s.stopped = true
 	srv := s.srv
+	s.srv = nil
 	s.mu.Unlock()
 
-	if first && srv != nil {
+	if srv != nil {
 		// The graceful/force split and its two grpc-go hazards are
 		// gracefulStopBounded's (CHAOS-56); this call site must not hold a lock
-		// across it, which is why srv was read above and released.
-		stopControlPlaneServer(srv)
+		// across it, which is why srv was claimed above and the lock released.
+		teardownCPGRPCServer(srv, true)
 	}
 
 	select {
@@ -380,25 +395,36 @@ func (s *cpListenerSupervisor) currentServer() *grpc.Server {
 	return s.srv
 }
 
-// adopt publishes srv as the current server, or reports false when Stop has
-// already run — in which case the caller owns tearing it down.
-func (s *cpListenerSupervisor) adopt(srv *grpc.Server) bool {
+// adopt publishes the attempt's server as the current server, or reports
+// false when Stop has already run — in which case the caller owns tearing it
+// down.
+func (s *cpListenerSupervisor) adopt(a *cpAttempt) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
 		return false
 	}
-	s.srv = srv
+	s.srv = a.srv
+	a.published = true
 	return true
 }
 
-// release clears the current server once its serve has ended.
-func (s *cpListenerSupervisor) release(srv *grpc.Server) {
-	s.mu.Lock()
-	if s.srv == srv {
-		s.srv = nil
+// claimTeardown decides, atomically under mu, whether the loop owns tearing
+// down the attempt's server. A server adopt never published is the loop's
+// alone. A published one is the loop's only if it is still in s.srv, and
+// taking it out is the claim; if Stop already took it, Stop owns its teardown
+// (the graceful drain) and the loop must not touch it.
+func (s *cpListenerSupervisor) claimTeardown(a *cpAttempt) bool {
+	if !a.published {
+		return true
 	}
-	s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.srv != a.srv {
+		return false
+	}
+	s.srv = nil
+	return true
 }
 
 // noteFirstBound records that the first attempt bound, for the starter to read.
@@ -424,8 +450,9 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 // (TestChaos71_Wall_TerminalExitsGoThroughExitTerminal). A terminal exit
 // leaves no Control Plane behind, so it gives up CP address-list ownership —
 // a Data Plane that won a role conflict, or a node whose loop panicked, must
-// not keep reporting and reconciling a CP list (Codex review of #1556) — and
-// then records the terminal state (fail row, alert).
+// not keep reporting and reconciling a CP list (Codex review of #1556). It
+// records the terminal state (fail row, alert) first, then withdraws this
+// node and gives up ownership.
 //
 // If the committed CP address list names this node — whichever owned path
 // published it: this supervisor's activation, or an HA transition's
@@ -442,7 +469,18 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 // On the panic edge this runs inside the deferred recover, so the withdrawal
 // is contained: a panic in it leaves the withdrawal unrecorded, and the
 // ownership step then latches it pending so a retry still owns it.
+//
+// The terminal state is recorded FIRST (Codex P2 4314031070 on #1556): by
+// now nothing is serving (abandonAfterPanic stopped the server, or the role
+// was refused), and the withdrawal can clone, marshal and delta a snapshot
+// near the wire budget. Recorded after it, that whole window reported
+// Serving=true on diagnostics and kept cpGRPCLeaseRenewWithheld renewing a
+// lease for a leader whose listener and supervisor were already gone,
+// delaying failover. The order touches only health: withdrawal ownership and
+// its retry path are unchanged
+// (TestChaos71_TerminalStateIsRecordedBeforeTheWithdrawal).
 func (s *cpListenerSupervisor) exitTerminal(reason string) {
+	noteCPGRPCSupervisorDown(reason)
 	func() {
 		defer func() { _ = recover() }()
 		// A no-op unless the committed list names this node. The outcome is
@@ -451,7 +489,6 @@ func (s *cpListenerSupervisor) exitTerminal(reason string) {
 		_, _ = cpWithdrawCPAddress(s.cfg.addr)
 	}()
 	globalConfigStore.releaseCPAddressSourceAfterWithdrawal(s.cfg.addr)
-	noteCPGRPCSupervisorDown(reason)
 }
 
 // run is the bind/serve/rebind loop.
@@ -475,6 +512,8 @@ func (s *cpListenerSupervisor) exitTerminal(reason string) {
 //	panic, withdrawal rejected   | as above; ownership KEPT (withdrawal pending, retried) until it commits | TERMINAL + alert + config_snapshot_rejected
 //	Stop while serving           | handle (Stop owns the graceful drain)      | stopped
 //	serve ends on its own        | server RETIRED (DP transports) + handle    | recoverable failure, backoff
+//	shutdown races a serve end   | server stopped by ONE owner (claimTeardown): | stopped
+//	                             | Stop's drain, or the loop's retire/drain   |
 //	panic after a serve ended    | role restored + address ownership after the withdrawal commits | TERMINAL + alert (bypasses latch)
 //
 // Address ownership: every TERMINAL exit releases it (exitTerminal) — at once
@@ -510,7 +549,7 @@ func (s *cpListenerSupervisor) run() {
 			// left the server, the bound socket and the CP role claimed with
 			// nothing serving (Codex review of #1556).
 			s.abandonAfterPanic()
-			s.exitTerminal("bind loop panicked") // withdraws this node from the list, then releases ownership
+			s.exitTerminal("bind loop panicked") // records the terminal state, withdraws this node from the list, then releases ownership
 		}
 	}()
 
@@ -542,7 +581,7 @@ func (s *cpListenerSupervisor) run() {
 		}
 
 		s.cur = &cpAttempt{srv: srv, ln: ln}
-		if !s.adopt(srv) {
+		if !s.adopt(s.cur) {
 			// Stop won the race: tear down what we just built rather than
 			// serving on a socket nobody will ever stop.
 			s.releaseAttempt()
@@ -600,8 +639,9 @@ func (s *cpListenerSupervisor) run() {
 		backoff = cpGRPCBackoffAfterServe(backoff, cpGRPCHealthNow().Sub(servedFrom))
 
 		if s.stopRequested() {
-			// Stop owns this server's teardown (graceful drain, then force):
-			// stopping it here would cut that drain short.
+			// Stop owns this server's teardown (graceful drain, then force) if
+			// it claimed it; otherwise releaseAttempt drains it under the same
+			// bound. Never both (claimTeardown).
 			s.releaseAttempt()
 			noteCPGRPCListenerStopped()
 			return
@@ -614,7 +654,10 @@ func (s *cpListenerSupervisor) run() {
 		// the listener but not the transports Data Planes already hold, and
 		// only Server.Stop closes those. Dropping the handle without it would
 		// leave an orphaned server generation per listener fault, unreachable
-		// by stopControlPlaneListener (Codex review of #1556).
+		// by stopControlPlaneListener (Codex review of #1556). Shutdown can
+		// still arrive between the check above and the retirement; the
+		// teardown claim in releaseAttempt decides which side stops the
+		// server, so the retirement never races Stop's GracefulStop.
 		s.releaseAttempt() // retires the server: see releaseAttempt
 		if !s.handleServeEnded(serveErr, backoff) {
 			noteCPGRPCListenerStopped()
@@ -624,30 +667,43 @@ func (s *cpListenerSupervisor) run() {
 	}
 }
 
-// releaseAttempt releases what the in-flight attempt holds, by stage:
+// releaseAttempt releases what the in-flight attempt holds. Who stops the
+// server is decided FIRST, atomically (claimTeardown): exactly one of Stop and
+// this loop tears down a given server, and neither ever enters a stop while
+// the other can be in one. Then, by stage:
 //
-//   - not yet serving: stop the server and close the bound listener;
-//   - serving, Serve returned on its own: RETIRE the server — on a fatal
+//   - not yet serving: close the bound listener (Serve never took it over)
+//     and, if claimed, stop the server;
+//   - serving, claimed, no Stop requested: RETIRE the server — on a fatal
 //     Accept error grpc-go closes the listener but not the transports Data
 //     Planes hold, and only Server.Stop closes those;
-//   - serving, Stop requested: Stop owns the teardown (graceful drain, then
-//     force) — stopping here would cut the drain short.
+//   - serving, claimed, Stop requested (shutdown arrived after Serve ended but
+//     before Stop could claim): the loop owns the graceful drain, bounded by
+//     the same cpGRPCGracefulStopBudget Stop would have used;
+//   - not claimed: Stop owns the teardown (graceful drain, then force) and
+//     this loop only exits — stopping here would race Stop's GracefulStop.
 //
-// Always clears the published handle. Idempotent; supervisor goroutine only.
+// Always clears the published handle (the claim does). Idempotent;
+// supervisor goroutine only.
 func (s *cpListenerSupervisor) releaseAttempt() {
 	a := s.cur
 	s.cur = nil
 	if a == nil || a.srv == nil {
 		return
 	}
-	switch {
-	case !a.serving:
-		a.srv.Stop()
+	owned := s.claimTeardown(a)
+	if !a.serving {
 		_ = a.ln.Close()
+	}
+	switch {
+	case !owned:
+	case !a.serving:
+		teardownCPGRPCServer(a.srv, false)
 	case !s.stopRequested():
 		retireCPGRPCServer(a.srv)
+	default:
+		teardownCPGRPCServer(a.srv, true)
 	}
-	s.release(a.srv)
 }
 
 // abandonAfterPanic is the panic edge's release: whatever the interrupted
@@ -674,8 +730,26 @@ func (s *cpListenerSupervisor) abandonAfterPanic() {
 
 // retireCPGRPCServer stops a server whose Serve already returned on its own,
 // closing the client transports grpc-go leaves open after a fatal Accept
-// error. A package-level seam so a gate can observe it.
-var retireCPGRPCServer = func(srv *grpc.Server) { srv.Stop() }
+// error. Called only with the teardown claimed (releaseAttempt). A
+// package-level seam so a gate can observe it — and interleave shutdown with
+// it (TestChaos71_RetirementAndShutdownNeverStopTheSameServer).
+var retireCPGRPCServer = func(srv *grpc.Server) { teardownCPGRPCServer(srv, false) }
+
+// teardownCPGRPCServer is the ONE place a supervised *grpc.Server is stopped
+// (TestChaos71_Wall_SupervisedGRPCServersHaveOneTeardownOwner). Its callers hold
+// the teardown claim for srv (Stop, or releaseAttempt after claimTeardown), so
+// no two stops of one server ever run concurrently. drain selects the bounded
+// graceful drain (stopControlPlaneServer, cpGRPCGracefulStopBudget); otherwise
+// it is an immediate Stop, which closes every transport and does not wait for
+// handlers (the server is built without WaitForHandlers), so a wedged handler
+// cannot hold it.
+func teardownCPGRPCServer(srv *grpc.Server, drain bool) {
+	if drain {
+		stopControlPlaneServer(srv)
+		return
+	}
+	srv.Stop()
+}
 
 // handleServeEnded records a serve that ended on its own and sleeps out the
 // backoff through the SAME failure path as a failed bind (failAndWait), so the
@@ -803,7 +877,7 @@ func buildControlPlaneServer(cfg cpListenerConfig) (*grpc.Server, net.Listener, 
 	}
 
 	srv := newControlPlaneGRPCServer(serverOpt)
-	registerConfigService(srv)
+	cpRegisterGRPCServices(srv)
 
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", cfg.addr)
@@ -813,6 +887,11 @@ func buildControlPlaneServer(cfg cpListenerConfig) (*grpc.Server, net.Listener, 
 	}
 	return srv, cpWrapListener(ln), mode, nil
 }
+
+// cpRegisterGRPCServices registers the services one attempt's server serves:
+// ConfigService in production. A seam so a gate can add a handler that wedges
+// (TestChaos71_RetirementAndShutdownNeverStopTheSameServer).
+var cpRegisterGRPCServices = func(srv *grpc.Server) { registerConfigService(srv) }
 
 // cpWrapListener lets a gate observe (and fault) the bound listener. Identity
 // in production.
@@ -954,7 +1033,9 @@ func awaitCPDeactivation(wait time.Duration) error {
 // writer has changed it since) and CP address-list ownership — after any
 // withdrawal of this node from the committed list commits, as a terminal exit
 // does (exitTerminal), but without its terminal report: an undo is not a
-// listener failure. Only after the loop exited (Stop returned), so s.committed
+// listener failure. Health already reads not-serving here, as exitTerminal
+// records it before its withdrawal: the loop's noteCPGRPCListenerStopped ran
+// before Stop returned. Only after the loop exited (Stop returned), so s.committed
 // and s.original are no longer the loop's. Its one caller is deactivate.
 func (s *cpListenerSupervisor) releaseActivation() {
 	if s.committed && s.haveOriginal && restoreControlPlaneRole(s.original, s.cfg.addr) {

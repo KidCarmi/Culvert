@@ -699,9 +699,41 @@ func (s *ConfigStore) setCPAddressSource(build func() []string) {
 	s.resetCPAddrPublish() // a new owner starts a new episode
 }
 
-// validateSnapshotForPublish runs the commit-time gates every publish passes
-// (Update and UpdateCPAddresses alike). Returns the RAW error; the caller
-// routes it through rejectPublish.
+// validatePublishCandidate runs the commit-time gates for one publish kind.
+// Returns the RAW error; commitPublish routes it through rejectPublish.
+//
+// A FULL publish passes every gate (validateSnapshotForPublish). An
+// address-only candidate passes the size gates but NOT Gate 0 (Codex P1
+// 4314031064 on #1556): it is the COMMITTED snapshot with only CPAddresses
+// replaced (updateCPAddressesBound, or a same-content restamp), so it carries
+// no rewrite StableID that is not already committed and served; Gate 0 exists
+// to stop a publish that CAPTURES the live, known-ephemeral ones
+// (CurrentConfigSnapshot). Applying the process-global latch to it instead
+// refused every CP activation and HA promotion on a node whose store had
+// already published, rolling the role back on each attempt until a restart —
+// an unrelated rewrite-persistence fault disabling failover. Full publishes
+// are still refused while the latch is set
+// (TestChaos71_RewriteDegradationStillRefusesFullPublishes).
+//
+// An epoch restamp (RestampFenceEpoch) is the same case: the COMMITTED
+// snapshot, content unchanged, with only the fencing epoch replaced — the
+// commit every fenced HA transition makes before it advertises a new epoch
+// (commitGrant). Through Gate 0 it refused every fenced promote while the
+// latch was set (TestChaos71_FencedPromotionRestampsTheEpochWhileRewriteIdentityDegraded).
+// A promote's FIRST publish is a full one and stays gated
+// (preflightFirstPublish). Any other kind takes every gate: the exemption is
+// listed, never inferred.
+func validatePublishCandidate(kind publishKind, cand ConfigSnapshot) error {
+	switch kind {
+	case publishAddresses, publishEpoch:
+		return validateSnapshotWireForPublish(cand)
+	default:
+		return validateSnapshotForPublish(cand)
+	}
+}
+
+// validateSnapshotForPublish runs every commit-time gate a FULL publish passes
+// (Update). Returns the RAW error; the caller routes it through rejectPublish.
 func validateSnapshotForPublish(snap ConfigSnapshot) error {
 	// Gate 0 — rewrite management-identity degradation: while the latch is
 	// set, CurrentConfigSnapshot has captured KNOWN-ephemeral rewrite
@@ -713,6 +745,12 @@ func validateSnapshotForPublish(snap ConfigSnapshot) error {
 	if d := rewriteIdentityDegraded(); d != nil {
 		return fmt.Errorf("rewrite management identity degraded (%s): refusing to publish ephemeral rewrite StableIDs as authoritative fleet identity", d.reason)
 	}
+	return validateSnapshotWireForPublish(snap)
+}
+
+// validateSnapshotWireForPublish is the size gates every publish kind passes:
+// an address-only candidate can still grow the snapshot past the frame.
+func validateSnapshotWireForPublish(snap ConfigSnapshot) error {
 	// Gate 1 — entry counts (fast pre-check).
 	if err := validateConfigSnapshot(snap); err != nil {
 		return err
@@ -866,7 +904,7 @@ func (s *ConfigStore) commitPublish(p publishPlan) (committed bool, err error) {
 			return false, nil
 		}
 		cand.Epoch = epoch
-		if verr := validateSnapshotForPublish(cand); verr != nil {
+		if verr := validatePublishCandidate(p.kind, cand); verr != nil {
 			return false, s.rejectPublish(p.kind, verr)
 		}
 		if p.beforeCommit != nil {
@@ -970,7 +1008,9 @@ var cpAddrMergeBeforeCommit func()
 // publish committed would republish the OLDER state at a higher version merely
 // to add the address list, rolling the admin change back on every Data Plane.
 // Instead this reads (snapshot, version) under the store lock, validates the
-// merged copy with the SAME commit-time gates as Update, and commits only if
+// merged copy with Update's size gates (not its rewrite-identity Gate 0: the
+// merged copy captures no live state; see validatePublishCandidate), and
+// commits only if
 // the version is still the one it read — a compare-and-swap on s.version under
 // the same s.mu every publish commits under, not a second lock. A lost race
 // re-reads and re-merges onto the newer commit.
@@ -1064,7 +1104,7 @@ func (s *ConfigStore) RestampFenceEpoch() error {
 // refused before that listener exists, not after.
 func preflightFirstPublish(snap ConfigSnapshot) error {
 	snap.Epoch = publishFenceEpoch()
-	return validateSnapshotForPublish(snap)
+	return validatePublishCandidate(publishFull, snap) // the activation's first publish is a full one (Update)
 }
 
 // keepEpochStampIfCommitted reports whether the committed snapshot already
@@ -1365,17 +1405,19 @@ func applySnapshotBlocklist(snap ConfigSnapshot) {
 // applySnapshotAdmission applies the IP filter and rate-limit settings before
 // the remaining traffic configuration, shared by full and delta snapshots.
 func applySnapshotAdmission(snap ConfigSnapshot) {
-	// IP filter.
-	newIPF := newIPFilter()
-	newIPF.SetMode(snap.IPFilterMode)
-	// Bulk load: one pass, one view publish. An Add loop is quadratic in the
-	// entry count, and this list's snapshot cap is maxSnapIPList (2,000,000),
-	// so a large allowlist would stall the snapshot apply. Invalid entries are
-	// reported after the lock is released.
-	for _, bad := range newIPF.AddAll(snap.IPList) {
+	// IP filter: replace the live owner's contents IN PLACE. The request path
+	// (proxy.go / socks5.go) reads the ipf composition handle with no
+	// synchronisation, so the previous `ipf = newIPF` swap was a data race on
+	// the first admission gate (RISK-030); the owner already publishes an
+	// immutable view through an atomic pointer, which is the synchronisation
+	// the readers rely on. Replace is one pass, one lock, one view publish: an
+	// Add loop is quadratic in the entry count, and this list's snapshot cap is
+	// maxSnapIPList (2,000,000), so a large allowlist would stall the apply.
+	// Invalid entries are reported after the lock is released. Pinned by
+	// TestRISK030_* (controlplane_snapshot_ipf_race_test.go).
+	for _, bad := range ipf.Replace(snap.IPFilterMode, snap.IPList) {
 		logger.Printf("DataPlane: invalid IP %q: %v", bad.Entry, bad.Err)
 	}
-	ipf = newIPF
 
 	// Rate limiter.
 	if snap.RateLimitRPM != rl.Limit() {

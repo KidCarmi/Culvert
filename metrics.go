@@ -1080,7 +1080,12 @@ culvert_upstream_direct_fallback_total %d
 	// visible across restarts even after the store self-healed.
 	cfdb := catFeedDBState()
 	cfdbAvailable, cfdbRecovered := 0, 0
-	if cfdb.Available {
+	// CHAOS-74: this gauge's contract is "open and SERVING LOOKUPS", and it was
+	// sourced purely from the boot record — so a store that lost its mapped
+	// tables at 03:00 kept reporting 1 while every lookup returned
+	// "uncategorised". A latched runtime degradation is reported as 0, which is
+	// what the HELP text already promised.
+	if cfdb.Available && !cfdb.RuntimeDegraded {
 		cfdbAvailable = 1
 	}
 	if cfdb.Recovered {
@@ -1097,10 +1102,20 @@ culvert_catfeeddb_recovered %d
 # HELP culvert_catfeeddb_quarantined_copies Quarantined (.corrupt.*) copies of the community category store still on the data volume
 # TYPE culvert_catfeeddb_quarantined_copies gauge
 culvert_catfeeddb_quarantined_copies %d
+
+# HELP culvert_catfeeddb_lookup_errors_total Community category lookups that failed with a store error instead of a clean miss since startup
+# TYPE culvert_catfeeddb_lookup_errors_total counter
+culvert_catfeeddb_lookup_errors_total %d
+
+# HELP culvert_catfeeddb_memory_faults_total Contained memory faults reading the community category store's mapped tables; non-zero means the data volume damaged the store while it was open and Layer-2 categorisation is off until this node restarts
+# TYPE culvert_catfeeddb_memory_faults_total counter
+culvert_catfeeddb_memory_faults_total %d
 `,
 		cfdbAvailable,
 		cfdbRecovered,
 		cfdb.ResidualCopies,
+		cfdb.RuntimeFaults,
+		cfdb.RuntimeMemoryFaults,
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is

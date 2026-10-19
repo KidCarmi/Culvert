@@ -14,7 +14,7 @@ listener) and CHAOS-66 (the SOCKS5 bind):
 |---|---|
 | CHAOS-57 (§33) | the **management** plane killed the **data** plane |
 | CHAOS-66 (§36) | a **secondary, opt-in** data plane killed the **primary** one |
-| **CHAOS-71 (§41)** | the **cluster** plane — whose job is serving config to *other* nodes — killed this node's data plane, management plane and health endpoints, before any of them existed |
+| **CHAOS-71 (§44)** | the **cluster** plane — whose job is serving config to *other* nodes — killed this node's data plane, management plane and health endpoints, before any of them existed |
 
 Before this change the Control Plane boot path was:
 

@@ -159,7 +159,15 @@ This note amends S3's stamping in one case and leaves the S3 rule itself unchang
     promote retry that arrives during the drain waits for the release, or is refused as
     retryable (`errCPDeactivating`), never "already running as control-plane". Every wait on
     a supervisor stop is derived from the drain budget (`cpListenerStopWait`).
+    The undo stops the server only through the supervisor's single teardown
+    owner (`Stop` → `teardownCPGRPCServer`, #1556), never with a stop of its own.
     Pinned by `cp_deactivate_drain_chaos_test.go`.
+  - The commit that carries a new epoch (`RestampFenceEpoch`) is the committed snapshot with
+    only its stamp replaced. Like #1556's address-only publish, it passes the count and
+    wire-size gates but not the rewrite-identity Gate 0 (`validatePublishCandidate`), so an
+    unrelated rewrite-persistence fault cannot refuse a fenced promote. A promote's first
+    publish is a full one and stays gated (`preflightFirstPublish`). Pinned by
+    `TestChaos71_FencedPromotionRestampsTheEpochWhileRewriteIdentityDegraded`.
   - Pinned by `ha_epoch_install_cause_chaos_test.go`.
   - Every exit after an acquisition either installs the staged grant
     (`exposeGrantLocked`) or abandons it (`abandonGrantLocked`). That covers

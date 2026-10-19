@@ -343,6 +343,9 @@ func TestNoteCDRCallError_SubscribedFiresOneDedupKey(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+	// The drop counter is bumped BEFORE the save, under the retry mutex, so
+	// take that mutex once more: the save has returned when this does.
+	_ = alerts.RetryQueueDepth()
 }
 
 // TestNoteCDRCallError_LogIsRateLimited pins the request-path half. The line is
