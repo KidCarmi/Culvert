@@ -253,6 +253,9 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   cpcase 0 '{"phase":"running","reason":"FIRSTBOOT_RUNNING"}' '' not_ready product-running '"phase": "running"' ''
   cpcase 0 '{"phase":"provisioned","reason":"READINESS_INCOMPLETE"}' '' not_ready readiness-incomplete '"reason": "READINESS_INCOMPLETE"' ''
   cpcase 0 '{"phase":"ready","reason":"HEALTH_CHECKS_PASSED"}' '' ready ready '"class": "ready"' ''
+  # Raw stdout is retained redacted (ASTRA rule 3): redaction fires (the
+  # <redacted> marker appears) and a sensitive-keyed value NEVER survives.
+  cpcase 0 '{"phase":"ready","reason":"HEALTH_CHECKS_PASSED","session_secret":"SHHH-do-not-keep"}' '' ready redact-raw '<redacted>' 'SHHH-do-not-keep'
   unset -f cpcase
   # The console-marks watcher runs in the background for up to an hour; the
   # caller captures its pid with $(...), which must return at once (run
@@ -1281,6 +1284,7 @@ err = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", err)
 err = re.sub(r"[^ -~]", " ", err).strip()[:200]
 phase = reason = message = ""
 parsed = False
+d = None
 if raw.strip():
     try:
         d = json.loads(raw)
@@ -1288,6 +1292,28 @@ if raw.strip():
         parsed = True
     except Exception:
         parsed = False
+# Redacted RAW stdout per sample (ASTRA rule 3): the actual status payload the
+# product returned, so an operator can see WHAT it answered, not only the
+# class. It must never retain a credential/token/secret: when the body parses,
+# every value under a sensitive-looking key is dropped before serialising;
+# then host/IP are masked and the result is control-stripped and capped. The
+# full raw stays bound by stdout_sha256/stdout_len above, so redaction cannot
+# hide tampering. status-json carries no credentials by design — this is
+# defence in depth, not a behaviour the snapshot relies on.
+SENSITIVE = re.compile(r"token|secret|password|passphrase|credential|signing|hmac|cookie|authorization|private", re.I)
+def _redact(o):
+    if isinstance(o, dict):
+        return {k: ("<redacted>" if SENSITIVE.search(k) else _redact(v)) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_redact(v) for v in o]
+    return o
+if parsed:
+    red = json.dumps(_redact(d), sort_keys=True)
+else:
+    red = raw.decode("utf-8", "replace")
+red = red.replace(host, "<host>")
+red = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", red)
+red = re.sub(r"[^ -~]", " ", red)[:4096]
 if rc == 124:
     klass = "timeout"
 elif rc == 255:
@@ -1304,7 +1330,8 @@ rec = {"sample": int(sample), "offset_s": float(off), "elapsed_ms": elapsed_ms,
        "exit_code": rc, "timed_out": rc == 124, "class": klass,
        "transport_ok": rc == 0 and parsed, "phase": phase, "reason": reason,
        "message": message, "stdout_len": len(raw),
-       "stdout_sha256": hashlib.sha256(raw).hexdigest()[:16], "stderr": err}
+       "stdout_sha256": hashlib.sha256(raw).hexdigest()[:16],
+       "stdout_redacted": red, "stderr": err}
 with open(out, "a") as o:
     o.write(json.dumps(rec, sort_keys=True) + "\n")
 print("%s\t%s\t%s" % (klass, phase or "-", reason or "-"))

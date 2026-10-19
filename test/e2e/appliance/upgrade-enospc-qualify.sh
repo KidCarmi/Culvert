@@ -165,8 +165,21 @@ RUN_IMG="$(IN docker inspect -f '{{.Image}}' culvert 2>/dev/null || true)"
 FP0="$(ca_fp)"; [[ -n "$FP0" ]] && check E0 ca-identity pass "root CA sha256 $FP0" || check E0 ca-identity fail "no CA certificate from /api/ca-cert"
 assert_enforcement E0
 
-AGENT_SRC="${QUAL_AGENT_SRC:-$ROOT}"
-( cd "$AGENT_SRC/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$EVID/culvert-maint" . )
+# The agent under test is the EXACT shipped binary when QUAL_AGENT_BIN is set
+# (the f-disk job extracts /app/deploy/bin/culvert-maint from the candidate
+# image), otherwise it is built from source (QUAL_AGENT_SRC / repo root). Using
+# the shipped bytes is what binds F-DISK evidence to the agent the appliance
+# actually runs, not a local dev rebuild (ASTRA finding on run 39140010708).
+if [[ -n "${QUAL_AGENT_BIN:-}" ]]; then
+  [[ -x "$QUAL_AGENT_BIN" ]] || { echo "QUAL_AGENT_BIN=$QUAL_AGENT_BIN is not an executable file"; exit 1; }
+  cp "$QUAL_AGENT_BIN" "$EVID/culvert-maint"
+  AGENT_PROVENANCE="shipped binary sha256 $(sha256sum "$EVID/culvert-maint" | cut -d' ' -f1), $("$EVID/culvert-maint" --version 2>/dev/null | head -1 | tr -d '\r' || echo 'version unavailable')"
+else
+  AGENT_SRC="${QUAL_AGENT_SRC:-$ROOT}"
+  ( cd "$AGENT_SRC/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$EVID/culvert-maint" . )
+  AGENT_PROVENANCE="built from cmd/culvert-maint at $(git -C "$AGENT_SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+fi
+check E0 agent-identity pass "$AGENT_PROVENANCE"
 docker cp "$EVID/culvert-maint" "$DIND:/usr/local/bin/culvert-maint" >/dev/null
 esc_reg="$(printf '%s' "$REGHOST" | sed 's/\./\\\\./g')"
 cat > "$MNT/culvert-maint/config.toml" <<CFG
@@ -226,7 +239,7 @@ write_report_and_exit(){
     echo "| artifact | reference |"; echo "|---|---|"
     echo "| image under qualification | \`$CUR_IMAGE\` → \`$CUR_REF\` |"; echo "| predecessor | \`$PRED_IMAGE\` → \`$PRED_REF\` |"
     echo "| bounded host | \`$DIND_IMAGE\`, data root + containerd + stack + agent state on one ${DISK_MB} MiB ext4 loop file (-m 0) |"
-    echo "| agent | built from \`cmd/culvert-maint\` at $(git -C "${AGENT_SRC:-$ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown), privilege_mode=docker_group_lab, inside the bounded host |"
+    echo "| agent | ${AGENT_PROVENANCE:-unknown}, privilege_mode=docker_group_lab, inside the bounded host |"
     echo; echo "| scenario | check | result | detail |"; echo "|---|---|---|---|"
     python3 - "$JSONL" <<'PY'
 import json,sys

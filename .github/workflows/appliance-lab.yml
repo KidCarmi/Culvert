@@ -673,11 +673,30 @@ jobs:
           PY
           cat "$RUNNER_TEMP/in/identity.env" | tee -a "$GITHUB_ENV"
           docker load -i "$tar" && docker image inspect culvert:ci-smoke --format 'id={{.Id}}'
-      - name: Check out the image's source (agent build)
+      - name: Check out the image's source (fallback agent build only)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SOURCE_IMAGE_SHA }}
           path: image-src
+      - name: Extract the EXACT shipped maintenance agent from the candidate image
+        # ASTRA finding on run 39140010708: the F-DISK agent was a local dev
+        # rebuild (Go 1.26.8, version "dev"), not the agent the OVA ships. The
+        # candidate image carries the maintbuilder output at /app/deploy/bin/
+        # culvert-maint (Dockerfile COPY --from=maintbuilder); that is the exact
+        # binary install.sh deploys to the host. Pass it to the qualify harness
+        # via QUAL_AGENT_BIN so F-DISK exercises the shipped bytes, not a rebuild.
+        id: agent
+        run: |
+          set -euo pipefail
+          cid="$(docker create culvert:ci-smoke)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/app/deploy/bin/culvert-maint" "$RUNNER_TEMP/culvert-maint-shipped"
+          chmod +x "$RUNNER_TEMP/culvert-maint-shipped"
+          sha="$(sha256sum "$RUNNER_TEMP/culvert-maint-shipped" | cut -d' ' -f1)"
+          ver="$("$RUNNER_TEMP/culvert-maint-shipped" --version 2>/dev/null | head -1 | tr -d '\r' || echo 'version unavailable')"
+          gover="$(go version "$RUNNER_TEMP/culvert-maint-shipped" 2>/dev/null | awk '{print $2}' || echo unknown)"
+          echo "shipped agent: sha256=$sha version=\"$ver\" compiler=$gover (from culvert:ci-smoke:/app/deploy/bin/culvert-maint)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "bin=$RUNNER_TEMP/culvert-maint-shipped" >> "$GITHUB_OUTPUT"
       - name: Pre-pull harness images (retry)
         run: |
           set -euo pipefail
@@ -698,7 +717,7 @@ jobs:
           for attempt in 1 2 3; do
             sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
               QUAL_ENOSPC_SCENARIO=midwrite CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
-              QUAL_AGENT_SRC="$GITHUB_WORKSPACE/image-src" EXPECT_CONFIG_DIGEST="$EXPECT_CONFIG_DIGEST" \
+              QUAL_AGENT_BIN="${{ steps.agent.outputs.bin }}" QUAL_AGENT_SRC="$GITHUB_WORKSPACE/image-src" EXPECT_CONFIG_DIGEST="$EXPECT_CONFIG_DIGEST" \
               EXPECT_SOURCE_NOTE="tar sha256 $SOURCE_IMAGE_TAR_SHA256, OCI manifest $EXPECT_MANIFEST_DIGEST (the OVA image ID), source $SOURCE_IMAGE_SHA" \
               EVID="$RUNNER_TEMP/fdisk1/attempt-$attempt" ./test/e2e/appliance/upgrade-enospc-qualify.sh
             rc=$?
@@ -927,21 +946,21 @@ jobs:
             sidecar_archive_sha256: "b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445"
             sidecar_index: "sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251"
             expect: nonzero
-          # CANDIDATE (console P1 + boot-UX, 6248daf7): the 1.5 sidecar baked into
-          # THIS candidate OVA must show ZERO wrong-cleans — F-P2 closed on the
-          # shipped engine. Its bytes are NOT inherited from any prior candidate:
-          # image id 8af92aa4 (vs a80be4b6's b11e29c5, 9e344526's dc96d2f2),
-          # archive 7fefc79c, ref culvert/clamav:1.5.4-culvert.1 — an INDEPENDENT
-          # rebuild off the same upstream clamav/clamav:1.5 index (638d9020) and
-          # pcre2-10.49-r0, so a third all-zero build answers "a future rebuild
-          # is not byte-guaranteed". OVA/archive/image-id are this OVA's OWN build
-          # record (build-info.json clamav_baked_tar_sha256 /
-          # clamav_sidecar_image_id, run 38964077956).
-          - label: candidate-1.5-6248daf7
-            ova_artifact: "12074562532"
-            ova_sha256: "59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61"
-            sidecar_archive_sha256: "7fefc79c82e4febdd59377e3689f042d0d77a17120e0a4959d9bde63e20db95e"
-            sidecar_index: "sha256:8af92aa4da736583ede38a5565a11cc57b30fb91bdcb2b31374dd81848382413"
+          # CANDIDATE (operator-status deadline fix, 246cb73d): the 1.5.4 sidecar
+          # baked into THIS candidate OVA must show ZERO wrong-cleans — F-P2
+          # closed on the shipped engine. Pins are this OVA's OWN build record
+          # (build-info.json clamav_baked_tar_sha256 78fef25a /
+          # clamav_sidecar_image_id 32c2be57, run 39140010708). The sidecar bytes
+          # differ from 6248daf7's (image id 32c2be57 vs 8af92aa4, archive
+          # 78fef25a vs 7fefc79c) — an INDEPENDENT rebuild off the same upstream
+          # clamav/clamav:1.5 index (638d9020) + pcre2-10.49-r0 — so its F-P2
+          # result is not reusable from the prior candidate's. bind kind is
+          # `either`, so sidecar_index is matched as the config/image id.
+          - label: candidate-1.5.4-246cb73d
+            ova_artifact: "12141566476"
+            ova_sha256: "b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a"
+            sidecar_archive_sha256: "78fef25aaef82784619c4be4820e31231a8ae83730d4c86218c39128096b313c"
+            sidecar_index: "sha256:32c2be57bc73d2aedf3e4178386ff30011290131bf08db225ed97c64522b3f90"
             expect: zero
     env:
       OVA_ARTIFACT_ID: ${{ matrix.ova_artifact }}
@@ -1001,7 +1020,7 @@ jobs:
           echo "$got  /var/lib/culvert-appliance/images/clamav.tar.gz" | tee "$E/archive.sha256"
           [ "$got" = "$SIDECAR_ARCHIVE_SHA256" ] || { echo "::error::archive sha256 $got, expected $SIDECAR_ARCHIVE_SHA256"; exit 1; }
           gunzip -c clamav.tar.gz > clamav.tar
-          cfg="$("$GITHUB_WORKSPACE/test/e2e/appliance/lab/sidecar-scan.sh" bind "$W/clamav.tar" "$SIDECAR_INDEX" top "$E/binding.json")"
+          cfg="$("$GITHUB_WORKSPACE/test/e2e/appliance/lab/sidecar-scan.sh" bind "$W/clamav.tar" "$SIDECAR_INDEX" either "$E/binding.json")"
           docker load -i clamav.tar | tee "$E/docker-load.txt"
           ref="$(sed -n 's/^Loaded image: //p; s/^Loaded image ID: //p' "$E/docker-load.txt" | head -1)"
           id="$(docker image inspect -f '{{.Id}}' "$ref")"
@@ -1186,10 +1205,14 @@ jobs:
       # (image id 8af92aa4 vs b11e29c5, archive 7fefc79c vs 9404b981), so its
       # scan is not reusable from the prior candidates'. The 1.4.6 scans are not
       # reusable either.
-      OVA_ARTIFACT_ID: "12074562532"   # appliance-lab-ova-candidate-6248daf7, run 38964077956 (console P1 + boot-UX candidate)
-      OVA_SHA256: 59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61
-      SIDECAR_ARCHIVE_SHA256: 7fefc79c82e4febdd59377e3689f042d0d77a17120e0a4959d9bde63e20db95e
-      SIDECAR_INDEX: sha256:8af92aa4da736583ede38a5565a11cc57b30fb91bdcb2b31374dd81848382413
+      OVA_ARTIFACT_ID: "12141566476"   # appliance-lab-ova-candidate-246cb73d, run 39140010708 (operator-status deadline-fix candidate)
+      OVA_SHA256: b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a
+      SIDECAR_ARCHIVE_SHA256: 78fef25aaef82784619c4be4820e31231a8ae83730d4c86218c39128096b313c
+      # The sidecar image id (= config digest) from this OVA's own build-info.json
+      # (clamav_sidecar_image_id). bind runs with kind `either`, so this binds to
+      # the config the archive resolves to — the identity ASTRA named for the new
+      # 1.5.4 sidecar. The archive sha above is clamav_baked_tar_sha256.
+      SIDECAR_INDEX: sha256:32c2be57bc73d2aedf3e4178386ff30011290131bf08db225ed97c64522b3f90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -1248,7 +1271,7 @@ jobs:
       - name: Bind archive → index → amd64 manifest → config (every blob re-hashed)
         run: |
           set -euo pipefail
-          cfg="$(test/e2e/appliance/lab/sidecar-scan.sh bind "$W/clamav.tar" "$SIDECAR_INDEX" top "$W/evidence/binding.json")"
+          cfg="$(test/e2e/appliance/lab/sidecar-scan.sh bind "$W/clamav.tar" "$SIDECAR_INDEX" either "$W/evidence/binding.json")"
           cat "$W/evidence/binding.json"
           # Later steps check Trivy's ImageID against the bound config.
           echo "SIDECAR_CONFIG=$cfg" >> "$GITHUB_ENV"
