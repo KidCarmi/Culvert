@@ -1599,8 +1599,18 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 
 // TestApiDiagnostics_UsernameLengthOKByDefault pins the quiet case: an
 // ordinary roster with no oversize usernames reports ok, not warn.
+//
+// The test builds that roster itself. The roster is process-global, and
+// snapshotCfgUIUsers only restores it afterwards, so an account an earlier
+// test left behind used to be part of "the ordinary roster" here (#1563,
+// seed 1792141755409420182: TestSECBASIC1_OversizeUsernameIsBounded's 261-byte
+// account turned this row to warn).
 func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
 	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
 	if err := cfg.SetUIUser("ordinary-admin", "Chaos63-ordinary-1!", RoleAdmin); err != nil {
 		t.Fatalf("SetUIUser: %v", err)
 	}

@@ -29,6 +29,14 @@ import (
 // middleware actually gates), and a snapshotted loginLimiter.
 func secBasicEnv(t *testing.T) {
 	t.Helper()
+	// setupProxyTest swaps in a fresh cfg at test START and never puts the old
+	// one back, so every account a secBasic test creates (including the
+	// 261-byte one in TestSECBASIC1_OversizeUsernameIsBounded) outlived the
+	// test and leaked into whichever roster-reading test ran next. Restore the
+	// predecessor's cfg so the accounts leave with the test. Registered first,
+	// so it runs LAST, after the cleanups below have run against this test's cfg.
+	origCfg := cfg
+	t.Cleanup(func() { cfg = origCfg })
 	setupProxyTest(t)
 	snapshotLoginLimiter(t)
 	// The roster is process-wide and `setupProxyTest` resets state at test
