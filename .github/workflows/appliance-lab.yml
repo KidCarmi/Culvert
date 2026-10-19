@@ -1194,16 +1194,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Candidate 1.5 OVA (appliance-lab-ova-candidate-6248daf7, lab run
-      # 38964077956 — the console-shutdown P1 + boot-UX candidate on top of the
-      # F-P2 1.4.6 -> 1.5 bump). Archive + index pins are the OVA's own build
-      # record (build-info.json clamav_baked_tar_sha256 and
-      # clamav_sidecar_image_id). The amd64 manifest and config are DERIVED from
-      # the re-hashed index (exported via GITHUB_ENV), so every link stays
-      # hash-bound. This scans the EXACT 1.5 sidecar baked into THIS candidate
-      # OVA — an independent rebuild whose bytes differ from a80be4b6's
-      # (image id 8af92aa4 vs b11e29c5, archive 7fefc79c vs 9404b981), so its
-      # scan is not reusable from the prior candidates'. The 1.4.6 scans are not
+      # Candidate 1.5.4 OVA (appliance-lab-ova-candidate-246cb73d, lab run
+      # 39140010708 — the operator-status deadline-fix candidate, #1528
+      # closeout). Archive + index pins are the OVA's own build record
+      # (build-info.json clamav_baked_tar_sha256 78fef25a and
+      # clamav_sidecar_image_id 32c2be57). The amd64 manifest and config are
+      # DERIVED from the re-hashed archive (exported via GITHUB_ENV), so every
+      # link stays hash-bound. This scans the EXACT 1.5.4 sidecar baked into THIS
+      # candidate OVA — an independent rebuild whose bytes differ from 6248daf7's
+      # (image id 32c2be57 vs 8af92aa4, archive 78fef25a vs 7fefc79c), so its
+      # scan is not reusable from the prior candidate's. The 1.4.6 scans are not
       # reusable either.
       OVA_ARTIFACT_ID: "12141566476"   # appliance-lab-ova-candidate-246cb73d, run 39140010708 (operator-status deadline-fix candidate)
       OVA_SHA256: b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a
