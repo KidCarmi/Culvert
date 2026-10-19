@@ -20,6 +20,7 @@ package main
 // pool is also what "off" looks like from the picker.
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -265,7 +266,7 @@ func TestRunCDRStage_UnavailableFailOpenForwardsUnchanged(t *testing.T) {
 	if dec.blocked {
 		t.Fatal("fail-open must not block when CDR is unavailable")
 	}
-	if string(dec.body) != string(body) || string(dec.scanBody) != string(body) {
+	if !bytes.Equal(dec.body, body) || !bytes.Equal(dec.scanBody, body) {
 		t.Errorf("body = %q / scanBody = %q, want the original %q passed through", dec.body, dec.scanBody, body)
 	}
 	if calls, _ := br.snapshot(); calls != 0 {
@@ -294,7 +295,7 @@ func TestRunCDRStage_DisabledCDRNeverBlocks(t *testing.T) {
 	if dec.blocked {
 		t.Fatal("a disabled CDR must never refuse a document")
 	}
-	if string(dec.body) != string(body) {
+	if !bytes.Equal(dec.body, body) {
 		t.Errorf("body = %q, want the original %q", dec.body, body)
 	}
 	if calls, _ := br.snapshot(); calls != 0 {
@@ -344,5 +345,102 @@ func TestCDRUnavailable_FailClosedIsRaceFreeAndLeavesTheBreakerAlone(t *testing.
 	if after.StaleProbes != beforeStats.StaleProbes {
 		t.Errorf("staleProbes %d -> %d: the refusal path stranded a reservation",
 			beforeStats.StaleProbes, after.StaleProbes)
+	}
+}
+
+// ─── Cold start: the configured posture must survive a failed pool init ────
+
+// TestCDRUnavailable_FailClosedSurvivesPoolInitFailure is the Codex #1668 P1.
+//
+// initCDRClient returned its "every instance failed to dial / none enrolled"
+// error BEFORE publishing the config it was asked to apply, so cdrActiveCfg
+// stayed at its zero value — Enabled false. An appliance configured enabled +
+// fail_mode: closed that boots while Sluice is unreachable therefore read
+// ITSELF as disabled: cdrUnavailableFailsClosed saw Enabled false, the
+// unavailable path returned SKIPPED, and every inspected document was
+// forwarded unsanitized — the exact state this whole change exists to refuse,
+// reached by the most ordinary route to it. initCDRInfrastructure logs the
+// init error and carries on by design (cdr_startup.go), so nothing else
+// stopped it.
+//
+// The scenario is the one TestInitCDRClient_NoInstanceNoEndpointFails already
+// builds: enabled, empty registry, no endpoint ⇒ error with an empty pool.
+func TestCDRUnavailable_FailClosedSurvivesPoolInitFailure(t *testing.T) {
+	resetCDRCountersAndCache(t)
+	freshPolicyStore(t)
+	resetCDRClient(t)
+	withActiveCDRConfig(t, CDRConfig{}) // the zero value a cold boot starts from
+
+	origInstances := cdrInstances
+	cdrInstances = &CDRInstanceRegistry{}
+	t.Cleanup(func() { cdrInstances = origInstances })
+	withTempPool(t)
+
+	want := CDRConfig{Enabled: true, FailMode: "closed"}
+	if err := initCDRClient(want); err == nil {
+		t.Fatal("initCDRClient must fail with no enrolled instance and no endpoint")
+	}
+
+	// The error is expected. What must NOT happen is losing the posture.
+	got := cdrActiveConfig()
+	if !got.Enabled {
+		t.Error("cdrActiveConfig().Enabled = false after a failed init — the appliance reads itself as disabled")
+	}
+	if got.FailMode != "closed" {
+		t.Errorf("cdrActiveConfig().FailMode = %q, want \"closed\"", got.FailMode)
+	}
+	if !cdrUnavailableFailsClosed(got) {
+		t.Fatal("a failed pool init must not downgrade a fail-closed appliance to fail-open")
+	}
+
+	// And the decision that depends on it must refuse, through the real path.
+	br := &stageResponder{}
+	dec := runStageForTest(t, br, []byte("payload.docx"))
+	if !dec.blocked {
+		t.Fatalf("fail-closed with a failed pool init must block, got %+v", dec)
+	}
+	if calls, _ := br.snapshot(); calls != 1 {
+		t.Errorf("blockBeforeResponse calls = %d, want 1", calls)
+	}
+	if n := atomic.LoadInt64(&statCDRFailClosed); n != 1 {
+		t.Errorf("statCDRFailClosed = %d, want 1", n)
+	}
+}
+
+// Negative control for the above: a failed init under fail-OPEN still passes,
+// so publishing the config on the failure path cannot turn the default
+// deployment into a blocking one.
+func TestCDRUnavailable_FailOpenSurvivesPoolInitFailureWithoutBlocking(t *testing.T) {
+	resetCDRCountersAndCache(t)
+	freshPolicyStore(t)
+	resetCDRClient(t)
+	withActiveCDRConfig(t, CDRConfig{})
+
+	origInstances := cdrInstances
+	cdrInstances = &CDRInstanceRegistry{}
+	t.Cleanup(func() { cdrInstances = origInstances })
+	withTempPool(t)
+
+	if err := initCDRClient(CDRConfig{Enabled: true, FailMode: "open"}); err == nil {
+		t.Fatal("initCDRClient must fail with no enrolled instance and no endpoint")
+	}
+	if got := cdrActiveConfig(); !got.Enabled || got.FailMode != "open" {
+		t.Fatalf("cdrActiveConfig() = %+v, want enabled fail-open", got)
+	}
+
+	br := &stageResponder{}
+	body := []byte("payload.docx")
+	dec := runStageForTest(t, br, body)
+	if dec.blocked {
+		t.Fatal("fail-open must not block after a failed pool init")
+	}
+	if !bytes.Equal(dec.body, body) {
+		t.Errorf("body = %q, want the original %q", dec.body, body)
+	}
+	if calls, _ := br.snapshot(); calls != 0 {
+		t.Errorf("blockBeforeResponse calls = %d, want 0", calls)
+	}
+	if n := atomic.LoadInt64(&statCDRFailClosed); n != 0 {
+		t.Errorf("statCDRFailClosed = %d, want 0", n)
 	}
 }

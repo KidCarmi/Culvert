@@ -215,6 +215,7 @@ posture change — and it is the direction the Implementation Rules require
 | File | Change |
 |---|---|
 | `cdr_proxy.go` | `cdrUnavailableOutcome` / `cdrUnavailableFailsClosed` / `cdrUnavailableBlockReason`; both unavailable paths routed through them; `cdrEmitStageBlock` extracted from the `cdrBlock` branch so a refusal and a verdict block emit identically |
+| `cdrstore.go` | `initCDRClient` publishes the config it is applying **before** returning the complete-pool-failure error, so a cold start that cannot reach Sluice does not read itself as disabled (Codex #1668 P1) |
 | `cdr_pool.go` | `cdrPickPooledReserved` doc: nil means *cannot be scanned*, route it through `cdrUnavailableOutcome` — a bare pass there is the bypass |
 | `cdr_metrics.go` | `culvert_cdr_fail_closed_total` HELP and the counter comment widened to cover unavailability, not only engine errors |
 | `cdr_fail_closed_unavailable_test.go` | New — the suite in §7 |
@@ -282,6 +283,48 @@ Safe-implementation properties:
   authoritative. `runCDRStage`'s cyclomatic complexity is 7 after the change
   (the `cdrBlock` branch moved out), well inside the cyclop threshold of 15.
 - A passing local run is not a passing hosted review or merge gate.
+
+## 8a. Post-review finding — the same bypass through a lost config (Codex #1668 P1)
+
+Codex's review of the fix found a second route to the identical exposure, and it
+is the more likely one in production. `initCDRClient` returned its "every
+instance failed to dial, or none enrolled" error **before** the
+`cdrActiveCfg = cfg` publish, so a total pool-construction failure left the
+active config at its zero value — `Enabled: false`. Since
+`initCDRInfrastructure` logs that error and continues by design
+(`cdr_startup.go`: "CDR: initial client dial failed, CDR effectively
+disabled"), an appliance configured enabled + `fail_mode: closed` that **booted
+while Sluice was unreachable** read itself as disabled: `cdrUnavailableFailsClosed`
+saw `Enabled` false, the unavailable path returned `SKIPPED`, and every
+inspected document was forwarded unsanitized. The §2 fix alone would not have
+covered it — the posture never reached the decision.
+
+Verified at source before fixing: the early `return` precedes the publish, and
+`setCDREnabledRuntime` (whose "truthful flag (unchanged on failure)" comment in
+`cdr_ui.go` looked like a deliberate reliance on NOT publishing) only mutates
+`Enabled` in place and never calls `initCDRClient`, so nothing depended on the
+old ordering.
+
+The failure path now publishes before returning the error. Two pre-existing
+defects fall with it:
+
+- `checkCDR` (`diagnostics.go`) reported a boot-time total dial failure as
+  `"disabled"` with status **OK** — a broken appliance reading as healthy —
+  instead of the `enabled-broken` / `diagFail` row that state is for.
+- `propagateServerRotation` and the RenewCert poller both re-init with
+  `initCDRClient(cdrActiveConfig())`. Handed a zero config, that takes
+  `!cfg.Enabled` → `shutdownCDRClient()`, so the recovery paths **turned CDR
+  off until restart** instead of retrying.
+
+Breaker seeding is unaffected: `buildCDRPoolFromRegistry` has already returned
+and built nothing, so the `cdr_breaker.go` rule that a breaker is seeded from
+the config being applied and never from the published one still holds on this
+path.
+
+Pinned by `TestCDRUnavailable_FailClosedSurvivesPoolInitFailure` (and its
+fail-open negative control), which drive the real `initCDRClient` failure.
+Both were confirmed to **fail against the un-fixed `cdrstore.go`** and pass
+against the fixed one, rather than being written to the fix.
 
 ## 9. Residual risk
 

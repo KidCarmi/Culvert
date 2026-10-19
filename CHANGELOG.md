@@ -410,13 +410,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   deployments — the default, and any explicit `fail_mode: open` — are
   unchanged down to the counters the skip path does not touch.
 
+  A second way to lose the posture was closed with it (Codex #1668 P1):
+  `initCDRClient` returned its "every instance failed to dial / none enrolled"
+  error **before** publishing the config it was applying, so `cdrActiveCfg`
+  stayed at its zero value. An appliance configured enabled + fail-closed that
+  booted while Sluice was unreachable therefore read ITSELF as disabled and
+  forwarded every document unsanitized — the same hole, reached by the most
+  ordinary route to it, since `initCDRInfrastructure` logs the init error and
+  carries on by design. The failure path now publishes the config before
+  returning the error, which also stops `checkCDR` reporting a broken appliance
+  as `"disabled"`/OK instead of `enabled-broken`, and stops the two recovery
+  re-inits (`propagateServerRotation`, the RenewCert poller — both calling
+  `initCDRClient(cdrActiveConfig())`) being handed a disabled config that
+  shut CDR down until restart rather than retrying. Breaker seeding is
+  unaffected: nothing is constructed after that publish.
+
   `cdr_fail_closed_unavailable_test.go` pins both halves: every `fail_mode`
   spelling `CDRFailOpen` folds (`CLOSED`, `Closed`, padded), the two
   disabled-CDR negative controls, a healthy instance under fail-closed still
   returning its verdict, the `runCDRStage` gate blocking the tunnel and
   writing one block page, the fail-open gate forwarding the original bytes
   with no counter movement, and 24 concurrent refusals under `-race` that
-  leave the breaker open with no stale probe.
+  leave the breaker open with no stale probe. The cold-start pair
+  (`TestCDRUnavailable_FailClosedSurvivesPoolInitFailure` and its fail-open
+  negative control) drives the real `initCDRClient` failure and was confirmed
+  to fail against the un-fixed `cdrstore.go` before it passed against the
+  fixed one.
 
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
