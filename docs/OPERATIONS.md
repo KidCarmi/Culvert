@@ -469,10 +469,19 @@ If Sluice is enrolled but reporting unhealthy:
 
 Under `fail-closed`, an unavailable engine is a refusal, not a bypass: while
 no instance is available — every circuit breaker open, or none enrolled — each
-inspected document is blocked with reason `cdr_unavailable`, counted in
-`culvert_cdr_fail_closed_total`, and logged as `CDR_BLOCKED`. That is the
-posture `fail-closed` asks for, and it is why step 4 exists. A **disabled**
-CDR never blocks, whatever fail-mode is left in the config.
+document that reaches the unavailable-instance check is blocked with reason
+`cdr_unavailable`, counted in `culvert_cdr_fail_closed_total`, and logged as
+`CDR_BLOCKED`. That is the posture `fail-closed` asks for, and it is why step 4
+exists.
+
+Two documents do NOT reach that check, and `fail-closed` does not refuse them.
+A file over the configured or profile size cap is skipped as
+`SKIPPED_OVERSIZE` before the engine is consulted, and a file Sluice itself
+rejects as `file_too_large` is passed with a log — both are deliberately not
+fail-mode events (a file the engine cannot process at all is a different
+condition from an engine that is not there). Size-capped content is governed by
+the cap, not by fail-mode. A **disabled** CDR never blocks either, whatever
+fail-mode is left in the config.
 
 ---
 
