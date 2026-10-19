@@ -68,11 +68,12 @@ func startHAStandby(cfg clusterStartupConfig, ctx context.Context, leaderAddr, t
 	// ADR-0005 S4: record the material a later demotion needs to resync
 	// (a promoted standby that self-fences re-enters standby mode).
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
-	globalHA.StartAsStandby(ctx, leaderAddr, token,
+	globalHA.StartAsStandbyWithUndo(ctx, leaderAddr, token,
 		cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, autoFailover,
 		func() error {
 			return enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath)
 		},
+		undoPromoteControlPlane, // a promote that fails after the activation leaves no Control Plane behind
 	)
 }
 

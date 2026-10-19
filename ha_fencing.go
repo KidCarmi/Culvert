@@ -39,7 +39,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
-	"time"
 )
 
 // setLeaseEpochLocked records the epoch of our current grant (0 = not held)
@@ -49,64 +48,74 @@ func (h *HAState) setLeaseEpochLocked(epoch int64) {
 	h.syncFenceEpochLocked()
 }
 
-// grantedLeaseEpoch is the epoch of the grant an acquisition just took, or 0
-// when it took none (denied, unknown, or legacy mode). Read right after a
-// granted acquire: while that grant is live every other Acquire is denied, so
-// no other path can have replaced the epoch in between.
-func (h *HAState) grantedLeaseEpoch(granted bool) int64 {
-	if !granted {
-		return 0
-	}
-	return h.CurrentEpoch()
-}
-
-// clearLeaseGrantLocked drops the LOCAL state of a grant (epoch) that an
-// acquisition took but its caller is not installing: a resume whose
-// revalidation failed, a resume claimed by shutdown or a live HA transition, a
-// promotion whose onPromote failed, a recovery whose leader role went away
-// (Codex review of #1556, P1 4306890528). Without it the node kept
-// leaseEpoch/fenceEpoch = E with no role and no keepalive: CurrentEpoch kept
-// advertising the abandoned E on heartbeats and enrollment, so Data Planes
-// ratcheted to an epoch no committed snapshot carries.
+// clearLeaseGrantLocked abandons the STAGED grant an acquisition took (took)
+// when its caller is not installing it: a resume whose revalidation failed,
+// or a resume claimed by shutdown or a live HA transition (Codex review of
+// #1556, P1 4306890528). It folds #1556's clear into this branch's one
+// abandonment, abandonGrantLocked: the staged epoch, any stamp an install was
+// committing with it (reverted under the store lock) and the keepalive that
+// renewed it. Because an acquisition only stages, the abandoned epoch was
+// never advertised (CurrentEpoch, the heartbeat, issuance, write authority),
+// and the caller needs no copy of it: nothing outside the grant owners reads
+// a staged epoch (TestChaos71_Wall_FencingEpochIsAdvertisedOnlyAfterItsCommit).
 //
-// It is the ONE clear for an uninstalled grant
-// (TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared). The lease itself is
-// NOT released — ADR-0005 S1 gives the Provider no Release, so the grant runs
-// out its TTL (the documented bounded stall). A no-op when epoch is not the
-// current local grant (0, legacy mode, or a newer grant installed meanwhile).
-// Caller holds h.mu (write), so the clear is atomic with the caller's decision.
-func (h *HAState) clearLeaseGrantLocked(epoch int64) {
-	if h.lease == nil || epoch == 0 || h.leaseEpoch != epoch {
+// took keys the clear to the caller's own grant: while that grant is live
+// every other Acquire is denied, so no other transition can have staged one.
+// A no-op when the acquisition took none or in legacy mode. The lease itself
+// is NOT released — ADR-0005 S1 gives the Provider no Release, so the grant
+// runs out its TTL (the documented bounded stall). Caller holds h.mu (write),
+// so the clear is atomic with the caller's decision.
+func (h *HAState) clearLeaseGrantLocked(took bool) {
+	if h.lease == nil || !took {
 		return
 	}
-	h.setLeaseEpochLocked(0)
-	h.leaseConfirmedAt = time.Time{}
-	h.leaseValidFor = 0
-	if h.leaseStopCh != nil {
-		close(h.leaseStopCh)
-		h.leaseStopCh = nil
-	}
+	h.abandonGrantLocked()
 }
 
 // clearLeaseGrant is clearLeaseGrantLocked for a decision taken without h.mu.
-func (h *HAState) clearLeaseGrant(epoch int64) {
+func (h *HAState) clearLeaseGrant(took bool) {
 	h.mu.Lock()
-	h.clearLeaseGrantLocked(epoch)
+	h.clearLeaseGrantLocked(took)
 	h.mu.Unlock()
 }
 
-// syncFenceEpochLocked refreshes fenceEpoch from the fields CurrentEpoch
-// reads. Caller holds h.mu (write).
+// syncFenceEpochLocked refreshes fenceEpoch, the epoch publishes stamp: the
+// one an install is committing (stampEpoch), else configEpochLocked. Caller
+// holds h.mu (write). The mirror derives from the role too, so a role change
+// re-runs it (setTopologyLocked).
 func (h *HAState) syncFenceEpochLocked() {
-	if h.lease == nil {
+	switch {
+	case h.lease == nil:
 		h.fenceEpoch.Store(0)
-		return
+	case h.stampEpoch != 0:
+		h.fenceEpoch.Store(h.stampEpoch)
+	default:
+		h.fenceEpoch.Store(h.configEpochLocked())
 	}
-	h.fenceEpoch.Store(h.leaseEpoch)
 }
 
-// PublishedFenceEpoch is CurrentEpoch without h.mu — what a config publish
-// stamps (ConfigStore.commitPublish), safe to call while h.mu is held.
+// configEpochLocked is the epoch this node's config carries outside an
+// install. Under an HA role (leader, read-only leader, standby) it is the
+// installed grant: a node that lost its lease stamps 0, ADR-0005 S3's zombie
+// shape, which a Data Plane that has seen an epoch rejects. With NO HA role it
+// never drops below committedEpoch, the highest epoch this node committed in a
+// snapshot (the role-less floor, ADR-0005 implementation note): a node that
+// committed E and then lost the grant before exposing it (a failed enable) is
+// HA-off and still serving, and stamping 0 would freeze every Data Plane that
+// fetched the E-stamped snapshot. Caller holds h.mu.
+func (h *HAState) configEpochLocked() int64 {
+	if h.role == "" {
+		return max(h.leaseEpoch, h.committedEpoch)
+	}
+	return h.leaseEpoch
+}
+
+// PublishedFenceEpoch is the epoch a config publish stamps
+// (ConfigStore.commitPublish), read without h.mu so it is safe while h.mu is
+// held. It equals CurrentEpoch except while commitGrant commits a new
+// grant's epoch: then it is already the new one, so that commit (and any
+// concurrent publish) carries it before CurrentEpoch advertises it. And with
+// no HA role it never drops below the role-less floor (configEpochLocked).
 func (h *HAState) PublishedFenceEpoch() int64 { return h.fenceEpoch.Load() }
 
 // CurrentEpoch reports this node's fencing epoch for stamping outbound

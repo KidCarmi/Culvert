@@ -160,6 +160,30 @@ the background every 1–30 s, so reducing the oversized collection is enough to
 clear it; no restart or HA change is needed. While the row is failing, Data
 Planes still hold the last committed list.
 
+The new **fencing epoch** never rides in that republish. Before an enable,
+resume, promote or lease recovery advertises its new epoch (heartbeats,
+certificate issuance, `/healthz`), it commits the current config restamped with
+that epoch and otherwise unchanged. Only when that commit succeeds do the epoch
+and write authority become live, so Data Planes never learn an epoch that the
+committed snapshot does not carry.
+
+That commit is the prior config plus a few bytes, so it is refused only when
+the committed config is already at the cap. It is also refused when there is
+no committed config at all, for example when the node's initial config publish
+was itself rejected at boot: there is nothing that could carry the epoch. (A
+promoting standby has not published yet; its first publish is checked against
+the cap before the listener starts, and the epoch goes live only once that
+publish has committed.) Then the transition is refused and
+`config_snapshot_rejected` fires once:
+- An enable returns an error and HA stays off.
+- A promote leaves the node a retryable standby.
+- Lease recovery keeps the node a read-only leader and keeps retrying.
+- A boot resume comes up as a **read-only leader**, with no write authority and
+  no certificate issuance.
+
+Reduce the oversized collection, then retry the action. For a boot resume,
+restart the node instead: a refused resume does not retry on its own.
+
 On the **promote** path the listener is started synchronously: if it cannot
 bind, the promotion fails and the node stays a retryable standby rather than
 becoming a leader nobody can reach. Once the role is committed the config is

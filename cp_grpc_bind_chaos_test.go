@@ -123,6 +123,11 @@ func cpSnapshotRoleAndSupervisor(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = stopControlPlaneListener(ctx)
+		// A deactivation still draining releases on its own goroutine: join
+		// it before restoring, or its release lands in the next test.
+		if err := awaitCPDeactivation(10 * time.Second); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
 		resetClusterRoleConflictForTest()
 
 		cpActivationMu.Lock()

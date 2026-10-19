@@ -1611,8 +1611,18 @@ func enableControlPlaneResilient(grpcAddr, certFile, keyFile, caFile, clusterDBP
 // bind, which is what lets the supervisor goroutine claim the role on a later
 // successful attempt without deadlocking against a starter waiting on it.
 func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, tolerateFirstFailure bool, onActivated func()) error {
+	// An undo still draining (deactivateControlPlane) holds the role it is
+	// about to restore: wait it out, OUTSIDE the lock its release takes, so a
+	// promote retry gets "deactivating, retry" rather than "already running"
+	// (Codex P1 4303232156 on #1645).
+	if err := awaitCPDeactivation(cpListenerStopWait()); err != nil {
+		return err
+	}
 	cpActivationMu.Lock()
 	defer cpActivationMu.Unlock()
+	if cpDeactivation != nil {
+		return fmt.Errorf("%w — retry once it completes", errCPDeactivating)
+	}
 
 	alreadyCP := isControlPlaneRole()
 	if alreadyCP {

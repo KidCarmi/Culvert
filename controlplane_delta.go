@@ -435,8 +435,13 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 		}
 	}
 
-	epoch := globalHA.CurrentEpoch()
-	cur := globalConfigStore.Version()
+	// The reply's epoch labels the COMMITTED data it describes — the target
+	// version's snapshot stamp, read with that version under one lock — never
+	// live HA state (Codex P1 4302926140 on #1645). A live read could label a
+	// version committed with a new grant's epoch with the old one before the
+	// new one is exposed, and a Data Plane would apply it without ratcheting.
+	// The stamp already carries the role-less floor (configEpochLocked).
+	cur, epoch := globalConfigStore.committedVersionEpoch()
 	if dreq.KnownVersion == cur {
 		// Idle-drift detection: if the DP reports a fingerprint for the current
 		// version that disagrees with ours, it has drifted (e.g. a half-applied
