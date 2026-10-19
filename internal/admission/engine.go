@@ -393,15 +393,30 @@ func (f *IPFilter) addLocked(entry string) error {
 	return &net.AddrError{Err: "invalid IP or CIDR", Addr: entry}
 }
 
+// canonicalEntry maps an entry spelling to the key Add stores it under: a CIDR
+// becomes its network address, a plain IP its canonical text. Anything that
+// does not parse is returned unchanged so the raw-string match keeps working.
+func canonicalEntry(entry string) string {
+	if _, cidr, err := net.ParseCIDR(entry); err == nil {
+		return cidr.String()
+	}
+	if ip := net.ParseIP(entry); ip != nil {
+		return ip.String()
+	}
+	return entry
+}
+
 // Remove removes an entry and publishes the updated filter view.
 func (f *IPFilter) Remove(entry string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	canon := canonicalEntry(entry)
 	delete(f.single, entry)
+	delete(f.single, canon)
 	// Remove from nets slice.
 	filtered := f.nets[:0]
 	for _, n := range f.nets {
-		if n.String() != entry {
+		if s := n.String(); s != entry && s != canon {
 			filtered = append(filtered, n)
 		}
 	}
@@ -416,6 +431,37 @@ func (f *IPFilter) ClearAll() {
 	f.single = map[string]bool{}
 	f.publishView()
 	f.mu.Unlock()
+}
+
+// Replace installs mode and entries as the filter's ENTIRE configuration in
+// one pass, under ONE writer lock, publishing the derived view ONCE. Every
+// previous entry is discarded; a nil or empty entries slice leaves the filter
+// with the given mode and no entries. Invalid entries are skipped and
+// returned, as AddAll reports them, for logging after the lock is released.
+//
+// This is the wholesale-replacement primitive for a caller that previously
+// built a fresh filter and swapped the pointer it enforces with (the CP→DP
+// snapshot apply). Replacing a live filter's pointer is a data race against
+// the lock-free Allowed readers in the request path; replacing its contents
+// here is not: readers observe either the previous view or the new one, never
+// an intermediate (a SetMode / ClearAll / AddAll sequence publishes three
+// views, and the middle one is an empty allowlist that denies everything or an
+// empty blocklist that admits everything). Linear in the entry count, like
+// AddAll. The owner's identity, and any observer installed on it, are kept.
+func (f *IPFilter) Replace(mode string, entries []string) []InvalidIPEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mode = mode
+	f.nets = nil
+	f.single = map[string]bool{}
+	var invalid []InvalidIPEntry
+	for _, entry := range entries {
+		if err := f.addLocked(entry); err != nil {
+			invalid = append(invalid, InvalidIPEntry{Entry: entry, Err: err})
+		}
+	}
+	f.publishView()
+	return invalid
 }
 
 // List returns a detached list of configured entries.
@@ -834,10 +880,12 @@ func (r *RateLimiter) addExemptionLocked(entry string) error {
 func (r *RateLimiter) RemoveExemption(entry string) {
 	r.exemptMu.Lock()
 	defer r.exemptMu.Unlock()
+	canon := canonicalEntry(entry)
 	delete(r.exemptIPs, entry)
+	delete(r.exemptIPs, canon)
 	filtered := r.exemptNets[:0]
 	for _, n := range r.exemptNets {
-		if n.String() != entry {
+		if s := n.String(); s != entry && s != canon {
 			filtered = append(filtered, n)
 		}
 	}
@@ -1046,18 +1094,44 @@ func clusterRemoteCountMaxAge(window time.Duration) time.Duration {
 // broadcast is older than maxAge (or none has ever been applied). It is the ONLY
 // read accessor for enforcement — there is deliberately no unconditional Get, so
 // a future caller cannot reintroduce the frozen-count path by accident.
-// A NEGATIVE age (the clock moved back between the stamp and this read) is
-// stale, not fresh. `age >= maxAge` alone reads a future stamp as brand new and
-// would honour the broadcast for however far back the clock went — and it would
-// disagree with ClusterFreshness, which reports the same condition as
-// stale. Two answers to one question is the defect; both fail toward the local
-// decision, which is where every other failure on this path lands.
+// A NEGATIVE age against a clock read taken AFTER the stamp was loaded (the
+// clock moved back between the stamp and this read) is stale, not fresh.
+// `age >= maxAge` alone reads a future stamp as brand new and would honour the
+// broadcast for however far back the clock went — and it would disagree with
+// ClusterFreshness, which reports the same condition as stale. Two answers to
+// one question is the defect; both fail toward the local decision, which is
+// where every other failure on this path lands.
+//
+// The caller's `now` is NOT that clock read. AllowClusterAware samples its
+// clock before the shard lock and the gossip loop's Apply stamps with its own
+// time.Now(), so a broadcast that lands between the two steps is always a few
+// microseconds AHEAD of the decision's clock. Treating that as a rollback
+// zeroed the remote half of a live decision and admitted a request the
+// cluster-wide limit refused — a transient, self-inflicted fail-open on every
+// gossip tick that overlapped a decision (seen as
+// TestDistributedAdmission_ProductionWiring admitting the SOCKS5 leg, 6 local
+// + 2 remote against a limit of 8, with gossip every millisecond). So a
+// negative age re-reads the clock ONCE, after the stamp was loaded: a stamp
+// still in the future against that read is a genuine rollback; one behind it
+// is simply fresh. The steady-state path never takes the branch, so it costs
+// nothing per request, and it is the same stamp-then-clock order
+// ClusterFreshness already uses, so enforcement and diagnostics agree on the
+// same instant. Pinned by TestChaos61_InFlightBroadcast* and
+// TestChaos61_GenuineRollbackIsStillStale.
 func (c *clusterCountStore) FreshCount(ip string, now time.Time, maxAge time.Duration) int {
 	applied := c.appliedAtNano.Load()
 	if applied == 0 {
 		return 0
 	}
-	if age := now.Sub(time.Unix(0, applied)); age < 0 || age >= maxAge {
+	appliedAt := time.Unix(0, applied)
+	age := now.Sub(appliedAt)
+	if age < 0 {
+		age = time.Since(appliedAt)
+		if age < 0 {
+			return 0
+		}
+	}
+	if age >= maxAge {
 		return 0
 	}
 	c.mu.RLock()

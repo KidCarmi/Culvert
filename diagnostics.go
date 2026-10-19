@@ -168,6 +168,7 @@ func buildOperatorContract() OperatorContract {
 		checkThreatFeed(),
 		checkRequestHistory(),
 		checkBandwidthQoSEnforcement(),
+		checkFileProfileResolution(),
 		checkSOCKS5Listener(),
 		checkAdminUIListener(),
 		checkCPGRPCListener(),
@@ -188,9 +189,17 @@ func buildOperatorContract() OperatorContract {
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
 	checks = append(checks, checkClusterCA()...)
+	// Break-glass release-catalog signature mode (permissive/disabled).
+	// Contributes nothing in enforce mode or when release management is not
+	// composed on this node.
+	checks = append(checks, checkReleaseVerifyPosture()...)
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
+	// Signed SaaS feed (stale / degraded / waiting / critical, or an enabled feed
+	// that has never activated and is failing). Contributes nothing when the feed
+	// is healthy, disabled, or serving the embedded baseline without failures.
+	checks = append(checks, checkSaaSFeed()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
@@ -573,7 +582,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		return OperatorContractCheck{
 			Code:    "admin_username_length",
 			Status:  diagOK,
-			Message: "all configured admin usernames are within the login length limit",
+			Message: fmt.Sprintf("all configured admin usernames are within the %d-byte account limit", adminUsernameAccountLimit),
 		}
 	}
 	plural := ""

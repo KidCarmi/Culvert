@@ -348,6 +348,19 @@ var ipFilterRepublishCases = []struct {
 			t.Error("AddAll did not republish: newly blocked range still allowed")
 		}
 	}},
+	{name: "Replace", mutator: "Replace", run: func(t *testing.T, f *IPFilter) {
+		f.SetMode("allow")
+		if err := f.Add("203.0.113.47"); err != nil {
+			t.Fatal(err)
+		}
+		f.Replace("block", []string{"198.51.100.0/24"})
+		if !f.Allowed("203.0.113.47") {
+			t.Error("Replace did not republish: discarded allowlist still enforced")
+		}
+		if f.Allowed("198.51.100.7") {
+			t.Error("Replace did not republish: newly blocked range still allowed")
+		}
+	}},
 }
 
 // ipFilterExercisedMutators is the mutator set the inventory wall accepts: the
@@ -661,6 +674,113 @@ func TestIPFilterAddAll_PublishesOnce(t *testing.T) {
 	}
 	if !f.Allowed("192.0.2.1") {
 		t.Error("AddAll blocked an unlisted IP")
+	}
+}
+
+// TestIPFilterReplace_PublishesExactlyOnce pins the wholesale-replacement
+// contract the CP→DP snapshot apply depends on (RISK-030): a Replace over a
+// populated filter publishes ONE new view, so a lock-free reader observes the
+// previous configuration or the new one and never an intermediate — unlike the
+// SetMode / ClearAll / AddAll sequence, whose middle publish is an empty list
+// under the new mode (deny-all for "allow", admit-all for "block").
+func TestIPFilterReplace_PublishesExactlyOnce(t *testing.T) {
+	f := &IPFilter{single: map[string]bool{}}
+	f.SetMode("allow")
+	if err := f.Add("203.0.113.47"); err != nil {
+		t.Fatal(err)
+	}
+	rec := recordIPFilterPublishes(f)
+	before := f.view.Load()
+
+	f.Replace("block", []string{"198.51.100.0/24", "2001:db8::1"})
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.events) != 1 {
+		var names []string
+		for _, ev := range rec.events {
+			names = append(names, ev.method)
+		}
+		t.Fatalf("Replace published %d view(s) %v, want exactly 1", len(rec.events), names)
+	}
+	if rec.events[0].method != "Replace" || rec.events[0].view == before || rec.events[0].view != f.view.Load() {
+		t.Fatal("the single publish must be Replace's own, and must be the view readers now load")
+	}
+	if !f.Allowed("203.0.113.47") || f.Allowed("198.51.100.7") || f.Allowed("2001:db8::1") || !f.Allowed("192.0.2.1") {
+		t.Fatal("Replace did not install exactly the new blocklist")
+	}
+}
+
+// TestIPFilterReplace_MatchesFreshFilter is the differential control for the
+// snapshot apply's change of shape: Replace on a LIVE, previously configured
+// filter must answer every probe exactly as a FRESH filter built with
+// SetMode + AddAll (the pre-fix shape) does, for every mode including the
+// fail-closed corrupt one, with singles, CIDRs, a mapped address, an invalid
+// entry, and the nil / empty list cases. Mode and List must agree too.
+func TestIPFilterReplace_MatchesFreshFilter(t *testing.T) {
+	probes := []string{
+		"10.0.0.1", "10.0.0.2", "198.51.100.9", "198.51.101.1", "203.0.113.5",
+		"::ffff:10.0.0.1", "2001:db8::1", "2001:db8:1::1", "192.0.2.77", "not-an-ip",
+	}
+	configs := []struct {
+		mode    string
+		entries []string
+	}{
+		{"allow", []string{"10.0.0.1", "198.51.100.0/24", "2001:db8::1"}},
+		{"block", []string{"203.0.113.5", "2001:db8::/64", "bogus-entry"}},
+		{"", []string{"10.0.0.1"}},
+		{"corrupt", nil},
+		{"allow", nil},
+		{"block", []string{}},
+		{"allow", []string{"::ffff:10.0.0.1"}},
+	}
+	live := &IPFilter{single: map[string]bool{}}
+	live.SetMode("block")
+	if err := live.Add("192.0.2.0/24"); err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range configs {
+		gotBad := live.Replace(c.mode, c.entries)
+
+		fresh := &IPFilter{single: map[string]bool{}}
+		fresh.SetMode(c.mode)
+		wantBad := fresh.AddAll(c.entries)
+
+		if len(gotBad) != len(wantBad) {
+			t.Errorf("config %d: Replace reported %d invalid entries, AddAll %d", i, len(gotBad), len(wantBad))
+		}
+		for j := range gotBad {
+			if j < len(wantBad) && gotBad[j].Entry != wantBad[j].Entry {
+				t.Errorf("config %d: invalid entry %d = %q, want %q", i, j, gotBad[j].Entry, wantBad[j].Entry)
+			}
+		}
+		if live.Mode() != fresh.Mode() {
+			t.Errorf("config %d: mode %q, want %q", i, live.Mode(), fresh.Mode())
+		}
+		got, want := live.List(), fresh.List()
+		sort.Strings(got)
+		sort.Strings(want)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("config %d: list %v, want %v", i, got, want)
+		}
+		for _, p := range probes {
+			if g, w := live.Allowed(p), fresh.Allowed(p); g != w {
+				t.Errorf("config %d (mode %q): Allowed(%q) = %v, fresh filter says %v", i, c.mode, p, g, w)
+			}
+		}
+	}
+}
+
+// TestIPFilterReplace_ZeroValueIsSafe: Replace initialises the writer map it
+// needs, so it is usable on a bare literal and must not depend on NewIPFilter
+// having run (the constructor remains the blessed path).
+func TestIPFilterReplace_ZeroValueIsSafe(t *testing.T) {
+	var f IPFilter
+	if bad := f.Replace("allow", []string{"10.0.0.1"}); len(bad) != 0 {
+		t.Fatalf("unexpected invalid entries: %v", bad)
+	}
+	if !f.Allowed("10.0.0.1") || f.Allowed("10.0.0.2") {
+		t.Fatal("zero-value Replace did not enforce the allowlist")
 	}
 }
 

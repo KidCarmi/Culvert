@@ -29,6 +29,14 @@ import (
 // middleware actually gates), and a snapshotted loginLimiter.
 func secBasicEnv(t *testing.T) {
 	t.Helper()
+	// setupProxyTest swaps in a fresh cfg at test START and never puts the old
+	// one back, so every account a secBasic test creates (including the
+	// 261-byte one in TestSECBASIC1_OversizeUsernameIsBounded) outlived the
+	// test and leaked into whichever roster-reading test ran next. Restore the
+	// predecessor's cfg so the accounts leave with the test. Registered first,
+	// so it runs LAST, after the cleanups below have run against this test's cfg.
+	origCfg := cfg
+	t.Cleanup(func() { cfg = origCfg })
 	setupProxyTest(t)
 	snapshotLoginLimiter(t)
 	cfg.SetUIUsersFile(filepath.Join(t.TempDir(), "ui_users.json"))
@@ -330,6 +338,14 @@ func TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller(t *testing.T) {
 		// current password at the limiter's rate. Adding a lock would let a
 		// session holder lock themselves out of the login flow, so the trade is
 		// deliberate rather than an oversight.
+		//
+		// SEC-REAUTH-AUDIT-1: that residual used to come with a SECOND one this
+		// note did not mention — the rejection was also unaudited, so the one
+		// unlocked password oracle in the admin API was also the only silent
+		// one. The EVIDENCE half is now closed (auth.password_change.fail, see
+		// auth_change_password_reauth_audit_test.go); the lockout half above
+		// remains the deliberate trade. When recording a residual, state which
+		// controls are absent — "no lockout" was read as the whole gap.
 		"apiAuthChangePassword": "re-auth of an already-authenticated session for its OWN account; session-derived username, mutating-method rate limit",
 	}
 
