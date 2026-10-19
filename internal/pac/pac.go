@@ -8,6 +8,7 @@ package pac
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -15,6 +16,12 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
+
+// storeAtomicWrite is the store's durable-write seam. Production is
+// fileutil.AtomicWrite; a test swaps it to drive a write outcome that cannot
+// be produced from a real filesystem — notably the post-rename
+// fileutil.ErrReplacedNotSynced. Mirrors uiTLSAtomicWrite in package main.
+var storeAtomicWrite = fileutil.AtomicWrite
 
 // Config is the persisted PAC configuration.
 type Config struct {
@@ -144,8 +151,25 @@ func (s *Store) Set(c Config) error {
 		if err != nil {
 			return err
 		}
-		if err := fileutil.AtomicWrite(s.path, data, 0o600); err != nil {
-			return err
+		if err := storeAtomicWrite(s.path, data, 0o600); err != nil {
+			// ErrReplacedNotSynced is a POST-rename failure: the target
+			// already carries the new content, every reader sees it, and a
+			// restart loads it. Returning here would leave memory
+			// contradicting the visible file — the exact inverse of the
+			// divergence this ordering exists to prevent, and it would
+			// activate a fleet-wide routing change on the next restart that
+			// the admin was told had failed. fileutil documents the rule
+			// ("callers ... must NOT restore prior in-memory state"), and
+			// every other handler in the tree follows it
+			// (rosterChangeCommitted, policylearn.saveLocked, policy_draft,
+			// ui_security, mcp_canary_runtime). The commit HELD, so fall
+			// through to the swap. The durability degradation is already
+			// surfaced by the write-failure observer (CHAOS-45), which this
+			// branch has fired, so swallowing the sentinel here hides
+			// nothing from the operator.
+			if !errors.Is(err, fileutil.ErrReplacedNotSynced) {
+				return err
+			}
 		}
 	}
 	s.cfg = c

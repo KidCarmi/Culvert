@@ -10736,6 +10736,54 @@ store does: marshal and `AtomicWrite` first, then assign `s.cfg` and the stamp
 once — the API path now fails closed, the rollback stays rolled back, the
 import does not half-apply, and the DP defers instead of diverging.
 
+#### PAC-1c — the ordering's other side: a post-rename sync failure is a COMMIT (H → CLOSED)
+
+Found by Codex as a P1 on #1669, against this sweep's own first push, and it is
+the sharpest lesson in this section: **getting the ordering right is only half
+of it — the write outcome has to be classified correctly too.**
+
+`fileutil.AtomicWrite` has a distinguished failure, `ErrReplacedNotSynced`,
+returned when the parent-directory fsync or close fails *after* the rename.
+`internal/fileutil/fileutil.go:76-84` is explicit about what it means:
+
+> "the target file **already carries the new content** (visible to every reader,
+> and on the overwhelming majority of filesystems durable), but the
+> parent-directory sync failed... Callers running compensating rollbacks **must
+> NOT restore prior in-memory state** on this error — memory would then
+> contradict the visible file, and a restart would load the 'rolled back'
+> content anyway."
+
+The first cut of this fix returned on *any* error from the write, sentinel
+included. That produced the exact **inverse** of PAC-1: the running process kept
+serving the old PAC while the visible file carried the new one, the admin got a
+500 — and the next restart activated the fleet-wide routing change they had been
+told failed. Trading a divergence for its mirror image is not a fix.
+
+The sentinel is a settled house contract everywhere else in the tree, and this
+sweep had already *read* one of those handlers and cited it as sound in the
+scan recorded below without drawing the conclusion:
+`rosterChangeCommitted` (CHAOS-70's own predicate, and gated by
+`roster_persist_durability_chaos_test.go:330-337` — *"ErrReplacedNotSynced must
+count as committed: the content is already on disk"*),
+`policylearn.saveLocked`, `policy_draft.go:207`, `ui_security.go:608`,
+`ui_policy.go:687`, `mcp_canary_runtime.go:195`. The store was the only writer
+that did not follow it.
+
+**Fixed:** the sentinel falls through to the swap, so the commit that held is
+recorded in memory too; every other error still returns without committing. The
+sentinel is not re-reported to the caller, matching `policylearn.saveLocked`'s
+reasoning — three of the four callers discard the error, and the admin API turns
+any error into a 500, which would re-create PAC-1's "told it failed, but it is
+live" shape for a change that genuinely committed. Nothing is hidden: that
+branch has already fired the write-failure observer (CHAOS-45), so the
+durability degradation reaches the `storage_path` diagnostics row and the config
+rollback's `configPersistError` scope. The store takes no logger, per the
+owner-boundary rule in `conventions.md`.
+
+A `storeAtomicWrite` seam (mirroring `uiTLSAtomicWrite` in main) makes the
+outcome injectable, since a real filesystem cannot be made to fail only its
+parent-directory fsync.
+
 #### PAC-2 — a stamp that did not advance held If-Modified-Since clients on a superseded PAC (M–H → CLOSED)
 
 `modTime` is the `Last-Modified` source for the PAC endpoints
@@ -10851,7 +10899,8 @@ of these are why the findings above are *bounded* rather than catastrophic.
   `policylearn.saveLocked` clears `e.dirty` only *after* a successful write and
   deliberately treats `ErrReplacedNotSynced` as a held write (the durable domain
   already carries the content, so reporting failure would fire compensating
-  rollbacks against a file a restart recovers correctly);
+  rollbacks against a file a restart recovers correctly) — **the very rule this
+  sweep then failed to apply to its own fix; see PAC-1c**;
   `scanner.Load` and `scanexcl.Save` assign a path and a local file struct
   respectively, not serving state. So PAC-1 was an isolated deviation, not a
   house pattern — which is also why the sibling store's comment could be cited
@@ -10866,6 +10915,7 @@ of these are why the findings above are *bounded* rather than catastrophic.
 |---|---|---|---|---|
 | PAC-1 | Full/read-only/quota-exhausted volume → unpersisted PAC served to the whole fleet, unaudited, uncaptured, reverting on restart | M — a degraded volume is the most frequently revisited fault class in this register (§13, §19, §31, §40) | **H** — fleet-wide routing change with no record | **CLOSED** |
 | PAC-1b | Config-version rollback that un-does itself on the next restart | L–M | **H** — a rollback is the break-glass path; it must be the one thing that holds | **CLOSED** |
+| PAC-1c | A post-rename parent-dir fsync failure reported as uncommitted → memory serves the old PAC, the visible file carries the new one, and the next restart activates it | L–M (needs the fsync to fail after a successful rename) | **H** — a fleet-wide routing change activating at restart that the admin was told had failed | **CLOSED** |
 | PAC-2 | IMS-only (WinHTTP/WinINET) clients hold a superseded PAC after two same-second commits | **M–H** (no fault needed) | M — stale bypass list or stale upstream until the next change | **CLOSED** |
 | PAC-2b | Same, after a backwards clock step | L | M–H — every change invisible for the size of the step | **CLOSED** |
 | PAC-3 | DP converges on paper (healthy apply, ratcheted version) with the PAC slice not applied | M | M — stale exclusions until an unrelated version bump | **Recorded** |
@@ -10932,6 +10982,12 @@ Each was confirmed red against `main` before the fix and green after
   the same previous stamp, driven through the real `ArtifactCache`, must not
   serve the first one's artifact for the second (red against the reproducible
   `prev.Add(time.Second)` form this sweep first shipped);
+- `TestChaos77_APostRenameSyncFailureCommitsInsteadOfDiverging` — the sentinel
+  commits: config, revision and stamp all advance, the compiled artifact names
+  the new proxy, and a reload agrees with the serving view (red against the
+  return-on-any-error form this sweep first pushed);
+- `TestChaos77_AnOrdinaryWriteFailureStillDoesNotCommit` — negative control: a
+  no-space error still commits nothing;
 - `TestChaos77_FailedPACSaveIsNotServedToTheFleet` — end to end through
   `apiPACConfig` and `GET /proxy.pac`: 500 to the operator, the persisted proxy
   still served, revision not advanced, and **no audit entry naming the phantom

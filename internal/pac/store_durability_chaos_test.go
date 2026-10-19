@@ -18,11 +18,15 @@ package pac
 // nothing recorded and that reverts on the next restart.
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // unwritableStorePath returns a path whose PARENT is a regular file, so every
@@ -232,5 +236,90 @@ func TestChaos77_AnAdvancedStampIsNeverAReusedArtifactCacheKey(t *testing.T) {
 	second := serve("second.corp.example")
 	if strings.Contains(second, "first.corp.example") || !strings.Contains(second, "second.corp.example") {
 		t.Errorf("the artifact cache answered the second commit with the first one's artifact: the advanced stamp was reproducible and collided as a cache key")
+	}
+}
+
+// TestChaos77_APostRenameSyncFailureCommitsInsteadOfDiverging covers the other
+// side of the persist-before-swap ordering, and the arm the first cut of this
+// sweep got wrong (Codex P1 on #1669).
+//
+// fileutil.ErrReplacedNotSynced is a POST-rename failure: fileutil.go states
+// that "the target file already carries the new content (visible to every
+// reader...)" and that "callers running compensating rollbacks must NOT
+// restore prior in-memory state on this error — memory would then contradict
+// the visible file, and a restart would load the 'rolled back' content
+// anyway." Returning it as an uncommitted mutation is therefore the exact
+// INVERSE of the divergence this ordering exists to prevent: the running
+// process would serve the old PAC while the visible file carries the new one,
+// and the next restart would activate a fleet-wide routing change the admin
+// was told had failed. Every other handler in the tree treats the sentinel as
+// committed (rosterChangeCommitted, policylearn.saveLocked, policy_draft,
+// ui_security, mcp_canary_runtime); the store must too.
+func TestChaos77_APostRenameSyncFailureCommitsInsteadOfDiverging(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pac_config.json")
+
+	prevWrite := storeAtomicWrite
+	t.Cleanup(func() { storeAtomicWrite = prevWrite })
+	storeAtomicWrite = func(p string, data []byte, perm os.FileMode) error {
+		// The rename genuinely landed: the new content IS on disk, and only
+		// the post-rename parent-directory fsync is reported as failed.
+		if err := os.WriteFile(p, data, perm); err != nil {
+			return err
+		}
+		return fmt.Errorf("atomic write %s: parent dir fsync: %w", p, fileutil.ErrReplacedNotSynced)
+	}
+
+	s := &Store{}
+	s.Restore(State{Cfg: Config{ProxyHost: "old.corp.example", ProxyPort: 8080}, Path: path, ModTime: time.Now()})
+	before := s.Get()
+	beforeMod := s.ModTime()
+
+	if err := s.Set(Config{ProxyHost: "new.corp.example", ProxyPort: 3128}); err != nil {
+		t.Fatalf("a post-rename sync failure must not be reported as an uncommitted mutation: %v", err)
+	}
+
+	got := s.Get()
+	if got.ProxyHost != "new.corp.example" || got.ProxyPort != 3128 {
+		t.Errorf("serving config = %+v after a post-rename sync failure, want the committed new.corp.example:3128: memory now contradicts the visible file, and the next restart activates the change anyway",
+			got)
+	}
+	if got.Revision != before.Revision+1 {
+		t.Errorf("revision = %d, want %d: the commit held, so the token must advance", got.Revision, before.Revision+1)
+	}
+	if !s.ModTime().After(beforeMod) {
+		t.Error("modTime must advance for a commit that held, or the served artifact and Last-Modified stay on the superseded config")
+	}
+	if js := s.Compile("").JS; !strings.Contains(js, "new.corp.example") {
+		t.Errorf("compiled PAC does not name the committed proxy: %s", js)
+	}
+
+	// The durable copy is what a restart will load; memory must match it.
+	reloaded := &Store{}
+	if err := reloaded.Load(path); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if rc := reloaded.Get(); rc.ProxyHost != got.ProxyHost {
+		t.Errorf("reloaded ProxyHost = %q but serving = %q: a restart would change what the fleet is served",
+			rc.ProxyHost, got.ProxyHost)
+	}
+}
+
+// TestChaos77_AnOrdinaryWriteFailureStillDoesNotCommit is the negative control
+// for the gate above: only the post-rename sentinel counts as committed.
+func TestChaos77_AnOrdinaryWriteFailureStillDoesNotCommit(t *testing.T) {
+	prevWrite := storeAtomicWrite
+	t.Cleanup(func() { storeAtomicWrite = prevWrite })
+	storeAtomicWrite = func(string, []byte, os.FileMode) error {
+		return errors.New("atomic write: create temp: no space left on device")
+	}
+
+	s := &Store{}
+	s.Restore(State{Cfg: Config{ProxyHost: "old.corp.example", ProxyPort: 8080}, Path: "/irrelevant/pac_config.json", ModTime: time.Now()})
+
+	if err := s.Set(Config{ProxyHost: "new.corp.example", ProxyPort: 3128}); err == nil {
+		t.Fatal("an ordinary write failure must still be reported")
+	}
+	if got := s.Get().ProxyHost; got != "old.corp.example" {
+		t.Errorf("serving ProxyHost = %q after an ordinary failed write, want old.corp.example", got)
 	}
 }
