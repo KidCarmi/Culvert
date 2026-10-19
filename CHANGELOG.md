@@ -9,6 +9,150 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A Control Plane gRPC listener fault terminated the whole appliance, and a
+  listener that died after binding was silent and terminal (CHAOS-71).** The CP
+  boot path had exactly one error branch — `logFatalf("ControlPlane gRPC: %v",
+  err)` — reached from `initCluster`, which `main.go` runs **before**
+  `initSOCKS5`, `startAdminUI` and `buildAndStartProxyServer`. So an occupied
+  gRPC address or an unreadable mTLS pair meant no proxy, no SOCKS5, no admin
+  UI and no health endpoint; under `restart: unless-stopped`, an unattended
+  crash loop recoverable only with shell access.
+
+  Both triggers were reproduced against the real binary (`EXIT CODE: 1`,
+  `proxy http_code=000`, `adminui http_code=000`). Neither is visible to
+  `validatePortCollisions`, which compares the proxy, UI and SOCKS5 ports to
+  each other — the CP gRPC address is not even among the three it knows about.
+  Process death is *not* "fail closed": it delegates the posture to your
+  topology (an explicit-proxy fleet loses all egress; a PAC/WPAD fleet with a
+  `DIRECT` fallback goes unfiltered).
+
+  Separately, `srv.Serve(ln)` ran in a bare goroutine whose only branch was one
+  log line, so a listener that died after a successful bind never rebound —
+  while `clusterRole.role` and `grpcAddr` stayed set, so
+  `GET /api/cluster/status` reported a healthy Control Plane with its listening
+  address, forever, on a node with no listener. This was the only listener in
+  the appliance with no health plane at all.
+
+  The listener now has a supervisor owning bind → serve → rebind: the boot path
+  is non-fatal and retries at a bounded rate (1 s doubling to 30 s, ±20 %
+  jitter, interruptible by shutdown), the mTLS material is re-read on every
+  attempt so a cert-manager/certbot rotation self-heals with no restart, and a
+  serve that ends is counted, classified and rebound. **The node's role is
+  claimed only on an observed bind** — while the listener is down it reports
+  `standalone`, so every surface says what is true — and the HA leadership
+  resume rides the same rule, so a node never asserts a term it cannot
+  exercise. The live admin path (`POST /api/cluster/mode`) keeps its
+  synchronous `409`: an admin at the keyboard can retype an address, and a
+  background retry there would report success for a Control Plane that may
+  never exist.
+
+  New surfaces, all on the **proxy** port (the CP's own gRPC port cannot report
+  that it is unreachable): a `cp_grpc_listener` diagnostics row with a
+  per-reason operator action, a **report-only** `/ready cp_grpc` row, a
+  `cp_grpc` field on `/health`, and
+  `culvert_cp_grpc_{up,unavailable,bind_failures_total,binds_total,bind_backoff_seconds}`
+  — emitted only on a node that asked to be a Control Plane. Page on
+  `culvert_cp_grpc_unavailable == 1`, not on `up == 0`, which drops for the few
+  seconds of rebinding after an ordinary rollout.
+
+  **Action required for alerting:** `cp_grpc_listener_down` is a new alert event
+  (named per the `<contract-row>_down` convention) and will not reach existing
+  webhooks until you add it to their subscriptions — the admin UI's webhook
+  editor now lists it. See `docs/operator/cp-grpc-listener-recovery.md`.
+
+  Also fixed in the same change: `StopControlPlaneGRPC` read
+  `clusterRole.grpcSrv` with no lock — latent while that field was written once
+  per process, a real data race once anything rebinds. The handle now lives on
+  the supervisor under its own mutex.
+
+  **HA interaction.** A lease-mode HA leader whose CP gRPC listener has been
+  unavailable past the 30 s threshold (or whose listener supervisor stopped)
+  now **stops renewing its fencing lease**: the fence no longer vouches for a
+  leader no Data Plane or standby can reach, the node self-fences when its
+  last confirmed window ends, and the standby acquires the lapsed lease
+  through its ordinary fence-gated promotion. Renewal resumes if the listener
+  serves again before the window ends. HA promotion through the synchronous
+  `enableControlPlane` no longer risks main's `clusterRoleMu` self-deadlock
+  (the pre-bind snapshot is taken with the role lock released), a promote whose
+  listener cannot bind leaves the node a retryable standby, and once the role
+  is committed the Data Planes' CP address list is updated to name the
+  promoted node instead of only the dead leader (the CHAOS-71
+  address-republish rider, ported from #1618). That update MERGES onto the
+  latest committed config snapshot (it can no longer roll back an admin
+  publish that committed in between), and a rejected update fails the
+  activation — the role is rolled back and the listener retries — instead of
+  reporting success. Because a retried bind can land long after boot, the
+  activation also aborts once shutdown has begun (no HA resume after
+  `globalHA.Stop`), never replaces an established Data Plane role (refused,
+  alerted as `cp_grpc_listener_down`, reason `role_conflict`), and re-reads the
+  persisted HA config before resuming leadership. The other way round,
+  Data-Plane startup no longer overwrites a Control Plane role the listener
+  already claimed: every role write goes through one arbiter, the role claimed
+  first wins, and the refused claim is reported FAIL by the `cluster_posture`
+  diagnostics row; every reader of the role takes one locked snapshot.
+  A serve that ends on its own now stops the retired gRPC server (closing the
+  Data Planes' transports to it) before rebinding, shares the bind path's
+  threshold clamp and alert latch, and a full config publish can no longer
+  overwrite the CP address list the activation published. A self-fenced
+  ex-leader whose CP listener is still dark is no longer AUTO-promoted
+  (manual promotion unchanged). Every exit of the listener supervisor —
+  including a panic between bind and serve — now releases the server, the
+  socket and the role claim it holds; a terminal listener failure pages even
+  after a recoverable episode already paged; and a full publish validates the
+  snapshot with the CP address list it actually commits. With HA on, every
+  Control Plane RPC is now leader-gated: a self-fenced standby whose listener
+  rebinds refuses Data Planes with a retriable error, so they fail over to the
+  new leader instead of staying on its stale config; and a listener alert
+  raised before the webhooks load at boot is queued, not lost. Every HA
+  transition (enable, resume, standby entry, promote, self-fence) now
+  republishes the Control Plane address list itself, so a persisted leader
+  whose listener bound late no longer hands Data Planes a list without its
+  standby. If that republish is rejected (a config at its sync size cap),
+  the transition still stands; a new `cp_address_list` diagnostics row reports
+  the pending list until a background retry publishes it. An unreadable
+  Control Plane TLS file now reports `tls_certificate` instead of the
+  bind-permission advice. Address-list publishes now carry the current
+  fencing epoch, so Data Planes accept the new list after HA is enabled, and
+  they no longer clear the "config publish rejected" banner left by an
+  earlier rejected config change. A listener-down alert raised before the
+  webhooks loaded is dropped if the listener recovered first. Concurrent config
+  publishes now commit only onto the exact version they validated against, so a
+  publish racing an HA promotion can no longer ship a stale fencing epoch. A
+  re-promoted former leader no longer republishes below the version it
+  replicated from the new leader. A Control Plane listener whose socket dies
+  right after every bind is now treated as one continuous outage, so it pages
+  and (in lease mode) gives up the fencing lease instead of resetting each
+  cycle. An outage closes only after 60 s of stable serving. An admin HA
+  enable made while a restarted leader is still re-acquiring its fencing lease
+  is no longer overwritten by the restart's resume. A node whose Control Plane
+  listener ends terminally (a Data Plane role won, or the loop crashed) no
+  longer reports itself as an active Control Plane. The rebind-backoff gauge
+  reads 0 while the listener serves. A restarted leader that is still waiting
+  out its fencing lease when shutdown begins now stops at once instead of
+  outliving the shutdown watchdog. A `role_conflict` listener alert now
+  describes a local CP/DP configuration conflict rather than a fleet outage. A
+  Control Plane address list that keeps being rejected at commit now pages
+  once per episode instead of every 30 s. A refused admin/promote
+  activation (409) now leaves the listener health plane unconfigured instead
+  of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
+  a serve that stayed up for 60 s, so a one-off socket loss after a long
+  healthy run is not charged the 30 s ceiling. The `ha_resume_unfenced` page
+  for an HA config that cannot be read at boot and the read-only
+  leader-resume page are now queued until the alert webhooks load, so they
+  are no longer lost at boot; each is dropped if its condition cleared first.
+  A fencing grant that a leader resume, promotion or lease recovery took but
+  did not install (the HA config changed during the acquisition, shutdown
+  began, another HA transition claimed the node, or the promotion failed) no
+  longer leaves the node advertising that epoch with no role; the lease still
+  runs out its TTL. An ordinary config publish no longer re-adds a Control
+  Plane address that a terminal listener exit withdrew: a full publish now
+  always carries the committed address list, and only the owned address
+  publish changes it. While rewrite management identity is degraded, a
+  Control Plane activation or HA promotion no longer fails at its address
+  publish (full config publishes are still refused). A Control Plane listener
+  that ends terminally is reported down, and stops renewing the fencing lease,
+  before its address is withdrawn rather than after.
+
 - A damaged data volume could kill the gateway outright from the proxy request
   path, with no log line and no containment available (CHAOS-74, §41 of the
   chaos register). badger v4 reads every `.sst` table through a memory mapping
@@ -1116,6 +1260,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
 ### Changed
+
+- A panic in either of the release-dispatch plane's detached worker goroutines
+  no longer takes the appliance down, and no longer reports an upgrade that
+  never started as a success (CHAOS-75). `POST /api/releases/dispatch` and
+  `.../dispatch/resume` hand the upgrade to a goroutine that outlives its
+  request — correctly, since the 202 ships before the watch finishes — and
+  neither goroutine had a panic tap, so a fault anywhere under
+  `DispatchService` killed the proxy data plane, the admin plane and `/healthz`
+  together from one authenticated admin POST.
+
+  Containment alone would have made it worse, which is the part that shaped the
+  fix. The worker's only `defer` was `close(done)`, and a defer fires *during*
+  unwinding — before the outcome assignment lands — so a panicking worker woke
+  the parked handler on a zero report/error pair and `respondPreApply` fell
+  through to its `default` arm: **`200 {"status":"ok"}`** for an upgrade that
+  never started. That false success shipped in 6 of 30 runs against the
+  pre-fix tree before the process died; with the panic merely contained it
+  shipped in 10 of 10, because the process now survives to deliver it.
+
+  Both workers now run under `runGuarded` (the existing background-worker
+  primitive, so the panic lands on `culvert_crash_records_total{component}`
+  under the new `release_dispatch` / `release_resume` labels, plus a
+  `system`-actor `panic_recovered` audit entry), and the panic is converted
+  into an explicit outcome rather than a silent one: **HTTP 500
+  `{"status":"internal_error"}`** when no op had started, or a
+  `FAILED_NEEDS_ATTN` status record over the live `op_id` — telling the
+  operator to *resume*, not re-dispatch — when the agent had already accepted
+  the apply. A no-outcome pair is now rejected ahead of `respondPreApply`'s
+  switch independently of that, so a future detached writer cannot reproduce
+  the 200. No route, request body, or successful-response shape changes.
+
+  Left open with the reasoning recorded in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §43: `DispatchResumeContext` is
+  documented as a persistable restart-recovery record but lives only in an
+  in-memory map, so a restart mid-upgrade still loses the `op_id` and recovery
+  degrades to hand-assembling a `resume_context` from the audit trail.
 
 - `GET /api/diagnostics` now carries a `saas_feed` row when the signed SaaS feed
   is stale, failing to refresh, waiting for authority, or critical. Previously

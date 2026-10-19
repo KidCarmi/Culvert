@@ -255,6 +255,9 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		s.auditDispatch(actor, ep, target, rep)
 		return rep, plan.Reason
 	}
+	if opts.OnIdempotencyKey != nil && plan.Outcome == OutcomePlan {
+		opts.OnIdempotencyKey(plan.Apply.IdempotencyKey)
+	}
 
 	// The release.dispatch audit is written from the onApplied hook — as soon as
 	// the agent returns an op_id and BEFORE the blocking watch — so a CP crash
@@ -264,34 +267,72 @@ func (s *DispatchService) Dispatch(ctx context.Context, actor string, ep AgentEn
 		applied = true
 		early := reportFromPlan(plan)
 		early.OpID = opID
-		// auditAdd is in-memory + best-effort file persistence, so this does not
+		rc := resumeContextFor(ep.Key, plan, opID)
+		// Order is load-bearing (CHAOS-75 review, two findings that pull in
+		// opposite directions):
+		//   1. The audit is ATTEMPTED FIRST, so on the normal path the
+		//      release.dispatch record (op_id + key) has been handed to the audit
+		//      sink before any observer can release the API's 202. That is an
+		//      ORDERING guarantee, not a durability one: the sink is in-memory
+		//      plus best-effort file persistence and reports no write error, so
+		//      the record survives a CP restart only when the audit log file is
+		//      configured and the write succeeded.
+		//   2. The observers ALWAYS run, even when the audit write panics, so a
+		//      fault in the audit sink cannot leave a live agent op with no status
+		//      record and a reply that claims no op started. The audit panic is
+		//      then re-raised, so the caller's containment still records it.
+		// auditAdd is in-memory + best-effort file persistence, so it does not
 		// fail today; the error return honors the executor's durable-record
 		// contract for a future persistent recorder.
-		s.auditDispatch(actor, ep, target, early)
-		rc := resumeContextFor(ep.Key, plan, opID)
+		auditPanic := s.auditDispatchContained(actor, ep, target, early)
 		for _, ob := range onApplied {
 			ob(opID, rc)
+		}
+		if auditPanic != nil {
+			panic(auditPanic)
 		}
 		return nil
 	})
 	rep := reportFromResult(plan, res)
+	// Everything below runs AFTER the executor produced its result, so it is
+	// contained: a fault in an audit or alert sink must not discard a result
+	// that already exists. Uncontained, the caller saw a panic with applied
+	// set and recorded a watch that had in fact completed as an abandoned live
+	// op (FAILED_NEEDS_ATTN + "resume it") — a false failure (CHAOS-75 review).
+	// The fault is still counted on the crash plane.
 	if errors.Is(eerr, errDispatchInFlight) {
 		// Concurrent dispatch on the same agent — rejected before any apply.
-		s.auditDispatch(actor, ep, target, rep)
+		s.contained(crashComponentReleaseDispatch, func() { s.auditDispatch(actor, ep, target, rep) })
 		return rep, eerr
 	}
 	if !applied {
 		// already_current / stale: no apply happened, so the onApplied hook did
 		// not fire — record the dispatch decision here.
-		s.auditDispatch(actor, ep, target, rep)
+		s.contained(crashComponentReleaseDispatch, func() { s.auditDispatch(actor, ep, target, rep) })
 	}
-	s.auditOutcome(actor, ep, target, rep)
+	s.contained(crashComponentReleaseDispatch, func() { s.auditOutcome(actor, ep, target, rep) })
 	// Stale already-current is a re-plan signal, not an incident — audit it but
 	// do NOT page. Genuine FAILED_NEEDS_ATTN terminals still alert.
 	if !errors.Is(eerr, errStaleAlreadyCurrent) {
-		s.maybeAlert(actor, ep, rep)
+		s.contained(crashComponentReleaseDispatch, func() { s.maybeAlert(actor, ep, rep) })
 	}
 	return rep, eerr
+}
+
+// contained runs one post-result audit or alert callback under the crash
+// guard, so a sink fault is counted without discarding the result the caller
+// is about to return.
+func (s *DispatchService) contained(component string, fn func()) {
+	_ = runGuarded(component, fn)
+}
+
+// auditDispatchContained writes the release.dispatch audit and returns the
+// value of a panic raised while writing it (nil when none), so the caller can
+// record the applied op before re-raising it. See Dispatch's onApplied hook.
+func (s *DispatchService) auditDispatchContained(actor string, ep AgentEndpoint, target DispatchTarget, rep *DispatchReport) (recovered any) {
+	defer func() { recovered = recover() }()
+	s.auditDispatch(actor, ep, target, rep)
+	return nil
 }
 
 // resumeContextFor builds the persistable resume record at apply time.
@@ -324,12 +365,14 @@ func (s *DispatchService) Resume(ctx context.Context, actor string, ep AgentEndp
 	res, eerr := reg.exec.Resume(ctx, rc)
 	rep := reportFromResume(rc, res)
 	target := DispatchTarget{ReleaseID: rc.ReleaseID}
+	// Contained for the same reason as Dispatch's post-result callbacks: the
+	// resume worker writes the terminal only after this returns.
 	if errors.Is(eerr, errDispatchInFlight) {
-		s.auditDispatch(actor, ep, target, rep)
+		s.contained(crashComponentReleaseResume, func() { s.auditDispatch(actor, ep, target, rep) })
 		return rep, eerr
 	}
-	s.auditOutcome(actor, ep, target, rep)
-	s.maybeAlert(actor, ep, rep)
+	s.contained(crashComponentReleaseResume, func() { s.auditOutcome(actor, ep, target, rep) })
+	s.contained(crashComponentReleaseResume, func() { s.maybeAlert(actor, ep, rep) })
 	return rep, eerr
 }
 
