@@ -8912,6 +8912,42 @@ required before merge; each is now in the tree.
   Three mutations each fail (a) and the wall: restoring `Update`'s
   owned-only substitution (which also fails (b)), restoring the HA-state
   derivation in `CurrentConfigSnapshot`, and both together.
+* **One teardown owner per gRPC server (Codex P2 4313548177).** `Serve`
+  failed on its own while a Data Plane RPC was wedged in its handler, and
+  shutdown closed `stopping` just after the loop's check. The loop then called
+  the synchronous retirement `srv.Stop()` while `cpListenerSupervisor.Stop`
+  was in `GracefulStop()` on the same server. grpc-go v1.83.2's shared
+  `stop()` holds the server mutex across `handlersWG.Wait()`, so once the last
+  transport went the graceful stop parked holding it, the retirement blocked
+  on it, `done` never closed, and the shutdown hook ran to its deadline.
+
+  The class rule: exactly one owner stops a given `*grpc.Server`, decided
+  atomically under the supervisor mutex. The published handle `s.srv` is the
+  claim:
+  - `Stop` takes it in the same critical section that sets `stopped`, and a
+    server already claimed by the loop leaves `Stop` only waiting on `done`;
+  - the loop's `claimTeardown` takes it before any stop; a server `Stop`
+    already took is left to `Stop`'s drain. A server `adopt` never published
+    is the loop's alone;
+  - a loop that claims after shutdown began drains with the same
+    `cpGRPCGracefulStopBudget`, so the bound derivation is unchanged.
+
+  `teardownCPGRPCServer` is the one helper that stops a supervised server.
+
+  Gates:
+  - `TestChaos71_RetirementAndShutdownNeverStopTheSameServer` drives the
+    interleaving through the real supervisor and `stopControlPlaneListener`:
+    wedged handler, forced Accept failure, shutdown injected in the
+    retirement seam, transport closed. Shutdown must finish within the early
+    shutdown budget and `done` must close. With the claim removed it fails
+    3/3 under `-race` on the context deadline.
+  - `TestChaos71_TeardownClaimHasExactlyOneOwner` checks both claim orders
+    and the unpublished case.
+  - `TestChaos71_Wall_SupervisedGRPCServersHaveOneTeardownOwner` (AST): only
+    the helper, the bounded mechanism and the never-published Listen-failure
+    cleanup reference `Stop`/`GracefulStop` on a `*grpc.Server`. The call
+    graph into the helper is exact, and both claim holders claim first. A
+    negative control and a reintroduced direct `a.srv.Stop()` both fail it.
 * **An uninstalled fencing grant is cleared (Codex P1 4306890528).** A
   guarded boot resume acquired epoch E. Its post-acquisition revalidation
   then found `ha_config.json` removed or disabled, and the return left
