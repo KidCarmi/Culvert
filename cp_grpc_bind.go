@@ -26,7 +26,7 @@ package main
 //
 //	§33  the MANAGEMENT plane killed the DATA plane.
 //	§36  a SECONDARY, opt-in data plane killed the PRIMARY data plane.
-//	§41  the CLUSTER plane — whose job is serving config to OTHER nodes —
+//	§44  the CLUSTER plane — whose job is serving config to OTHER nodes —
 //	     kills this node's own data plane, management plane and health
 //	     endpoints, before any of them exist.
 //
