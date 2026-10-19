@@ -150,8 +150,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   rather than dropping the account, and the session resolver splits the compat
   branch so `""` still means admin for pre-RBAC deployments while every other
   unenrolled value is refused with a 401 and a cleared cookie. The clamp is
-  surfaced as `culvert_ui_roster_role_clamped_total` and as
-  `uiRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero.
+  surfaced as `culvert_admin_roster_role_clamped_total` and as
+  `adminRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero. The
+  earlier names `culvert_ui_roster_role_clamped_total` and
+  `uiRosterRoleClamped` (T-64) are still emitted with the same value as
+  deprecated aliases for one release window.
 - An unauthenticated client could park a gateway core for minutes with one
   request by choosing a very long destination host (CHAOS-69, register rows
   PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
