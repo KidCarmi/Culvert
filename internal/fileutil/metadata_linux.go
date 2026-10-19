@@ -12,15 +12,18 @@ import (
 )
 
 // RewriteInPlace's metadata preservation as ONE ordered, verified step (Codex
-// P2s 4316064806, 4316401892, 4316645541 and 4316645546 on PR #1601). The
-// list of what is and is not preserved is the contract in rewrite.go; this
-// file is its only implementation.
+// P2s 4316064806, 4316401892, 4316645541, 4316645546 and 4317024211 on PR
+// #1601). The list of what is and is not preserved is the contract in
+// rewrite.go; this file (with xattr_linux.go and inodeattr_linux.go) is its
+// only implementation.
 
 // fileMeta is the metadata RewriteInPlace preserves exactly.
 type fileMeta struct {
 	uid, gid uint32
-	mode     uint32 // all 12 mode bits: rwx for user, group and other, plus setuid, setgid and sticky
-	flags    uint32 // inode (chattr) flags, state-carrying bits only (see inodeFlagsImplementation)
+	mode     uint32  // all 12 mode bits: rwx for user, group and other, plus setuid, setgid and sticky
+	flags    uint32  // inode (chattr) flags, state-carrying bits only (see inodeFlagsImplementation)
+	fsx      fsxMeta // FS_IOC_FSGETXATTR: xflags (see fsXflagsIgnored), extent-size hints, project ID
+	statx    uint64  // statx stx_attributes, masked by stx_attributes_mask
 	xattrs   xattrSet
 }
 
@@ -82,9 +85,9 @@ func readInodeFlags(fd int) (uint32, error) {
 	return fl &^ inodeFlagsImplementation, nil
 }
 
-// readMeta reads f's fileMeta. Inode flags are read only from a regular file:
-// the descriptor may name whatever was at the target, and an ioctl on a
-// device node would reach its driver.
+// readMeta reads f's fileMeta. The ioctls (inode flags, fsxattr) are issued
+// only on a regular file: the descriptor may name whatever was at the
+// target, and an ioctl on a device node would reach its driver.
 func readMeta(f *os.File) (fileMeta, error) {
 	fi, err := f.Stat()
 	if err != nil {
@@ -100,6 +103,12 @@ func readMeta(f *os.File) (fileMeta, error) {
 		if m.flags, err = readInodeFlags(fd); err != nil {
 			return fileMeta{}, err
 		}
+		if m.fsx, err = readFsxMeta(fd); err != nil {
+			return fileMeta{}, err
+		}
+	}
+	if m.statx, err = readStatxAttributes(fd); err != nil {
+		return fileMeta{}, err
 	}
 	if m.xattrs, err = readXattrs(fd); err != nil {
 		return fileMeta{}, err
@@ -116,6 +125,10 @@ func (m fileMeta) differs(o fileMeta) string {
 		return "mode (permission, setuid, setgid or sticky bits)"
 	case m.flags != o.flags:
 		return "inode flags (chattr)"
+	case m.fsx != o.fsx:
+		return "project ID, extent-size hints or XFS flags (FS_IOC_FSGETXATTR)"
+	case m.statx != o.statx:
+		return "statx attributes"
 	case !m.xattrs.equal(o.xattrs):
 		return "extended attributes (or ACL)"
 	}
@@ -144,8 +157,14 @@ func targetMeta(op, path string, orig os.FileInfo) (fileMeta, error) {
 	if err != nil {
 		return fileMeta{}, fmt.Errorf("%s %s: read metadata: %w: %w", op, path, err, ErrMetadataNotPreservable)
 	}
-	if m.flags&(fsImmutableFL|fsAppendFL) != 0 {
+	if m.flags&(fsImmutableFL|fsAppendFL) != 0 || m.statx&(unix.STATX_ATTR_IMMUTABLE|unix.STATX_ATTR_APPEND) != 0 {
 		return fileMeta{}, fmt.Errorf("%s %s: %w: %w", op, path, errTargetImmutable, unix.EPERM)
+	}
+	if m.statx&(unix.STATX_ATTR_VERITY|unix.STATX_ATTR_DAX) != 0 {
+		// A new file cannot be given fs-verity protection or DAX here, so
+		// the roster is never replaced by one without it.
+		return fileMeta{}, fmt.Errorf("%s %s: the target is fs-verity protected or DAX: %w", op, path,
+			ErrMetadataNotPreservable)
 	}
 	return m, nil
 }

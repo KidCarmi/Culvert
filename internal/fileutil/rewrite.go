@@ -10,40 +10,59 @@ import "errors"
 // reproduces.
 //
 // It must never change the file's metadata just because the process started
-// (Codex P2s 4316064806, 4316401892, 4316645541 and 4316645546 on PR #1601).
-// This is the complete list; metadata_linux.go is its one implementation.
+// (Codex P2s 4316064806, 4316401892, 4316645541, 4316645546 and 4317024211
+// on PR #1601). It covers every interface through which Linux exposes
+// per-inode metadata to user space — stat, statx, FS_IOC_GETFLAGS,
+// FS_IOC_FSGETXATTR and the extended attributes — so this is the complete
+// list; metadata_linux.go (with xattr_linux.go and inodeattr_linux.go) is
+// its one implementation.
 //
 // PRESERVED EXACTLY, or nothing is exchanged:
-//   - the content, byte for byte (never re-serialised);
-//   - owner and group (uid, gid);
-//   - all 12 mode bits: rwx for user, group and other, plus setuid, setgid
-//     and sticky;
-//   - every extended attribute this process can list, names and values: the
-//     POSIX access ACL (system.posix_acl_access), the SELinux or other LSM
-//     label (security.*), file capabilities (security.capability), user.*,
-//     and trusted.* when the process has CAP_SYS_ADMIN;
-//   - inode (chattr) flags such as nodump, noatime, sync, compress, nocow:
-//     these are compared, never set, so a roster that has one a fresh file
-//     lacks (or a temp file that inherits one from its directory) is not
-//     rewritten. Only the filesystem's own storage flags (extents, inline
-//     data, huge file, compression internals, directory index) and the
-//     encryption flag (inherited from the directory; the kernel refuses to
-//     exchange across policies) are ignored.
+//   - stat: the content, byte for byte (never re-serialised); owner and
+//     group (uid, gid); all 12 mode bits — rwx for user, group and other,
+//     plus setuid, setgid and sticky;
+//   - extended attributes: every one this process can list, names and
+//     values — the POSIX access ACL (system.posix_acl_access), the SELinux
+//     or other LSM label (security.*), file capabilities
+//     (security.capability), user.*, and trusted.* when the process has
+//     CAP_SYS_ADMIN;
+//   - FS_IOC_GETFLAGS inode (chattr) flags such as nodump, noatime, sync,
+//     compress, nocow, verity, dax — compared, never set. Ignored: only the
+//     filesystem's own storage flags (extents, inline data, huge file,
+//     compression internals, directory index, EA inode) and encryption
+//     (inherited from the directory; the kernel refuses to exchange across
+//     policies);
+//   - FS_IOC_FSGETXATTR struct fsxattr: the project quota ID, the extent-size
+//     and CoW extent-size hints, and the xflags — compared, never set.
+//     Ignored: the xflags that mirror a compared FS_IOC_GETFLAGS bit
+//     (immutable, append, sync, noatime, nodump, project inherit, dax), the
+//     filesystem-internal prealloc and hasattr, and fsx_nextents (allocation,
+//     not metadata);
+//   - statx: stx_attributes masked by stx_attributes_mask (compressed,
+//     immutable, append, nodump, encrypted, automount, mount root, verity,
+//     dax, atomic write) — compared, never set.
+//
+// A filesystem where an ioctl is unsupported (ENOTTY, ENOTSUP), or a kernel
+// without statx (ENOSYS), keeps no such metadata; any other failure to read
+// any item refuses. Because flags, fsxattr and statx attributes are compared
+// rather than set, a roster carrying one a fresh file lacks — or a temp file
+// that inherits one from its directory — is not rewritten. An fs-verity or
+// DAX roster is refused outright.
 //
 // The temp file gets them in the only working order — fchown (it clears
 // setuid, setgid and security.capability), then fchmod with the full mode,
 // then the extended attributes with the access ACL last (it rewrites the
 // group bits from its mask), then removal of any attribute the temp
 // inherited that the target lacks (a directory's default ACL) — and is then
-// read back: owner, group, full mode, inode flags and attributes must equal
-// the target's exactly, which also catches a chown with no effect and a
-// special bit the kernel dropped silently (an unprivileged setgid on a file
-// whose group the process is not in). The temp is then fsynced, always,
-// before the exchange. If any step fails, the temp is removed, the target is
-// untouched and ErrMetadataNotPreservable is returned, wrapping the cause.
-// An immutable or append-only target (chattr +i/+a) is not exchanged either;
-// rename(2) would refuse every save over it, so that is returned as a plain
-// EPERM write refusal.
+// read back: every item above must equal the target's exactly, which also
+// catches a chown with no effect and a special bit the kernel dropped
+// silently (an unprivileged setgid on a file whose group the process is not
+// in). The temp is then fsynced, always, before the exchange. If any step
+// fails, the temp is removed, the target is untouched and
+// ErrMetadataNotPreservable is returned, wrapping the cause. An immutable or
+// append-only target (chattr +i/+a, or statx reporting it) is not exchanged
+// either; rename(2) would refuse every save over it, so that is returned as
+// a plain EPERM write refusal.
 //
 // NOT PRESERVED: the inode number and its timestamps (atime, mtime, ctime and
 // birth time are the replacement's own), other hard links to the old inode

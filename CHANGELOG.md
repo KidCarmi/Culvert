@@ -1507,11 +1507,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   all 12 mode bits (setuid, setgid and sticky included); every extended
   attribute it can list — the POSIX ACL (`system.posix_acl_access`), the
   SELinux label (`security.selinux`), file capabilities, `user.*`, and
-  `trusted.*` when it has `CAP_SYS_ADMIN`; and inode (`chattr`) flags, which
-  are compared, never set. The temp file is given them in order (`chown`,
-  then `chmod` with the full mode, then the attributes with the ACL last,
-  then removal of anything it inherited from the directory), read back
-  exactly, and fsynced before the exchange; the displaced file is compared on
+  `trusted.*` when it has `CAP_SYS_ADMIN`; and inode (`chattr`) flags, the
+  `FS_IOC_FSGETXATTR` project quota ID, extent-size hints and XFS flags, and
+  the `statx` attributes, which are compared, never set — together every
+  interface through which Linux exposes per-inode metadata to user space.
+  The temp file is given them in order (`chown`, then `chmod` with the full
+  mode, then the attributes with the ACL last, then removal of anything it
+  inherited from the directory), read back exactly, and fsynced before the exchange; the displaced file is compared on
   the same list afterwards. Not preserved: the inode number, timestamps,
   other hard links, and `trusted.*` attributes when Culvert lacks
   `CAP_SYS_ADMIN` (Linux does not list them to it). If anything on the list
@@ -1527,7 +1529,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   one log line names the cause) and is not an admin mutation: no audit entry,
   configuration version, roster counter, storage-health event or alert. A
   symlinked roster path is left alone and reported. A configured roster file
-  that does not exist yet reads `warn` until the first roster save creates it.
+  that does not exist yet reads `warn` until the first roster save creates it,
+  and so does a roster file removed from disk after it was last written (its
+  accounts are then only in memory and are lost on restart; the next admin
+  save recreates it).
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

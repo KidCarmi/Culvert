@@ -909,6 +909,15 @@ const rosterTargetRewriteUnsupported = "the configured roster file was not rewri
 	"platform or filesystem cannot replace it without risking a concurrent change, so it is not proven that " +
 	"admin account changes can be saved"
 
+// rosterTargetDisappeared is the targetProblem when a write to the configured
+// roster file landed earlier (the boot rewrite or a save) but the file no
+// longer exists (Codex P2 4317024199 on PR #1601): it was deleted or moved
+// away externally. The recorded write evidence is stale; the roster in use is
+// now only in memory, so accounts that exist only in it are lost on restart.
+const rosterTargetDisappeared = "the configured roster file no longer exists: it was removed from disk after it " +
+	"was last written, so the roster in use is held only in memory and accounts that exist only in it are LOST " +
+	"on restart"
+
 // rosterTargetMetadataNotPreservable is the targetProblem when the boot
 // rewrite was not exchanged in because the roster's owner, group, mode bits,
 // inode flags or extended attributes (a POSIX ACL, an SELinux label, a user.*
@@ -985,6 +994,10 @@ func rosterWriteProblem(missing, tried bool, writeErr error) string {
 	switch {
 	case !tried && missing:
 		return rosterTargetFirstWritePending
+	case missing && writeErr == nil:
+		// A write landed, but the file is gone now: the absence is the
+		// current fact and overrides that stale evidence.
+		return rosterTargetDisappeared
 	case !tried:
 		return "the configured roster file has not been written since it was configured"
 	case errors.Is(writeErr, errRosterIsSymlink):
@@ -1070,6 +1083,11 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 		row.OperatorAction = "The first admin account change that is saved proves the file and clears this " +
 			"warning. If that change is refused, fix the admin users file (-ui-users-file) path or its permissions " +
 			"so it names a writable regular file on a persistent volume, restart, and re-apply the change."
+	case rosterTargetDisappeared:
+		row.OperatorAction = "Before the next restart, either save an admin account change (any change from " +
+			"Administrators writes the roster in use back and recreates the file) or restore the admin users file " +
+			"(-ui-users-file) from backup and restart to load it. Find out what removed it: a configuration " +
+			"manager or cleanup job that deletes it will do so again."
 	case rosterTargetMetadataNotPreservable:
 		row.OperatorAction = "Nothing was replaced, so the file's owner, mode, flags, ACL and labels are as they " +
 			"were; the process log line names the cause. If the roster belongs to another account than the one Culvert runs " +

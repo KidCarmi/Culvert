@@ -182,7 +182,11 @@ administrative decision was affected, and therefore what the operator must redo.
    regular file (a directory, or a missing parent directory), when the boot
    rewrite described below was refused, when no write to the file has landed
    since startup (a configured file that does not exist yet: the first admin
-   account change creates it and clears the warning), or when
+   account change creates it and clears the warning), when the file was
+   **removed from disk after it was last written** (the roster in use is then
+   only in memory and accounts that exist only in it are lost on restart:
+   save an admin account change, which recreates the file, or restore it from
+   backup, before the next restart), or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. The counts, the remedy and the degraded login-write
@@ -221,8 +225,11 @@ administrative decision was affected, and therefore what the operator must redo.
    exchange and writes through that descriptor afterwards can still lose its
    write, exactly as it can against any save.
 
-   **The rewrite never changes the file's metadata.** This is the complete
-   list (the same as `fileutil.RewriteInPlace`'s contract).
+   **The rewrite never changes the file's metadata.** It covers every
+   interface through which Linux exposes per-inode metadata to user space —
+   `stat`, `statx`, `FS_IOC_GETFLAGS` (`chattr`), `FS_IOC_FSGETXATTR`
+   (`xfs_io`/`chattr -p`) and the extended attributes — so this is the
+   complete list (the same as `fileutil.RewriteInPlace`'s contract).
 
    | Preserved exactly — or the roster is not rewritten | Not preserved |
    |---|---|
@@ -231,6 +238,8 @@ administrative decision was affected, and therefore what the operator must redo.
    | All 12 mode bits, including setuid, setgid and sticky | Other hard links to the roster (they keep the old inode, with identical content) |
    | Every extended attribute Culvert can list: the POSIX access ACL (`system.posix_acl_access`), the SELinux or other LSM label (`security.*`), file capabilities, `user.*`, and `trusted.*` when Culvert has `CAP_SYS_ADMIN` | `trusted.*` attributes when Culvert lacks `CAP_SYS_ADMIN`: Linux does not list them to it, so it can neither see nor keep them |
    | Inode (`chattr`) flags such as nodump (`d`), noatime (`A`), sync (`S`), compress (`c`), nocow (`C`): compared, never set | |
+   | The project quota ID (`chattr -p`, XFS/ext4 project quotas), extent-size and CoW extent-size hints, and XFS flags (`FS_IOC_FSGETXATTR`): compared, never set | |
+   | `statx` attributes (compressed, immutable, append, nodump, encrypted, mount root, verity, DAX, atomic write, …): compared, never set | |
 
    The temp file gets them in the only order that works: `chown` (which
    clears setuid, setgid and file capabilities), then `chmod` with the full
@@ -243,8 +252,12 @@ administrative decision was affected, and therefore what the operator must redo.
    setgid on a file whose group it is not in) and a temp file that inherited
    an inode flag such as nodump from the directory. Only the filesystem's own
    storage flags (extents, inline data, huge file, compression internals,
-   directory index) and the encryption flag (inherited from the directory)
-   are ignored. After the exchange, the displaced file is compared on the
+   directory index), the encryption flag (inherited from the directory), the
+   XFS flags that merely mirror a compared `chattr` flag or are internal
+   (prealloc, has-attribute fork) and the extent count are ignored. Where an
+   interface is unsupported (`ENOTTY`/`ENOTSUP`, or no `statx` at all) the
+   filesystem keeps no such metadata; any other failure to read it refuses.
+   An fs-verity or DAX roster is refused outright. After the exchange, the displaced file is compared on the
    same list, so a `chown`, `chmod`, `chattr`, ACL or label changed
    concurrently is swapped straight back like any other change.
 

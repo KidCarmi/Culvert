@@ -251,6 +251,10 @@ func TestCheckAdminRosterDurability_UnusableRosterTarget(t *testing.T) {
 		{"missing-file-then-saved", setupRosterFirstRunThenSaved, false},
 		{"symlink", setupRosterSymlink, true},
 		{"healthy-file", setupRosterHealthyFile, false},
+		// Codex P2 4317024199 on #1601: a write landed, then the file was
+		// removed externally. The stale evidence must not read "persisting".
+		{"healthy-file-then-deleted", thenRosterDeleted(setupRosterHealthyFile), true},
+		{"missing-file-saved-then-deleted", thenRosterDeleted(setupRosterFirstRunThenSaved), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -399,6 +403,49 @@ func setupRosterHealthyFile(t *testing.T, c *Config) {
 	}
 	if err := c.LoadUIUsersFile(); err != nil {
 		t.Fatalf("LoadUIUsersFile: %v", err)
+	}
+}
+
+// thenRosterDeleted runs setup (which must leave a landed write) and then
+// removes the roster file, as an external cleanup job would.
+func thenRosterDeleted(setup func(t *testing.T, c *Config)) func(t *testing.T, c *Config) {
+	return func(t *testing.T, c *Config) {
+		setup(t, c)
+		if tried, werr := c.rosterWriteEvidence(); !tried || werr != nil {
+			t.Fatalf("precondition: evidence = (%v, %v), want a landed write", tried, werr)
+		}
+		path, _ := c.rosterPersistTarget()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestRosterDurability_DeletedAfterWriteWarnsUntilRecreated: the deleted
+// roster gets its own message and remedy, and the next save, which recreates
+// the file, clears it. Dropping the missing-file override fails this test.
+func TestRosterDurability_DeletedAfterWriteWarnsUntilRecreated(t *testing.T) {
+	c := configuredRosterCfg(t, false)
+	swapCfgForRosterDurability(t, c)
+	thenRosterDeleted(setupRosterHealthyFile)(t, c)
+
+	row := checkAdminRosterDurability()
+	if row.Status != diagWarn || row.Message != rosterTargetDisappeared {
+		t.Fatalf("row = %+v, want warn %q", row, rosterTargetDisappeared)
+	}
+	if !strings.Contains(row.OperatorAction, "recreates the file") ||
+		!strings.Contains(row.OperatorAction, "Before the next restart") {
+		t.Errorf("action = %q, want the save-or-restore-before-restart remedy", row.OperatorAction)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+	path, _ := c.rosterPersistTarget()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the save did not recreate the roster: %v", err)
+	}
+	if row := checkAdminRosterDurability(); row.Status != diagOK {
+		t.Errorf("after the save recreated the file: row = %+v, want ok", row)
 	}
 }
 
