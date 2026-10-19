@@ -15,7 +15,10 @@ package main
 // probeRoster* helpers it calls (pinned by
 // TestWall_RosterRowFilesystemAccessIsOnlyInTheProbe):
 //
-//   - the target's stat (regular file, or absent under an existing directory);
+//   - the target's stat (regular file, or absent under an existing directory),
+//     and whether rename(2) would refuse to replace it at all — immutable,
+//     append-only, a mount point (fileutil.ReplacementBlocked, the very
+//     predicate the boot rewrite applies; Linux only);
 //   - the parent directory's write capability, live and without side effects
 //     (probeRosterParent: faccessat(W_OK|X_OK, AT_EACCESS) for mode bits,
 //     ACLs and the effective uid, and statfs for a read-only mount; no probe
@@ -35,18 +38,22 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // rosterProbeResult is everything the row learns from the filesystem.
 type rosterProbeResult struct {
 	statProblem   string            // the target or its directory is unusable ("" when usable)
 	missing       bool              // the target is absent under an existing directory
+	blocked       bool              // rename(2) would refuse to replace the target itself
 	parentProblem string            // rosterParentNotWritable, or ""
 	disk          rosterDiskVerdict // the identity read's verdict
 	diskErr       error             // the identity read failed
@@ -63,8 +70,12 @@ var (
 // Filesystem seams, only for tests: they block or fail these calls to stand
 // in for a stalled volume, a revoked ACL or a read-only remount.
 var (
-	rosterProbeStat    = os.Stat
-	rosterIdentityOpen = func(path string) (*os.File, error) {
+	rosterProbeStat = os.Stat
+	// rosterReplacementBlocked is fileutil's one predicate for a target no
+	// save can replace (immutable, append-only, a mount point), the same the
+	// boot rewrite applies (pinned by TestRosterProbe_UsesTheRewritePredicate).
+	rosterReplacementBlocked = fileutil.ReplacementBlocked
+	rosterIdentityOpen       = func(path string) (*os.File, error) {
 		// O_NONBLOCK: the path is not trusted to still be a regular file.
 		return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- operator-configured -ui-users-file path
 	}
@@ -173,6 +184,14 @@ func probeRosterTarget(path string, d rosterWrittenDigest) rosterProbeResult {
 		return res
 	}
 	res.missing = err != nil
+	if !res.missing {
+		if berr := rosterReplacementBlocked(path); errors.Is(berr, fileutil.ErrReplacementBlocked) {
+			res.blocked = true
+		} else if berr != nil {
+			res.statProblem = "the configured roster path cannot be inspected"
+			return res
+		}
+	}
 	res.parentProblem = probeRosterParent(dir)
 	if !res.missing {
 		res.disk, res.diskErr = probeRosterIdentity(path, d, di)

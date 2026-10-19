@@ -127,3 +127,35 @@ func TestRosterIdentity_HarmlessChangesStayOK(t *testing.T) {
 		})
 	}
 }
+
+// TestRosterIdentity_RecordsTheLandedFilesOwner (Codex P2 4319694771 on PR
+// #1601): an external writer replaces the roster with an identical copy owned
+// by another account between the save's rename and its return. The recorded
+// owner must be the file Culvert landed (root), not the replacement, so the
+// probe sees the change. Recording a stat of the path after the write fails
+// this test.
+func TestRosterIdentity_RecordsTheLandedFilesOwner(t *testing.T) {
+	needRoot(t)
+	c, path := savedRosterCfg(t)
+	if err := os.Chmod(filepath.Dir(path), os.ModeSticky|0o777); err != nil { // #nosec G302 -- a sticky shared directory under test
+		t.Fatal(err)
+	}
+	asUnprivileged(t)
+	prev := rosterAtomicWrite
+	rosterAtomicWrite = func(p string, data []byte, perm os.FileMode) (os.FileInfo, error) {
+		landed, err := prev(p, data, perm)
+		if err == nil {
+			installIdenticalCopy(t, p, otherAccount, otherAccount) // wins the race
+		}
+		return landed, err
+	}
+	t.Cleanup(func() { rosterAtomicWrite = prev })
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatal(err)
+	}
+
+	row := checkAdminRosterDurability()
+	if row.Status != diagWarn || row.Message != rosterTargetOwnerChanged {
+		t.Fatalf("row = %+v, want warn %q: the recorded owner must be the landed file's", row, rosterTargetOwnerChanged)
+	}
+}

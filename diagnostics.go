@@ -942,6 +942,15 @@ const rosterParentNotWritable = "the directory holding the configured roster fil
 	"process create and replace files in it (its permissions or ACL, or a read-only mount), so the next admin " +
 	"account change will be refused when it is saved"
 
+// rosterTargetImmutable is the targetProblem when rename(2) would refuse to
+// replace the roster file itself — immutable or append-only, a mount point,
+// or in an immutable or append-only directory (fileutil.ReplacementBlocked,
+// the predicate the boot rewrite also applies; Codex P2 4319694761 on PR
+// #1601) — so no save can land, whatever was written before.
+const rosterTargetImmutable = "the configured roster file cannot be replaced by any save: it is immutable or " +
+	"append-only (chattr +i/+a), a mount point, or in an immutable or append-only directory, so every admin " +
+	"account change will be refused when it is saved"
+
 // rosterTargetOwnerChanged is the targetProblem when the roster file still
 // holds exactly what Culvert last wrote, but now belongs to another account in
 // a way that makes the next save's rename be refused (Codex P2 4317730264 on
@@ -1001,6 +1010,8 @@ func rosterTargetProblem(path string, loadErr error, tried bool, writeErr error,
 		return rosterTargetNotResponding
 	case pr.statProblem != "":
 		return pr.statProblem
+	case pr.blocked:
+		return rosterTargetImmutable
 	case writeErr != nil:
 		// A recorded refusal names its own cause best.
 		return rosterWriteProblem(pr.missing, tried, writeErr)
@@ -1035,6 +1046,8 @@ func rosterWriteProblem(missing, tried bool, writeErr error) string {
 	case errors.Is(writeErr, errRosterIsSymlink):
 		return "the configured roster path is a symbolic link; it was not rewritten at startup because a " +
 			"save replaces the link with a regular file"
+	case errors.Is(writeErr, fileutil.ErrReplacementBlocked):
+		return rosterTargetImmutable
 	case errors.Is(writeErr, fileutil.ErrRewriteUnsupported):
 		return rosterTargetRewriteUnsupported
 	case errors.Is(writeErr, fileutil.ErrMetadataNotPreservable):
@@ -1125,6 +1138,10 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 			"Administrators and find what changed it. Then either save an admin account change, which writes the " +
 			"roster in use back over the file, or restart to adopt the file as it is now. Until then, a restart " +
 			"silently switches to the file's accounts and credentials."
+	case rosterTargetImmutable:
+		row.OperatorAction = "Clear the flag on the admin users file (-ui-users-file) or its directory (chattr -i, " +
+			"chattr -a; lsattr shows it), or point -ui-users-file at a file that is not a bind mount. The row " +
+			"re-checks live, so no restart is needed; re-apply any admin change refused meanwhile."
 	case rosterTargetNotResponding:
 		row.OperatorAction = "Check the volume holding the admin users file (-ui-users-file): a stalled NFS or FUSE " +
 			"mount, or a hung storage backend. Admin account changes and TOTP logins may hang or fail until it " +

@@ -103,25 +103,45 @@ func noteWriteFailure(path string, err error) error {
 // Every failure branch additionally notifies the write-failure observer
 // (CHAOS-45) so error-discarding callers cannot fail silently.
 func AtomicWrite(path string, data []byte, perm os.FileMode) error {
-	if err := atomicWrite(path, data, perm); err != nil {
-		return noteWriteFailure(path, err)
-	}
-	noteWriteSuccess(path)
-	return nil
+	_, err := AtomicWriteInfo(path, data, perm)
+	return err
 }
 
-// atomicWrite is AtomicWrite's body without the observer notifications.
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	const op = "atomic write"
-	tmp, err := writeTempBeside(op, path, data, perm, nil)
+// AtomicWriteInfo is AtomicWrite that also returns the FileInfo of the file
+// it landed: fstat on the temp file's OWN descriptor just before it is
+// renamed over path, so it describes exactly the inode the write put there
+// (rename(2) keeps an inode's owner, group and mode) even if an external
+// writer replaces path again before the caller could look at it — which a
+// stat of the path after the write cannot promise (Codex P2 4319694771 on PR
+// #1601). It is nil when nothing landed, and set alongside
+// ErrReplacedNotSynced (the rename landed; only the directory fsync failed).
+// Observers are notified exactly as for AtomicWrite.
+func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (os.FileInfo, error) {
+	info, err := atomicWrite(path, data, perm)
 	if err != nil {
-		return err
+		return info, noteWriteFailure(path, err)
+	}
+	noteWriteSuccess(path)
+	return info, nil
+}
+
+// atomicWrite is AtomicWriteInfo's body without the observer notifications.
+func atomicWrite(path string, data []byte, perm os.FileMode) (os.FileInfo, error) {
+	const op = "atomic write"
+	var landed os.FileInfo
+	tmp, err := writeTempBeside(op, path, data, perm, func(f *os.File) {
+		if fi, err := f.Stat(); err == nil {
+			landed = fi
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp) // #nosec G104 -- best-effort cleanup
-		return fmt.Errorf("%s %s: rename: %w", op, path, err)
+		return nil, fmt.Errorf("%s %s: rename: %w", op, path, err)
 	}
-	return syncParentDir(op, path)
+	return landed, syncParentDir(op, path)
 }
 
 // writeTempBeside creates a unique temp file in path's directory holding data

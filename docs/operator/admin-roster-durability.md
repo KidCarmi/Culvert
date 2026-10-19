@@ -208,7 +208,12 @@ administrative decision was affected, and therefore what the operator must redo.
    creating a file; on non-Unix platforms there is no such live check and a
    refused save is what reports it), when the **storage does not respond**
    to that check within 2 seconds (a stalled NFS or FUSE mount: persistence
-   is not verified, so the row is not `ok`), or when
+   is not verified, so the row is not `ok`), when the roster **cannot be
+   replaced by any save** — made immutable or append-only (`chattr +i`/`+a`;
+   `lsattr` shows it), bind-mounted as a file, or in an immutable or
+   append-only directory; checked live on Linux with the same predicate the
+   boot rewrite applies, and on other platforms reported only once a save is
+   refused (clear the flag with `chattr -i`/`-a`) — or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. Everything the row learns from the filesystem

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -66,11 +67,6 @@ var (
 	inodeFlags = func(fd int) (uint32, error) { return unix.IoctlGetUint32(fd, unix.FS_IOC_GETFLAGS) }
 	fsyncFile  = func(f *os.File) error { return f.Sync() }
 )
-
-// errTargetImmutable: the target is immutable or append-only (chattr +i/+a).
-// rename(2) refuses to replace such a file (EPERM), so no save can land: this
-// is write-refusal evidence, not unpreservable metadata.
-var errTargetImmutable = errors.New("the target is immutable or append-only (chattr +i/+a), so no save can replace it")
 
 // readInodeFlags returns fd's state-carrying inode flags. A filesystem without
 // inode flags (the ioctl is ENOTTY or ENOTSUP there) has none to lose.
@@ -138,8 +134,9 @@ func (m fileMeta) differs(o fileMeta) string {
 // targetMeta reads the metadata of the file at path through an O_NOFOLLOW
 // descriptor, after confirming it is still orig with orig's owner and mode. A
 // target that vanished, became a symlink, is another file or was chowned or
-// chmodded since it was loaded is a concurrent change; an immutable or
-// append-only target is a write refusal; any other failure means its metadata
+// chmodded since it was loaded is a concurrent change; a target rename(2)
+// would refuse to replace (replacementBlockedBy) is a write refusal; any
+// other failure means its metadata
 // cannot be preserved. Nothing is written in any case.
 func targetMeta(op, path string, orig os.FileInfo) (fileMeta, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- the caller's own path
@@ -157,8 +154,16 @@ func targetMeta(op, path string, orig os.FileInfo) (fileMeta, error) {
 	if err != nil {
 		return fileMeta{}, fmt.Errorf("%s %s: read metadata: %w: %w", op, path, err, ErrMetadataNotPreservable)
 	}
-	if m.flags&(fsImmutableFL|fsAppendFL) != 0 || m.statx&(unix.STATX_ATTR_IMMUTABLE|unix.STATX_ATTR_APPEND) != 0 {
-		return fileMeta{}, fmt.Errorf("%s %s: %w: %w", op, path, errTargetImmutable, unix.EPERM)
+	dirAttrs, err := readDirAttrs(filepath.Dir(path))
+	if err != nil {
+		return fileMeta{}, fmt.Errorf("%s %s: read its directory's attributes: %w: %w", op, path, err,
+			ErrMetadataNotPreservable)
+	}
+	if err := replacementBlockedBy(m.flags, m.statx, dirAttrs); err != nil {
+		// The same predicate ReplacementBlocked applies: no save could
+		// replace this target, which is write-refusal evidence, not
+		// unpreservable metadata.
+		return fileMeta{}, fmt.Errorf("%s %s: %w", op, path, err)
 	}
 	if m.statx&(unix.STATX_ATTR_VERITY|unix.STATX_ATTR_DAX) != 0 {
 		// A new file cannot be given fs-verity protection or DAX here, so

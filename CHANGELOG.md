@@ -1546,7 +1546,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   warns; no file is created) — run on its own goroutine, at most one at a
   time, reused for 5 s while Culvert has not written the roster, and waited
   on for at most 2 s, after which the row reports the storage as not
-  responding instead of blocking the request. Every
+  responding instead of blocking the request. The probe also re-checks, on
+  Linux, whether the roster can be replaced at all (immutable, append-only,
+  a mount point, or an immutable or append-only directory) with the same
+  predicate the boot rewrite applies (`fileutil.ReplacementBlocked`), and the
+  owner it compares against is taken from the landed file's own descriptor
+  (`fileutil.AtomicWriteInfo`), never a stat of the path after the write.
+  Every
   `fileutil.AtomicWrite` and the boot rewrite now also report
   `ErrReplacedNotSynced`, rather than success, when the parent directory
   cannot be opened for its `fsync` (for example a `0300` data directory); only

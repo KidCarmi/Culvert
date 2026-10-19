@@ -30,11 +30,11 @@ var rosterRowRoots = []string{"checkAdminRosterDurability", "readRosterDurabilit
 // rosterFSSeams are the package's filesystem seams for the probe: calling
 // one is filesystem access.
 var rosterFSSeams = map[string]bool{"rosterProbeStat": true, "rosterIdentityOpen": true,
-	"rosterParentAccess": true, "rosterParentReadOnly": true, "statfsReadOnly": true}
+	"rosterParentAccess": true, "rosterParentReadOnly": true, "statfsReadOnly": true, "rosterReplacementBlocked": true}
 
 // fsCallPackages are packages whose function calls touch the filesystem
 // (os's, other than the pure helpers below) or the kernel.
-var fsCallPackages = map[string]bool{"os": true, "unix": true, "syscall": true, "ioutil": true}
+var fsCallPackages = map[string]bool{"os": true, "unix": true, "syscall": true, "ioutil": true, "fileutil": true}
 
 // pureOSFuncs are os functions that do not touch the filesystem.
 var pureOSFuncs = map[string]bool{"IsNotExist": true, "IsExist": true, "IsPermission": true, "Geteuid": true,
@@ -204,9 +204,10 @@ func TestWall_RosterRowFilesystemAccessIsOnlyInTheProbe(t *testing.T) {
 		t.Fatalf("negative-control anchor missing from diagnostics.go")
 	}
 	for name, inject := range map[string]string{
-		"os.Stat in readRosterDurabilityFacts":     anchor + "\t_, _ = os.Stat(path)\n",
-		"a seam call in readRosterDurabilityFacts": anchor + "\t_, _ = rosterProbeStat(path)\n",
-		"os.Lstat in a reached helper":             anchor + "\t_ = fixtureRosterHelper(path)\n",
+		"os.Stat in readRosterDurabilityFacts":          anchor + "\t_, _ = os.Stat(path)\n",
+		"a seam call in readRosterDurabilityFacts":      anchor + "\t_, _ = rosterProbeStat(path)\n",
+		"os.Lstat in a reached helper":                  anchor + "\t_ = fixtureRosterHelper(path)\n",
+		"fileutil.ReplacementBlocked outside the probe": anchor + "\t_ = fileutil.ReplacementBlocked(path)\n",
 	} {
 		mutated := strings.Replace(string(src), anchor, inject, 1) +
 			"\nfunc fixtureRosterHelper(p string) error { _, err := os.Lstat(p); return err }\n"

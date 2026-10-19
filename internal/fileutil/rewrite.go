@@ -59,10 +59,13 @@ import "errors"
 // silently (an unprivileged setgid on a file whose group the process is not
 // in). The temp is then fsynced, always, before the exchange. If any step
 // fails, the temp is removed, the target is untouched and
-// ErrMetadataNotPreservable is returned, wrapping the cause. An immutable or
-// append-only target (chattr +i/+a, or statx reporting it) is not exchanged
-// either; rename(2) would refuse every save over it, so that is returned as
-// a plain EPERM write refusal.
+// ErrMetadataNotPreservable is returned, wrapping the cause. A target
+// rename(2) would refuse to replace — immutable or append-only (chattr
+// +i/+a, or statx reporting it), a mount point, or in an immutable or
+// append-only directory — is not exchanged either: every save over it would
+// be refused, so that is ErrReplacementBlocked wrapping EPERM (EBUSY for a
+// mount point). ReplacementBlocked applies the same predicate without
+// writing.
 //
 // NOT PRESERVED: the inode number and its timestamps (atime, mtime, ctime and
 // birth time are the replacement's own), other hard links to the old inode
@@ -112,6 +115,12 @@ var (
 	// the newer file to the target failed. The newer content is preserved at
 	// the temp path named in the error, which is left in place.
 	ErrExchangeBackFailed = errors.New("rewrite in place: a concurrent change was detected and could not be restored to the target")
+	// ErrReplacementBlocked means rename(2) would refuse to replace the target
+	// itself — it is immutable or append-only, a mount point, or in an
+	// immutable or append-only directory — so no save can land there.
+	// Returned by RewriteInPlace's precheck and by ReplacementBlocked, which
+	// share one predicate. Not detected outside Linux.
+	ErrReplacementBlocked = errors.New("the target cannot be replaced by any save")
 	// ErrMetadataNotPreservable means some preserved metadata of the target
 	// (owner, group, mode bits, inode flags, an extended attribute or ACL)
 	// could not be read, or could not be given exactly to the replacement, so

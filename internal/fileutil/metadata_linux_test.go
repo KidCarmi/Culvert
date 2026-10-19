@@ -259,7 +259,7 @@ func TestRewriteInPlace_ImmutableTargetIsAWriteRefusal(t *testing.T) {
 			exchanges := countExchanges(t)
 
 			err := RewriteInPlace(path, loaded, fi)
-			if !errors.Is(err, errTargetImmutable) || !errors.Is(err, syscall.EPERM) ||
+			if !errors.Is(err, ErrReplacementBlocked) || !errors.Is(err, syscall.EPERM) ||
 				errors.Is(err, ErrMetadataNotPreservable) || errors.Is(err, ErrConcurrentChange) {
 				t.Fatalf("err = %v, want a plain EPERM write refusal", err)
 			}

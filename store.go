@@ -1543,10 +1543,15 @@ func (c *Config) rosterWriteEvidence() (tried bool, err error) {
 // exact evidence that supersedes a failed or absent boot rewrite, and the
 // identity of what is now on disk (rosterWrittenDigest). A save that fails is
 // not recorded here; the refused/degraded counters report it.
-func (c *Config) noteRosterWriteLanded(path string, data []byte) {
+//
+// landed is the FileInfo of the file the write put at path, taken from its
+// own descriptor before the rename (fileutil.AtomicWriteInfo) — never a stat
+// of the path afterwards, which an external replacement could already have
+// won (Codex P2 4319694771 on PR #1601).
+func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileInfo) {
 	var owner fileOwnerID
-	if fi, err := os.Lstat(path); err == nil { // the save path already does disk I/O under saveUIUsersMu
-		owner = ownerOf(fi)
+	if landed != nil {
+		owner = ownerOf(landed)
 	}
 	c.mu.Lock()
 	if c.uiUsersFile == path {
@@ -1834,14 +1839,19 @@ func (c *Config) saveUIUsersLocked() error {
 	// rename: concurrent admin mutations save from separate handler
 	// goroutines, and a shared temp name lets two writers interleave into
 	// the same file before one renames the torn result over the roster.
-	err = fileutil.AtomicWrite(path, data, 0o600)
+	landed, err := rosterAtomicWrite(path, data, 0o600)
 	if err == nil || errors.Is(err, fileutil.ErrReplacedNotSynced) {
 		// Landed (ErrReplacedNotSynced: renamed into place, only the parent
 		// fsync failed) — exact evidence for admin_roster_durability.
-		c.noteRosterWriteLanded(path, data)
+		c.noteRosterWriteLanded(path, data, landed)
 	}
 	return err
 }
+
+// rosterAtomicWrite is the roster save's durable write. A seam only for
+// tests, which replace the target between the rename and the return to show
+// the recorded owner is the landed file's, not whatever is at the path then.
+var rosterAtomicWrite = fileutil.AtomicWriteInfo
 
 // rosterSnapshot is a deep copy of every piece of state SaveUIUsersFile
 // serialises. It exists so a mutation whose durable write fails can be undone
