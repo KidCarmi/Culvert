@@ -370,6 +370,105 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The CDR circuit breaker could strand itself in half-open for the whole
+  process lifetime, silently disabling content sanitization (CHAOS-72).
+  `Allow()` hands out a half-open probe reservation that only
+  `OnSuccess`/`OnFailure`/`Reset` release, and the half-open branch had no
+  timer of its own — the `ResetTimeout` re-check lives only under
+  `cbStateOpen`. A single caller that took a reservation and never recorded
+  an outcome therefore denied every later `Allow()`, verified to still deny a
+  simulated year later.
+
+  `runCDRStage` guaranteed exactly that unpaired `Allow()` on the first
+  inspected upload past `ResetTimeout`: its liveness gate ran
+  `cdrActiveClient()` → `Pick()` → `Allow()`, which issues no RPC and so can
+  never report an outcome, and `safeCDRSanitize`'s own `Pick()` was then
+  denied and took the skip-CDR branch. `Reset()` has no production caller and
+  `cdrClientPool.replace` deliberately carries breaker state across pool
+  rebuilds, so nothing cleared it short of a restart. Under the default
+  fail-OPEN `cdr.fail_mode` every document was then forwarded **unsanitized**,
+  indefinitely, signalled only by the `culvert_cdr_pool_breaker_state` gauge.
+
+  Two independent guarantees now hold. `HalfOpenProbeTimeout` re-arms a budget
+  whose reserved probe never reported an outcome, so the breaker self-heals
+  against any non-recording caller; it is the larger of 2×`ResetTimeout` and
+  the configured per-file deadline (`cdr.timeout_sec`, seeded from the config
+  being applied) plus a 30s grace, with a 90s floor, so it cannot preempt a
+  probe that is merely slow, and each re-arm is counted as `staleProbes` in the
+  breaker stats because a non-zero value means some caller is taking a
+  reservation it cannot release. And `Breaker.Available()` /
+  `cdrAnyInstanceAvailable()` give the hot path a non-consuming liveness gate,
+  leaving the probe for the call that can record the outcome. No persisted
+  state, wire format or configuration default changes.
+
+  The same reservation leaked on two more paths. Inside `safeCDRSanitize`
+  the instance is picked (reserving the probe) before the oversize gate,
+  which needs that instance's profile cap, and before the cache lookup —
+  both return without calling Sluice and so without an outcome, so an
+  oversize file arriving first after each re-arm kept the breaker half-open
+  indefinitely. And the status/UI/diagnostic selectors (`cdrActiveClient()`
+  behind `GET /api/cdr/config` and five other admin handlers, plus the
+  revoke/recovery client pickers) reserved through `Pick()`/`Allow()` for a
+  read. The API is now split by whether the caller issues the data-path
+  RPC. Every `Sanitize` caller — `safeCDRSanitize` and the admin
+  `POST /api/cdr/test` — reserves (`cdrPickPooledReserved`), owns the
+  reservation, records the outcome on its RPC paths, and hands it back
+  through a deferred, outcome-neutral, generation-scoped `Release` on every
+  return that records none (oversize, cache hit, client-side
+  `file_too_large`, panic). An admin test that finds no free probe slot gets
+  `503 CDR is recovering; retry shortly` instead of running uncounted beside
+  the recovery probe. `Pick()`, `cdrActiveClient()` and every other caller
+  select through the non-consuming `Available()`; the control-plane RPCs
+  (Health, RenewCert, RevokeClient, EnrollStatus) are deliberately outside
+  the data-path breaker and never feed it. Two AST walls pin both
+  directions: no production code reserves except the Sanitize callers
+  (`TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath`), and every
+  Sanitize call reserves and defers its Release, while every control-plane
+  call site is individually classified
+  (`TestCDRRPC_EverySanitizeCallOwnsAReservation`).
+
+  The breaker's coupled state — state, reset timer, half-open generation,
+  newest-reservation stamp, probe budget — is now changed under ONE
+  per-breaker mutex per transition instead of as independent atomics, which
+  had admitted a failed probe's cleanup erasing a concurrently re-armed
+  half-open episode (half-open with no generation: every reserver spun) and
+  two stale re-armers both admitted past a one-probe budget. The critical
+  sections are a few loads and stores, never span the RPC, and run once per
+  inspected document against a sanitize RPC measured in milliseconds. The
+  wedge escape measures staleness from the newest reservation rather than
+  the arm time, so a slot handed back and re-taken is never reclaimed while
+  live.
+
+  Probe age and the reset timer now run on a monotonic clock. They had been
+  differences of wall-clock `UnixNano` readings while the probe's own deadline
+  is monotonic, so a forward wall-clock step of `HalfOpenProbeTimeout` (NTP
+  correction, VM resume) declared a live probe stale and admitted a
+  replacement, and a backward step held an open breaker open for the size of
+  the step. Outcomes are also generation-aware: `OnSuccess`/`OnFailure` take
+  the reservation the RPC ran under, and a reservation that no longer belongs
+  to the current episode — a probe the wedge escape reclaimed, or a request
+  admitted before the breaker opened — is dropped and counted as
+  `staleOutcomes` in the breaker stats. Its late failure previously reopened
+  the breaker under the replacement probe (a fail-open window), and its late
+  success closed it past the probe budget. `openedAt` in the stats stays wall
+  time for display. The same rule covers closed-state reservations: every
+  reservation records the state episode it was admitted under, the episode
+  advances on every transition (closed→open, open→half-open, half-open→closed
+  or open, `Reset`), and an outcome counts only for its own episode. Without
+  that, closed-state RPCs still in flight when the breaker tripped and then
+  recovered fed their late failures into the new closed episode's threshold,
+  and `FailureThreshold` of them reopened a just-recovered breaker.
+
+  `cdr.timeout_sec` is bounded below (30s) but not above, and its conversions
+  wrapped instead of saturating. At `9223372036` the deadline fits but
+  deadline + 30s grace wrapped negative, so `HalfOpenProbeTimeout` fell to the
+  90s floor and could reclaim a live probe; one second more and the
+  seconds→duration conversion itself wrapped, giving the Sluice client and the
+  per-call context a negative deadline that expired every `Sanitize` at once.
+  Every conversion of the setting (client deadline, call context, breaker
+  seed) and the probe-timeout arithmetic now saturate at the largest
+  `time.Duration`; accepted values and the configuration surface are unchanged.
+
 - The viewer-readable operator contract rendered **admin-only roster state**
   (SEC-DIAG-ROSTER-1). `GET /api/diagnostics` is deliberately `RoleViewer` — a
   management-plane health surface must not require admin — but the oversize
