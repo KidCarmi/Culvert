@@ -196,6 +196,9 @@ func buildOperatorContract() OperatorContract {
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
+	// Rules the last policy load rejected fail-closed. Contributes nothing when
+	// every rule in the file was accepted.
+	checks = append(checks, checkPolicyRulesDroppedOnLoad(policyStore)...)
 	// Signed SaaS feed (stale / degraded / waiting / critical, or an enabled feed
 	// that has never activated and is failing). Contributes nothing when the feed
 	// is healthy, disabled, or serving the embedded baseline without failures.
@@ -404,6 +407,41 @@ func checkPolicyLoaded() OperatorContractCheck {
 		Status:  diagOK,
 		Message: "policy ruleset loaded",
 	}
+}
+
+// checkPolicyRulesDroppedOnLoad surfaces rules that Load rejected fail-closed
+// (invalid auth rule, or a source-scoped access rule the evaluator cannot
+// honour). Before this row the only signal was a boot log line, while
+// policy_loaded still read "policy ruleset loaded": an operator saw an
+// all-green policy that silently lacked rules they had written. Report-only;
+// contributes nothing when nothing was dropped. Names are capped so a large
+// hand-edited file cannot bloat the report.
+func checkPolicyRulesDroppedOnLoad(ps *PolicyStore) []OperatorContractCheck {
+	p := ps.loadDropped.Load()
+	if p == nil || len(*p) == 0 {
+		return nil
+	}
+	const maxNames = 5
+	names := *p
+	shown := names
+	if len(shown) > maxNames {
+		shown = shown[:maxNames]
+	}
+	listed := make([]string, len(shown))
+	for i, n := range shown {
+		listed[i] = fmt.Sprintf("%q", n)
+	}
+	more := ""
+	if len(names) > len(shown) {
+		more = fmt.Sprintf(" and %d more", len(names)-len(shown))
+	}
+	return []OperatorContractCheck{{
+		Code:   "policy_rules_dropped_on_load",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d rule(s) in the policy file were rejected at load and are NOT enforced: %s%s",
+			len(names), strings.Join(listed, ", "), more),
+		OperatorAction: "Recreate the intended rules under Policy (the editor validates them), then restart; the rejected entries stay in the policy file and are re-reported at every load until they are removed.",
+	}}
 }
 
 func checkRootCA() OperatorContractCheck {

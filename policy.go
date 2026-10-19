@@ -281,6 +281,11 @@ type PolicyStore struct {
 	// false (the GUI warning stays up) until a later write succeeds. Only a
 	// successful SaveErr, or a later Load, clears it.
 	adoptUnsaved atomic.Bool
+	// loadDropped holds the names of rules the most recent Load rejected
+	// (policyRulePersistable). Read-only diagnostic state for the operator
+	// contract; it never feeds evaluation. Replaced wholesale on every
+	// successful parse so a clean reload clears it.
+	loadDropped atomic.Pointer[[]string]
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -408,6 +413,7 @@ func (ps *PolicyStore) Load(path string) error {
 	// only; the file is not rewritten here, so an offending line is inert and
 	// re-warned each load until removed.
 	kept := rules[:0]
+	var droppedNames []string
 	for _, r := range rules {
 		if ok, reason := policyRulePersistable(r); !ok {
 			name := ""
@@ -415,11 +421,13 @@ func (ps *PolicyStore) Load(path string) error {
 				name = r.Name
 			}
 			logWarnf("Policy: dropping rule %q on load — %s", sanitizeLog(name), sanitizeLog(reason))
+			droppedNames = append(droppedNames, name)
 			continue
 		}
 		kept = append(kept, r)
 	}
 	rules = kept
+	ps.loadDropped.Store(&droppedNames)
 	ps.mu.Lock()
 	ps.path = path
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
