@@ -256,7 +256,33 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # Raw stdout is retained redacted (ASTRA rule 3): redaction fires (the
   # <redacted> marker appears) and a sensitive-keyed value NEVER survives.
   cpcase 0 '{"phase":"ready","reason":"HEALTH_CHECKS_PASSED","session_secret":"SHHH-do-not-keep"}' '' ready redact-raw '<redacted>' 'SHHH-do-not-keep'
-  unset -f cpcase
+  # ASTRA Phase-3 rule 2: a status payload LARGER than the old 4096 cap must be
+  # retained COMPLETE and re-parse as JSON — not silently truncated. Build a
+  # >4096-byte valid status body with a sentinel at the very end and assert the
+  # record kept the whole thing (stdout_redacted_parses true, no overflow,
+  # redacted length past 4096, and the tail sentinel survives).
+  bigstatus() { local sf="$d/cp-big.json" ef="$d/cp-big.err" out="$d/cp-big.jsonl"; : > "$out"; : > "$ef"
+    python3 - "$sf" <<'PY'
+import json, sys
+# Non-IP, non-sensitive filler so the payload stays >4096 bytes AFTER redaction
+# (dotted-quads would be masked to <ip> and shrink it, which is not the point).
+cats = ["category-entry-%04d-nethserver-blacklist-mirror" % i for i in range(120)]
+json.dump({"phase": "ready", "reason": "HEALTH_CHECKS_PASSED",
+           "categories": cats, "tail_marker": "END_OF_BIG_STATUS"}, open(sys.argv[1], "w"))
+PY
+    LAB_HOST=10.9.9.9 rec_classify_probe "$sf" "$ef" 0 1234.5 8 42.0 10.9.9.9 "$out" >/dev/null
+    python3 - "$out" <<'PY'
+import json, sys
+r = json.loads(open(sys.argv[1]).read().strip())
+ok = (r["stdout_redacted_parses"] is True and r["stdout_overflow"] is False
+      and r["stdout_redacted_len"] > 4096
+      and json.loads(r["stdout_redacted"]).get("tail_marker") == "END_OF_BIG_STATUS"
+      and len(r["stdout_sha256"]) == 64)
+sys.exit(0 if ok else 1)
+PY
+  }
+  if bigstatus; then log "selftest ok: >4096-byte status retained complete + parses (no truncation)"; else log "selftest FAILED: large status payload truncated or unparseable"; rc=1; fi
+  unset -f cpcase bigstatus
   # The console-marks watcher runs in the background for up to an hour; the
   # caller captures its pid with $(...), which must return at once (run
   # 37363074909 lost ~60 min per reboot waiting for the watcher to exit).
@@ -1313,7 +1339,23 @@ else:
     red = raw.decode("utf-8", "replace")
 red = red.replace(host, "<host>")
 red = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", red)
-red = re.sub(r"[^ -~]", " ", red)[:4096]
+red = re.sub(r"[^ -~]", " ", red)
+# ASTRA Phase-3 rule 2: retain the COMPLETE sanitised payload per sample, never
+# a silent truncation. The old [:4096] cap cut 14/20 samples mid-string so they
+# could not be parsed as JSON. Keep a generous hard bound only as a DoS guard,
+# and when a payload exceeds it record an EXPLICIT overflow failure rather than
+# quietly dropping text. status-json is a few KiB, so no real sample overflows.
+MAXRED = 65536
+full_red_len = len(red)
+overflow = full_red_len > MAXRED
+red = red[:MAXRED]
+# Does the retained sanitised payload re-parse as complete JSON? (parsed+not
+# overflowed ⇒ true; bad_json or an overflow truncation ⇒ false.) This is the
+# field ASTRA checks, not the markers/hashes.
+try:
+    json.loads(red); red_parses = True
+except Exception:
+    red_parses = False
 if rc == 124:
     klass = "timeout"
 elif rc == 255:
@@ -1330,8 +1372,12 @@ rec = {"sample": int(sample), "offset_s": float(off), "elapsed_ms": elapsed_ms,
        "exit_code": rc, "timed_out": rc == 124, "class": klass,
        "transport_ok": rc == 0 and parsed, "phase": phase, "reason": reason,
        "message": message, "stdout_len": len(raw),
-       "stdout_sha256": hashlib.sha256(raw).hexdigest()[:16],
-       "stdout_redacted": red, "stderr": err}
+       "stdout_sha256": hashlib.sha256(raw).hexdigest(),
+       "stdout_redacted": red,
+       "stdout_redacted_len": full_red_len,
+       "stdout_redacted_sha256": hashlib.sha256(red.encode()).hexdigest(),
+       "stdout_redacted_parses": red_parses,
+       "stdout_overflow": overflow, "stderr": err}
 with open(out, "a") as o:
     o.write(json.dumps(rec, sort_keys=True) + "\n")
 print("%s\t%s\t%s" % (klass, phase or "-", reason or "-"))

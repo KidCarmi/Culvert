@@ -320,6 +320,31 @@ if [[ "$SCENARIO" == midwrite ]]; then
       check W known-failure-reproduced survived "no crash: still running, no restart since the fill; $st; /health version=$v; the write then reported: ${after}"
     fi
   fi
+  # ASTRA Phase-3 rule 1: the ACCURATE DEGRADED OPERATOR STATE while the disk is
+  # full — survival plus a bulk-write error log does not establish it. With the
+  # fill STILL in place (free space bracketed before/after), send bounded
+  # allow/deny traffic through the proxy and record what an operator observes:
+  # enforcement must still hold under fill, and /health + the category-store
+  # metrics must report the degradation truthfully. Only meaningful when the
+  # container survived the fill; a crash is the known-failure path above.
+  if [[ "$cst" == running && "${v:-unreachable}" != unreachable ]]; then
+    freeA="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
+    ua="$(through_proxy origin-allowed)"; ub="$(through_proxy origin-blocked)"
+    freeB="$(df -k --output=avail "$MNT" | tail -1 | tr -d ' ')"
+    if [[ "$ua" == 200 && "$ub" != 200 && "$ub" != 000 ]]; then
+      check W under-fill-enforcement pass "under fill (free ${freeA}->${freeB}KiB): allowed=$ua blocked=$ub — policy still enforced with the disk full, before any cleanup"
+    else
+      check W under-fill-enforcement fail "under fill (free ${freeA}->${freeB}KiB): allowed=$ua blocked=$ub"
+    fi
+    # Explicit degraded-state observations with allocation/error brackets: the
+    # boot category import hit ENOSPC, so the operator-visible state is a serving
+    # proxy whose category feed did NOT finish importing. Record /health, the
+    # catfeeddb metrics and the bulk-write error together, under fill.
+    hv="$(health_version 2>/dev/null || echo unreachable)"
+    mfull="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | grep -E '^culvert_catfeeddb_(available|recovered|quarantined_copies) ' | tr '\n' ' ' || true)"
+    werr="$(wlogs | grep -m1 -oE 'bulk write failed[^"]*' || echo 'no bulk-write-failed line')"
+    check W degraded-state-observed info "disk full, pre-cleanup (free ${freeB}KiB): /health version=$hv; category import error: ${werr}; catfeeddb metrics: ${mfull:-none}"
+  fi
   # Recovery procedure (docs/appliance/readiness-report.md F-DISK-1): free
   # space on the data filesystem, then bring the stack back. The FIRST runner
   # run of this scenario (Deep 37125042106) found that `compose up -d` alone
