@@ -161,6 +161,16 @@ list; and five backup/restore findings including a never-required backup
 passphrase), each with evidence and each stating whether it was measured or
 reasoned.
 
+**2026-10-19 — `CHAOS-77` CLAIMED (placeholder, commit one). Domain: the PAC
+plane as a durability surface — what the client fleet is served after a PAC
+write that did not land, and after the wall clock moves backwards.** The
+`internal/pac` owner has **zero** mentions in this register across all 44
+preceding sections, while being the largest unswept domain in the tree
+(~4,956 production lines) and the only one whose output the entire client
+fleet fetches unauthenticated. `CHAOS-76` is held by the open credential-flood
+sweep (#1633), so this one is 77; claimed here before any code was written,
+per the governance note above. Findings and gates are written up in §45 below.
+
 **2026-10-04 — `CHAOS-71` CLAIMED (placeholder, commit one). Domain: the
 Control Plane's gRPC listener, and the third instance of "which plane may kill
 which". `CLAUDE.md`'s CHAOS-66 note names this path explicitly — *"the CP gRPC
