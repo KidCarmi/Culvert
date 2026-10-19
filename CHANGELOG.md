@@ -7,6 +7,55 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A damaged data volume could kill the gateway outright from the proxy request
+  path, with no log line and no containment available (CHAOS-74, §41 of the
+  chaos register). badger v4 reads every `.sst` table through a memory mapping
+  and removed the option to do otherwise, so when the pages behind that mapping
+  stop existing — the file shrinks, the volume detaches, a page fault returns
+  EIO — the read raises SIGBUS. Go delivers that as `fatal error: fault` rather
+  than a panic, so neither `recover()` nor `crashguard.go` could see it. The
+  Layer-2 community category lookup runs on the data path for every request that
+  resolves a host category, which made one damaged table a total, evidence-free
+  outage and, the damage being on disk, a restart loop rather than a recovery.
+
+  Reproduced against the real store and contained with
+  `debug.SetPanicOnFault`, which delivers a fault on mapped memory as a
+  recoverable panic; the guard is armed once per domain walk and re-panics
+  anything that is not a mapping fault, so a genuine bug still reaches
+  `crashguard` instead of being reported as a failing disk. A Linux node that
+  takes such a fault now latches Layer-2 categorisation off and keeps serving on the
+  admin-managed Layer 1, which is the existing posture for a store that never
+  opened. **The policy outcome is unchanged** — an affected host is still
+  "uncategorised", not denied.
+
+  Visibility was the other half. `culvert_catfeeddb_available` promises in its
+  own HELP text to mean "open and serving lookups" but was sourced purely from
+  the boot record, so it reported `1` for a store whose every lookup had stopped
+  answering. It now reports `0` on a latched degradation, alongside two new
+  counters — `culvert_catfeeddb_lookup_errors_total` and
+  `culvert_catfeeddb_memory_faults_total` — and a `category_feed_db` diagnostics
+  row that names the Layer-1-only impact and the restart that re-opens (and
+  quarantines) the store. The fault is recorded durably beside the store
+  (`<store>.faulted`), so that restart quarantines it with trigger
+  `runtime_fault` and re-creates it empty for the feed to re-sync — badger's
+  reopen error for a truncated table is not a recognised corruption signal, and
+  without the record every later start stayed Layer-1-only.
+  `culvert_catfeeddb_memory_faults_total > 0` is the
+  alerting rule to add: it means a node's data volume is damaging a live store.
+
+  Containment is **Linux-only**. A fault is contained only when its address can
+  be shown to lie in one of the store's mapped files, which is checked against
+  `/proc/self/maps`; anything else re-panics. On the Darwin and Windows release
+  binaries a mapping fault keeps the prior behaviour, and the
+  `category_feed_db` row says `runtime fault containment: unavailable on
+  <GOOS>`. Production deployments (Docker/OVA) are Linux.
+
+  Known limit: `SetPanicOnFault` is per-goroutine, so badger's own compaction
+  goroutines remain exposed. This closes the reachable, request-driven exposure,
+  not the class.
+
 ### Performance
 
 - The per-rule URL-category **membership** probe no longer takes a read lock.
