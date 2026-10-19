@@ -6,24 +6,19 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
-// Extended-attribute preservation for RewriteInPlace (Codex P2 4316064806 on
-// PR #1601): the exchanged-in inode must carry exactly the target's extended
-// attributes, POSIX ACL and security label included. The contract is in
-// rewrite.go.
+// Extended attributes for RewriteInPlace's metadata preservation (Codex P2
+// 4316064806 on PR #1601; the whole ordered step is in metadata_linux.go and
+// the contract in rewrite.go).
 
 // xattrSet is a file's extended attributes, name to value.
 type xattrSet map[string][]byte
 
-// aclAccessXattr encodes a file's POSIX access ACL. It is set last, after the
-// chmod and the other attributes, because setting it rewrites the group
-// permission bits from the ACL mask.
+// aclAccessXattr encodes a file's POSIX access ACL.
 const aclAccessXattr = "system.posix_acl_access"
 
 // xattrMaxSize is the kernel's XATTR_LIST_MAX and XATTR_SIZE_MAX (64 KiB):
@@ -109,78 +104,30 @@ func readSized(call func(buf []byte) (int, error)) ([]byte, error) {
 	return nil, fmt.Errorf("its size kept changing while it was read: %w", unix.ERANGE)
 }
 
-// targetXattrs reads the extended attributes of the file at path through an
-// O_NOFOLLOW descriptor, after confirming that descriptor is still orig. A
-// target that vanished, became a symlink or is another file is a concurrent
-// change; any other failure means its metadata cannot be preserved.
-func targetXattrs(op, path string, orig os.FileInfo) (xattrSet, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- the caller's own path
-	if err != nil {
-		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) {
-			return nil, fmt.Errorf("%s %s: open to read its attributes: %w: %w", op, path, err, ErrConcurrentChange)
-		}
-		return nil, fmt.Errorf("%s %s: open to read its attributes: %w: %w", op, path, err, ErrMetadataNotPreservable)
-	}
-	defer func() { _ = f.Close() }() // #nosec G104 -- read-only handle
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: stat to read its attributes: %w: %w", op, path, err, ErrMetadataNotPreservable)
-	}
-	if !os.SameFile(fi, orig) {
-		return nil, fmt.Errorf("%s %s: the target is no longer the loaded file: %w", op, path, ErrConcurrentChange)
-	}
-	set, err := readXattrs(int(f.Fd()))
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: read extended attributes: %w: %w", op, path, err, ErrMetadataNotPreservable)
-	}
-	return set, nil
-}
-
-// copyXattrs makes the attributes of f — the temp file, already chmodded and
-// chowned to match orig — exactly src: it sets every attribute of src (the
-// access ACL last), removes any f inherited that src lacks (a directory's
-// default ACL), and then reads f back, requiring the same attribute set,
-// permission bits, owner and group as orig. It reports whether it changed
-// any attribute on f.
-func copyXattrs(f *os.File, src xattrSet, orig os.FileInfo) (bool, error) {
-	fd := int(f.Fd())
-	for _, name := range xattrSetOrder(src) {
-		if err := fsetxattr(fd, name, src[name]); err != nil {
-			return false, fmt.Errorf("set %q on the replacement: %w", name, err)
+// copyXattrs makes fd's extended attributes want: it sets every attribute
+// of want (the access ACL last, after the chmod, because setting it rewrites
+// the group permission bits from the ACL mask) and removes any fd inherited
+// that want lacks (a directory's default ACL becomes a new file's access
+// ACL). preserveMetadata verifies the result.
+func copyXattrs(fd int, want xattrSet) error {
+	for _, name := range xattrSetOrder(want) {
+		if err := fsetxattr(fd, name, want[name]); err != nil {
+			return fmt.Errorf("set %q on the replacement: %w", name, err)
 		}
 	}
-	changed := len(src) > 0
 	got, err := readXattrs(fd)
 	if err != nil {
-		return changed, fmt.Errorf("read back the replacement's attributes: %w", err)
+		return fmt.Errorf("read back the replacement's attributes: %w", err)
 	}
 	for name := range got {
-		if _, ok := src[name]; ok {
+		if _, ok := want[name]; ok {
 			continue
 		}
 		if err := unix.Fremovexattr(fd, name); err != nil {
-			return changed, fmt.Errorf("remove %q the replacement inherited: %w", name, err)
+			return fmt.Errorf("remove %q the replacement inherited: %w", name, err)
 		}
-		changed = true
 	}
-	if got, err = readXattrs(fd); err != nil {
-		return changed, fmt.Errorf("read back the replacement's attributes: %w", err)
-	}
-	if !got.equal(src) {
-		return changed, errors.New("the replacement's extended attributes differ from the target's after copying")
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		return changed, fmt.Errorf("stat the replacement: %w", err)
-	}
-	if fi.Mode().Perm() != orig.Mode().Perm() {
-		return changed, fmt.Errorf("the replacement's permission bits are %v after copying, want %v",
-			fi.Mode().Perm(), orig.Mode().Perm())
-	}
-	if !sameOwner(fi, orig) {
-		return changed, errors.New("the replacement's owner or group differs from the target's")
-	}
-	return changed, nil
+	return nil
 }
 
 // xattrSetOrder is src's names sorted, with the access ACL last.
@@ -196,26 +143,4 @@ func xattrSetOrder(src xattrSet) []string {
 		names = append(names, aclAccessXattr)
 	}
 	return names
-}
-
-// preserveMetadata is RewriteInPlace's metadata step on the open temp file,
-// after its chmod: it gives f orig's owner and group (first, because a chown
-// clears security.capability), copies src onto it, verifies the result
-// exactly, and, if an attribute changed, fsyncs f again so the metadata is as
-// durable as the bytes. A failure to preserve ownership or attributes wraps
-// ErrMetadataNotPreservable.
-func preserveMetadata(f *os.File, orig os.FileInfo, src xattrSet) error {
-	if err := preserveOwner(f, orig); err != nil {
-		return fmt.Errorf("preserve owner and group: %w: %w", err, ErrMetadataNotPreservable)
-	}
-	changed, err := copyXattrs(f, src, orig)
-	if err != nil {
-		return fmt.Errorf("preserve extended attributes: %w: %w", err, ErrMetadataNotPreservable)
-	}
-	if changed {
-		if err := f.Sync(); err != nil {
-			return fmt.Errorf("fsync after copying extended attributes: %w", err)
-		}
-	}
-	return nil
 }

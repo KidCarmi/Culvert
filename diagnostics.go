@@ -910,15 +910,15 @@ const rosterTargetRewriteUnsupported = "the configured roster file was not rewri
 	"admin account changes can be saved"
 
 // rosterTargetMetadataNotPreservable is the targetProblem when the boot
-// rewrite was not exchanged in because the roster's owner and group or its
-// extended attributes (a POSIX ACL, an SELinux label, a user.* attribute)
-// could not be kept exactly on the replacement (Codex P2s 4316064806 and
-// 4316401892 on PR #1601): a rewrite that changes them would change the
-// file's security posture just because the process started. Nothing was
-// replaced, so the path is unproven.
+// rewrite was not exchanged in because the roster's owner, group, mode bits,
+// inode flags or extended attributes (a POSIX ACL, an SELinux label, a user.*
+// attribute) could not be kept exactly on the replacement (Codex P2s on PR
+// #1601; the complete list is fileutil.RewriteInPlace's contract): a rewrite
+// that changes them would change the file's security posture just because
+// the process started. Nothing was replaced, so the path is unproven.
 const rosterTargetMetadataNotPreservable = "the configured roster file was not rewritten at startup, because its " +
-	"owner and group or its extended attributes (for example an SELinux label or a POSIX ACL) could not be kept " +
-	"exactly on the replacement, so it is not proven that admin account changes can be saved"
+	"owner, group, mode bits, inode flags or extended attributes (for example an SELinux label or a POSIX ACL) " +
+	"could not be kept exactly on the replacement, so it is not proven that admin account changes can be saved"
 
 // rosterTargetChangedAtBoot is the targetProblem when the roster changed on
 // disk while it was loaded or rewritten at startup: the newer file was kept,
@@ -1001,7 +1001,7 @@ func rosterWriteProblem(missing, tried bool, writeErr error) string {
 	case writeErr != nil:
 		return "the configured roster file could not be rewritten in place at startup (a read-only or " +
 			"permission-denied volume, or a directory that does not let this process replace the file, " +
-			"such as a sticky directory where another user owns it)"
+			"such as a sticky directory where another user owns it, or an immutable or append-only file)"
 	}
 	return ""
 }
@@ -1071,11 +1071,12 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 			"warning. If that change is refused, fix the admin users file (-ui-users-file) path or its permissions " +
 			"so it names a writable regular file on a persistent volume, restart, and re-apply the change."
 	case rosterTargetMetadataNotPreservable:
-		row.OperatorAction = "Nothing was replaced, so the file's owner, ACL and labels are as they were; the " +
-			"process log line names the cause. If the roster belongs to another account than the one Culvert runs " +
+		row.OperatorAction = "Nothing was replaced, so the file's owner, mode, flags, ACL and labels are as they " +
+			"were; the process log line names the cause. If the roster belongs to another account than the one Culvert runs " +
 			"as, give it to Culvert's account (or run Culvert as its owner) and restart. Otherwise the first admin " +
 			"account change that is saved proves the file and clears this warning, but a save, like any replace, " +
-			"does not carry a file's own ACL or extended attributes over, so re-apply them after it."
+			"does not carry a file's own ACL, extended attributes, special mode bits or inode flags over (it writes " +
+			"mode 0600), so re-apply them after it."
 	case rosterTargetChangedAtBoot:
 		row.OperatorAction = "Restart to load the roster file as it now is on disk. Until then, do not make admin " +
 			"account changes: saving one writes the roster in use over the newer file."

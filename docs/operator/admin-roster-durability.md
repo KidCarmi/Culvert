@@ -192,13 +192,12 @@ administrative decision was affected, and therefore what the operator must redo.
 
    **On Linux, the roster file is rewritten in place once at every boot.**
    After `ui_users.json` loads, Culvert writes the exact bytes it read into a
-   temp file beside it, with the file's own permission bits, owner and group
-   and **all of its extended attributes**, and atomically **exchanges** that
-   temp file with the roster (`renameat2` `RENAME_EXCHANGE`). The content,
-   permission bits, owner, group, POSIX ACL, SELinux label and other extended
-   attributes do not change, but the file gets a **new inode and mtime** at
-   each start, as it does at each save. That write is the row's evidence: it is `ok` only if it
-   landed, or a later roster save did. Nothing short of a real write to the
+   temp file beside it, with the file's own owner, group, full mode and
+   **all of its extended attributes** (the complete list is below), and
+   atomically **exchanges** that temp file with the roster (`renameat2`
+   `RENAME_EXCHANGE`). None of that changes, but the file gets a **new inode
+   and timestamps** at each start, as it does at each save. That write is the
+   row's evidence: it is `ok` only if it landed, or a later roster save did. Nothing short of a real write to the
    real file can tell: a stat passes on a read-only mount, and a test file
    created and renamed beside the roster passes in a sticky (`1777`) or
    ACL-restricted directory where the roster belongs to another user. The
@@ -222,36 +221,50 @@ administrative decision was affected, and therefore what the operator must redo.
    exchange and writes through that descriptor afterwards can still lose its
    write, exactly as it can against any save.
 
-   **The rewrite never changes the file's owner or security metadata.** The
-   temp file is given the roster's owner and group, and this is not best
-   effort: a process that may replace another account's roster (a writable,
-   non-sticky directory) but cannot give a file away would otherwise take the
-   roster over at every boot. A new inode also starts with no extended
-   attributes, so before the exchange Culvert lists every attribute of the
-   roster — the POSIX access ACL (`system.posix_acl_access`), the SELinux
-   label (`security.selinux`), `user.*`, and the `trusted.*` and other
-   `security.*` attributes it can see — and sets each one on the temp file
-   after its `chmod` and `chown` (the ACL and the mode interact). An ACL the
-   temp file inherited from the directory's default ACL, which the roster does
-   not have, is removed. The temp file's owner, group, permission bits and
-   attributes are then read back and must equal the roster's exactly. After
-   the exchange, the displaced file's owner, group and attributes (names and
-   values) are part of the comparison above, so a `chown`, ACL or label
-   changed concurrently is swapped straight back like any other change. If
-   the owner or **any** attribute cannot be kept (a `chown` to another account
-   refused with `EPERM`, or a label this process is not allowed to assign:
-   `EPERM`, `EACCES`, `ENOTSUP`), **nothing is replaced**: the temp file is
-   removed, the roster keeps its inode, owner and metadata, one `UIUsers:
-   admin roster "<path>" was not rewritten in place at startup: its owner,
-   group, extended attributes or ACL could not be kept` line names the cause,
-   and the row is `warn` (*not proven that admin account changes can be
-   saved*). If the roster belongs to another account than Culvert's, give it
-   to Culvert's account (or run Culvert as its owner) and restart; otherwise
-   the warning clears when the first admin account change is saved. A roster
-   owned by Culvert's own account with no extended attributes is rewritten
-   exactly as before. Limit: Linux lists `trusted.*` attributes only to a
-   process with `CAP_SYS_ADMIN`, so a process without it can neither see nor
-   keep them.
+   **The rewrite never changes the file's metadata.** This is the complete
+   list (the same as `fileutil.RewriteInPlace`'s contract).
+
+   | Preserved exactly — or the roster is not rewritten | Not preserved |
+   |---|---|
+   | Content, byte for byte (never re-serialised) | Inode number |
+   | Owner and group | Timestamps: atime, mtime, ctime and birth time are the new inode's own |
+   | All 12 mode bits, including setuid, setgid and sticky | Other hard links to the roster (they keep the old inode, with identical content) |
+   | Every extended attribute Culvert can list: the POSIX access ACL (`system.posix_acl_access`), the SELinux or other LSM label (`security.*`), file capabilities, `user.*`, and `trusted.*` when Culvert has `CAP_SYS_ADMIN` | `trusted.*` attributes when Culvert lacks `CAP_SYS_ADMIN`: Linux does not list them to it, so it can neither see nor keep them |
+   | Inode (`chattr`) flags such as nodump (`d`), noatime (`A`), sync (`S`), compress (`c`), nocow (`C`): compared, never set | |
+
+   The temp file gets them in the only order that works: `chown` (which
+   clears setuid, setgid and file capabilities), then `chmod` with the full
+   mode, then the extended attributes with the access ACL last (it rewrites
+   the group bits), then removal of any attribute it inherited that the
+   roster lacks (a directory's default ACL). It is then read back — owner,
+   group, full mode, inode flags and attributes must equal the roster's
+   exactly — and fsynced before the exchange. The read-back also catches a
+   special bit the kernel dropped silently (an unprivileged process setting
+   setgid on a file whose group it is not in) and a temp file that inherited
+   an inode flag such as nodump from the directory. Only the filesystem's own
+   storage flags (extents, inline data, huge file, compression internals,
+   directory index) and the encryption flag (inherited from the directory)
+   are ignored. After the exchange, the displaced file is compared on the
+   same list, so a `chown`, `chmod`, `chattr`, ACL or label changed
+   concurrently is swapped straight back like any other change.
+
+   If **any** of it cannot be kept — a `chown` to another account refused
+   with `EPERM` (Culvert runs unprivileged and the roster belongs to another
+   account), a special bit dropped, a label this process is not allowed to
+   assign (`EPERM`, `EACCES`, `ENOTSUP`), or an inode flag a new file would
+   not have — **nothing is replaced**: the temp file is removed, the roster
+   keeps its inode and all of its metadata, one `UIUsers: admin roster
+   "<path>" was not rewritten in place at startup: its owner, group, mode,
+   inode flags, extended attributes or ACL could not be kept` line names the
+   cause, and the row is `warn` (*not proven that admin account changes can
+   be saved*). If the roster belongs to another account than Culvert's, give
+   it to Culvert's account (or run Culvert as its owner) and restart;
+   otherwise the warning clears when the first admin account change is
+   saved. An **immutable or append-only** roster (`chattr +i` / `+a`) is not
+   rewritten either; since no save can replace it, the row reports it as a
+   refused write (*every admin account change will be refused*). A roster
+   owned by Culvert's account, with a plain mode, no extended attributes and
+   no inode flags, is rewritten exactly as before.
 
    **Elsewhere, the roster is not rewritten.** Without an atomic exchange
    (macOS, Windows, other non-Linux platforms, or a Linux kernel or filesystem

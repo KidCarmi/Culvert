@@ -29,13 +29,16 @@ package main
 // writes nothing (ErrRewriteUnsupported) and the row stays "not verified"
 // until the first save lands.
 //
-// The rewrite must not change the roster's security metadata either (Codex
-// P2s 4316064806 and 4316401892 on PR #1601): RewriteInPlace gives the
-// replacement the roster's owner and group and every extended attribute
-// (POSIX ACL, SELinux label, user.*), and compares them after the exchange;
-// if any cannot be kept (an unprivileged process cannot give the replacement
-// to another account) it replaces nothing (ErrMetadataNotPreservable) and the
-// row stays "not verified" the same way.
+// The rewrite must not change the roster's metadata either (Codex P2s on PR
+// #1601): RewriteInPlace gives the replacement the roster's owner, group,
+// full mode (setuid, setgid and sticky included) and every extended attribute
+// (POSIX ACL, SELinux label, user.*), requires matching inode flags, verifies
+// all of it before the exchange and compares it after; the complete list,
+// and what is not preserved (timestamps), is its contract. If any of it
+// cannot be kept (an unprivileged process cannot give the replacement to
+// another account) it replaces nothing (ErrMetadataNotPreservable) and the
+// row stays "not verified" the same way. An immutable or append-only roster
+// is a plain write refusal: no save can replace it.
 //
 // Exact bytes
 // rather than SaveUIUsersFile's re-serialisation, because that is not a pure
@@ -54,7 +57,7 @@ package main
 // line below says what to fix.
 //
 // On Linux the file gets a new inode and mtime at every boot (as at every
-// save). Its content, permission bits, owner, group and extended attributes
+// save). Its content, owner, group, mode, inode flags and extended attributes
 // do not change.
 
 import (
@@ -127,9 +130,9 @@ func rewriteLoadedRoster(path string, loaded *loadedRosterFile) error {
 			"exchange, and a plain replace could destroy a concurrent change, so whether admin account changes "+
 			"can be saved is unverified until the first one is", path, err)
 	case errors.Is(err, fileutil.ErrMetadataNotPreservable):
-		logRosterBootRewrite("was not rewritten in place at startup: its owner, group, extended attributes or ACL "+
-			"could not be kept exactly on the replacement, and a rewrite must not change the file's security metadata, so "+
-			"nothing was replaced and whether admin account changes can be saved is unverified until the first one is",
+		logRosterBootRewrite("was not rewritten in place at startup: its owner, group, mode, inode flags, "+
+			"extended attributes or ACL could not be kept exactly on the replacement, and a rewrite must not change "+
+			"the file's metadata, so nothing was replaced and whether admin account changes can be saved is unverified until the first one is",
 			path, err)
 	case errors.Is(err, fileutil.ErrExchangeBackFailed):
 		logRosterBootRewrite("CHANGED ON DISK during the startup rewrite, and the newer file could NOT be "+

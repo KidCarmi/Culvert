@@ -37,20 +37,21 @@ var rewriteHooks struct {
 // over a concurrent change; the full contract is in rewrite.go.
 func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	const op = "rewrite in place"
-	src, err := targetXattrs(op, path, orig)
+	want, err := targetMeta(op, path, orig)
 	if err != nil {
 		return err // nothing written
 	}
 	var metaErr error
 	tmp, err := writeTempBeside(op, path, data, orig.Mode().Perm(), func(f *os.File) {
-		metaErr = preserveMetadata(f, orig, src)
+		metaErr = preserveMetadata(f, want)
 	})
 	if err != nil {
 		return err
 	}
 	if metaErr != nil {
-		// The replacement would not carry the target's security metadata
-		// exactly, so it is never exchanged in: the target is untouched.
+		// The replacement would not carry the target's metadata exactly (or
+		// is not durable), so it is never exchanged in: the target is
+		// untouched.
 		removeTemp(tmp)
 		return fmt.Errorf("%s %s: %w", op, path, metaErr)
 	}
@@ -69,7 +70,7 @@ func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	if h := rewriteHooks.afterExchange; h != nil {
 		h(tmp)
 	}
-	if why := displacedDiffers(tmp, data, orig, src); why != "" {
+	if why := displacedDiffers(tmp, data, want); why != "" {
 		return undoExchange(op, path, tmp, mine, why)
 	}
 	// What was live just before the swap is exactly what the caller loaded,
@@ -112,10 +113,10 @@ func undoExchange(op, path, tmp string, mine os.FileInfo, why string) error {
 }
 
 // displacedDiffers compares the file the exchange displaced (now at tmp) with
-// what the caller loaded: content, mode, owner and the extended attributes
-// read from the target before the exchange (src). "" means identical; any
-// doubt is a difference.
-func displacedDiffers(tmp string, data []byte, orig os.FileInfo, src xattrSet) string {
+// what the caller loaded: content, and the full fileMeta read from the target
+// before the exchange (want) — owner, group, all 12 mode bits, inode flags
+// and extended attributes. "" means identical; any doubt is a difference.
+func displacedDiffers(tmp string, data []byte, want fileMeta) string {
 	// O_NOFOLLOW|O_NONBLOCK: the displaced entry is whatever was at the
 	// target, so it is not trusted to be a regular file.
 	f, err := os.OpenFile(tmp, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- our own temp name beside the caller's path
@@ -129,19 +130,15 @@ func displacedDiffers(tmp string, data []byte, orig os.FileInfo, src xattrSet) s
 		return "the file displaced from the target could not be inspected"
 	case !fi.Mode().IsRegular():
 		return "the entry displaced from the target is not a regular file"
-	case fi.Mode() != orig.Mode():
-		return "the file displaced from the target has a different mode than the loaded one"
-	case !sameOwner(fi, orig):
-		return "the file displaced from the target has a different owner than the loaded one"
 	case fi.Size() != int64(len(data)):
 		return "the file displaced from the target differs in size from the loaded content"
 	}
-	got, err := readXattrs(int(f.Fd()))
+	got, err := readMeta(f)
 	if err != nil {
-		return "the extended attributes of the file displaced from the target could not be read for comparison"
+		return "the metadata of the file displaced from the target could not be read for comparison"
 	}
-	if !got.equal(src) {
-		return "the file displaced from the target has different extended attributes (or ACL) than the loaded one"
+	if what := want.differs(got); what != "" {
+		return "the file displaced from the target has a different " + what + " than the loaded one"
 	}
 	content, err := io.ReadAll(io.LimitReader(f, int64(len(data))+1))
 	if err != nil {
@@ -151,28 +148,6 @@ func displacedDiffers(tmp string, data []byte, orig os.FileInfo, src xattrSet) s
 		return "the file displaced from the target differs from the loaded content"
 	}
 	return ""
-}
-
-// fchown sets f's owner and group. A seam only for this package's white-box
-// tests: they run as root, which may give a file away, so the EPERM an
-// unprivileged process gets is injected.
-var fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
-
-// preserveOwner gives f the owner and group of orig. Unlike a save, the boot
-// rewrite must not change the file's ownership (Codex P2 4316401892 on PR
-// #1601): an unprivileged process that may replace another account's roster
-// (a writable, non-sticky directory) cannot give the replacement away, and
-// exchanging anyway would silently make the roster its own at every boot. So
-// a refused chown is returned, and RewriteInPlace exchanges nothing.
-func preserveOwner(f *os.File, orig os.FileInfo) error {
-	st, ok := orig.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errors.New("the loaded file's owner is not known")
-	}
-	if err := fchown(f, int(st.Uid), int(st.Gid)); err != nil {
-		return fmt.Errorf("chown the replacement to %d:%d: %w", st.Uid, st.Gid, err)
-	}
-	return nil
 }
 
 // sameOwner reports whether a and b have the same owner and group.

@@ -1488,7 +1488,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
   Admin Users panel hint and are deliberately absent from `/api/stats`.
 - On Linux, `ui_users.json` is now **rewritten in place once at every boot**,
-  after it loads: the exact bytes read, the file's own mode, owner and group,
+  after it loads: the exact bytes read, with the file's own metadata (below),
   written to a temp file that is atomically
   exchanged with the roster (`renameat2` `RENAME_EXCHANGE`,
   `fileutil.RewriteInPlace`). Content is unchanged, but the file gets a new
@@ -1503,17 +1503,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   configuration manager's or operator's concurrent change is swapped straight
   back (row `warn`, restart to load it); if that swap fails, the newer content
   is kept in a `ui_users.json.tmp.*` file the log names. The rewrite also
-  **keeps the file's security metadata**: its owner and group (an
-  unprivileged process that cannot give the replacement to the roster's
-  owning account does not rewrite it), and every extended attribute — a POSIX
-  ACL (`system.posix_acl_access`), an SELinux label (`security.selinux`),
-  `user.*` and other attributes — is copied onto the replacement (an ACL the
-  temp inherited from the directory's default ACL is removed) and read back
-  before the exchange, and the displaced file's attributes are part of the
-  concurrent-change comparison. If the owner or any attribute cannot be kept,
-  nothing is replaced, one log line names it, and the row is `warn` (*not
-  proven that admin account changes can be saved*) until the first admin
-  change is saved. Without an atomic
+  **never changes the file's metadata**. Preserved exactly: owner and group;
+  all 12 mode bits (setuid, setgid and sticky included); every extended
+  attribute it can list — the POSIX ACL (`system.posix_acl_access`), the
+  SELinux label (`security.selinux`), file capabilities, `user.*`, and
+  `trusted.*` when it has `CAP_SYS_ADMIN`; and inode (`chattr`) flags, which
+  are compared, never set. The temp file is given them in order (`chown`,
+  then `chmod` with the full mode, then the attributes with the ACL last,
+  then removal of anything it inherited from the directory), read back
+  exactly, and fsynced before the exchange; the displaced file is compared on
+  the same list afterwards. Not preserved: the inode number, timestamps,
+  other hard links, and `trusted.*` attributes when Culvert lacks
+  `CAP_SYS_ADMIN` (Linux does not list them to it). If anything on the list
+  cannot be kept (for example an unprivileged process cannot give the
+  replacement to the roster's owning account, or the roster has the nodump
+  flag), nothing is replaced, one log line names it, and the row is `warn`
+  (*not proven that admin account changes can be saved*) until the first
+  admin change is saved; an immutable or append-only roster is reported as a
+  refused write. Without an atomic
   exchange (non-Linux platforms, or a kernel or filesystem without it) the
   roster is not rewritten and the row is `warn` until the first admin change
   is saved. A refused rewrite never stops boot (the roster is used read-only,
