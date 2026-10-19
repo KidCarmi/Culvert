@@ -147,7 +147,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   runs out its TTL. An ordinary config publish no longer re-adds a Control
   Plane address that a terminal listener exit withdrew: a full publish now
   always carries the committed address list, and only the owned address
-  publish changes it.
+  publish changes it. While rewrite management identity is degraded, a
+  Control Plane activation or HA promotion no longer fails at its address
+  publish (full config publishes are still refused). A Control Plane listener
+  that ends terminally is reported down, and stops renewing the fencing lease,
+  before its address is withdrawn rather than after.
 
 - A damaged data volume could kill the gateway outright from the proxy request
   path, with no log line and no containment available (CHAOS-74, §41 of the

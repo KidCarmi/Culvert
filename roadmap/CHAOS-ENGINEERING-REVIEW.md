@@ -9713,6 +9713,50 @@ required before merge; each is now in the tree.
     cleanup reference `Stop`/`GracefulStop` on a `*grpc.Server`. The call
     graph into the helper is exact, and both claim holders claim first. A
     negative control and a reintroduced direct `a.srv.Stop()` both fail it.
+* **An address-only publish is not refused by rewrite-identity degradation
+  (Codex P1 4314031064).** Gate 0 of the commit-time validator (main's,
+  from #1265) refuses every publish while the rewrite management-identity
+  latch is set, because a full publish captures the live, known-ephemeral
+  rewrite StableIDs. This PR routed the address-only publish through the same
+  validator. That candidate is the committed snapshot with only `CPAddresses`
+  replaced, so it carries no identity that is not already committed. On a
+  store that had already published (a node that led earlier in the process,
+  or the boot path's first publish, which runs before `LoadAdminSettings`
+  can set the latch), every CP activation and HA promotion was refused at
+  the address publish and rolled back until a restart. An unrelated
+  rewrite-persistence fault disabled failover.
+
+  `validatePublishCandidate` applies Gate 0 to full publishes only. Both
+  kinds still pass the count and wire-size gates.
+
+  Gates:
+  - `TestChaos71_PromotionCommitsAddressesWhileRewriteIdentityDegraded`:
+    publish, set the latch, promote. The promotion succeeds, the role holds,
+    the committed list names the node, and the activation's full publish is
+    still refused.
+  - `TestChaos71_RewriteDegradationStillRefusesFullPublishes`, on a bare
+    store: the full publish is refused and commits nothing; the address
+    publish commits onto the committed content and leaves the full kind's
+    rejection latched.
+
+  Routing the address kind through Gate 0 fails both. Exempting the full kind
+  fails both.
+* **A terminal exit records the terminal state before the withdrawal (Codex
+  P2 4314031070).** `exitTerminal` withdrew this node from the committed list
+  first and marked the supervisor down only afterwards. The withdrawal can
+  clone, marshal and delta a snapshot near the wire budget. Throughout that
+  window, after a panic in which `abandonAfterPanic` had already stopped the
+  server, diagnostics reported `Serving=true` and `cpGRPCLeaseRenewWithheld`
+  kept renewing the lease of a leader with no listener and no supervisor,
+  which delayed failover. `noteCPGRPCSupervisorDown` now runs first. The
+  withdrawal, its pending-and-retried rejection path and the
+  ownership-after-withdrawal rule are unchanged.
+
+  Gate: `TestChaos71_TerminalStateIsRecordedBeforeTheWithdrawal`. A seam in
+  the withdrawal asserts that the listener is already down and lease renewal
+  is already withheld, for a panic while a served server is retired and for a
+  panic in the backoff after a serve. Moving the health record back after the
+  withdrawal fails both rows.
 * **An uninstalled fencing grant is cleared (Codex P1 4306890528).** A
   guarded boot resume acquired epoch E. Its post-acquisition revalidation
   then found `ha_config.json` removed or disabled, and the return left

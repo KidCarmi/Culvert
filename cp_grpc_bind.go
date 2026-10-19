@@ -444,8 +444,9 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 // (TestChaos71_Wall_TerminalExitsGoThroughExitTerminal). A terminal exit
 // leaves no Control Plane behind, so it gives up CP address-list ownership —
 // a Data Plane that won a role conflict, or a node whose loop panicked, must
-// not keep reporting and reconciling a CP list (Codex review of #1556) — and
-// then records the terminal state (fail row, alert).
+// not keep reporting and reconciling a CP list (Codex review of #1556). It
+// records the terminal state (fail row, alert) first, then withdraws this
+// node and gives up ownership.
 //
 // If the committed CP address list names this node — whichever owned path
 // published it: this supervisor's activation, or an HA transition's
@@ -462,7 +463,18 @@ func (s *cpListenerSupervisor) stopRequested() bool {
 // On the panic edge this runs inside the deferred recover, so the withdrawal
 // is contained: a panic in it leaves the withdrawal unrecorded, and the
 // ownership step then latches it pending so a retry still owns it.
+//
+// The terminal state is recorded FIRST (Codex P2 4314031070 on #1556): by
+// now nothing is serving (abandonAfterPanic stopped the server, or the role
+// was refused), and the withdrawal can clone, marshal and delta a snapshot
+// near the wire budget. Recorded after it, that whole window reported
+// Serving=true on diagnostics and kept cpGRPCLeaseRenewWithheld renewing a
+// lease for a leader whose listener and supervisor were already gone,
+// delaying failover. The order touches only health: withdrawal ownership and
+// its retry path are unchanged
+// (TestChaos71_TerminalStateIsRecordedBeforeTheWithdrawal).
 func (s *cpListenerSupervisor) exitTerminal(reason string) {
+	noteCPGRPCSupervisorDown(reason)
 	func() {
 		defer func() { _ = recover() }()
 		// A no-op unless the committed list names this node. The outcome is
@@ -471,7 +483,6 @@ func (s *cpListenerSupervisor) exitTerminal(reason string) {
 		_, _ = cpWithdrawCPAddress(s.cfg.addr)
 	}()
 	globalConfigStore.releaseCPAddressSourceAfterWithdrawal(s.cfg.addr)
-	noteCPGRPCSupervisorDown(reason)
 }
 
 // run is the bind/serve/rebind loop.
@@ -532,7 +543,7 @@ func (s *cpListenerSupervisor) run() {
 			// left the server, the bound socket and the CP role claimed with
 			// nothing serving (Codex review of #1556).
 			s.abandonAfterPanic()
-			s.exitTerminal("bind loop panicked") // withdraws this node from the list, then releases ownership
+			s.exitTerminal("bind loop panicked") // records the terminal state, withdraws this node from the list, then releases ownership
 		}
 	}()
 
