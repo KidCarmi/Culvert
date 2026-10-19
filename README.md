@@ -242,7 +242,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 | **Certificate revocation** | OCSP checking (fail-closed when a published responder is unreachable), currently scoped to the upstream parent-proxy TLS handshake only - **not yet wired to SSL-inspected origin certificates**. CRL checking is **not yet implemented** - see [Limitations](#limitations--known-gaps) |
 | **Hop-by-hop stripping** | RFC 7230-compliant - parses the `Connection` header for dynamically listed hop-by-hop names |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, drops private `X-Real-IP`, always removes `X-User-Identity` before forwarding |
-| **Password complexity** | 8+ chars, mixed case, and a digit required |
+| **Password complexity** | 8 bytes minimum and 72 bytes maximum (bcrypt's hard limit; both bounds count UTF-8 bytes, not characters), with at least one uppercase letter, one lowercase letter and one digit (`validatePasswordComplexity`, `store.go`) |
 | **Admin RBAC (defense-in-depth)** | Metadata-driven enforcement layer *in addition to* per-handler `requireRole`; report-only audit-completeness and role-divergence detectors; read-only governance surface at `/api/governance/control-plane` |
 
 ### Post-Quantum key exchange
@@ -335,7 +335,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live under 68 top-level directories in `internal/` (some, like the MCP gateway, further decomposed into dozens of subpackages — 107 directories tree-wide contain non-test Go source). A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live under 70 top-level directories in `internal/` (`ls -d internal/*/ | wc -l`; some, like the MCP gateway, are further decomposed into dozens of subpackages — 109 directories under `internal/` in total contain non-test Go source). A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions are in [`docs/agent-context/conventions.md`](docs/agent-context/conventions.md), the `internal/` decomposition in [`roadmap/PACKAGE-ISOLATION.md`](roadmap/PACKAGE-ISOLATION.md), and the admin-API route-metadata contract in [`docs/agent-context/domains/admin-control-plane.md`](docs/agent-context/domains/admin-control-plane.md); [`AGENTS.md`](AGENTS.md) routes to the rest.
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
