@@ -26,11 +26,11 @@ func TestInstallScript_PersistSessionSecret_UnderErrexit_ExistingEnvWithoutSecre
 
 	script := "set -euo pipefail\n" +
 		"info() { :; }\nwarn() { :; }\nerror() { echo \"ERROR: $*\" >&2; exit 7; }\n" +
-		"INSTALL_DIR=" + dir + "\nexport CULVERT_SESSION_SECRET=" + secret + "\n" +
+		"INSTALL_DIR=\"$1\"\nexport CULVERT_SESSION_SECRET=" + secret + "\n" +
 		envPutFn + "\n" + fn + "\n" +
 		"persist_host_env_session_secret\necho REACHED_END\n"
 
-	out, err := exec.CommandContext(t.Context(), "bash", "-c", script).CombinedOutput() // #nosec G204 -- fixed test script content
+	out, err := exec.CommandContext(t.Context(), "bash", "-c", script, "install-test", dir).CombinedOutput() // #nosec G204 -- fixed test script content
 	if err != nil || !strings.Contains(string(out), "REACHED_END") {
 		t.Fatalf("persist_host_env_session_secret aborted under set -e: err=%v out=%q", err, out)
 	}
