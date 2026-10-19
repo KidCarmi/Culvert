@@ -116,3 +116,30 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesParallel(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkPolicyEvaluate_CategoryRulesParallel measures the plain
+// DestCategory scan under concurrency — the end-to-end instrument for the
+// urlcat forward read view (internal/urlcat forwardView).
+//
+// It is deliberately the DestCategory path and not the category-GROUP one.
+// matchesCategory reaches catStore.MatchesHost / MatchesHostAdmin once per
+// category-scoped rule and nothing else contended, so this benchmark isolates
+// that cost. BenchmarkPolicyEvaluate_CategoryGroupRulesParallel below adds
+// catgroup.Store.GetByName, whose own per-rule RLock dominates it — a profile
+// of that benchmark on a tree carrying the view puts 91.9% of samples in
+// GetByName with 68.6% in its RLock atomic, so it measures that ceiling rather
+// than this one. Read this benchmark for this change, and that one for the
+// catgroup finding it exposes.
+func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
+	seedCategoryTaxonomy(b, 12, 40)
+	ps := buildCategoryPolicyStore(50)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if m := ps.Evaluate("203.0.113.7", "", "unauth", "uncategorized.example.net", nil); m != nil {
+				b.Fatalf("expected no match, got %q", m.Rule.Name)
+			}
+		}
+	})
+}

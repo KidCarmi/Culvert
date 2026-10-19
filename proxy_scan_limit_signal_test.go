@@ -542,7 +542,13 @@ func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
 	}
 
 	// With a subscriber the alert must still fire, with its bounded Detail.
-	globalAlertStore.Add(AlertWebhook{URL: "https://example.invalid/h", Events: []string{"scan_skipped"}, Enabled: true})
+	// Loopback, not https://example.invalid: the sink above is a recorder, so
+	// nothing here delivers today, but if a regression ever routed these alerts
+	// to the real dispatcher, a public name would start a DNS lookup that
+	// outlives the test. 127.0.0.1:1 is refused at the SSRF dial guard with no
+	// lookup and no egress. No drain is needed: waitFor(20) already proves
+	// every dispatch this test started has reached the recorder.
+	globalAlertStore.Add(AlertWebhook{URL: "http://127.0.0.1:1/h", Events: []string{"scan_skipped"}, Enabled: true})
 	if delta = fire(); delta != 20 {
 		t.Errorf("ScanSkipped counter delta = %d, want 20 while subscribed", delta)
 	}
