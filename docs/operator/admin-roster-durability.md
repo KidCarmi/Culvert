@@ -201,11 +201,23 @@ administrative decision was affected, and therefore what the operator must redo.
    sticky directory whose owner is neither Culvert nor root, with Culvert not
    root and not the new owner: give the file back to Culvert's account, or
    run Culvert as its owner — an identical re-copy with the same owner, or an
-   owner change in a non-sticky directory, stays `ok`), or when
+   owner change in a non-sticky directory, stays `ok`), when the **directory
+   no longer lets Culvert create and replace files** after the last landed
+   write (a `chmod 0555`, an ACL revocation, or a read-only remount — checked
+   live with `faccessat(W_OK|X_OK, AT_EACCESS)` and `statfs`, never by
+   creating a file; on non-Unix platforms there is no such live check and a
+   refused save is what reports it), when the **storage does not respond**
+   to that check within 2 seconds (a stalled NFS or FUSE mount: persistence
+   is not verified, so the row is not `ok`), or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
-   counts clear on restart. The counts, the remedy and the degraded login-write
-   state are shown to **admins only**: a viewer or operator sees a fixed message
+   counts clear on restart. Everything the row learns from the filesystem
+   comes from one live probe, which runs on its own goroutine with no roster
+   lock held, at most one at a time however many requests arrive, and whose
+   result is reused for 5 seconds while Culvert has not written the roster:
+   a stalled volume costs one blocked check, not one per request, and never
+   delays admin changes or logins. The counts, the remedy and the degraded
+   login-write state are shown to **admins only**: a viewer or operator sees a fixed message
    for "not durable" or "a change was refused", and nothing for a degraded
    login-time write (SEC-DIAG-ROSTER-1).
 

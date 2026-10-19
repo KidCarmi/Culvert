@@ -14,4 +14,4 @@ func ownerOf(os.FileInfo) fileOwnerID { return fileOwnerID{} }
 
 // renameLikelyRefused: there is no POSIX owner here, so an owner change is
 // never reported.
-func renameLikelyRefused(string, fileOwnerID) bool { return false }
+func renameLikelyRefused(os.FileInfo, error, fileOwnerID) bool { return false }

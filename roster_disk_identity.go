@@ -26,27 +26,13 @@ package main
 // (renameLikelyRefused). The inode number and mtime are deliberately NOT part
 // of the identity: an identical re-copy, a touch or a chmod stays ok.
 //
-// No disk I/O happens under saveUIUsersMu (Codex P2 4317730279): on a stalled
-// NFS or FUSE volume a viewer's diagnostics request would otherwise block
-// every roster mutation, TOTP and backup-code logins included. Instead every
-// Culvert roster write brackets itself with uiUsersWriteGen (odd while a
-// write is in progress, seqlock style): the row snapshots the recorded
-// identity and the generation, reads the file with no lock held, and accepts
-// the result only if the generation did not move. A moved generation means a
-// Culvert write raced the read: it retries once, and if the generation moves
-// again it reports the file as in flux (ok) rather than a false "replaced".
-// At most one identity read is in flight at a time (rosterIdentityFlight), so
-// concurrent requests on a stalled volume share one blocked read instead of
-// each starting another.
+// The comparison runs inside the row's one live filesystem probe
+// (roster_probe.go), with no roster lock held: every Culvert roster write
+// brackets itself with uiUsersWriteGen (odd while a write is in progress,
+// seqlock style), and the probe accepts its identity result only if the
+// generation did not move.
 
-import (
-	"bytes"
-	"crypto/sha256"
-	"io"
-	"os"
-	"sync"
-	"syscall"
-)
+import "crypto/sha256"
 
 // rosterWrittenDigest identifies what Culvert last wrote to path. The zero
 // value (path "") means no landed write is recorded.
@@ -75,117 +61,3 @@ const (
 // generation is odd while one is in progress and moves with each.
 func (c *Config) beginRosterWrite() { c.uiUsersWriteGen.Add(1) }
 func (c *Config) endRosterWrite()   { c.uiUsersWriteGen.Add(1) }
-
-// rosterIdentityOpen opens the roster for the identity read. A seam only for
-// tests, which block it to stand in for a stalled volume. O_NONBLOCK: the
-// path is not trusted to still be a regular file.
-var rosterIdentityOpen = func(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- operator-configured -ui-users-file path
-}
-
-// rosterIdentityFlight lets at most one identity read of a given roster be in
-// flight; callers that arrive meanwhile for the same Config and path wait for
-// its result instead of starting their own.
-var rosterIdentityFlight struct {
-	mu      sync.Mutex
-	pending *rosterIdentityCall
-}
-
-type rosterIdentityCall struct {
-	c       *Config
-	path    string
-	done    chan struct{}
-	verdict rosterDiskVerdict
-	err     error
-}
-
-// rosterDiskState reports how the roster file at path compares with what
-// Culvert last wrote to it. It never holds saveUIUsersMu.
-func (c *Config) rosterDiskState(path string) (rosterDiskVerdict, error) {
-	rosterIdentityFlight.mu.Lock()
-	if call := rosterIdentityFlight.pending; call != nil && call.c == c && call.path == path {
-		rosterIdentityFlight.mu.Unlock()
-		<-call.done
-		return call.verdict, call.err
-	}
-	call := &rosterIdentityCall{c: c, path: path, done: make(chan struct{})}
-	owner := rosterIdentityFlight.pending == nil
-	if owner {
-		rosterIdentityFlight.pending = call
-	}
-	rosterIdentityFlight.mu.Unlock()
-
-	call.verdict, call.err = c.rosterDiskStateOnce(path)
-
-	if owner {
-		rosterIdentityFlight.mu.Lock()
-		rosterIdentityFlight.pending = nil
-		rosterIdentityFlight.mu.Unlock()
-	}
-	close(call.done)
-	return call.verdict, call.err
-}
-
-// rosterDiskStateOnce is one generation-checked identity read, retried once
-// if a Culvert write raced it.
-func (c *Config) rosterDiskStateOnce(path string) (rosterDiskVerdict, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		gen := c.uiUsersWriteGen.Load()
-		if gen%2 == 1 {
-			continue // a Culvert write is in progress
-		}
-		c.mu.RLock()
-		d := c.uiUsersWritten
-		c.mu.RUnlock()
-		verdict, err := readRosterIdentity(path, d) // disk I/O: no lock held
-		if c.uiUsersWriteGen.Load() == gen {
-			return verdict, err
-		}
-	}
-	return rosterDiskSame, nil // in flux: Culvert itself is writing it
-}
-
-// readRosterIdentity compares the file at path with d. READ-ONLY.
-func readRosterIdentity(path string, d rosterWrittenDigest) (rosterDiskVerdict, error) {
-	if d.path == "" || d.path != path {
-		return rosterDiskSame, nil
-	}
-	f, err := rosterIdentityOpen(path)
-	if err != nil {
-		return rosterDiskSame, err
-	}
-	defer func() { _ = f.Close() }() // #nosec G104 -- read-only handle
-	fi, err := f.Stat()
-	if err != nil {
-		return rosterDiskSame, err
-	}
-	if !fi.Mode().IsRegular() || fi.Size() != d.size {
-		return rosterDiskReplaced, nil
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, io.LimitReader(f, d.size+1)); err != nil {
-		return rosterDiskSame, err
-	}
-	if !bytes.Equal(h.Sum(nil), d.sum[:]) {
-		return rosterDiskReplaced, nil
-	}
-	if now := ownerOf(fi); d.owner.known && now.known && now.uid != d.owner.uid && renameLikelyRefused(path, now) {
-		return rosterDiskOwnerChanged, nil
-	}
-	return rosterDiskSame, nil
-}
-
-// rosterReplacedProblem is the targetProblem for a roster file that no longer
-// matches what Culvert last wrote, "" when it does (or nothing is recorded).
-func (c *Config) rosterReplacedProblem(path string) string {
-	verdict, err := c.rosterDiskState(path)
-	switch {
-	case err != nil:
-		return "the configured roster path cannot be inspected"
-	case verdict == rosterDiskReplaced:
-		return rosterTargetReplaced
-	case verdict == rosterDiskOwnerChanged:
-		return rosterTargetOwnerChanged
-	}
-	return ""
-}

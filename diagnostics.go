@@ -926,6 +926,22 @@ const rosterTargetReplaced = "the configured roster file on disk no longer match
 	"replaced or edited outside Culvert after Culvert last wrote it, and a restart loads the file as it is now, " +
 	"which may restore revoked accounts or credentials, or drop changes made since"
 
+// rosterTargetNotResponding is the targetProblem when the row's live probe of
+// the roster's storage did not answer within rosterProbeWait (Codex P2
+// 4319224642 on PR #1601): a stalled NFS or FUSE mount. Persistence is not
+// verified, so the row is not ok; the request returns without starting
+// another probe.
+const rosterTargetNotResponding = "the storage holding the configured roster file is not responding (a " +
+	"filesystem check of it did not complete), so it is not verified that admin account changes can be saved"
+
+// rosterParentNotWritable is the targetProblem when the directory holding the
+// roster no longer lets this process create and rename the save's temp file
+// (Codex P2 4319224648 on PR #1601): its mode bits or ACL changed, or the
+// volume was remounted read-only, after the last landed write.
+const rosterParentNotWritable = "the directory holding the configured roster file does not currently let this " +
+	"process create and replace files in it (its permissions or ACL, or a read-only mount), so the next admin " +
+	"account change will be refused when it is saved"
+
 // rosterTargetOwnerChanged is the targetProblem when the roster file still
 // holds exactly what Culvert last wrote, but now belongs to another account in
 // a way that makes the next save's rename be refused (Codex P2 4317730264 on
@@ -960,49 +976,49 @@ const rosterTargetRestoreFailed = "the configured roster file changed on disk du
 	"in the process log), and the roster file and the roster in use are the older version"
 
 // rosterTargetProblem reports why a configured roster path cannot hold the
-// roster, or "" when a write to it is known to land. READ-ONLY: it stats the
-// target and its parent directory and reads the RECORDED write evidence
-// (tried, writeErr — see Config.rosterWriteEvidence); it never creates, opens
-// for writing or modifies anything, so a viewer's GET causes no disk write.
-// The returned reason never names the path.
+// roster, or "" when a write to it is known to land and the save path can
+// still land one now. It is PURE: the filesystem facts come from the row's
+// one live probe (pr, from probeRosterTarget via Config.sharedRosterProbe;
+// responded false when the storage did not answer in time), and the RECORDED
+// write evidence from tried and writeErr (Config.rosterWriteEvidence). The
+// returned reason never names the path.
 //
 // Existence and file type are not evidence of writability (Codex P2s, PR
 // #1601): a readable roster on a read-only bind mount, in a mode-0555
 // directory, or owned by another user in a sticky directory passes both
 // stats, yet the first mutation's rename over it is refused. "" therefore
 // requires a real write to the real target — the boot rewrite or a later save
-// — to have landed since the path was configured.
-func rosterTargetProblem(path string, loadErr error, tried bool, writeErr error) string {
-	if path == "" {
-		return ""
-	}
-	if loadErr != nil {
-		return "the configured roster file could not be loaded at startup"
-	}
-	missing, problem := rosterTargetStat(path)
-	if problem != "" {
-		return problem
-	}
-	return rosterWriteProblem(missing, tried, writeErr)
-}
-
-// rosterTargetStat stats the roster target: whether it is absent (the
-// supported first-run state, under an existing directory), or why it is not a
-// usable regular-file path.
-func rosterTargetStat(path string) (missing bool, problem string) {
-	fi, err := os.Stat(path)
+// — to have landed since the path was configured, the directory to still
+// allow the next one (probeRosterParent), and the file to still hold what
+// was written (probeRosterIdentity).
+func rosterTargetProblem(path string, loadErr error, tried bool, writeErr error, pr rosterProbeResult, responded bool) string {
 	switch {
-	case err == nil && !fi.Mode().IsRegular():
-		return false, "the configured roster path is not a regular file"
-	case err == nil:
-		return false, ""
-	case !os.IsNotExist(err):
-		return false, "the configured roster path cannot be inspected"
+	case path == "":
+		return ""
+	case loadErr != nil:
+		return "the configured roster file could not be loaded at startup"
+	case !responded:
+		return rosterTargetNotResponding
+	case pr.statProblem != "":
+		return pr.statProblem
+	case writeErr != nil:
+		// A recorded refusal names its own cause best.
+		return rosterWriteProblem(pr.missing, tried, writeErr)
+	case pr.parentProblem != "":
+		return pr.parentProblem
 	}
-	if di, err := os.Stat(filepath.Dir(path)); err != nil || !di.IsDir() {
-		return true, "the configured roster file's parent directory does not exist"
+	if p := rosterWriteProblem(pr.missing, tried, nil); p != "" {
+		return p
 	}
-	return true, ""
+	switch {
+	case pr.diskErr != nil:
+		return "the configured roster path cannot be inspected"
+	case pr.disk == rosterDiskReplaced:
+		return rosterTargetReplaced
+	case pr.disk == rosterDiskOwnerChanged:
+		return rosterTargetOwnerChanged
+	}
+	return ""
 }
 
 // rosterWriteProblem renders the recorded write evidence.
@@ -1041,15 +1057,15 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	}
 	path, loadErr := cfg.rosterPersistTarget()
 	tried, writeErr := cfg.rosterWriteEvidence()
-	problem := rosterTargetProblem(path, loadErr, tried, writeErr)
-	if problem == "" && path != "" {
-		// A write landed and the file is there: is it still what was written?
-		problem = cfg.rosterReplacedProblem(path)
+	var pr rosterProbeResult
+	responded := true
+	if path != "" && loadErr == nil {
+		pr, responded = cfg.sharedRosterProbe(path) // the row's only filesystem access
 	}
 	return rosterDurabilityFacts{
 		configured:    true,
 		persisted:     path != "",
-		targetProblem: problem,
+		targetProblem: rosterTargetProblem(path, loadErr, tried, writeErr, pr, responded),
 		localAdmin:    cfg.hasLocalAdministrator(),
 		notDurable:    rosterNotDurable.Load(),
 		refused:       rosterPersistRefused.Load(),
@@ -1109,6 +1125,14 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 			"Administrators and find what changed it. Then either save an admin account change, which writes the " +
 			"roster in use back over the file, or restart to adopt the file as it is now. Until then, a restart " +
 			"silently switches to the file's accounts and credentials."
+	case rosterTargetNotResponding:
+		row.OperatorAction = "Check the volume holding the admin users file (-ui-users-file): a stalled NFS or FUSE " +
+			"mount, or a hung storage backend. Admin account changes and TOTP logins may hang or fail until it " +
+			"responds; the row re-checks on its own once it does, with no restart needed."
+	case rosterParentNotWritable:
+		row.OperatorAction = "Restore write and search permission (mode bits and ACL) on the directory holding the " +
+			"admin users file (-ui-users-file) for the account Culvert runs as, or remount the volume read-write. " +
+			"The row re-checks live, so no restart is needed; re-apply any admin change refused meanwhile."
 	case rosterTargetOwnerChanged:
 		row.OperatorAction = "Give the admin users file (-ui-users-file) back to the account Culvert runs as " +
 			"(chown), or run Culvert as the file's owner and restart. Until then an admin account change may be " +

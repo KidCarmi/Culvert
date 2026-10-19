@@ -1539,7 +1539,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   rename be refused (a sticky directory, Culvert unprivileged). The check
   reads the file with no roster lock held, so a stalled volume cannot block
   admin changes or TOTP logins, and a Culvert save racing it is never reported
-  as a replacement. Every
+  as a replacement. Everything the row learns from the filesystem now comes
+  from one live probe — the target's stat, its identity, and the directory's
+  write capability (`faccessat(W_OK|X_OK, AT_EACCESS)` and `statfs`, so a
+  `chmod 0555`, a revoked ACL or a read-only remount after the last write
+  warns; no file is created) — run on its own goroutine, at most one at a
+  time, reused for 5 s while Culvert has not written the roster, and waited
+  on for at most 2 s, after which the row reports the storage as not
+  responding instead of blocking the request. Every
   `fileutil.AtomicWrite` and the boot rewrite now also report
   `ErrReplacedNotSynced`, rather than success, when the parent directory
   cannot be opened for its `fsync` (for example a `0300` data directory); only
