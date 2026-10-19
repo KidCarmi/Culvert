@@ -43,8 +43,7 @@ func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	}
 	var metaErr error
 	tmp, err := writeTempBeside(op, path, data, orig.Mode().Perm(), func(f *os.File) {
-		preserveOwner(f, orig) // before the attributes: a chown clears security.capability
-		metaErr = preserveXattrs(f, src, orig.Mode().Perm())
+		metaErr = preserveMetadata(f, orig, src)
 	})
 	if err != nil {
 		return err
@@ -154,16 +153,26 @@ func displacedDiffers(tmp string, data []byte, orig os.FileInfo, src xattrSet) s
 	return ""
 }
 
-// preserveOwner gives f the owner and group of orig, best effort. An
-// unprivileged process may not give a file away (EPERM), and that refusal is
-// deliberately ignored: the replacement then carries the process's own
-// ownership, exactly as an AtomicWrite of the same target would.
-func preserveOwner(f *os.File, orig os.FileInfo) {
+// fchown sets f's owner and group. A seam only for this package's white-box
+// tests: they run as root, which may give a file away, so the EPERM an
+// unprivileged process gets is injected.
+var fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
+
+// preserveOwner gives f the owner and group of orig. Unlike a save, the boot
+// rewrite must not change the file's ownership (Codex P2 4316401892 on PR
+// #1601): an unprivileged process that may replace another account's roster
+// (a writable, non-sticky directory) cannot give the replacement away, and
+// exchanging anyway would silently make the roster its own at every boot. So
+// a refused chown is returned, and RewriteInPlace exchanges nothing.
+func preserveOwner(f *os.File, orig os.FileInfo) error {
 	st, ok := orig.Sys().(*syscall.Stat_t)
 	if !ok {
-		return
+		return errors.New("the loaded file's owner is not known")
 	}
-	_ = f.Chown(int(st.Uid), int(st.Gid)) // #nosec G104 -- best-effort; see doc comment
+	if err := fchown(f, int(st.Uid), int(st.Gid)); err != nil {
+		return fmt.Errorf("chown the replacement to %d:%d: %w", st.Uid, st.Gid, err)
+	}
+	return nil
 }
 
 // sameOwner reports whether a and b have the same owner and group.

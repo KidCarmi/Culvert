@@ -136,12 +136,13 @@ func targetXattrs(op, path string, orig os.FileInfo) (xattrSet, error) {
 	return set, nil
 }
 
-// copyXattrs makes the attributes of f — the temp file, already chmodded to
-// perm and chowned — exactly src: it sets every attribute of src (the access
-// ACL last), removes any f inherited that src lacks (a directory's default
-// ACL), and then reads f back, requiring the same attribute set and perm.
-// It reports whether it changed anything on f.
-func copyXattrs(f *os.File, src xattrSet, perm os.FileMode) (bool, error) {
+// copyXattrs makes the attributes of f — the temp file, already chmodded and
+// chowned to match orig — exactly src: it sets every attribute of src (the
+// access ACL last), removes any f inherited that src lacks (a directory's
+// default ACL), and then reads f back, requiring the same attribute set,
+// permission bits, owner and group as orig. It reports whether it changed
+// any attribute on f.
+func copyXattrs(f *os.File, src xattrSet, orig os.FileInfo) (bool, error) {
 	fd := int(f.Fd())
 	for _, name := range xattrSetOrder(src) {
 		if err := fsetxattr(fd, name, src[name]); err != nil {
@@ -172,8 +173,12 @@ func copyXattrs(f *os.File, src xattrSet, perm os.FileMode) (bool, error) {
 	if err != nil {
 		return changed, fmt.Errorf("stat the replacement: %w", err)
 	}
-	if fi.Mode().Perm() != perm {
-		return changed, fmt.Errorf("the replacement's permission bits are %v after copying, want %v", fi.Mode().Perm(), perm)
+	if fi.Mode().Perm() != orig.Mode().Perm() {
+		return changed, fmt.Errorf("the replacement's permission bits are %v after copying, want %v",
+			fi.Mode().Perm(), orig.Mode().Perm())
+	}
+	if !sameOwner(fi, orig) {
+		return changed, errors.New("the replacement's owner or group differs from the target's")
 	}
 	return changed, nil
 }
@@ -193,11 +198,17 @@ func xattrSetOrder(src xattrSet) []string {
 	return names
 }
 
-// preserveXattrs is RewriteInPlace's metadata step on the open temp file: it
-// copies src onto f and, if that changed f, fsyncs it again so the attributes
-// are as durable as the bytes. A copy failure wraps ErrMetadataNotPreservable.
-func preserveXattrs(f *os.File, src xattrSet, perm os.FileMode) error {
-	changed, err := copyXattrs(f, src, perm)
+// preserveMetadata is RewriteInPlace's metadata step on the open temp file,
+// after its chmod: it gives f orig's owner and group (first, because a chown
+// clears security.capability), copies src onto it, verifies the result
+// exactly, and, if an attribute changed, fsyncs f again so the metadata is as
+// durable as the bytes. A failure to preserve ownership or attributes wraps
+// ErrMetadataNotPreservable.
+func preserveMetadata(f *os.File, orig os.FileInfo, src xattrSet) error {
+	if err := preserveOwner(f, orig); err != nil {
+		return fmt.Errorf("preserve owner and group: %w: %w", err, ErrMetadataNotPreservable)
+	}
+	changed, err := copyXattrs(f, src, orig)
 	if err != nil {
 		return fmt.Errorf("preserve extended attributes: %w: %w", err, ErrMetadataNotPreservable)
 	}

@@ -11,9 +11,8 @@ package main
 // mutation would be refused while the row read "persisting to disk".
 //
 // So LoadUIUsersFile writes the roster back once, in place, with the exact
-// bytes it just parsed and the file's own mode (owner and group preserved
-// where the process may set them), through fileutil.RewriteInPlace. Its
-// outcome is the row's evidence.
+// bytes it just parsed and the file's own mode, owner and group, through
+// fileutil.RewriteInPlace. Its outcome is the row's evidence.
 //
 // The rewrite must never destroy content it did not load (Codex P2
 // 4315243806 on PR #1601). saveUIUsersMu serialises only Culvert's own
@@ -31,10 +30,12 @@ package main
 // until the first save lands.
 //
 // The rewrite must not change the roster's security metadata either (Codex
-// P2 4316064806 on PR #1601): RewriteInPlace copies every extended attribute
-// (POSIX ACL, SELinux label, user.*) onto the replacement and compares them
-// after the exchange; if one cannot be copied it replaces nothing
-// (ErrMetadataNotPreservable) and the row stays "not verified" the same way.
+// P2s 4316064806 and 4316401892 on PR #1601): RewriteInPlace gives the
+// replacement the roster's owner and group and every extended attribute
+// (POSIX ACL, SELinux label, user.*), and compares them after the exchange;
+// if any cannot be kept (an unprivileged process cannot give the replacement
+// to another account) it replaces nothing (ErrMetadataNotPreservable) and the
+// row stays "not verified" the same way.
 //
 // Exact bytes
 // rather than SaveUIUsersFile's re-serialisation, because that is not a pure
@@ -53,7 +54,8 @@ package main
 // line below says what to fix.
 //
 // On Linux the file gets a new inode and mtime at every boot (as at every
-// save). Its content, permission bits and extended attributes do not change.
+// save). Its content, permission bits, owner, group and extended attributes
+// do not change.
 
 import (
 	"errors"
@@ -125,8 +127,8 @@ func rewriteLoadedRoster(path string, loaded *loadedRosterFile) error {
 			"exchange, and a plain replace could destroy a concurrent change, so whether admin account changes "+
 			"can be saved is unverified until the first one is", path, err)
 	case errors.Is(err, fileutil.ErrMetadataNotPreservable):
-		logRosterBootRewrite("was not rewritten in place at startup: its extended attributes or ACL could not be "+
-			"copied exactly to the replacement, and a rewrite must not change the file's security metadata, so "+
+		logRosterBootRewrite("was not rewritten in place at startup: its owner, group, extended attributes or ACL "+
+			"could not be kept exactly on the replacement, and a rewrite must not change the file's security metadata, so "+
 			"nothing was replaced and whether admin account changes can be saved is unverified until the first one is",
 			path, err)
 	case errors.Is(err, fileutil.ErrExchangeBackFailed):

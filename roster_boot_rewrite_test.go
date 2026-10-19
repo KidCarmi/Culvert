@@ -445,7 +445,7 @@ func TestLoadUIUsersFile_UncopyableMetadataIsUnverified(t *testing.T) {
 	if strings.Contains(row.Message+row.OperatorAction, path) {
 		t.Errorf("row names the path: %+v", row)
 	}
-	if n := strings.Count(out, "extended attributes or ACL could not be copied"); n != 1 {
+	if n := strings.Count(out, "extended attributes or ACL could not be kept"); n != 1 {
 		t.Errorf("logged %d metadata line(s), want exactly 1:\n%s", n, out)
 	}
 	_, viewer := durabilityRowAt(t, RoleViewer)

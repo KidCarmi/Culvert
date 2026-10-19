@@ -7,8 +7,12 @@ import "errors"
 // evidence that a later AtomicWrite to the same target can land: replacing
 // the real target is the step a read-only mount, a sticky directory or an
 // ACL-restricted directory refuses to a non-owner, which no scratch-file test
-// reproduces. The temp file carries orig's permission bits and, best effort,
-// its owner and group.
+// reproduces. The temp file carries orig's permission bits, owner and group.
+// Ownership is not best effort (Codex P2 4316401892 on PR #1601): a process
+// that may replace another account's file (a writable, non-sticky directory)
+// but not give the replacement away would otherwise take the file over, so a
+// refused or ineffective chown means nothing is exchanged and
+// ErrMetadataNotPreservable is returned, wrapping the chown error.
 //
 // It must never change the file's security metadata either (Codex P2
 // 4316064806 on PR #1601). A new inode carries no extended attributes, so a
@@ -69,9 +73,10 @@ var (
 	// the newer file to the target failed. The newer content is preserved at
 	// the temp path named in the error, which is left in place.
 	ErrExchangeBackFailed = errors.New("rewrite in place: a concurrent change was detected and could not be restored to the target")
-	// ErrMetadataNotPreservable means the target carries an extended attribute
-	// (an ACL, a security label, a user attribute) that could not be read or
-	// copied exactly onto the replacement, so RewriteInPlace exchanged nothing
-	// (the target is untouched) and the caller has no write evidence.
-	ErrMetadataNotPreservable = errors.New("rewrite in place: the file's extended attributes or ACL could not be preserved exactly; nothing was replaced")
+	// ErrMetadataNotPreservable means the target's owner and group, or an
+	// extended attribute (an ACL, a security label, a user attribute), could
+	// not be read or set exactly on the replacement, so RewriteInPlace
+	// exchanged nothing (the target is untouched) and the caller has no write
+	// evidence.
+	ErrMetadataNotPreservable = errors.New("rewrite in place: the file's owner, group, extended attributes or ACL could not be preserved exactly; nothing was replaced")
 )

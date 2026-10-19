@@ -435,9 +435,9 @@ func TestRewriteInPlace_NotifiesNoObserver(t *testing.T) {
 }
 
 // TestRewriteInPlace_PreservesOwnerWherePermitted: a privileged process keeps
-// the original owner and group; an unprivileged one cannot give a file away,
-// so the rewrite still succeeds and the file carries the process's own uid,
-// exactly as an AtomicWrite of the same target would.
+// another account's owner and group; an unprivileged one rewriting its own
+// file keeps its own. Where the owner cannot be kept, nothing is exchanged:
+// see TestRewriteInPlace_UnpreservableOwnerIsNotExchanged.
 func TestRewriteInPlace_PreservesOwnerWherePermitted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ui_users.json")
 	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
@@ -472,4 +472,135 @@ func TestRewriteInPlace_PreservesOwnerWherePermitted(t *testing.T) {
 	if st.Uid != wantUID || st.Gid != wantGID {
 		t.Errorf("owner %d:%d after rewrite, want %d:%d (privileged=%v)", st.Uid, st.Gid, wantUID, wantGID, privileged)
 	}
+}
+
+// foreignOwnedFixture is rewriteFixture with the roster owned by another
+// account (nobody/nogroup), which only root can arrange.
+func foreignOwnedFixture(t *testing.T, loaded []byte) (path string, fi os.FileInfo) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to give the fixture to another account")
+	}
+	path, _ = rewriteFixture(t, loaded)
+	const otherID = 65534
+	if err := os.Chown(path, otherID, otherID); err != nil {
+		t.Fatalf("chown fixture: %v", err)
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, fi
+}
+
+func setFchown(t *testing.T, fn func(f *os.File, uid, gid int) error) {
+	t.Helper()
+	prev := fchown
+	fchown = fn
+	t.Cleanup(func() { fchown = prev })
+}
+
+// countExchanges wraps the kernel exchange and counts the calls.
+func countExchanges(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	kernelExchange := renameExchange
+	var n atomic.Int32
+	setRenameExchange(t, func(a, b string) error {
+		n.Add(1)
+		return kernelExchange(a, b)
+	})
+	return &n
+}
+
+// assertUntouched: the target is still the loaded inode, with its owner,
+// group, mode and bytes, and no temp file is left beside it.
+func assertUntouched(t *testing.T, path string, fi os.FileInfo, loaded []byte) {
+	t.Helper()
+	cur, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(fi, cur) || !sameOwner(fi, cur) || cur.Mode() != fi.Mode() {
+		t.Errorf("the target changed: %v %v -> %v %v", fi.Mode(), fi.Sys(), cur.Mode(), cur.Sys())
+	}
+	if !bytes.Equal(readFileT(t, path), loaded) {
+		t.Error("content changed")
+	}
+	assertOnlyTarget(t, path)
+}
+
+// TestRewriteInPlace_UnpreservableOwnerIsNotExchanged is the Codex P2
+// 4316401892 gate: an unprivileged process may replace another account's
+// roster in a writable, non-sticky directory but cannot give the replacement
+// away (EPERM, injected here because the tests run as root). The rewrite must
+// then exchange nothing rather than silently take the roster over. Ignoring
+// the chown error fails this test.
+func TestRewriteInPlace_UnpreservableOwnerIsNotExchanged(t *testing.T) {
+	loaded := []byte(`{"users":[]}`)
+	var path string
+	var fi os.FileInfo
+	if os.Geteuid() == 0 {
+		path, fi = foreignOwnedFixture(t, loaded) // the reported case: another account's roster
+	} else {
+		path, fi = rewriteFixture(t, loaded)
+	}
+	setFchown(t, func(*os.File, int, int) error { return syscall.EPERM })
+	exchanges := countExchanges(t)
+
+	err := RewriteInPlace(path, loaded, fi)
+	if !errors.Is(err, ErrMetadataNotPreservable) || !errors.Is(err, syscall.EPERM) || errors.Is(err, ErrConcurrentChange) {
+		t.Fatalf("err = %v, want ErrMetadataNotPreservable wrapping EPERM", err)
+	}
+	if n := exchanges.Load(); n != 0 {
+		t.Errorf("%d exchange(s) ran although the owner could not be preserved", n)
+	}
+	assertUntouched(t, path, fi, loaded)
+}
+
+// TestRewriteInPlace_OwnerIsVerifiedAfterChown: a chown that reports success
+// but leaves the replacement with another owner (here a no-op) is caught by
+// the read-back, so nothing is exchanged. Dropping the owner read-back fails
+// this test.
+func TestRewriteInPlace_OwnerIsVerifiedAfterChown(t *testing.T) {
+	loaded := []byte(`{"users":[]}`)
+	path, fi := foreignOwnedFixture(t, loaded)
+	setFchown(t, func(*os.File, int, int) error { return nil })
+	exchanges := countExchanges(t)
+
+	if err := RewriteInPlace(path, loaded, fi); !errors.Is(err, ErrMetadataNotPreservable) {
+		t.Fatalf("err = %v, want ErrMetadataNotPreservable", err)
+	}
+	if n := exchanges.Load(); n != 0 {
+		t.Errorf("%d exchange(s) ran although the replacement has another owner", n)
+	}
+	assertUntouched(t, path, fi, loaded)
+}
+
+// TestRewriteInPlace_ConcurrentChownIsSwappedBack: another process changing
+// the roster's owner just before the exchange is a metadata change like any
+// other, so the exchange is undone and the original inode, with the new
+// owner, is back at the target.
+func TestRewriteInPlace_ConcurrentChownIsSwappedBack(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to change the fixture's owner")
+	}
+	loaded := []byte(`{"users":[]}`)
+	path, fi := rewriteFixture(t, loaded)
+	setRewriteHooks(t, func(string) {
+		if err := os.Chown(path, 65534, 65534); err != nil {
+			t.Error(err)
+		}
+	}, nil)
+	if err := RewriteInPlace(path, loaded, fi); !errors.Is(err, ErrConcurrentChange) {
+		t.Fatalf("err = %v, want ErrConcurrentChange", err)
+	}
+	cur, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := cur.Sys().(*syscall.Stat_t)
+	if !os.SameFile(fi, cur) || !ok || st.Uid != 65534 {
+		t.Errorf("the chowned original was not swapped back: %v", cur.Sys())
+	}
+	assertOnlyTarget(t, path)
 }

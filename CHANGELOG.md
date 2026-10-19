@@ -1488,8 +1488,8 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
   Admin Users panel hint and are deliberately absent from `/api/stats`.
 - On Linux, `ui_users.json` is now **rewritten in place once at every boot**,
-  after it loads: the exact bytes read, the file's own mode (owner and group
-  where the process may set them), written to a temp file that is atomically
+  after it loads: the exact bytes read, the file's own mode, owner and group,
+  written to a temp file that is atomically
   exchanged with the roster (`renameat2` `RENAME_EXCHANGE`,
   `fileutil.RewriteInPlace`). Content is unchanged, but the file gets a new
   inode and mtime at each start. This write is the `admin_roster_durability`
@@ -1503,12 +1503,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   configuration manager's or operator's concurrent change is swapped straight
   back (row `warn`, restart to load it); if that swap fails, the newer content
   is kept in a `ui_users.json.tmp.*` file the log names. The rewrite also
-  **keeps the file's security metadata**: every extended attribute — a POSIX
+  **keeps the file's security metadata**: its owner and group (an
+  unprivileged process that cannot give the replacement to the roster's
+  owning account does not rewrite it), and every extended attribute — a POSIX
   ACL (`system.posix_acl_access`), an SELinux label (`security.selinux`),
   `user.*` and other attributes — is copied onto the replacement (an ACL the
   temp inherited from the directory's default ACL is removed) and read back
   before the exchange, and the displaced file's attributes are part of the
-  concurrent-change comparison. If any attribute cannot be read or copied,
+  concurrent-change comparison. If the owner or any attribute cannot be kept,
   nothing is replaced, one log line names it, and the row is `warn` (*not
   proven that admin account changes can be saved*) until the first admin
   change is saved. Without an atomic
