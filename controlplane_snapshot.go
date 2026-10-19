@@ -860,17 +860,19 @@ func applySnapshotBlocklist(snap ConfigSnapshot) {
 // applySnapshotAdmission applies the IP filter and rate-limit settings before
 // the remaining traffic configuration, shared by full and delta snapshots.
 func applySnapshotAdmission(snap ConfigSnapshot) {
-	// IP filter.
-	newIPF := newIPFilter()
-	newIPF.SetMode(snap.IPFilterMode)
-	// Bulk load: one pass, one view publish. An Add loop is quadratic in the
-	// entry count, and this list's snapshot cap is maxSnapIPList (2,000,000),
-	// so a large allowlist would stall the snapshot apply. Invalid entries are
-	// reported after the lock is released.
-	for _, bad := range newIPF.AddAll(snap.IPList) {
+	// IP filter: replace the live owner's contents IN PLACE. The request path
+	// (proxy.go / socks5.go) reads the ipf composition handle with no
+	// synchronisation, so the previous `ipf = newIPF` swap was a data race on
+	// the first admission gate (RISK-030); the owner already publishes an
+	// immutable view through an atomic pointer, which is the synchronisation
+	// the readers rely on. Replace is one pass, one lock, one view publish: an
+	// Add loop is quadratic in the entry count, and this list's snapshot cap is
+	// maxSnapIPList (2,000,000), so a large allowlist would stall the apply.
+	// Invalid entries are reported after the lock is released. Pinned by
+	// TestRISK030_* (controlplane_snapshot_ipf_race_test.go).
+	for _, bad := range ipf.Replace(snap.IPFilterMode, snap.IPList) {
 		logger.Printf("DataPlane: invalid IP %q: %v", bad.Entry, bad.Err)
 	}
-	ipf = newIPF
 
 	// Rate limiter.
 	if snap.RateLimitRPM != rl.Limit() {
