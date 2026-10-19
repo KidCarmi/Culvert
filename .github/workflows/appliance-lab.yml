@@ -1818,12 +1818,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      OVA_ARTIFACT_ID: "11666266481"   # appliance-lab-ova-candidate-bad788e54ffe, run 38040972664
-      OVA_SHA256: 87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c
-      SOURCE_IMAGE_RUN_ID: "38040017115"
-      SOURCE_IMAGE_TAR_SHA256: b1d63190dec3f45a733fc78e40fd4f844390f4b918c66c9f1ae3f573d6835790
-      IMAGE_ID: sha256:ac1909ec95d7588a86737cfa6d8927b0e7c04a5fe12891706eec86591dbb2ad7
-      SRC_SHA: bad788e54ffef2a2f8490ba27ebfe027a2a6eb11
+      # Canonical #1528 candidate (appliance-lab-ova-candidate-246cb73d, run
+      # 39140010708 — the operator-status deadline-fix candidate). Same pins the
+      # F-P2/sidecar jobs and the workflow-level env carry; the app image id is
+      # the OVA's baked app (9d30a157, proven by the agent-identity job).
+      OVA_ARTIFACT_ID: "12141566476"   # appliance-lab-ova-candidate-246cb73d, run 39140010708
+      OVA_SHA256: b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a
+      SOURCE_IMAGE_RUN_ID: "39134155144"
+      SOURCE_IMAGE_TAR_SHA256: 7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e
+      IMAGE_ID: sha256:9d30a157cb925de6628db1a9e3e5f70e308cc9b1f8f8a918117a7e8275f3bc16
+      SRC_SHA: 246cb73d4b62d7a4baf2fcb8558ad8622657529a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -1972,7 +1976,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-bad788e54ffe
+          name: appliance-lab-exact-scan-246cb73d
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
