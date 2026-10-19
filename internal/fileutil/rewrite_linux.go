@@ -33,7 +33,8 @@ var rewriteHooks struct {
 	afterExchange  func(tmp string)
 }
 
-// RewriteInPlace: see rewrite.go.
+// RewriteInPlace writes the loaded data back onto path by exchange, never
+// over a concurrent change; the full contract is in rewrite.go.
 func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	const op = "rewrite in place"
 	tmp, err := writeTempBeside(op, path, data, orig.Mode().Perm(), func(f *os.File) {

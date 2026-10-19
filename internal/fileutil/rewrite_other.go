@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-// RewriteInPlace: see rewrite.go. Without renameat2's RENAME_EXCHANGE there is
+// RewriteInPlace writes nothing here (the contract is in rewrite.go). Without renameat2's RENAME_EXCHANGE there is
 // no way to replace path that cannot destroy a concurrent external change, so
 // nothing is written and the caller has no write evidence.
 func RewriteInPlace(path string, _ []byte, _ os.FileInfo) error {

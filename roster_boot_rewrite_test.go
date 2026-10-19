@@ -283,55 +283,60 @@ func TestLoadUIUsersFile_BootRewriteNeverDestroysAConcurrentChange(t *testing.T)
 		},
 	}
 	for name, write := range cases {
-		t.Run(name, func(t *testing.T) {
-			path, user, _ := seedRosterFileForBoot(t)
-			newer := []byte(`{"users":[],"default_auth_outcome":"Default"}`) // the revocation of user
-			c := configuredRosterCfg(t, false)
-			swapCfgForRosterDurability(t, c)
-			prev := rosterRewriteInPlace
-			rosterRewriteInPlace = func(p string, d []byte, fi os.FileInfo) error {
-				write(t, p, newer)
-				return prev(p, d, fi)
-			}
-			t.Cleanup(func() { rosterRewriteInPlace = prev })
+		t.Run(name, func(t *testing.T) { assertBootRewriteKeepsNewer(t, write) })
+	}
+}
 
-			c.SetUIUsersFile(path)
-			out := captureLogger(t, func() {
-				if err := c.LoadUIUsersFile(); err != nil {
-					t.Fatalf("LoadUIUsersFile: %v", err)
-				}
-			})
+// assertBootRewriteKeepsNewer boots a roster while write lands an external
+// change just before the rewrite's write step, and checks the outcome.
+func assertBootRewriteKeepsNewer(t *testing.T, write func(t *testing.T, path string, newer []byte)) {
+	t.Helper()
+	path, user, _ := seedRosterFileForBoot(t)
+	newer := []byte(`{"users":[],"default_auth_outcome":"Default"}`) // the revocation of user
+	c := configuredRosterCfg(t, false)
+	swapCfgForRosterDurability(t, c)
+	prev := rosterRewriteInPlace
+	rosterRewriteInPlace = func(p string, d []byte, fi os.FileInfo) error {
+		write(t, p, newer)
+		return prev(p, d, fi)
+	}
+	t.Cleanup(func() { rosterRewriteInPlace = prev })
 
-			if got, _ := os.ReadFile(path); !bytes.Equal(got, newer) { // #nosec G304 -- test temp path
-				t.Fatalf("the newer roster was overwritten by the boot rewrite: disk holds %q", got)
-			}
-			if !loadedHasUser(c, user) {
-				t.Errorf("the roster loaded before the change is not the one in use")
-			}
-			if _, werr := c.rosterWriteEvidence(); !errors.Is(werr, fileutil.ErrConcurrentChange) {
-				t.Errorf("evidence error = %v, want ErrConcurrentChange", werr)
-			}
-			row := checkAdminRosterDurability()
-			if row.Status != diagWarn || row.Message != rosterTargetChangedAtBoot {
-				t.Errorf("row = %+v, want warn %q", row, rosterTargetChangedAtBoot)
-			}
-			if !strings.Contains(row.OperatorAction, "Restart") {
-				t.Errorf("action = %q, want the restart-to-load remedy", row.OperatorAction)
-			}
-			if n := strings.Count(out, "changed on disk while it was loaded at startup"); n != 1 {
-				t.Errorf("logged %d concurrent-change line(s), want exactly 1:\n%s", n, out)
-			}
-			if want := fmt.Sprintf("%q", sanitizeLog(path)); !strings.Contains(out, want) {
-				t.Errorf("log does not name the path as %s:\n%s", want, out)
-			}
-			entries, err := os.ReadDir(filepath.Dir(path))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(entries) != 1 {
-				t.Errorf("%d directory entries after the rewrite, want only the roster", len(entries))
-			}
-		})
+	c.SetUIUsersFile(path)
+	out := captureLogger(t, func() {
+		if err := c.LoadUIUsersFile(); err != nil {
+			t.Fatalf("LoadUIUsersFile: %v", err)
+		}
+	})
+
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, newer) { // #nosec G304 -- test temp path
+		t.Fatalf("the newer roster was overwritten by the boot rewrite: disk holds %q", got)
+	}
+	if !loadedHasUser(c, user) {
+		t.Errorf("the roster loaded before the change is not the one in use")
+	}
+	if _, werr := c.rosterWriteEvidence(); !errors.Is(werr, fileutil.ErrConcurrentChange) {
+		t.Errorf("evidence error = %v, want ErrConcurrentChange", werr)
+	}
+	row := checkAdminRosterDurability()
+	if row.Status != diagWarn || row.Message != rosterTargetChangedAtBoot {
+		t.Errorf("row = %+v, want warn %q", row, rosterTargetChangedAtBoot)
+	}
+	if !strings.Contains(row.OperatorAction, "Restart") {
+		t.Errorf("action = %q, want the restart-to-load remedy", row.OperatorAction)
+	}
+	if n := strings.Count(out, "changed on disk while it was loaded at startup"); n != 1 {
+		t.Errorf("logged %d concurrent-change line(s), want exactly 1:\n%s", n, out)
+	}
+	if want := fmt.Sprintf("%q", sanitizeLog(path)); !strings.Contains(out, want) {
+		t.Errorf("log does not name the path as %s:\n%s", want, out)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("%d directory entries after the rewrite, want only the roster", len(entries))
 	}
 }
 

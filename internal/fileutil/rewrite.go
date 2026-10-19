@@ -40,14 +40,14 @@ import "errors"
 // only the parent-directory fsync failed.
 
 var (
-	// ErrRewriteUnsupported: no atomic exchange is available here, so
+	// ErrRewriteUnsupported means no atomic exchange is available here, so
 	// RewriteInPlace wrote nothing (the target is untouched).
 	ErrRewriteUnsupported = errors.New("rewrite in place: atomic exchange not supported on this platform or filesystem")
-	// ErrConcurrentChange: the target was not the content the caller loaded
+	// ErrConcurrentChange means the target was not the content the caller loaded
 	// when the exchange ran; the newer file was restored to the target (or
 	// was never displaced) and the rewrite is not evidence of anything.
 	ErrConcurrentChange = errors.New("rewrite in place: the target changed concurrently; the newer file was kept")
-	// ErrExchangeBackFailed: a concurrent change was detected but restoring
+	// ErrExchangeBackFailed means a concurrent change was detected but restoring
 	// the newer file to the target failed. The newer content is preserved at
 	// the temp path named in the error, which is left in place.
 	ErrExchangeBackFailed = errors.New("rewrite in place: a concurrent change was detected and could not be restored to the target")

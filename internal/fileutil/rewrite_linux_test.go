@@ -17,9 +17,9 @@ import (
 // rewriteFixture writes loaded to dir/ui_users.json at mode 0640 (not
 // AtomicWrite's usual 0600, so a preserved mode is distinguishable) and
 // returns the path and its FileInfo, as a caller that just read it holds.
-func rewriteFixture(t *testing.T, loaded []byte) (string, os.FileInfo) {
+func rewriteFixture(t *testing.T, loaded []byte) (path string, fi os.FileInfo) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "ui_users.json")
+	path = filepath.Join(t.TempDir(), "ui_users.json")
 	if err := os.WriteFile(path, loaded, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -126,12 +126,7 @@ func TestRewriteInPlace_SameBytesSameModeNewInode(t *testing.T) {
 func TestRewriteInPlace_NeverDestroysAConcurrentChange(t *testing.T) {
 	loaded := []byte(`{"users":[{"username":"old"}]}`)
 	newer := []byte(`{"users":[]}`) // e.g. the revocation of "old"
-	cases := []struct {
-		name   string
-		before func(t *testing.T, path string, held **os.File)
-		after  func(t *testing.T, path string, held *os.File)
-		check  func(t *testing.T, path string)
-	}{
+	cases := []concurrentChangeCase{
 		{
 			name:   "atomic replace before the exchange",
 			before: func(t *testing.T, path string, _ **os.File) { replaceAtomically(t, path, newer) },
@@ -191,33 +186,46 @@ func TestRewriteInPlace_NeverDestroysAConcurrentChange(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			path, fi := rewriteFixture(t, loaded)
-			var held *os.File
-			setRewriteHooks(t,
-				func(string) {
-					if tc.before != nil {
-						tc.before(t, path, &held)
-					}
-				},
-				func(string) {
-					if tc.after != nil {
-						tc.after(t, path, held)
-					}
-				})
-
-			err := RewriteInPlace(path, loaded, fi)
-			if !errors.Is(err, ErrConcurrentChange) {
-				t.Fatalf("err = %v, want ErrConcurrentChange", err)
-			}
-			if tc.check != nil {
-				tc.check(t, path)
-			} else if got := readFileT(t, path); !bytes.Equal(got, newer) {
-				t.Errorf("the newer roster was destroyed: target holds %q, want %q", got, newer)
-			}
-			assertOnlyTarget(t, path)
-		})
+		t.Run(tc.name, func(t *testing.T) { runConcurrentChangeCase(t, tc, loaded, newer) })
 	}
+}
+
+// concurrentChangeCase is one external writer: what it does just before the
+// exchange (it may keep a descriptor in held), just after it, and an optional
+// check replacing the default "the target holds newer".
+type concurrentChangeCase struct {
+	name   string
+	before func(t *testing.T, path string, held **os.File)
+	after  func(t *testing.T, path string, held *os.File)
+	check  func(t *testing.T, path string)
+}
+
+func runConcurrentChangeCase(t *testing.T, tc concurrentChangeCase, loaded, newer []byte) {
+	t.Helper()
+	path, fi := rewriteFixture(t, loaded)
+	var held *os.File
+	setRewriteHooks(t,
+		func(string) {
+			if tc.before != nil {
+				tc.before(t, path, &held)
+			}
+		},
+		func(string) {
+			if tc.after != nil {
+				tc.after(t, path, held)
+			}
+		})
+
+	err := RewriteInPlace(path, loaded, fi)
+	if !errors.Is(err, ErrConcurrentChange) {
+		t.Fatalf("err = %v, want ErrConcurrentChange", err)
+	}
+	if tc.check != nil {
+		tc.check(t, path)
+	} else if got := readFileT(t, path); !bytes.Equal(got, newer) {
+		t.Errorf("the newer roster was destroyed: target holds %q, want %q", got, newer)
+	}
+	assertOnlyTarget(t, path)
 }
 
 // TestRewriteInPlace_RemovedTargetIsNotResurrected: a roster deleted after it
@@ -261,13 +269,13 @@ func TestRewriteInPlace_ReplacedTargetAfterExchangeIsKept(t *testing.T) {
 func TestRewriteInPlace_ExchangeBackFailurePreservesTheNewerFile(t *testing.T) {
 	loaded, newer := []byte("{\"v\":1}"), []byte("{\"v\":2}")
 	path, fi := rewriteFixture(t, loaded)
-	real := renameExchange
+	kernelExchange := renameExchange
 	var calls atomic.Int32
 	setRenameExchange(t, func(a, b string) error {
 		if calls.Add(1) == 2 {
 			return &os.LinkError{Op: "renameat2 exchange", Old: a, New: b, Err: syscall.EIO}
 		}
-		return real(a, b)
+		return kernelExchange(a, b)
 	})
 	setRewriteHooks(t, func(string) { replaceAtomically(t, path, newer) }, nil)
 
