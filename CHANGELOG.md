@@ -1117,6 +1117,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- A panic in either of the release-dispatch plane's detached worker goroutines
+  no longer takes the appliance down, and no longer reports an upgrade that
+  never started as a success (CHAOS-75). `POST /api/releases/dispatch` and
+  `.../dispatch/resume` hand the upgrade to a goroutine that outlives its
+  request — correctly, since the 202 ships before the watch finishes — and
+  neither goroutine had a panic tap, so a fault anywhere under
+  `DispatchService` killed the proxy data plane, the admin plane and `/healthz`
+  together from one authenticated admin POST.
+
+  Containment alone would have made it worse, which is the part that shaped the
+  fix. The worker's only `defer` was `close(done)`, and a defer fires *during*
+  unwinding — before the outcome assignment lands — so a panicking worker woke
+  the parked handler on a zero report/error pair and `respondPreApply` fell
+  through to its `default` arm: **`200 {"status":"ok"}`** for an upgrade that
+  never started. That false success shipped in 6 of 30 runs against the
+  pre-fix tree before the process died; with the panic merely contained it
+  shipped in 10 of 10, because the process now survives to deliver it.
+
+  Both workers now run under `runGuarded` (the existing background-worker
+  primitive, so the panic lands on `culvert_crash_records_total{component}`
+  under the new `release_dispatch` / `release_resume` labels, plus a
+  `system`-actor `panic_recovered` audit entry), and the panic is converted
+  into an explicit outcome rather than a silent one: **HTTP 500
+  `{"status":"internal_error"}`** when no op had started, or a
+  `FAILED_NEEDS_ATTN` status record over the live `op_id` — telling the
+  operator to *resume*, not re-dispatch — when the agent had already accepted
+  the apply. A no-outcome pair is now rejected ahead of `respondPreApply`'s
+  switch independently of that, so a future detached writer cannot reproduce
+  the 200. No route, request body, or successful-response shape changes.
+
+  Left open with the reasoning recorded in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §43: `DispatchResumeContext` is
+  documented as a persistable restart-recovery record but lives only in an
+  in-memory map, so a restart mid-upgrade still loses the `op_id` and recovery
+  degrades to hand-assembling a `resume_context` from the audit trail.
+
 - `GET /api/diagnostics` now carries a `saas_feed` row when the signed SaaS feed
   is stale, failing to refresh, waiting for authority, or critical. Previously
   that state was visible only on `/ready` and the Signed SaaS Feed tab, so the
