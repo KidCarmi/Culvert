@@ -18,13 +18,17 @@ package main
 //     - ConfigSnapshot — stamped; DPs reject snapshots below their
 //       last-seen epoch and ratchet forward otherwise.
 //
-//   DELIBERATELY NOT FENCED (telemetry aggregation, not authority):
+//   NOT EPOCH-FENCED (telemetry aggregation, not authority):
 //     - PushMetrics / SyncRateLimits / PushAuditEvents — DP→CP telemetry;
-//       accepting these on a zombie wastes memory but grants nothing. The
-//       PushMetrics REPLY carries the epoch so DPs learn it on every
-//       heartbeat.
+//       accepting these on a zombie would grant nothing. The PushMetrics
+//       REPLY carries the epoch so DPs learn it on every heartbeat.
 //     - GetConfig — reads are epoch-checked on the DP side (the snapshot
-//       carries the stamp), which is stronger than gating the serve.
+//       carries the stamp).
+//   Separately from epoch fencing, with HA enabled EVERY ConfigService
+//   method (these included) is leader-gated by role at the server
+//   (gatedUnary / cpRPCPolicies in controlplane_server.go, CHAOS-71): a
+//   standby or self-fenced node refuses with a retriable Unavailable so DPs
+//   fail over, requeueing refused audit batches for the new leader.
 //
 // Epoch semantics: 0 = no fencing information (legacy mode / standalone) —
 // checks pass. A positive epoch only ever ratchets forward.
@@ -35,7 +39,75 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 )
+
+// setLeaseEpochLocked records the epoch of our current grant (0 = not held)
+// and refreshes the lock-free mirror. Caller holds h.mu (write).
+func (h *HAState) setLeaseEpochLocked(epoch int64) {
+	h.leaseEpoch = epoch
+	h.syncFenceEpochLocked()
+}
+
+// grantedLeaseEpoch is the epoch of the grant an acquisition just took, or 0
+// when it took none (denied, unknown, or legacy mode). Read right after a
+// granted acquire: while that grant is live every other Acquire is denied, so
+// no other path can have replaced the epoch in between.
+func (h *HAState) grantedLeaseEpoch(granted bool) int64 {
+	if !granted {
+		return 0
+	}
+	return h.CurrentEpoch()
+}
+
+// clearLeaseGrantLocked drops the LOCAL state of a grant (epoch) that an
+// acquisition took but its caller is not installing: a resume whose
+// revalidation failed, a resume claimed by shutdown or a live HA transition, a
+// promotion whose onPromote failed, a recovery whose leader role went away
+// (Codex review of #1556, P1 4306890528). Without it the node kept
+// leaseEpoch/fenceEpoch = E with no role and no keepalive: CurrentEpoch kept
+// advertising the abandoned E on heartbeats and enrollment, so Data Planes
+// ratcheted to an epoch no committed snapshot carries.
+//
+// It is the ONE clear for an uninstalled grant
+// (TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared). The lease itself is
+// NOT released — ADR-0005 S1 gives the Provider no Release, so the grant runs
+// out its TTL (the documented bounded stall). A no-op when epoch is not the
+// current local grant (0, legacy mode, or a newer grant installed meanwhile).
+// Caller holds h.mu (write), so the clear is atomic with the caller's decision.
+func (h *HAState) clearLeaseGrantLocked(epoch int64) {
+	if h.lease == nil || epoch == 0 || h.leaseEpoch != epoch {
+		return
+	}
+	h.setLeaseEpochLocked(0)
+	h.leaseConfirmedAt = time.Time{}
+	h.leaseValidFor = 0
+	if h.leaseStopCh != nil {
+		close(h.leaseStopCh)
+		h.leaseStopCh = nil
+	}
+}
+
+// clearLeaseGrant is clearLeaseGrantLocked for a decision taken without h.mu.
+func (h *HAState) clearLeaseGrant(epoch int64) {
+	h.mu.Lock()
+	h.clearLeaseGrantLocked(epoch)
+	h.mu.Unlock()
+}
+
+// syncFenceEpochLocked refreshes fenceEpoch from the fields CurrentEpoch
+// reads. Caller holds h.mu (write).
+func (h *HAState) syncFenceEpochLocked() {
+	if h.lease == nil {
+		h.fenceEpoch.Store(0)
+		return
+	}
+	h.fenceEpoch.Store(h.leaseEpoch)
+}
+
+// PublishedFenceEpoch is CurrentEpoch without h.mu — what a config publish
+// stamps (ConfigStore.commitPublish), safe to call while h.mu is held.
+func (h *HAState) PublishedFenceEpoch() int64 { return h.fenceEpoch.Load() }
 
 // CurrentEpoch reports this node's fencing epoch for stamping outbound
 // bundles/snapshots/issuance (0 = legacy mode or lease not held).
@@ -54,6 +126,10 @@ func (h *HAState) CurrentEpoch() int64 {
 // its write authority must be live (WriteAllowed re-checks the confirmed
 // validity window at call time — the commit-time re-check of Finding 3).
 func haIssuanceAllowed() (ok bool, reason string) {
+	// Unknown persisted intent is not "standalone" (ha_intent.go).
+	if reason, gated := globalHA.intentGate(); gated {
+		return false, reason
+	}
 	st := globalHA.Status()
 	if !st.Enabled {
 		return true, ""

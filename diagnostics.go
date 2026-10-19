@@ -171,6 +171,8 @@ func buildOperatorContract() OperatorContract {
 		checkFileProfileResolution(),
 		checkSOCKS5Listener(),
 		checkAdminUIListener(),
+		checkCPGRPCListener(),
+		checkCPAddressList(),
 		checkDNSResolution(),
 		checkGeoResolution(),
 		checkRequestLogPersistence(),
@@ -1237,9 +1239,19 @@ func checkCDR() OperatorContractCheck {
 // is intentionally a WARN, not a FAIL — operators are explicitly allowed to
 // run insecure clusters for development. The warning surfaces the risk.
 func checkClusterPosture() OperatorContractCheck {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	if set, held, refused := clusterRoleConflictState(); set {
+		// CHAOS-71: a refused role claim (cluster_role_arbiter.go). Outranks
+		// the TLS posture: the node is not running the role it was told to.
+		return OperatorContractCheck{
+			Code:    "cluster_posture",
+			Status:  diagFail,
+			Message: fmt.Sprintf("cluster role conflict: the %s role was refused because this node already holds the %s role", refused, held),
+			OperatorAction: "Both Control Plane and Data Plane wiring are configured on this node, and the role claimed first won. " +
+				"Remove the configuration for the role this node should NOT have (-cp-grpc-addr / cluster CP settings, or the " +
+				"-dp-* flags / saved enrollment) and restart the node.",
+		}
+	}
+	role := clusterRoleSnapshot().role
 
 	switch role {
 	case "", "standalone":
@@ -1265,9 +1277,7 @@ func checkClusterPosture() OperatorContractCheck {
 }
 
 func checkSAMLStatePosture() OperatorContractCheck {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	if role == "" || role == "standalone" || !hasLiveSAMLProvider() {
 		return OperatorContractCheck{
 			Code:    "saml_state_posture",

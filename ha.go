@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -86,10 +88,38 @@ type HAState struct {
 	// ── Fencing lease (ADR-0005 S2; nil provider = legacy manual mode) ──
 	lease            halease.Provider
 	leaseCandidateID string
-	leaseEpoch       int64         // epoch of our current grant; 0 = not held
-	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
-	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
-	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running
+	leaseEpoch       int64 // epoch of our current grant; 0 = not held
+	// shutdown is the PROCESS shutdown latch (BeginShutdown, set by the ha-stop
+	// hook before Stop). Unlike stopping it is permanent: a resume still
+	// waiting on the fencing backend when shutdown begins must never take a
+	// role or start HA work afterwards (Codex review of #1556). shutdownCh is
+	// closed with it so waits abort at once.
+	shutdown   bool
+	shutdownCh chan struct{}
+	// intent is the "persisted HA intent unknown" gate (ha_intent.go): set
+	// while the persisted HA config exists but cannot be read or decoded, so
+	// this node cannot know whether it leads, stands by or runs without HA.
+	// While set and no HA role is held, every HA-gated sink refuses — "could
+	// not read" is never "HA disabled" (Codex review of #1556).
+	intent haIntentGateState
+	// fenceEpoch mirrors CurrentEpoch (lease == nil ? 0 : leaseEpoch) for
+	// LOCK-FREE readers: a config publish stamps it at commit without taking
+	// h.mu. Written only by syncFenceEpochLocked, under h.mu, in the same
+	// critical section as the fields it mirrors
+	// (TestChaos71_Wall_OnlyCommitPublishCommits).
+	fenceEpoch atomic.Int64
+	// topologyRepublish is the transition whose CP address republish is due
+	// (setTopologyLocked records it under h.mu; republishTopology runs it
+	// after h.mu is released). "" = none.
+	topologyRepublish string
+	leaseConfirmedAt  time.Time     // local time of the last backend-CONFIRMED grant/renew
+	leaseValidFor     time.Duration // validity the backend confirmed at leaseConfirmedAt
+	leaseStopCh       chan struct{} // keepalive loop stop; nil = not running
+	// leaseRenewWithheld is true while the keepalive is deliberately NOT
+	// renewing because this leader's Control Plane gRPC listener is dark
+	// (CHAOS-71 self-fence, see leaseRenewOnce). Only drives the transition
+	// log lines; the decision itself is re-evaluated every round.
+	leaseRenewWithheld atomic.Bool
 	// leaseRecoveryCh stops the CHAOS-55 re-acquire loop; nil = not running.
 	// Armed only for role=leader with leaseEpoch==0 — a node that holds the
 	// leader role but not the fence. See ha_lease_recovery.go.
@@ -283,8 +313,7 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 		return "", fmt.Errorf("fencing lease not acquired — cannot enable HA leadership (see logs)")
 	}
 	h.mu.Lock()
-	h.role = "leader"
-	h.peerAddr = peerAddr
+	h.setTopologyLocked("leader", peerAddr, haTransitionEnable)
 	h.since = time.Now()
 	h.autoFailover = autoFailover
 	if h.lease != nil {
@@ -307,6 +336,7 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 	})
 	h.mu.Unlock()
 	h.startLeaseKeepalive()
+	h.republishTopology() // after the keepalive: renewal never waits on publication
 
 	logPeerAddr := sanitizeLog(peerAddr)
 	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", logPeerAddr, autoFailover, term)
@@ -317,7 +347,63 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 // WITHOUT bumping the term — it is the same leadership epoch continuing, not a
 // new promotion. Replaces the previous EnableAsLeader-then-patch-token dance in
 // main.go so the persisted term/token survive a restart intact (ADR-0004).
-func (h *HAState) ResumeAsLeader(cfg *haConfig) {
+func (h *HAState) ResumeAsLeader(cfg *haConfig) { h.resumeAsLeader(cfg, nil) }
+
+// ResumeAsLeaderIfUnclaimed is ResumeAsLeader for a resume that can race a
+// live HA transition — the boot path's delayed-bind callback, which may run
+// after the admin HA API became usable (Codex review of #1556). The lease
+// acquisition takes seconds and cannot hold a lock, so the resume is
+// REVALIDATED after it: persistedStill re-reads the persisted config (it must
+// still be the one being resumed), and then, atomically with every other HA
+// transition — under h.mu, the lock setTopologyLocked writes under — the
+// resume applies only if this process still holds NO HA role. An admin enable
+// that landed meanwhile has set the role and persisted its own peer/token;
+// the resume aborts instead of overwriting and re-persisting the older one.
+// Reports whether the resume was applied.
+func (h *HAState) ResumeAsLeaderIfUnclaimed(cfg *haConfig, persistedStill func() bool) bool {
+	return h.resumeAsLeader(cfg, persistedStill)
+}
+
+// haResumeAfterAcquire, when non-nil, runs right after a resume's lease
+// acquisition. Test seam only (nil in production): it lands a concurrent HA
+// transition inside the acquisition window deterministically.
+var haResumeAfterAcquire func()
+
+// resumePersistedStill is a guarded resume's first post-acquisition check: the
+// persisted config must still be the one being resumed (guard == nil: always).
+func resumePersistedStill(guard func() bool) bool {
+	if hook := haResumeAfterAcquire; hook != nil {
+		hook()
+	}
+	if guard != nil && !guard() {
+		logger.Printf("HA: the persisted HA config changed while the fencing lease was being acquired — not resuming leadership from the older copy")
+		return false
+	}
+	return true
+}
+
+// resumeClaimedLocked is a resume's second check, under h.mu and so atomic with
+// every HA transition and with BeginShutdown: shutdown wins for EVERY resume,
+// and for a guarded resume an HA role set meanwhile wins too. A claimed resume
+// clears the grant it took (grant, 0 = none) in the same critical section, so
+// no exit leaves a half-installed grant (Codex review of #1556). Caller holds
+// h.mu (write).
+func (h *HAState) resumeClaimedLocked(guard func() bool, grant int64) bool {
+	if h.shutdown {
+		h.clearLeaseGrantLocked(grant)
+		logger.Printf("HA: process shutdown began during the leadership resume — not taking the leader role")
+		return true
+	}
+	if guard == nil || h.role == "" {
+		return false
+	}
+	h.clearLeaseGrantLocked(grant)
+	logger.Printf("HA: an HA transition claimed this node (role %q) during the resume's lease acquisition — not resuming leadership from the older persisted config", h.role)
+	return true
+}
+
+// resumeAsLeader is the shared body; guard == nil is the unconditional resume.
+func (h *HAState) resumeAsLeader(cfg *haConfig, guard func() bool) bool {
 	// ADR-0005 S2: a restarting leader's old lease expired during the
 	// restart, so it must re-acquire. Granted ⇒ normal leadership (epoch,
 	// keepalive). Denied BY A LIVE FOREIGN HOLDER ⇒ S4: the peer promoted
@@ -337,19 +423,37 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	// foreign holder (handleForeignFenceHolder) and otherwise completes the
 	// interrupted resume.
 	leaseGranted, foreignHolder := h.acquireLeaseForResume()
+	grant := h.grantedLeaseEpoch(leaseGranted)
+	// A grant taken by a resume that then aborts (revalidation failed,
+	// shutdown, or a live HA transition) is left unkept and expires after its
+	// TTL — the bounded stall ADR-0005 documents; the Provider deliberately has
+	// no Release primitive. Its LOCAL state is cleared on every such exit
+	// (clearLeaseGrantLocked, Codex review of #1556): an abandoned epoch must
+	// not stay advertised by a node that holds no role.
+	if !resumePersistedStill(guard) {
+		h.clearLeaseGrant(grant)
+		return false
+	}
 	if !leaseGranted && h.leaseConfigured() && foreignHolder {
 		h.mu.Lock()
+		if h.resumeClaimedLocked(guard, grant) {
+			h.mu.Unlock()
+			return false
+		}
 		h.token = cfg.Token
 		h.standbyAddr = cfg.StandbyAddr
 		h.autoFailover = cfg.AutoFailover
 		h.mu.Unlock()
 		if h.enterStandbyResync("unfenced leader resume") {
-			return
+			return true
 		}
 	}
 	h.mu.Lock()
-	h.role = "leader"
-	h.peerAddr = cfg.PeerAddr
+	if h.resumeClaimedLocked(guard, grant) {
+		h.mu.Unlock()
+		return false
+	}
+	h.setTopologyLocked("leader", cfg.PeerAddr, haTransitionResume)
 	h.token = cfg.Token
 	h.autoFailover = cfg.AutoFailover
 	h.term = cfg.Term
@@ -364,11 +468,9 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	if leaseConfigured && !leaseGranted {
 		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF (ADR-0005 S2). " +
 			"Recovery runs in the background (CHAOS-55) — no operator action is required unless it keeps failing.")
-		go alerts.Fire("ha_resume_unfenced", alerts.Payload{
-			Event:  "ha_resume_unfenced",
-			Detail: "leader restarted but could not acquire the fencing lease; serving read-only (no write authority)",
-			Source: "ha",
-		})
+		// The boot resume runs inside initCluster, before the webhooks load:
+		// queued until then (pageUnfencedLeader, Codex review of #1556).
+		h.pageUnfencedLeader("leader restarted but could not acquire the fencing lease; serving read-only (no write authority)")
 		// CHAOS-55 / register row HA-7: without this the node stays a
 		// permanently read-only leader — startLeaseKeepalive no-ops on a zero
 		// epoch, so nothing in the process would ever call Acquire again.
@@ -382,8 +484,10 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 		}
 	}
 	h.startLeaseKeepalive()
+	h.republishTopology() // after the keepalive: renewal never waits on publication
 	// Re-persist the SAME values (idempotent; keeps the file canonical).
 	_ = saveHAConfig(cfg)
+	return true
 }
 
 // ── Standby Mode ────────────────────────────────────────────────────────────
@@ -395,15 +499,14 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
 	onPromote func() error) {
 	h.mu.Lock()
-	if h.stopping {
+	if h.stopping || h.shutdown {
 		// Stop() is joining our goroutines — spawning a new sync loop here
 		// would hand it a channel the in-flight stopLoops already missed.
 		h.mu.Unlock()
 		logger.Printf("HA: stop in progress — not (re-)entering standby against %s", sanitizeLog(leaderAddr))
 		return
 	}
-	h.role = "standby"
-	h.peerAddr = leaderAddr
+	h.setTopologyLocked("standby", leaderAddr, haTransitionStandby)
 	h.token = token
 	h.since = time.Now()
 	h.autoFailover = autoFailover
@@ -418,6 +521,7 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	// passing the check guarantees this Add happens-before it.
 	h.wg.Add(1)
 	h.mu.Unlock()
+	h.republishTopology()
 
 	// Persist HA config so standby restarts know HA is enabled.
 	_ = saveHAConfig(&haConfig{
@@ -908,6 +1012,10 @@ func (h *HAState) promote(reason string) {
 		logger.Printf("HA: promote (%s) blocked by the fencing lease — staying as standby", sanitizeLog(reason))
 		return
 	}
+	// The grant's local state is cleared if the promotion fails below (the
+	// lease itself still runs out its TTL): a standby must not keep
+	// advertising an epoch it does not exercise (Codex review of #1556).
+	grant := h.grantedLeaseEpoch(true)
 
 	logger.Printf("HA: promoting to leader (%s)", reason)
 	// CHAOS-25: onPromote starts the CP gRPC server — foreign, failure-prone
@@ -921,18 +1029,20 @@ func (h *HAState) promote(reason string) {
 	// role-gated, so a standby holding an unrenewed grant issues nothing.
 	var promoteErr error
 	if runGuarded(haPromoteComponent, func() { promoteErr = pc.onPromote() }) {
+		h.clearLeaseGrant(grant)
 		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
 		logger.Printf("HA: promote panicked and was contained — staying as standby (retryable)")
 		return
 	}
 	if promoteErr != nil {
+		h.clearLeaseGrant(grant)
 		h.promoted.Store(false) // allow a later retry
 		logger.Printf("HA: promote failed: %v — staying as standby", promoteErr)
 		return
 	}
 
 	h.mu.Lock()
-	h.role = "leader"
+	h.setTopologyLocked("leader", h.peerAddr, haTransitionPromote)
 	h.since = time.Now()
 	if h.lease != nil {
 		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)
@@ -967,6 +1077,7 @@ func (h *HAState) promote(reason string) {
 	// joining would deadlock waiting on ourselves.
 	h.stopLoops()
 	h.startLeaseKeepalive() // after stopLoops(): it halts the keepalive too
+	h.republishTopology()   // after the keepalive: renewal never waits on publication
 
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }
@@ -1035,6 +1146,54 @@ func (h *HAState) Stop() {
 	h.mu.Unlock()
 }
 
+// BeginShutdown latches process shutdown for HA: from here on no resume takes
+// a role, no keepalive, recovery or standby loop starts, and every resume wait
+// returns at once. Called by the ha-stop hook BEFORE Stop. Idempotent.
+func (h *HAState) BeginShutdown() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.shutdown {
+		return
+	}
+	h.shutdown = true
+	close(h.shutdownChLocked())
+}
+
+// shutdownChLocked returns the shutdown channel, creating it on first use (the
+// zero HAState is valid). Caller holds h.mu (write).
+func (h *HAState) shutdownChLocked() chan struct{} {
+	if h.shutdownCh == nil {
+		h.shutdownCh = make(chan struct{})
+	}
+	return h.shutdownCh
+}
+
+// shutdownSignal is the channel BeginShutdown closes.
+func (h *HAState) shutdownSignal() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.shutdownChLocked()
+}
+
+// shuttingDown reports the shutdown latch.
+func (h *HAState) shuttingDown() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.shutdown
+}
+
+// sleepUnlessShutdown waits d, or returns false as soon as shutdown begins.
+func (h *HAState) sleepUnlessShutdown(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-h.shutdownSignal():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 // ── HA Config Persistence ───────────────────────────────────────────────────
 
 const haConfigFile = "ha_config.json"
@@ -1079,6 +1238,18 @@ func haRestartAction(cfg *haConfig, loadErr error) string {
 		return "standby"
 	}
 	return "leader"
+}
+
+// haPersistedAction is haRestartAction for every read that DECIDES from the
+// persisted HA intent: it never mistakes "could not read" for "HA disabled".
+// A missing file (HA never configured on this node) and a decoded config are
+// answers; any other read error, or a decode error, is returned as an error
+// and the caller must stay HA-gated (haIntentGate) until a read succeeds.
+func haPersistedAction(cfg *haConfig, loadErr error) (string, error) {
+	if loadErr != nil && !errors.Is(loadErr, fs.ErrNotExist) {
+		return "", loadErr
+	}
+	return haRestartAction(cfg, loadErr), nil
 }
 
 func loadHAConfig() (*haConfig, error) {
@@ -1157,6 +1328,21 @@ func addRequestLogHealth(resp map[string]any) {
 func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Unknown persisted HA intent is not standalone: 503, so a load balancer
+	// does not route Data Planes to a node that refuses them (ha_intent.go).
+	// The read error itself (it names a data-directory path) is in the log,
+	// not on this endpoint.
+	if _, gated := globalHA.intentGate(); gated {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		resp, _ := json.Marshal(map[string]any{
+			"status": "ha_intent_unknown", "role": "", "leader": false, "write_authority": false,
+			"detail":  "the persisted HA config could not be read; leader-gated requests are refused until it is",
+			"version": version,
+		})
+		_, _ = w.Write(resp)
 		return
 	}
 	status := globalHA.Status()
@@ -1267,9 +1453,7 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check that we're already running as CP.
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	if role != "control-plane" {
 		http.Error(w, "must be running as Control Plane to enable HA", http.StatusConflict)
 		return
@@ -1353,12 +1537,8 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 // Includes enterprise TLS cert paths when the leader was started with them,
 // so the admin knows exactly which cert files to stage on the standby server.
 func haDeployCommand() string {
-	clusterRoleMu.RLock()
-	grpcAddr := clusterRole.grpcAddr
-	certFile := clusterRole.certFile
-	keyFile := clusterRole.keyFile
-	caFile := clusterRole.caFile
-	clusterRoleMu.RUnlock()
+	view := clusterRoleSnapshot()
+	grpcAddr, certFile, keyFile, caFile := view.grpcAddr, view.certFile, view.keyFile, view.caFile
 
 	globalHA.mu.RLock()
 	token := globalHA.token
