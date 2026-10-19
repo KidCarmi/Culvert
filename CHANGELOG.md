@@ -1049,7 +1049,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the 200. No route, request body, or successful-response shape changes.
 
   Left open with the reasoning recorded in
-  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §41: `DispatchResumeContext` is
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §43: `DispatchResumeContext` is
   documented as a persistable restart-recovery record but lives only in an
   in-memory map, so a restart mid-upgrade still loses the `op_id` and recovery
   degrades to hand-assembling a `resume_context` from the audit trail.

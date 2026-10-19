@@ -229,7 +229,7 @@ func currentReleaseManager() *releaseManager {
 // false success for an upgrade that never started. So the panic is converted
 // into an explicit FAILED outcome (errDispatchWorkerFailed → 500) and, when an
 // op had already been accepted by the agent, into a terminal status record —
-// never into a silent one. See roadmap/CHAOS-ENGINEERING-REVIEW.md §41.
+// never into a silent one. See roadmap/CHAOS-ENGINEERING-REVIEW.md §43.
 const (
 	crashComponentReleaseDispatch = "release_dispatch"
 	crashComponentReleaseResume   = "release_resume"
@@ -794,7 +794,7 @@ func (rm *releaseManager) write202(w http.ResponseWriter, agentKey, dispatchID s
 // pre-fix panic path did precisely that: the recovered-panic defer closed `done`
 // while `rep, derr = …` was still unwinding, so the handler woke on a zero pair
 // and answered `200 {"status":"ok"}` for an upgrade that never started
-// (empirically reproduced; see roadmap/CHAOS-ENGINEERING-REVIEW.md §41). The
+// (empirically reproduced; see roadmap/CHAOS-ENGINEERING-REVIEW.md §43). The
 // guard below is deliberately independent of that fix: it holds for ANY future
 // writer that forgets, which the panic-containment change alone would not.
 func (rm *releaseManager) respondPreApply(w http.ResponseWriter, rep *DispatchReport, err error) {
