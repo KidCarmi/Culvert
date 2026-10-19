@@ -1549,12 +1549,19 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 		updateDPAddresses(snap.CPAddresses)
 	}
 
-	// PAC exclusions.
+	// PAC exclusions. Store.Set is a persist-before-swap commit (CHAOS-77),
+	// so a write that cannot land leaves the live exclusions untouched: the
+	// slice is DEFERRED, exactly like the PAC profiles slice below, and the
+	// rest of the snapshot still applies. Saying so matters because
+	// fetchAndApply goes on to persist last-good, mark the apply healthy and
+	// ratchet lastVersion, after which the CP answers every later poll
+	// "unchanged" — so this line is the only notice that the node is
+	// converged on paper while serving the previous exclusions.
 	if snap.PACExclusions != nil {
 		cur := pacStore.Get()
 		cur.Exclusions = snap.PACExclusions
 		if err := pacStore.Set(cur); err != nil {
-			logger.Printf("DataPlane: PAC exclusions: %v", err)
+			logger.Printf("DataPlane: PAC exclusions NOT applied this sync (deferred, previous list still live): %v", err)
 		}
 	}
 	// PAC profiles/pools (PAC initiative PR 2): nil-skip (old CP), non-nil
