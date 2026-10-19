@@ -106,7 +106,10 @@ password change cannot leave the new password working from cache.
 ### One error is deliberately not a failure
 
 `fileutil.ErrReplacedNotSynced` means the rename already landed the new content
-and only the best-effort parent-directory `fsync` failed. Every future reader,
+and only the parent-directory `fsync` failed — or the directory could not even
+be opened for it (for example a write-and-search-only `0300` data directory,
+which gives `EACCES`); only an `fsync` the platform reports as unsupported
+counts as success. Every future reader,
 including a restart, sees the new roster, so the change **did** take effect and
 the request succeeds. It is logged loudly: the write is durable across a process
 crash and at risk only across a power loss in the following moments.
@@ -186,7 +189,14 @@ administrative decision was affected, and therefore what the operator must redo.
    **removed from disk after it was last written** (the roster in use is then
    only in memory and accounts that exist only in it are lost on restart:
    save an admin account change, which recreates the file, or restore it from
-   backup, before the next restart), or when
+   backup, before the next restart), when the file was **replaced or edited
+   outside Culvert after Culvert last wrote it** (each landed write records the
+   size and SHA-256 of the bytes written, and the row compares the file with
+   them, so an in-place edit counts but a `touch` or `chmod` does not: a
+   restart would load the file as it is now, which may restore revoked
+   accounts or credentials or drop changes made since — reconcile, then either
+   save an admin account change to write the roster in use back, or restart
+   to adopt the file), or when
    refused or degraded roster writes have occurred since process start. The
    Admin Users panel shows the same refused/degraded counts. Read-only; the
    counts clear on restart. The counts, the remedy and the degraded login-write

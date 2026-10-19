@@ -1532,7 +1532,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   that does not exist yet reads `warn` until the first roster save creates it,
   and so does a roster file removed from disk after it was last written (its
   accounts are then only in memory and are lost on restart; the next admin
-  save recreates it).
+  save recreates it), and so does one replaced or edited outside Culvert after
+  Culvert last wrote it (each landed write records the size and SHA-256 of
+  the bytes written; a restart would load the file as it is now). Every
+  `fileutil.AtomicWrite` and the boot rewrite now also report
+  `ErrReplacedNotSynced`, rather than success, when the parent directory
+  cannot be opened for its `fsync` (for example a `0300` data directory); only
+  an `fsync` the platform reports as unsupported still counts as success.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

@@ -604,3 +604,21 @@ func TestRewriteInPlace_ConcurrentChownIsSwappedBack(t *testing.T) {
 	}
 	assertOnlyTarget(t, path)
 }
+
+// TestRewriteInPlace_UnopenableParentDirIsNotSynced: the boot rewrite's own
+// directory fsync follows the same rule (Codex P2 4317365510 on PR #1601):
+// the exchange landed, the directory could not be opened, so the result is
+// ErrReplacedNotSynced, not success.
+func TestRewriteInPlace_UnopenableParentDirIsNotSynced(t *testing.T) {
+	loaded := []byte(`{"users":[]}`)
+	path, fi := rewriteFixture(t, loaded)
+	injectParentDirOpen(t, syscall.EACCES)
+	err := RewriteInPlace(path, loaded, fi)
+	if !errors.Is(err, ErrReplacedNotSynced) || !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("err = %v, want ErrReplacedNotSynced wrapping EACCES", err)
+	}
+	if os.SameFile(fi, statT(t, path)) {
+		t.Error("same inode: the exchange did not land")
+	}
+	assertOnlyTarget(t, path)
+}

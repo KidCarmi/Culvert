@@ -918,6 +918,14 @@ const rosterTargetDisappeared = "the configured roster file no longer exists: it
 	"was last written, so the roster in use is held only in memory and accounts that exist only in it are LOST " +
 	"on restart"
 
+// rosterTargetReplaced is the targetProblem when the configured roster file no
+// longer holds the bytes Culvert last wrote to it (Codex P2 4317365500 on PR
+// #1601): it was replaced or edited outside Culvert, so the write evidence is
+// stale and a restart would load a roster other than the one in use.
+const rosterTargetReplaced = "the configured roster file on disk no longer matches the roster in use: it was " +
+	"replaced or edited outside Culvert after Culvert last wrote it, and a restart loads the file as it is now, " +
+	"which may restore revoked accounts or credentials, or drop changes made since"
+
 // rosterTargetMetadataNotPreservable is the targetProblem when the boot
 // rewrite was not exchanged in because the roster's owner, group, mode bits,
 // inode flags or extended attributes (a POSIX ACL, an SELinux label, a user.*
@@ -1025,10 +1033,15 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	}
 	path, loadErr := cfg.rosterPersistTarget()
 	tried, writeErr := cfg.rosterWriteEvidence()
+	problem := rosterTargetProblem(path, loadErr, tried, writeErr)
+	if problem == "" && path != "" {
+		// A write landed and the file is there: is it still what was written?
+		problem = cfg.rosterReplacedProblem(path)
+	}
 	return rosterDurabilityFacts{
 		configured:    true,
 		persisted:     path != "",
-		targetProblem: rosterTargetProblem(path, loadErr, tried, writeErr),
+		targetProblem: problem,
 		localAdmin:    cfg.hasLocalAdministrator(),
 		notDurable:    rosterNotDurable.Load(),
 		refused:       rosterPersistRefused.Load(),
@@ -1083,6 +1096,11 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 		row.OperatorAction = "The first admin account change that is saved proves the file and clears this " +
 			"warning. If that change is refused, fix the admin users file (-ui-users-file) path or its permissions " +
 			"so it names a writable regular file on a persistent volume, restart, and re-apply the change."
+	case rosterTargetReplaced:
+		row.OperatorAction = "Reconcile first: compare the admin users file (-ui-users-file) on disk with " +
+			"Administrators and find what changed it. Then either save an admin account change, which writes the " +
+			"roster in use back over the file, or restart to adopt the file as it is now. Until then, a restart " +
+			"silently switches to the file's accounts and credentials."
 	case rosterTargetDisappeared:
 		row.OperatorAction = "Before the next restart, either save an admin account change (any change from " +
 			"Administrators writes the roster in use back and recreates the file) or restore the admin users file " +

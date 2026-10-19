@@ -882,6 +882,11 @@ type Config struct {
 	// path has not been written.
 	uiUsersWriteTried bool
 	uiUsersWriteErr   error
+	// uiUsersWritten identifies the bytes the last landed write put at
+	// uiUsersFile, so the row can tell when the file was replaced or edited
+	// outside Culvert afterwards (roster_disk_identity.go). Reset with the
+	// evidence above.
+	uiUsersWritten rosterWrittenDigest
 
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
 	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
@@ -1506,6 +1511,7 @@ func (c *Config) SetUIUsersFile(path string) {
 	c.uiUsersFile = path
 	c.uiUsersLoadErr = nil // a new path has not been loaded yet
 	c.uiUsersWriteTried, c.uiUsersWriteErr = false, nil
+	c.uiUsersWritten = rosterWrittenDigest{}
 	c.mu.Unlock()
 }
 
@@ -1527,13 +1533,15 @@ func (c *Config) rosterWriteEvidence() (tried bool, err error) {
 	return c.uiUsersWriteTried, c.uiUsersWriteErr
 }
 
-// noteRosterWriteLanded records that a roster save to path landed: exact
-// evidence that supersedes a failed or absent boot rewrite. A save that fails
-// is not recorded here; the refused/degraded counters report it.
-func (c *Config) noteRosterWriteLanded(path string) {
+// noteRosterWriteLanded records that a roster save of data to path landed:
+// exact evidence that supersedes a failed or absent boot rewrite, and the
+// identity of what is now on disk (rosterWrittenDigest). A save that fails is
+// not recorded here; the refused/degraded counters report it.
+func (c *Config) noteRosterWriteLanded(path string, data []byte) {
 	c.mu.Lock()
 	if c.uiUsersFile == path {
 		c.uiUsersWriteTried, c.uiUsersWriteErr = true, nil
+		c.uiUsersWritten = digestRosterWrite(path, data)
 	}
 	c.mu.Unlock()
 }
@@ -1605,6 +1613,11 @@ func (c *Config) LoadUIUsersFile() error {
 	if c.uiUsersFile == path { // not re-pointed while loading
 		c.uiUsersLoadErr = err
 		c.uiUsersWriteTried, c.uiUsersWriteErr = tried, writeErr
+		c.uiUsersWritten = rosterWrittenDigest{}
+		if tried && writeErr == nil {
+			// The rewrite put exactly the loaded bytes on disk.
+			c.uiUsersWritten = digestRosterWrite(path, loaded.data)
+		}
 	}
 	c.mu.Unlock()
 	return err
@@ -1811,7 +1824,7 @@ func (c *Config) saveUIUsersLocked() error {
 	if err == nil || errors.Is(err, fileutil.ErrReplacedNotSynced) {
 		// Landed (ErrReplacedNotSynced: renamed into place, only the parent
 		// fsync failed) — exact evidence for admin_roster_durability.
-		c.noteRosterWriteLanded(path)
+		c.noteRosterWriteLanded(path, data)
 	}
 	return err
 }

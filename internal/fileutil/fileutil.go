@@ -95,7 +95,8 @@ func noteWriteFailure(path string, err error) error {
 
 // AtomicWrite writes data to path atomically: it writes to a unique temp file in
 // the same directory, chmods, fsyncs the file, renames over the target, and
-// best-effort fsyncs the parent directory. A crash mid-write never leaves a
+// fsyncs the parent directory (ErrReplacedNotSynced if that fails, see
+// syncParentDir). A crash mid-write never leaves a
 // partial or corrupt target file. Moved verbatim from package main's
 // atomicWriteFile (ADR-0003); behaviour is unchanged.
 //
@@ -163,15 +164,22 @@ func writeTempBeside(op, path string, data []byte, perm os.FileMode, beforeClose
 	return tmp, nil
 }
 
-// syncParentDir best-effort fsyncs path's directory after a rename into it.
-// A failure the platform reports as unsupported is not an error; any other
-// is returned wrapping ErrReplacedNotSynced (the rename already landed).
+// openParentDir opens the directory syncParentDir fsyncs. A seam only for
+// this package's white-box tests (root may open any directory, so the EACCES
+// a mode-0300 directory gives an unprivileged process is injected).
+var openParentDir = os.Open
+
+// syncParentDir fsyncs path's directory after a rename into it. Only an fsync
+// the platform reports as unsupported (EINVAL, ENOTSUP/EOPNOTSUPP) counts as
+// success. Any other failure — including failing to OPEN the directory (a
+// write+search-only 0300 directory gives EACCES; Codex P2 4317365510 on PR
+// #1601), which leaves the rename's durability exactly as unproven as a
+// failed fsync — is returned wrapping ErrReplacedNotSynced: the rename
+// already landed.
 func syncParentDir(op, path string) error {
-	d, err := os.Open(filepath.Dir(path))
+	d, err := openParentDir(filepath.Dir(path))
 	if err != nil {
-		// Best-effort: opening a directory for sync is not portable. The data
-		// is already renamed into place, so this is a successful durable write.
-		return nil
+		return fmt.Errorf("%s %s: parent dir open: %w: %w", op, path, err, ErrReplacedNotSynced)
 	}
 	syncErr := d.Sync()
 	closeErr := d.Close()

@@ -13,6 +13,7 @@ package main
 // replay-window oracle the policy withholds.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func swapCfgForRosterDurability(t *testing.T, c *Config) {
@@ -255,6 +257,11 @@ func TestCheckAdminRosterDurability_UnusableRosterTarget(t *testing.T) {
 		// removed externally. The stale evidence must not read "persisting".
 		{"healthy-file-then-deleted", thenRosterDeleted(setupRosterHealthyFile), true},
 		{"missing-file-saved-then-deleted", thenRosterDeleted(setupRosterFirstRunThenSaved), true},
+		// Codex P2 4317365500 on #1601: a write landed, then the file was
+		// replaced or edited outside Culvert. A restart would load it.
+		{"healthy-file-then-replaced", thenRosterReplacedExternally(setupRosterHealthyFile), true},
+		{"healthy-file-then-edited-in-place", thenRosterEditedInPlace(setupRosterHealthyFile), true},
+		{"saved-file-then-replaced", thenRosterReplacedExternally(setupRosterFirstRunThenSaved), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -419,6 +426,105 @@ func thenRosterDeleted(setup func(t *testing.T, c *Config)) func(t *testing.T, c
 			t.Fatal(err)
 		}
 	}
+}
+
+// externalRoster is a different, valid roster an external writer installs.
+var externalRoster = []byte(`{"users":[{"username":"restored-by-cm","pass_hash":"00","role":"admin"}]}`)
+
+// thenRosterReplacedExternally runs setup (which must leave a landed write)
+// and then atomically replaces the roster with different content, as a
+// configuration manager would (a new inode renamed over it).
+func thenRosterReplacedExternally(setup func(t *testing.T, c *Config)) func(t *testing.T, c *Config) {
+	return func(t *testing.T, c *Config) {
+		setup(t, c)
+		path, _ := c.rosterPersistTarget()
+		side := path + ".cm"
+		if err := os.WriteFile(side, externalRoster, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(side, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// thenRosterEditedInPlace runs setup and then rewrites the roster's bytes in
+// place (same inode, same size), as an editor that writes through the file
+// would: only a content comparison sees this.
+func thenRosterEditedInPlace(setup func(t *testing.T, c *Config)) func(t *testing.T, c *Config) {
+	return func(t *testing.T, c *Config) {
+		setup(t, c)
+		path, _ := c.rosterPersistTarget()
+		before, err := os.ReadFile(path) // #nosec G304 -- test temp path
+		if err != nil || len(before) == 0 {
+			t.Fatalf("read roster: %v", err)
+		}
+		edited := bytes.Clone(before)
+		edited[len(edited)-1] ^= 0x20               // same length, different content
+		f, err := os.OpenFile(path, os.O_WRONLY, 0) // #nosec G304 -- test temp path
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteAt(edited, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestRosterDurability_ExternalReplaceWarnsUntilReconciled: after the boot
+// rewrite the row is ok; an external replacement makes it warn with its own
+// message and remedy; Culvert's own save (which writes the roster in use
+// back) clears it and does not trip it; a touch alone does not trip it; an
+// in-place same-size edit does. Removing the comparison, or not recording
+// the digest on a save, fails this test.
+func TestRosterDurability_ExternalReplaceWarnsUntilReconciled(t *testing.T) {
+	path, _, _ := seedRosterFileForBoot(t)
+	c := configuredRosterCfg(t, false)
+	swapCfgForRosterDurability(t, c)
+	c.SetUIUsersFile(path)
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Fatalf("LoadUIUsersFile: %v", err)
+	}
+	wantOK := func(stage string) {
+		t.Helper()
+		if row := checkAdminRosterDurability(); row.Status != diagOK {
+			t.Errorf("%s: row = %+v, want ok", stage, row)
+		}
+	}
+	wantReplaced := func(stage string) {
+		t.Helper()
+		row := checkAdminRosterDurability()
+		if row.Status != diagWarn || row.Message != rosterTargetReplaced {
+			t.Fatalf("%s: row = %+v, want warn %q", stage, row, rosterTargetReplaced)
+		}
+		if !strings.Contains(row.OperatorAction, "Reconcile") || !strings.Contains(row.OperatorAction, "restart") {
+			t.Errorf("%s: action = %q, want the reconcile-then-save-or-restart remedy", stage, row.OperatorAction)
+		}
+	}
+	wantOK("after the boot rewrite")
+
+	thenRosterReplacedExternally(func(*testing.T, *Config) {})(t, c)
+	wantReplaced("after an external replace")
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+	wantOK("after Culvert's own save")
+
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	wantOK("after a touch")
+
+	thenRosterEditedInPlace(func(*testing.T, *Config) {})(t, c)
+	wantReplaced("after an in-place edit")
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+	wantOK("after the next save")
 }
 
 // TestRosterDurability_DeletedAfterWriteWarnsUntilRecreated: the deleted
