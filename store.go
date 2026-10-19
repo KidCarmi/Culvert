@@ -422,7 +422,7 @@ func init() {
 
 // Engine funcs re-exposed under their original names.
 var (
-	auditAdd                = audit.Add
+	auditAdd                = addAuditEntry
 	auditGet                = audit.Get
 	auditGetMemory          = audit.GetMemory
 	auditGetPersistent      = audit.GetPersistent
@@ -432,6 +432,20 @@ var (
 	auditWriteErrors        = audit.WriteErrors
 	auditPendingDrops       = audit.PendingDrops
 )
+
+// addAuditEntry is the single write chokepoint from package main into the audit
+// engine, and the only non-test caller of audit.Add (TestAuditActorBoundWall
+// enforces both across main and internal/). It applies the CHAOS-63 render-only
+// actor bound (boundAuditActor) before the entry reaches the ring, the JSONL
+// file, the SIEM hook and the Data-Plane push queue. Producers keep handing the
+// FULL principal — auditActor is compared for identity by MCP four-eyes, so it
+// must never be truncated at its source (Codex review, PR #1532) — and the
+// bound lands here once, whether the entry came from auditEventDiffID or was
+// built directly (release DispatchService, PAC lifecycle, HA, cluster, CDR).
+func addAuditEntry(e AuditEntry) {
+	e.Actor = boundAuditActor(e.Actor)
+	audit.Add(e)
+}
 
 // InitAuditLog opens path for append-only JSONL audit persistence.
 func InitAuditLog(path string) error { return audit.Init(path) }

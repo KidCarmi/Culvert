@@ -24,8 +24,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // LDAPProfileConfig holds LDAP/AD-specific settings for an IdP profile.
@@ -341,7 +339,7 @@ func markLegacyLDAPRetired(reason string) {
 	if legacyLDAPRetiredFlag.Swap(true) {
 		return
 	}
-	audit.Add(audit.Entry{
+	auditAdd(AuditEntry{
 		TS:     time.Now().UnixMilli(),
 		Time:   time.Now().Format("2006-01-02 15:04:05"),
 		Actor:  "system",
