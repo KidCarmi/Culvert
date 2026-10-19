@@ -465,7 +465,7 @@ func retryFreeLimitsViolation(src string) string {
 		return "the binding of " + ident.Name + " comes AFTER the Config that uses it, so the value " +
 			"reaching Limits is whatever that name meant earlier — not this binding"
 	}
-	if !isCallTo(bindings[0], pkg, retryFreeLimitsFunc) {
+	if !isPkgCallTo(bindings[0], pkg, retryFreeLimitsFunc) {
 		return "the Limits identifier " + ident.Name + " is not bound by " + pkg + "." + retryFreeLimitsFunc
 	}
 	if addressIsTaken(fn, ident.Name) {
@@ -741,7 +741,7 @@ func alternateClientReturn(fn *ast.FuncDecl, call *ast.CallExpr) string {
 	return why
 }
 
-func isCallTo(e ast.Expr, pkg, fn string) bool {
+func isPkgCallTo(e ast.Expr, pkg, fn string) bool {
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
