@@ -40,8 +40,10 @@ package session
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -313,6 +315,14 @@ func TestRevocationExpiry_UserRevocationHonoursTheSameOracle(t *testing.T) {
 // time-independent (it exists to shake out races and panics across every entry
 // point), and phase 2 takes the boundary observation on its own, inside a
 // single settled second, while the same concurrent traffic is still running.
+//
+// "Still running" is proven, not assumed: phase-2 workers loop until stopped
+// (a fixed iteration budget would let them finish while the helper is still
+// settling), and the assertion waits until more full export sweeps — the one
+// worker path that evicts every token — have completed after the boundary
+// entry was inserted than there are workers. At most one sweep per worker can
+// already be in flight when the count is sampled, so at least one counted
+// sweep started after the insert and ran over the entry under test.
 func TestRevocationExpiry_ConcurrentReadersAndWriters(t *testing.T) {
 	rl := NewRevocationList()
 	// A far-future expiry for the storm: phase 1 asserts nothing about the
@@ -322,14 +332,19 @@ func TestRevocationExpiry_ConcurrentReadersAndWriters(t *testing.T) {
 	const workers = 8
 	const iters = 300
 
+	// exportSweeps counts completed ExportRevocations calls across workers.
+	var exportSweeps atomic.Int64
+
 	// ── Phase 1: the storm. Races and panics only. ──────────────────────────
-	hammer := func(stop <-chan struct{}) func() {
+	// limit > 0 bounds each worker to that many iterations; limit == 0 runs
+	// each worker until stop is closed.
+	hammer := func(stop <-chan struct{}, limit int) func() {
 		var wg sync.WaitGroup
 		for w := 0; w < workers; w++ {
 			wg.Add(1)
 			go func(w int) {
 				defer wg.Done()
-				for i := 0; i < iters; i++ {
+				for i := 0; limit == 0 || i < limit; i++ {
 					select {
 					case <-stop:
 						return
@@ -342,6 +357,7 @@ func TestRevocationExpiry_ConcurrentReadersAndWriters(t *testing.T) {
 						rl.IsRevoked("storm")
 					case 2:
 						rl.ExportRevocations()
+						exportSweeps.Add(1)
 					case 3:
 						rl.MergeRevocations([]RevocationEntry{{Token: "peer", Expiry: stormExp}})
 					case 4:
@@ -353,7 +369,7 @@ func TestRevocationExpiry_ConcurrentReadersAndWriters(t *testing.T) {
 		return wg.Wait
 	}
 	never := make(chan struct{})
-	hammer(never)()
+	hammer(never, iters)()
 
 	if !rl.IsRevoked("storm") {
 		t.Error("a far-future entry did not survive the concurrent storm")
@@ -361,14 +377,26 @@ func TestRevocationExpiry_ConcurrentReadersAndWriters(t *testing.T) {
 
 	// ── Phase 2: the boundary, under live concurrent traffic. ───────────────
 	// Background traffic keeps the eviction sites running against the entry
-	// under test; the observation itself is microseconds and is voided and
-	// retried if it straddles a second boundary.
+	// under test until stop is closed; the observation is voided and retried if
+	// it straddles a second boundary.
 	stop := make(chan struct{})
-	wait := hammer(stop)
+	wait := hammer(stop, 0)
 	defer func() { close(stop); wait() }()
 
 	observeWithinSecond(t, func(sec int64) string {
 		rl.Revoke("final-second", time.Unix(sec, 0))
+		// Require workers+1 sweeps completed after the insert (see the test
+		// doc): only then is a sweep over "final-second" guaranteed.
+		base := exportSweeps.Load()
+		for exportSweeps.Load()-base <= workers {
+			if time.Now().Unix() != sec {
+				if exportSweeps.Load() == base {
+					t.Fatal("phase-2 workers completed no export sweep across a whole observation window — the boundary is not being checked under live traffic")
+				}
+				return "" // second rolled over before enough sweeps; the helper voids this attempt
+			}
+			runtime.Gosched()
+		}
 		if !rl.IsRevoked("final-second") {
 			return "entry inside its final second was evicted by a concurrent pass"
 		}
