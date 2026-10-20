@@ -414,8 +414,10 @@ const maxAuditLogs = audit.MaxRing
 
 func init() {
 	audit.SetSIEM(func(e audit.Entry) {
-		if globalSyslog != nil {
-			globalSyslog.WriteAudit(e)
+		// One load, used for both the nil test and the call: the admin disable
+		// branch stores nil concurrently with this hook (CHAOS-78).
+		if sw := syslogHandle(); sw != nil {
+			sw.WriteAudit(e)
 		}
 	})
 }
@@ -2580,8 +2582,10 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	auth.applyTo(&entry)
 	logAdd(entry)
 	// Forward request log entry to syslog/SIEM if configured (Finding 17.2).
-	if globalSyslog != nil {
-		globalSyslog.WriteRequest(entry)
+	// One load into a local: this runs on the proxy request path, and the admin
+	// disable branch stores nil concurrently (CHAOS-78).
+	if sw := syslogHandle(); sw != nil {
+		sw.WriteRequest(entry)
 	}
 }
 

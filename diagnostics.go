@@ -1757,7 +1757,7 @@ func checkOIDCJWKSTrust() OperatorContractCheck {
 
 // checkSyslogFeed reports whether the operator-configured syslog/SIEM feed is
 // actually delivering. A silent connect failure at startup (unreachable
-// collector, bad host/port, TCP refused) leaves globalSyslog nil while the
+// collector, bad host/port, TCP refused) leaves globalSyslogHandle nil while the
 // /api/syslog readback reports the feed as "not configured" — indistinguishable
 // from an intentional no-op — so a compliance/SIEM feed can be down with only a
 // single startup log line ("Syslog: connect failed …") as signal. This surfaces
@@ -1777,13 +1777,13 @@ func checkSyslogFeed() OperatorContractCheck {
 	// Healthy only when the target we actually connected to (syslogConfigured,
 	// set SOLELY on a successful InitSyslog) matches the operator's current
 	// intent (syslogConfiguredAddr, recorded regardless of outcome). A bare
-	// globalSyslog != nil check is not enough: observability inits from
+	// globalSyslogHandle != nil check is not enough: observability inits from
 	// YAML/flags BEFORE admin settings apply a persisted override, so if the
 	// first target connects and a later re-init to a new target fails,
-	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
+	// globalSyslogHandle stays non-nil pointing at the PREVIOUS collector while intent
 	// has moved on — the persisted SIEM target is silently down but a nil-check
 	// would still report OK.
-	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+	if syslogHandle() == nil || syslogConfigured != syslogConfiguredAddr {
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,

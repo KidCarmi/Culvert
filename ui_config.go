@@ -1791,7 +1791,7 @@ var syslogConfigured string // the addr string, empty = not configured
 // syslogConfiguredAddr records the operator-configured syslog/SIEM target
 // regardless of whether InitSyslog actually connected (mirrors
 // auditLogConfiguredPath). buildOperatorContract's checkSyslogFeed compares
-// it against the live globalSyslog handle so the Diagnostics panel can tell an
+// it against the live globalSyslogHandle handle so the Diagnostics panel can tell an
 // intentional "no SIEM feed" apart from a configured feed that silently failed
 // to connect at startup — the latter previously left only one startup log line
 // as signal while the /api/syslog readback reported the feed as "not
@@ -1823,16 +1823,16 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		format := "rfc3164"
 		var drops, panics uint64
-		if globalSyslog != nil {
-			format = globalSyslog.Format()
+		if sw := syslogHandle(); sw != nil {
+			format = sw.Format()
 			// Read panics before drops: deliverGuarded's recover branch always
 			// increments panics first, then drops (independent atomics, no
 			// combined snapshot). Reading in the same order means a report can
 			// only ever lag panics behind drops, never the reverse — so the
 			// UI's `drops > 0` gate can never hide a real panic behind a
 			// stale-looking drops==0.
-			panics = globalSyslog.Panics()
-			drops = globalSyslog.Drops()
+			panics = sw.Panics()
+			drops = sw.Drops()
 		}
 		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
@@ -1855,9 +1855,13 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Addr == "" {
 			// Disable syslog.
-			if globalSyslog != nil {
-				globalSyslog.Close()
-				globalSyslog = nil
+			// Swap to nil FIRST, then close what we displaced: a request
+			// goroutine that already loaded the old handle delivers into a
+			// closed writer, which the engine drops and counts, whereas
+			// closing before the swap widens that window for no gain
+			// (CHAOS-78).
+			if displaced := setSyslogHandle(nil); displaced != nil {
+				_ = displaced.Close()
 			}
 			syslogConfigured = ""
 			syslogConfiguredAddr = ""
@@ -1872,9 +1876,20 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		syslogConfigured = body.Addr
 		syslogConfiguredAddr = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
+		// Resolve the format from ONE load, and fall back to the requested
+		// value rather than dereferencing: these two reads were separate
+		// unguarded derefs of the global, so a second admin's concurrent
+		// disable between InitSyslog and here nil-panicked the admin handler
+		// (CHAOS-78). The fallback mirrors the engine's own normalisation.
+		format := body.Format
+		if sw := syslogHandle(); sw != nil {
+			format = sw.Format()
+		} else if format == "" {
+			format = "rfc3164"
+		}
+		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+format+")")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
+		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": format})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1889,13 +1904,14 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if globalSyslog == nil {
+	sw := syslogHandle()
+	if sw == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
 	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
 	// now via the exported io.Writer surface (writeMsg is package-internal).
-	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
+	_, _ = sw.Write([]byte("Culvert syslog test message — connectivity verified"))
 	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
 }
 
