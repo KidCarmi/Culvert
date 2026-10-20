@@ -71,6 +71,10 @@ var (
 // in for a stalled volume, a revoked ACL or a read-only remount.
 var (
 	rosterProbeStat = os.Stat
+	// rosterStampOf reads the probed file's inode stamp. A seam only for
+	// tests: no real replacement can keep the ctime while changing the
+	// inode, so that case is injected.
+	rosterStampOf = stampOf
 	// rosterReplacementBlocked is fileutil's read-only check for a target no
 	// save can replace (immutable, append-only, a mount point; pinned by
 	// TestRosterProbe_UsesTheReplacementPredicate).
@@ -226,6 +230,9 @@ func probeRosterIdentity(path string, d rosterWrittenDigest, dir os.FileInfo) (r
 	}
 	if now := ownerOf(fi); d.owner.known && now.known && now.uid != d.owner.uid && renameLikelyRefused(dir, nil, now) {
 		return rosterDiskOwnerChanged, nil
+	}
+	if d.stamp.known && rosterStampOf(fi) != d.stamp {
+		return rosterDiskChangedExternally, nil
 	}
 	return rosterDiskSame, nil
 }

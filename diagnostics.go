@@ -982,6 +982,15 @@ const rosterTargetImmutable = "the configured roster file cannot be replaced by 
 	"append-only (chattr +i/+a), a mount point, or in an immutable or append-only directory, so every admin " +
 	"account change will be refused when it is saved"
 
+// rosterTargetChangedExternally is the targetProblem when the roster file
+// still holds exactly what Culvert last saved, with the same owner, but is no
+// longer the untouched inode that save landed: a new inode (an identical
+// re-copy) or a changed ctime (a touch, chmod, ACL, security label or xattr
+// change). Any of those can change whether the next save may replace it, so
+// the save's evidence no longer stands (Codex P2 4325019932 on PR #1601).
+const rosterTargetChangedExternally = "the roster file was changed or replaced outside Culvert since its last " +
+	"save; persistence is not re-verified until the next admin account change"
+
 // rosterTargetOwnerChanged is the targetProblem when the roster file still
 // holds exactly what Culvert last wrote, but now belongs to another account in
 // a way that makes the next save's rename be refused (Codex P2 4317730264 on
@@ -1029,12 +1038,23 @@ func rosterTargetProblem(path string, loadErr error, landed, synced bool, pr ros
 		return rosterTargetFirstWritePending
 	case !landed:
 		return rosterTargetNotYetVerified
+	}
+	return landedTargetProblem(pr, synced)
+}
+
+// landedTargetProblem is rosterTargetProblem once a write has landed and
+// the file is present: whether it is still the file Culvert wrote, most
+// specific first, then whether its directory was synced.
+func landedTargetProblem(pr rosterProbeResult, synced bool) string {
+	switch {
 	case pr.diskErr != nil:
 		return "the configured roster path cannot be inspected"
 	case pr.disk == rosterDiskReplaced:
 		return rosterTargetReplaced
 	case pr.disk == rosterDiskOwnerChanged:
 		return rosterTargetOwnerChanged
+	case pr.disk == rosterDiskChangedExternally:
+		return rosterTargetChangedExternally
 	case !synced:
 		return rosterTargetDirNotSynced
 	}
@@ -1131,6 +1151,11 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 		row.OperatorAction = "Restore write and search permission (mode bits and ACL) on the directory holding the " +
 			"admin users file (-ui-users-file) for the account Culvert runs as, or remount the volume read-write. " +
 			"The row re-checks live, so no restart is needed; re-apply any admin change refused meanwhile."
+	case rosterTargetChangedExternally:
+		row.OperatorAction = "None needed if the change to the admin users file (-ui-users-file) was intentional: " +
+			"the next admin account change that is saved re-verifies persistence and clears this, with no restart. " +
+			"If it was not, find what touched the file, and check its permissions, ACL and labels still let Culvert " +
+			"replace it."
 	case rosterTargetOwnerChanged:
 		row.OperatorAction = "Give the admin users file (-ui-users-file) back to the account Culvert runs as " +
 			"(chown), or run Culvert as the file's owner and restart. Until then an admin account change may be " +

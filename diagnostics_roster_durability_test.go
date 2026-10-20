@@ -62,7 +62,7 @@ func pinRosterDurabilityBaseline(t *testing.T) {
 	prevLanded, prevWritten, prevSynced := cfg.uiUsersWriteLanded, cfg.uiUsersWritten, cfg.uiUsersWriteSynced
 	cfg.uiUsersFile, cfg.uiUsersLoadErr = p, nil
 	cfg.uiUsersWriteLanded, cfg.uiUsersWriteSynced = true, true
-	cfg.uiUsersWritten = digestRosterWrite(p, data, ownerOf(fi))
+	cfg.uiUsersWritten = digestRosterWrite(p, data, fi)
 	cfg.mu.Unlock()
 	resetRosterPersistCountersForTest()
 	t.Cleanup(func() {
@@ -473,8 +473,9 @@ func thenRosterEditedInPlace(setup func(t *testing.T, c *Config)) func(t *testin
 // TestRosterDurability_ExternalReplaceWarnsUntilReconciled: after a landed
 // save the row is ok; an external replacement makes it warn with its own
 // message and remedy; Culvert's own save (which writes the roster in use
-// back) clears it and does not trip it; a touch alone does not trip it; an
-// in-place same-size edit does. Removing the comparison, or not recording
+// back) clears it and does not trip it; a touch alone reports changed
+// externally where the inode stamp is known; an in-place same-size edit
+// reports replaced. Removing the comparison, or not recording
 // the digest on a save, fails this test.
 func TestRosterDurability_ExternalReplaceWarnsUntilReconciled(t *testing.T) {
 	c, path := savedRosterCfg(t)
@@ -503,11 +504,20 @@ func TestRosterDurability_ExternalReplaceWarnsUntilReconciled(t *testing.T) {
 	}
 	wantOK("after Culvert's own save")
 
+	// A touch leaves the bytes alone but is not the untouched inode the save
+	// landed (Codex P2 4325019932): changed outside Culvert, until the next
+	// save re-verifies. Platforms without an inode stamp compare bytes only.
 	future := time.Now().Add(time.Hour)
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatal(err)
 	}
-	wantOK("after a touch")
+	if row := checkAdminRosterDurability(); c.uiUsersWritten.stamp.known && row.Message != rosterTargetChangedExternally {
+		t.Errorf("after a touch: row = %+v, want %q", row, rosterTargetChangedExternally)
+	}
+	if err := c.SaveUIUsersFile(); err != nil {
+		t.Fatalf("SaveUIUsersFile: %v", err)
+	}
+	wantOK("after the save that re-verifies")
 
 	thenRosterEditedInPlace(func(*testing.T, *Config) {})(t, c)
 	wantReplaced("after an in-place edit")

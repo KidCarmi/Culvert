@@ -1505,8 +1505,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   2 s. After a landed save the row also warns when the roster file is
   removed, replaced or edited outside Culvert (each landed save records the
   size and SHA-256 of the bytes written), replaced by an identical copy owned
-  by another account where that makes the next save's rename be refused, or
-  when the save's directory could not be synced. The probe runs on its own
+  by another account where that makes the next save's rename be refused,
+  changed or replaced outside Culvert in any other way, or when the save's
+  directory could not be synced. A landed save is evidence only for the exact
+  file it wrote, unchanged since: on Linux and macOS it also records that
+  file's device, inode and `ctime` (fstat of the written file after the
+  rename), and any difference — a new inode, or a same-inode `touch`, `chmod`,
+  `chown`, ACL, extended attribute or label change — reports the new
+  `warn` *the roster file was changed or replaced outside Culvert since its
+  last save* (no action needed if intentional; the next admin account change
+  re-verifies). Deliberately, a `touch`, a `chmod` or an identical re-copy
+  now warns instead of reading `ok`. Changed contents, a refused-rename owner
+  change, a missing or immutable file and an unwritable directory take
+  precedence. Other Unix systems compare size, SHA-256 and owner; Windows
+  compares size and SHA-256 only. The probe runs on its own
   goroutine, holds no roster lock, runs at most once at a time, is reused for
   5 s, and is read once per diagnostics request (the viewer rendering reuses
   it), so a stalled volume costs a request at most one 2 s wait and never

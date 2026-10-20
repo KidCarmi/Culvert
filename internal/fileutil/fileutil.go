@@ -108,12 +108,14 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 
 // WriteResult describes what AtomicWriteInfo landed.
 type WriteResult struct {
-	// Landed is the FileInfo of the file the write put at path: fstat on the
-	// temp file's OWN descriptor just before it is renamed over path, so it
-	// describes exactly the inode the write put there (rename(2) keeps an
-	// inode's owner, group and mode) even if an external writer replaces
-	// path again before the caller could look at it — which a stat of the
-	// path after the write cannot promise. Nil when nothing landed.
+	// Landed is the FileInfo of the file the write put at path: fstat on a
+	// descriptor of the temp file itself, taken just AFTER it is renamed over
+	// path (a duplicate kept open across the rename on Unix; elsewhere the
+	// file's last fstat before it). So it describes exactly the inode the
+	// write put there, including the ctime the rename itself set, even if an
+	// external writer replaces path again before the caller could look at
+	// it — which a stat of the path after the write cannot promise. Nil when
+	// nothing landed.
 	Landed os.FileInfo
 	// DirSynced reports whether the parent directory was fsynced after the
 	// rename (or the platform reports a directory fsync as unsupported, the
@@ -138,33 +140,23 @@ var (
 // and its observer notifications are exactly AtomicWrite's.
 func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (WriteResult, error) {
 	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	f, err := os.CreateTemp(dir, base+".tmp.*")
+	f, err := writeSyncedTemp(path, dir, data, perm)
 	if err != nil {
-		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: create temp: %w", path, err))
+		return WriteResult{}, err
 	}
 	tmp := f.Name()
 	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
 
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		cleanup()
-		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: write: %w", path, err))
-	}
-	if err := f.Chmod(perm); err != nil {
-		_ = f.Close()
-		cleanup()
-		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: chmod: %w", path, err))
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		cleanup()
-		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: fsync: %w", path, err))
-	}
 	landed, statErr := f.Stat()
 	if statErr != nil {
 		landed = nil // the write still lands; only the caller's identity record is unknown
+	}
+	// A second descriptor of the same inode survives the close below, so
+	// the landed file can be fstat'ed after the rename (which sets its
+	// ctime) without looking it up by path. nil where unavailable.
+	held := holdInode(f)
+	if held != nil {
+		defer func() { _ = held.Close() }() // #nosec G104 -- read-only duplicate
 	}
 	if err := f.Close(); err != nil {
 		cleanup()
@@ -174,8 +166,42 @@ func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (WriteResult, e
 		cleanup()
 		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: rename: %w", path, err))
 	}
-	res := WriteResult{Landed: landed}
+	if held != nil {
+		if fi, err := held.Stat(); err == nil {
+			landed = fi
+		}
+	}
+	return syncParentAfterRename(path, dir, WriteResult{Landed: landed})
+}
 
+// writeSyncedTemp creates the temp file beside path and writes, chmods and
+// fsyncs data into it, returning it still open. On failure it has closed
+// and removed the temp file and notified the observer.
+func writeSyncedTemp(path, dir string, data []byte, perm os.FileMode) (*os.File, error) {
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return nil, noteWriteFailure(path, fmt.Errorf("atomic write %s: create temp: %w", path, err))
+	}
+	fail := func(step string, err error) (*os.File, error) {
+		_ = f.Close()
+		_ = os.Remove(f.Name()) // #nosec G104 -- best-effort cleanup
+		return nil, noteWriteFailure(path, fmt.Errorf("atomic write %s: %s: %w", path, step, err))
+	}
+	if _, err := f.Write(data); err != nil {
+		return fail("write", err)
+	}
+	if err := f.Chmod(perm); err != nil {
+		return fail("chmod", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail("fsync", err)
+	}
+	return f, nil
+}
+
+// syncParentAfterRename fsyncs dir once the write has been renamed into
+// place, setting res.DirSynced, with AtomicWrite's errors and notifications.
+func syncParentAfterRename(path, dir string, res WriteResult) (WriteResult, error) {
 	d, err := openParentDir(dir)
 	if err != nil {
 		// Best-effort: opening a directory for sync is not portable. The data

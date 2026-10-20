@@ -37,8 +37,18 @@ func TestRosterDurability_NotYetVerifiedAtBoot(t *testing.T) {
 	if viewer.Status != diagWarn || viewer.Message != rosterDurabilityViewerNotYetVerified {
 		t.Errorf("viewer row = %+v, want the fixed not-yet-verified message", viewer)
 	}
-	if contract.Verdict == diagFail {
-		t.Errorf("a fresh boot's contract verdict is fail; not-verified-yet must never fail it")
+	// The verdict also folds in every other row, whose state other tests in
+	// the package may leave behind, so assert the roster row's contribution:
+	// the verdict is exactly what the other rows give with one warn added.
+	others := make([]OperatorContractCheck, 0, len(contract.Checks))
+	for i := range contract.Checks {
+		if contract.Checks[i].Code != adminRosterDurabilityCode {
+			others = append(others, contract.Checks[i])
+		}
+	}
+	want := rollUpVerdict(append(others, OperatorContractCheck{Status: diagWarn}))
+	if contract.Verdict != want {
+		t.Errorf("contract verdict = %q, want %q: not-verified-yet must only warn, never fail", contract.Verdict, want)
 	}
 	if err := c.SaveUIUsersFile(); err != nil {
 		t.Fatal(err)

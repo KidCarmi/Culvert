@@ -14,8 +14,11 @@ import (
 
 // Gates for Codex P2 4317730264 on PR #1601: a byte-identical roster copy
 // that now belongs to another account, in a way that makes the next save's
-// rename be refused, is reported; an identical re-copy with the same owner,
-// a touch and a chmod are not.
+// rename be refused, is reported as an owner change. Since Codex P2
+// 4325019932 every other change outside Culvert (an identical re-copy with
+// the same owner, a touch, a chmod, a same-inode xattr) is reported as
+// changed externally where the inode stamp is known, and Culvert's own
+// saves stay ok.
 
 const otherAccount = 65534 // nobody/nogroup
 
@@ -79,14 +82,18 @@ func TestRosterIdentity_IdenticalCopyWithAnotherOwnerWarns(t *testing.T) {
 	}
 }
 
-// TestRosterIdentity_HarmlessChangesStayOK: none of these changes what a
-// restart loads or whether a save can land, so none warns: an identical
-// re-copy with the same owner (a new inode and mtime), a touch, a chmod, and
-// an owner change where the rename is still permitted (a non-sticky
-// directory, or a process that may replace any file).
-func TestRosterIdentity_HarmlessChangesStayOK(t *testing.T) {
+// TestRosterIdentity_ChangesOutsideCulvertWarn (Codex P2 4325019932 on PR
+// #1601): the evidence of a landed save stands only while the target is the
+// untouched inode that save landed. Each of these keeps the bytes, and none
+// is reported as replaced content or a refusing owner, yet each is a change
+// outside Culvert that could alter whether the next rename is allowed, so
+// each is rosterTargetChangedExternally until the next save. (Before this,
+// a re-copy, a touch, a chmod and an allowed owner change read ok; that is
+// the deliberate behaviour change.) Platforms without an inode stamp keep
+// comparing bytes and owner only.
+func TestRosterIdentity_ChangesOutsideCulvertWarn(t *testing.T) {
 	cases := map[string]func(t *testing.T, path string){
-		"identical re-copy, same owner": func(t *testing.T, path string) {
+		"identical re-copy, same owner (new inode)": func(t *testing.T, path string) {
 			installIdenticalCopy(t, path, os.Geteuid(), os.Getegid())
 		},
 		"touch": func(t *testing.T, path string) {
@@ -100,6 +107,7 @@ func TestRosterIdentity_HarmlessChangesStayOK(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		"same-inode ACL or label change (xattr stand-in)": setSameInodeXattr,
 		"another owner in a non-sticky directory": func(t *testing.T, path string) {
 			needRoot(t)
 			asUnprivileged(t)
@@ -121,12 +129,39 @@ func TestRosterIdentity_HarmlessChangesStayOK(t *testing.T) {
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, path := savedRosterCfg(t)
+			c, path := savedRosterCfg(t)
 			change(t, path)
+			want := rosterTargetChangedExternally
+			if !c.uiUsersWritten.stamp.known {
+				t.Skip("no inode stamp on this platform; bytes and owner only")
+			}
+			if row := checkAdminRosterDurability(); row.Status != diagWarn || row.Message != want {
+				t.Fatalf("row = %+v, want warn %q", row, want)
+			}
+			if err := c.SaveUIUsersFile(); err != nil {
+				t.Fatal(err)
+			}
 			if row := checkAdminRosterDurability(); row.Status != diagOK {
-				t.Errorf("row = %+v, want ok", row)
+				t.Errorf("after the next save: row = %+v, want ok", row)
 			}
 		})
+	}
+}
+
+// TestRosterIdentity_CulvertsOwnSavesStayOK: a save, and two saves in a row,
+// leave the row ok — Culvert's own writes always re-record the stamp.
+func TestRosterIdentity_CulvertsOwnSavesStayOK(t *testing.T) {
+	c, _ := savedRosterCfg(t)
+	for i := 0; i < 2; i++ {
+		if row := checkAdminRosterDurability(); row.Status != diagOK {
+			t.Fatalf("after %d save(s): row = %+v, want ok", i+1, row)
+		}
+		if err := c.SaveUIUsersFile(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if row := checkAdminRosterDurability(); row.Status != diagOK {
+		t.Errorf("after two saves in a row: row = %+v, want ok", row)
 	}
 }
 

@@ -1551,14 +1551,10 @@ func (c *Config) rosterWriteLanded() bool {
 // of the path afterwards, which an external replacement could already have
 // won (Codex P2 4319694771 on PR #1601).
 func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileInfo, dirSynced bool) {
-	var owner fileOwnerID
-	if landed != nil {
-		owner = ownerOf(landed)
-	}
 	c.mu.Lock()
 	if c.uiUsersFile == path {
 		c.uiUsersWriteLanded = true
-		c.uiUsersWritten = digestRosterWrite(path, data, owner)
+		c.uiUsersWritten = digestRosterWrite(path, data, landed)
 		c.uiUsersWriteSynced = dirSynced
 	}
 	c.mu.Unlock()

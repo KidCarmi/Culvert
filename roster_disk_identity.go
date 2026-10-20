@@ -18,12 +18,21 @@ package main
 // short-circuits a different-length file without reading it, and the row is
 // computed at diagnostics rate, not on a hot path.
 //
-// A byte-identical copy can still be a problem: installed with another owner
-// in a sticky directory, it makes the next save's rename fail with EPERM. So
-// the write also records the file's owner, and an identical file whose owner
-// changed is reported when the change would make a save be refused
-// (renameLikelyRefused). The inode number and mtime are deliberately NOT part
-// of the identity: an identical re-copy, a touch or a chmod stays ok.
+// Identical bytes are not enough (Codex P2s 4317730264 and 4325019932 on PR
+// #1601): a same-UID replacement, or a same-inode SELinux label or NFSv4 ACL
+// change, can deny the next rename while the content is unchanged — and the
+// list of replacement-relevant attributes has no end. So the evidence of a
+// landed write is valid ONLY while the target is exactly the inode Culvert
+// landed and unchanged since: each landed write also records the inode's
+// dev, ino and ctime (inodeStamp; the landed descriptor's fstat AFTER the
+// rename, which itself sets the ctime), and any difference is
+// rosterDiskChangedExternally. The more specific verdicts come first: other
+// content is rosterDiskReplaced, and an identical file now owned by another
+// account where the next rename would be refused is rosterDiskOwnerChanged.
+// A touch, a chmod, an identical re-copy or an xattr/ACL change therefore
+// warns too, deliberately: persistence is re-verified by the next save. On
+// platforms without an inode stamp (roster_disk_stamp_other.go) only size,
+// hash and owner are compared.
 //
 // The comparison runs inside the row's one live filesystem probe
 // (roster_probe.go), with no roster lock held: every Culvert roster write
@@ -33,7 +42,10 @@ package main
 // identity result only if no write was in flight and the generation did not
 // move.
 
-import "crypto/sha256"
+import (
+	"crypto/sha256"
+	"os"
+)
 
 // rosterWrittenDigest identifies what Culvert last wrote to path. The zero
 // value (path "") means no landed write is recorded.
@@ -42,19 +54,27 @@ type rosterWrittenDigest struct {
 	size  int64
 	sum   [sha256.Size]byte
 	owner fileOwnerID // the file's owner after the write; owner.known false where the platform has none
+	stamp inodeStamp  // dev, ino and ctime of the landed inode; stamp.known false where the platform has none
 }
 
-func digestRosterWrite(path string, data []byte, owner fileOwnerID) rosterWrittenDigest {
-	return rosterWrittenDigest{path: path, size: int64(len(data)), sum: sha256.Sum256(data), owner: owner}
+// digestRosterWrite records data as written to path; landed is the landed
+// file's own FileInfo (fileutil.WriteResult.Landed), nil if unknown.
+func digestRosterWrite(path string, data []byte, landed os.FileInfo) rosterWrittenDigest {
+	d := rosterWrittenDigest{path: path, size: int64(len(data)), sum: sha256.Sum256(data)}
+	if landed != nil {
+		d.owner, d.stamp = ownerOf(landed), stampOf(landed)
+	}
+	return d
 }
 
 // rosterDiskVerdict is what the identity read found.
 type rosterDiskVerdict int
 
 const (
-	rosterDiskSame         rosterDiskVerdict = iota // what Culvert wrote, or nothing to compare, or in flux
-	rosterDiskReplaced                              // different content: replaced or edited outside Culvert
-	rosterDiskOwnerChanged                          // same content, another owner a save may be refused over
+	rosterDiskSame              rosterDiskVerdict = iota // what Culvert wrote, or nothing to compare, or in flux
+	rosterDiskReplaced                                   // different content: replaced or edited outside Culvert
+	rosterDiskOwnerChanged                               // same content, another owner a save may be refused over
+	rosterDiskChangedExternally                          // same content and owner, but not the untouched inode Culvert landed
 )
 
 // beginRosterWrite and endRosterWrite bracket every Culvert write to the

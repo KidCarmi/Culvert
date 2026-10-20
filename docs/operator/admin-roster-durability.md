@@ -218,22 +218,43 @@ administrative decision was affected, and therefore what the operator must redo.
    it are lost on restart: save an admin account change, which recreates the
    file, or restore it from backup, before the next restart), **replaced or
    edited outside Culvert** (each landed save records the size and SHA-256 of
-   the bytes written, so an in-place edit counts but a `touch` or `chmod` does
-   not: a restart would load the file as it is now, which may restore revoked
-   accounts or credentials or drop changes made since — reconcile, then either
-   save an admin account change to write the roster in use back, or restart to
-   adopt the file), **replaced by an identical copy owned by another account**
-   in a way that makes the next save's rename be refused (a sticky directory
-   whose owner is neither Culvert nor root, with Culvert not root and not the
-   new owner: give the file back to Culvert's account, or run Culvert as its
-   owner — an identical re-copy with the same owner, or an owner change in a
-   non-sticky directory, stays `ok`), or when the save landed but its
+   the bytes written, so any edit that changes them counts: a restart would
+   load the file as it is now, which may restore revoked accounts or
+   credentials or drop changes made since — reconcile, then either save an
+   admin account change to write the roster in use back, or restart to adopt
+   the file), **replaced by an identical copy owned by another account** in a
+   way that makes the next save's rename be refused (a sticky directory whose
+   owner is neither Culvert nor root, with Culvert not root and not the new
+   owner: give the file back to Culvert's account, or run Culvert as its
+   owner), **changed or replaced outside Culvert in any other way** (the
+   message reads *the roster file was changed or replaced outside Culvert
+   since its last save; persistence is not re-verified until the next admin
+   account change*), or when the save landed but its
    **directory could not be synced** (for example a write-and-search-only
    `0300` directory that cannot be opened for the `fsync`: that write may not
    survive a power loss; the save itself succeeds, as every other store's
    does). It is also `warn` when refused or degraded roster writes have
    occurred since process start; the Admin Users panel shows the same
    refused/degraded counts, which clear on restart.
+
+   A landed save is evidence only for the exact file Culvert wrote, unchanged
+   since. On Linux and macOS each landed save also records that file's device,
+   inode number and status-change time (`ctime`, nanoseconds), taken from the
+   written file itself after the rename. Any later difference — a new inode
+   (an identical re-copy, even by the same owner, or an owner-changing copy in
+   a non-sticky directory), or a `ctime` change on the same inode (`touch`,
+   `chmod`, `chown`, `setfacl`, a new extended attribute or SELinux label) —
+   reports *changed or replaced outside Culvert*, because any of those can
+   change whether the next save is allowed and no stat can tell which. This is
+   deliberate: **a `touch`, a `chmod` or an identical re-copy makes the row
+   `warn`, not `ok`.** If the change was intentional no
+   action is needed: the next admin account change that is saved re-verifies
+   persistence and clears it, with no restart. The more specific problems take
+   precedence: changed contents, a refused-rename owner change, a missing
+   file, an immutable file and a directory Culvert can no longer write. On
+   other Unix systems only the size, SHA-256 and owner are compared, and on
+   Windows only the size and SHA-256, so there a metadata-only change does not
+   warn.
 
    Everything the row learns from the filesystem comes from one live probe,
    read once per diagnostics request (the viewer rendering reuses it). The
