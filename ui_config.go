@@ -1836,18 +1836,21 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
-		apiSyslogConfigApply(w, r)
+		handleSyslogConfigPost(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// apiSyslogConfigApply is the POST half of /api/syslog: validate the body, then
-// either disable forwarding or (re)point it at a new collector. Split out of
-// apiSyslogConfig, behaviour unchanged, to keep that handler inside the
+// handleSyslogConfigPost is the POST half of /api/syslog: validate the body,
+// then either disable forwarding or (re)point it at a new collector. Split out
+// of apiSyslogConfig, behaviour unchanged, to keep that handler inside the
 // repository's configured complexity/length bars (cyclop 15, funlen 80/50)
-// after CHAOS-78 added the one-load format resolution below.
-func apiSyslogConfigApply(w http.ResponseWriter, r *http.Request) {
+// after CHAOS-78 added the one-load format resolution below. Named for the
+// method it serves, not apiXxx, because it is NOT a routed handler — the route
+// table and the mux still name apiSyslogConfig (mirrors
+// handleSupportDebugLevelPost).
+func handleSyslogConfigPost(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
