@@ -296,4 +296,59 @@ HD_PING_RC=1 PATH="$TEST_DIR/hd/bin:$PATH" "$hd_shell" "$TEST_DIR/hd/culvert-spl
 grep -qx 'ExecCondition=/opt/culvert-appliance/bin/culvert-has-display' "$SOURCE/plymouth-headless.conf" || fail 'Plymouth drop-in lost its display condition'
 grep -qx '\[Service\]' "$SOURCE/plymouth-headless.conf" || fail 'Plymouth drop-in has no [Service] section'
 
-echo 'PASS: splash staging, alternatives/initramfs/GRUB ordering, failure fences, GRUB preservation, runtime-only overlay'
+# EXECUTION proof of the failed-unit display (#1528 ASTRA: a failed systemd unit
+# must surface its NAME on the boot console, not a generic warning). The greps
+# above prove the script CARRIES the checks; this RUNS culvert-splash-status
+# against a fake systemctl+plymouth and asserts the exact text plymouth is told
+# to display in each state. Deterministic, no QEMU — the frame capture in the
+# [boot-console] lab job corroborates this end to end, but the owner mandate
+# (req 7) wants the proof to be a deterministic test, not an intermittent boot.
+ss_shell=$(command -v dash || command -v sh)
+mkdir -p "$TEST_DIR/ss/bin"
+SS_CNT="$TEST_DIR/ss/ping-count"; SS_TRACE="$TEST_DIR/ss/trace"
+# plymouth: --ping succeeds exactly ONCE (one loop iteration, then the loop
+# exits), display-message records the full argument so the --text is checked
+# verbatim including its ASCII double-space separators.
+cat >"$TEST_DIR/ss/bin/plymouth" <<EOF
+#!/bin/sh
+case "\$1" in
+  --ping) n=\$(cat "$SS_CNT" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" >"$SS_CNT"; [ "\$n" -le 1 ] ;;
+  display-message) shift; echo "display-message \$*" >>"$SS_TRACE" ;;
+  *) : ;;
+esac
+EOF
+# systemctl: is-system-running echoes SS_STATE; list-units prints SS_FAILED
+# verbatim (the raw --no-legend --plain rows the summary parses with awk).
+cat >"$TEST_DIR/ss/bin/systemctl" <<'EOF'
+#!/bin/sh
+case "$1" in
+  is-system-running) echo "${SS_STATE:-running}" ;;
+  list-units) printf '%s' "${SS_FAILED:-}" ;;
+  *) : ;;
+esac
+EOF
+printf '#!/bin/sh\nexit 0\n' >"$TEST_DIR/ss/bin/sleep"   # no real 2 s wait in the test
+chmod +x "$TEST_DIR/ss/bin/plymouth" "$TEST_DIR/ss/bin/systemctl" "$TEST_DIR/ss/bin/sleep"
+ss_run() { : >"$SS_CNT"; : >"$SS_TRACE"
+    SS_STATE="$1" SS_FAILED="$2" PATH="$TEST_DIR/ss/bin:$PATH" "$ss_shell" "$SOURCE/culvert-splash-status" || fail "splash-status exited non-zero ($3)"
+    cat "$SS_TRACE"; }
+# 1. Degraded + a named failed unit: the NAME is on the frame (the ASTRA ask).
+got=$(ss_run degraded 'culvert-failtest.service loaded failed failed Culvert failure injection test' 'named failed unit')
+[[ $got == 'display-message --text=Service failed: culvert-failtest.service  -  Esc or Alt+F12: boot log' ]] \
+    || fail "failed-unit frame did not name the unit: $got"
+# 2. Degraded but the failed-unit list is momentarily empty: a generic warning,
+#    never silence (the pre-#1528 behaviour was no warning at all).
+got=$(ss_run degraded '' 'degraded, list empty')
+[[ $got == 'display-message --text=A service failed to start  -  Esc or Alt+F12: boot log' ]] \
+    || fail "degraded fallback warning wrong: $got"
+# 3. Several failed: the first is named with a (+N more) count, still 80-col safe.
+got=$(ss_run degraded $'a.service loaded failed failed A\nb.service loaded failed failed B\nc.service loaded failed failed C' 'three failed')
+[[ $got == 'display-message --text=Service failed: a.service (+2 more)  -  Esc or Alt+F12: boot log' ]] \
+    || fail "multi-failure summary wrong: $got"
+# 4. Healthy: the ordinary status line, NO false failure warning (a control —
+#    a script that always warned would pass cases 1-3 and be wrong here).
+got=$(ss_run starting '' 'healthy/starting')
+[[ $got == 'display-message --text=Starting system services  -  Esc: boot messages' ]] \
+    || fail "healthy state showed a failure warning or wrong line: $got"
+
+echo 'PASS: splash staging, alternatives/initramfs/GRUB ordering, failure fences, failed-unit display, GRUB preservation, runtime-only overlay'
