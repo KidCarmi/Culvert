@@ -54,7 +54,8 @@ func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
 // The second reason is the one a nil guard would NOT have fixed. The engine
 // sets its queue in startAsync, AFTER the struct literal (internal/syslog), and
 // treats a nil queue as "deliver synchronously" — a path that holds the
-// writer's mutex across up to two 5 s dials and two 5 s writes. A plain
+// writer's mutex across three serialized network ops (write, dial, write),
+// which deliverLine's own comment puts at ~15 s worst case. A plain
 // pointer write carries no release edge, so on a weakly ordered target (this
 // appliance ships linux/arm64) a request goroutine could observe a non-nil
 // writer whose queue was still zero, fall into that synchronous path, and pay

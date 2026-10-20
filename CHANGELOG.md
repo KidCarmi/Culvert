@@ -28,7 +28,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   The subtler half is the one a nil guard would **not** have fixed. The engine
   sets its queue in `startAsync` *after* the struct literal and treats a zero
   queue as "deliver synchronously" — a path that holds the writer mutex across
-  up to two 5 s dials and two 5 s writes. A plain pointer write carries no
+  three serialized network ops, which the engine's own comment puts at ~15 s
+  worst case (`writeTimeout` + dial + `writeTimeout`). A plain pointer write
+  carries no
   release edge, so on a weakly ordered target (the appliance ships
   `linux/arm64`) a request goroutine could observe a non-nil writer whose queue
   was still zero, take that path, and pay ~15 s on the data path with every

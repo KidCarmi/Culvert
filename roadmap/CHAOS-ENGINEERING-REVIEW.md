@@ -10667,7 +10667,7 @@ here, and the sweep found two further defects while reading the write sites.
 | | Finding | Impact |
 |---|---|---|
 | **SIEM-1** | The nil check and the dereference were two separate unsynchronized loads, so a request goroutine could pass the check and dereference the `nil` the disable branch had just stored | Aborts an in-flight request or tunnel, over a routine "disable SIEM forwarding" click |
-| **SIEM-2** | A plain pointer write carries no release edge, and the engine treats a zero `queue` as *deliver synchronously* — a path holding the writer mutex across up to two 5 s dials and two 5 s writes | A request goroutine pays ~15 s on the data path, every other logging caller queued behind it |
+| **SIEM-2** | A plain pointer write carries no release edge, and the engine treats a zero `queue` as *deliver synchronously* — a path holding the writer mutex across three serialized network ops | A request goroutine pays ~15 s on the data path (the engine's own figure), every other logging caller queued behind it |
 | **SIEM-3** | `InitSyslog` published over the previous writer without closing it, and `drainLoop` exits ONLY via `Close` | One delivery goroutine and one collector socket stranded per runtime SIEM retarget, permanently, with nothing to show it |
 
 SIEM-2 is the load-bearing one, and the reason a nil guard would have been the
@@ -10677,7 +10677,11 @@ its `queue` in `startAsync`, **after** the struct literal, and
 `internal/syslog`'s `send()` reads `if s.queue == nil { s.writeMsg(...) }`. A
 reader with no acquire edge may observe the non-nil writer and the zero queue,
 fall into `writeMsg` → `deliverLine`, and take `s.mu` across the
-connect/backoff/write state machine on the proxy request goroutine. That is
+connect/backoff/write state machine on the proxy request goroutine.
+`deliverLine`'s own comment accounts for that cost — "`writeTimeout` + dial
+(5s) + `writeTimeout` — three serialized network ops (~15s worst case) under
+`s.mu`" — which it wrote about the drain goroutine, the only caller it expected
+to be there. That is
 precisely the proxy-wide stall the async design and the engine's own
 `TestAsync_WedgedCollectorNeverBlocksCaller` exist to prevent — reached not
 through the engine but through the pointer holding it. This appliance ships
