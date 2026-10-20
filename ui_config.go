@@ -1836,63 +1836,70 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
-		if !requireRole(w, r, RoleAdmin) {
-			return
-		}
-		var body struct {
-			Addr   string `json:"addr"`
-			Format string `json:"format"`
-		}
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		body.Addr = strings.TrimSpace(body.Addr)
-		body.Format = strings.TrimSpace(body.Format)
-		if body.Format != "" && body.Format != "rfc3164" && body.Format != "rfc5424" {
-			http.Error(w, "format must be \"rfc3164\" or \"rfc5424\"", http.StatusBadRequest)
-			return
-		}
-		if body.Addr == "" {
-			// Disable syslog.
-			// Swap to nil FIRST, then close what we displaced: a request
-			// goroutine that already loaded the old handle delivers into a
-			// closed writer, which the engine drops and counts, whereas
-			// closing before the swap widens that window for no gain
-			// (CHAOS-78).
-			if displaced := setSyslogHandle(nil); displaced != nil {
-				_ = displaced.Close()
-			}
-			syslogConfigured = ""
-			syslogConfiguredAddr = ""
-			auditEvent(r, "settings.syslog", "disabled", "")
-			adminSettingsSave()
-			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
-			return
-		}
-		if err := InitSyslog(body.Addr, body.Format); err != nil {
-			http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		syslogConfigured = body.Addr
-		syslogConfiguredAddr = body.Addr
-		// Resolve the format from ONE load, and fall back to the requested
-		// value rather than dereferencing: these two reads were separate
-		// unguarded derefs of the global, so a second admin's concurrent
-		// disable between InitSyslog and here nil-panicked the admin handler
-		// (CHAOS-78). The fallback mirrors the engine's own normalisation.
-		format := body.Format
-		if sw := syslogHandle(); sw != nil {
-			format = sw.Format()
-		} else if format == "" {
-			format = "rfc3164"
-		}
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+format+")")
-		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": format})
+		apiSyslogConfigApply(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// apiSyslogConfigApply is the POST half of /api/syslog: validate the body, then
+// either disable forwarding or (re)point it at a new collector. Split out of
+// apiSyslogConfig, behaviour unchanged, to keep that handler inside the
+// repository's configured complexity/length bars (cyclop 15, funlen 80/50)
+// after CHAOS-78 added the one-load format resolution below.
+func apiSyslogConfigApply(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var body struct {
+		Addr   string `json:"addr"`
+		Format string `json:"format"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	body.Addr = strings.TrimSpace(body.Addr)
+	body.Format = strings.TrimSpace(body.Format)
+	if body.Format != "" && body.Format != "rfc3164" && body.Format != "rfc5424" {
+		http.Error(w, "format must be \"rfc3164\" or \"rfc5424\"", http.StatusBadRequest)
+		return
+	}
+	if body.Addr == "" {
+		// Disable syslog. Swap to nil FIRST, then close what we displaced: a
+		// request goroutine that already loaded the old handle delivers into a
+		// closed writer, which the engine drops and counts, whereas closing
+		// before the swap widens that window for no gain (CHAOS-78).
+		if displaced := setSyslogHandle(nil); displaced != nil {
+			_ = displaced.Close()
+		}
+		syslogConfigured = ""
+		syslogConfiguredAddr = ""
+		auditEvent(r, "settings.syslog", "disabled", "")
+		adminSettingsSave()
+		jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
+		return
+	}
+	if err := InitSyslog(body.Addr, body.Format); err != nil {
+		http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	syslogConfigured = body.Addr
+	syslogConfiguredAddr = body.Addr
+	// Resolve the format from ONE load, and fall back to the requested value
+	// rather than dereferencing: these two reads were separate unguarded derefs
+	// of the global, so a second admin's concurrent disable between InitSyslog
+	// and here nil-panicked the admin handler (CHAOS-78). The fallback mirrors
+	// the engine's own normalisation.
+	format := body.Format
+	if sw := syslogHandle(); sw != nil {
+		format = sw.Format()
+	} else if format == "" {
+		format = "rfc3164"
+	}
+	auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+format+")")
+	adminSettingsSave()
+	jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": format})
 }
 
 // POST /api/syslog/test — send a test message to the configured syslog target.

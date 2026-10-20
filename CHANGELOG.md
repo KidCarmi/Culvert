@@ -9,6 +9,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The syslog/SIEM writer handle was published without synchronization, so a
+  "disable forwarding" click could abort an in-flight proxy request, and every
+  runtime retarget leaked a delivery goroutine and its collector socket
+  (CHAOS-78).** `globalSyslog` was a plain `*syslogWriter`: written at runtime
+  from the admin handler goroutine (`InitSyslog` via `POST /api/syslog`; the
+  disable branch stored `nil`) and read unsynchronized on the proxy request
+  path at `persistLogEntry` — the chokepoint every request-log record flows
+  through — and on the audit SIEM hook.
+
+  The nil check and the dereference were two separate unsynchronized loads, so
+  a request goroutine could pass the check and then dereference the `nil` the
+  disable branch had just stored. Measured: 14 reported data races under
+  `-race` between `persistLogEntry` and `InitSyslog`. The proxy crash guard
+  contains the panic per request, so the cost is a dead request or tunnel and a
+  crash record, not a dead appliance.
+
+  The subtler half is the one a nil guard would **not** have fixed. The engine
+  sets its queue in `startAsync` *after* the struct literal and treats a zero
+  queue as "deliver synchronously" — a path that holds the writer mutex across
+  up to two 5 s dials and two 5 s writes. A plain pointer write carries no
+  release edge, so on a weakly ordered target (the appliance ships
+  `linux/arm64`) a request goroutine could observe a non-nil writer whose queue
+  was still zero, take that path, and pay ~15 s on the data path with every
+  other logging caller queued behind it — exactly the proxy-wide stall the
+  async design exists to prevent, reached through the pointer rather than the
+  engine.
+
+  The handle is now an `atomic.Pointer[syslogWriter]` read once into a local at
+  every site, which supplies both the single load and the release edge. This is
+  the pattern the codebase already uses for every other hot-path-read,
+  runtime-reconfigured global (`globalLogStore`, `logSink`, `obs.sink`, and the
+  syslog engine's own `panicObserver`); the pointer holding the engine was the
+  one left plain.
+
+  Separately, `InitSyslog` published over the previous writer without closing
+  it, and the engine's `drainLoop` exits **only** via `Close` — so each runtime
+  SIEM retarget stranded one delivery goroutine and one collector socket for
+  the life of the process (measured: 8 retargets, 8 leaked, 7 still live after
+  a disable). `InitSyslog` now closes the writer it displaces. The enable
+  branch also dereferenced the global twice more with no nil guard at all, so a
+  second admin's concurrent disable nil-panicked the admin handler; the format
+  now resolves from one load.
+
+  Closes `OBS-1` of the chaos register's §42, which nominated it as the
+  recommended first follow-up. Gated by a `-race` reconfigure-versus-request
+  test, a goroutine-leak test counting delivery goroutines by stack, an AST
+  wall (the handle stays an `atomic.Pointer`, only `syslog.go` names it, and
+  no caller may write `syslogHandle().Method()`), and a compile-time type
+  assertion. Full write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §45.
+
 - **A Control Plane gRPC listener fault terminated the whole appliance, and a
   listener that died after binding was silent and terminal (CHAOS-71).** The CP
   boot path had exactly one error branch — `logFatalf("ControlPlane gRPC: %v",
