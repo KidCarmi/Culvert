@@ -16,10 +16,22 @@
 set -u
 command -v plymouth >/dev/null 2>&1 || exit 0
 ok='Starting system services  -  Esc: boot messages'
+# The failure line is: fail_prefix + body (the failed-unit summary) + fail_hint.
+# It is assembled from these two literals so the width budget below is DERIVED
+# from them and cannot drift if either string is edited. ASCII only (VGA text,
+# nomodeset).
+fail_prefix='Service failed: '
+fail_hint='  -  Esc or Alt+F12: boot log'
+# Width left for the body so the WHOLE line fits the 80-column VGA console.
+# #1528 ASTRA: the old code bounded only the unit NAME to 40 chars and ignored
+# the prefix (16), the "(+N more)" count and the hint (29), so a 40-char unit
+# emitted a 95-column line. Budget the entire line instead.
+body_max=$(( 80 - ${#fail_prefix} - ${#fail_hint} ))
 
 # failed_units_summary prints the first failed unit's name plus a "(+N more)"
-# count when several have failed, bounded for the 80-column VGA text console
-# (ASCII only, nomodeset). A generic "a service failed" told the operator
+# count when several have failed, with the WHOLE body bounded to body_max so
+# that fail_prefix + body + fail_hint never exceeds 80 columns for ANY name
+# length or failure count. A generic "a service failed" told the operator
 # nothing actionable (#1528 ASTRA: the failed unit was journal-proven but its
 # NAME was absent from the progress frame); naming the unit points them at the
 # right `journalctl -u <unit>` / Alt+F12 log. Best-effort: on any error or no
@@ -30,13 +42,18 @@ failed_units_summary() {
     _first=$(systemctl list-units --state=failed --no-legend --plain --no-pager 2>/dev/null \
         | awk 'NR==1{print $1}')
     [ -n "$_first" ] || return 0
-    # Bound the unit name to 40 chars so the line + key hint stays within 80.
-    _first=$(printf '%.40s' "$_first")
+    # Build the count suffix FIRST, then give the unit name whatever width is
+    # left of the body budget — so the count is never truncated and the TOTAL
+    # (prefix + name + suffix + hint) stays within 80 columns.
     if [ "${_u:-0}" -gt 1 ]; then
-        printf '%s (+%s more)' "$_first" "$((_u - 1))"
+        _suffix=" (+$((_u - 1)) more)"
     else
-        printf '%s' "$_first"
+        _suffix=""
     fi
+    _name_max=$(( body_max - ${#_suffix} ))
+    [ "$_name_max" -lt 1 ] && _name_max=1
+    _first=$(printf "%.${_name_max}s" "$_first")
+    printf '%s%s' "$_first" "$_suffix"
 }
 
 while plymouth --ping 2>/dev/null; do
@@ -50,7 +67,7 @@ while plymouth --ping 2>/dev/null; do
     # failed_units_summary is the authoritative signal and works while "starting".
     units=$(failed_units_summary)
     if [ -n "$units" ]; then
-        msg="Service failed: $units  -  Esc or Alt+F12: boot log"
+        msg="$fail_prefix$units$fail_hint"
     elif [ "$(systemctl is-system-running 2>/dev/null)" = degraded ]; then
         # Degraded but the unit list is momentarily unavailable: still warn.
         msg='A service failed to start  -  Esc or Alt+F12: boot log'

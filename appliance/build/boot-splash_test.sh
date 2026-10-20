@@ -354,6 +354,23 @@ got=$(ss_run degraded '' 'degraded, list empty')
 got=$(ss_run degraded $'a.service loaded failed failed A\nb.service loaded failed failed B\nc.service loaded failed failed C' 'three failed')
 [[ $got == 'display-message --text=Service failed: a.service (+2 more)  -  Esc or Alt+F12: boot log' ]] \
     || fail "multi-failure summary wrong: $got"
+# 3b. A LONG unit name WITH a (+N more) count must NOT blow the 80-column VGA
+#     budget (#1528 ASTRA: bounding only the name to 40 ignored the 16-char
+#     prefix, the "(+N more)" count and the 29-char hint, emitting a 95-column
+#     line). The WHOLE emitted line must be <=80, still start with the prefix,
+#     keep the count and the hint, and name a prefix of the unit. This case
+#     FAILS against the pre-fix script (95 columns) and is the width regression.
+ss_longname='culvert-extremely-long-failed-unit-name-abcdefghij.service'  # 58 chars
+got=$(ss_run degraded "$ss_longname loaded failed failed Long
+x.service loaded failed failed X
+y.service loaded failed failed Y" 'long unit name + multiple failures (80-col budget)')
+ss_line=${got#display-message --text=}
+[[ ${#ss_line} -le 80 ]] \
+    || fail "failed-unit line exceeds 80 columns (${#ss_line}): $ss_line"
+[[ $ss_line == 'Service failed: '*'(+2 more)  -  Esc or Alt+F12: boot log' ]] \
+    || fail "long-name line lost the prefix/count/hint shape (${#ss_line} cols): $ss_line"
+[[ $ss_line == *"${ss_longname:0:10}"* ]] \
+    || fail "long-name line does not name a prefix of the unit: $ss_line"
 # 4. Healthy: the ordinary status line, NO false failure warning (a control —
 #    a script that always warned would pass cases 1-3 and be wrong here).
 got=$(ss_run starting '' 'healthy/starting')
