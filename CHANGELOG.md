@@ -374,6 +374,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- `fileutil.AtomicWrite`'s new post-rename `fstat` duplicate was created
+  without `syscall.ForkLock`, so the descriptor was briefly inheritable
+  (CWE-403). `holdInode` ran `syscall.Dup` and then `syscall.CloseOnExec` as
+  two separate calls; `dup(2)` cannot set `FD_CLOEXEC` itself, so between them
+  the duplicate was an ordinary inheritable descriptor. A `fork`+`exec` started
+  in that window by any goroutine would hand the child a **read** descriptor of
+  the file the write is landing — and `AtomicWrite` is the single chokepoint for
+  every durable write in the appliance, the admin roster, data-plane and cluster
+  CA key-at-rest material and enrollment receipts among them.
+
+  No shipped `culvert` binary execs a subprocess, so this was latent rather
+  than reachable; the duplicate is new on every durable write regardless, and
+  the exposure would turn on whenever a future caller does exec. The dup and
+  the flag now run inside `syscall.ForkLock.RLock`, the pattern the `syscall`
+  package documents for descriptor-creating code: `forkExec` takes that lock
+  for writing, so no exec can begin in the window. The failure path releases
+  the lock (holding it would wedge every later exec in the process).
+  Pinned by `TestHoldInode_DuplicateIsCloseOnExec` and
+  `TestHoldInode_ReleasesForkLockWhenTheDupFails`.
+
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
   `Allow()` hands out a half-open probe reservation that only
