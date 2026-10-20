@@ -461,7 +461,14 @@ fi
 # is interrupted); without it the run is INCONCLUSIVE (exit 2), never a pass.
 if [[ "$SCENARIO" == midimport-kill ]]; then
   MARKER=/data/catfeeddb.importing
-  vol_has(){ IN docker run --rm -v culvert_proxy-data:/data:ro busybox:stable test -e "$1" >/dev/null 2>&1; }
+  # Fast marker check straight on the dind's volume mountpoint — NOT a per-poll
+  # `docker run busybox` (the first draft did that, ~1 s each: too coarse to
+  # catch a short-lived import, and it also broke the loop on a "bulk write
+  # failed" line before killing, even though the marker PERSISTS after a failed
+  # import — no CompleteImport runs — so the interrupted state was there to catch;
+  # run 39391241768 was inconclusive 3× for exactly that reason).
+  MP="$(IN docker volume inspect culvert_proxy-data -f '{{.Mountpoint}}' 2>/dev/null)"; [ -n "$MP" ] || MP=/var/lib/docker/volumes/culvert_proxy-data/_data
+  marker_present(){ IN sh -c "[ -e '$MP/catfeeddb.importing' ]" >/dev/null 2>&1; }
   # Make the import happen under observation: stop, drop ONLY the derived cache
   # (re-downloadable, CHAOS-50) and any stale marker/quarantine, start again.
   IN sh -c 'cd /srv/culvert && docker compose stop proxy' >/dev/null 2>&1
@@ -469,30 +476,31 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   LOGS_SINCE="$(IN date -u +%Y-%m-%dT%H:%M:%SZ)"
   IN sh -c 'cd /srv/culvert && docker compose start proxy' >/dev/null 2>&1
   wlogs(){ IN docker logs --since "$LOGS_SINCE" culvert 2>&1; }
-  wdone='FeedSync: (sync complete|bulk write failed|could not begin the import)[^"]*'
-  dlfail='FeedSync: download/parse failed'
+  done_re='FeedSync: sync complete'                               # the ONLY line that clears the marker
+  beginfail='FeedSync: could not begin the import'                # BeginImport itself failed: no marker, nothing to interrupt
   r0="$(IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null || echo 0)"
-  # Wait for BeginImport to lay the durable marker while the bulk write is still
-  # in flight, then kill. Catching the marker present + the import not yet
-  # certified is the deterministic mid-import state.
+  # Kill the instant the durable marker is present and the import has NOT certified
+  # complete — the deterministic interrupted-import state. The marker persists
+  # through a FAILED BulkWrite too (no CompleteImport), so this catches both a slow
+  # write (kill mid-write) and a fast failure (kill with the marker left behind).
   killed=""
-  for _ in $(seq 1 1200); do
-    wlogs | grep -qE "$dlfail" && { check K import-started inconclusive "feed download/parse failed (no egress?); cannot reach the mid-import window"; INCONCLUSIVE=1; write_report_and_exit; }
-    if vol_has "$MARKER"; then
-      wlogs | grep -qE "$wdone" && break   # import finished before we could catch the window
-      check K import-pending-marker pass "C1: $MARKER present mid-import — BeginImport wrote the durable intent BEFORE the bulk write; restarts=$r0"
+  for _ in $(seq 1 2400); do
+    if marker_present; then
+      check K import-pending-marker pass "C1: $MARKER present and the import not yet certified — BeginImport wrote the durable intent BEFORE completing the bulk write; restarts=$r0"
       IN docker rm -f culvert >/dev/null 2>&1 || true   # SIGKILL + no restart-policy race
       killed=1; break
     fi
-    wlogs | grep -qE "$wdone" && break
-    sleep 0.5
+    wlogs | grep -qE "$done_re" && break     # import completed → marker already cleared; window missed
+    wlogs | grep -qE "$beginfail" && break   # could not begin (no egress / begin failed) → nothing to interrupt
+    sleep 0.25
   done
   if [[ -z "$killed" ]]; then
-    check K import-pending-marker inconclusive "no mid-import window observed (marker never seen in flight; last feed line: $(wlogs | grep -m1 -oE "$wdone" || echo none)); this host cannot reproduce the interrupted import"
+    feedtail="$(wlogs | grep -oE 'FeedSync: [^"]{0,120}' | tail -4 | tr '\n' '|' || true)"
+    check K import-pending-marker inconclusive "no interrupted-import window observed (marker never present before the import resolved); feed log: ${feedtail:-none}; this host completed or could-not-begin the import too fast/entirely to interrupt"
     INCONCLUSIVE=1; write_report_and_exit; fi
   # The kill leaves the interrupted end-state: marker present, no completion — the
   # same durable state the stalled landing produces, reached deterministically.
-  if vol_has "$MARKER"; then check K interrupted-state pass "proxy SIGKILLed mid-import; $MARKER still present and the import never certified — the stall's durable end-state, reached deterministically"
+  if marker_present; then check K interrupted-state pass "proxy SIGKILLed mid-import; $MARKER still present and the import never certified — the stall's durable end-state, reached deterministically"
   else check K interrupted-state fail "marker gone after the kill — the import may have completed; nothing was interrupted"; INCONCLUSIVE=1; write_report_and_exit; fi
   # Recovery is a plain restart (no disk is full here). The next boot MUST
   # quarantine the interrupted store and rebuild — breaking the re-fault loop that
@@ -515,7 +523,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   else
     check K interrupted-import-quarantined fail "expected quarantine+rebuild of the interrupted store (quarantined_copies/quarantines_total >= 1 AND available=1): $mfull"
   fi
-  if vol_has "$MARKER"; then check K marker-cleared fail "$MARKER still present after the quarantine+rebuild"; else check K marker-cleared pass "import-pending marker cleared after quarantine+rebuild (no false re-quarantine on later clean boots)"; fi
+  if marker_present; then check K marker-cleared fail "$MARKER still present after the quarantine+rebuild"; else check K marker-cleared pass "import-pending marker cleared after quarantine+rebuild (no false re-quarantine on later clean boots)"; fi
   c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 || true)"
   s1="$(state_sum || true)"
   [[ "$c" == 200 && "$s1" == "$STATE0" ]] && check K state-intact pass "admin login http $c; ui_users.json+ca.bundle digest $s1 unchanged (Layer-1/admin/CA untouched by the Layer-2 recovery)" || check K state-intact fail "login=$c digest=$s1 want=$STATE0"
