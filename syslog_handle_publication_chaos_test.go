@@ -51,7 +51,10 @@ import (
 // "udp://host:port" address InitSyslog accepts.
 func newTestCollector(t *testing.T) string {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	// Contextual I/O, per conventions.md and the noctx linter: the sibling
+	// chaos tests use (&net.ListenConfig{}).Listen(t.Context(), ...) and this
+	// is the packet-socket form of the same idiom.
+	pc, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("bind test collector: %v", err)
 	}
@@ -249,37 +252,13 @@ func syslogHandleViolations(fset *token.FileSet, files []*ast.File) []string {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.ValueSpec:
-				for _, id := range node.Names {
-					if id.Name != "globalSyslogHandle" {
-						continue
-					}
-					declSeen = true
-					idx, ok := node.Type.(*ast.IndexExpr)
-					if !ok {
-						out = append(out, fmt.Sprintf("%s: globalSyslogHandle is not a generic atomic.Pointer — a plain handle reopens the torn publication and the split check-then-deref", name))
-						continue
-					}
-					sel, ok := idx.X.(*ast.SelectorExpr)
-					if !ok || sel.Sel.Name != "Pointer" {
-						out = append(out, fmt.Sprintf("%s: globalSyslogHandle must be declared atomic.Pointer[syslogWriter]", name))
-					}
-				}
+				seen, msgs := syslogHandleDeclViolations(name, node)
+				declSeen = declSeen || seen
+				out = append(out, msgs...)
 			case *ast.Ident:
-				if node.Name == "globalSyslogHandle" && name != "syslog.go" {
-					out = append(out, fmt.Sprintf("%s: names globalSyslogHandle directly; go through syslogHandle/setSyslogHandle", name))
-				}
+				out = append(out, syslogHandleIdentViolations(name, node)...)
 			case *ast.SelectorExpr:
-				// syslogHandle().Method() — an unguarded deref of a fresh load.
-				call, ok := node.X.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				fn, ok := call.Fun.(*ast.Ident)
-				if !ok || fn.Name != "syslogHandle" {
-					return true
-				}
-				out = append(out, fmt.Sprintf("%s:%d: syslogHandle().%s is an unguarded deref of a fresh load; assign one value to a local and nil-test that",
-					name, fset.Position(node.Pos()).Line, node.Sel.Name))
+				out = append(out, syslogHandleDerefViolations(fset, name, node)...)
 			}
 			return true
 		})
@@ -288,6 +267,53 @@ func syslogHandleViolations(fset *token.FileSet, files []*ast.File) []string {
 		out = append(out, "globalSyslogHandle declaration not found — the wall is anchored to a symbol that no longer exists")
 	}
 	return out
+}
+
+// syslogHandleDeclViolations is rule (a): the handle's declared type. Reports
+// whether the declaration was seen at all, so the caller can fail when the
+// symbol the wall is anchored to has disappeared.
+func syslogHandleDeclViolations(file string, spec *ast.ValueSpec) (seen bool, out []string) {
+	for _, id := range spec.Names {
+		if id.Name != "globalSyslogHandle" {
+			continue
+		}
+		seen = true
+		idx, ok := spec.Type.(*ast.IndexExpr)
+		if !ok {
+			out = append(out, fmt.Sprintf("%s: globalSyslogHandle is not a generic atomic.Pointer — a plain handle reopens the torn publication and the split check-then-deref", file))
+			continue
+		}
+		sel, ok := idx.X.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Pointer" {
+			out = append(out, fmt.Sprintf("%s: globalSyslogHandle must be declared atomic.Pointer[syslogWriter]", file))
+		}
+	}
+	return seen, out
+}
+
+// syslogHandleIdentViolations is the first half of rule (b): only syslog.go may
+// name the handle; everyone else goes through the accessors.
+func syslogHandleIdentViolations(file string, id *ast.Ident) (out []string) {
+	if id.Name == "globalSyslogHandle" && file != "syslog.go" {
+		out = append(out, fmt.Sprintf("%s: names globalSyslogHandle directly; go through syslogHandle/setSyslogHandle", file))
+	}
+	return out
+}
+
+// syslogHandleDerefViolations is the second half of rule (b): nobody may write
+// syslogHandle().Method(). Two calls in one expression are two loads, which is
+// exactly the window the atomic.Pointer closes.
+func syslogHandleDerefViolations(fset *token.FileSet, file string, sel *ast.SelectorExpr) (out []string) {
+	call, ok := sel.X.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	fn, ok := call.Fun.(*ast.Ident)
+	if !ok || fn.Name != "syslogHandle" {
+		return nil
+	}
+	return append(out, fmt.Sprintf("%s:%d: syslogHandle().%s is an unguarded deref of a fresh load; assign one value to a local and nil-test that",
+		file, fset.Position(sel.Pos()).Line, sel.Sel.Name))
 }
 
 // TestChaos78_Wall_SyslogHandleIsPublishedAtomically parses package main at the
@@ -368,8 +394,16 @@ func persistLogEntry() {
 // AST wall: it fails to build, rather than to run, if the handle's type ever
 // goes back to a plain pointer.
 func TestChaos78_HandleTypeIsAtomicPointer(t *testing.T) {
-	var _ *atomic.Pointer[syslogWriter] = &globalSyslogHandle
+	// The assertion is the PARAMETER type, not a typed var: staticcheck's
+	// QF1011 would have us drop the type from `var _ *atomic.Pointer[...] = ...`,
+	// and dropping it deletes the very thing being asserted. A parameter type
+	// cannot be inferred away, so this keeps the build-time guarantee.
+	requireAtomicSyslogHandle(&globalSyslogHandle)
 	if syslogHandle() != globalSyslogHandle.Load() {
 		t.Error("syslogHandle() must be a plain Load of the published handle")
 	}
 }
+
+// requireAtomicSyslogHandle accepts only *atomic.Pointer[syslogWriter], so the
+// package stops COMPILING if the handle regresses to a plain pointer.
+func requireAtomicSyslogHandle(*atomic.Pointer[syslogWriter]) {}
