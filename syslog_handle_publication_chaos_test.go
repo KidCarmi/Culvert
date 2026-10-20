@@ -119,7 +119,7 @@ func TestChaos78_ReconfigureRacesTheRequestPath(t *testing.T) {
 	stop := make(chan struct{})
 	var readersWG, writerWG sync.WaitGroup
 
-	// Readers: the two production read paths, as hot as the test can drive them.
+	// Readers: the request-log chokepoint, as hot as the test can drive it.
 	for i := 0; i < readers; i++ {
 		readersWG.Add(1)
 		go func(n int) {
@@ -133,10 +133,30 @@ func TestChaos78_ReconfigureRacesTheRequestPath(t *testing.T) {
 				}
 				persistLogEntry("203.0.113.7", "GET", host, "OK", "r", "Allow",
 					"", 0, 0, 0, "", "", AuthLogFields{})
-				auditAdd(AuditEntry{Action: "chaos78.probe", ObjectID: host})
 			}
 		}(i)
 	}
+
+	// The second read path is the audit SIEM hook, and it needs its own
+	// goroutine — but a BOUNDED one. The audit ring holds audit.MaxRing (500)
+	// entries and its own file says tests must not assert on length deltas;
+	// flooding it here would silently evict entries other tests in this
+	// package placed there. auditProbes well under the ring is enough to have
+	// the hook running concurrently with the reconfigures, which is all this
+	// gate needs from it.
+	const auditProbes = 40
+	readersWG.Add(1)
+	go func() {
+		defer readersWG.Done()
+		for i := 0; i < auditProbes; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			auditAdd(AuditEntry{Action: "chaos78.probe", ObjectID: fmt.Sprintf("probe-%d", i)})
+		}
+	}()
 
 	// Writer: the admin plane flipping forwarding on and off underneath them.
 	// A fixed iteration count, so the test is bounded by work and not by a
