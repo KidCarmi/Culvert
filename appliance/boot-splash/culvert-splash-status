@@ -40,16 +40,20 @@ failed_units_summary() {
 }
 
 while plymouth --ping 2>/dev/null; do
-    # is-system-running reports "degraded" once any unit has failed; "starting"
-    # during the ordinary wait. Anything else (or no systemctl) keeps the hint.
-    if [ "$(systemctl is-system-running 2>/dev/null)" = degraded ]; then
-        units=$(failed_units_summary)
-        if [ -n "$units" ]; then
-            msg="Service failed: $units  -  Esc or Alt+F12: boot log"
-        else
-            # Degraded but the unit list is momentarily unavailable: still warn.
-            msg='A service failed to start  -  Esc or Alt+F12: boot log'
-        fi
+    # Gate on an ACTUAL failed unit, not on is-system-running. A unit that fails
+    # during boot is in "failed" state (listed by `list-units --state=failed`)
+    # immediately, but `is-system-running` stays "starting" until the default
+    # target completes — which is ~when Plymouth quits. Gating the warning on
+    # "degraded" therefore left the whole splash window showing the OK line while
+    # a unit had already failed (#1528: a lab VGA capture showed exactly that —
+    # "Starting system services" on screen while a unit had failed at boot).
+    # failed_units_summary is the authoritative signal and works while "starting".
+    units=$(failed_units_summary)
+    if [ -n "$units" ]; then
+        msg="Service failed: $units  -  Esc or Alt+F12: boot log"
+    elif [ "$(systemctl is-system-running 2>/dev/null)" = degraded ]; then
+        # Degraded but the unit list is momentarily unavailable: still warn.
+        msg='A service failed to start  -  Esc or Alt+F12: boot log'
     else
         msg=$ok
     fi

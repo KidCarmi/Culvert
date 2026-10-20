@@ -336,6 +336,15 @@ ss_run() { : >"$SS_CNT"; : >"$SS_TRACE"
 got=$(ss_run degraded 'culvert-failtest.service loaded failed failed Culvert failure injection test' 'named failed unit')
 [[ $got == 'display-message --text=Service failed: culvert-failtest.service  -  Esc or Alt+F12: boot log' ]] \
     || fail "failed-unit frame did not name the unit: $got"
+# 1b. STARTING + a failed unit: the NAME must still show. This is the #1528 gap
+#     a live VGA capture exposed — is-system-running stays "starting" until the
+#     default target completes (~when Plymouth quits), so gating on "degraded"
+#     left the splash showing the OK line while a unit had already failed. This
+#     case FAILS against the pre-fix script (which showed the OK line) and is the
+#     regression that proves the gate now keys on the failed unit, not the state.
+got=$(ss_run starting 'culvert-failtest.service loaded failed failed Culvert failure injection test' 'STARTING + failed unit (the #1528 live-display gap)')
+[[ $got == 'display-message --text=Service failed: culvert-failtest.service  -  Esc or Alt+F12: boot log' ]] \
+    || fail "STARTING + failed unit did not name the unit (the #1528 gap): $got"
 # 2. Degraded but the failed-unit list is momentarily empty: a generic warning,
 #    never silence (the pre-#1528 behaviour was no warning at all).
 got=$(ss_run degraded '' 'degraded, list empty')
