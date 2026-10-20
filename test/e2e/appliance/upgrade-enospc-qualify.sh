@@ -48,7 +48,15 @@ CUR_IMAGE="${CUR_IMAGE:?}"; PRED_IMAGE="${PRED_IMAGE:?}"; EVID="${EVID:?}"
 DISK_MB="${QUAL_ENOSPC_DISK_MB:-2048}"; LEAVE_KB="${QUAL_ENOSPC_LEAVE_KB:-6144}"
 DIND_IMAGE="${QUAL_DIND_IMAGE:-docker:29-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1}"; REG_PORT="${QUAL_ENOSPC_REG_PORT:-5056}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(cd "$HERE/../../.." && pwd)"
+# The convergence verdict is a PURE, locally-testable decision (ASTRA §2
+# "mandatory convergence verdict"); its functions live in a sourced lib so
+# convergence-oracle_test.sh can prove them red/green with no lab run.
+. "$HERE/convergence-oracle.sh"
 SCENARIO="${QUAL_ENOSPC_SCENARIO:-upgrade}"
+# Convergence-verdict run state (ASTRA §2): CONV_PATH_RAN is set once a recovery
+# scenario reaches its convergence decision; CONV_VERDICT holds the best class
+# observed (proven > unproven_* ; a product failure is carried by FAILS).
+CONV_PATH_RAN=0; CONV_VERDICT=none; CONV_LAST=none
 mkdir -p "$EVID"; JSONL="$EVID/checks.jsonl"; MD="$EVID/REPORT.md"; : > "$JSONL"; FAILS=0
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"; DIND="eq-dind-$$"; REG="eq-registry-$$"
 IMG="$EVID/appliance-root.img"; MNT="$EVID/mnt"; SOCKDIR="$(mktemp -d /tmp/eqsock.XXXXXX)"; SOCK="$SOCKDIR/agent.sock"
@@ -56,6 +64,24 @@ log(){ printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 check(){ local sc="$1" n="$2" r="$3" d="${4:-}"
   python3 -c 'import json,sys; print(json.dumps({"run":sys.argv[1],"scenario":sys.argv[2],"check":sys.argv[3],"result":sys.argv[4],"detail":sys.argv[5]},separators=(",",":")))' "$RUN_ID" "$sc" "$n" "$r" "$d" >> "$JSONL"
   if [[ "$r" == fail ]]; then FAILS=$((FAILS+1)); log "FAIL [$sc] $n: $d"; else log "$r [$sc] $n: $d"; fi; }
+# conv_check <scenario> <check-name> <feedsync-outcome> <waited-s> [context] — the
+# ONE convergence call path (ASTRA §2). classify_convergence (the sourced pure
+# fn) decides the class; this records that the convergence path ran, keeps the
+# run's best verdict, and emits the check: proven=pass, lab/network shortfall=
+# info (UNPROVEN — not a pass; enforced at exit via convergence_exit_class),
+# disk-side error or no outcome=fail. It never, on its own, lets a non-proven
+# convergence exit 0 — write_report_and_exit does that.
+conv_check(){ local sc="$1" name="$2" res="$3" waited="$4" ctx="${5:-}"
+  CONV_PATH_RAN=1; CONV_LAST="$(classify_convergence "$res")"
+  case "$CONV_LAST" in
+    proven)       CONV_VERDICT=proven
+      check "$sc" "$name" pass "convergence PROVEN: ${res#FeedSync: } (${waited}s)${ctx:+ — $ctx}" ;;
+    unproven_lab) [[ "$CONV_VERDICT" == none ]] && CONV_VERDICT=unproven_lab || true
+      check "$sc" "$name" info "convergence UNPROVEN — lab volume below the import footprint (${res#FeedSync: }); a lab dind-volume sizing limit, NOT a product fault${ctx:+; $ctx}" ;;
+    unproven_net) [[ "$CONV_VERDICT" == none ]] && CONV_VERDICT=unproven_net || true
+      check "$sc" "$name" info "convergence UNPROVEN — network download failure after ${waited}s (not disk)${ctx:+; $ctx}" ;;
+    failed)       check "$sc" "$name" fail "convergence FAILED on the disk side: ${res:-no FeedSync outcome within ${conv:-?}s} (${waited}s)${ctx:+; $ctx}" ;;
+  esac; }
 CERTSD=""
 cleanup(){
   docker rm -f "$DIND" "$REG" >/dev/null 2>&1 || true
@@ -233,6 +259,21 @@ fill_bounded(){ local avail fill
 
 write_report_and_exit(){
   IN cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
+  # ASTRA §2 mandatory convergence verdict. Emitted BEFORE the report is built so
+  # the row appears and INCONCLUSIVE is set before the exit decision. A recovery
+  # scenario that EXERCISED convergence but never PROVED it (only a lab-sizing or
+  # network shortfall) is INCONCLUSIVE (exit 2) — NOT a pass; job SUCCESS can no
+  # longer be read as convergence proof. A disk-side convergence failure already
+  # set FAILS>0 (exit 1). The convergence path not being exercised at all (a
+  # non-recovery scenario) is a pass here and decided by the scenario's own checks.
+  if [[ "$CONV_PATH_RAN" == 1 ]]; then
+    case "$(convergence_exit_class "$CONV_PATH_RAN" "$CONV_VERDICT" "$FAILS")" in
+      pass)       check "$SCENARIO" convergence-verdict pass "convergence PROVEN (FeedSync sync complete observed) — the mandatory convergence verdict is satisfied" ;;
+      incomplete) check "$SCENARIO" convergence-verdict info "convergence was EXERCISED but never PROVEN (best=$CONV_VERDICT): a lab-sizing/network shortfall is not product convergence — this run is INCONCLUSIVE for the convergence criterion, NOT a pass (exit 2)"
+                  INCONCLUSIVE="${INCONCLUSIVE:-convergence-unproven}" ;;
+      fail)       : ;;  # a disk-side convergence failure already set FAILS>0 (exit 1)
+    esac
+  fi
   local title="Upgrade-under-ENOSPC qualification"
   [[ "$SCENARIO" == midwrite ]] && title="Disk exhaustion during an active database write (F-DISK-1)"
   [[ "$SCENARIO" == midimport-kill ]] && title="Process kill during an active category import — interrupted-import recovery (F-DISK-RECOVERY-1 C1+C2)"
@@ -432,12 +473,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
     [[ -n "$res" ]] && break; sleep 15
   done
   waited=$((SECONDS - t0))
-  case "$res" in
-    "FeedSync: sync complete"*) check W category-import-converges pass "retry after recovery: ${res#FeedSync: } (${waited}s after recovery)";;
-    *"download/parse failed"*) check W category-import-converges info "retry after ${waited}s hit a download failure (network, not disk); convergence not observed";;
-    "") check W category-import-converges fail "no import retry finished within ${conv}s of recovery";;
-    *) check W category-import-converges fail "retry after recovery failed on the disk side: $res (${waited}s)";;
-  esac
+  conv_check W category-import-converges "$res" "$waited" "after recovery"
   write_report_and_exit
 fi
 
@@ -545,8 +581,13 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   waited=$((SECONDS - t0))
   feedlog="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,140}' | tail -6 | tr '\n' '|' || true)"
   degraded_on_space=0
+  # ASTRA §2: the convergence path is now EXERCISED. Whatever terminal outcome
+  # this decision reaches (converge outright, degrade-then-recover below, a
+  # network INFO that never converges, or a disk-side failure), the mandatory
+  # verdict in write_report_and_exit refuses exit 0 unless convergence is PROVEN.
+  CONV_PATH_RAN=1
   case "$res" in
-    "FeedSync: sync complete"*) check K restart-disk-full-degrades pass "rebuilt store re-synced outright (node had room): ${res#FeedSync: } (${waited}s) — no free-space step needed; feed: ${feedlog:-none}";;
+    "FeedSync: sync complete"*) CONV_VERDICT=proven; check K restart-disk-full-degrades pass "rebuilt store re-synced outright (node had room): ${res#FeedSync: } (${waited}s) — no free-space step needed; feed: ${feedlog:-none}";;
     "FeedSync: write REFUSED (disk_space)"*)
         degraded_on_space=1
         hv="$(health_version 2>/dev/null || echo unreachable)"
@@ -589,13 +630,8 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     done
     waited2=$((SECONDS - t0))
     feedlog2="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,140}' | tail -6 | tr '\n' '|' || true)"
-    case "$res2" in
-      "FeedSync: sync complete"*) check K free-space-recovery-converges pass "after freeing the quarantined partial (avail ${freeB4}->${freeAf} KiB) and a restart, the rebuilt store re-synced the WHOLE feed: ${res2#FeedSync: } (${waited2}s) — owner 'free-space recovery' converges; feed: ${feedlog2:-none}";;
-      "FeedSync: write REFUSED (disk_space)"*) check K free-space-recovery-converges info "lab volume still below the import footprint after freeing the quarantine (avail ${freeB4}->${freeAf} KiB; ${res2#FeedSync: }) — a lab dind-volume sizing limit, NOT a product fault; grow the volume to exercise convergence; feed: ${feedlog2:-none}";;
-      *"download/parse failed"*) check K free-space-recovery-converges info "free-space retry hit a network download failure (not disk); avail ${freeB4}->${freeAf} KiB; feed: ${feedlog2:-none}";;
-      "") check K free-space-recovery-converges fail "no FeedSync outcome within ${conv}s after freeing space (avail ${freeB4}->${freeAf} KiB)"; diagnose K-free-space;;
-      *) check K free-space-recovery-converges fail "free-space retry failed on the disk side: $res2 (avail ${freeB4}->${freeAf} KiB; ${waited2}s); feed: ${feedlog2:-none}";;
-    esac
+    conv_check K free-space-recovery-converges "$res2" "$waited2" "after freeing the quarantined partial, avail ${freeB4}->${freeAf} KiB; feed: ${feedlog2:-none}"
+    [[ -z "$res2" ]] && diagnose K-free-space || true
   fi
   write_report_and_exit
 fi
