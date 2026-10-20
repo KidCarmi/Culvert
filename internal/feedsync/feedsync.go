@@ -552,15 +552,22 @@ func (fs *Syncer) storeDegraded() bool {
 // elapses — so a sync that cannot complete is surfaced as a failure even when
 // BulkWrite never returns (F-DISK-RECOVERY-1 req 4).
 //
-// A BulkWrite still running when this returns degraded/stalled is ABANDONED. The
-// store has latched degraded (access refuses every further write), and it is
-// quarantined+rebuilt on the next boot via the import-pending marker, so the
-// abandoned goroutine's mid-write state is thrown away. badger's WriteBatch.Flush
-// takes no context, so there is no clean cancellation; abandoning is the only way
-// to report a write that never returns, and a stalled import holding a goroutine
-// and a badger write transaction indefinitely is itself a resource the appliance
-// should not carry. The channel is buffered so the goroutine never blocks on send
-// after this returns.
+// A BulkWrite still running when this returns degraded/stalled is ABANDONED, and
+// the two abandon paths differ in what they leave behind (ASTRA held-writer
+// review): on the DEGRADED path the store has latched degraded, so access
+// already refuses every further write; on the STALL path it has NOT — the write
+// is wedged (e.g. a full disk) but the store is not degraded, so nothing stops a
+// later round from starting a SECOND BulkWrite that races the still-in-flight
+// one. The caller (syncRound) closes that window with the writeAbandoned latch:
+// once a write is abandoned (either path), no further import starts until a
+// restart. In both paths the import-pending marker BeginImport wrote is still
+// present, so the next boot quarantines+rebuilds and the abandoned goroutine's
+// mid-write state is thrown away. badger's WriteBatch.Flush takes no context, so
+// there is no clean cancellation; abandoning is the only way to report a write
+// that never returns, and a stalled import holding a goroutine and a badger
+// write transaction indefinitely is itself a resource the appliance should not
+// carry. The channel is buffered so the goroutine never blocks on send after
+// this returns.
 func (fs *Syncer) writeBulkWatched(entries map[string]string) (bulkWriteOutcome, error) {
 	done := make(chan error, 1)
 	go func() { done <- fs.db.BulkWrite(entries) }()

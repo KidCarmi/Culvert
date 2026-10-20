@@ -9,6 +9,7 @@ package feedsync
 import (
 	"errors"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -138,6 +139,17 @@ func TestWriteBulkWatched_ReturnedErrorPropagates(t *testing.T) {
 // pre-fix tree it starts a second BulkWrite — faultCalls increases — racing the
 // still-in-flight held writer, which is the defect this gate proves.
 func TestSyncRound_QuiescesAfterAbandonedWrite(t *testing.T) {
+	// The scenario drives a real syncRound, whose BeginImport writes the durable
+	// import-pending marker with a parent-DIRECTORY fsync (F-DISK-RECOVERY-1 C1).
+	// That is a POSIX guarantee the Linux appliance depends on; Windows rejects a
+	// directory fsync, so BeginImport fails there before the held writer is
+	// reached (ASTRA ran this on Windows/amd64 and recorded platform-blocked
+	// target coverage). The fix under test — the writeAbandoned quiescence latch
+	// — is plain Go and platform-independent; only this test's marker dependency
+	// is POSIX-specific, so skip off Linux rather than report a false failure.
+	if runtime.GOOS != "linux" {
+		t.Skipf("F-DISK recovery marker needs POSIX directory fsync (BeginImport); the fix is platform-independent — skipped on %s", runtime.GOOS)
+	}
 	// Stall fires quickly; the degrade poll is far away so this is the pure
 	// stall path (storeDegraded stays false — the path with no other latch).
 	withWatchdogTimings(t, time.Second, 20*time.Millisecond)
