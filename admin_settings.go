@@ -508,7 +508,10 @@ func applyAdminServices(s *AdminSettings) {
 		SetLogLevel(ParseLogLevel(s.LogLevel))
 	}
 	if s.SessionTimeoutHours > 0 {
-		SetSessionTTL(time.Duration(s.SessionTimeoutHours) * time.Hour)
+		// Clamp BEFORE converting: a persisted/restored file is not range-checked
+		// by the API, and hours*time.Hour wraps int64 past ~2.5M hours, which
+		// would land on the 15-minute floor instead of the 168h ceiling.
+		SetSessionTTL(time.Duration(min(s.SessionTimeoutHours, 168)) * time.Hour)
 	}
 	applyAdminLogStore(s)
 	applyBlocklistFeeds(s)
