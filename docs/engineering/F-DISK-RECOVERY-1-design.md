@@ -173,13 +173,33 @@ All via injected clock / filesystem / opener and the existing `writeFault`
 **C3 abandons a blocked `BulkWrite` goroutine** to surface a write that never returns.
 The alternatives are worse: waiting for it defeats req 4 (the whole point is it does
 not return within the window), and badger's `WriteBatch.Flush` accepts no context, so
-there is no clean cancellation. The abandoned goroutine touches only a store that has
-already latched degraded and will be quarantined+rebuilt on the next boot, so its
-state is discarded. ASTRA review question: is abandoning the goroutine acceptable, or
-should the stall timeout merely REPORT while the process continues to hold the
-goroutine until a natural restart? The recommendation is to abandon, because a stalled
-import holding a goroutine + a badger write transaction indefinitely is itself a
-resource the appliance should not carry.
+there is no clean cancellation. A stalled import holding a goroutine + a badger write
+transaction indefinitely is itself a resource the appliance should not carry, so the
+decision is to abandon.
+
+**CORRECTION — the held-writer overwrite (ASTRA-confirmed; `review/1528-fdisk-splash-fix`).**
+The first design claimed the abandoned goroutine "touches only a store that has already
+latched degraded and will be quarantined+rebuilt on the next boot, so its state is
+discarded." That is true for the **degrade** path (`storeDegraded()` latches, so the
+next `syncRound` skips) but FALSE for the **stall** path: a non-faulting stall on a full
+disk does NOT degrade the store, so `storeDegraded()` stays false and the scheduler's
+next round would start a SECOND `BulkWrite` while the held writer is still blocked. If
+that second writer then reaches `CompleteImport`, the held writer can later flush stale
+data over the now-CERTIFIED store — which the import-pending marker would NOT quarantine
+(the marker was cleared by the second writer's `CompleteImport`). That is a silent,
+restart-surviving data-integrity hazard, not a discarded store.
+
+**Ownership/quiescence correction (shipped on the review branch):** `writeBulkWatched`
+abandoning a write (stall OR contained fault) now latches an in-memory `writeAbandoned`
+flag, and `syncRound` refuses any further import while it is set — so the held writer is
+the SOLE writer, no second writer can certify the store, and the marker `BeginImport`
+already wrote makes the next boot quarantine+rebuild and discard the abandoned data. The
+latch is in-memory by design: the hazard is intra-process, a restart is the recovery,
+and the durable marker carries the interrupted-import state across it. Proven by
+`TestSyncRound_QuiescesAfterAbandonedWrite` (feedsync), which FAILS against the pre-fix
+tree (`faultCalls 1 -> 2`, a second BulkWrite starts, racing the held writer) and passes
+under `-race` with the latch. This narrows the trade-off: abandoning the goroutine is
+acceptable because the store it may still touch can never be certified in this process.
 
 ## 7. Acceptance
 

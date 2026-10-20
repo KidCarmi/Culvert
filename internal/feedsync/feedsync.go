@@ -170,6 +170,18 @@ type Syncer struct {
 	// freeBytes reports the free space on the filesystem holding the store,
 	// or nil when unknown. See SetFreeSpaceProbe.
 	freeBytes func() (uint64, error)
+
+	// writeAbandoned latches when a BulkWrite was abandoned mid-write (a
+	// contained fault or a stall — see writeBulkWatched). The abandoned
+	// goroutine still holds the badger WriteBatch and will flush its (stale)
+	// data if the disk later frees, so NO new import may start in this process
+	// until a restart: a second writer could certify a store the held writer
+	// then overwrites (ASTRA review — the held-writer overwrite). The marker
+	// BeginImport wrote is still present, so the next boot quarantines+rebuilds
+	// and discards the abandoned data. In-memory by design: the hazard is
+	// intra-process; a restart is the recovery, and the durable marker carries
+	// the interrupted-import state across it.
+	writeAbandoned atomic.Bool
 }
 
 // Bounded reason classes for a failed round. The verbose cause goes to the log.
@@ -434,6 +446,21 @@ func (fs *Syncer) syncRound() bool {
 		return false
 	}
 
+	// A previously abandoned BulkWrite (stall or contained fault) may still be
+	// in flight on a detached goroutine holding the badger WriteBatch. Starting
+	// another import now would race it — and if this new writer certifies the
+	// store (CompleteImport) the held writer can then flush stale data over the
+	// certified store, which the marker would NOT quarantine (ASTRA: the
+	// held-writer overwrite). Quiesce: refuse further imports in this process;
+	// the marker BeginImport already wrote makes the next boot quarantine+rebuild.
+	// The degraded path above latches for the fault case; this covers the stall
+	// case, which does not degrade the store.
+	if fs.writeAbandoned.Load() {
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)")
+		return false
+	}
+
 	entries, err := downloadAndParse(fs.feedURL)
 	if err != nil {
 		fs.noteFailure(failDownload)
@@ -477,11 +504,19 @@ func (fs *Syncer) syncRound() bool {
 		// The store latched a contained memory fault mid-write; the import is a
 		// failure even though BulkWrite has not returned (F-DISK-RECOVERY-1). The
 		// import-pending marker from BeginImport quarantines+rebuilds on the next
-		// boot; this round is surfaced truthfully now.
+		// boot; this round is surfaced truthfully now. Latch writeAbandoned so no
+		// new import races the still-in-flight writer (defense-in-depth beside the
+		// storeDegraded latch, which already quiesces this path).
+		fs.writeAbandoned.Store(true)
 		fs.noteFailure(failWrite)
 		obs.Printf("FeedSync: bulk write did not complete — the community category store latched degraded after a contained memory fault mid-write (import NOT complete; the store is rebuilt on the next start)")
 		return false
 	case bulkWriteStalled:
+		// The write stalled without degrading the store (a non-faulting stall on a
+		// full disk), so storeDegraded stays false. Latch writeAbandoned so the
+		// scheduler's next round does NOT start a second BulkWrite that races the
+		// stalled, still-in-flight writer (ASTRA: the held-writer overwrite).
+		fs.writeAbandoned.Store(true)
 		fs.noteFailure(failWrite)
 		obs.Printf("FeedSync: bulk write stalled past %s without returning (import NOT complete; the store is rebuilt on the next start)", bulkWriteStallTimeout)
 		return false

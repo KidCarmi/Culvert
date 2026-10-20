@@ -9,6 +9,7 @@ package feedsync
 import (
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,5 +124,65 @@ func TestWriteBulkWatched_ReturnedErrorPropagates(t *testing.T) {
 	outcome, err := fs.writeBulkWatched(map[string]string{"a.example": "Social"})
 	if outcome != bulkWriteReturned || !errors.Is(err, boom) {
 		t.Fatalf("clean write error: outcome=%v err=%v", outcome, err)
+	}
+}
+
+// TestSyncRound_QuiescesAfterAbandonedWrite is the ASTRA held-writer-overwrite
+// gate. When a BulkWrite is abandoned mid-write (here a stall — it neither
+// returns nor degrades the store), the abandoned goroutine still holds the
+// badger WriteBatch and will flush its (stale) data if the disk later frees.
+// The scheduler's next round therefore MUST NOT start a second BulkWrite: a
+// second writer that reaches CompleteImport would certify a store the held
+// writer then overwrites, which the import-pending marker would not quarantine.
+// With the fix syncRound quiesces (the writeAbandoned latch). Against the
+// pre-fix tree it starts a second BulkWrite — faultCalls increases — racing the
+// still-in-flight held writer, which is the defect this gate proves.
+func TestSyncRound_QuiescesAfterAbandonedWrite(t *testing.T) {
+	// Stall fires quickly; the degrade poll is far away so this is the pure
+	// stall path (storeDegraded stays false — the path with no other latch).
+	withWatchdogTimings(t, time.Second, 20*time.Millisecond)
+	url, _, _ := controlledFeed(t, 50)
+	db := openStore(t, t.TempDir())
+	t.Cleanup(func() { _ = db.Close() })
+
+	var faultCalls atomic.Int64
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // let the abandoned writer exit at test end
+	db.SetBulkWriteFaultForTest(func(n int) error {
+		if n == 1 {
+			faultCalls.Add(1)
+			<-release // block the first write => the write stalls, never returns
+		}
+		return nil
+	})
+	s := New(db, url, 24*time.Hour)
+
+	// Round 1: the write stalls; writeBulkWatched abandons it and latches.
+	if s.syncRound() {
+		t.Fatal("a stalled import must not count as a sync")
+	}
+	// The abandoned writer reached its (now blocked) first write.
+	deadline := time.Now().Add(5 * time.Second)
+	for faultCalls.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the abandoned BulkWrite never reached its first write")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !s.writeAbandoned.Load() {
+		t.Fatal("a stalled BulkWrite must latch writeAbandoned (quiescence)")
+	}
+
+	// Round 2 (the scheduler's retry): MUST be quiesced — no second BulkWrite,
+	// no download, no BeginImport — so the held writer stays the sole writer.
+	before := faultCalls.Load()
+	if s.syncRound() {
+		t.Fatal("a quiesced round must not count as a sync")
+	}
+	// Give any (erroneously started) second BulkWrite time to reach its first
+	// write before asserting it did not happen.
+	time.Sleep(50 * time.Millisecond)
+	if got := faultCalls.Load(); got != before {
+		t.Fatalf("held-writer overwrite: a second BulkWrite started while the first was still in flight (faultCalls %d -> %d); the retry must be quiesced", before, got)
 	}
 }
