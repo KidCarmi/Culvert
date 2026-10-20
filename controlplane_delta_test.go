@@ -9,6 +9,14 @@ import (
 	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
+// record reserves and completes one version's delta in a single step, as a
+// sequential publisher would (the store itself reserves under its commit
+// lock and completes after it: ConfigStore.recordCommitDelta).
+func (r *blocklistDeltaRing) record(base, target int64, oldHosts, newHosts []string, fp string) {
+	r.reserve(target)
+	r.complete(buildBlocklistDelta(base, target, oldHosts, newHosts, fp, 0))
+}
+
 func sortedEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -49,9 +57,9 @@ func TestDeltaRing_ChainToLatest(t *testing.T) {
 	v1 := []string{"a.example", "b.example"}
 	v2 := []string{"a.example", "b.example", "c.example"}
 	v3 := []string{"a.example", "c.example", "*.d.example"}
-	r.record(0, 1, nil, v1, blocklist.FeedSetFingerprint(v1), 0)
-	r.record(1, 2, v1, v2, blocklist.FeedSetFingerprint(v2), 0)
-	r.record(2, 3, v2, v3, blocklist.FeedSetFingerprint(v3), 0)
+	r.record(0, 1, nil, v1, blocklist.FeedSetFingerprint(v1))
+	r.record(1, 2, v1, v2, blocklist.FeedSetFingerprint(v2))
+	r.record(2, 3, v2, v3, blocklist.FeedSetFingerprint(v3))
 
 	chain, latest, ok := r.chain(1)
 	if !ok || latest != 3 {
@@ -90,7 +98,7 @@ func versionsOf(chain []blocklistDelta) []int64 {
 // with ok=true (nothing to apply).
 func TestDeltaRing_AlreadyCurrent(t *testing.T) {
 	var r blocklistDeltaRing
-	r.record(0, 1, nil, []string{"a"}, blocklist.FeedSetFingerprint([]string{"a"}), 0)
+	r.record(0, 1, nil, []string{"a"}, blocklist.FeedSetFingerprint([]string{"a"}))
 	chain, latest, ok := r.chain(1)
 	if !ok || latest != 1 || len(chain) != 0 {
 		t.Fatalf("chain(1) at latest: ok=%v latest=%d len=%d, want ok/1/0", ok, latest, len(chain))
@@ -102,7 +110,7 @@ func TestDeltaRing_AlreadyCurrent(t *testing.T) {
 func TestDeltaRing_GapResync(t *testing.T) {
 	var r blocklistDeltaRing
 	for v := int64(1); v <= 5; v++ {
-		r.record(v-1, v, nil, []string{"a"}, "fp", 0)
+		r.record(v-1, v, nil, []string{"a"}, "fp")
 	}
 	// Force eviction so v1..v2 fall out.
 	// (With small deltas eviction is count-driven; shrink the ring by exceeding
@@ -118,13 +126,13 @@ func TestDeltaRing_GapResync(t *testing.T) {
 // cap becomes a resync marker; a DP that would traverse it resyncs.
 func TestDeltaRing_OversizedDeltaMarker(t *testing.T) {
 	var r blocklistDeltaRing
-	r.record(0, 1, nil, []string{"a.example"}, "fp1", 0)
+	r.record(0, 1, nil, []string{"a.example"}, "fp1")
 	// v2: a huge added set that blows maxSingleDeltaBytes (each ~24 B, 600k → ~14 MiB).
 	huge := make([]string, 0, 600000)
 	for i := 0; i < 600000; i++ {
 		huge = append(huge, "host-"+padNum(i)+".example.com")
 	}
-	r.record(1, 2, []string{"a.example"}, huge, "fp2", 0)
+	r.record(1, 2, []string{"a.example"}, huge, "fp2")
 
 	// The v2 entry must be a resync marker with no retained host slices.
 	_, _, ok := r.chain(1) // traversing base=1 → must hit the v2 resync marker
@@ -164,7 +172,7 @@ func TestDeltaRing_CountEviction(t *testing.T) {
 	for v := int64(1); v <= total; v++ {
 		// Non-nil oldHosts so each entry is a real delta (not a nil-baseline
 		// resync marker); this test exercises count eviction + servability.
-		r.record(v-1, v, []string{"prev"}, []string{"a"}, "fp", 0)
+		r.record(v-1, v, []string{"prev"}, []string{"a"}, "fp")
 	}
 	ents, _, oldest, newest := r.stats()
 	if ents != maxDeltaRingEntries {
@@ -190,10 +198,10 @@ func TestDeltaRing_CountEviction(t *testing.T) {
 // newest retained version invalidates the chain (ring cleared).
 func TestDeltaRing_NonContiguousClears(t *testing.T) {
 	var r blocklistDeltaRing
-	r.record(0, 1, nil, []string{"a"}, "fp", 0)
-	r.record(1, 2, []string{"a"}, []string{"a", "b"}, "fp", 0)
+	r.record(0, 1, nil, []string{"a"}, "fp")
+	r.record(1, 2, []string{"a"}, []string{"a", "b"}, "fp")
 	// A jump (e.g. HA promotion): base=100, target=101 — not contiguous with v2.
-	r.record(100, 101, nil, []string{"c"}, "fp", 0)
+	r.record(100, 101, nil, []string{"c"}, "fp")
 	ents, _, oldest, newest := r.stats()
 	if ents != 1 || oldest != 101 || newest != 101 {
 		t.Fatalf("non-contiguous publish should clear the ring to just the new entry; got ents=%d oldest=%d newest=%d", ents, oldest, newest)
@@ -222,7 +230,7 @@ func TestDeltaRing_ByteEviction(t *testing.T) {
 	}
 	total := int64(40)
 	for v := int64(1); v <= total; v++ {
-		r.record(v-1, v, []string{"prev"}, mk(int(v)), "fp", 0)
+		r.record(v-1, v, []string{"prev"}, mk(int(v)), "fp")
 	}
 	ents, bytes, oldest, newest := r.stats()
 	if bytes > maxDeltaRingBytes {

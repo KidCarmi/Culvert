@@ -509,7 +509,7 @@ func findFunc(f *ast.File, name string) *ast.FuncDecl {
 // motivated the whole gate — follow the value that is USED.
 func newCallLimitsExpr(fn *ast.FuncDecl, pkg string) (limitsExpr ast.Expr, why string) {
 	var calls []*ast.CallExpr
-	inspectOwnBody(fn, func(n ast.Node) bool {
+	inspectFuncOwnBody(fn, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -687,7 +687,7 @@ func isTopLevelBinding(fn *ast.FuncDecl, rhs ast.Expr) bool {
 // constructor itself returned something else entirely (Codex round 6, P1 — verified as a real
 // bypass). What this gate reasons about is what `newProductionUpstreamClient` does, so it must
 // look only at that function's own body.
-func inspectOwnBody(fn *ast.FuncDecl, visit func(ast.Node) bool) {
+func inspectFuncOwnBody(fn *ast.FuncDecl, visit func(ast.Node) bool) {
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if _, isLit := n.(*ast.FuncLit); isLit {
 			return false
@@ -699,7 +699,7 @@ func inspectOwnBody(fn *ast.FuncDecl, visit func(ast.Node) bool) {
 // isReturnedCall reports whether call appears directly in a return statement of fn ITSELF.
 func isReturnedCall(fn *ast.FuncDecl, call *ast.CallExpr) bool {
 	returned := false
-	inspectOwnBody(fn, func(n ast.Node) bool {
+	inspectFuncOwnBody(fn, func(n ast.Node) bool {
 		ret, ok := n.(*ast.ReturnStmt)
 		if !ok {
 			return true
@@ -721,7 +721,7 @@ func isReturnedCall(fn *ast.FuncDecl, call *ast.CallExpr) bool {
 // this gate cannot follow, and is refused.
 func alternateClientReturn(fn *ast.FuncDecl, call *ast.CallExpr) string {
 	why := ""
-	inspectOwnBody(fn, func(n ast.Node) bool {
+	inspectFuncOwnBody(fn, func(n ast.Node) bool {
 		ret, ok := n.(*ast.ReturnStmt)
 		if !ok || why != "" {
 			return why == ""
