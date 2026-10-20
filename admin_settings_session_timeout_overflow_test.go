@@ -11,11 +11,11 @@ import (
 // range check. An oversized session_timeout_hours must clamp to the 168h
 // ceiling (as the -session-timeout path does), not wrap time.Duration to a
 // negative number and collapse every admin session to the 15-minute floor.
-func TestApplyAdminServices_HugeSessionTimeoutHoursClampsToCeiling(t *testing.T) {
+func TestApplySessionTimeoutHours_HugeValueClampsToCeiling(t *testing.T) {
 	origTTL := session.TTL()
 	t.Cleanup(func() { session.SetTTL(origTTL) })
 
-	applyAdminServices(&AdminSettings{SessionTimeoutHours: 3_000_000})
+	applySessionTimeoutHours(3_000_000)
 
 	if got, want := session.TTL(), 168*time.Hour; got != want {
 		t.Fatalf("TTL = %v; want %v (Duration overflow collapsed to the floor)", got, want)
