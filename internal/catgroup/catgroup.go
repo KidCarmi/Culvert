@@ -10,9 +10,10 @@
 // every mutation (admin edit, UT1 sync, cluster sync) — never during
 // request evaluation. All category names are normalized to lowercase.
 //
-// Concurrency: RWMutex protects the store. Read path (GetByName) takes
-// RLock; write path (ReplaceAll) builds the new map outside the lock, then
-// swaps the pointer under a brief Lock.
+// Concurrency: RWMutex protects the authoritative store, and every writer
+// republishes an immutable readView that the per-request matchers read with no
+// lock at all (see readView). Write path (ReplaceAll) builds the new map
+// outside the lock, then swaps the pointer under a brief Lock.
 //
 // package main keeps: the `globalCategoryGroups` singleton, the API
 // handlers, cluster sync, rollback, and — deliberately — the HOST-level
@@ -178,7 +179,110 @@ type Store struct {
 	// callers that need a durable, restart-stable identity must hash the
 	// group CONTENTS (the QB-2 lesson from urlcat's retired revision
 	// counter). Atomic so readers never touch mu.
+	//
+	// This field stays the authoritative counter that writers increment under
+	// mu; Revision() serves its value out of the published view instead, so a
+	// reader can never pair new contents with an old signal (see readView).
 	rev atomic.Uint64
+
+	// view is the lock-free read side of the per-request group match
+	// (MatchesCategoryByID / MatchesCategory / GetByName) and of Revision().
+	// See readView.
+	view atomic.Pointer[readView]
+}
+
+// readView is the immutable read-side projection of the store, published under
+// s.mu and consumed WITHOUT any lock by the per-request matchers.
+//
+// Why it exists. package main's matchDestNorm calls
+// categoryGroupMatchesHostScratch ONCE PER RULE that carries a destination
+// category group, inside the policy scan every proxied request walks. Each such
+// call used to cost:
+//
+//   - one s.mu.RLock/RUnlock pair — two atomic read-modify-writes on ONE shared
+//     word, so every request wrote the same cache line once per
+//     category-group rule purely to read tables that in steady state never
+//     change. That is not a constant cost but a THROUGHPUT CEILING, the same
+//     shape already found and fixed in internal/threatfeed, internal/urlcat,
+//     internal/connlimit, the IP filter and topHosts. Measured on a 4-core
+//     Xeon @2.80GHz, 64 groups, BenchmarkMatchesCategory_UnknownNameParallel:
+//     30.6 ns/op at GOMAXPROCS=1 against 103.7 ns/op at 4 — 1.2x throughput
+//     for 4x the cores, i.e. essentially flat.
+//
+//   - for the ID path, a LINEAR SCAN of every group comparing ID strings.
+//     policy.go's matchDestNorm documents this leg as "amortized O(1) per
+//     rule"; it was O(groups), and production rules do carry
+//     DestCategoryGroupID (ui_policy stamps it), so the ID path is the live
+//     one. Measured, BenchmarkMatchesCategoryByID_Hit: 107.9 ns/op at 8 groups,
+//     455.0 ns at 64, 1690 ns at 256 — per rule, per request.
+//
+// The view answers both with one atomic pointer load and one map probe: byID
+// makes the ID leg genuinely O(1) and the lock disappears from every leg.
+//
+// The contract that makes the lock-free read safe is simple and load-bearing:
+//
+//	A Group or map reachable from a PUBLISHED readView is never mutated in place.
+//
+// Every writer that changes a group installs a REPLACEMENT *Group (Update,
+// UpdateByID and Rename copy-on-write rather than editing the live value, which
+// is also what retires the unsynchronized read of g.catSet that GetByName's
+// returned pointer used to expose) or a replacement map, and calls
+// publishLocked before releasing s.mu. Readers therefore observe one
+// self-consistent generation.
+//
+// rev travels INSIDE the view so contents and the memo change-signal are ONE
+// publication. Published separately they could be observed out of step, and the
+// damaging order is real: a reader that loaded the bumped counter and then the
+// pre-publication contents would memoize STALE contents under the NEW
+// revision — permanently stale, because the counter will not move again. In the
+// view there is no interleaving to get wrong.
+//
+// The view ALIASES each group pointer rather than cloning the groups, so
+// publishing is O(groups) pointer writes on an admin-sized set and nothing more.
+type readView struct {
+	byName map[string]*Group // lowercase name → group
+	byID   map[string]*Group // stable ID → group ("" IDs are not indexed)
+	rev    uint64            // s.rev as of this publication
+}
+
+// publishLocked republishes the read view from the authoritative fields.
+// Callers MUST hold s.mu for WRITING, and must have already applied their rev
+// bump — every mutator of groups/order ends with this call, and
+// TestReadView_EveryMutatorRepublishes pins that behaviourally while
+// TestReadView_EveryWriterPublishes pins it structurally.
+func (s *Store) publishLocked() {
+	byName := make(map[string]*Group, len(s.groups))
+	byID := make(map[string]*Group, len(s.groups))
+	for key, g := range s.groups {
+		byName[key] = g
+		// A group with no ID is unreachable by ID addressing — leaving it out
+		// keeps the "" lookup a miss without a special case at the read site.
+		if g.ID != "" {
+			byID[g.ID] = g
+		}
+	}
+	s.view.Store(&readView{byName: byName, byID: byID, rev: s.rev.Load()})
+}
+
+// readState returns the current read view. The nil branch materialises it on
+// first use so a Store assembled as a struct literal — the shape this package's
+// whitebox tests build — still resolves; New() and every mutator publish
+// eagerly, so production never reaches it after startup.
+//
+// That branch takes s.mu, so readState (and therefore the matchers, GetByName,
+// GetByID and Revision) must not be called by in-package code that already
+// holds the lock. Nothing does today: every in-package caller is a reader that
+// never takes the lock itself.
+func (s *Store) readState() *readView {
+	if v := s.view.Load(); v != nil {
+		return v
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v := s.view.Load(); v == nil {
+		s.publishLocked()
+	}
+	return s.view.Load()
 }
 
 // Version returns the durable per-store mutation generation (the ifVersion
@@ -191,11 +295,16 @@ func (s *Store) Version() int64 {
 
 // Revision returns the process-local mutation counter. Monotonic within a
 // process; resets on restart — a memo key, not an identity.
-func (s *Store) Revision() uint64 { return s.rev.Load() }
+//
+// Served from the published view, so the counter a caller reads and the
+// contents it can observe are the SAME generation (see readView).
+func (s *Store) Revision() uint64 { return s.readState().rev }
 
 // New builds an empty store.
 func New() *Store {
-	return &Store{groups: make(map[string]*Group)}
+	s := &Store{groups: make(map[string]*Group)}
+	s.publishLocked() // no other reference exists yet; no lock needed
+	return s
 }
 
 // normCats normalizes a category list to lowercase, trimmed, deduplicated.
@@ -265,10 +374,11 @@ func (s *Store) Load(path string) error {
 	s.groups = built
 	s.order = order
 	s.version = loadedVersion
-	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
-	// the new contents, so any reader that can observe them already sees the
-	// advanced revision — value and change signal are never out of step.
+	// Bump BEFORE publishing (round 19 follow-up, carried onto the view): the
+	// publication carries the counter with the contents, so value and change
+	// signal are never out of step.
 	s.rev.Add(1)
+	s.publishLocked()
 	s.mu.Unlock()
 
 	obs.Printf("CategoryGroups: loaded %d group(s) from %s", len(groups), path)
@@ -432,10 +542,10 @@ func (s *Store) restoreSnapshot(groups []Group, version int64) {
 	built := make(map[string]*Group, len(groups))
 	order := make([]string, 0, len(groups))
 	for i := range groups {
-		g := &groups[i]
+		g := groups[i] // copy, as ReplaceAll — the store owns what it publishes
 		g.catSet = buildCatSet(g.Categories)
 		key := strings.ToLower(g.Name)
-		built[key] = g
+		built[key] = &g
 		order = append(order, key)
 	}
 	s.mu.Lock()
@@ -443,6 +553,7 @@ func (s *Store) restoreSnapshot(groups []Group, version int64) {
 	s.order = order
 	s.version = version
 	s.rev.Add(1) // contents may have changed twice (mutate + restore) — memo readers must refresh
+	s.publishLocked()
 	s.mu.Unlock()
 }
 
@@ -515,14 +626,16 @@ func (s *Store) SnapshotView() Snapshot {
 	return snap
 }
 
-// GetByName returns a group by name (case-insensitive). O(1).
-// Returns nil if not found. The returned pointer is safe to read
-// concurrently — catSet is immutable between mutations.
+// GetByName returns a group by name (case-insensitive). O(1), lock-free, off
+// the published view. Returns nil if not found.
+//
+// The returned pointer is safe to read concurrently, and now actually is: a
+// published *Group is never mutated in place (readView), so the caller reads an
+// immutable snapshot. Before the view, Update/UpdateByID/Rename edited the live
+// value a previous caller still held, which made reading its catSet or Name a
+// data race the comment here claimed was impossible.
 func (s *Store) GetByName(name string) *Group {
-	s.mu.RLock()
-	g := s.groups[strings.ToLower(name)]
-	s.mu.RUnlock()
-	return g
+	return s.readState().byName[strings.ToLower(name)]
 }
 
 // Add creates a new category group. Returns error if name already exists.
@@ -553,6 +666,7 @@ func (s *Store) Add(name string, categories []string) (*Group, error) {
 	s.groups[key] = g
 	s.order = append(s.order, key)
 	s.rev.Add(1)
+	s.publishLocked()
 	return g, nil
 }
 
@@ -568,10 +682,15 @@ func (s *Store) Update(name string, categories []string) error {
 	if !ok {
 		return fmt.Errorf("group %q not found", name)
 	}
-	g.Categories = cats
-	g.catSet = buildCatSet(cats)
-	g.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	// Copy-on-write: g may already be reachable from a published view, where it
+	// is immutable by contract (readView). Edit a replacement and install it.
+	ng := *g
+	ng.Categories = cats
+	ng.catSet = buildCatSet(cats)
+	ng.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	s.groups[key] = &ng
 	s.rev.Add(1)
+	s.publishLocked()
 	return nil
 }
 
@@ -594,25 +713,24 @@ func (s *Store) Delete(name string) error {
 		}
 	}
 	s.rev.Add(1)
+	s.publishLocked()
 	return nil
 }
 
 // GetByID returns a copy of the group with the given stable ID, or nil. ID
-// addressing is rename-safe (the name key is mutable; the ID is not).
+// addressing is rename-safe (the name key is mutable; the ID is not). O(1),
+// lock-free, off the published view's byID index.
 func (s *Store) GetByID(id string) *Group {
 	if id == "" {
 		return nil
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, g := range s.groups {
-		if g.ID == id {
-			cp := *g
-			cp.catSet = nil // internal index; not part of the public copy
-			return &cp
-		}
+	g := s.readState().byID[id]
+	if g == nil {
+		return nil
 	}
-	return nil
+	cp := *g
+	cp.catSet = nil // internal index; not part of the public copy
+	return &cp
 }
 
 // UpdateByID replaces the categories of the group with the given stable ID.
@@ -625,12 +743,16 @@ func (s *Store) UpdateByID(id string, categories []string) error {
 	cats := normCats(categories)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, g := range s.groups {
+	for key, g := range s.groups {
 		if g.ID == id {
-			g.Categories = cats
-			g.catSet = buildCatSet(cats)
-			g.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			// Copy-on-write, as Update — g may be published (readView).
+			ng := *g
+			ng.Categories = cats
+			ng.catSet = buildCatSet(cats)
+			ng.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.groups[key] = &ng
 			s.rev.Add(1)
+			s.publishLocked()
 			return nil
 		}
 	}
@@ -656,6 +778,7 @@ func (s *Store) DeleteByID(id string) (string, error) {
 				}
 			}
 			s.rev.Add(1)
+			s.publishLocked()
 			return name, nil
 		}
 	}
@@ -692,20 +815,24 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 	oldName = cur.Name
 	newKey := strings.ToLower(newName)
 	now := time.Now().UTC().Format(time.RFC3339)
+	// Copy-on-write, as Update — cur may be published (readView), so the new
+	// display name goes onto a replacement rather than onto the live value.
+	// Built before the collision check so the refusal path installs nothing.
+	ng := *cur
+	ng.Name = newName
+	ng.UpdatedAt = now
 	if newKey == curKey {
-		// Same key (no change or case-only) — update the display name in place.
-		cur.Name = newName
-		cur.UpdatedAt = now
+		// Same key (no change or case-only) — the name map keeps its key.
+		s.groups[curKey] = &ng
 		s.rev.Add(1)
+		s.publishLocked()
 		return oldName, nil
 	}
 	if _, taken := s.groups[newKey]; taken {
 		return "", fmt.Errorf("a group named %q already exists: %w", newName, ErrNameTaken)
 	}
-	cur.Name = newName
-	cur.UpdatedAt = now
 	delete(s.groups, curKey)
-	s.groups[newKey] = cur
+	s.groups[newKey] = &ng
 	for i, k := range s.order {
 		if k == curKey {
 			s.order[i] = newKey
@@ -713,6 +840,7 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 		}
 	}
 	s.rev.Add(1)
+	s.publishLocked()
 	return oldName, nil
 }
 
@@ -721,24 +849,26 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 // EXISTS; matched is whether that group contains the (already-resolved) category.
 // The ID is AUTHORITATIVE: a resolved group returns its own membership result so
 // the caller does NOT fall back to a possibly-stale denormalized name (which
-// could match a DIFFERENT group). No-copy fast path (one RLock + a catSet probe);
-// O(groups), a small admin set. Empty id / not found ⇒ resolved=false so the
+// could match a DIFFERENT group). Empty id / not found ⇒ resolved=false so the
 // caller may fall back to the name.
+//
+// Lock-free and O(1): one atomic view load, one byID probe, one catSet probe.
+// It is called once per category-group rule inside the policy scan, so both
+// properties matter — this used to take s.mu.RLock and scan every group
+// comparing IDs, which is the cost policy.go's matchDestNorm documents as
+// "amortized O(1) per rule". See readView for the measured figures.
 func (s *Store) MatchesCategoryByID(id, category string) (matched, resolved bool) {
 	if id == "" {
 		return false, false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, g := range s.groups {
-		if g.ID == id {
-			if category == "" {
-				return false, true
-			}
-			return g.catSet[strings.ToLower(category)], true
-		}
+	g := s.readState().byID[id]
+	if g == nil {
+		return false, false
 	}
-	return false, false
+	if category == "" {
+		return false, true
+	}
+	return g.catSet[strings.ToLower(category)], true
 }
 
 // ReplaceAll atomically replaces all groups (used by cluster config sync,
@@ -756,14 +886,22 @@ func (s *Store) ReplaceAll(groups []Group) {
 	built := make(map[string]*Group, len(groups))
 	order := make([]string, 0, len(groups))
 	for i := range groups {
-		g := &groups[i]
+		// COPY, never &groups[i]: a published *Group is immutable by contract
+		// (readView), and aliasing the CALLER's backing array cannot honour
+		// that — a second ReplaceAll of the same slice (or any caller that
+		// keeps and edits it) would write a group the lock-free matchers are
+		// reading. The normalization below then lands on store-owned memory,
+		// which is also why the caller's slice no longer gets its IDs
+		// backfilled in place; no call site reads them back, and Save()
+		// persists them from the store.
+		g := groups[i]
 		g.Categories = normCats(g.Categories)
 		g.catSet = buildCatSet(g.Categories)
 		if g.ID == "" { // backfill for groups arriving without an ID (old import/CP)
 			g.ID = uuid.NewString()[:12]
 		}
 		key := strings.ToLower(g.Name)
-		built[key] = g
+		built[key] = &g
 		order = append(order, key)
 	}
 
@@ -774,10 +912,11 @@ func (s *Store) ReplaceAll(groups []Group) {
 	// admin edit loaded against the pre-install contents conflicts instead of
 	// silently overwriting the installed truth.
 	s.version++
-	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
-	// the new contents, so any reader that can observe them already sees the
-	// advanced revision — value and change signal are never out of step.
+	// Bump BEFORE publishing (round 19 follow-up, carried onto the view): the
+	// publication carries the counter with the contents, so value and change
+	// signal are never out of step.
 	s.rev.Add(1)
+	s.publishLocked()
 	s.mu.Unlock()
 }
 
@@ -800,6 +939,9 @@ func (s *Store) ContainsCategory(catName string) (groupName string, found bool) 
 // group match: package main's categoryGroupMatchesHost resolves host →
 // category through its two-tier fusion, then calls this O(1) check.
 // Unknown group = no match (fail-closed); empty category never matches.
+//
+// Lock-free: GetByName reads the published view, so the name fallback no longer
+// writes s.mu's cache line once per category-group rule per request.
 func (s *Store) MatchesCategory(groupName, category string) bool {
 	g := s.GetByName(groupName)
 	if g == nil || category == "" {
