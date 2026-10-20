@@ -537,11 +537,13 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     [[ -n "$res" ]] && break; sleep 15
   done
   waited=$((SECONDS - t0))
+  feedlog="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,140}' | tail -6 | tr '\n' '|' || true)"
   case "$res" in
-    "FeedSync: sync complete"*) check K category-import-converges pass "rebuilt store re-synced: ${res#FeedSync: } (${waited}s after recovery)";;
-    *"download/parse failed"*) check K category-import-converges info "retry after ${waited}s hit a download failure (network, not disk); convergence not observed";;
-    "") check K category-import-converges fail "no import retry finished within ${conv}s of recovery";;
-    *) check K category-import-converges fail "retry after recovery failed on the disk side: $res (${waited}s)";;
+    "FeedSync: sync complete"*) check K category-import-converges pass "rebuilt store re-synced: ${res#FeedSync: } (${waited}s after recovery); feed: ${feedlog:-none}";;
+    *"download/parse failed"*) check K category-import-converges info "retry after ${waited}s hit a download failure (network, not disk); feed: ${feedlog:-none}";;
+    "") allfeed="$(IN docker logs culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,140}' | tail -8 | tr '\n' '|' || true)"
+        check K category-import-converges fail "no import retry finished within ${conv}s of recovery; since-recovery feed: ${feedlog:-NONE}; all-boots feed: ${allfeed:-NONE (FeedSync never logged — boot sync did not run on the rebuilt store)}"; diagnose K-no-converge;;
+    *) check K category-import-converges fail "retry after recovery failed on the disk side: $res (${waited}s); feed: ${feedlog:-none}";;
   esac
   # Bounded + idempotent (owner req 5): a SECOND clean restart must NOT re-quarantine.
   qc1="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | awk '/^culvert_catfeeddb_quarantined_copies /{print $2}')"
