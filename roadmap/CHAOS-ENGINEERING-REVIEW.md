@@ -10662,7 +10662,8 @@ flows through — and on the audit SIEM hook. §42 nominated this as the
 *recommended first follow-up* and left it only for its site count. It is closed
 here, and the sweep found two further defects while reading the write sites.
 
-**Three findings, all measured, none reasoned-from-source:**
+**Three findings — SIEM-1 and SIEM-3 measured, SIEM-2 confirmed by construction
+and NOT reproduced (see §45.3):**
 
 | | Finding | Impact |
 |---|---|---|
@@ -10854,6 +10855,65 @@ write in `persistLogEntry`, so a fault in it cannot cost the local record.
   long. Pre-existing, admin-plane-only, and unchanged by this PR; recorded
   because the fix moved two `Format()` calls, and it would be wrong to imply
   they became cheap.
+
+### 45.9b Codex round 1 — the fix traded a leak for silent loss
+
+Closing SIEM-3 opened a narrower hole, and the reviewer was right to call it.
+
+`InitSyslog` now closes the writer it displaces. But `send` reads
+`closed.Load()` and only *then* enqueues, while `Close` stored `closed`, closed
+`stop` and let `drainLoop` exit — so a sender preempted between its check and
+its enqueue could put a line on a queue whose drain goroutine had already
+returned. `Close` deliberately never closes the channel, so the send succeeds:
+the line is **neither delivered nor counted in `Drops`**. Silent loss, invisible
+on every surface, in audit records.
+
+**The shape of the trade is the lesson.** Before SIEM-3's fix the displaced
+writer was leaked, and a leaked `drainLoop` keeps running — so that same
+in-flight line *was* delivered. Fixing the leak is what created the loss. A
+containment fix that moves the failure instead of removing it is the same
+pattern §43 recorded ("containment alone makes it worse"), reached from a
+different direction.
+
+`Close` now stores `closed`, **waits for in-flight senders**, and only then
+closes `stop` (`waitForSenders`, bounded by `senderDrainTimeout`). With that
+ordering a sender either loses the race and is counted as a drop, or wins it and
+has its line on the queue before the flush begins. Every line is accounted for.
+The cost is two atomic adds bracketing a buffered channel send that already
+takes the channel's lock and a `formatMsg` that already allocates — noise
+against what the path does anyway, so the engine's "request path never blocks on
+the collector" contract is untouched.
+
+**NOT reproduced, and recorded as such.** The interleaving needs `drainLoop`'s
+flush to observe an EMPTY queue at the one moment every sender sits inside the
+window. Roughly 500 attempts across two strategies — a deliberately slow
+`formatMsg` via a large payload, and `Close` landing in steady-state traffic —
+never hit it in this environment. It is confirmed **by construction** from the
+source, exactly as SIEM-2 is, and the register's own §42 standard is why that
+distinction is stated rather than glossed.
+
+What *is* measured is the mechanism:
+`TestClose_WaitsForAnInFlightSenderBeforeStoppingTheDrain` parks a registration
+and requires `Close` not to return before it clears — pre-fix `Close` returns in
+**~108 µs** against a required **150 ms**. `TestClose_SenderWaitIsBounded` pins
+the other half: an unreleased registration must never hang shutdown.
+`TestClose_EveryLineIsDeliveredOrDropped` asserts the conservation law
+(delivered + dropped == sent) as a regression invariant, and is labelled in the
+file as an invariant rather than an oracle, because it passes pre-fix too.
+
+One assertion was removed rather than kept: an earlier version of this round
+checked `inFlight == 0` once `Close` returned. That is a **false** invariant —
+senders arriving after `waitForSenders` finishes still register briefly before
+taking the closed branch — and the fixed code failed it, which is how the error
+surfaced. The property that matters is the ordering against `close(stop)`, which
+is what the timing assertion measures.
+
+**Residual:** `waitForSenders` is bounded, so a registration that never clears
+within `senderDrainTimeout` lets `Close` proceed and that one line may still go
+unaccounted. Bounding it is deliberate — a wait that cannot finish must not be
+able to hang shutdown — and senders in that window do only CPU work and a
+non-blocking send, never a syscall, so reaching the bound means the goroutine
+was descheduled for a second mid-function.
 
 ### 45.10 Residual risk
 

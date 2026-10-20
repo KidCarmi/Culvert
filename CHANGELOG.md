@@ -54,6 +54,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   second admin's concurrent disable nil-panicked the admin handler; the format
   now resolves from one load.
 
+  Closing that leak opened a narrower hole, which review caught: `send` read
+  `closed` and only *then* enqueued, while `Close` closed `stop` and let
+  `drainLoop` exit — so a sender preempted between its check and its enqueue
+  could put a line on a queue whose drain goroutine had already returned.
+  `Close` never closes the channel, so the send succeeds and the line is
+  **neither delivered nor counted in `Drops`** — silent loss, in audit records.
+  The leak had been masking it: a leaked `drainLoop` keeps running, so that same
+  line was delivered. `Close` now stores `closed`, waits for in-flight senders,
+  and only then closes `stop`, so every line is either delivered or counted; the
+  wait is bounded so it can never hang shutdown. Confirmed by construction and
+  not reproduced (~500 attempts); the `Close`-waits-for-a-sender ordering itself
+  is measured, at ~108 µs pre-fix against a required 150 ms.
+
   Closes `OBS-1` of the chaos register's §42, which nominated it as the
   recommended first follow-up. Gated by a `-race` reconfigure-versus-request
   test, a goroutine-leak test counting delivery goroutines by stack, an AST

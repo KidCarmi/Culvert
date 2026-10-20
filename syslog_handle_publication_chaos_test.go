@@ -44,6 +44,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newTestCollector binds a real UDP socket and drains it, so InitSyslog's dial
@@ -191,6 +192,26 @@ func TestChaos78_ReconfigureRacesTheRequestPath(t *testing.T) {
 	}
 }
 
+// waitForDrainGoroutines waits, bounded, for the delivery-goroutine count to
+// reach want, and reports what it last saw. Close is synchronous but its wait
+// on the drain goroutine is bounded by closeWait, so on a loaded runner it can
+// return while a goroutine is still unwinding — an immediate exact-count
+// assertion would be flaky for a reason that has nothing to do with the leak.
+// Waiting for quiescence keeps the assertion exact without making it timing-
+// dependent: a real leak never reaches want, so this still fails.
+func waitForDrainGoroutines(want int) (got int, ok bool) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got = drainGoroutines(); got == want {
+			return got, true
+		}
+		if time.Now().After(deadline) {
+			return got, false
+		}
+		runtime.Gosched()
+	}
+}
+
 // TestChaos78_RetargetLeaksNoDeliveryGoroutine pins the second defect.
 // InitSyslog published the new writer over the old one and never closed it;
 // drainLoop exits only via Close, so each retarget stranded one goroutine
@@ -216,9 +237,10 @@ func TestChaos78_RetargetLeaksNoDeliveryGoroutine(t *testing.T) {
 		}
 	}
 
-	// Close() is synchronous, so by here every displaced writer's drainLoop has
-	// already returned; only the last writer's is live.
-	if got := drainGoroutines(); got != baseline+1 {
+	// Close is synchronous, so every displaced writer's drainLoop has been told
+	// to stop; waitForDrainGoroutines allows for one still unwinding (see its
+	// doc) without weakening the count.
+	if got, ok := waitForDrainGoroutines(baseline + 1); !ok {
 		t.Errorf("after %d retargets: %d syslog delivery goroutines; want %d (baseline %d + the live writer).\n"+
 			"Each retarget that does not close the writer it displaces strands one goroutine and one collector socket for the life of the process.",
 			retargets, got, baseline+1, baseline)
@@ -228,7 +250,7 @@ func TestChaos78_RetargetLeaksNoDeliveryGoroutine(t *testing.T) {
 	if sw := setSyslogHandle(nil); sw != nil {
 		_ = sw.Close()
 	}
-	if got := drainGoroutines(); got != baseline {
+	if got, ok := waitForDrainGoroutines(baseline); !ok {
 		t.Errorf("after disable: %d syslog delivery goroutines; want the %d baseline", got, baseline)
 	}
 }
