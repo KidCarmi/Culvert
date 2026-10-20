@@ -1473,6 +1473,105 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- The operator contract (`GET /api/diagnostics`, `GET /api/health/explain`)
+  now carries an `admin_roster_durability` row (CHAOS-70 evidence): `warn`
+  when no `-ui-users-file` is configured, so admin account deletes, role
+  changes and password rotations revert on restart; when the configured file
+  failed to load at startup or is not a usable regular-file target (a
+  read-only check); when no write to the roster file has landed since
+  startup (*not verified yet*); and when admin-roster
+  changes were refused or login-time roster writes failed since process
+  start. Counts, the remedy and the degraded login-write state are shown to
+  admins only. Viewers and operators get a fixed message for "not durable" and
+  "a change was refused", and the row shows nothing for a degraded write
+  (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
+  `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
+  Admin Users panel hint and are deliberately absent from `/api/stats`.
+- The `admin_roster_durability` row reports persistence only on evidence: a
+  roster save that landed in this process. Culvert does not write the roster
+  at startup, so after every restart the row reads `warn` with the distinct,
+  non-alarming *not verified yet* state ("the next admin account change
+  verifies that it persists"; viewers see a fixed message) until the first
+  admin account change lands, which turns it `ok`. That `ok` states evidence,
+  never capability: "the last admin roster save was written to disk and the
+  file is unchanged since" (viewers: "an admin roster file is configured; the
+  file on disk is the last one Culvert wrote, unchanged since"). It does not
+  claim that the roster "is persisting" or that the next save will be allowed.
+  No read-only check can authorise that: an SELinux `add_name`/`remove_name`
+  denial, AppArmor, an NFSv4 or server-side ACL, or a quota can refuse it
+  while `faccessat` passes. The live checks below are advisory: they report
+  what they detect, and passing them is no claim. A refused save is rolled
+  back, answers `500` and is counted, and the next read of the row reports it
+  in place of `ok`. A stat is not evidence: a
+  readable roster on a read-only mount, or one owned by another user in a
+  sticky directory, stats like a writable one. Hard problems found by the
+  row's one live probe take precedence over *not verified yet*: a configured
+  roster file that does not exist yet, a directory that no longer lets
+  Culvert create and replace files (`faccessat(W_OK|X_OK, AT_EACCESS)` and
+  `statfs`: a `chmod 0555`, a revoked ACL, a read-only remount), a roster no
+  save can replace (immutable or append-only, a bind-mounted file, or an
+  immutable or append-only directory; Linux, read-only
+  `fileutil.ReplacementBlocked`), and storage that does not answer within
+  2 s. After a landed save the row also warns when the roster file is
+  removed, replaced or edited outside Culvert (each landed save records the
+  size and SHA-256 of the bytes written), replaced by an identical copy owned
+  by another account where that makes the next save's rename be refused,
+  changed or replaced outside Culvert in any other way, or when the save's
+  directory could not be synced. A landed save is evidence only for the exact
+  file it wrote, unchanged since: on Linux and macOS it also records that
+  file's device, inode and `ctime` (fstat of the written file after the
+  rename), and any difference — a new inode, or a same-inode `touch`, `chmod`,
+  `chown`, ACL, extended attribute or label change — reports the new
+  `warn` *the roster file was changed or replaced outside Culvert since its
+  last save* (no action needed if intentional; the next admin account change
+  re-verifies). Deliberately, a `touch`, a `chmod` or an identical re-copy
+  now warns instead of reading `ok`. Changed contents, a refused-rename owner
+  change, a missing or immutable file and an unwritable directory take
+  precedence. Other Unix systems compare size, SHA-256 and owner; Windows
+  compares size and SHA-256 only. The probe runs on its own
+  goroutine, holds no roster lock, runs at most once at a time, is reused for
+  5 s, and is read once per diagnostics request (the viewer rendering reuses
+  it), so a stalled volume costs a request at most one 2 s wait and never
+  blocks admin changes or TOTP logins. `fileutil.AtomicWriteInfo` returns
+  the landed file's own `FileInfo` and whether its directory was synced;
+  `fileutil.AtomicWrite` is unchanged for its callers.
+- The `admin_roster_durability` row now picks its state from one ordered list,
+  and the admin and viewer renderings both use that list (Codex P2 4326470080).
+  Previously each renderer ranked the states in its own order. That let a
+  refused first save after a restart hide behind *not verified yet* ("No action
+  is needed now"). The order is:
+  1. setup incomplete
+  2. no roster file
+  3. storage not responding
+  4. refused saves
+  5. failed login-time writes (admin-only)
+  6. unusable target
+  7. missing target
+  8. replaced
+  9. owner changed
+  10. immutable
+  11. directory not writable
+  12. changed externally
+  13. directory not synced
+  14. not verified yet
+  15. ok
+
+  The admin remedy for a refusal also names the highest-ranked problem the live
+  checks see below it. The row now counts refused and failed writes from the
+  last save that landed (from startup before the first one), so a refusal stays
+  visible until a later save lands. The since-startup totals are still shown,
+  and the counters, metrics and Admin Users panel are unchanged. The identity
+  probe reports content, owner and inode changes as independent facts, and the
+  list ranks them.
+- A failed startup load of `ui_users.json` no longer pins the
+  `admin_roster_durability` row (Codex P2 4327431894). Before, the row kept
+  reporting "could not be loaded at startup" after a later save landed at the
+  same path, and it skipped the live probe. Now a landed save clears the load
+  error, under the same lock that records the save. Pointing at another path
+  resets it as before. The live probe now runs whether or not the load failed.
+- **Deferred:** the boot-time in-place rewrite of `ui_users.json` (which would
+  verify persistence at startup instead of at the first admin change) is
+  split out of this change into its own follow-up PR.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

@@ -107,7 +107,8 @@ func assertCheckShape(t *testing.T, idx int, ck OperatorContractCheck) {
 }
 
 func TestApiDiagnostics_DefaultOK(t *testing.T) {
-	primeWritable(t) // baseline expects storage_path=ok
+	primeWritable(t)               // baseline expects storage_path=ok
+	pinRosterDurabilityBaseline(t) // and admin_roster_durability independent of test order
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 
@@ -153,6 +154,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"interactive_login_state":    false,
 		"alert_webhook_signing":      false,
 		"memory_backstop":            false,
+		"admin_roster_durability":    false,
 	}
 	for i := range c.Checks {
 		assertCheckShape(t, i, c.Checks[i])
