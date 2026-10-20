@@ -628,9 +628,16 @@ var rosterRowExceptions = map[string]rosterClass{
 		Reason: "the inventory checkOversizeConfiguredUsernames renders; every consumer is classified"},
 	"hasCredentialCapableProvider": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
 		"existence probe; renders no name, role, count or second-factor posture"},
-	"checkAdminRosterDurability": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
-		Reason: "the admin_roster_durability row; redactContractForRole replaces it with " +
-			"rosterDurabilityFacts.viewerRow below admin (gated by diagnostics_roster_durability_test.go)"},
+	// buildOperatorContract reads the roster facts ONCE per contract and
+	// renders both rows from them (Codex P2 4320228851 on PR #1601), so the
+	// classified producers are rosterDurabilityFacts' own methods.
+	"rosterDurabilityFacts.adminRow": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "the admin_roster_durability row; redactContractForRole replaces it with the contract's " +
+			"precomputed viewerRow below admin (gated by diagnostics_roster_durability_test.go)"},
+	"rosterDurabilityFacts.notDurableAdminRow": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "adminRow's rendering when no roster file is configured; the same row, replaced the same way"},
+	"rosterDurabilityFacts.viewerRow": {Kind: rosterProbe, Reason: "the viewer rendering itself: fixed " +
+		"constants only, reviewed as safe below admin (SEC-DIAG-ROSTER-1)"},
 	"readRosterDurabilityFacts": {Kind: rosterInput, Reason: "the CHAOS-70 counters, local-admin probe and " +
 		"roster-target load outcome behind admin_roster_durability"},
 }
@@ -638,6 +645,9 @@ var rosterRowExceptions = map[string]rosterClass{
 const (
 	rosterContractRoot = "buildOperatorContract"
 	rosterRedactor     = "redactContractForRole"
+	// rosterFactsType is the roster-derived facts type; its methods render
+	// roster state whatever they read.
+	rosterFactsType = "rosterDurabilityFacts"
 )
 
 // contractReachable returns every function reachable from
@@ -717,6 +727,10 @@ func rosterTaint(idx *contractIndex, reachable map[*contractFunc]bool) map[*cont
 		refs[fn] = contractRefs(idx, fn)
 		if p := rosterPrimitiveIn(fn); p != "" {
 			taint[fn] = "reads " + p
+		} else if strings.HasPrefix(fn.Key, rosterFactsType+".") {
+			// Its receiver IS roster-derived state (readRosterDurabilityFacts'
+			// result), so every method renders roster state.
+			taint[fn] = "renders " + rosterFactsType
 		}
 	}
 	for changed := true; changed; {
@@ -1062,7 +1076,7 @@ func TestWall_RosterConsumers_NegativeControls(t *testing.T) {
 		recoded.replaceOnce(t, "diagnostics.go", "\tcase f.refused == 0 && f.degraded == 0:\n",
 			inject+"\tcase f.refused == 0 && f.degraded == 0:\n")
 		v, _ := rosterRowViolations(parseContractSources(t, recoded))
-		if !rosterViolationFor(v, "checkAdminRosterDurability is classified as a redacted row") {
+		if !rosterViolationFor(v, "rosterDurabilityFacts.adminRow is classified as a redacted row") {
 			t.Errorf("an adminRow branch that %s passed the wall; violations=%q", name, v)
 		}
 	}
@@ -1094,6 +1108,17 @@ func TestWall_RosterConsumers_NegativeControls(t *testing.T) {
 // here.
 var rosterRowProducers = rosterProducerKeys()
 
+// rosterProducerNames are the identifiers a producer is referenced by: its
+// function name, or a method's name ("rosterDurabilityFacts.adminRow" is
+// referenced as adminRow).
+var rosterProducerNames = func() map[string]bool {
+	names := map[string]bool{}
+	for k := range rosterRowProducers {
+		names[k[strings.LastIndexByte(k, '.')+1:]] = true
+	}
+	return names
+}()
+
 func rosterProducerKeys() map[string]bool {
 	keys := map[string]bool{}
 	for k, c := range rosterRowExceptions {
@@ -1102,52 +1127,6 @@ func rosterProducerKeys() map[string]bool {
 		}
 	}
 	return keys
-}
-
-// rosterProducerUse is the ONE producer use a caller outside the contract
-// walk is allowed: the exact call `<producer>().<method>()`, with no
-// arguments, matched on the AST.
-type rosterProducerUse struct {
-	producer, method, reason string
-}
-
-// rosterProducerCallerExceptions are callers outside the contract walk that
-// may make exactly one kind of producer use. Every OTHER roster-row producer
-// use inside them is still a violation (Codex P2 4317365515 on PR #1601): the
-// redactor is excepted for re-deriving the viewer row, not as a whole.
-var rosterProducerCallerExceptions = map[string]rosterProducerUse{
-	// The redactor re-derives admin_roster_durability's VIEWER row from the
-	// facts below admin; it runs only inside writeOperatorContract.
-	"redactContractForRole": {producer: "readRosterDurabilityFacts", method: "viewerRow",
-		reason: "renders the viewer twin inside writeOperatorContract"},
-}
-
-// allowedProducerIdents returns the producer identifiers in body that form
-// the exact allowed use `<producer>().<method>()`.
-func allowedProducerIdents(body ast.Node, use rosterProducerUse) map[*ast.Ident]bool {
-	allowed := map[*ast.Ident]bool{}
-	if use.producer == "" {
-		return allowed
-	}
-	ast.Inspect(body, func(n ast.Node) bool {
-		outer, ok := n.(*ast.CallExpr)
-		if !ok || len(outer.Args) != 0 {
-			return true
-		}
-		sel, ok := outer.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != use.method {
-			return true
-		}
-		inner, ok := sel.X.(*ast.CallExpr)
-		if !ok || len(inner.Args) != 0 {
-			return true
-		}
-		if id, ok := inner.Fun.(*ast.Ident); ok && id.Name == use.producer {
-			allowed[id] = true
-		}
-		return true
-	})
-	return allowed
 }
 
 // contractReachableKeys is contractReachable keyed by function key.
@@ -1168,19 +1147,20 @@ func rosterProducerViolations(idx *contractIndex) []string {
 		if reachable[fn.Key] || rosterRowProducers[fn.Key] {
 			continue
 		}
-		violations = append(violations, producerUsesIn(fn, rosterProducerCallerExceptions[fn.Key])...)
+		violations = append(violations, producerUsesIn(fn)...)
 	}
 	sort.Strings(violations)
 	return violations
 }
 
-// producerUsesIn reports fn's roster-row producer uses, except the one exact
-// use its exception (if any) allows.
-func producerUsesIn(fn *contractFunc, use rosterProducerUse) []string {
-	allowed := allowedProducerIdents(fn.Decl.Body, use)
+// producerUsesIn reports fn's roster-row producer uses. There are no
+// exceptions: the redactor, the one caller outside the contract walk that
+// needs the roster row, uses the viewer row buildOperatorContract rendered
+// from the same single read of the facts (Codex P2 4320228851 on PR #1601).
+func producerUsesIn(fn *contractFunc) []string {
 	var out []string
 	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && rosterRowProducers[id.Name] && !allowed[id] {
+		if id, ok := n.(*ast.Ident); ok && rosterProducerNames[id.Name] {
 			out = append(out, fn.File+": "+fn.Key+" uses roster-row producer "+id.Name+
 				" outside the operator-contract path, so its output bypasses redactContractForRole")
 		}
@@ -1221,32 +1201,14 @@ func TestWall_RosterRowProducersOnlyReachedViaContract(t *testing.T) {
 	}
 }
 
-// TestWall_RedactorExceptionIsTheExactViewerRowCall (Codex P2 4317365515 on
-// PR #1601): the redactor's exception covers only
-// `readRosterDurabilityFacts().viewerRow()`. The exact use is present (the
-// exception is not stale), and any other roster-row producer use inside the
-// redactor — copying another row's Message, or reading the facts any other
-// way — fails the wall. A whole-function exception fails the negative
-// controls.
-func TestWall_RedactorExceptionIsTheExactViewerRowCall(t *testing.T) {
+// TestWall_RedactorReadsNoRosterProducer (Codex P2s 4317365515 and
+// 4320228851 on PR #1601): redactContractForRole uses no roster-row producer
+// at all — it swaps in the viewer row the contract already carries — so
+// copying another row's Message, re-reading the facts (a second probe of the
+// roster's storage per request), or rendering the admin row inside it fails
+// the wall.
+func TestWall_RedactorReadsNoRosterProducer(t *testing.T) {
 	base := loadContractSources(t)
-	idx := parseContractSources(t, base)
-	for key, use := range rosterProducerCallerExceptions {
-		var fn *contractFunc
-		for _, f := range idx.funcs {
-			if f.Key == key {
-				fn = f
-			}
-		}
-		if fn == nil {
-			t.Errorf("exception %s names no function", key)
-			continue
-		}
-		if len(allowedProducerIdents(fn.Decl.Body, use)) == 0 {
-			t.Errorf("exception %s: the allowed use %s().%s() is not in it — stale exception", key, use.producer, use.method)
-		}
-	}
-
 	const anchor = "\t\t\tchecks[i].Message = diagnosticsRedactedUsernameMessage\n"
 	for name, inject := range map[string]string{
 		"copies another roster row's Message": "\t\t\tchecks[i].Message = checkOversizeConfiguredUsernames().Message\n",
@@ -1254,8 +1216,9 @@ func TestWall_RedactorExceptionIsTheExactViewerRowCall(t *testing.T) {
 		"keeps the facts for later":           "\t\t\tfacts := readRosterDurabilityFacts\n\t\t\t_ = facts\n",
 		// The right producer through the wrong method: the ADMIN row below admin.
 		"renders the admin row": "\t\t\tchecks[i] = readRosterDurabilityFacts().adminRow()\n",
-		// The right method on another producer (shape only: the wall reads the AST).
-		"uses another producer's viewerRow": "\t\t\tchecks[i] = checkAdminRosterDurability().viewerRow()\n",
+		// Re-reading the facts here would probe the roster's storage a second
+		// time per request (Codex P2 4320228851 on PR #1601).
+		"re-reads the facts for the viewer row": "\t\t\tchecks[i] = readRosterDurabilityFacts().viewerRow()\n",
 	} {
 		srcs := base.clone()
 		srcs.replaceOnce(t, "diagnostics.go", anchor, inject)

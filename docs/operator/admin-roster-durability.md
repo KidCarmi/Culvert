@@ -175,177 +175,86 @@ administrative decision was affected, and therefore what the operator must redo.
 1. The Diagnostics panel (`GET /api/diagnostics`, also rendered by
    `GET /api/health/explain`) carries an `admin_roster_durability` row. It is
    `ok` while initial setup is incomplete (there is no credential to persist
-   yet). Once setup is complete it is `warn` when no `-ui-users-file` is
-   configured (changes revert at restart; on a node with no local
-   administrator it also names the missing break-glass account), when the
-   configured file failed to load at startup or its path is not a usable
-   regular file (a directory, or a missing parent directory), when the boot
-   rewrite described below was refused, when no write to the file has landed
-   since startup (a configured file that does not exist yet: the first admin
-   account change creates it and clears the warning), when the file was
-   **removed from disk after it was last written** (the roster in use is then
-   only in memory and accounts that exist only in it are lost on restart:
-   save an admin account change, which recreates the file, or restore it from
-   backup, before the next restart), when the file was **replaced or edited
-   outside Culvert after Culvert last wrote it** (each landed write records the
-   size and SHA-256 of the bytes written, and the row compares the file with
-   them, so an in-place edit counts but a `touch` or `chmod` does not: a
-   restart would load the file as it is now, which may restore revoked
+   yet), and `ok` once an admin account change has been saved in this
+   process and nothing below applies.
+
+   **After every restart it is `warn` — *not verified yet* — until the first
+   admin account change is saved.** Culvert does not write the roster at
+   startup, and nothing short of a real save can prove one will land: a stat
+   passes on a read-only mount, and a test file created beside the roster
+   passes in a sticky (`1777`) or ACL-restricted directory where the roster
+   belongs to another user. This state is pending, not a fault: the message
+   reads *the admin roster has not been written since startup; the next admin
+   account change verifies that it persists*, viewers see a fixed
+   non-alarming message, no action is needed, and it never makes the contract
+   verdict `fail` (the row's `warn` only colours the verdict; `/healthz` and
+   readiness do not read it). The first landed save turns the row `ok`.
+
+   Once setup is complete the row is also `warn`, and these take precedence
+   over *not verified yet*, when:
+
+   - no `-ui-users-file` is configured (changes revert at restart; on a node
+     with no local administrator it also names the missing break-glass
+     account);
+   - the configured file failed to load at startup, or its path is not a
+     usable regular file (a directory, or a missing parent directory);
+   - the configured file **does not exist yet** (its accounts are only in
+     memory; the first admin account change creates it and clears this);
+   - the **directory no longer lets Culvert create and replace files** (a
+     `chmod 0555`, an ACL revocation, or a read-only remount — checked live
+     with `faccessat(W_OK|X_OK, AT_EACCESS)` and `statfs`, never by creating a
+     file; on non-Unix platforms there is no such live check, and a refused
+     save is what reports it);
+   - the roster **cannot be replaced by any save** — immutable or append-only
+     (`chattr +i`/`+a`; `lsattr` shows it), a bind-mounted file, or in an
+     immutable or append-only directory; checked live and read-only on Linux
+     (clear the flag with `chattr -i`/`-a`), reported elsewhere only once a
+     save is refused;
+   - the **storage does not respond** to that check within 2 seconds (a
+     stalled NFS or FUSE mount: persistence is not verified).
+
+   After a landed save it is `warn` when the file was **removed from disk**
+   (the roster in use is then only in memory and accounts that exist only in
+   it are lost on restart: save an admin account change, which recreates the
+   file, or restore it from backup, before the next restart), **replaced or
+   edited outside Culvert** (each landed save records the size and SHA-256 of
+   the bytes written, so an in-place edit counts but a `touch` or `chmod` does
+   not: a restart would load the file as it is now, which may restore revoked
    accounts or credentials or drop changes made since — reconcile, then either
-   save an admin account change to write the roster in use back, or restart
-   to adopt the file), when it was **replaced by an identical copy owned by
-   another account** in a way that makes the next save's rename be refused (a
-   sticky directory whose owner is neither Culvert nor root, with Culvert not
-   root and not the new owner: give the file back to Culvert's account, or
-   run Culvert as its owner — an identical re-copy with the same owner, or an
-   owner change in a non-sticky directory, stays `ok`), when the **directory
-   no longer lets Culvert create and replace files** after the last landed
-   write (a `chmod 0555`, an ACL revocation, or a read-only remount — checked
-   live with `faccessat(W_OK|X_OK, AT_EACCESS)` and `statfs`, never by
-   creating a file; on non-Unix platforms there is no such live check and a
-   refused save is what reports it), when the **storage does not respond**
-   to that check within 2 seconds (a stalled NFS or FUSE mount: persistence
-   is not verified, so the row is not `ok`), when the roster **cannot be
-   replaced by any save** — made immutable or append-only (`chattr +i`/`+a`;
-   `lsattr` shows it), bind-mounted as a file, or in an immutable or
-   append-only directory; checked live on Linux with the same predicate the
-   boot rewrite applies, and on other platforms reported only once a save is
-   refused (clear the flag with `chattr -i`/`-a`) — or when
-   refused or degraded roster writes have occurred since process start. The
-   Admin Users panel shows the same refused/degraded counts. Read-only; the
-   counts clear on restart. Everything the row learns from the filesystem
-   comes from one live probe, which runs on its own goroutine with no roster
-   lock held, at most one at a time however many requests arrive, and whose
-   result is reused for 5 seconds while Culvert has not written the roster:
-   a stalled volume costs one blocked check, not one per request, and never
-   delays admin changes or logins. The counts, the remedy and the degraded
-   login-write state are shown to **admins only**: a viewer or operator sees a fixed message
-   for "not durable" or "a change was refused", and nothing for a degraded
-   login-time write (SEC-DIAG-ROSTER-1).
+   save an admin account change to write the roster in use back, or restart to
+   adopt the file), **replaced by an identical copy owned by another account**
+   in a way that makes the next save's rename be refused (a sticky directory
+   whose owner is neither Culvert nor root, with Culvert not root and not the
+   new owner: give the file back to Culvert's account, or run Culvert as its
+   owner — an identical re-copy with the same owner, or an owner change in a
+   non-sticky directory, stays `ok`), or when the save landed but its
+   **directory could not be synced** (for example a write-and-search-only
+   `0300` directory that cannot be opened for the `fsync`: that write may not
+   survive a power loss; the save itself succeeds, as every other store's
+   does). It is also `warn` when refused or degraded roster writes have
+   occurred since process start; the Admin Users panel shows the same
+   refused/degraded counts, which clear on restart.
 
-   A roster write that landed but whose directory could not be synced — for
-   example a write-and-search-only `0300` directory that cannot be opened for
-   the `fsync` — reads `warn` (*that write may not survive a power loss*)
-   until a save is synced; the save itself succeeds, as every other store's
-   does.
+   Everything the row learns from the filesystem comes from one live probe,
+   read once per diagnostics request (the viewer rendering reuses it). The
+   probe runs on its own goroutine with no roster lock held, at most one at a
+   time however many requests arrive, and its result is reused for 5 seconds
+   while Culvert has not written the roster: a stalled volume costs a request
+   at most one 2-second wait, and never delays admin changes or logins. The
+   counts, the remedy and the degraded login-write state are shown to
+   **admins only**: a viewer or operator sees a fixed message for "not
+   durable", "not verified yet" or "a change was refused", and nothing for a
+   degraded login-time write (SEC-DIAG-ROSTER-1).
 
-   **On Linux, the roster file is rewritten in place once at every boot** —
-   in the background: startup waits for it at most 3 seconds, holding no
-   roster lock. If it has not finished by then (slow or stalled storage),
-   startup continues, the row reads `warn` (*not verified, storage slow*),
-   and the rewrite is abandoned: it checks before its exchange and never
-   replaces the file later. The one window it cannot close is an exchange
-   already in flight when the deadline passes; that exchange carries the
-   roster's own bytes and metadata and is still compared and swapped back. A
-   save made meanwhile always wins: the rewrite sees it and gives up, or its
-   exchange is swapped back like any concurrent change. If a swap-back of a
-   concurrent change cannot be synced, the displaced `ui_users.json.tmp.*`
-   entry is kept as the recovery copy, the log names it, and the row says
-   the restore is not durable: restart to load the roster as it now is, then
-   remove the kept file.
-   After `ui_users.json` loads, Culvert writes the exact bytes it read into a
-   temp file beside it, with the file's own owner, group, full mode and
-   **all of its extended attributes** (the complete list is below), and
-   atomically **exchanges** that temp file with the roster (`renameat2`
-   `RENAME_EXCHANGE`). None of that changes, but the file gets a **new inode
-   and timestamps** at each start, as it does at each save. That write is the
-   row's evidence: it is `ok` only if it landed, or a later roster save did. Nothing short of a real write to the
-   real file can tell: a stat passes on a read-only mount, and a test file
-   created and renamed beside the roster passes in a sticky (`1777`) or
-   ACL-restricted directory where the roster belongs to another user. The
-   exchange is subject to the same permission checks as the rename every save
-   performs (verified as a non-root user: a root-owned roster in a `1777`
-   directory refuses both with `EPERM`), so a refused exchange is exact
-   evidence that saves will be refused.
+   A symlinked roster path is used as is; a save replaces the link with a
+   regular file, so point `-ui-users-file` at the real file. A save writes a
+   new file at mode `0600` that does not carry the roster's own ACL or
+   extended attributes over (it gets the directory's default ACL, if any);
+   re-apply them after a save if you rely on them.
 
-   **The rewrite never overwrites a newer roster.** Culvert serialises its own
-   roster writers, but a configuration manager or an operator can replace the
-   file at any moment. After the exchange, Culvert compares the file it
-   displaced with what it loaded (bytes, mode, owner, extended attributes).
-   If they differ, it swaps the newer file straight back, logs one `UIUsers: admin roster
-   "<path>" changed on disk while it was loaded at startup` line, and the row
-   stays `warn`: the roster **in use** is the one loaded before that change,
-   so restart to load the newer file, and make no admin account change until
-   then (a save writes the roster in use over it). If swapping back fails, the
-   newer content is left in a `ui_users.json.tmp.*` file beside the roster —
-   never deleted — and a `CHANGED ON DISK` line names it; move it back over
-   the roster and restart. A writer that keeps the old file open across the
-   exchange and writes through that descriptor afterwards can still lose its
-   write, exactly as it can against any save.
-
-   **The rewrite never changes the file's metadata.** It covers every
-   interface through which Linux exposes per-inode metadata to user space —
-   `stat`, `statx`, `FS_IOC_GETFLAGS` (`chattr`), `FS_IOC_FSGETXATTR`
-   (`xfs_io`/`chattr -p`) and the extended attributes — so this is the
-   complete list (the same as `fileutil.RewriteInPlace`'s contract).
-
-   | Preserved exactly — or the roster is not rewritten | Not preserved |
-   |---|---|
-   | Content, byte for byte (never re-serialised) | Inode number |
-   | Owner and group | Timestamps: atime, mtime, ctime and birth time are the new inode's own |
-   | All 12 mode bits, including setuid, setgid and sticky | Other hard links to the roster (they keep the old inode, with identical content) |
-   | Every extended attribute Culvert can list: the POSIX access ACL (`system.posix_acl_access`), the SELinux or other LSM label (`security.*`), file capabilities, `user.*`, and `trusted.*` when Culvert has `CAP_SYS_ADMIN` | `trusted.*` attributes when Culvert lacks `CAP_SYS_ADMIN`: Linux does not list them to it, so it can neither see nor keep them |
-   | Inode (`chattr`) flags such as nodump (`d`), noatime (`A`), sync (`S`), compress (`c`), nocow (`C`): compared, never set | |
-   | The project quota ID (`chattr -p`, XFS/ext4 project quotas), extent-size and CoW extent-size hints, and XFS flags (`FS_IOC_FSGETXATTR`): compared, never set | |
-   | `statx` attributes (compressed, immutable, append, nodump, encrypted, mount root, verity, DAX, atomic write, …): compared, never set | |
-
-   The temp file gets them in the only order that works: `chown` (which
-   clears setuid, setgid and file capabilities), then `chmod` with the full
-   mode, then the extended attributes with the access ACL last (it rewrites
-   the group bits), then removal of any attribute it inherited that the
-   roster lacks (a directory's default ACL). It is then read back — owner,
-   group, full mode, inode flags and attributes must equal the roster's
-   exactly — and fsynced before the exchange. The read-back also catches a
-   special bit the kernel dropped silently (an unprivileged process setting
-   setgid on a file whose group it is not in) and a temp file that inherited
-   an inode flag such as nodump from the directory. Only the filesystem's own
-   storage flags (extents, inline data, huge file, compression internals,
-   directory index), the encryption flag (inherited from the directory), the
-   XFS flags that merely mirror a compared `chattr` flag or are internal
-   (prealloc, has-attribute fork) and the extent count are ignored. Where an
-   interface is unsupported (`ENOTTY`/`ENOTSUP`, or no `statx` at all) the
-   filesystem keeps no such metadata; any other failure to read it refuses.
-   An fs-verity or DAX roster is refused outright. After the exchange, the displaced file is compared on the
-   same list, so a `chown`, `chmod`, `chattr`, ACL or label changed
-   concurrently is swapped straight back like any other change.
-
-   If **any** of it cannot be kept — a `chown` to another account refused
-   with `EPERM` (Culvert runs unprivileged and the roster belongs to another
-   account), a special bit dropped, a label this process is not allowed to
-   assign (`EPERM`, `EACCES`, `ENOTSUP`), or an inode flag a new file would
-   not have — **nothing is replaced**: the temp file is removed, the roster
-   keeps its inode and all of its metadata, one `UIUsers: admin roster
-   "<path>" was not rewritten in place at startup: its owner, group, mode,
-   inode flags, extended attributes or ACL could not be kept` line names the
-   cause, and the row is `warn` (*not proven that admin account changes can
-   be saved*). If the roster belongs to another account than Culvert's, give
-   it to Culvert's account (or run Culvert as its owner) and restart;
-   otherwise the warning clears when the first admin account change is
-   saved. An **immutable or append-only** roster (`chattr +i` / `+a`) is not
-   rewritten either; since no save can replace it, the row reports it as a
-   refused write (*every admin account change will be refused*). A roster
-   owned by Culvert's account, with a plain mode, no extended attributes and
-   no inode flags, is rewritten exactly as before.
-
-   **Elsewhere, the roster is not rewritten.** Without an atomic exchange
-   (macOS, Windows, other non-Linux platforms, or a Linux kernel or filesystem
-   that rejects `RENAME_EXCHANGE`) a replace could destroy a concurrent change,
-   so Culvert writes nothing at boot, logs one line, and the row is `warn`
-   (*not proven that admin account changes can be saved*) until the first
-   admin account change is saved; if that change is refused, fix the path and
-   restart.
-
-   If the rewrite is refused, boot continues and the roster is used read-only;
-   one `UIUsers: admin roster "<path>" loaded, but could not be rewritten in
-   place at startup` line names the cause, and the row stays `warn` (admins
-   get the fix-path-and-restart remedy) until a write lands. The rewrite is
-   not an admin change: no audit entry, configuration version, roster
-   counter, storage-health event or alert. A symlinked roster path is not
-   rewritten (a save replaces the link with a regular file); point
-   `-ui-users-file` at the real file. Unlike the boot rewrite, an admin
-   account **save** still writes a new file that does not carry the roster's
-   own ACL or extended attributes over (it gets the directory's default ACL,
-   if any, and mode `0600`); re-apply them after a save if you rely on them.
+   **Deferred:** a boot-time in-place rewrite of `ui_users.json`, which would
+   verify persistence at startup instead of at the first admin change, is
+   split out of this change into its own follow-up PR.
 2. `culvert_admin_roster_persist_failures_total` is climbing, or an operator
    reports a `500` from a user-management action.
 3. Check the process log for `UIUsers: REFUSED` lines — each names the action and

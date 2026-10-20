@@ -24,7 +24,7 @@ import (
 var rosterProbeFuncs = map[string]bool{"probeRosterTarget": true, "probeRosterIdentity": true, "probeRosterParent": true}
 
 // rosterRowRoots are where the row is computed.
-var rosterRowRoots = []string{"checkAdminRosterDurability", "readRosterDurabilityFacts", "adminRow", "viewerRow",
+var rosterRowRoots = []string{"redactContractForRole", "readRosterDurabilityFacts", "adminRow", "viewerRow",
 	"notDurableAdminRow", "targetProblemAdminRow"}
 
 // rosterFSSeams are the package's filesystem seams for the probe: calling
@@ -187,7 +187,7 @@ func TestWall_RosterRowFilesystemAccessIsOnlyInTheProbe(t *testing.T) {
 	}
 	// Not vacuous: the roots and the probe exist, and the row reaches it.
 	for _, name := range []string{"probeRosterTarget", "probeRosterIdentity", "probeRosterParent",
-		"checkAdminRosterDurability", "readRosterDurabilityFacts", "Config.sharedRosterProbe"} {
+		"redactContractForRole", "readRosterDurabilityFacts", "Config.sharedRosterProbe"} {
 		if len(funcs[name]) == 0 {
 			t.Errorf("%s not found: renamed without updating the wall", name)
 		}

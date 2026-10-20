@@ -10,9 +10,8 @@ package main
 // "persisting to disk" while a restart would load the replacement — possibly
 // restoring a revoked account or password, or dropping changes made since.
 //
-// So every landed write (the boot rewrite, and each roster save) records the
-// size and SHA-256 of the exact bytes written, and the row compares the file
-// with them. A content hash rather than the inode identity (dev+ino, size,
+// So every landed roster save records the size and SHA-256 of the exact
+// bytes written, and the row compares the file with them. A content hash rather than the inode identity (dev+ino, size,
 // mtime): it also catches an in-place edit of the same inode, it does not
 // false-alarm on a touch, a chmod or an identical re-copy (none changes what a
 // restart loads), and it is cheap here — the roster is small, the size check
@@ -29,8 +28,8 @@ package main
 // The comparison runs inside the row's one live filesystem probe
 // (roster_probe.go), with no roster lock held: every Culvert roster write
 // brackets itself with beginRosterWrite/endRosterWrite (uiUsersWriteGen moves
-// at both ends, uiUsersWritesInFlight counts writers — two can overlap now
-// that the boot rewrite runs in the background), and the probe accepts its
+// at both ends, uiUsersWritesInFlight counts writers in progress), and the
+// probe accepts its
 // identity result only if no write was in flight and the generation did not
 // move.
 
@@ -59,9 +58,9 @@ const (
 )
 
 // beginRosterWrite and endRosterWrite bracket every Culvert write to the
-// roster file: a save (saveUIUsersMu held) and the background boot rewrite
-// (not, so the two can overlap). The generation moves at both ends; the
-// in-flight count is non-zero while any is in progress.
+// roster file (a save, or a corrupt roster's quarantine on load). The
+// generation moves at both ends; the in-flight count is non-zero while any
+// is in progress.
 func (c *Config) beginRosterWrite() {
 	c.uiUsersWritesInFlight.Add(1)
 	c.uiUsersWriteGen.Add(1)

@@ -1479,7 +1479,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   changes and password rotations revert on restart; when the configured file
   failed to load at startup or is not a usable regular-file target (a
   read-only check); when no write to the roster file has landed since
-  startup; and when admin-roster
+  startup (*not verified yet*); and when admin-roster
   changes were refused or login-time roster writes failed since process
   start. Counts, the remedy and the degraded login-write state are shown to
   admins only. Viewers and operators get a fixed message for "not durable" and
@@ -1487,83 +1487,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
   `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
   Admin Users panel hint and are deliberately absent from `/api/stats`.
-- On Linux, `ui_users.json` is now **rewritten in place once at every boot**,
-  after it loads: the exact bytes read, with the file's own metadata (below),
-  written to a temp file that is atomically
-  exchanged with the roster (`renameat2` `RENAME_EXCHANGE`,
-  `fileutil.RewriteInPlace`). Content is unchanged, but the file gets a new
-  inode and mtime at each start. This write is the `admin_roster_durability`
-  row's evidence (it is `ok` only if the rewrite or a later save landed),
-  because nothing short of it is exact: a readable roster on a read-only mount
-  passes a stat, and one owned by another user in a sticky (`1777`) or
-  ACL-restricted directory passes a create-and-rename test on scratch files,
-  yet the first admin change's rename over it is refused; the exchange is
-  refused by the same checks. The rewrite **never overwrites a newer roster**:
-  the file the exchange displaced is compared with what was loaded, and a
-  configuration manager's or operator's concurrent change is swapped straight
-  back (row `warn`, restart to load it); if that swap fails, the newer content
-  is kept in a `ui_users.json.tmp.*` file the log names. The rewrite also
-  **never changes the file's metadata**. Preserved exactly: owner and group;
-  all 12 mode bits (setuid, setgid and sticky included); every extended
-  attribute it can list — the POSIX ACL (`system.posix_acl_access`), the
-  SELinux label (`security.selinux`), file capabilities, `user.*`, and
-  `trusted.*` when it has `CAP_SYS_ADMIN`; and inode (`chattr`) flags, the
-  `FS_IOC_FSGETXATTR` project quota ID, extent-size hints and XFS flags, and
-  the `statx` attributes, which are compared, never set — together every
-  interface through which Linux exposes per-inode metadata to user space.
-  The temp file is given them in order (`chown`, then `chmod` with the full
-  mode, then the attributes with the ACL last, then removal of anything it
-  inherited from the directory), read back exactly, and fsynced before the exchange; the displaced file is compared on
-  the same list afterwards. Not preserved: the inode number, timestamps,
-  other hard links, and `trusted.*` attributes when Culvert lacks
-  `CAP_SYS_ADMIN` (Linux does not list them to it). If anything on the list
-  cannot be kept (for example an unprivileged process cannot give the
-  replacement to the roster's owning account, or the roster has the nodump
-  flag), nothing is replaced, one log line names it, and the row is `warn`
-  (*not proven that admin account changes can be saved*) until the first
-  admin change is saved; an immutable or append-only roster is reported as a
-  refused write. Without an atomic
-  exchange (non-Linux platforms, or a kernel or filesystem without it) the
-  roster is not rewritten and the row is `warn` until the first admin change
-  is saved. A refused rewrite never stops boot (the roster is used read-only,
-  one log line names the cause) and is not an admin mutation: no audit entry,
-  configuration version, roster counter, storage-health event or alert. A
-  symlinked roster path is left alone and reported. A configured roster file
-  that does not exist yet reads `warn` until the first roster save creates it,
-  and so does a roster file removed from disk after it was last written (its
-  accounts are then only in memory and are lost on restart; the next admin
-  save recreates it), and so does one replaced or edited outside Culvert after
-  Culvert last wrote it (each landed write records the size and SHA-256 of
-  the bytes written; a restart would load the file as it is now), and so does
-  an identical copy owned by another account where that makes the next save's
-  rename be refused (a sticky directory, Culvert unprivileged). The check
-  reads the file with no roster lock held, so a stalled volume cannot block
-  admin changes or TOTP logins, and a Culvert save racing it is never reported
-  as a replacement. Everything the row learns from the filesystem now comes
-  from one live probe — the target's stat, its identity, and the directory's
-  write capability (`faccessat(W_OK|X_OK, AT_EACCESS)` and `statfs`, so a
-  `chmod 0555`, a revoked ACL or a read-only remount after the last write
-  warns; no file is created) — run on its own goroutine, at most one at a
-  time, reused for 5 s while Culvert has not written the roster, and waited
-  on for at most 2 s, after which the row reports the storage as not
-  responding instead of blocking the request. The probe also re-checks, on
-  Linux, whether the roster can be replaced at all (immutable, append-only,
-  a mount point, or an immutable or append-only directory) with the same
-  predicate the boot rewrite applies (`fileutil.ReplacementBlocked`), and the
-  owner it compares against is taken from the landed file's own descriptor
-  (`fileutil.AtomicWriteInfo`), never a stat of the path after the write.
-  `fileutil.AtomicWrite` itself is unchanged: a parent directory that cannot
-  be opened for its `fsync` still counts as success for its callers. Only the
-  roster path reads the strict answer (`WriteResult.DirSynced`), so a landed
-  roster write whose directory could not be synced reads `warn` (*may not
-  survive a power loss*) until a synced save. The boot rewrite never delays
-  startup: it runs in the background and is waited on for at most 3 s,
-  after which startup continues, the row reads `warn` (*storage slow, not
-  verified*), and the rewrite is abandoned before its exchange; it holds no
-  roster lock, so saves and logins proceed meanwhile and a save always wins.
-  If it swaps a concurrent change back but cannot sync the restore, it keeps
-  the displaced `ui_users.json.tmp.*` entry as the recovery copy and says so
-  in the log and the row.
+- The `admin_roster_durability` row reports persistence only on evidence: a
+  roster save that landed in this process. Culvert does not write the roster
+  at startup, so after every restart the row reads `warn` with the distinct,
+  non-alarming *not verified yet* state ("the next admin account change
+  verifies that it persists"; viewers see a fixed message) until the first
+  admin account change lands, which turns it `ok`. A stat is not evidence: a
+  readable roster on a read-only mount, or one owned by another user in a
+  sticky directory, stats like a writable one. Hard problems found by the
+  row's one live probe take precedence over *not verified yet*: a configured
+  roster file that does not exist yet, a directory that no longer lets
+  Culvert create and replace files (`faccessat(W_OK|X_OK, AT_EACCESS)` and
+  `statfs`: a `chmod 0555`, a revoked ACL, a read-only remount), a roster no
+  save can replace (immutable or append-only, a bind-mounted file, or an
+  immutable or append-only directory; Linux, read-only
+  `fileutil.ReplacementBlocked`), and storage that does not answer within
+  2 s. After a landed save the row also warns when the roster file is
+  removed, replaced or edited outside Culvert (each landed save records the
+  size and SHA-256 of the bytes written), replaced by an identical copy owned
+  by another account where that makes the next save's rename be refused, or
+  when the save's directory could not be synced. The probe runs on its own
+  goroutine, holds no roster lock, runs at most once at a time, is reused for
+  5 s, and is read once per diagnostics request (the viewer rendering reuses
+  it), so a stalled volume costs a request at most one 2 s wait and never
+  blocks admin changes or TOTP logins. `fileutil.AtomicWriteInfo` returns
+  the landed file's own `FileInfo` and whether its directory was synced;
+  `fileutil.AtomicWrite` is unchanged for its callers.
+- **Deferred:** the boot-time in-place rewrite of `ui_users.json` (which would
+  verify persistence at startup instead of at the first admin change) is
+  split out of this change into its own follow-up PR.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

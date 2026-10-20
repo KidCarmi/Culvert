@@ -17,8 +17,8 @@ package main
 //
 //   - the target's stat (regular file, or absent under an existing directory),
 //     and whether rename(2) would refuse to replace it at all — immutable,
-//     append-only, a mount point (fileutil.ReplacementBlocked, the very
-//     predicate the boot rewrite applies; Linux only);
+//     append-only, a mount point (fileutil.ReplacementBlocked, read-only;
+//     Linux only);
 //   - the parent directory's write capability, live and without side effects
 //     (probeRosterParent: faccessat(W_OK|X_OK, AT_EACCESS) for mode bits,
 //     ACLs and the effective uid, and statfs for a read-only mount; no probe
@@ -71,9 +71,9 @@ var (
 // in for a stalled volume, a revoked ACL or a read-only remount.
 var (
 	rosterProbeStat = os.Stat
-	// rosterReplacementBlocked is fileutil's one predicate for a target no
-	// save can replace (immutable, append-only, a mount point), the same the
-	// boot rewrite applies (pinned by TestRosterProbe_UsesTheRewritePredicate).
+	// rosterReplacementBlocked is fileutil's read-only check for a target no
+	// save can replace (immutable, append-only, a mount point; pinned by
+	// TestRosterProbe_UsesTheReplacementPredicate).
 	rosterReplacementBlocked = fileutil.ReplacementBlocked
 	rosterIdentityOpen       = func(path string) (*os.File, error) {
 		// O_NONBLOCK: the path is not trusted to still be a regular file.

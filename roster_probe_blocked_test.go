@@ -11,13 +11,12 @@ import (
 )
 
 // Gates for Codex P2 4319694761 on PR #1601: the live probe rechecks whether
-// the roster can be replaced at all, with the boot rewrite's own predicate.
+// the roster can be replaced at all.
 
-// TestRosterProbe_UsesTheRewritePredicate pins that the probe's check IS
-// fileutil.ReplacementBlocked — the predicate RewriteInPlace's precheck
-// applies (TestReplacementBlocked_SamePredicateAsTheRewrite pins that side) —
+// TestRosterProbe_UsesTheReplacementPredicate pins that the probe's check IS
+// fileutil.ReplacementBlocked (TestReplacementBlocked_Cases pins its cases),
 // not a copy that could drift.
-func TestRosterProbe_UsesTheRewritePredicate(t *testing.T) {
+func TestRosterProbe_UsesTheReplacementPredicate(t *testing.T) {
 	if reflect.ValueOf(rosterReplacementBlocked).Pointer() != reflect.ValueOf(fileutil.ReplacementBlocked).Pointer() {
 		t.Fatal("rosterReplacementBlocked is not fileutil.ReplacementBlocked")
 	}

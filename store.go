@@ -870,18 +870,14 @@ type Config struct {
 	// would report a configured-but-unusable roster as persisted.
 	uiUsersLoadErr error
 
-	// uiUsersWriteTried / uiUsersWriteErr are the admin_roster_durability
-	// row's ONLY evidence that a write to uiUsersFile can land (Codex P2s on
-	// PR #1601): the outcome of the boot rewrite LoadUIUsersFile performs
-	// after a successful load — the loaded bytes exchanged onto the real
-	// target, never over a concurrent change (rewriteLoadedRoster) — and,
-	// after it, of any roster save that lands. A stat cannot supply this: a
+	// uiUsersWriteLanded is the admin_roster_durability row's evidence that a
+	// write to uiUsersFile has landed in this process (a roster save): until
+	// one has, persistence is not verified yet. A stat cannot supply this: a
 	// readable roster on a read-only mount, or one owned by another user in a
 	// sticky directory, stats exactly like a writable one, and only the
-	// rename over the real file is refused. Reset by SetUIUsersFile: a new
-	// path has not been written.
-	uiUsersWriteTried bool
-	uiUsersWriteErr   error
+	// rename over the real file is refused. Reset by SetUIUsersFile and
+	// LoadUIUsersFile.
+	uiUsersWriteLanded bool
 	// uiUsersWritten identifies the bytes the last landed write put at
 	// uiUsersFile, so the row can tell when the file was replaced or edited
 	// outside Culvert afterwards (roster_disk_identity.go). Reset with the
@@ -890,15 +886,13 @@ type Config struct {
 	// uiUsersWriteGen and uiUsersWritesInFlight bracket every Culvert write
 	// to uiUsersFile (beginRosterWrite/endRosterWrite) so the row's identity
 	// read can run with no lock held and still tell a Culvert write racing it
-	// from an external one, and so the background boot rewrite can tell that
-	// a save took over (roster_disk_identity.go, roster_boot_rewrite.go).
-	// SetUIUsersFile moves the generation too.
+	// from an external one (roster_disk_identity.go). SetUIUsersFile moves the
+	// generation too.
 	uiUsersWriteGen       atomic.Uint64
 	uiUsersWritesInFlight atomic.Int32
 	// uiUsersWriteSynced is whether the last landed write's directory was
-	// synced (fileutil.WriteResult.DirSynced; the boot rewrite's
-	// ErrReplacedNotSynced): a landed but unsynced write may not survive a
-	// power loss, and the row says so.
+	// synced (fileutil.WriteResult.DirSynced): a landed but unsynced write
+	// may not survive a power loss, and the row says so.
 	uiUsersWriteSynced bool
 
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
@@ -1523,10 +1517,10 @@ func (c *Config) SetUIUsersFile(path string) {
 	c.mu.Lock()
 	c.uiUsersFile = path
 	c.uiUsersLoadErr = nil // a new path has not been loaded yet
-	c.uiUsersWriteTried, c.uiUsersWriteErr = false, nil
+	c.uiUsersWriteLanded = false
 	c.uiUsersWritten = rosterWrittenDigest{}
 	c.uiUsersWriteSynced = false
-	c.uiUsersWriteGen.Add(2) // a background boot rewrite of the old path abandons itself
+	c.uiUsersWriteGen.Add(2) // an identity read of the old path is discarded
 	c.mu.Unlock()
 }
 
@@ -1539,18 +1533,17 @@ func (c *Config) rosterPersistTarget() (path string, loadErr error) {
 	return c.uiUsersFile, c.uiUsersLoadErr
 }
 
-// rosterWriteEvidence returns whether a real write to the configured roster
-// path has been attempted since it was set, and that write's outcome (see
-// uiUsersWriteTried). Read-only; it never writes anything itself.
-func (c *Config) rosterWriteEvidence() (tried bool, err error) {
+// rosterWriteLanded reports whether a roster write has landed at the
+// configured path in this process (see uiUsersWriteLanded). Read-only.
+func (c *Config) rosterWriteLanded() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.uiUsersWriteTried, c.uiUsersWriteErr
+	return c.uiUsersWriteLanded
 }
 
 // noteRosterWriteLanded records that a roster save of data to path landed:
-// exact evidence that supersedes a failed or absent boot rewrite, and the
-// identity of what is now on disk (rosterWrittenDigest). A save that fails is
+// the evidence that persistence works, and the identity of what is now on
+// disk (rosterWrittenDigest). A save that fails is
 // not recorded here; the refused/degraded counters report it.
 //
 // landed is the FileInfo of the file the write put at path, taken from its
@@ -1564,7 +1557,7 @@ func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileI
 	}
 	c.mu.Lock()
 	if c.uiUsersFile == path {
-		c.uiUsersWriteTried, c.uiUsersWriteErr = true, nil
+		c.uiUsersWriteLanded = true
 		c.uiUsersWritten = digestRosterWrite(path, data, owner)
 		c.uiUsersWriteSynced = dirSynced
 	}
@@ -1611,75 +1604,50 @@ type uiUsersFileEnvelope struct {
 // LoadUIUsersFile reads persisted UI users from disk and populates the roster.
 // Silently returns nil if the file does not exist yet (first run). The outcome
 // is recorded (rosterPersistTarget) so diagnostics can report a configured but
-// unusable roster file instead of reading it as persisted.
-//
-// After a successful load of an existing file it rewrites that file in place,
-// once, with the exact bytes it read and the file's own mode
-// (rewriteLoadedRoster), and records the outcome as the durability row's
-// evidence (rosterWriteEvidence). That write is the real thing — the same
-// temp-create a roster save performs, then an atomic exchange with the real
-// target that the same permission checks govern and that is undone if the
-// target changed concurrently — so the row reports the roster as persisting
-// only when a save could land. Where no exchange exists nothing is written
-// and the row stays unverified until a save lands. It is
-// NOT an admin mutation: it changes no roster content, writes no audit entry
-// or configuration version, and notifies no write observer. Its failure is
-// not this call's error: the roster loaded and is served read-only as before,
-// and the row reports the failure instead.
-//
-// saveUIUsersMu is held across the READ (lock order saveUIUsersMu → c.mu),
-// but not across the rewrite (Codex P1 4319946910 on PR #1601): the rewrite
-// runs on its own goroutine and this call waits for it at most
-// rosterBootRewriteWait, so stalled storage can never block startup, saves
-// or logins. A save that lands meanwhile always wins: the rewrite abandons
-// itself before its exchange when the write generation moves, and an
-// exchange already in flight is compared and swapped back like any other
-// concurrent change (bootRewriteRoster).
+// unusable roster file instead of reading it as persisted. It writes nothing:
+// until the first admin account change lands, the admin_roster_durability
+// row reports persistence as not verified yet (rosterTargetNotYetVerified).
+// saveUIUsersMu is held across the read (lock order saveUIUsersMu → c.mu),
+// as for any roster writer — a corrupt roster's quarantine writes a fresh
+// file.
 func (c *Config) LoadUIUsersFile() error {
 	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
 	c.mu.RLock()
 	path := c.uiUsersFile
 	c.mu.RUnlock()
 	c.beginRosterWrite() // a quarantine's fresh file is a roster write
-	loaded, err := c.loadUIUsersFile(path)
+	err := c.loadUIUsersFile(path)
 	c.endRosterWrite()
 	c.mu.Lock()
 	if c.uiUsersFile == path { // not re-pointed while loading
 		c.uiUsersLoadErr = err
-		c.uiUsersWriteTried, c.uiUsersWriteErr = false, nil
+		c.uiUsersWriteLanded = false
 		c.uiUsersWritten, c.uiUsersWriteSynced = rosterWrittenDigest{}, false
 	}
 	c.mu.Unlock()
-	c.saveUIUsersMu.Unlock()
-	if err == nil && loaded != nil {
-		// Bounded and without saveUIUsersMu (Codex P1 4319946910): see
-		// bootRewriteRoster.
-		c.bootRewriteRoster(path, loaded)
-	}
 	return err
 }
 
-// loadUIUsersFile parses the roster at path into c. It returns the bytes it
-// parsed and the FileInfo of the file they came from (for the boot rewrite),
-// or nil when path is unset or the file does not exist yet.
-func (c *Config) loadUIUsersFile(path string) (*loadedRosterFile, error) {
+// loadUIUsersFile parses the roster at path into c. A missing file (first run)
+// or an unset path is not an error.
+func (c *Config) loadUIUsersFile(path string) error {
 	if path == "" {
-		return nil, nil
+		return nil
 	}
 	// Re-surface an unreconciled quarantine from a prior boot (CHAOS-05):
 	// the fresh file we write after a corrupt load parses cleanly next
 	// time, so the /readyz row would otherwise vanish while the evidence
 	// and the empty-roster state persist.
 	noteResidualQuarantine("ui_users", path)
-	loaded, err := readRosterFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- operator-configured -ui-users-file path
 	if os.IsNotExist(err) {
 		logger.Printf("Loader: ui_users.json: file %q missing — caller may bootstrap defaults (D1.2-flag-F1)", sanitizeLog(path))
-		return nil, nil
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
-	data := loaded.data
 	// Try new envelope format first, fall back to bare array for backward compat.
 	var env uiUsersFileEnvelope
 	var records []uiUserRecord
@@ -1691,7 +1659,7 @@ func (c *Config) loadUIUsersFile(path string) (*loadedRosterFile, error) {
 		// the --reset-password one-shot) cannot overwrite the only copy
 		// of the admin accounts + TOTP enrollments.
 		quarantineCorruptStateFile("ui_users", path, err)
-		return nil, err
+		return err
 	}
 	resolved := resolveLoadedDefaultAuthOutcome(env)
 
@@ -1728,7 +1696,7 @@ func (c *Config) loadUIUsersFile(path string) (*loadedRosterFile, error) {
 			c.passHash = hash
 		}
 	}
-	return loaded, nil
+	return nil
 }
 
 // loadedRosterRole is the fail-closed door for a role value arriving from DISK.

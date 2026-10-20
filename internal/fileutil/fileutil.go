@@ -1,7 +1,7 @@
 // Package fileutil provides durable filesystem helpers shared by package main
 // and internal/* packages (ADR-0003). It has no dependency on the rest of
 // Culvert: the standard library, plus golang.org/x/sys/unix on Linux for the
-// renameat2 exchange RewriteInPlace needs (rewrite_linux.go).
+// read-only ReplacementBlocked check (replacement_linux.go).
 package fileutil
 
 import (
@@ -95,7 +95,7 @@ func noteWriteFailure(path string, err error) error {
 
 // AtomicWrite writes data to path atomically: it writes to a unique temp file in
 // the same directory, chmods, fsyncs the file, renames over the target, and
-// best-effort fsyncs the parent directory (see syncParentDir). A crash mid-write never leaves a
+// best-effort fsyncs the parent directory. A crash mid-write never leaves a
 // partial or corrupt target file. Moved verbatim from package main's
 // atomicWriteFile (ADR-0003); behaviour is unchanged.
 //
@@ -113,93 +113,20 @@ type WriteResult struct {
 	// describes exactly the inode the write put there (rename(2) keeps an
 	// inode's owner, group and mode) even if an external writer replaces
 	// path again before the caller could look at it — which a stat of the
-	// path after the write cannot promise (Codex P2 4319694771 on PR #1601).
-	// Nil when nothing landed.
+	// path after the write cannot promise. Nil when nothing landed.
 	Landed os.FileInfo
 	// DirSynced reports whether the parent directory was fsynced after the
-	// rename (or the platform reports a directory fsync as unsupported, which
-	// is the best it offers). It is false when the directory could not even
-	// be opened for its fsync — a write+search-only 0300 directory gives
-	// EACCES — which AtomicWrite, exactly as before, reports as success
-	// (Codex P1 4319946917 on PR #1601: its callers roll back on any error,
-	// and the file did land). A caller that must know reads it here.
+	// rename (or the platform reports a directory fsync as unsupported, the
+	// best it offers). It is false when the directory could not even be
+	// opened for its fsync — a write+search-only 0300 directory gives EACCES
+	// — which AtomicWrite reports as success, as it always has: its callers
+	// roll back on any error, and the file did land. A caller that must know
+	// reads it here.
 	DirSynced bool
 }
 
-// AtomicWriteInfo is AtomicWrite that also reports what it landed. The error
-// and the observer notifications are exactly AtomicWrite's; the result adds
-// the landed file's own FileInfo and whether its directory was synced.
-func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (WriteResult, error) {
-	res, err := atomicWrite(path, data, perm)
-	if err != nil {
-		return res, noteWriteFailure(path, err)
-	}
-	noteWriteSuccess(path)
-	return res, nil
-}
-
-// atomicWrite is AtomicWriteInfo's body without the observer notifications.
-func atomicWrite(path string, data []byte, perm os.FileMode) (WriteResult, error) {
-	const op = "atomic write"
-	var res WriteResult
-	tmp, err := writeTempBeside(op, path, data, perm, func(f *os.File) {
-		if fi, err := f.Stat(); err == nil {
-			res.Landed = fi
-		}
-	})
-	if err != nil {
-		return WriteResult{}, err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // #nosec G104 -- best-effort cleanup
-		return WriteResult{}, fmt.Errorf("%s %s: rename: %w", op, path, err)
-	}
-	res.DirSynced, _, err = syncParentDir(op, path) // an unopenable directory is not an error here (see WriteResult)
-	return res, err
-}
-
-// writeTempBeside creates a unique temp file in path's directory holding data
-// at perm, fsynced and closed, and returns its name. beforeClose, when
-// non-nil, runs on the fully written, fsynced file just before it is closed.
-// On error nothing is left behind. Errors are prefixed "<op> <path>: <stage>".
-func writeTempBeside(op, path string, data []byte, perm os.FileMode, beforeClose func(*os.File)) (string, error) {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	f, err := os.CreateTemp(dir, base+".tmp.*")
-	if err != nil {
-		return "", fmt.Errorf("%s %s: create temp: %w", op, path, err)
-	}
-	tmp := f.Name()
-	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
-
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		cleanup()
-		return "", fmt.Errorf("%s %s: write: %w", op, path, err)
-	}
-	if err := f.Chmod(perm); err != nil {
-		_ = f.Close()
-		cleanup()
-		return "", fmt.Errorf("%s %s: chmod: %w", op, path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		cleanup()
-		return "", fmt.Errorf("%s %s: fsync: %w", op, path, err)
-	}
-	if beforeClose != nil {
-		beforeClose(f)
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return "", fmt.Errorf("%s %s: close: %w", op, path, err)
-	}
-	return tmp, nil
-}
-
-// openParentDir and syncDir open and fsync the directory syncParentDir
-// syncs. Seams only for this package's white-box tests (root may open any
+// openParentDir and syncDir open and fsync the parent directory after the
+// rename. Seams only for this package's white-box tests (root may open any
 // directory, so the EACCES a mode-0300 directory gives an unprivileged
 // process, and an fsync EIO, are injected).
 var (
@@ -207,19 +134,54 @@ var (
 	syncDir       = func(d *os.File) error { return d.Sync() }
 )
 
-// syncParentDir fsyncs path's directory after a rename into it and reports
-// whether it did. A directory that cannot be opened for the fsync is NOT an
-// error — opening a directory is not portable, and AtomicWrite's callers
-// have always treated that write as landed (Codex P1 4319946917 on PR #1601)
-// — but synced is false, for the callers that must know (WriteResult,
-// RewriteInPlace). An fsync the platform reports as unsupported (EINVAL,
-// ENOTSUP/EOPNOTSUPP) counts as synced. Any other fsync or close failure is
-// returned wrapping ErrReplacedNotSynced: the rename already landed.
-// openErr is the open failure, for the callers that report it.
-func syncParentDir(op, path string) (synced bool, openErr, err error) {
-	d, openErr := openParentDir(filepath.Dir(path))
-	if openErr != nil {
-		return false, openErr, nil
+// AtomicWriteInfo is AtomicWrite that also reports what it landed. Its error
+// and its observer notifications are exactly AtomicWrite's.
+func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (WriteResult, error) {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	f, err := os.CreateTemp(dir, base+".tmp.*")
+	if err != nil {
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: create temp: %w", path, err))
+	}
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: write: %w", path, err))
+	}
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		cleanup()
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: chmod: %w", path, err))
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: fsync: %w", path, err))
+	}
+	landed, statErr := f.Stat()
+	if statErr != nil {
+		landed = nil // the write still lands; only the caller's identity record is unknown
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: close: %w", path, err))
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		cleanup()
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: rename: %w", path, err))
+	}
+	res := WriteResult{Landed: landed}
+
+	d, err := openParentDir(dir)
+	if err != nil {
+		// Best-effort: opening a directory for sync is not portable. The data
+		// is already renamed into place, so this is a successful durable write.
+		noteWriteSuccess(path)
+		return res, nil
 	}
 	syncErr := syncDir(d)
 	closeErr := d.Close()
@@ -230,12 +192,14 @@ func syncParentDir(op, path string) (synced bool, openErr, err error) {
 		// Post-rename failure: the target already carries the new content —
 		// mark it so compensating-rollback callers can tell (see
 		// ErrReplacedNotSynced).
-		return false, nil, fmt.Errorf("%s %s: parent dir fsync: %w: %w", op, path, syncErr, ErrReplacedNotSynced)
+		return res, noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", path, syncErr, ErrReplacedNotSynced))
 	}
 	if closeErr != nil && syncErr == nil {
-		return false, nil, fmt.Errorf("%s %s: parent dir close: %w: %w", op, path, closeErr, ErrReplacedNotSynced)
+		return res, noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w: %w", path, closeErr, ErrReplacedNotSynced))
 	}
-	return true, nil, nil
+	res.DirSynced = true
+	noteWriteSuccess(path)
+	return res, nil
 }
 
 // ── Predictable-path secret writes (SEC-SECRETWRITE-1) ───────────────────────
