@@ -10878,28 +10878,57 @@ different direction.
 `Close` now stores `closed`, **waits for in-flight senders**, and only then
 closes `stop` (`waitForSenders`, bounded by `senderDrainTimeout`). With that
 ordering a sender either loses the race and is counted as a drop, or wins it and
-has its line on the queue before the flush begins. Every line is accounted for.
+has its line on the queue before the flush begins. Every line is accounted for
+**provided the sender clears within `senderDrainTimeout`**; the bound is
+deliberate and the one path that can still lose a line is stated in the
+residual below, rather than being glossed by an unqualified "every".
 The cost is two atomic adds bracketing a buffered channel send that already
 takes the channel's lock and a `formatMsg` that already allocates — noise
 against what the path does anyway, so the engine's "request path never blocks on
 the collector" contract is untouched.
 
-**NOT reproduced, and recorded as such.** The interleaving needs `drainLoop`'s
-flush to observe an EMPTY queue at the one moment every sender sits inside the
-window. Roughly 500 attempts across two strategies — a deliberately slow
-`formatMsg` via a large payload, and `Close` landing in steady-state traffic —
-never hit it in this environment. It is confirmed **by construction** from the
-source, exactly as SIEM-2 is, and the register's own §42 standard is why that
-distinction is stated rather than glossed.
+**REPRODUCED AND MEASURED — after a correction this section originally got
+wrong.** Against the pre-fix ordering the conservation test fails **6 runs in
+10**, typically losing exactly one line:
 
-What *is* measured is the mechanism:
+```
+delivered 2091 + dropped 5273 = 7364; want exactly 7365 sent
+```
+
+That one missing line is the finding: enqueued onto a queue whose drain
+goroutine had already returned, so neither delivered nor counted.
+
+**This section first said the opposite, and the reason is the more useful
+lesson.** The original write-up recorded the finding as "confirmed by
+construction, not reproduced", on the strength of ~500 failed attempts across
+two strategies. That conclusion was an artifact of a bug in the test's own fake
+collector: `countingConn` embedded a bare `net.Conn`, so `writeLine`'s
+`SetWriteDeadline` nil-panicked on every line, `deliverGuarded` recovered each
+one and counted it as a drop, and **zero lines were ever delivered**
+(measured: `delivered=0 dropped=50 panics=50`). The conservation law then held
+trivially and the test passed on fixed and broken code alike — a vacuous gate
+that looked like coverage, and a "could not reproduce" that was really "could
+not deliver".
+
+A review comment rated **minor** is what caught it. The generalisable rule: a
+conservation law over two counters is only evidence if BOTH counters can move,
+so assert that they do. The test now requires `delivered > 0` and
+`Panics() == 0` before the law is allowed to mean anything. The same trap
+applies to any differential oracle whose negative case is "a number did not
+change".
+
+Note what this does **not** change: SIEM-2 remains confirmed-by-construction
+and unreproduced, for the unrelated reason that no weakly ordered host was
+available here.
+
+The mechanism is separately measured:
 `TestClose_WaitsForAnInFlightSenderBeforeStoppingTheDrain` parks a registration
 and requires `Close` not to return before it clears — pre-fix `Close` returns in
 **~108 µs** against a required **150 ms**. `TestClose_SenderWaitIsBounded` pins
 the other half: an unreleased registration must never hang shutdown.
-`TestClose_EveryLineIsDeliveredOrDropped` asserts the conservation law
-(delivered + dropped == sent) as a regression invariant, and is labelled in the
-file as an invariant rather than an oracle, because it passes pre-fix too.
+`TestClose_EveryLineIsDeliveredOrDropped` carries the conservation law
+(delivered + dropped == sent) and is the differential above, with the two
+anti-vacuity guards that episode earned.
 
 One assertion was removed rather than kept: an earlier version of this round
 checked `inFlight == 0` once `Close` returned. That is a **false** invariant —

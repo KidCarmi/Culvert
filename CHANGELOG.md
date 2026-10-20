@@ -62,10 +62,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   **neither delivered nor counted in `Drops`** — silent loss, in audit records.
   The leak had been masking it: a leaked `drainLoop` keeps running, so that same
   line was delivered. `Close` now stores `closed`, waits for in-flight senders,
-  and only then closes `stop`, so every line is either delivered or counted; the
-  wait is bounded so it can never hang shutdown. Confirmed by construction and
-  not reproduced (~500 attempts); the `Close`-waits-for-a-sender ordering itself
-  is measured, at ~108 µs pre-fix against a required 150 ms.
+  and only then closes `stop`, so every line is either delivered or counted
+  provided the sender clears within the bound; the wait is bounded so it can
+  never hang shutdown, and that bound is the one path that can still lose a
+  line. Measured: against the pre-fix ordering the conservation test fails 6
+  runs in 10, typically losing exactly one line (`delivered 2091 + dropped 5273
+  = 7364; want exactly 7365 sent`), and the `Close`-waits-for-a-sender ordering
+  is ~108 µs pre-fix against a required 150 ms.
 
   Closes `OBS-1` of the chaos register's §42, which nominated it as the
   recommended first follow-up. Gated by a `-race` reconfigure-versus-request
