@@ -201,6 +201,9 @@ func buildOperatorContract() OperatorContract {
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
 	checks = append(checks, checkClusterCA()...)
+	// Log disk guard: emergency minimal logging or pressure-forced early deletion.
+	// Contributes nothing until the guard has intervened.
+	checks = append(checks, checkLogDiskProtection()...)
 	// Break-glass release-catalog signature mode (permissive/disabled).
 	// Contributes nothing in enforce mode or when release management is not
 	// composed on this node.
