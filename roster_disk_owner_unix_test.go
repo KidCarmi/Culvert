@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // Gates for Codex P2 4317730264 on PR #1601: a byte-identical roster copy
@@ -142,7 +144,7 @@ func TestRosterIdentity_RecordsTheLandedFilesOwner(t *testing.T) {
 	}
 	asUnprivileged(t)
 	prev := rosterAtomicWrite
-	rosterAtomicWrite = func(p string, data []byte, perm os.FileMode) (os.FileInfo, error) {
+	rosterAtomicWrite = func(p string, data []byte, perm os.FileMode) (fileutil.WriteResult, error) {
 		landed, err := prev(p, data, perm)
 		if err == nil {
 			installIdenticalCopy(t, p, otherAccount, otherAccount) // wins the race

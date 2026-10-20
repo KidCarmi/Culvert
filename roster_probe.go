@@ -147,12 +147,12 @@ func (c *Config) runRosterProbe(call *rosterProbeCall) {
 func (c *Config) genCheckedRosterProbe(path string) rosterProbeResult {
 	var res rosterProbeResult
 	for attempt := 0; attempt < 2; attempt++ {
-		gen := c.uiUsersWriteGen.Load()
+		gen, quiet := c.rosterWriteQuiet()
 		c.mu.RLock()
 		d := c.uiUsersWritten
 		c.mu.RUnlock()
 		res = probeRosterTarget(path, d) // all of the row's disk I/O; no lock held
-		if gen%2 == 0 && c.uiUsersWriteGen.Load() == gen {
+		if now, stillQuiet := c.rosterWriteQuiet(); quiet && stillQuiet && now == gen {
 			return res
 		}
 	}

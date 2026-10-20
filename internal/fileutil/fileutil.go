@@ -95,8 +95,7 @@ func noteWriteFailure(path string, err error) error {
 
 // AtomicWrite writes data to path atomically: it writes to a unique temp file in
 // the same directory, chmods, fsyncs the file, renames over the target, and
-// fsyncs the parent directory (ErrReplacedNotSynced if that fails, see
-// syncParentDir). A crash mid-write never leaves a
+// best-effort fsyncs the parent directory (see syncParentDir). A crash mid-write never leaves a
 // partial or corrupt target file. Moved verbatim from package main's
 // atomicWriteFile (ADR-0003); behaviour is unchanged.
 //
@@ -107,41 +106,56 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	return err
 }
 
-// AtomicWriteInfo is AtomicWrite that also returns the FileInfo of the file
-// it landed: fstat on the temp file's OWN descriptor just before it is
-// renamed over path, so it describes exactly the inode the write put there
-// (rename(2) keeps an inode's owner, group and mode) even if an external
-// writer replaces path again before the caller could look at it — which a
-// stat of the path after the write cannot promise (Codex P2 4319694771 on PR
-// #1601). It is nil when nothing landed, and set alongside
-// ErrReplacedNotSynced (the rename landed; only the directory fsync failed).
-// Observers are notified exactly as for AtomicWrite.
-func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (os.FileInfo, error) {
-	info, err := atomicWrite(path, data, perm)
+// WriteResult describes what AtomicWriteInfo landed.
+type WriteResult struct {
+	// Landed is the FileInfo of the file the write put at path: fstat on the
+	// temp file's OWN descriptor just before it is renamed over path, so it
+	// describes exactly the inode the write put there (rename(2) keeps an
+	// inode's owner, group and mode) even if an external writer replaces
+	// path again before the caller could look at it — which a stat of the
+	// path after the write cannot promise (Codex P2 4319694771 on PR #1601).
+	// Nil when nothing landed.
+	Landed os.FileInfo
+	// DirSynced reports whether the parent directory was fsynced after the
+	// rename (or the platform reports a directory fsync as unsupported, which
+	// is the best it offers). It is false when the directory could not even
+	// be opened for its fsync — a write+search-only 0300 directory gives
+	// EACCES — which AtomicWrite, exactly as before, reports as success
+	// (Codex P1 4319946917 on PR #1601: its callers roll back on any error,
+	// and the file did land). A caller that must know reads it here.
+	DirSynced bool
+}
+
+// AtomicWriteInfo is AtomicWrite that also reports what it landed. The error
+// and the observer notifications are exactly AtomicWrite's; the result adds
+// the landed file's own FileInfo and whether its directory was synced.
+func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (WriteResult, error) {
+	res, err := atomicWrite(path, data, perm)
 	if err != nil {
-		return info, noteWriteFailure(path, err)
+		return res, noteWriteFailure(path, err)
 	}
 	noteWriteSuccess(path)
-	return info, nil
+	return res, nil
 }
 
 // atomicWrite is AtomicWriteInfo's body without the observer notifications.
-func atomicWrite(path string, data []byte, perm os.FileMode) (os.FileInfo, error) {
+func atomicWrite(path string, data []byte, perm os.FileMode) (WriteResult, error) {
 	const op = "atomic write"
-	var landed os.FileInfo
+	var res WriteResult
 	tmp, err := writeTempBeside(op, path, data, perm, func(f *os.File) {
 		if fi, err := f.Stat(); err == nil {
-			landed = fi
+			res.Landed = fi
 		}
 	})
 	if err != nil {
-		return nil, err
+		return WriteResult{}, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp) // #nosec G104 -- best-effort cleanup
-		return nil, fmt.Errorf("%s %s: rename: %w", op, path, err)
+		return WriteResult{}, fmt.Errorf("%s %s: rename: %w", op, path, err)
 	}
-	return landed, syncParentDir(op, path)
+	res.DirSynced, _, err = syncParentDir(op, path) // an unopenable directory is not an error here (see WriteResult)
+	return res, err
 }
 
 // writeTempBeside creates a unique temp file in path's directory holding data
@@ -184,24 +198,30 @@ func writeTempBeside(op, path string, data []byte, perm os.FileMode, beforeClose
 	return tmp, nil
 }
 
-// openParentDir opens the directory syncParentDir fsyncs. A seam only for
-// this package's white-box tests (root may open any directory, so the EACCES
-// a mode-0300 directory gives an unprivileged process is injected).
-var openParentDir = os.Open
+// openParentDir and syncDir open and fsync the directory syncParentDir
+// syncs. Seams only for this package's white-box tests (root may open any
+// directory, so the EACCES a mode-0300 directory gives an unprivileged
+// process, and an fsync EIO, are injected).
+var (
+	openParentDir = os.Open
+	syncDir       = func(d *os.File) error { return d.Sync() }
+)
 
-// syncParentDir fsyncs path's directory after a rename into it. Only an fsync
-// the platform reports as unsupported (EINVAL, ENOTSUP/EOPNOTSUPP) counts as
-// success. Any other failure — including failing to OPEN the directory (a
-// write+search-only 0300 directory gives EACCES; Codex P2 4317365510 on PR
-// #1601), which leaves the rename's durability exactly as unproven as a
-// failed fsync — is returned wrapping ErrReplacedNotSynced: the rename
-// already landed.
-func syncParentDir(op, path string) error {
-	d, err := openParentDir(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("%s %s: parent dir open: %w: %w", op, path, err, ErrReplacedNotSynced)
+// syncParentDir fsyncs path's directory after a rename into it and reports
+// whether it did. A directory that cannot be opened for the fsync is NOT an
+// error — opening a directory is not portable, and AtomicWrite's callers
+// have always treated that write as landed (Codex P1 4319946917 on PR #1601)
+// — but synced is false, for the callers that must know (WriteResult,
+// RewriteInPlace). An fsync the platform reports as unsupported (EINVAL,
+// ENOTSUP/EOPNOTSUPP) counts as synced. Any other fsync or close failure is
+// returned wrapping ErrReplacedNotSynced: the rename already landed.
+// openErr is the open failure, for the callers that report it.
+func syncParentDir(op, path string) (synced bool, openErr, err error) {
+	d, openErr := openParentDir(filepath.Dir(path))
+	if openErr != nil {
+		return false, openErr, nil
 	}
-	syncErr := d.Sync()
+	syncErr := syncDir(d)
 	closeErr := d.Close()
 	if syncErr != nil &&
 		!errors.Is(syncErr, syscall.EINVAL) &&
@@ -210,12 +230,12 @@ func syncParentDir(op, path string) error {
 		// Post-rename failure: the target already carries the new content —
 		// mark it so compensating-rollback callers can tell (see
 		// ErrReplacedNotSynced).
-		return fmt.Errorf("%s %s: parent dir fsync: %w: %w", op, path, syncErr, ErrReplacedNotSynced)
+		return false, nil, fmt.Errorf("%s %s: parent dir fsync: %w: %w", op, path, syncErr, ErrReplacedNotSynced)
 	}
 	if closeErr != nil && syncErr == nil {
-		return fmt.Errorf("%s %s: parent dir close: %w: %w", op, path, closeErr, ErrReplacedNotSynced)
+		return false, nil, fmt.Errorf("%s %s: parent dir close: %w: %w", op, path, closeErr, ErrReplacedNotSynced)
 	}
-	return nil
+	return true, nil, nil
 }
 
 // ── Predictable-path secret writes (SEC-SECRETWRITE-1) ───────────────────────

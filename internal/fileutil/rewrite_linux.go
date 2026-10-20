@@ -36,10 +36,30 @@ var rewriteHooks struct {
 // RewriteInPlace writes the loaded data back onto path by exchange, never
 // over a concurrent change; the full contract is in rewrite.go.
 func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
+	return RewriteInPlaceUnless(path, data, orig, nil)
+}
+
+// RewriteInPlaceUnless is RewriteInPlace that gives up as soon as abandoned
+// reports true (nil: never). It is checked before any work, after the target's
+// metadata is read, and — once the temp file is written — immediately before
+// the exchange; once it is true the temp file is removed, nothing is
+// exchanged and ErrRewriteAbandoned is returned. The one window it cannot
+// close is an exchange syscall already in flight when abandoned turns true:
+// that exchange carries the target's own loaded bytes and metadata, and its
+// result still goes through the compare and swap-back.
+func RewriteInPlaceUnless(path string, data []byte, orig os.FileInfo, abandoned func() bool) error {
 	const op = "rewrite in place"
+	gaveUp := func() bool { return abandoned != nil && abandoned() }
+	abandonErr := fmt.Errorf("%s %s: %w", op, path, ErrRewriteAbandoned)
+	if gaveUp() {
+		return abandonErr
+	}
 	want, err := targetMeta(op, path, orig)
 	if err != nil {
 		return err // nothing written
+	}
+	if gaveUp() {
+		return abandonErr
 	}
 	var metaErr error
 	tmp, err := writeTempBeside(op, path, data, orig.Mode().Perm(), func(f *os.File) {
@@ -63,6 +83,10 @@ func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	if h := rewriteHooks.beforeExchange; h != nil {
 		h(tmp)
 	}
+	if gaveUp() {
+		removeTemp(tmp) // still only our bytes
+		return abandonErr
+	}
 	if err := renameExchange(tmp, path); err != nil {
 		removeTemp(tmp) // the exchange did not happen: still only our bytes
 		return exchangeError(op, path, err)
@@ -76,7 +100,14 @@ func RewriteInPlace(path string, data []byte, orig os.FileInfo) error {
 	// What was live just before the swap is exactly what the caller loaded,
 	// so removing it destroys nothing. Best effort: a leftover is a duplicate.
 	removeTemp(tmp)
-	return syncParentDir(op, path)
+	_, openErr, err := syncParentDir(op, path)
+	if openErr != nil {
+		// Strict here, unlike AtomicWrite: the boot rewrite is the only
+		// caller, and it records "landed, directory not synced" rather than
+		// rolling anything back.
+		err = fmt.Errorf("%s %s: parent dir open: %w: %w", op, path, openErr, ErrReplacedNotSynced)
+	}
+	return err
 }
 
 func removeTemp(tmp string) { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
@@ -107,8 +138,16 @@ func undoExchange(op, path, tmp string, mine os.FileInfo, why string) error {
 		return fmt.Errorf("%s %s: %s, and the target changed again while it was being restored; the file the "+
 			"restore displaced is preserved at %s: %w", op, path, why, tmp, ErrExchangeBackFailed)
 	}
+	// Make the restore durable BEFORE removing the recovery entry (Codex P2
+	// 4319946921 on PR #1601): if the directory cannot be synced, a crash
+	// could still revert to the exchanged state, so the temp entry is kept
+	// and named, and the result says the restore is not durable.
+	if _, openErr, err := syncParentDir(op, path); openErr != nil || err != nil {
+		why := fmt.Sprintf("%s; the newer file was restored to the target, but the restore could not be "+
+			"synced to disk (%v), so the entry the restore displaced is kept at %s", why, errors.Join(openErr, err), tmp)
+		return fmt.Errorf("%s %s: %s: %w", op, path, why, errors.Join(ErrConcurrentChange, ErrRestoreNotSynced))
+	}
 	removeTemp(tmp)
-	_ = syncParentDir(op, path) // #nosec G104 -- best effort: path holds the external writer's file again
 	return fmt.Errorf("%s %s: %s: %w", op, path, why, ErrConcurrentChange)
 }
 

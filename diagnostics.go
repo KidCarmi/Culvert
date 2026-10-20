@@ -942,6 +942,28 @@ const rosterParentNotWritable = "the directory holding the configured roster fil
 	"process create and replace files in it (its permissions or ACL, or a read-only mount), so the next admin " +
 	"account change will be refused when it is saved"
 
+// rosterTargetRewriteSlow is the targetProblem when the boot rewrite did not
+// finish within rosterBootRewriteWait and was abandoned (Codex P1 4319946910
+// on PR #1601): startup did not wait on slow or stalled storage, and nothing
+// about the target is proven.
+const rosterTargetRewriteSlow = "the configured roster file was not rewritten at startup in the time allowed " +
+	"because its storage was slow or stalled, so it is not verified that admin account changes can be saved"
+
+// rosterTargetDirNotSynced is the targetProblem when the last roster write
+// landed but its directory could not be synced afterwards — for example a
+// write+search-only (0300) directory that cannot be opened for the fsync
+// (Codex P1 4319946917 on PR #1601): the write may not survive a power loss.
+const rosterTargetDirNotSynced = "the last write to the configured roster file landed, but its directory could " +
+	"not be synced to disk afterwards, so that write may not survive a power loss"
+
+// rosterTargetRestoreNotSynced is the targetProblem when the boot rewrite saw
+// a concurrent change and restored the newer file, but could not sync the
+// restore (Codex P2 4319946921 on PR #1601): a crash could revert it, so the
+// displaced entry is kept beside the roster as the recovery copy.
+const rosterTargetRestoreNotSynced = "the configured roster file changed on disk during the startup rewrite; the " +
+	"newer file was restored but the restore could not be synced to disk, so a crash could revert it, and a " +
+	"temporary file beside the roster (named in the process log) is kept as the recovery copy"
+
 // rosterTargetImmutable is the targetProblem when rename(2) would refuse to
 // replace the roster file itself — immutable or append-only, a mount point,
 // or in an immutable or append-only directory (fileutil.ReplacementBlocked,
@@ -1000,7 +1022,8 @@ const rosterTargetRestoreFailed = "the configured roster file changed on disk du
 // — to have landed since the path was configured, the directory to still
 // allow the next one (probeRosterParent), and the file to still hold what
 // was written (probeRosterIdentity).
-func rosterTargetProblem(path string, loadErr error, tried bool, writeErr error, pr rosterProbeResult, responded bool) string {
+func rosterTargetProblem(path string, loadErr error, tried bool, writeErr error, synced bool,
+	pr rosterProbeResult, responded bool) string {
 	switch {
 	case path == "":
 		return ""
@@ -1028,6 +1051,8 @@ func rosterTargetProblem(path string, loadErr error, tried bool, writeErr error,
 		return rosterTargetReplaced
 	case pr.disk == rosterDiskOwnerChanged:
 		return rosterTargetOwnerChanged
+	case !synced:
+		return rosterTargetDirNotSynced
 	}
 	return ""
 }
@@ -1048,6 +1073,10 @@ func rosterWriteProblem(missing, tried bool, writeErr error) string {
 			"save replaces the link with a regular file"
 	case errors.Is(writeErr, fileutil.ErrReplacementBlocked):
 		return rosterTargetImmutable
+	case errors.Is(writeErr, errRosterRewriteSlow):
+		return rosterTargetRewriteSlow
+	case errors.Is(writeErr, fileutil.ErrRestoreNotSynced):
+		return rosterTargetRestoreNotSynced
 	case errors.Is(writeErr, fileutil.ErrRewriteUnsupported):
 		return rosterTargetRewriteUnsupported
 	case errors.Is(writeErr, fileutil.ErrMetadataNotPreservable):
@@ -1070,6 +1099,7 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	}
 	path, loadErr := cfg.rosterPersistTarget()
 	tried, writeErr := cfg.rosterWriteEvidence()
+	synced := cfg.rosterWriteSynced()
 	var pr rosterProbeResult
 	responded := true
 	if path != "" && loadErr == nil {
@@ -1078,7 +1108,7 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	return rosterDurabilityFacts{
 		configured:    true,
 		persisted:     path != "",
-		targetProblem: rosterTargetProblem(path, loadErr, tried, writeErr, pr, responded),
+		targetProblem: rosterTargetProblem(path, loadErr, tried, writeErr, synced, pr, responded),
 		localAdmin:    cfg.hasLocalAdministrator(),
 		notDurable:    rosterNotDurable.Load(),
 		refused:       rosterPersistRefused.Load(),
@@ -1138,6 +1168,18 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 			"Administrators and find what changed it. Then either save an admin account change, which writes the " +
 			"roster in use back over the file, or restart to adopt the file as it is now. Until then, a restart " +
 			"silently switches to the file's accounts and credentials."
+	case rosterTargetRewriteSlow:
+		row.OperatorAction = "Check the volume holding the admin users file (-ui-users-file) for a stalled NFS or " +
+			"FUSE mount. The first admin account change that is saved proves the file and clears this warning; " +
+			"no restart is needed."
+	case rosterTargetDirNotSynced:
+		row.OperatorAction = "Give the account Culvert runs as read permission on the directory holding the admin " +
+			"users file (-ui-users-file) so it can be synced, or check the volume. The next admin account change " +
+			"that is saved and synced clears this; no restart is needed."
+	case rosterTargetRestoreNotSynced:
+		row.OperatorAction = "Restart to load the admin users file (-ui-users-file) as it now is (it holds the newer " +
+			"roster); make no admin account change until then. Keep the ui_users.json.tmp.* file the process log " +
+			"names until the restart has loaded the newer roster, then remove it, and check the directory can be synced."
 	case rosterTargetImmutable:
 		row.OperatorAction = "Clear the flag on the admin users file (-ui-users-file) or its directory (chattr -i, " +
 			"chattr -a; lsattr shows it), or point -ui-users-file at a file that is not a bind mount. The row " +

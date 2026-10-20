@@ -28,9 +28,11 @@ package main
 //
 // The comparison runs inside the row's one live filesystem probe
 // (roster_probe.go), with no roster lock held: every Culvert roster write
-// brackets itself with uiUsersWriteGen (odd while a write is in progress,
-// seqlock style), and the probe accepts its identity result only if the
-// generation did not move.
+// brackets itself with beginRosterWrite/endRosterWrite (uiUsersWriteGen moves
+// at both ends, uiUsersWritesInFlight counts writers — two can overlap now
+// that the boot rewrite runs in the background), and the probe accepts its
+// identity result only if no write was in flight and the generation did not
+// move.
 
 import "crypto/sha256"
 
@@ -57,7 +59,22 @@ const (
 )
 
 // beginRosterWrite and endRosterWrite bracket every Culvert write to the
-// roster file (saveUIUsersMu held, so writers never interleave): the
-// generation is odd while one is in progress and moves with each.
-func (c *Config) beginRosterWrite() { c.uiUsersWriteGen.Add(1) }
-func (c *Config) endRosterWrite()   { c.uiUsersWriteGen.Add(1) }
+// roster file: a save (saveUIUsersMu held) and the background boot rewrite
+// (not, so the two can overlap). The generation moves at both ends; the
+// in-flight count is non-zero while any is in progress.
+func (c *Config) beginRosterWrite() {
+	c.uiUsersWritesInFlight.Add(1)
+	c.uiUsersWriteGen.Add(1)
+}
+
+func (c *Config) endRosterWrite() {
+	c.uiUsersWriteGen.Add(1)
+	c.uiUsersWritesInFlight.Add(-1)
+}
+
+// rosterWriteQuiet reports the generation if no Culvert roster write is in
+// progress, and false otherwise.
+func (c *Config) rosterWriteQuiet() (uint64, bool) {
+	gen := c.uiUsersWriteGen.Load()
+	return gen, c.uiUsersWritesInFlight.Load() == 0
+}

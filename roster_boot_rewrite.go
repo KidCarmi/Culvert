@@ -65,6 +65,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
@@ -90,7 +93,7 @@ var (
 // so a test can inject the refusal a non-owner gets in a sticky directory or
 // on a read-only mount (CI runs as root, which bypasses both), an unsupported
 // exchange, or an external write that lands just before the real one.
-var rosterRewriteInPlace = fileutil.RewriteInPlace
+var rosterRewriteInPlace = fileutil.RewriteInPlaceUnless
 
 // readRosterFile reads path and the FileInfo of exactly the file it read.
 func readRosterFile(path string) (*loadedRosterFile, error) {
@@ -115,16 +118,38 @@ func readRosterFile(path string) (*loadedRosterFile, error) {
 // as it does for an admin mutation: the exchange happened. Any other outcome
 // is logged once (LoadUIUsersFile runs once per configured path) and never
 // stops boot.
-func rewriteLoadedRoster(path string, loaded *loadedRosterFile) error {
+//
+// abandoned (nil: never) is the background rewrite's give-up signal
+// (bootRewriteRoster). ErrReplacedNotSynced is returned as is: the rewrite
+// landed, and the caller records that its directory was not synced. The two
+// outcomes that name a preserved recovery file are always logged, even when
+// the rewrite was abandoned meanwhile.
+func rewriteLoadedRoster(path string, loaded *loadedRosterFile, abandoned func() bool) error {
 	err := checkRosterUnchanged(path, loaded)
 	if err == nil {
-		err = rosterRewriteInPlace(path, loaded.data, loaded.info)
+		err = rosterRewriteInPlace(path, loaded.data, loaded.info, abandoned)
 	}
+	superseded := abandoned != nil && abandoned()
 	switch {
 	case err == nil:
+	case errors.Is(err, fileutil.ErrExchangeBackFailed):
+		logRosterBootRewrite("CHANGED ON DISK during the startup rewrite, and the newer file could NOT be "+
+			"restored to the roster path: it is preserved at the temporary path in this message, and the roster "+
+			"file and the roster in use are the OLDER version. Make no admin account changes; move the preserved "+
+			"file over the roster path and restart", path, err)
+	case errors.Is(err, fileutil.ErrRestoreNotSynced):
+		logRosterBootRewrite("CHANGED ON DISK during the startup rewrite; the newer file was restored to the "+
+			"roster path, but the restore could not be synced to disk, so a crash could revert it. The entry the "+
+			"restore displaced is kept at the temporary path in this message: keep it until a restart has loaded "+
+			"the roster file as it now is", path, err)
+	case superseded, errors.Is(err, fileutil.ErrRewriteAbandoned):
+		// Culvert's own save took over, or the deadline passed (logged by
+		// bootRewriteRoster): not an operator problem.
+		if !errors.Is(err, fileutil.ErrRewriteAbandoned) {
+			err = fmt.Errorf("%w (%w)", fileutil.ErrRewriteAbandoned, err)
+		}
 	case errors.Is(err, fileutil.ErrReplacedNotSynced):
 		logRosterBootRewrite("rewritten in place at startup, but its directory could not be fsynced afterward", path, err)
-		return nil
 	case errors.Is(err, fileutil.ErrRewriteUnsupported):
 		logRosterBootRewrite("was not rewritten in place at startup: this platform or filesystem has no atomic "+
 			"exchange, and a plain replace could destroy a concurrent change, so whether admin account changes "+
@@ -134,11 +159,6 @@ func rewriteLoadedRoster(path string, loaded *loadedRosterFile) error {
 			"extended attributes or ACL could not be kept exactly on the replacement, and a rewrite must not change "+
 			"the file's metadata, so nothing was replaced and whether admin account changes can be saved is unverified until the first one is",
 			path, err)
-	case errors.Is(err, fileutil.ErrExchangeBackFailed):
-		logRosterBootRewrite("CHANGED ON DISK during the startup rewrite, and the newer file could NOT be "+
-			"restored to the roster path: it is preserved at the temporary path in this message, and the roster "+
-			"file and the roster in use are the OLDER version. Make no admin account changes; move the preserved "+
-			"file over the roster path and restart", path, err)
 	case errors.Is(err, fileutil.ErrConcurrentChange), errors.Is(err, errRosterChangedDuringLoad):
 		logRosterBootRewrite("changed on disk while it was loaded at startup; the newer file was kept and "+
 			"the rewrite is not verified. The roster in use predates that change: restart to load it, and make "+
@@ -173,4 +193,96 @@ func logRosterBootRewrite(what, path string, err error) {
 		return
 	}
 	logger.Printf("UIUsers: admin roster %q %s: %q", sanitizeLog(path), what, sanitizeLog(err.Error()))
+}
+
+// rosterBootRewriteWait bounds how long LoadUIUsersFile waits for the boot
+// rewrite (Codex P1 4319946910 on PR #1601). A var only so tests can shorten
+// it.
+var rosterBootRewriteWait = 3 * time.Second
+
+// errRosterRewriteSlow is the recorded evidence when the boot rewrite did not
+// finish within rosterBootRewriteWait: startup went on, the rewrite was
+// abandoned, and nothing about the target is proven.
+var errRosterRewriteSlow = errors.New("the startup rewrite did not finish in time (slow or stalled storage) and was abandoned")
+
+// bootRewriteRoster runs the boot rewrite of loaded on its own goroutine,
+// without saveUIUsersMu, and waits for it at most rosterBootRewriteWait.
+//
+//   - Finished in time: its outcome is the recorded evidence, as before.
+//   - Deadline passed: the evidence is errRosterRewriteSlow ("not verified,
+//     storage slow"), startup continues, and the rewrite is ABANDONED: it
+//     checks the flag before its exchange (fileutil.RewriteInPlaceUnless),
+//     removes its temp file and never exchanges. The one window that cannot
+//     be closed is an exchange syscall already in flight when the deadline
+//     fires; it carries the roster's own loaded bytes and metadata and still
+//     goes through the compare and swap-back. Its late outcome is logged but
+//     never recorded over the "slow" evidence.
+//   - A Culvert roster write meanwhile (a save, or SetUIUsersFile): the write
+//     generation moves, the rewrite abandons itself, and the save's own
+//     evidence stands — the save always wins.
+func (c *Config) bootRewriteRoster(path string, loaded *loadedRosterFile) {
+	c.beginRosterWrite()
+	gen := c.uiUsersWriteGen.Load() // after our own begin: any later move is someone else
+	var timedOut atomic.Bool
+	abandoned := func() bool { return timedOut.Load() || c.uiUsersWriteGen.Load() != gen }
+	var outcome struct {
+		sync.Mutex
+		finished, timedOut bool
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer c.endRosterWrite()
+		err := rewriteLoadedRoster(path, loaded, abandoned)
+		outcome.Lock()
+		defer outcome.Unlock()
+		if outcome.timedOut {
+			return // the evidence already says "slow"; a late outcome is only logged
+		}
+		outcome.finished = true
+		c.recordBootRewrite(path, loaded, gen, err)
+	}()
+	timer := time.NewTimer(rosterBootRewriteWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+	}
+	outcome.Lock()
+	defer outcome.Unlock()
+	if outcome.finished {
+		return
+	}
+	outcome.timedOut = true
+	timedOut.Store(true)
+	logRosterBootRewrite(fmt.Sprintf("was not rewritten in place within %v at startup (slow or stalled "+
+		"storage); startup continues, the rewrite is abandoned, and whether admin account changes can be "+
+		"saved is unverified until one is", rosterBootRewriteWait), path, errRosterRewriteSlow)
+	c.recordBootRewrite(path, loaded, gen, errRosterRewriteSlow)
+}
+
+// recordBootRewrite records the boot rewrite's outcome as the row's evidence,
+// unless a Culvert write took over since it began (its own evidence stands)
+// or the path was re-pointed. ErrReplacedNotSynced is a landed rewrite whose
+// directory could not be synced.
+func (c *Config) recordBootRewrite(path string, loaded *loadedRosterFile, gen uint64, err error) {
+	if errors.Is(err, fileutil.ErrRewriteAbandoned) {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.uiUsersFile != path || c.uiUsersWriteGen.Load() != gen {
+		return
+	}
+	landed := err == nil || errors.Is(err, fileutil.ErrReplacedNotSynced)
+	c.uiUsersWriteTried, c.uiUsersWriteErr = true, err
+	c.uiUsersWritten, c.uiUsersWriteSynced = rosterWrittenDigest{}, false
+	if landed {
+		// The rewrite put exactly the loaded bytes, with the file's own
+		// metadata, on disk.
+		c.uiUsersWriteErr = nil
+		c.uiUsersWritten = digestRosterWrite(path, loaded.data, ownerOf(loaded.info))
+		c.uiUsersWriteSynced = err == nil
+	}
 }

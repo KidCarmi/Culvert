@@ -106,10 +106,7 @@ password change cannot leave the new password working from cache.
 ### One error is deliberately not a failure
 
 `fileutil.ErrReplacedNotSynced` means the rename already landed the new content
-and only the parent-directory `fsync` failed — or the directory could not even
-be opened for it (for example a write-and-search-only `0300` data directory,
-which gives `EACCES`); only an `fsync` the platform reports as unsupported
-counts as success. Every future reader,
+and only the parent-directory `fsync` failed. Every future reader,
 including a restart, sees the new roster, so the change **did** take effect and
 the request succeeds. It is logged loudly: the write is durable across a process
 crash and at risk only across a power loss in the following moments.
@@ -226,7 +223,26 @@ administrative decision was affected, and therefore what the operator must redo.
    for "not durable" or "a change was refused", and nothing for a degraded
    login-time write (SEC-DIAG-ROSTER-1).
 
-   **On Linux, the roster file is rewritten in place once at every boot.**
+   A roster write that landed but whose directory could not be synced — for
+   example a write-and-search-only `0300` directory that cannot be opened for
+   the `fsync` — reads `warn` (*that write may not survive a power loss*)
+   until a save is synced; the save itself succeeds, as every other store's
+   does.
+
+   **On Linux, the roster file is rewritten in place once at every boot** —
+   in the background: startup waits for it at most 3 seconds, holding no
+   roster lock. If it has not finished by then (slow or stalled storage),
+   startup continues, the row reads `warn` (*not verified, storage slow*),
+   and the rewrite is abandoned: it checks before its exchange and never
+   replaces the file later. The one window it cannot close is an exchange
+   already in flight when the deadline passes; that exchange carries the
+   roster's own bytes and metadata and is still compared and swapped back. A
+   save made meanwhile always wins: the rewrite sees it and gives up, or its
+   exchange is swapped back like any concurrent change. If a swap-back of a
+   concurrent change cannot be synced, the displaced `ui_users.json.tmp.*`
+   entry is kept as the recovery copy, the log names it, and the row says
+   the restore is not durable: restart to load the roster as it now is, then
+   remove the kept file.
    After `ui_users.json` loads, Culvert writes the exact bytes it read into a
    temp file beside it, with the file's own owner, group, full mode and
    **all of its extended attributes** (the complete list is below), and

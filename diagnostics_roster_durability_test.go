@@ -49,7 +49,7 @@ func pinRosterDurabilityBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeErr := rewriteLoadedRoster(p, loaded)
+	writeErr := rewriteLoadedRoster(p, loaded, nil)
 	if writeErr != nil {
 		t.Fatalf("boot rewrite of a fresh fixture: %v", writeErr)
 	}
@@ -352,7 +352,7 @@ func setupRosterReadOnlyParent(t *testing.T, c *Config) {
 func injectRosterRewriteFailure(t *testing.T, errno syscall.Errno, stage string) {
 	t.Helper()
 	prev := rosterRewriteInPlace
-	rosterRewriteInPlace = func(path string, _ []byte, _ os.FileInfo) error {
+	rosterRewriteInPlace = func(path string, _ []byte, _ os.FileInfo, _ func() bool) error {
 		return fmt.Errorf("atomic write %s: %s: %w", path, stage, &os.PathError{Op: stage, Path: path, Err: errno})
 	}
 	t.Cleanup(func() { rosterRewriteInPlace = prev })
@@ -586,7 +586,7 @@ func assertRosterTargetRow(t *testing.T, c *Config, name string, warn bool) {
 func TestRosterTargetProblem_IsReadOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "missing")
 	p := filepath.Join(dir, "ui_users.json")
-	if rosterTargetProblem(p, nil, true, nil, probeRosterTarget(p, rosterWrittenDigest{}), true) == "" {
+	if rosterTargetProblem(p, nil, true, nil, true, probeRosterTarget(p, rosterWrittenDigest{}), true) == "" {
 		t.Fatal("missing parent reported as usable")
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {

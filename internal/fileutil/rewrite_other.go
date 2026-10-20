@@ -14,6 +14,11 @@ func RewriteInPlace(path string, _ []byte, _ os.FileInfo) error {
 	return fmt.Errorf("rewrite in place %s: %w", path, ErrRewriteUnsupported)
 }
 
+// RewriteInPlaceUnless writes nothing here either (see RewriteInPlace).
+func RewriteInPlaceUnless(path string, data []byte, orig os.FileInfo, _ func() bool) error {
+	return RewriteInPlace(path, data, orig)
+}
+
 // ReplacementBlocked reports nothing here: the inode flags and statx
 // attributes that block a replacement are Linux interfaces, so this platform
 // has no live check (a known gap; a refused save still reports it).

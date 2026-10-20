@@ -1552,11 +1552,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   predicate the boot rewrite applies (`fileutil.ReplacementBlocked`), and the
   owner it compares against is taken from the landed file's own descriptor
   (`fileutil.AtomicWriteInfo`), never a stat of the path after the write.
-  Every
-  `fileutil.AtomicWrite` and the boot rewrite now also report
-  `ErrReplacedNotSynced`, rather than success, when the parent directory
-  cannot be opened for its `fsync` (for example a `0300` data directory); only
-  an `fsync` the platform reports as unsupported still counts as success.
+  `fileutil.AtomicWrite` itself is unchanged: a parent directory that cannot
+  be opened for its `fsync` still counts as success for its callers. Only the
+  roster path reads the strict answer (`WriteResult.DirSynced`), so a landed
+  roster write whose directory could not be synced reads `warn` (*may not
+  survive a power loss*) until a synced save. The boot rewrite never delays
+  startup: it runs in the background and is waited on for at most 3 s,
+  after which startup continues, the row reads `warn` (*storage slow, not
+  verified*), and the rewrite is abandoned before its exchange; it holds no
+  roster lock, so saves and logins proceed meanwhile and a save always wins.
+  If it swaps a concurrent change back but cannot sync the restore, it keeps
+  the displaced `ui_users.json.tmp.*` entry as the recovery copy and says so
+  in the log and the row.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already

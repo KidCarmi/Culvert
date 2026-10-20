@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -209,7 +210,7 @@ func TestRewriteLoadedRoster_RefusesAChangedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	captureLogger(t, func() {
-		if err := rewriteLoadedRoster(path, loaded); !errors.Is(err, errRosterChangedDuringLoad) {
+		if err := rewriteLoadedRoster(path, loaded, nil); !errors.Is(err, errRosterChangedDuringLoad) {
 			t.Errorf("err = %v, want errRosterChangedDuringLoad", err)
 		}
 	})
@@ -218,21 +219,51 @@ func TestRewriteLoadedRoster_RefusesAChangedFile(t *testing.T) {
 	}
 }
 
-// TestLoadUIUsersFile_RewriteSerialisesWithSaves: the read-and-rewrite runs
-// under saveUIUsersMu, so a concurrent save cannot land between the read and
-// the rewrite and then be overwritten by the older bytes.
-func TestLoadUIUsersFile_RewriteSerialisesWithSaves(t *testing.T) {
+// blockBootRewrite makes the boot rewrite's write step wait for release
+// (standing in for stalled storage), then run the real rewrite with the
+// abandon signal it was given. inRewrite is closed when it starts waiting;
+// release (idempotent, and run on cleanup too) lets it go.
+func blockBootRewrite(t *testing.T) (inRewrite chan struct{}, release func()) {
+	t.Helper()
+	inRewrite, gate := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	prev := rosterRewriteInPlace
+	rosterRewriteInPlace = func(p string, d []byte, fi os.FileInfo, ab func() bool) error {
+		close(inRewrite)
+		<-gate
+		return prev(p, d, fi, ab)
+	}
+	t.Cleanup(func() {
+		release()
+		rosterRewriteInPlace = prev
+	})
+	return inRewrite, release
+}
+
+// waitRosterWritesIdle waits for a background boot rewrite to finish.
+func waitRosterWritesIdle(t *testing.T, c *Config) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.uiUsersWritesInFlight.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the background boot rewrite did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestLoadUIUsersFile_SaveDuringBootRewriteWins (Codex P1 4319946910 on PR
+// #1601): the boot rewrite holds no roster lock, so a save while it is stuck
+// completes at once; the rewrite then abandons itself, never exchanges, and
+// the save's file and evidence stand. Recording or logging the superseded
+// rewrite as a concurrent change fails this test.
+func TestLoadUIUsersFile_SaveDuringBootRewriteWins(t *testing.T) {
 	path, _, _ := seedRosterFileForBoot(t)
 	c := configuredRosterCfg(t, false)
 	swapCfgForRosterDurability(t, c)
-	inRewrite, release := make(chan struct{}), make(chan struct{})
-	prev := rosterRewriteInPlace
-	rosterRewriteInPlace = func(p string, d []byte, fi os.FileInfo) error {
-		close(inRewrite)
-		<-release
-		return prev(p, d, fi)
-	}
-	t.Cleanup(func() { rosterRewriteInPlace = prev })
+	logs := captureLoggerForTest(t)
+	inRewrite, release := blockBootRewrite(t)
 
 	c.SetUIUsersFile(path)
 	loadDone := make(chan error, 1)
@@ -246,15 +277,96 @@ func TestLoadUIUsersFile_RewriteSerialisesWithSaves(t *testing.T) {
 	go func() { saveDone <- c.SaveUIUsersFile() }()
 	select {
 	case err := <-saveDone:
-		t.Fatalf("a save completed while the boot rewrite held the roster (err %v)", err)
-	case <-time.After(100 * time.Millisecond):
+		if err != nil {
+			t.Fatalf("SaveUIUsersFile: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a save was blocked behind the boot rewrite")
 	}
-	close(release)
+	saved, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedBytes, _ := os.ReadFile(path) // #nosec G304 -- test temp path
+	release()
 	if err := <-loadDone; err != nil {
 		t.Fatalf("LoadUIUsersFile: %v", err)
 	}
-	if err := <-saveDone; err != nil {
-		t.Fatalf("SaveUIUsersFile: %v", err)
+	waitRosterWritesIdle(t, c)
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(saved, after) {
+		t.Error("the superseded boot rewrite exchanged over the save's file")
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, savedBytes) { // #nosec G304 -- test temp path
+		t.Errorf("the roster no longer holds the save's bytes: %q", got)
+	}
+	if row := checkAdminRosterDurability(); row.Status != diagOK {
+		t.Errorf("row = %+v, want ok: the save's evidence stands", row)
+	}
+	if out := logs.String(); strings.Contains(out, "changed on disk") || strings.Contains(out, "CHANGED ON DISK") {
+		t.Errorf("Culvert's own save was logged as an external change:\n%s", out)
+	}
+}
+
+// TestLoadUIUsersFile_StalledBootRewriteIsBounded (Codex P1 4319946910): the
+// rewrite's write step is stuck. LoadUIUsersFile (startup) returns within the
+// bound with the roster loaded, the row reads "not verified (storage slow)",
+// and when the storage unblocks later the abandoned rewrite never exchanges.
+// An unbounded wait, or a rewrite that ignores the abandon signal, fails this
+// test.
+func TestLoadUIUsersFile_StalledBootRewriteIsBounded(t *testing.T) {
+	path, user, _ := seedRosterFileForBoot(t)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := configuredRosterCfg(t, false)
+	swapCfgForRosterDurability(t, c)
+	prevWait := rosterBootRewriteWait
+	rosterBootRewriteWait = 150 * time.Millisecond
+	t.Cleanup(func() { rosterBootRewriteWait = prevWait })
+	logs := captureLoggerForTest(t)
+	_, release := blockBootRewrite(t)
+	t.Cleanup(func() { waitRosterWritesIdle(t, c) })
+
+	c.SetUIUsersFile(path)
+	start := time.Now()
+	if err := c.LoadUIUsersFile(); err != nil {
+		t.Errorf("LoadUIUsersFile: %v", err)
+	}
+	out := logs.String()
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("LoadUIUsersFile took %v on stalled storage, want about the %v bound", took, rosterBootRewriteWait)
+	}
+	if !loadedHasUser(c, user) {
+		t.Errorf("roster account %q not loaded", user)
+	}
+	if n := strings.Count(out, "was not rewritten in place within"); n != 1 {
+		t.Errorf("logged %d slow-rewrite line(s), want exactly 1:\n%s", n, out)
+	}
+	row := checkAdminRosterDurability()
+	if row.Status != diagWarn || row.Message != rosterTargetRewriteSlow {
+		t.Errorf("row = %+v, want warn %q", row, rosterTargetRewriteSlow)
+	}
+
+	release() // the storage comes back after the deadline
+	waitRosterWritesIdle(t, c)
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("the abandoned boot rewrite exchanged after the deadline")
+	}
+	if names, _ := os.ReadDir(filepath.Dir(path)); len(names) != 1 {
+		t.Errorf("the abandoned rewrite left %d entries beside the roster", len(names)-1)
+	}
+	if row := checkAdminRosterDurability(); row.Message != rosterTargetRewriteSlow {
+		t.Errorf("after the late unblock: row = %+v, want it to stay %q", row, rosterTargetRewriteSlow)
 	}
 }
 
@@ -296,9 +408,9 @@ func assertBootRewriteKeepsNewer(t *testing.T, write func(t *testing.T, path str
 	c := configuredRosterCfg(t, false)
 	swapCfgForRosterDurability(t, c)
 	prev := rosterRewriteInPlace
-	rosterRewriteInPlace = func(p string, d []byte, fi os.FileInfo) error {
+	rosterRewriteInPlace = func(p string, d []byte, fi os.FileInfo, ab func() bool) error {
 		write(t, p, newer)
-		return prev(p, d, fi)
+		return prev(p, d, fi, ab)
 	}
 	t.Cleanup(func() { rosterRewriteInPlace = prev })
 
@@ -352,7 +464,7 @@ func TestLoadUIUsersFile_UnsupportedExchangeIsUnverified(t *testing.T) {
 	c := configuredRosterCfg(t, false)
 	swapCfgForRosterDurability(t, c)
 	prev := rosterRewriteInPlace
-	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo) error {
+	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo, _ func() bool) error {
 		return fmt.Errorf("rewrite in place %s: %w", p, fileutil.ErrRewriteUnsupported)
 	}
 	t.Cleanup(func() { rosterRewriteInPlace = prev })
@@ -413,7 +525,7 @@ func TestLoadUIUsersFile_UncopyableMetadataIsUnverified(t *testing.T) {
 	c := configuredRosterCfg(t, false)
 	swapCfgForRosterDurability(t, c)
 	prev := rosterRewriteInPlace
-	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo) error {
+	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo, _ func() bool) error {
 		return fmt.Errorf("rewrite in place %s: preserve extended attributes: set %q on the replacement: %w: %w",
 			p, "security.selinux", syscall.EPERM, fileutil.ErrMetadataNotPreservable)
 	}
@@ -469,7 +581,7 @@ func TestLoadUIUsersFile_FailedRestoreIsReportedLoudly(t *testing.T) {
 	swapCfgForRosterDurability(t, c)
 	preserved := path + ".tmp.12345"
 	prev := rosterRewriteInPlace
-	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo) error {
+	rosterRewriteInPlace = func(p string, _ []byte, _ os.FileInfo, _ func() bool) error {
 		return fmt.Errorf("rewrite in place %s: the newer content is preserved at %s: %w", p, preserved,
 			fileutil.ErrExchangeBackFailed)
 	}

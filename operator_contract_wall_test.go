@@ -786,24 +786,133 @@ func rosterRowViolations(idx *contractIndex) (violations []string, classifiedSee
 	return violations, classifiedSeen
 }
 
-// referencesWithin reports whether fn, or any function it transitively
-// references (contractRefs), references the identifier name.
-func referencesWithin(idx *contractIndex, fn *contractFunc, name string) bool {
-	seen := map[*contractFunc]bool{}
-	queue := []*contractFunc{fn}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		if seen[cur] {
-			continue
-		}
-		seen[cur] = true
-		if identUses(cur.Decl.Body, name) > 0 {
-			return true
-		}
-		queue = append(queue, contractRefs(idx, cur)...)
+// returnedRowCodes collects the Code of every row fn can return (Codex P2
+// 4319946930 on PR #1601): each return statement's value is followed — a
+// composite OperatorContractCheck literal's Code, a call into another
+// function or method that returns one (recursively), or a local variable
+// through every assignment to it and every assignment to its Code field.
+// Anything it cannot resolve to a code identifier is reported in unknown, so
+// the check fails closed.
+func returnedRowCodes(idx *contractIndex, fn *contractFunc, seen map[*contractFunc]bool) (codes, unknown []string) {
+	if seen[fn] {
+		return nil, nil
 	}
-	return false
+	seen[fn] = true
+	add := func(c, u []string) {
+		codes, unknown = append(codes, c...), append(unknown, u...)
+	}
+	inspectOwnBody(fn.Decl.Body, func(n ast.Node) {
+		if ret, ok := n.(*ast.ReturnStmt); ok {
+			for _, res := range ret.Results {
+				add(rowExprCodes(idx, fn, res, seen))
+			}
+		}
+	})
+	return codes, unknown
+}
+
+// inspectOwnBody visits body without descending into function literals,
+// whose returns are not fn's.
+func inspectOwnBody(body ast.Node, visit func(ast.Node)) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		if n != nil {
+			visit(n)
+		}
+		return true
+	})
+}
+
+// rowExprCodes resolves the codes a row-valued expression in fn can carry.
+func rowExprCodes(idx *contractIndex, fn *contractFunc, e ast.Expr, seen map[*contractFunc]bool) (codes, unknown []string) {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return rowExprCodes(idx, fn, x.X, seen)
+	case *ast.CompositeLit:
+		for _, el := range x.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Code" {
+					return codeIdent(kv.Value)
+				}
+			}
+		}
+		return nil, []string{"a row literal without a Code"}
+	case *ast.CallExpr:
+		callees := rowReturningCallees(idx, x)
+		if len(callees) == 0 {
+			return nil, []string{"a row from an unresolved call"}
+		}
+		for _, callee := range callees {
+			c, u := returnedRowCodes(idx, callee, seen)
+			codes, unknown = append(codes, c...), append(unknown, u...)
+		}
+		return codes, unknown
+	case *ast.Ident:
+		return localRowCodes(idx, fn, x.Name, seen)
+	}
+	return nil, []string{"a row from an expression the wall cannot follow"}
+}
+
+// codeIdent is the code a Code field is set to: a named constant, or unknown.
+func codeIdent(e ast.Expr) (codes, unknown []string) {
+	if id, ok := e.(*ast.Ident); ok {
+		return []string{id.Name}, nil
+	}
+	return nil, []string{"a Code that is not a named constant"}
+}
+
+// rowReturningCallees resolves a call to the package functions or methods it
+// may name that return an OperatorContractCheck.
+func rowReturningCallees(idx *contractIndex, call *ast.CallExpr) []*contractFunc {
+	var cands []*contractFunc
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		cands = idx.byName[f.Name]
+	case *ast.SelectorExpr:
+		cands = idx.methods[f.Sel.Name]
+	}
+	var out []*contractFunc
+	for _, c := range cands {
+		if r := c.Decl.Type.Results; r != nil && len(r.List) == 1 {
+			if id, ok := r.List[0].Type.(*ast.Ident); ok && id.Name == "OperatorContractCheck" {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// localRowCodes follows a local row variable through every assignment to it
+// and every assignment to its Code field in fn.
+func localRowCodes(idx *contractIndex, fn *contractFunc, name string, seen map[*contractFunc]bool) (codes, unknown []string) {
+	assigned := false
+	inspectOwnBody(fn.Decl.Body, func(n ast.Node) {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != len(as.Rhs) {
+			return
+		}
+		for i, lhs := range as.Lhs {
+			switch l := lhs.(type) {
+			case *ast.Ident:
+				if l.Name == name {
+					assigned = true
+					c, u := rowExprCodes(idx, fn, as.Rhs[i], seen)
+					codes, unknown = append(codes, c...), append(unknown, u...)
+				}
+			case *ast.SelectorExpr:
+				if id, ok := l.X.(*ast.Ident); ok && id.Name == name && l.Sel.Name == "Code" {
+					c, u := codeIdent(as.Rhs[i])
+					codes, unknown = append(codes, c...), append(unknown, u...)
+				}
+			}
+		}
+	})
+	if !assigned {
+		unknown = append(unknown, "the row variable "+name+", which the wall cannot trace")
+	}
+	return codes, unknown
 }
 
 // rosterClassViolations checks that a classified reader's entry is coherent:
@@ -818,9 +927,20 @@ func rosterClassViolations(idx *contractIndex, fn *contractFunc, class rosterCla
 	}
 	switch class.Kind {
 	case rosterRedactedRow:
-		if class.Code == "" || !referencesWithin(idx, fn, class.Code) {
+		codes, unknown := returnedRowCodes(idx, fn, map[*contractFunc]bool{})
+		if class.Code == "" || len(codes) == 0 {
 			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but does not render "+
 				"that code", where, class.Code))
+		}
+		for _, c := range codes {
+			if c != class.Code {
+				out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but can return a "+
+					"row coded %s, which the redactor does not handle as this row", where, class.Code, c))
+			}
+		}
+		for _, u := range unknown {
+			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but returns %s",
+				where, class.Code, u))
 		}
 		if redactor != nil && (class.Code == "" || identUses(redactor.Decl.Body, class.Code) == 0) {
 			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but %s does not "+
@@ -926,6 +1046,24 @@ func TestWall_RosterConsumers_NegativeControls(t *testing.T) {
 		wire(srcs, tc.check)
 		if v, _ := rosterRowViolations(parseContractSources(t, srcs)); !rosterViolationFor(v, tc.want) {
 			t.Errorf("%s: passed the wall; want a violation containing %q, got %q", name, tc.want, v)
+		}
+	}
+
+	// Codex P2 4319946930 on #1601: a branch of a classified row returns a row
+	// under another code. A reachable helper still references the classified
+	// code, so "the code is referenced somewhere" is not enough.
+	for name, inject := range map[string]string{
+		"returns an unclassified literal": "\tcase f.refused > 1000000:\n" +
+			"\t\treturn OperatorContractCheck{Code: \"fixture_unclassified\", Status: diagWarn}\n",
+		"re-codes the row":    "\tcase f.refused > 1000000:\n\t\trow.Code = fixtureOtherCode\n",
+		"returns another row": "\tcase f.refused > 1000000:\n\t\treturn checkStorage()\n",
+	} {
+		recoded := base.clone()
+		recoded.replaceOnce(t, "diagnostics.go", "\tcase f.refused == 0 && f.degraded == 0:\n",
+			inject+"\tcase f.refused == 0 && f.degraded == 0:\n")
+		v, _ := rosterRowViolations(parseContractSources(t, recoded))
+		if !rosterViolationFor(v, "checkAdminRosterDurability is classified as a redacted row") {
+			t.Errorf("an adminRow branch that %s passed the wall; violations=%q", name, v)
 		}
 	}
 

@@ -115,6 +115,15 @@ var (
 	// the newer file to the target failed. The newer content is preserved at
 	// the temp path named in the error, which is left in place.
 	ErrExchangeBackFailed = errors.New("rewrite in place: a concurrent change was detected and could not be restored to the target")
+	// ErrRewriteAbandoned means RewriteInPlaceUnless gave up because its
+	// caller abandoned it (a deadline passed, or a newer write took over)
+	// before the exchange: the temp file is removed and the target untouched.
+	ErrRewriteAbandoned = errors.New("rewrite in place: abandoned before the exchange; nothing was replaced")
+	// ErrRestoreNotSynced accompanies ErrConcurrentChange when the newer file
+	// was exchanged back onto the target but the directory could not be
+	// synced afterwards: the restore may not survive a crash, so the entry
+	// the restore displaced is kept at the temp path the error names.
+	ErrRestoreNotSynced = errors.New("rewrite in place: the newer file was restored but the restore could not be synced to disk")
 	// ErrReplacementBlocked means rename(2) would refuse to replace the target
 	// itself — it is immutable or append-only, a mount point, or in an
 	// immutable or append-only directory — so no save can land there.

@@ -622,3 +622,70 @@ func TestRewriteInPlace_UnopenableParentDirIsNotSynced(t *testing.T) {
 	}
 	assertOnlyTarget(t, path)
 }
+
+// TestRewriteInPlace_UnsyncedRestoreKeepsTheRecoveryEntry (Codex P2
+// 4319946921 on PR #1601): after a concurrent change is swapped back, the
+// directory cannot be opened, or its fsync fails. The restore may not be
+// durable, so the entry it displaced is kept and named, and the result is
+// ErrConcurrentChange AND ErrRestoreNotSynced. Removing the entry before the
+// sync, or ignoring the sync result, fails this test.
+func TestRewriteInPlace_UnsyncedRestoreKeepsTheRecoveryEntry(t *testing.T) {
+	for name, inject := range map[string]func(t *testing.T){
+		"directory cannot be opened": func(t *testing.T) { injectParentDirOpen(t, syscall.EACCES) },
+		"directory fsync fails":      func(t *testing.T) { injectDirSync(t, syscall.EIO) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			loaded, newer := []byte("{\"v\":1}"), []byte("{\"v\":2}")
+			path, fi := rewriteFixture(t, loaded)
+			inject(t)
+			setRewriteHooks(t, func(string) { replaceAtomically(t, path, newer) }, nil)
+
+			err := RewriteInPlace(path, loaded, fi)
+			if !errors.Is(err, ErrConcurrentChange) || !errors.Is(err, ErrRestoreNotSynced) {
+				t.Fatalf("err = %v, want ErrConcurrentChange and ErrRestoreNotSynced", err)
+			}
+			if got := readFileT(t, path); !bytes.Equal(got, newer) {
+				t.Errorf("target holds %q, want the restored newer roster", got)
+			}
+			var kept string
+			for _, n := range dirEntries(t, filepath.Dir(path)) {
+				if strings.HasPrefix(n, "ui_users.json.tmp.") {
+					kept = filepath.Join(filepath.Dir(path), n)
+				}
+			}
+			if kept == "" {
+				t.Fatal("the recovery entry was removed although the restore is not synced")
+			}
+			if !strings.Contains(err.Error(), kept) {
+				t.Errorf("error %q does not name the kept entry %q", err, kept)
+			}
+		})
+	}
+}
+
+// TestRewriteInPlaceUnless_AbandonedBeforeTheExchange (Codex P1 4319946910):
+// a rewrite abandoned at any checkpoint never exchanges, leaves no temp file
+// and returns ErrRewriteAbandoned. Dropping the pre-exchange check fails the
+// "after the temp is written" case.
+func TestRewriteInPlaceUnless_AbandonedBeforeTheExchange(t *testing.T) {
+	for name, at := range map[string]int{"before any work": 0, "after the temp is written": 1} {
+		t.Run(name, func(t *testing.T) {
+			loaded := []byte(`{"users":[]}`)
+			path, fi := rewriteFixture(t, loaded)
+			var gaveUp atomic.Bool
+			if at == 0 {
+				gaveUp.Store(true)
+			}
+			setRewriteHooks(t, func(string) { gaveUp.Store(true) }, nil) // the deadline fires with the temp written
+			exchanges := countExchanges(t)
+			err := RewriteInPlaceUnless(path, loaded, fi, gaveUp.Load)
+			if !errors.Is(err, ErrRewriteAbandoned) {
+				t.Fatalf("err = %v, want ErrRewriteAbandoned", err)
+			}
+			if n := exchanges.Load(); n != 0 {
+				t.Errorf("%d exchange(s) ran after the rewrite was abandoned", n)
+			}
+			assertUntouched(t, path, fi, loaded)
+		})
+	}
+}

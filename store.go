@@ -887,11 +887,19 @@ type Config struct {
 	// outside Culvert afterwards (roster_disk_identity.go). Reset with the
 	// evidence above.
 	uiUsersWritten rosterWrittenDigest
-	// uiUsersWriteGen brackets every Culvert write to uiUsersFile (odd while
-	// one is in progress) so the row's identity read can run with no lock
-	// held and still tell a Culvert write racing it from an external one
-	// (roster_disk_identity.go). SetUIUsersFile moves it by two.
-	uiUsersWriteGen atomic.Uint64
+	// uiUsersWriteGen and uiUsersWritesInFlight bracket every Culvert write
+	// to uiUsersFile (beginRosterWrite/endRosterWrite) so the row's identity
+	// read can run with no lock held and still tell a Culvert write racing it
+	// from an external one, and so the background boot rewrite can tell that
+	// a save took over (roster_disk_identity.go, roster_boot_rewrite.go).
+	// SetUIUsersFile moves the generation too.
+	uiUsersWriteGen       atomic.Uint64
+	uiUsersWritesInFlight atomic.Int32
+	// uiUsersWriteSynced is whether the last landed write's directory was
+	// synced (fileutil.WriteResult.DirSynced; the boot rewrite's
+	// ErrReplacedNotSynced): a landed but unsynced write may not survive a
+	// power loss, and the row says so.
+	uiUsersWriteSynced bool
 
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
 	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
@@ -1517,7 +1525,8 @@ func (c *Config) SetUIUsersFile(path string) {
 	c.uiUsersLoadErr = nil // a new path has not been loaded yet
 	c.uiUsersWriteTried, c.uiUsersWriteErr = false, nil
 	c.uiUsersWritten = rosterWrittenDigest{}
-	c.uiUsersWriteGen.Add(2) // parity kept: a write in progress stays odd
+	c.uiUsersWriteSynced = false
+	c.uiUsersWriteGen.Add(2) // a background boot rewrite of the old path abandons itself
 	c.mu.Unlock()
 }
 
@@ -1548,7 +1557,7 @@ func (c *Config) rosterWriteEvidence() (tried bool, err error) {
 // own descriptor before the rename (fileutil.AtomicWriteInfo) — never a stat
 // of the path afterwards, which an external replacement could already have
 // won (Codex P2 4319694771 on PR #1601).
-func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileInfo) {
+func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileInfo, dirSynced bool) {
 	var owner fileOwnerID
 	if landed != nil {
 		owner = ownerOf(landed)
@@ -1557,8 +1566,17 @@ func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileI
 	if c.uiUsersFile == path {
 		c.uiUsersWriteTried, c.uiUsersWriteErr = true, nil
 		c.uiUsersWritten = digestRosterWrite(path, data, owner)
+		c.uiUsersWriteSynced = dirSynced
 	}
 	c.mu.Unlock()
+}
+
+// rosterWriteSynced reports whether the last landed roster write's directory
+// was synced. Read-only.
+func (c *Config) rosterWriteSynced() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersWriteSynced
 }
 
 // uiUserRecord is the on-disk representation of a UI admin user.
@@ -1609,34 +1627,35 @@ type uiUsersFileEnvelope struct {
 // not this call's error: the roster loaded and is served read-only as before,
 // and the row reports the failure instead.
 //
-// saveUIUsersMu is held across read and rewrite, as for any roster writer
-// (lock order saveUIUsersMu → c.mu), so a concurrent save can never land
-// between them and be overwritten by the older bytes. At boot this runs from
-// initAuth, before any listener can serve a mutation.
+// saveUIUsersMu is held across the READ (lock order saveUIUsersMu → c.mu),
+// but not across the rewrite (Codex P1 4319946910 on PR #1601): the rewrite
+// runs on its own goroutine and this call waits for it at most
+// rosterBootRewriteWait, so stalled storage can never block startup, saves
+// or logins. A save that lands meanwhile always wins: the rewrite abandons
+// itself before its exchange when the write generation moves, and an
+// exchange already in flight is compared and swapped back like any other
+// concurrent change (bootRewriteRoster).
 func (c *Config) LoadUIUsersFile() error {
 	c.saveUIUsersMu.Lock()
-	defer c.saveUIUsersMu.Unlock()
-	c.beginRosterWrite() // the boot rewrite (and a quarantine's fresh file) write the roster
-	defer c.endRosterWrite()
 	c.mu.RLock()
 	path := c.uiUsersFile
 	c.mu.RUnlock()
+	c.beginRosterWrite() // a quarantine's fresh file is a roster write
 	loaded, err := c.loadUIUsersFile(path)
-	tried, writeErr := false, error(nil)
-	if err == nil && loaded != nil {
-		tried, writeErr = true, rewriteLoadedRoster(path, loaded)
-	}
+	c.endRosterWrite()
 	c.mu.Lock()
 	if c.uiUsersFile == path { // not re-pointed while loading
 		c.uiUsersLoadErr = err
-		c.uiUsersWriteTried, c.uiUsersWriteErr = tried, writeErr
-		c.uiUsersWritten = rosterWrittenDigest{}
-		if tried && writeErr == nil {
-			// The rewrite put exactly the loaded bytes on disk.
-			c.uiUsersWritten = digestRosterWrite(path, loaded.data, ownerOf(loaded.info))
-		}
+		c.uiUsersWriteTried, c.uiUsersWriteErr = false, nil
+		c.uiUsersWritten, c.uiUsersWriteSynced = rosterWrittenDigest{}, false
 	}
 	c.mu.Unlock()
+	c.saveUIUsersMu.Unlock()
+	if err == nil && loaded != nil {
+		// Bounded and without saveUIUsersMu (Codex P1 4319946910): see
+		// bootRewriteRoster.
+		c.bootRewriteRoster(path, loaded)
+	}
 	return err
 }
 
@@ -1839,11 +1858,13 @@ func (c *Config) saveUIUsersLocked() error {
 	// rename: concurrent admin mutations save from separate handler
 	// goroutines, and a shared temp name lets two writers interleave into
 	// the same file before one renames the torn result over the roster.
-	landed, err := rosterAtomicWrite(path, data, 0o600)
+	res, err := rosterAtomicWrite(path, data, 0o600)
 	if err == nil || errors.Is(err, fileutil.ErrReplacedNotSynced) {
 		// Landed (ErrReplacedNotSynced: renamed into place, only the parent
-		// fsync failed) — exact evidence for admin_roster_durability.
-		c.noteRosterWriteLanded(path, data, landed)
+		// fsync failed) — exact evidence for admin_roster_durability, with
+		// whether the directory was synced (the strict answer AtomicWrite's
+		// error deliberately does not give).
+		c.noteRosterWriteLanded(path, data, res.Landed, err == nil && res.DirSynced)
 	}
 	return err
 }
