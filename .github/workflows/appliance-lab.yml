@@ -68,7 +68,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -663,7 +663,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -766,6 +766,111 @@ jobs:
             ${{ runner.temp }}/fdisk1/**/REPORT.md
             ${{ runner.temp }}/fdisk1/**/checks.jsonl
             ${{ runner.temp }}/fdisk1/**/diagnose.log
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ASTRA (2026-10-20): the three green midwrite runs prove the CLEAN-FAIL landing
+  # only (badger returns ENOSPC, store not torn, quarantined_copies=0). They do
+  # NOT prove the earlier STALLED-recovery failure is fixed — the landing where
+  # the write faults, CHAOS-74 contains it, the store is torn+degraded and
+  # re-faults every restart. This job proves the F-DISK-RECOVERY-1 recovery
+  # (C1 durable import-pending marker + C2 interrupted-import quarantine+rebuild)
+  # at the appliance level, DETERMINISTICALLY: it SIGKILLs the proxy mid-import
+  # (docker rm -f) once BeginImport has laid the durable marker, which reaches the
+  # SAME durable end-state the stall produces — marker present, no completion
+  # record — then on one restart asserts quarantine+rebuild+re-converge, marker
+  # cleared, state intact, and bounded/idempotent (a second restart does not
+  # re-quarantine). Runs ONLY on the explicit [midimport-kill] tag.
+  f-disk-midimport-kill:
+    name: "Lab · F-DISK interrupted-import recovery (SIGKILL mid-import → quarantine+rebuild)"
+    if: ${{ contains(github.event.head_commit.message, '[midimport-kill]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+      - name: Obtain + load the source image (verified sha256)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test/e2e/appliance/lab/obtain-image.sh "$RUNNER_TEMP/in"
+          tar="$RUNNER_TEMP/in/culvert-image.tar"
+          python3 -I - "$tar" > "$RUNNER_TEMP/in/identity.env" <<'PY'
+          import hashlib, json, sys, tarfile
+          t = tarfile.open(sys.argv[1])
+          blob = lambda d: t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+          def ok(d):
+              b = blob(d)
+              assert "sha256:" + hashlib.sha256(b).hexdigest() == d, d
+              return b
+          idx = json.load(t.extractfile("index.json"))
+          (m,) = idx["manifests"]
+          cfg = json.loads(ok(m["digest"]))["config"]["digest"]
+          ok(cfg)
+          assert json.load(t.extractfile("manifest.json"))[0]["Config"].endswith(cfg.split(":")[1])
+          print(f"EXPECT_MANIFEST_DIGEST={m['digest']}")
+          print(f"EXPECT_CONFIG_DIGEST={cfg}")
+          PY
+          cat "$RUNNER_TEMP/in/identity.env" | tee -a "$GITHUB_ENV"
+          docker load -i "$tar" && docker image inspect culvert:ci-smoke --format 'id={{.Id}}'
+      - name: Check out the image's source (fallback agent build only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_IMAGE_SHA }}
+          path: image-src
+      - name: Extract the EXACT shipped maintenance agent from the candidate image
+        id: agent
+        run: |
+          set -euo pipefail
+          cid="$(docker create culvert:ci-smoke)"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/app/deploy/bin/culvert-maint" "$RUNNER_TEMP/culvert-maint-shipped"
+          chmod +x "$RUNNER_TEMP/culvert-maint-shipped"
+          sha="$(sha256sum "$RUNNER_TEMP/culvert-maint-shipped" | cut -d' ' -f1)"
+          ver="$("$RUNNER_TEMP/culvert-maint-shipped" --version 2>/dev/null | head -1 | tr -d '\r' || echo 'version unavailable')"
+          echo "shipped agent: sha256=$sha version=\"$ver\" (from culvert:ci-smoke:/app/deploy/bin/culvert-maint)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "bin=$RUNNER_TEMP/culvert-maint-shipped" >> "$GITHUB_OUTPUT"
+      - name: Pre-pull harness images (retry)
+        run: |
+          set -euo pipefail
+          pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; sleep $((i*3)); done; return 1; }
+          for img in registry:2 busybox:stable docker:29-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1; do pull_retry "$img"; done
+      - name: "Interrupted-import recovery: SIGKILL mid-import, restart, prove quarantine+rebuild+re-converge"
+        # exit 0 = the interrupted import was reproduced AND every recovery check
+        # passed; exit 1 = a recovery/integrity check failed; exit 2 = inconclusive
+        # (the mid-import window was not observed — e.g. no feed egress). The
+        # window can be missed on a fast/slow host, so retry up to 3× on exit 2.
+        run: |
+          set +e
+          set -uo pipefail
+          rc=2
+          for attempt in 1 2 3; do
+            sudo -E env "PATH=$PATH" "HOME=$HOME" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" "GOFLAGS=-mod=mod" \
+              QUAL_ENOSPC_SCENARIO=midimport-kill CUR_IMAGE=culvert:ci-smoke PRED_IMAGE=culvert:ci-smoke \
+              QUAL_AGENT_BIN="${{ steps.agent.outputs.bin }}" QUAL_AGENT_SRC="$GITHUB_WORKSPACE/image-src" EXPECT_CONFIG_DIGEST="$EXPECT_CONFIG_DIGEST" \
+              EXPECT_SOURCE_NOTE="tar sha256 $SOURCE_IMAGE_TAR_SHA256, OCI manifest $EXPECT_MANIFEST_DIGEST (the OVA image ID), source $SOURCE_IMAGE_SHA" \
+              EVID="$RUNNER_TEMP/killimport/attempt-$attempt" ./test/e2e/appliance/upgrade-enospc-qualify.sh
+            rc=$?
+            echo "attempt $attempt: exit $rc"
+            [ "$rc" = 2 ] || break
+          done
+          sudo cp "$RUNNER_TEMP/killimport/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log} "$RUNNER_TEMP/killimport/" 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/killimport"
+          exit "$rc"
+      - name: Report
+        if: always()
+        run: cat "$RUNNER_TEMP/killimport/REPORT.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "no REPORT.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-fdisk-midimport-kill-evidence
+          path: |
+            ${{ runner.temp }}/killimport/**/REPORT.md
+            ${{ runner.temp }}/killimport/**/checks.jsonl
+            ${{ runner.temp }}/killimport/**/diagnose.log
           retention-days: 30
           if-no-files-found: warn
 

@@ -135,7 +135,7 @@ IN docker pull -q "$PRED_REF" >/dev/null; IN docker tag "$PRED_REF" "$PINNED"
 PRED_ID="$(IN docker image inspect -f '{{.Id}}' "$PINNED")"
 [[ "$PRED_ID" == "${PRED_REF##*@}" ]] && check E0 image-pulled pass "nested daemon runs $PRED_ID = the pushed manifest digest" \
   || check E0 image-pulled fail "nested daemon image $PRED_ID, pushed ${PRED_REF##*@}"
-if [[ "$SCENARIO" == midwrite ]]; then :
+if [[ "$SCENARIO" == midwrite || "$SCENARIO" == midimport-kill ]]; then :
 elif IN docker image inspect "$CUR_REF" >/dev/null 2>&1; then check E0 cur-absent fail "CUR already present inside the bounded host"; else check E0 cur-absent pass "CUR not present inside the bounded host — the apply must pull it"; fi
 
 cid="$(docker create "$CUR_IMAGE")"; docker cp "$cid:/app/deploy/docker-compose.yml" "$MNT/srv-culvert/culvert/docker-compose.yml" >/dev/null; docker rm -f "$cid" >/dev/null
@@ -235,6 +235,7 @@ write_report_and_exit(){
   IN cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
   local title="Upgrade-under-ENOSPC qualification"
   [[ "$SCENARIO" == midwrite ]] && title="Disk exhaustion during an active database write (F-DISK-1)"
+  [[ "$SCENARIO" == midimport-kill ]] && title="Process kill during an active category import — interrupted-import recovery (F-DISK-RECOVERY-1 C1+C2)"
   { echo "# $title — run $RUN_ID"; echo
     echo "| artifact | reference |"; echo "|---|---|"
     echo "| image under qualification | \`$CUR_IMAGE\` → \`$CUR_REF\` |"; echo "| predecessor | \`$PRED_IMAGE\` → \`$PRED_REF\` |"
@@ -437,6 +438,109 @@ if [[ "$SCENARIO" == midwrite ]]; then
     "") check W category-import-converges fail "no import retry finished within ${conv}s of recovery";;
     *) check W category-import-converges fail "retry after recovery failed on the disk side: $res (${waited}s)";;
   esac
+  write_report_and_exit
+fi
+
+# ── K: process kill DURING an active category import (F-DISK-RECOVERY-1 C1+C2) ─
+# QUAL_ENOSPC_SCENARIO=midimport-kill. The midwrite scenario above proves the
+# CLEAN-FAIL landing (badger returns ENOSPC, the store is not torn, recovery is a
+# plain re-import — quarantined_copies stays 0). The ORIGINAL intermittent F-DISK
+# failure was the STALLED landing: badger's mmap write faults, CHAOS-74 contains
+# it, BulkWrite never returns, the store is torn+degraded and — because a RUNTIME
+# fault is never quarantined (CHAOS-50 quarantines only at OPEN time) — re-faults
+# on every restart forever. F-DISK-RECOVERY-1 closes that with a DURABLE
+# import-pending marker written by BeginImport BEFORE the risky write (C1) and a
+# startup quarantine+rebuild of an interrupted import (C2, TriggerInterruptedImport).
+# This scenario proves that recovery at the APPLIANCE level, DETERMINISTICALLY and
+# landing-independently: a SIGKILL mid-import (docker rm -f, which also prevents
+# the restart-policy from racing the observation) leaves the SAME durable state
+# the stall produces — the marker present and no completion record — so the next
+# boot MUST quarantine+rebuild+re-converge instead of looping. It uses a kill, not
+# a disk fill, because the recovery triggers on the marker, not on corruption, so
+# no ENOSPC is needed to exercise it. Needs egress to the feed (the import is what
+# is interrupted); without it the run is INCONCLUSIVE (exit 2), never a pass.
+if [[ "$SCENARIO" == midimport-kill ]]; then
+  MARKER=/data/catfeeddb.importing
+  vol_has(){ IN docker run --rm -v culvert_proxy-data:/data:ro busybox:stable test -e "$1" >/dev/null 2>&1; }
+  # Make the import happen under observation: stop, drop ONLY the derived cache
+  # (re-downloadable, CHAOS-50) and any stale marker/quarantine, start again.
+  IN sh -c 'cd /srv/culvert && docker compose stop proxy' >/dev/null 2>&1
+  IN docker run --rm -v culvert_proxy-data:/data busybox:stable sh -c 'rm -rf /data/catfeeddb; rm -rf /data/catfeeddb.importing /data/catfeeddb.importingtmp.* /data/catfeeddb.corrupt.*' >/dev/null 2>&1 || true
+  LOGS_SINCE="$(IN date -u +%Y-%m-%dT%H:%M:%SZ)"
+  IN sh -c 'cd /srv/culvert && docker compose start proxy' >/dev/null 2>&1
+  wlogs(){ IN docker logs --since "$LOGS_SINCE" culvert 2>&1; }
+  wdone='FeedSync: (sync complete|bulk write failed|could not begin the import)[^"]*'
+  dlfail='FeedSync: download/parse failed'
+  r0="$(IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null || echo 0)"
+  # Wait for BeginImport to lay the durable marker while the bulk write is still
+  # in flight, then kill. Catching the marker present + the import not yet
+  # certified is the deterministic mid-import state.
+  killed=""
+  for _ in $(seq 1 1200); do
+    wlogs | grep -qE "$dlfail" && { check K import-started inconclusive "feed download/parse failed (no egress?); cannot reach the mid-import window"; INCONCLUSIVE=1; write_report_and_exit; }
+    if vol_has "$MARKER"; then
+      wlogs | grep -qE "$wdone" && break   # import finished before we could catch the window
+      check K import-pending-marker pass "C1: $MARKER present mid-import — BeginImport wrote the durable intent BEFORE the bulk write; restarts=$r0"
+      IN docker rm -f culvert >/dev/null 2>&1 || true   # SIGKILL + no restart-policy race
+      killed=1; break
+    fi
+    wlogs | grep -qE "$wdone" && break
+    sleep 0.5
+  done
+  if [[ -z "$killed" ]]; then
+    check K import-pending-marker inconclusive "no mid-import window observed (marker never seen in flight; last feed line: $(wlogs | grep -m1 -oE "$wdone" || echo none)); this host cannot reproduce the interrupted import"
+    INCONCLUSIVE=1; write_report_and_exit; fi
+  # The kill leaves the interrupted end-state: marker present, no completion — the
+  # same durable state the stalled landing produces, reached deterministically.
+  if vol_has "$MARKER"; then check K interrupted-state pass "proxy SIGKILLed mid-import; $MARKER still present and the import never certified — the stall's durable end-state, reached deterministically"
+  else check K interrupted-state fail "marker gone after the kill — the import may have completed; nothing was interrupted"; INCONCLUSIVE=1; write_report_and_exit; fi
+  # Recovery is a plain restart (no disk is full here). The next boot MUST
+  # quarantine the interrupted store and rebuild — breaking the re-fault loop that
+  # was the original failure.
+  REC_AT="$(date -u +%FT%TZ)"
+  IN sh -c 'cd /srv/culvert && docker compose up -d' >/dev/null 2>&1
+  up=""; for _ in $(seq 1 60); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && { up=1; break; }; sleep 2; done
+  if [[ -z "$up" ]]; then check K recovered-serving fail "proxy not serving 120 s after one restart"; diagnose K-no-serve; write_report_and_exit; fi
+  v="$(health_version 2>/dev/null || echo unreachable)"
+  [[ "$v" == "$PRED_VER" ]] && check K recovered-serving pass "/health 200 version=$v after one restart (compose up -d)" || check K recovered-serving fail "version=$v after restart (want $PRED_VER)"
+  # C2: the interrupted import is quarantined and the store rebuilt + serving.
+  metrics="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null || true)"
+  qc="$(printf '%s\n' "$metrics" | awk '/^culvert_catfeeddb_quarantined_copies /{print $2}')"
+  qt="$(printf '%s\n' "$metrics" | awk '/^culvert_catfeeddb_quarantines_total /{print $2}')"
+  av="$(printf '%s\n' "$metrics" | awk '/^culvert_catfeeddb_available /{print $2}')"
+  mfull="$(printf '%s\n' "$metrics" | grep -E '^culvert_catfeeddb_(available|recovered|quarantines_total|quarantined_copies) ' | tr '\n' ' ')"
+  qmsg="$(wlogs | grep -m1 -oE 'community category store (was damaged and re-created|is healthy)[^"]{0,80}' || echo 'no catfeeddb health line')"
+  if { [[ "${qc:-0}" -ge 1 ]] || [[ "${qt:-0}" -ge 1 ]]; } && [[ "$av" == 1 ]]; then
+    check K interrupted-import-quarantined pass "C2: the interrupted import was quarantined and the store rebuilt + available (quarantined_copies=${qc:-?} quarantines_total=${qt:-?} available=$av) — breaks the re-fault loop; health='${qmsg}'; $mfull"
+  else
+    check K interrupted-import-quarantined fail "expected quarantine+rebuild of the interrupted store (quarantined_copies/quarantines_total >= 1 AND available=1): $mfull"
+  fi
+  if vol_has "$MARKER"; then check K marker-cleared fail "$MARKER still present after the quarantine+rebuild"; else check K marker-cleared pass "import-pending marker cleared after quarantine+rebuild (no false re-quarantine on later clean boots)"; fi
+  c="$(api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' | tail -n1 || true)"
+  s1="$(state_sum || true)"
+  [[ "$c" == 200 && "$s1" == "$STATE0" ]] && check K state-intact pass "admin login http $c; ui_users.json+ca.bundle digest $s1 unchanged (Layer-1/admin/CA untouched by the Layer-2 recovery)" || check K state-intact fail "login=$c digest=$s1 want=$STATE0"
+  fp="$(ca_fp || true)"; [[ "$fp" == "$FP0" ]] && check K ca-identity-intact pass "root CA sha256 $fp" || check K ca-identity-intact fail "fp=$fp want=$FP0"
+  assert_enforcement K || true
+  # The rebuilt store is EMPTY, so the boot-time sync (RunNow: !ImportComplete)
+  # re-runs and must certify the whole feed — bounded recovery that converges.
+  conv="${QUAL_FEED_CONVERGE_SECS:-1800}"; t0=$SECONDS; res=""
+  while (( SECONDS - t0 < conv )); do
+    res="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: (sync complete[^"]*|bulk write failed|could not begin the import|import written but could not be certified|download/parse failed)' | tail -1 || true)"
+    [[ -n "$res" ]] && break; sleep 15
+  done
+  waited=$((SECONDS - t0))
+  case "$res" in
+    "FeedSync: sync complete"*) check K category-import-converges pass "rebuilt store re-synced: ${res#FeedSync: } (${waited}s after recovery)";;
+    *"download/parse failed"*) check K category-import-converges info "retry after ${waited}s hit a download failure (network, not disk); convergence not observed";;
+    "") check K category-import-converges fail "no import retry finished within ${conv}s of recovery";;
+    *) check K category-import-converges fail "retry after recovery failed on the disk side: $res (${waited}s)";;
+  esac
+  # Bounded + idempotent (owner req 5): a SECOND clean restart must NOT re-quarantine.
+  qc1="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | awk '/^culvert_catfeeddb_quarantined_copies /{print $2}')"
+  IN sh -c 'cd /srv/culvert && docker compose restart proxy' >/dev/null 2>&1
+  for _ in $(seq 1 60); do curl -fsS -m 3 http://127.0.0.1:18080/health >/dev/null 2>&1 && break; sleep 2; done
+  qc2="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | awk '/^culvert_catfeeddb_quarantined_copies /{print $2}')"
+  [[ -n "$qc2" && "$qc2" == "$qc1" ]] && check K idempotent-no-reloop pass "a second clean restart did not re-quarantine (quarantined_copies stayed ${qc1:-?}) — recovery is bounded, not a loop" || check K idempotent-no-reloop fail "quarantined_copies changed on a clean restart: ${qc1:-?} -> ${qc2:-?} (possible re-quarantine loop)"
   write_report_and_exit
 fi
 
