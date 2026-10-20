@@ -744,17 +744,18 @@ func (s *Store) UpdateByID(id string, categories []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, g := range s.groups {
-		if g.ID == id {
-			// Copy-on-write, as Update — g may be published (readView).
-			ng := *g
-			ng.Categories = cats
-			ng.catSet = buildCatSet(cats)
-			ng.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-			s.groups[key] = &ng
-			s.rev.Add(1)
-			s.publishLocked()
-			return nil
+		if g.ID != id {
+			continue
 		}
+		// Copy-on-write, as Update — g may be published (readView).
+		ng := *g
+		ng.Categories = cats
+		ng.catSet = buildCatSet(cats)
+		ng.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		s.groups[key] = &ng
+		s.rev.Add(1)
+		s.publishLocked()
+		return nil
 	}
 	return fmt.Errorf("group id %q not found", id)
 }
@@ -768,19 +769,20 @@ func (s *Store) DeleteByID(id string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, g := range s.groups {
-		if g.ID == id {
-			name := g.Name
-			delete(s.groups, key)
-			for i, k := range s.order {
-				if k == key {
-					s.order = append(s.order[:i], s.order[i+1:]...)
-					break
-				}
-			}
-			s.rev.Add(1)
-			s.publishLocked()
-			return name, nil
+		if g.ID != id {
+			continue
 		}
+		name := g.Name
+		delete(s.groups, key)
+		for i, k := range s.order {
+			if k == key {
+				s.order = append(s.order[:i], s.order[i+1:]...)
+				break
+			}
+		}
+		s.rev.Add(1)
+		s.publishLocked()
+		return name, nil
 	}
 	return "", fmt.Errorf("group id %q not found", id)
 }
