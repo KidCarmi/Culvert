@@ -60,14 +60,32 @@ func TestHoldInode_ReleasesForkLockWhenTheDupFails(t *testing.T) {
 		t.Fatal("holdInode duplicated a closed descriptor")
 	}
 
-	locked := make(chan struct{})
+	probed, err := os.CreateTemp(t.TempDir(), "probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = probed.Close() }()
+
+	// Take the lock the way forkExec does — for writing — and do under it what
+	// it is there to make safe: create a descriptor that no concurrent fork can
+	// inherit. On a goroutine with a deadline, because a lock holdInode leaked
+	// would block this forever rather than fail.
+	probe := make(chan error, 1)
 	go func() {
 		syscall.ForkLock.Lock()
-		syscall.ForkLock.Unlock()
-		close(locked)
+		defer syscall.ForkLock.Unlock()
+		fd, err := syscall.Dup(int(probed.Fd()))
+		if err == nil {
+			syscall.CloseOnExec(fd)
+			err = syscall.Close(fd)
+		}
+		probe <- err
 	}()
 	select {
-	case <-locked:
+	case err := <-probe:
+		if err != nil {
+			t.Errorf("dup under syscall.ForkLock: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("syscall.ForkLock is still held after a failed holdInode: no exec can run again")
 	}
