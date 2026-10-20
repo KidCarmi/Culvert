@@ -1062,7 +1062,7 @@ jobs:
           echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
           for i in 1 2; do
             sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-              qemu-utils qemu-system-x86 genisoimage imagemagick && break
+              qemu-utils qemu-system-x86 genisoimage imagemagick tesseract-ocr && break
             sleep 15
           done
       - name: Fetch the RETAINED OVA (verified sha256)

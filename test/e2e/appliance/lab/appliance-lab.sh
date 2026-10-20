@@ -3171,6 +3171,14 @@ vsheet() { local name="$1" from="$2" to="$3" files=()
   (( ${#files[@]} )) || return 0
   montage "${files[@]}" -tile 6x -geometry 360x200+3+3 -label '%t' -pointsize 9 "$EV/$name.png" 2>/dev/null || true; }
 vtime() { awk -F'\t' 'END{print $1+0}' "$EV/V-frames/events.tsv" 2>/dev/null || echo 0; }
+# vocr FROM TO — OCR every-other VGA frame captured in [FROM,TO) s and emit the
+# concatenated text (space-collapsed). The splash MESSAGE is rendered by Plymouth
+# on its own surface, not into /dev/vcs1 (the vcs probe sees the brand + systemd
+# lines, never the display-message text), so reading what the splash actually
+# SHOWS needs the pixels. The VGA text is clean monospace, so tesseract is exact.
+vocr() { local from="$1" to="$2" fr
+  awk -F'\t' -v a="$from" -v b="$to" -v d="$EV/V-frames" '$2>=a && $2<b && (NR%2==1){printf "%s/%05d_%08.2f.png\n",d,$1,$2}' "$EV/V-frames/frames.tsv" 2>/dev/null \
+  | while IFS= read -r fr; do [ -f "$fr" ] && tesseract "$fr" - 2>/dev/null; done | tr -s ' \t\n' ' '; }
 vstray_check() { local id="$1" name="$2" f="$3" s; s="$(vstray "$f" || true)"
   if [[ -z "$s" ]]; then vcheck "$id" "$name" pass "tty1 ($(sed -n 's/^---size //p' "$f")) holds only the console UI"
   else vcheck "$id" "$name" fail "stray text on tty1: $(printf '%s' "$s" | head -5 | tr '\n' '|' | cut -c1-400)"; fi; }
@@ -3290,6 +3298,29 @@ EOS
   vmark "ready after maintenance reboot"; sleep 20
   f="$EV/V2-tty.txt"; vtty "$f"; vstray_check V2 tty1-after-reboot-with-failures "$f"; vkdmode_check V2 tty1-text-mode "$f"
   vesc_judge
+  # Owner #1528 (comment 6295975528): end-to-end proof the failed-unit warning is
+  # DISPLAYED on the live splash, not merely that the script carries the logic.
+  # lab-console-fail.service is failed from early boot; OCR the frames while it was
+  # failed AND the splash was up ([splash window open, first Esc)) and require
+  # "Service failed:". The healthy control OCRs the clean first boot ([0,
+  # maintenance reboot)) — the OK line shown, no false warning. This is RED on the
+  # pre-fix OVA (the splash showed "Starting system services" the whole window) and
+  # GREEN once the gate keys on the failed unit, not on is-system-running==degraded.
+  if command -v tesseract >/dev/null; then
+    v1end="$(awk -F'\t' '/maintenance reboot requested/{print $1; exit}' "$EV/V-frames/events.tsv" 2>/dev/null || echo 100)"
+    wopen="$(awk -F'\t' '/slow unit running \(splash window open\)/{print $1; exit}' "$EV/V-frames/events.tsv" 2>/dev/null || echo 0)"
+    wesc="$(awk -F'\t' '$3=="Esc pressed"{print $1; exit}' "$EV/V-frames/events.tsv" 2>/dev/null || echo 999999)"
+    hctl="$(vocr 0 "$v1end")"; printf '%s\n' "$hctl" > "$EV/V1-splash-ocr.txt"
+    v2ocr="$(vocr "$wopen" "$wesc")"; printf '%s\n' "$v2ocr" > "$EV/V2-splash-ocr.txt"
+    if printf '%s' "$hctl" | grep -qi 'starting system services'; then
+      if printf '%s' "$hctl" | grep -qi 'service failed'; then vcheck V2 splash-healthy-control fail "a failure warning appeared on the clean first boot (no unit was injected): V1-splash-ocr.txt"
+      else vcheck V2 splash-healthy-control pass "clean first boot: the live splash displayed 'Starting system services' and NO failure warning (OCR; V1-splash-ocr.txt)"; fi
+    else vcheck V2 splash-healthy-control info "OCR could not read the first-boot splash status line (tool/capture issue, not a product verdict); V1-splash-ocr.txt"; fi
+    if printf '%s' "$v2ocr" | grep -qiE 'service failed|starting system services|esc'; then
+      if printf '%s' "$v2ocr" | grep -qi 'service failed'; then vcheck V2 splash-names-failed-unit pass "the LIVE splash displayed a failed-unit warning while a unit was failed (OCR of [$wopen,$wesc) s; V2-splash-ocr.txt): $(printf '%s' "$v2ocr" | grep -ioE 'service failed[: ][a-z0-9.+ ()-]{0,40}' | head -1)"
+      else vcheck V2 splash-names-failed-unit fail "the live splash did NOT show a failed-unit warning while a unit was failed — OCR read the splash status line but found no 'Service failed'. This is the #1528 display gap; RED until the gate keys on the failed unit, not is-system-running; V2-splash-ocr.txt"; fi
+    else vcheck V2 splash-names-failed-unit info "OCR could not read the splash status line in the failure window [$wopen,$wesc) (tool/capture issue, not a product verdict); V2-splash-ocr.txt"; fi
+  else vcheck V2 splash-names-failed-unit info "tesseract not installed on this runner; OCR display check skipped"; fi
   # V3 after boot: kernel messages and /dev/console output while the console UI is up.
   gpriv --timeout 300 > "$EV/V3-writes.txt" 2>&1 <<'EOS' || true
 echo "<6>LAB-KMSG-POSTBOOT info" > /dev/kmsg; echo "<3>LAB-KMSG-POSTBOOT err" > /dev/kmsg
