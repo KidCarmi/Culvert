@@ -13,6 +13,13 @@ package catgroup
 //     reaches policy evaluation.
 //   - the IMMUTABILITY contract: a published *Group edited in place is a data
 //     race that -race observes only if a reader happens to be running.
+//
+// Note on shape: each republish case is a named top-level function rather than
+// a closure inside one table, and the AST visitor is its own function. Both
+// splits are for gocognit, which the repository's `_test.go` exclusions
+// deliberately do NOT cover (they are funlen/dupl/cyclop/errcheck/unparam) —
+// the same trap internal/urlcat's forward-view test records. Inlining the ten
+// cases scored 60 against the limit of 30.
 
 import (
 	"go/ast"
@@ -41,156 +48,163 @@ func rvSeed(t *testing.T, s *Store, name, cat string) string {
 	return g.ID
 }
 
+// rvMust fails the test if a mutator returned an error. It exists so the ten
+// cases below do not each carry their own `if err != nil { t.Fatal }` — twelve
+// copies of that branch are what put the single-function form at 60.
+func rvMust(t *testing.T, what string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+}
+
 // TestReadView_EveryMutatorRepublishes drives each public mutator and requires
 // its effect to be visible through the lock-free read path immediately.
 func TestReadView_EveryMutatorRepublishes(t *testing.T) {
-	t.Run("Add", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		if matched, resolved := s.MatchesCategoryByID(id, "ai"); !matched || !resolved {
-			t.Fatalf("after Add: matched=%v resolved=%v, want both true", matched, resolved)
-		}
-		if s.GetByName("prod") == nil {
-			t.Error("after Add: GetByName sees nothing")
-		}
-	})
+	t.Run("Add", rvRepublishAdd)
+	t.Run("Update", rvRepublishUpdate)
+	t.Run("UpdateByID", rvRepublishUpdateByID)
+	t.Run("Rename", rvRepublishRename)
+	t.Run("RenameCaseOnly", rvRepublishRenameCaseOnly)
+	t.Run("Delete", rvRepublishDelete)
+	t.Run("DeleteByID", rvRepublishDeleteByID)
+	t.Run("ReplaceAll", rvRepublishReplaceAll)
+	t.Run("Load", rvRepublishLoad)
+	t.Run("restoreSnapshot", rvRepublishRestoreSnapshot)
+}
 
-	t.Run("Update", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		if err := s.Update("Prod", []string{"marketing"}); err != nil {
-			t.Fatalf("Update: %v", err)
-		}
-		if matched, _ := s.MatchesCategoryByID(id, "ai"); matched {
-			t.Error("after Update: the removed category still matches")
-		}
-		if matched, _ := s.MatchesCategoryByID(id, "marketing"); !matched {
-			t.Error("after Update: the added category does not match")
-		}
-	})
+func rvRepublishAdd(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	if matched, resolved := s.MatchesCategoryByID(id, "ai"); !matched || !resolved {
+		t.Fatalf("after Add: matched=%v resolved=%v, want both true", matched, resolved)
+	}
+	if s.GetByName("prod") == nil {
+		t.Error("after Add: GetByName sees nothing")
+	}
+}
 
-	t.Run("UpdateByID", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		if err := s.UpdateByID(id, []string{"messaging"}); err != nil {
-			t.Fatalf("UpdateByID: %v", err)
-		}
-		if matched, _ := s.MatchesCategoryByID(id, "ai"); matched {
-			t.Error("after UpdateByID: the removed category still matches")
-		}
-		if matched, _ := s.MatchesCategoryByID(id, "messaging"); !matched {
-			t.Error("after UpdateByID: the added category does not match")
-		}
-	})
+func rvRepublishUpdate(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	rvMust(t, "Update", s.Update("Prod", []string{"marketing"}))
+	if matched, _ := s.MatchesCategoryByID(id, "ai"); matched {
+		t.Error("after Update: the removed category still matches")
+	}
+	if matched, _ := s.MatchesCategoryByID(id, "marketing"); !matched {
+		t.Error("after Update: the added category does not match")
+	}
+}
 
-	t.Run("Rename", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		if _, err := s.Rename(id, "Staging"); err != nil {
-			t.Fatalf("Rename: %v", err)
-		}
-		if s.GetByName("prod") != nil {
-			t.Error("after Rename: the old name still resolves")
-		}
-		g := s.GetByName("staging")
-		if g == nil {
-			t.Fatal("after Rename: the new name does not resolve")
-		}
-		if g.Name != "Staging" {
-			t.Errorf("after Rename: published display name = %q, want %q", g.Name, "Staging")
-		}
-		// The ID index must survive a rename — that is what makes ID
-		// addressing rename-safe.
-		if _, resolved := s.MatchesCategoryByID(id, "ai"); !resolved {
-			t.Error("after Rename: the id no longer resolves")
-		}
-	})
+func rvRepublishUpdateByID(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	rvMust(t, "UpdateByID", s.UpdateByID(id, []string{"messaging"}))
+	if matched, _ := s.MatchesCategoryByID(id, "ai"); matched {
+		t.Error("after UpdateByID: the removed category still matches")
+	}
+	if matched, _ := s.MatchesCategoryByID(id, "messaging"); !matched {
+		t.Error("after UpdateByID: the added category does not match")
+	}
+}
 
-	t.Run("RenameCaseOnly", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		if _, err := s.Rename(id, "PROD"); err != nil {
-			t.Fatalf("Rename: %v", err)
-		}
-		g := s.GetByName("prod")
-		if g == nil {
-			t.Fatal("after case-only Rename: the name does not resolve")
-		}
-		if g.Name != "PROD" {
-			t.Errorf("after case-only Rename: display name = %q, want %q", g.Name, "PROD")
-		}
-	})
+func rvRepublishRename(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	_, err := s.Rename(id, "Staging")
+	rvMust(t, "Rename", err)
+	if s.GetByName("prod") != nil {
+		t.Error("after Rename: the old name still resolves")
+	}
+	g := s.GetByName("staging")
+	if g == nil {
+		t.Fatal("after Rename: the new name does not resolve")
+	}
+	if g.Name != "Staging" {
+		t.Errorf("after Rename: published display name = %q, want %q", g.Name, "Staging")
+	}
+	// The ID index must survive a rename — that is what makes ID addressing
+	// rename-safe.
+	if _, resolved := s.MatchesCategoryByID(id, "ai"); !resolved {
+		t.Error("after Rename: the id no longer resolves")
+	}
+}
 
-	t.Run("Delete", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		if err := s.Delete("Prod"); err != nil {
-			t.Fatalf("Delete: %v", err)
-		}
-		if _, resolved := s.MatchesCategoryByID(id, "ai"); resolved {
-			t.Error("after Delete: the id still resolves")
-		}
-		if s.GetByName("prod") != nil {
-			t.Error("after Delete: the name still resolves")
-		}
-	})
+func rvRepublishRenameCaseOnly(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	_, err := s.Rename(id, "PROD")
+	rvMust(t, "Rename", err)
+	g := s.GetByName("prod")
+	if g == nil {
+		t.Fatal("after case-only Rename: the name does not resolve")
+	}
+	if g.Name != "PROD" {
+		t.Errorf("after case-only Rename: display name = %q, want %q", g.Name, "PROD")
+	}
+}
 
-	t.Run("DeleteByID", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		if _, err := s.DeleteByID(id); err != nil {
-			t.Fatalf("DeleteByID: %v", err)
-		}
-		if _, resolved := s.MatchesCategoryByID(id, "ai"); resolved {
-			t.Error("after DeleteByID: the id still resolves")
-		}
-	})
+func rvRepublishDelete(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	rvMust(t, "Delete", s.Delete("Prod"))
+	if _, resolved := s.MatchesCategoryByID(id, "ai"); resolved {
+		t.Error("after Delete: the id still resolves")
+	}
+	if s.GetByName("prod") != nil {
+		t.Error("after Delete: the name still resolves")
+	}
+}
 
-	t.Run("ReplaceAll", func(t *testing.T) {
-		s := New()
-		rvSeed(t, s, "Prod", "ai")
-		s.ReplaceAll([]Group{{ID: "fixed-id", Name: "Only", Categories: []string{"marketing"}}})
-		if s.GetByName("prod") != nil {
-			t.Error("after ReplaceAll: a replaced group still resolves")
-		}
-		if matched, resolved := s.MatchesCategoryByID("fixed-id", "marketing"); !matched || !resolved {
-			t.Fatalf("after ReplaceAll: matched=%v resolved=%v, want both true", matched, resolved)
-		}
-	})
+func rvRepublishDeleteByID(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	_, err := s.DeleteByID(id)
+	rvMust(t, "DeleteByID", err)
+	if _, resolved := s.MatchesCategoryByID(id, "ai"); resolved {
+		t.Error("after DeleteByID: the id still resolves")
+	}
+}
 
-	t.Run("Load", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "groups.json")
-		src := New()
-		rvSeed(t, src, "Prod", "ai")
-		src.SetPathForTest(path)
-		if err := src.SaveErr(); err != nil {
-			t.Fatalf("SaveErr: %v", err)
-		}
-		dst := New()
-		if err := dst.Load(path); err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if dst.GetByName("prod") == nil {
-			t.Error("after Load: the loaded group does not resolve")
-		}
-	})
+func rvRepublishReplaceAll(t *testing.T) {
+	s := New()
+	rvSeed(t, s, "Prod", "ai")
+	s.ReplaceAll([]Group{{ID: "fixed-id", Name: "Only", Categories: []string{"marketing"}}})
+	if s.GetByName("prod") != nil {
+		t.Error("after ReplaceAll: a replaced group still resolves")
+	}
+	if matched, resolved := s.MatchesCategoryByID("fixed-id", "marketing"); !matched || !resolved {
+		t.Fatalf("after ReplaceAll: matched=%v resolved=%v, want both true", matched, resolved)
+	}
+}
 
-	t.Run("restoreSnapshot", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		snap := s.List()
-		if err := s.Update("Prod", []string{"marketing"}); err != nil {
-			t.Fatalf("Update: %v", err)
-		}
-		s.restoreSnapshot(snap, s.Version())
-		if matched, _ := s.MatchesCategoryByID(id, "ai"); !matched {
-			t.Error("after restoreSnapshot: the restored category does not match")
-		}
-		if matched, _ := s.MatchesCategoryByID(id, "marketing"); matched {
-			t.Error("after restoreSnapshot: the rolled-back category still matches")
-		}
-	})
+func rvRepublishLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "groups.json")
+	src := New()
+	rvSeed(t, src, "Prod", "ai")
+	src.SetPathForTest(path)
+	rvMust(t, "SaveErr", src.SaveErr())
+
+	dst := New()
+	rvMust(t, "Load", dst.Load(path))
+	if dst.GetByName("prod") == nil {
+		t.Error("after Load: the loaded group does not resolve")
+	}
+}
+
+func rvRepublishRestoreSnapshot(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	snap := s.List()
+	rvMust(t, "Update", s.Update("Prod", []string{"marketing"}))
+
+	s.restoreSnapshot(snap, s.Version())
+	if matched, _ := s.MatchesCategoryByID(id, "ai"); !matched {
+		t.Error("after restoreSnapshot: the restored category does not match")
+	}
+	if matched, _ := s.MatchesCategoryByID(id, "marketing"); matched {
+		t.Error("after restoreSnapshot: the rolled-back category still matches")
+	}
 }
 
 // TestReadView_FailedPersistRollsBackTheView pins the republish on the
@@ -218,55 +232,6 @@ func TestReadView_FailedPersistRollsBackTheView(t *testing.T) {
 // 2. The republish contract, structurally.
 // ---------------------------------------------------------------------------
 
-// rvGroupWriters parses src and returns, from it, the names of the functions
-// that WRITE the authoritative group tree (an assignment to s.groups, an
-// assignment into it, or a delete from it) and the subset of those that call
-// publishLocked.
-func rvGroupWriters(t *testing.T, src string) (writers, publishers []string) {
-	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "src.go", src, 0)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		writes, publishes := false, false
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.AssignStmt:
-				for _, lhs := range x.Lhs {
-					if rvIsGroupsTarget(lhs) {
-						writes = true
-					}
-				}
-			case *ast.CallExpr:
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "publishLocked" {
-					publishes = true
-				}
-				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "delete" && len(x.Args) > 0 {
-					if rvIsGroupsField(x.Args[0]) {
-						writes = true
-					}
-				}
-			}
-			return true
-		})
-		if writes {
-			writers = append(writers, fn.Name.Name)
-		}
-		if writes && publishes {
-			publishers = append(publishers, fn.Name.Name)
-		}
-	}
-	sort.Strings(writers)
-	sort.Strings(publishers)
-	return writers, publishers
-}
-
 // rvIsGroupsField reports whether e is the selector `<recv>.groups`.
 func rvIsGroupsField(e ast.Expr) bool {
 	sel, ok := e.(*ast.SelectorExpr)
@@ -280,6 +245,74 @@ func rvIsGroupsTarget(e ast.Expr) bool {
 	}
 	ix, ok := e.(*ast.IndexExpr)
 	return ok && rvIsGroupsField(ix.X)
+}
+
+// rvAssignsGroups reports whether any left-hand side of x writes the group tree.
+func rvAssignsGroups(x *ast.AssignStmt) bool {
+	for _, lhs := range x.Lhs {
+		if rvIsGroupsTarget(lhs) {
+			return true
+		}
+	}
+	return false
+}
+
+// rvIsPublishCall reports whether c is a call to publishLocked.
+func rvIsPublishCall(c *ast.CallExpr) bool {
+	sel, ok := c.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "publishLocked"
+}
+
+// rvIsGroupsDelete reports whether c is `delete(<recv>.groups, k)`.
+func rvIsGroupsDelete(c *ast.CallExpr) bool {
+	id, ok := c.Fun.(*ast.Ident)
+	return ok && id.Name == "delete" && len(c.Args) > 0 && rvIsGroupsField(c.Args[0])
+}
+
+// rvScanFunc classifies one function body: whether it writes the authoritative
+// group tree and whether it publishes the view.
+func rvScanFunc(fn *ast.FuncDecl) (writes, publishes bool) {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			writes = writes || rvAssignsGroups(x)
+		case *ast.CallExpr:
+			publishes = publishes || rvIsPublishCall(x)
+			writes = writes || rvIsGroupsDelete(x)
+		}
+		return true
+	})
+	return writes, publishes
+}
+
+// rvGroupWriters parses src and returns, from it, the names of the functions
+// that WRITE the authoritative group tree (an assignment to s.groups, an
+// assignment into it, or a delete from it) and the subset of those that also
+// call publishLocked.
+func rvGroupWriters(t *testing.T, src string) (writers, publishers []string) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "src.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		writes, publishes := rvScanFunc(fn)
+		if !writes {
+			continue
+		}
+		writers = append(writers, fn.Name.Name)
+		if publishes {
+			publishers = append(publishers, fn.Name.Name)
+		}
+	}
+	sort.Strings(writers)
+	sort.Strings(publishers)
+	return writers, publishers
 }
 
 // rvPackageWriters runs rvGroupWriters over every non-test source file of the
@@ -404,53 +437,52 @@ func (s *Store) ReplaceAll(groups []Group) {
 // only sees it when the two happen to overlap. Asserting the held value is
 // UNCHANGED turns it into a deterministic failure.
 func TestReadView_PublishedGroupsAreNeverMutatedInPlace(t *testing.T) {
-	t.Run("Update", func(t *testing.T) {
-		s := New()
-		rvSeed(t, s, "Prod", "ai")
-		held := s.GetByName("Prod")
-		if err := s.Update("Prod", []string{"marketing"}); err != nil {
-			t.Fatalf("Update: %v", err)
-		}
-		if !held.catSet["ai"] || held.catSet["marketing"] {
-			t.Error("Update edited a published group in place")
-		}
-	})
+	t.Run("Update", rvNoInPlaceUpdate)
+	t.Run("UpdateByID", rvNoInPlaceUpdateByID)
+	t.Run("Rename", rvNoInPlaceRename)
+	t.Run("RenameCaseOnly", rvNoInPlaceRenameCaseOnly)
+}
 
-	t.Run("UpdateByID", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		held := s.GetByName("Prod")
-		if err := s.UpdateByID(id, []string{"marketing"}); err != nil {
-			t.Fatalf("UpdateByID: %v", err)
-		}
-		if !held.catSet["ai"] || held.catSet["marketing"] {
-			t.Error("UpdateByID edited a published group in place")
-		}
-	})
+func rvNoInPlaceUpdate(t *testing.T) {
+	s := New()
+	rvSeed(t, s, "Prod", "ai")
+	held := s.GetByName("Prod")
+	rvMust(t, "Update", s.Update("Prod", []string{"marketing"}))
+	if !held.catSet["ai"] || held.catSet["marketing"] {
+		t.Error("Update edited a published group in place")
+	}
+}
 
-	t.Run("Rename", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		held := s.GetByName("Prod")
-		if _, err := s.Rename(id, "Staging"); err != nil {
-			t.Fatalf("Rename: %v", err)
-		}
-		if held.Name != "Prod" {
-			t.Errorf("Rename edited a published group in place: held name = %q", held.Name)
-		}
-	})
+func rvNoInPlaceUpdateByID(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	held := s.GetByName("Prod")
+	rvMust(t, "UpdateByID", s.UpdateByID(id, []string{"marketing"}))
+	if !held.catSet["ai"] || held.catSet["marketing"] {
+		t.Error("UpdateByID edited a published group in place")
+	}
+}
 
-	t.Run("RenameCaseOnly", func(t *testing.T) {
-		s := New()
-		id := rvSeed(t, s, "Prod", "ai")
-		held := s.GetByName("Prod")
-		if _, err := s.Rename(id, "PROD"); err != nil {
-			t.Fatalf("Rename: %v", err)
-		}
-		if held.Name != "Prod" {
-			t.Errorf("case-only Rename edited a published group in place: held name = %q", held.Name)
-		}
-	})
+func rvNoInPlaceRename(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	held := s.GetByName("Prod")
+	_, err := s.Rename(id, "Staging")
+	rvMust(t, "Rename", err)
+	if held.Name != "Prod" {
+		t.Errorf("Rename edited a published group in place: held name = %q", held.Name)
+	}
+}
+
+func rvNoInPlaceRenameCaseOnly(t *testing.T) {
+	s := New()
+	id := rvSeed(t, s, "Prod", "ai")
+	held := s.GetByName("Prod")
+	_, err := s.Rename(id, "PROD")
+	rvMust(t, "Rename", err)
+	if held.Name != "Prod" {
+		t.Errorf("case-only Rename edited a published group in place: held name = %q", held.Name)
+	}
 }
 
 // TestReadView_ReplaceAllDoesNotAliasTheCallerSlice pins the ownership half:
@@ -520,10 +552,30 @@ func rvScanByID(s *Store, id, category string) (matched, resolved bool) {
 	return false, false
 }
 
+// rvIDCorpus and rvCatCorpus are the inputs an index gets wrong: an empty id,
+// an unknown id, an empty category, mixed case, and a category no group holds.
+var (
+	rvIDCorpus  = []string{"", "id-a", "id-b", "id-missing", "ID-A"}
+	rvCatCorpus = []string{"", "ai", "AI", "marketing", "messaging", "social", "unknown"}
+)
+
+// rvCheckAgainstOracle compares every corpus pair against the scan oracle.
+func rvCheckAgainstOracle(t *testing.T, s *Store, stage string) {
+	t.Helper()
+	for _, id := range rvIDCorpus {
+		for _, cat := range rvCatCorpus {
+			gotM, gotR := s.MatchesCategoryByID(id, cat)
+			wantM, wantR := rvScanByID(s, id, cat)
+			if gotM != wantM || gotR != wantR {
+				t.Errorf("%s: MatchesCategoryByID(%q, %q) = (%v, %v), scan oracle = (%v, %v)",
+					stage, id, cat, gotM, gotR, wantM, wantR)
+			}
+		}
+	}
+}
+
 // TestReadView_ByIDDifferentialAgainstTheScan compares the indexed answer with
-// the pre-fix scan over a corpus that includes the cases an index gets wrong:
-// an empty id, an unknown id, an empty category, mixed case, a group with no
-// id at all, and the state after each mutator.
+// the pre-fix scan after each mutator, including a group carrying no id at all.
 func TestReadView_ByIDDifferentialAgainstTheScan(t *testing.T) {
 	s := New()
 	s.ReplaceAll([]Group{
@@ -531,41 +583,57 @@ func TestReadView_ByIDDifferentialAgainstTheScan(t *testing.T) {
 		{ID: "id-b", Name: "Beta", Categories: []string{"messaging"}},
 		{ID: "", Name: "NoID", Categories: []string{"social"}},
 	})
+	rvCheckAgainstOracle(t, s, "after ReplaceAll")
 
-	ids := []string{"", "id-a", "id-b", "id-missing", "ID-A"}
-	cats := []string{"", "ai", "AI", "marketing", "messaging", "social", "unknown"}
+	rvMust(t, "UpdateByID", s.UpdateByID("id-a", []string{"social"}))
+	rvCheckAgainstOracle(t, s, "after UpdateByID")
 
-	check := func(stage string) {
-		t.Helper()
-		for _, id := range ids {
-			for _, cat := range cats {
-				gotM, gotR := s.MatchesCategoryByID(id, cat)
-				wantM, wantR := rvScanByID(s, id, cat)
-				if gotM != wantM || gotR != wantR {
-					t.Errorf("%s: MatchesCategoryByID(%q, %q) = (%v, %v), scan oracle = (%v, %v)",
-						stage, id, cat, gotM, gotR, wantM, wantR)
-				}
-			}
+	_, err := s.Rename("id-b", "Beta Renamed")
+	rvMust(t, "Rename", err)
+	rvCheckAgainstOracle(t, s, "after Rename")
+
+	_, err = s.DeleteByID("id-a")
+	rvMust(t, "DeleteByID", err)
+	rvCheckAgainstOracle(t, s, "after DeleteByID")
+
+	_, err = s.Add("Gamma", []string{"ai"})
+	rvMust(t, "Add", err)
+	rvCheckAgainstOracle(t, s, "after Add")
+}
+
+// rvHammerReaders drives the lock-free read paths until stop closes.
+func rvHammerReaders(s *Store, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		_, _ = s.MatchesCategoryByID("id1", "ai")
+		_ = s.MatchesCategory("Prod", "ai")
+		_ = s.GetByName("prod")
+		_ = s.GetByID("id1")
+		_ = s.Revision()
+	}
+}
+
+// rvHammerWriters drives every writer class once per iteration.
+func rvHammerWriters(s *Store, iterations int) {
+	for i := 0; i < iterations; i++ {
+		switch i % 5 {
+		case 0:
+			_ = s.Update("Prod", []string{"ai", "marketing"})
+		case 1:
+			_ = s.UpdateByID("id1", []string{"ai"})
+		case 2:
+			_, _ = s.Rename("id1", "Prod")
+		case 3:
+			s.ReplaceAll([]Group{{ID: "id1", Name: "Prod", Categories: []string{"ai"}}})
+		case 4:
+			_, _ = s.Add("Transient", []string{"social"})
+			_ = s.Delete("Transient")
 		}
 	}
-
-	check("after ReplaceAll")
-	if err := s.UpdateByID("id-a", []string{"social"}); err != nil {
-		t.Fatalf("UpdateByID: %v", err)
-	}
-	check("after UpdateByID")
-	if _, err := s.Rename("id-b", "Beta Renamed"); err != nil {
-		t.Fatalf("Rename: %v", err)
-	}
-	check("after Rename")
-	if _, err := s.DeleteByID("id-a"); err != nil {
-		t.Fatalf("DeleteByID: %v", err)
-	}
-	check("after DeleteByID")
-	if _, err := s.Add("Gamma", []string{"ai"}); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-	check("after Add")
 }
 
 // TestReadView_ConcurrentReadersAndMutators is the -race instrument: lock-free
@@ -583,39 +651,14 @@ func TestReadView_ConcurrentReadersAndMutators(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				_, _ = s.MatchesCategoryByID("id1", "ai")
-				_ = s.MatchesCategory("Prod", "ai")
-				_ = s.GetByName("prod")
-				_ = s.GetByID("id1")
-				_ = s.Revision()
-			}
+			rvHammerReaders(s, stop)
 		}()
 	}
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 2000; i++ {
-			switch i % 5 {
-			case 0:
-				_ = s.Update("Prod", []string{"ai", "marketing"})
-			case 1:
-				_ = s.UpdateByID("id1", []string{"ai"})
-			case 2:
-				_, _ = s.Rename("id1", "Prod")
-			case 3:
-				s.ReplaceAll([]Group{{ID: "id1", Name: "Prod", Categories: []string{"ai"}}})
-			case 4:
-				_, _ = s.Add("Transient", []string{"social"})
-				_ = s.Delete("Transient")
-			}
-		}
+		rvHammerWriters(s, 2000)
 		close(stop)
 	}()
 
