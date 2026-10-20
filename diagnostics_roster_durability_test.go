@@ -589,11 +589,13 @@ func assertRosterTargetRow(t *testing.T, c *Config, name string, warn bool) {
 func TestRosterTargetProblem_IsReadOnly(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "missing")
 	p := filepath.Join(dir, "ui_users.json")
-	if rosterTargetProblem(p, nil, true, true, probeRosterTarget(p, rosterWrittenDigest{}), true) == "" {
+	f := rosterDurabilityFacts{configured: true, persisted: true, landed: true}
+	f.applyProbe(probeRosterTarget(p, rosterWrittenDigest{}))
+	if f.unusable == "" {
 		t.Fatal("missing parent reported as usable")
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("rosterTargetProblem created %s (stat err %v)", dir, err)
+		t.Errorf("the probe created %s (stat err %v)", dir, err)
 	}
 }
 

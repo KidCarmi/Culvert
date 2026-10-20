@@ -885,6 +885,10 @@ const adminRosterDurabilityCode = "admin_roster_durability"
 // Pinned by TestWall_RosterOKMessagesStateEvidenceNotCapability.
 const rosterDurabilityLandedOK = "the last admin roster save was written to disk and the file is unchanged since"
 
+// rosterDurabilitySetupIncomplete is the row's message, admin and viewer
+// alike, before initial setup: it names no roster fact.
+const rosterDurabilitySetupIncomplete = "initial setup is not complete; there are no admin credentials to persist yet"
+
 // Fixed viewer/operator renderings of the admin-roster durability row
 // (SEC-DIAG-ROSTER-1 policy, PR #1545). They are CONSTANTS carrying no count
 // and no second-factor or single-use-credential posture.
@@ -918,21 +922,37 @@ const (
 // rosterDurabilityFacts is one read of the state the durability row reports.
 // configured is the setup-complete gate (cfg.IsConfigured), NOT a roster read:
 // before setup there is no credential to lose.
+//
+// Every field is an INDEPENDENT fact. Which one the row shows is decided in
+// exactly one place, rosterRowPrecedence, walked by both the admin and the
+// viewer rendering (Codex P2 4326470080 on PR #1601: a refused save after a
+// restart was hidden behind "not verified yet" by a pairwise ordering in each
+// renderer). Nothing here pre-ranks one fact over another.
 type rosterDurabilityFacts struct {
 	configured bool
 	persisted  bool // a roster file (-ui-users-file) is configured
-	// targetProblem is the admin-only reason a CONFIGURED roster file is
-	// unusable or unproven (failed startup load, a problem the live probe
-	// found, or no write since startup — rosterTargetNotYetVerified); "" only
-	// when a real write to it has landed and still holds.
-	targetProblem string
-	localAdmin    bool // a local account can sign in as admin without the IdP
-	notDurable    int64
-	refused       int64
-	degraded      int64
+	localAdmin bool // a local account can sign in as admin without the IdP
+	notDurable int64
+
+	notResponding     bool   // the live probe did not answer within rosterProbeWait
+	unusable          string // why the configured target is unusable ("" when usable): load, stat or identity read
+	missing           bool   // the configured file does not exist
+	landed            bool   // a roster write has landed at the path in this process
+	dirUnsynced       bool   // the last landed write's directory could not be synced
+	blocked           bool   // no save can replace the file (immutable, append-only, a mount point)
+	parentNotWritable bool   // the advisory directory checks see a problem
+	replaced          bool   // the file's content is not what Culvert last wrote
+	ownerRefusing     bool   // an identical file now owned by another account the next rename may be refused over
+	changedExternally bool   // not the untouched inode Culvert last landed
+
+	// refused and degraded count failures since the last landed write (since
+	// startup before the first one): a refused admin change, a failed
+	// login-path write. refusedTotal and degradedTotal are since startup.
+	refused, degraded           int64
+	refusedTotal, degradedTotal int64
 }
 
-// rosterTargetFirstWritePending is the targetProblem of a configured roster
+// rosterTargetFirstWritePending is the admin message of a configured roster
 // file that does not exist yet and has not been written since startup: no
 // write has proven the path, and its accounts live only in memory. Named so
 // adminRow can give it its own remedy (restarting does not create the file).
@@ -948,7 +968,7 @@ const rosterTargetFirstWritePending = "the configured roster file does not exist
 const rosterTargetNotYetVerified = "the admin roster has not been written since startup; the next admin " +
 	"account change verifies that it persists"
 
-// rosterTargetDisappeared is the targetProblem when a write to the configured
+// rosterTargetDisappeared is the admin message when a write to the configured
 // roster file landed earlier (a save) but the file no
 // longer exists (Codex P2 4317024199 on PR #1601): it was deleted or moved
 // away externally. The recorded write evidence is stale; the roster in use is
@@ -957,7 +977,7 @@ const rosterTargetDisappeared = "the configured roster file no longer exists: it
 	"was last written, so the roster in use is held only in memory and accounts that exist only in it are LOST " +
 	"on restart"
 
-// rosterTargetReplaced is the targetProblem when the configured roster file no
+// rosterTargetReplaced is the admin message when the configured roster file no
 // longer holds the bytes Culvert last wrote to it (Codex P2 4317365500 on PR
 // #1601): it was replaced or edited outside Culvert, so the write evidence is
 // stale and a restart would load a roster other than the one in use.
@@ -965,7 +985,7 @@ const rosterTargetReplaced = "the configured roster file on disk no longer match
 	"replaced or edited outside Culvert after Culvert last wrote it, and a restart loads the file as it is now, " +
 	"which may restore revoked accounts or credentials, or drop changes made since"
 
-// rosterTargetNotResponding is the targetProblem when the row's live probe of
+// rosterTargetNotResponding is the admin message when the row's live probe of
 // the roster's storage did not answer within rosterProbeWait (Codex P2
 // 4319224642 on PR #1601): a stalled NFS or FUSE mount. Persistence is not
 // verified, so the row is not ok; the request returns without starting
@@ -973,7 +993,7 @@ const rosterTargetReplaced = "the configured roster file on disk no longer match
 const rosterTargetNotResponding = "the storage holding the configured roster file is not responding (a " +
 	"filesystem check of it did not complete), so it is not verified that admin account changes can be saved"
 
-// rosterParentNotWritable is the targetProblem when the directory holding the
+// rosterParentNotWritable is the admin message when the directory holding the
 // roster no longer lets this process create and rename the save's temp file
 // (Codex P2 4319224648 on PR #1601): its mode bits or ACL changed, or the
 // volume was remounted read-only, after the last landed write.
@@ -981,14 +1001,14 @@ const rosterParentNotWritable = "the directory holding the configured roster fil
 	"process create and replace files in it (its permissions or ACL, or a read-only mount), so the next admin " +
 	"account change will be refused when it is saved"
 
-// rosterTargetDirNotSynced is the targetProblem when the last roster write
+// rosterTargetDirNotSynced is the admin message when the last roster write
 // landed but its directory could not be synced afterwards — for example a
 // write+search-only (0300) directory that cannot be opened for the fsync
 // (Codex P1 4319946917 on PR #1601): the write may not survive a power loss.
 const rosterTargetDirNotSynced = "the last write to the configured roster file landed, but its directory could " +
 	"not be synced to disk afterwards, so that write may not survive a power loss"
 
-// rosterTargetImmutable is the targetProblem when rename(2) would refuse to
+// rosterTargetImmutable is the admin message when rename(2) would refuse to
 // replace the roster file itself — immutable or append-only, a mount point,
 // or in an immutable or append-only directory (fileutil.ReplacementBlocked;
 // Codex P2 4319694761 on PR #1601) — so no save can land, whatever was
@@ -997,7 +1017,7 @@ const rosterTargetImmutable = "the configured roster file cannot be replaced by 
 	"append-only (chattr +i/+a), a mount point, or in an immutable or append-only directory, so every admin " +
 	"account change will be refused when it is saved"
 
-// rosterTargetChangedExternally is the targetProblem when the roster file
+// rosterTargetChangedExternally is the admin message when the roster file
 // still holds exactly what Culvert last saved, with the same owner, but is no
 // longer the untouched inode that save landed: a new inode (an identical
 // re-copy) or a changed ctime (a touch, chmod, ACL, security label or xattr
@@ -1006,7 +1026,7 @@ const rosterTargetImmutable = "the configured roster file cannot be replaced by 
 const rosterTargetChangedExternally = "the roster file was changed or replaced outside Culvert since its last " +
 	"save; persistence is not re-verified until the next admin account change"
 
-// rosterTargetOwnerChanged is the targetProblem when the roster file still
+// rosterTargetOwnerChanged is the admin message when the roster file still
 // holds exactly what Culvert last wrote, but now belongs to another account in
 // a way that makes the next save's rename be refused (Codex P2 4317730264 on
 // PR #1601): an identical copy installed by someone else, for example
@@ -1014,67 +1034,144 @@ const rosterTargetChangedExternally = "the roster file was changed or replaced o
 const rosterTargetOwnerChanged = "the configured roster file was replaced by an identical copy owned by another " +
 	"account, so the next admin account change may be refused when it is saved"
 
-// rosterTargetProblem reports why a configured roster path cannot hold the
-// roster, or "" when a write to it has landed in this process, the file is
-// still that write, and the probe sees no problem with the next one (which is
-// not a claim that the next one is authorised: see rosterDurabilityLandedOK). It is PURE: the filesystem facts come from the
-// row's one live probe (pr, from probeRosterTarget via
-// Config.sharedRosterProbe; responded false when the storage did not answer
-// in time), and the write evidence from landed and synced
-// (Config.rosterWriteLanded, Config.rosterWriteSynced). The returned reason
-// never names the path.
-//
-// Existence and file type are not evidence of writability (Codex P2s, PR
-// #1601): a readable roster on a read-only bind mount, in a mode-0555
-// directory, or owned by another user in a sticky directory passes both
-// stats, yet the first mutation's rename over it is refused. "" therefore
-// requires a real save to have landed since the path was configured, the
-// advisory directory checks to see no problem (probeRosterParent), and the
-// file to still be what was written (probeRosterIdentity). Hard problems the probe
-// finds take precedence over the not-verified-yet boot state.
-func rosterTargetProblem(path string, loadErr error, landed, synced bool, pr rosterProbeResult, responded bool) string {
-	switch {
-	case path == "":
-		return ""
-	case loadErr != nil:
-		return "the configured roster file could not be loaded at startup"
-	case !responded:
-		return rosterTargetNotResponding
-	case pr.statProblem != "":
-		return pr.statProblem
-	case pr.blocked:
-		return rosterTargetImmutable
-	case pr.parentProblem != "":
-		return pr.parentProblem
-	case pr.missing && landed:
-		// A write landed, but the file is gone now: the absence is the
-		// current fact and overrides that evidence.
-		return rosterTargetDisappeared
-	case pr.missing:
-		return rosterTargetFirstWritePending
-	case !landed:
-		return rosterTargetNotYetVerified
-	}
-	return landedTargetProblem(pr, synced)
+// rosterRowState is one state the admin_roster_durability row can show.
+type rosterRowState int
+
+const (
+	rosterStateSetupIncomplete rosterRowState = iota + 1
+	rosterStateNoRosterFile
+	rosterStateNotResponding
+	rosterStateRefused
+	rosterStateLoginWritesFailed
+	rosterStateTargetUnusable
+	rosterStateTargetMissing
+	rosterStateReplaced
+	rosterStateOwnerChanged
+	rosterStateImmutable
+	rosterStateParentNotWritable
+	rosterStateChangedExternally
+	rosterStateDirNotSynced
+	rosterStateNotYetVerified
+	rosterStateOK
+)
+
+// rosterRowRank is one entry of rosterRowPrecedence.
+type rosterRowRank struct {
+	state rosterRowState
+	name  string
+	// viewer is the fixed message a caller below admin sees in this state;
+	// "" marks an admin-only state, which the viewer walk skips (the next
+	// active state is what a viewer sees), so it is not an oracle.
+	viewer   string
+	viewerOK bool
 }
 
-// landedTargetProblem is rosterTargetProblem once a write has landed and
-// the file is present: whether it is still the file Culvert wrote, most
-// specific first, then whether its directory was synced.
-func landedTargetProblem(pr rosterProbeResult, synced bool) string {
-	switch {
-	case pr.diskErr != nil:
-		return "the configured roster path cannot be inspected"
-	case pr.disk == rosterDiskReplaced:
-		return rosterTargetReplaced
-	case pr.disk == rosterDiskOwnerChanged:
-		return rosterTargetOwnerChanged
-	case pr.disk == rosterDiskChangedExternally:
-		return rosterTargetChangedExternally
-	case !synced:
-		return rosterTargetDirNotSynced
+// rosterRowPrecedence is THE ordering of every state the row can show, most
+// severe and most actionable first. adminRow and viewerRow both select by
+// walking it (selectRosterRowRank); neither renderer orders states itself,
+// and TestRosterRowPrecedence_EveryPairShowsTheHigherState checks every pair
+// of states, for both renderings, against this list.
+//
+//   - setup incomplete: nothing exists to persist yet.
+//   - no roster file: nothing is persisted at all; every later state
+//     presupposes a configured file.
+//   - storage not responding: no other filesystem fact is known.
+//   - refused saves: a change the operator made did NOT take effect, and
+//     nothing retries it. A fact, not a prediction, so it outranks every
+//     probe finding (whose cause the admin remedy names as well).
+//   - failed login-time writes: a consumed backup code or replay counter may
+//     not survive a restart. Admin-only (SEC-DIAG-ROSTER-1).
+//   - target unusable, then missing: the file cannot hold the roster, or is
+//     gone (accounts only in memory).
+//   - replaced, then owner changed: a restart loads something else, or the
+//     next save may be refused over an identical copy.
+//   - immutable, then directory not writable: problems the live checks see
+//     with the next save (advisory: a pass is no claim).
+//   - changed externally: the last write's evidence no longer stands.
+//   - directory not synced: the weakest gap (the write landed; only a power
+//     loss threatens it), and moot when the file has since changed or gone,
+//     so it ranks below all of those.
+//   - not yet verified: the ordinary boot state, nothing wrong seen.
+//   - ok: the last landed write is on disk, unchanged; always active.
+var rosterRowPrecedence = []rosterRowRank{
+	{rosterStateSetupIncomplete, "setup incomplete", rosterDurabilitySetupIncomplete, true},
+	{rosterStateNoRosterFile, "no roster file", rosterDurabilityViewerNotDurable, false},
+	{rosterStateNotResponding, "storage not responding", rosterDurabilityViewerNotDurable, false},
+	{rosterStateRefused, "refused saves", rosterDurabilityViewerRefused, false},
+	{rosterStateLoginWritesFailed, "failed login-time writes", "", false},
+	{rosterStateTargetUnusable, "target unusable", rosterDurabilityViewerNotDurable, false},
+	{rosterStateTargetMissing, "target missing", rosterDurabilityViewerNotDurable, false},
+	{rosterStateReplaced, "replaced", rosterDurabilityViewerNotDurable, false},
+	{rosterStateOwnerChanged, "owner changed", rosterDurabilityViewerNotDurable, false},
+	{rosterStateImmutable, "immutable", rosterDurabilityViewerNotDurable, false},
+	{rosterStateParentNotWritable, "parent not writable", rosterDurabilityViewerNotDurable, false},
+	{rosterStateChangedExternally, "changed externally", rosterDurabilityViewerNotDurable, false},
+	{rosterStateDirNotSynced, "directory not synced", rosterDurabilityViewerNotDurable, false},
+	{rosterStateNotYetVerified, "not yet verified", rosterDurabilityViewerNotYetVerified, false},
+	{rosterStateOK, "ok", rosterDurabilityViewerConfigured, true},
+}
+
+// stateActive reports whether the facts put the row in state s. Each case
+// reads its own fact only: ranking is rosterRowPrecedence's job.
+func (f rosterDurabilityFacts) stateActive(s rosterRowState) bool {
+	switch s {
+	case rosterStateSetupIncomplete:
+		return !f.configured
+	case rosterStateNoRosterFile:
+		return !f.persisted
+	case rosterStateNotResponding:
+		return f.notResponding
+	case rosterStateRefused:
+		return f.refused > 0
+	case rosterStateLoginWritesFailed:
+		return f.degraded > 0
+	case rosterStateNotYetVerified:
+		return !f.landed
+	case rosterStateOK:
+		return true
 	}
-	return ""
+	return f.targetStateActive(s)
+}
+
+// targetStateActive is stateActive for the states about the roster file and
+// its directory.
+func (f rosterDurabilityFacts) targetStateActive(s rosterRowState) bool {
+	switch s {
+	case rosterStateTargetUnusable:
+		return f.unusable != ""
+	case rosterStateTargetMissing:
+		return f.missing
+	case rosterStateReplaced:
+		return f.replaced
+	case rosterStateOwnerChanged:
+		return f.ownerRefusing
+	case rosterStateImmutable:
+		return f.blocked
+	case rosterStateParentNotWritable:
+		return f.parentNotWritable
+	case rosterStateChangedExternally:
+		return f.changedExternally
+	case rosterStateDirNotSynced:
+		return f.dirUnsynced
+	}
+	return false
+}
+
+// selectRosterRowRank walks rosterRowPrecedence from index from and returns
+// the first active state (for a viewer, the first active state that has a
+// viewer rendering), and its index.
+func (f rosterDurabilityFacts) selectRosterRowRank(viewer bool, from int) (rank rosterRowRank, index int) {
+	for i := from; i < len(rosterRowPrecedence); i++ {
+		r := rosterRowPrecedence[i]
+		if viewer && r.viewer == "" {
+			continue
+		}
+		if f.stateActive(r.state) {
+			return r, i
+		}
+	}
+	last := len(rosterRowPrecedence) - 1
+	return rosterRowPrecedence[last], last
 }
 
 func readRosterDurabilityFacts() rosterDurabilityFacts {
@@ -1083,20 +1180,54 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	}
 	path, loadErr := cfg.rosterPersistTarget()
 	landed, synced := cfg.rosterWriteLanded(), cfg.rosterWriteSynced()
-	var pr rosterProbeResult
-	responded := true
-	if path != "" && loadErr == nil {
-		pr, responded = cfg.sharedRosterProbe(path) // the row's only filesystem access
-	}
-	return rosterDurabilityFacts{
+	refusedBase, degradedBase := cfg.rosterCounterBase()
+	f := rosterDurabilityFacts{
 		configured:    true,
 		persisted:     path != "",
-		targetProblem: rosterTargetProblem(path, loadErr, landed, synced, pr, responded),
 		localAdmin:    cfg.hasLocalAdministrator(),
 		notDurable:    rosterNotDurable.Load(),
-		refused:       rosterPersistRefused.Load(),
-		degraded:      rosterPersistBestEffort.Load(),
+		landed:        landed,
+		dirUnsynced:   landed && !synced,
+		refusedTotal:  rosterPersistRefused.Load(),
+		degradedTotal: rosterPersistBestEffort.Load(),
 	}
+	f.refused = sinceBase(f.refusedTotal, refusedBase)
+	f.degraded = sinceBase(f.degradedTotal, degradedBase)
+	switch {
+	case path == "":
+	case loadErr != nil:
+		f.unusable = "the configured roster file could not be loaded at startup"
+	default:
+		pr, responded := cfg.sharedRosterProbe(path) // the row's only filesystem access
+		f.notResponding = !responded
+		f.applyProbe(pr)
+	}
+	return f
+}
+
+// sinceBase is a counter's growth since base (the whole count when the
+// counter was reset below base).
+func sinceBase(total, base int64) int64 {
+	if total < base {
+		return total
+	}
+	return total - base
+}
+
+// applyProbe copies the live probe's findings into the facts, one fact each.
+func (f *rosterDurabilityFacts) applyProbe(pr rosterProbeResult) {
+	switch {
+	case pr.statProblem != "":
+		f.unusable = pr.statProblem
+	case pr.diskErr != nil:
+		f.unusable = "the configured roster path cannot be inspected"
+	}
+	f.missing = pr.missing
+	f.blocked = pr.blocked
+	f.parentNotWritable = pr.parentProblem != ""
+	f.replaced = pr.disk.replaced
+	f.ownerRefusing = pr.disk.ownerRefusing
+	f.changedExternally = pr.disk.changedExternally
 }
 
 // adminRow is the admin_roster_durability row: the evidence on whether
@@ -1111,27 +1242,82 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 // contract by readRosterDurabilityFacts (atomics, config fields and the row's
 // one live, bounded probe of the roster target); nothing writes. This is the
 // ADMIN rendering; redactContractForRole replaces it with viewerRow, rendered
-// from the same facts, below admin. Counts are since process start.
+// from the same facts, below admin. The state is rosterRowPrecedence's.
 func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
-	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagOK}
-	switch {
-	case !f.configured:
-		row.Message = "initial setup is not complete; there are no admin credentials to persist yet"
-	case !f.persisted:
-		row = f.notDurableAdminRow()
-	case f.targetProblem != "":
-		row = targetProblemAdminRow(f.targetProblem)
-	case f.refused == 0 && f.degraded == 0:
-		row.Message = rosterDurabilityLandedOK
-	default:
-		row.Status = diagWarn
-		row.Message = fmt.Sprintf("since this process started, %d admin account change(s) were refused because the "+
-			"roster could not be written (nothing was changed), and %d login-time write(s) failed (a consumed "+
-			"backup code or TOTP replay counter may not survive a restart)", f.refused, f.degraded)
-		row.OperatorAction = "Fix free space or permissions on the data volume (see the storage_write_failed alert), " +
-			"then re-apply the refused change from Administrators — nothing retries it automatically. If login-time " +
-			"writes failed, rotate the affected administrator's TOTP backup codes once the volume is healthy. " +
-			"The counts clear on restart."
+	_, i := f.selectRosterRowRank(false, 0)
+	return f.adminRowAt(i)
+}
+
+// adminRowAt renders the state at rosterRowPrecedence[i] for an admin.
+func (f rosterDurabilityFacts) adminRowAt(i int) OperatorContractCheck {
+	switch rosterRowPrecedence[i].state {
+	case rosterStateSetupIncomplete:
+		return OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagOK, Message: rosterDurabilitySetupIncomplete}
+	case rosterStateNoRosterFile:
+		return f.notDurableAdminRow()
+	case rosterStateNotResponding:
+		return targetProblemAdminRow(rosterTargetNotResponding)
+	case rosterStateRefused, rosterStateLoginWritesFailed:
+		return f.writeFailuresAdminRow(i)
+	case rosterStateTargetUnusable:
+		return targetProblemAdminRow(f.unusable)
+	case rosterStateTargetMissing:
+		if f.landed {
+			// A write landed, but the file is gone now.
+			return targetProblemAdminRow(rosterTargetDisappeared)
+		}
+		return targetProblemAdminRow(rosterTargetFirstWritePending)
+	case rosterStateReplaced:
+		return targetProblemAdminRow(rosterTargetReplaced)
+	case rosterStateOwnerChanged:
+		return targetProblemAdminRow(rosterTargetOwnerChanged)
+	case rosterStateImmutable:
+		return targetProblemAdminRow(rosterTargetImmutable)
+	case rosterStateParentNotWritable:
+		return targetProblemAdminRow(rosterParentNotWritable)
+	case rosterStateChangedExternally:
+		return targetProblemAdminRow(rosterTargetChangedExternally)
+	case rosterStateDirNotSynced:
+		return targetProblemAdminRow(rosterTargetDirNotSynced)
+	case rosterStateNotYetVerified:
+		return targetProblemAdminRow(rosterTargetNotYetVerified)
+	}
+	return OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagOK, Message: rosterDurabilityLandedOK}
+}
+
+// writeFailuresAdminRow is the admin rendering of refused saves
+// (rosterStateRefused) or failed login-time writes
+// (rosterStateLoginWritesFailed) since the last landed write; i is the
+// state's index. It also names the highest-ranked problem below it, so
+// ranking a refusal first does not hide its likely cause.
+func (f rosterDurabilityFacts) writeFailuresAdminRow(i int) OperatorContractCheck {
+	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagWarn}
+	if rosterRowPrecedence[i].state == rosterStateRefused {
+		row.Message = fmt.Sprintf("%d admin account change(s) were refused since the last admin roster save that "+
+			"landed (or since startup, before the first) because the roster could not be written (nothing was "+
+			"changed), and %d login-time write(s) failed in that time (a consumed backup code or TOTP replay "+
+			"counter may not survive a restart); since startup: %d refused, %d failed",
+			f.refused, f.degraded, f.refusedTotal, f.degradedTotal)
+		row.OperatorAction = "Fix free space or permissions on the data volume (see the storage_write_failed " +
+			"alert), then re-apply the refused change from Administrators — nothing retries it automatically. If " +
+			"login-time writes failed, rotate the affected administrator's TOTP backup codes once the volume is " +
+			"healthy. The next admin account change that is saved clears this; the since-startup counts clear on " +
+			"restart."
+	} else {
+		row.Message = fmt.Sprintf("%d login-time write(s) failed since the last admin roster save that landed (or "+
+			"since startup, before the first): a consumed backup code or TOTP replay counter may not survive a "+
+			"restart; since startup: %d failed", f.degraded, f.degradedTotal)
+		row.OperatorAction = "Fix free space or permissions on the data volume (see the storage_write_failed " +
+			"alert), then rotate the affected administrator's TOTP backup codes. The next admin account change " +
+			"that is saved writes the roster in use, including those changes, and clears this; the since-startup " +
+			"count clears on restart."
+	}
+	if _, j := f.selectRosterRowRank(false, i+1); j > i {
+		switch rosterRowPrecedence[j].state {
+		case rosterStateRefused, rosterStateLoginWritesFailed, rosterStateNotYetVerified, rosterStateOK:
+		default:
+			row.OperatorAction += " The live check also reports: " + f.adminRowAt(j).Message + "."
+		}
 	}
 	return row
 }
@@ -1222,27 +1408,18 @@ func (f rosterDurabilityFacts) notDurableAdminRow() OperatorContractCheck {
 	return row
 }
 
-// viewerRow is the rendering for every caller below admin: status from the
-// viewer-safe facts only (not durable, any refusal), a fixed message, no
-// count, and on a warn row the fixed diagnosticsRedactedAction (the contract
-// requires an action on every non-ok row; the real remedy is admin-only).
+// viewerRow is the rendering for every caller below admin: the first state
+// in rosterRowPrecedence that is active and has a viewer rendering (an
+// admin-only state is skipped, so it renders like the state below it), its
+// fixed message, no count, and on a warn row the fixed
+// diagnosticsRedactedAction (the contract requires an action on every non-ok
+// row; the real remedy is admin-only).
 func (f rosterDurabilityFacts) viewerRow() OperatorContractCheck {
-	row := f.adminRow()
-	row.OperatorAction = ""
-	switch {
-	case !f.configured:
-		// The not-configured message names no roster fact; keep it.
-	case f.targetProblem == rosterTargetNotYetVerified:
-		row.Status, row.Message = diagWarn, rosterDurabilityViewerNotYetVerified
-	case !f.persisted, f.targetProblem != "":
-		row.Status, row.Message = diagWarn, rosterDurabilityViewerNotDurable
-	case f.refused > 0:
-		row.Status, row.Message = diagWarn, rosterDurabilityViewerRefused
-	default:
-		row.Status, row.Message = diagOK, rosterDurabilityViewerConfigured
-	}
-	if row.Status != diagOK {
-		row.OperatorAction = diagnosticsRedactedAction
+	r, _ := f.selectRosterRowRank(true, 0)
+	row := OperatorContractCheck{Code: adminRosterDurabilityCode, Status: diagWarn, Message: r.viewer,
+		OperatorAction: diagnosticsRedactedAction}
+	if r.viewerOK {
+		row.Status, row.OperatorAction = diagOK, ""
 	}
 	return row
 }

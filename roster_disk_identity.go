@@ -25,9 +25,10 @@ package main
 // landed and unchanged since: each landed write also records the inode's
 // dev, ino and ctime (inodeStamp; the landed descriptor's fstat AFTER the
 // rename, which itself sets the ctime), and any difference is
-// rosterDiskChangedExternally. The more specific verdicts come first: other
-// content is rosterDiskReplaced, and an identical file now owned by another
-// account where the next rename would be refused is rosterDiskOwnerChanged.
+// rosterDiskFacts.changedExternally. The row's precedence table ranks the
+// more specific facts first: other content (replaced), then an identical
+// file now owned by another account where the next rename would be refused
+// (ownerRefusing).
 // A touch, a chmod, an identical re-copy or an xattr/ACL change therefore
 // warns too, deliberately: persistence is re-verified by the next save. On
 // platforms without an inode stamp (roster_disk_stamp_other.go) only size,
@@ -66,15 +67,15 @@ func digestRosterWrite(path string, data []byte, landed os.FileInfo) rosterWritt
 	return d
 }
 
-// rosterDiskVerdict is what the identity read found.
-type rosterDiskVerdict int
-
-const (
-	rosterDiskSame              rosterDiskVerdict = iota // what Culvert wrote, or nothing to compare, or in flux
-	rosterDiskReplaced                                   // different content: replaced or edited outside Culvert
-	rosterDiskOwnerChanged                               // same content, another owner a save may be refused over
-	rosterDiskChangedExternally                          // same content and owner, but not the untouched inode Culvert landed
-)
+// rosterDiskFacts is what the identity read found. Each field is an
+// independent fact; which one the row shows is decided only by the row's
+// precedence table (rosterRowPrecedence in diagnostics.go), never here. The
+// zero value means what Culvert wrote, nothing to compare, or in flux.
+type rosterDiskFacts struct {
+	replaced          bool // different content: replaced or edited outside Culvert
+	ownerRefusing     bool // another owner, in a way the next save's rename may be refused over
+	changedExternally bool // not the untouched inode Culvert landed (dev, ino or ctime differ)
+}
 
 // beginRosterWrite and endRosterWrite bracket every Culvert write to the
 // roster file (a save, or a corrupt roster's quarantine on load). The

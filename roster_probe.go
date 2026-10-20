@@ -51,12 +51,12 @@ import (
 
 // rosterProbeResult is everything the row learns from the filesystem.
 type rosterProbeResult struct {
-	statProblem   string            // the target or its directory is unusable ("" when usable)
-	missing       bool              // the target is absent under an existing directory
-	blocked       bool              // rename(2) would refuse to replace the target itself
-	parentProblem string            // rosterParentNotWritable, or ""
-	disk          rosterDiskVerdict // the identity read's verdict
-	diskErr       error             // the identity read failed
+	statProblem   string          // the target or its directory is unusable ("" when usable)
+	missing       bool            // the target is absent under an existing directory
+	blocked       bool            // rename(2) would refuse to replace the target itself
+	parentProblem string          // rosterParentNotWritable, or ""
+	disk          rosterDiskFacts // what the identity read found
+	diskErr       error           // the identity read failed
 }
 
 var (
@@ -146,8 +146,8 @@ func (c *Config) runRosterProbe(call *rosterProbeCall) {
 
 // genCheckedRosterProbe runs probeRosterTarget with the identity snapshot it
 // compares against, and accepts its identity verdict only if no Culvert write
-// moved the generation meanwhile (retried once; then "in flux", which is
-// rosterDiskSame).
+// moved the generation meanwhile (retried once; then "in flux", which is the
+// zero rosterDiskFacts).
 func (c *Config) genCheckedRosterProbe(path string) rosterProbeResult {
 	var res rosterProbeResult
 	for attempt := 0; attempt < 2; attempt++ {
@@ -160,7 +160,7 @@ func (c *Config) genCheckedRosterProbe(path string) rosterProbeResult {
 			return res
 		}
 	}
-	res.disk, res.diskErr = rosterDiskSame, nil // in flux: Culvert itself is writing it
+	res.disk, res.diskErr = rosterDiskFacts{}, nil // in flux: Culvert itself is writing it
 	return res
 }
 
@@ -205,34 +205,35 @@ func probeRosterTarget(path string, d rosterWrittenDigest) rosterProbeResult {
 
 // probeRosterIdentity compares the file at path with d (roster_disk_identity.go).
 // dir is the probe's stat of its parent, for the sticky-directory owner logic.
-func probeRosterIdentity(path string, d rosterWrittenDigest, dir os.FileInfo) (rosterDiskVerdict, error) {
+// Each fact is computed on its own; the row's precedence table ranks them.
+func probeRosterIdentity(path string, d rosterWrittenDigest, dir os.FileInfo) (rosterDiskFacts, error) {
+	var out rosterDiskFacts
 	if d.path == "" || d.path != path {
-		return rosterDiskSame, nil
+		return out, nil
 	}
 	f, err := rosterIdentityOpen(path)
 	if err != nil {
-		return rosterDiskSame, err
+		return out, err
 	}
 	defer func() { _ = f.Close() }() // #nosec G104 -- read-only handle
 	fi, err := f.Stat()
 	if err != nil {
-		return rosterDiskSame, err
+		return out, err
+	}
+	if now := ownerOf(fi); d.owner.known && now.known && now.uid != d.owner.uid && renameLikelyRefused(dir, nil, now) {
+		out.ownerRefusing = true
+	}
+	if d.stamp.known && rosterStampOf(fi) != d.stamp {
+		out.changedExternally = true
 	}
 	if !fi.Mode().IsRegular() || fi.Size() != d.size {
-		return rosterDiskReplaced, nil
+		out.replaced = true
+		return out, nil
 	}
 	h := sha256.New()
 	if _, err := io.Copy(h, io.LimitReader(f, d.size+1)); err != nil {
-		return rosterDiskSame, err
+		return rosterDiskFacts{}, err
 	}
-	if !bytes.Equal(h.Sum(nil), d.sum[:]) {
-		return rosterDiskReplaced, nil
-	}
-	if now := ownerOf(fi); d.owner.known && now.known && now.uid != d.owner.uid && renameLikelyRefused(dir, nil, now) {
-		return rosterDiskOwnerChanged, nil
-	}
-	if d.stamp.known && rosterStampOf(fi) != d.stamp {
-		return rosterDiskChangedExternally, nil
-	}
-	return rosterDiskSame, nil
+	out.replaced = !bytes.Equal(h.Sum(nil), d.sum[:])
+	return out, nil
 }

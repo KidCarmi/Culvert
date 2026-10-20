@@ -636,6 +636,18 @@ var rosterRowExceptions = map[string]rosterClass{
 			"precomputed viewerRow below admin (gated by diagnostics_roster_durability_test.go)"},
 	"rosterDurabilityFacts.notDurableAdminRow": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
 		Reason: "adminRow's rendering when no roster file is configured; the same row, replaced the same way"},
+	"rosterDurabilityFacts.adminRowAt": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "adminRow's rendering of one rosterRowPrecedence state; the same row, replaced the same way"},
+	"rosterDurabilityFacts.writeFailuresAdminRow": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "adminRow's rendering of refused or failed roster writes; the same row, replaced the same way"},
+	"rosterDurabilityFacts.selectRosterRowRank": {Kind: rosterInput, Reason: "walks rosterRowPrecedence; " +
+		"its only callers are the two classified renderings"},
+	"rosterDurabilityFacts.stateActive": {Kind: rosterInput, Reason: "one roster fact per state, for " +
+		"selectRosterRowRank"},
+	"rosterDurabilityFacts.targetStateActive": {Kind: rosterInput, Reason: "stateActive for the file and " +
+		"directory states"},
+	"rosterDurabilityFacts.applyProbe": {Kind: rosterInput, Reason: "copies the live probe's findings into " +
+		"the facts readRosterDurabilityFacts returns"},
 	"rosterDurabilityFacts.viewerRow": {Kind: rosterProbe, Reason: "the viewer rendering itself: fixed " +
 		"constants only, reviewed as safe below admin (SEC-DIAG-ROSTER-1)"},
 	"readRosterDurabilityFacts": {Kind: rosterInput, Reason: "the CHAOS-70 counters, local-admin probe and " +
@@ -1067,14 +1079,14 @@ func TestWall_RosterConsumers_NegativeControls(t *testing.T) {
 	// under another code. A reachable helper still references the classified
 	// code, so "the code is referenced somewhere" is not enough.
 	for name, inject := range map[string]string{
-		"returns an unclassified literal": "\tcase f.refused > 1000000:\n" +
-			"\t\treturn OperatorContractCheck{Code: \"fixture_unclassified\", Status: diagWarn}\n",
-		"re-codes the row":    "\tcase f.refused > 1000000:\n\t\trow.Code = fixtureOtherCode\n",
-		"returns another row": "\tcase f.refused > 1000000:\n\t\treturn checkStorage()\n",
+		"returns an unclassified literal": "\t\tcase rosterStateOK + 1000:\n" +
+			"\t\t\treturn OperatorContractCheck{Code: \"fixture_unclassified\", Status: diagWarn}\n",
+		"re-codes the row":    "\t\tcase rosterStateOK + 1000:\n\t\t\trow.Code = fixtureOtherCode\n",
+		"returns another row": "\t\tcase rosterStateOK + 1000:\n\t\t\treturn checkStorage()\n",
 	} {
+		const anchor = "\t\tcase rosterStateRefused, rosterStateLoginWritesFailed, rosterStateNotYetVerified, rosterStateOK:\n"
 		recoded := base.clone()
-		recoded.replaceOnce(t, "diagnostics.go", "\tcase f.refused == 0 && f.degraded == 0:\n",
-			inject+"\tcase f.refused == 0 && f.degraded == 0:\n")
+		recoded.replaceOnce(t, "diagnostics.go", anchor, inject+anchor)
 		v, _ := rosterRowViolations(parseContractSources(t, recoded))
 		if !rosterViolationFor(v, "rosterDurabilityFacts.adminRow is classified as a redacted row") {
 			t.Errorf("an adminRow branch that %s passed the wall; violations=%q", name, v)

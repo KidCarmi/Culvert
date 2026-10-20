@@ -30,9 +30,9 @@ var futureCapabilityWording = []string{
 // wording, and do state the evidence. Restoring "admin roster is persisting
 // to disk" fails it.
 func TestWall_RosterOKMessagesStateEvidenceNotCapability(t *testing.T) {
-	f := rosterDurabilityFacts{configured: true, persisted: true, localAdmin: true}
+	f := rosterDurabilityFacts{configured: true, persisted: true, localAdmin: true, landed: true}
 	admin, viewer := f.adminRow(), f.viewerRow()
-	degradedViewer := rosterDurabilityFacts{configured: true, persisted: true, localAdmin: true, degraded: 3}.viewerRow()
+	degradedViewer := rosterDurabilityFacts{configured: true, persisted: true, localAdmin: true, landed: true, degraded: 3}.viewerRow()
 	for name, row := range map[string]OperatorContractCheck{
 		"admin": admin, "viewer": viewer, "viewer, degraded login writes": degradedViewer,
 	} {

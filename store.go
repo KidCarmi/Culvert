@@ -894,6 +894,16 @@ type Config struct {
 	// synced (fileutil.WriteResult.DirSynced): a landed but unsynced write
 	// may not survive a power loss, and the row says so.
 	uiUsersWriteSynced bool
+	// uiUsersRefusedAtLanded and uiUsersDegradedAtLanded are the CHAOS-70
+	// refused and degraded counters as they stood when the last write landed,
+	// so the row reports the failures since then (rosterCounterBase). A later
+	// landed save writes the whole roster in use, including a login-path
+	// change whose own write failed, so it is what clears them; a refused
+	// change stays visible until then, before and after any earlier landed
+	// write. Zero until the first landed write, so before it every failure
+	// since startup counts.
+	uiUsersRefusedAtLanded  int64
+	uiUsersDegradedAtLanded int64
 
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
 	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
@@ -1557,6 +1567,11 @@ func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileI
 		c.uiUsersWriteLanded = true
 		c.uiUsersWritten = digestRosterWrite(path, data, landed)
 		c.uiUsersWriteSynced = dirSynced
+		// Read inside the save transaction: a refusal is counted after its
+		// handler's transaction ends, so one racing this landing may still be
+		// counted as since it — the visible side, never a hidden refusal.
+		c.uiUsersRefusedAtLanded = rosterPersistRefused.Load()
+		c.uiUsersDegradedAtLanded = rosterPersistBestEffort.Load()
 	}
 	c.mu.Unlock()
 }
@@ -1567,6 +1582,14 @@ func (c *Config) rosterWriteSynced() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.uiUsersWriteSynced
+}
+
+// rosterCounterBase returns the refused and degraded counters as they stood
+// when the last roster write landed (zero before the first). Read-only.
+func (c *Config) rosterCounterBase() (refused, degraded int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersRefusedAtLanded, c.uiUsersDegradedAtLanded
 }
 
 // uiUserRecord is the on-disk representation of a UI admin user.

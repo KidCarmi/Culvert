@@ -198,7 +198,49 @@ save will be allowed.
   `culvert_admin_roster_persist_failures_total`; a failed login-path write
   increments `culvert_admin_roster_persist_degraded_total` instead. The very
   next read of this row shows the refused or degraded counts in place of
-  `ok`, and viewers see the fixed "changes were refused" message.
+  `ok`, and in place of *not verified yet* after a restart. Viewers see the
+  fixed "changes were refused" message.
+
+### Which state the row shows
+
+The row shows exactly one state: the first of these that applies, for
+admins and viewers alike. A single ordered list in the code decides it, and a
+test checks every pair of states against that list.
+
+1. Initial setup not complete (`ok`).
+2. No `-ui-users-file` configured.
+3. Storage not responding.
+4. Admin account changes refused since the last save that landed.
+5. Login-time writes failed since the last save that landed. Admins only:
+   a viewer sees the state below it.
+6. The configured file is unusable: it failed to load, is not a regular file,
+   or its directory is missing.
+7. The file is missing: removed after a save, or not created yet.
+8. The file was replaced or edited outside Culvert.
+9. The file is an identical copy owned by another account, and the next
+   save's rename may be refused.
+10. The file is immutable or append-only, or a mount point.
+11. The directory is not writable.
+12. The file was changed or replaced outside Culvert in another way.
+13. The last save's directory could not be synced.
+14. Not verified yet: no save since startup.
+15. `ok`.
+
+A refused change outranks every live-check finding. It is a fact, not a
+prediction: the change did not take effect, and nothing retries it. The
+admin remedy also names the highest-ranked problem the live checks see
+below it, which is usually the cause.
+
+An unsynced directory ranks low. The write landed and only a power loss
+threatens it, and that no longer matters once the file has been changed,
+replaced or removed.
+
+The refused and failed counts on this row are counted from the last save
+that landed, or from startup before the first one. A refused change stays
+visible until a later save lands. That later save writes the whole roster in
+use, including any login-time change whose own write failed, so it clears
+both counts. The since-startup totals still appear in the message, in the
+Admin Users panel and in the metrics, and they clear on restart.
 
 ## Recovery
 
@@ -271,8 +313,13 @@ save will be allowed.
    `0300` directory that cannot be opened for the `fsync`: that write may not
    survive a power loss; the save itself succeeds, as every other store's
    does). It is also `warn` when refused or degraded roster writes have
-   occurred since process start; the Admin Users panel shows the same
-   refused/degraded counts, which clear on restart.
+   occurred since the last save that landed (or since startup, before the
+   first one). That state outranks every file and directory problem listed
+   above; only a missing `-ui-users-file` and storage that is not responding
+   outrank it. See
+   [Which state the row shows](#which-state-the-row-shows). The Admin Users
+   panel shows the since-startup refused/degraded counts, which clear on
+   restart.
 
    A landed save is evidence only for the exact file Culvert wrote, unchanged
    since. On Linux and macOS each landed save also records that file's device,

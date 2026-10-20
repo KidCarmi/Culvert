@@ -1535,6 +1535,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   blocks admin changes or TOTP logins. `fileutil.AtomicWriteInfo` returns
   the landed file's own `FileInfo` and whether its directory was synced;
   `fileutil.AtomicWrite` is unchanged for its callers.
+- The `admin_roster_durability` row now picks its state from one ordered list,
+  and the admin and viewer renderings both use that list (Codex P2 4326470080).
+  Previously each renderer ranked the states in its own order. That let a
+  refused first save after a restart hide behind *not verified yet* ("No action
+  is needed now"). The order is:
+  1. setup incomplete
+  2. no roster file
+  3. storage not responding
+  4. refused saves
+  5. failed login-time writes (admin-only)
+  6. unusable target
+  7. missing target
+  8. replaced
+  9. owner changed
+  10. immutable
+  11. directory not writable
+  12. changed externally
+  13. directory not synced
+  14. not verified yet
+  15. ok
+
+  The admin remedy for a refusal also names the highest-ranked problem the live
+  checks see below it. The row now counts refused and failed writes from the
+  last save that landed (from startup before the first one), so a refusal stays
+  visible until a later save lands. The since-startup totals are still shown,
+  and the counters, metrics and Admin Users panel are unchanged. The identity
+  probe reports content, owner and inode changes as independent facts, and the
+  list ranks them.
 - **Deferred:** the boot-time in-place rewrite of `ui_users.json` (which would
   verify persistence at startup instead of at the first admin change) is
   split out of this change into its own follow-up PR.
