@@ -10635,3 +10635,19 @@ required before merge; each is now in the tree.
 Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
 listener is dark is still allowed (break-glass by design); it will withhold and
 fence again until the listener serves.
+
+---
+
+## 45. CHAOS-78 — The syslog/SIEM writer handle, published without synchronization
+
+**Id claimed in a committed placeholder row as commit one**, per the convention
+the header above reaches twice independently after ten collisions. `CHAOS-77`
+was the highest id claimed on any open branch (PR #1669), so this sweep took 78
+and will not move.
+
+**Date:** 2026-10-20 · **Domain:** Audit / SIEM forwarding, proxy request path ·
+**Follow-up to:** §42 `OBS-1`, which this file nominated as the *recommended
+first follow-up* and left unfixed because it "touches ~32 sites across a
+different domain".
+
+Write-up follows in this section once the sweep's findings are measured.
