@@ -792,11 +792,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # The canonical #1528 candidate OVA (appliance-lab-ova-candidate-246cb73d,
-      # lab run 39140010708 — the operator-status deadline-fix candidate). Same
-      # pins the ova-sidecar-scan job binds its sidecar against.
-      OVA_ARTIFACT_ID: "12141566476"
-      OVA_SHA256: b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a
+      # The canonical #1528 candidate OVA (appliance-lab-ova-candidate-4524311b,
+      # lab run 39338618373 — the F-DISK-RECOVERY-1 candidate). Same pins the
+      # scan-candidate job binds its app image against.
+      OVA_ARTIFACT_ID: "12228273676"
+      OVA_SHA256: 27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Obtain + load the source image, extract its shipped agent
@@ -926,17 +926,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Candidate 6248daf7 (console-shutdown P1 + boot-UX), RETAINED
-          # (run 38964077956): the frames are bound to these bytes
-          # (ova-sha256 + .mf + the guest's own console banner), and Esc is
-          # judged against the documented contract (esc-shows-boot-messages,
-          # esc-one-way). This OVA carries the culvert-splash-status unit
-          # (real-root re-assert of the Esc hint + a failure warning), so the
-          # frames prove the ~50s delayed-service interval now shows status and
-          # an Esc hint rather than brand/dots alone.
-          - variant: candidate-6248daf7
-            retained_run: "38964077956"
-            retained_sha256: "59d4d371b46b69ec2a992009c76ba0a72d96c30dabb1a51847f9ea8edccbfd61"
+          # Candidate 4524311b (F-DISK-RECOVERY-1), RETAINED (run 39338618373):
+          # the frames are bound to these bytes (ova-sha256 + .mf + the guest's
+          # own console banner), and Esc is judged against the documented
+          # contract (esc-shows-boot-messages, esc-one-way). This OVA carries
+          # the culvert-splash-status unit (real-root re-assert of the Esc hint
+          # + a failure warning) unchanged from the 6248daf7 lineage, so the
+          # frames prove the ~50s delayed-service interval still shows status
+          # and an Esc hint rather than brand/dots alone.
+          - variant: candidate-4524311b
+            retained_run: "39338618373"
+            retained_sha256: "27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: KVM, lab directory, tools
@@ -1850,16 +1850,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      # Canonical #1528 candidate (appliance-lab-ova-candidate-246cb73d, run
-      # 39140010708 — the operator-status deadline-fix candidate). Same pins the
-      # F-P2/sidecar jobs and the workflow-level env carry; the app image id is
-      # the OVA's baked app (9d30a157, proven by the agent-identity job).
-      OVA_ARTIFACT_ID: "12141566476"   # appliance-lab-ova-candidate-246cb73d, run 39140010708
-      OVA_SHA256: b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a
-      SOURCE_IMAGE_RUN_ID: "39134155144"
-      SOURCE_IMAGE_TAR_SHA256: 7211628d1b4e0ece0f29eeb00cce9cc527182c322ca75f657fff5b566bf6197e
-      IMAGE_ID: sha256:9d30a157cb925de6628db1a9e3e5f70e308cc9b1f8f8a918117a7e8275f3bc16
-      SRC_SHA: 246cb73d4b62d7a4baf2fcb8558ad8622657529a
+      # Canonical #1528 candidate (appliance-lab-ova-candidate-4524311b, run
+      # 39338618373 — the F-DISK-RECOVERY-1 candidate). Same pins the
+      # agent-identity job and the workflow-level env carry; the app image id is
+      # the OVA's baked app (36af5a8c = the index manifest digest asserted
+      # below), the running .Id the OVA reports.
+      OVA_ARTIFACT_ID: "12228273676"   # appliance-lab-ova-candidate-4524311b, run 39338618373
+      OVA_SHA256: 27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd
+      SOURCE_IMAGE_RUN_ID: "39336581431"
+      SOURCE_IMAGE_TAR_SHA256: eb9e1d40dfe0a0acb027f1ad775fbb8ee58478cc9080bc4c3626e921abf30c81
+      IMAGE_ID: sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a
+      SRC_SHA: 4524311ba9743abcf9df05e9955e2842eb48168c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
