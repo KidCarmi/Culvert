@@ -251,7 +251,7 @@ func TestCheckAdminRosterDurability_UnusableRosterTarget(t *testing.T) {
 		{"symlink", setupRosterSymlink, true},
 		{"healthy-file", setupRosterHealthyFile, false},
 		// Codex P2 4317024199 on #1601: a write landed, then the file was
-		// removed externally. The stale evidence must not read "persisting".
+		// removed externally. The stale evidence must not read ok.
 		{"healthy-file-then-deleted", thenRosterDeleted(setupRosterHealthyFile), true},
 		{"missing-file-saved-then-deleted", thenRosterDeleted(setupRosterFirstRunThenSaved), true},
 		// Codex P2 4317365500 on #1601: a write landed, then the file was

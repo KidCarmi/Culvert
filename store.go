@@ -1543,11 +1543,12 @@ func (c *Config) rosterWriteLanded() bool {
 
 // noteRosterWriteLanded records that a roster save of data to path landed:
 // the evidence that persistence works, and the identity of what is now on
-// disk (rosterWrittenDigest). A save that fails is
+// disk (rosterWrittenDigest). It is evidence of that write, not a promise
+// that the next one will be authorised. A save that fails is
 // not recorded here; the refused/degraded counters report it.
 //
 // landed is the FileInfo of the file the write put at path, taken from its
-// own descriptor before the rename (fileutil.AtomicWriteInfo) — never a stat
+// own descriptor after the rename (fileutil.AtomicWriteInfo) — never a stat
 // of the path afterwards, which an external replacement could already have
 // won (Codex P2 4319694771 on PR #1601).
 func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileInfo, dirSynced bool) {

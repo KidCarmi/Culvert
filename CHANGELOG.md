@@ -1492,7 +1492,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   at startup, so after every restart the row reads `warn` with the distinct,
   non-alarming *not verified yet* state ("the next admin account change
   verifies that it persists"; viewers see a fixed message) until the first
-  admin account change lands, which turns it `ok`. A stat is not evidence: a
+  admin account change lands, which turns it `ok`. That `ok` states evidence,
+  never capability: "the last admin roster save was written to disk and the
+  file is unchanged since" (viewers: "an admin roster file is configured; the
+  file on disk is the last one Culvert wrote, unchanged since"). It does not
+  claim that the roster "is persisting" or that the next save will be allowed.
+  No read-only check can authorise that: an SELinux `add_name`/`remove_name`
+  denial, AppArmor, an NFSv4 or server-side ACL, or a quota can refuse it
+  while `faccessat` passes. The live checks below are advisory: they report
+  what they detect, and passing them is no claim. A refused save is rolled
+  back, answers `500` and is counted, and the next read of the row reports it
+  in place of `ok`. A stat is not evidence: a
   readable roster on a read-only mount, or one owned by another user in a
   sticky directory, stats like a writable one. Hard problems found by the
   row's one live probe take precedence over *not verified yet*: a configured

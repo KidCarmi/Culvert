@@ -875,6 +875,16 @@ func checkAuditPersistence() OperatorContractCheck {
 // apart on a string literal.
 const adminRosterDurabilityCode = "admin_roster_durability"
 
+// rosterDurabilityLandedOK is the admin row's ok message once a save has
+// landed. It states EVIDENCE — what Culvert's own last write did and that the
+// file is still that write — and never a capability ("persisting", "can
+// save"): no read-only probe can authorise the next save (Codex P2 4326010251
+// on PR #1601: an SELinux add_name/remove_name denial, an NFSv4 or
+// server-side ACL or a quota can refuse it while every check passes). A save
+// that is refused is reported at once by the refused/degraded counters.
+// Pinned by TestWall_RosterOKMessagesStateEvidenceNotCapability.
+const rosterDurabilityLandedOK = "the last admin roster save was written to disk and the file is unchanged since"
+
 // Fixed viewer/operator renderings of the admin-roster durability row
 // (SEC-DIAG-ROSTER-1 policy, PR #1545). They are CONSTANTS carrying no count
 // and no second-factor or single-use-credential posture.
@@ -890,7 +900,12 @@ const (
 	// restart) are admin-only under the policy: telling a lower-privileged
 	// reader that a replay window may be open is an oracle, so the two states
 	// must render identically below admin.
-	rosterDurabilityViewerConfigured = "an admin roster file is configured"
+	//
+	// Like rosterDurabilityLandedOK it states evidence, never capability: the
+	// file on disk is what Culvert last wrote to it. That holds in the
+	// degraded state too, since a failed write leaves the target as it was.
+	rosterDurabilityViewerConfigured = "an admin roster file is configured; the file on disk is the last one " +
+		"Culvert wrote, unchanged since"
 	// rosterDurabilityViewerNotYetVerified is the viewer rendering of the boot
 	// state (rosterTargetNotYetVerified): pending, not a fault.
 	rosterDurabilityViewerNotYetVerified = "an admin roster file is configured; its persistence is verified by " +
@@ -1000,8 +1015,9 @@ const rosterTargetOwnerChanged = "the configured roster file was replaced by an 
 	"account, so the next admin account change may be refused when it is saved"
 
 // rosterTargetProblem reports why a configured roster path cannot hold the
-// roster, or "" when a write to it has landed in this process and the save
-// path can still land one now. It is PURE: the filesystem facts come from the
+// roster, or "" when a write to it has landed in this process, the file is
+// still that write, and the probe sees no problem with the next one (which is
+// not a claim that the next one is authorised: see rosterDurabilityLandedOK). It is PURE: the filesystem facts come from the
 // row's one live probe (pr, from probeRosterTarget via
 // Config.sharedRosterProbe; responded false when the storage did not answer
 // in time), and the write evidence from landed and synced
@@ -1013,8 +1029,8 @@ const rosterTargetOwnerChanged = "the configured roster file was replaced by an 
 // directory, or owned by another user in a sticky directory passes both
 // stats, yet the first mutation's rename over it is refused. "" therefore
 // requires a real save to have landed since the path was configured, the
-// directory to still allow the next one (probeRosterParent), and the file to
-// still hold what was written (probeRosterIdentity). Hard problems the probe
+// advisory directory checks to see no problem (probeRosterParent), and the
+// file to still be what was written (probeRosterIdentity). Hard problems the probe
 // finds take precedence over the not-verified-yet boot state.
 func rosterTargetProblem(path string, loadErr error, landed, synced bool, pr rosterProbeResult, responded bool) string {
 	switch {
@@ -1083,8 +1099,11 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	}
 }
 
-// adminRow is the admin_roster_durability row: whether admin-roster changes
-// survive a restart (CHAOS-70, roster_persist_durability.go). Before this row
+// adminRow is the admin_roster_durability row: the evidence on whether
+// admin-roster changes reached disk (CHAOS-70, roster_persist_durability.go) —
+// Culvert's own landed writes, the file still being that write, and the
+// problems the probe can see; never a prediction that the next save will be
+// authorised (rosterDurabilityLandedOK). Before this row
 // the evidence lived only in a boot log line (warnRosterNotDurable), a
 // rate-limited per-change line, and the
 // culvert_admin_roster_persist_{failures,degraded}_total counters — none
@@ -1103,7 +1122,7 @@ func (f rosterDurabilityFacts) adminRow() OperatorContractCheck {
 	case f.targetProblem != "":
 		row = targetProblemAdminRow(f.targetProblem)
 	case f.refused == 0 && f.degraded == 0:
-		row.Message = "admin roster is persisting to disk"
+		row.Message = rosterDurabilityLandedOK
 	default:
 		row.Status = diagWarn
 		row.Message = fmt.Sprintf("since this process started, %d admin account change(s) were refused because the "+

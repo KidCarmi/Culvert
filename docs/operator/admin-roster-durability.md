@@ -170,13 +170,47 @@ administrative decision was affected, and therefore what the operator must redo.
       rotate the affected administrator's backup codes.
 ```
 
+## What this row does and does not guarantee
+
+The `admin_roster_durability` row reports **evidence from Culvert's own
+writes**, plus the problems it can see. It does not predict that the next
+save will be allowed.
+
+- **What `ok` means:** Culvert's last admin roster save landed on disk in
+  this process, and the file is still exactly that write. On Linux and macOS
+  that means the same inode, unchanged since (device, inode and `ctime`). On
+  other Unix systems it means the same size, SHA-256 and owner. On Windows
+  only the size and SHA-256 are checked. It is a statement about the past
+  write. It is not a statement that the roster "is persisting" or that the
+  next change "can be saved".
+- **Live checks are advisory.** The `faccessat(W_OK|X_OK, AT_EACCESS)`,
+  `statfs` and immutable/append-only/bind-mount checks report the problems
+  they do detect: a directory that is not writable, a read-only mount, a file
+  no save can replace. When they pass, that is not a claim either way.
+- **What no read-only check can predict:** whether the next save will be
+  authorised. A mandatory-access-control policy (SELinux `add_name` or
+  `remove_name` on the directory, or AppArmor) can deny the save's temp-file
+  creation or rename while `faccessat` passes. So can an NFSv4 or server-side
+  ACL evaluated only by the server, or a quota. Culvert does not run a
+  self-test write to find out.
+- **A refused save is reported at once.** It is refused and rolled back with
+  a `500`, and audited as `<action>.refused`. It increments
+  `culvert_admin_roster_persist_failures_total`; a failed login-path write
+  increments `culvert_admin_roster_persist_degraded_total` instead. The very
+  next read of this row shows the refused or degraded counts in place of
+  `ok`, and viewers see the fixed "changes were refused" message.
+
 ## Recovery
 
 1. The Diagnostics panel (`GET /api/diagnostics`, also rendered by
    `GET /api/health/explain`) carries an `admin_roster_durability` row. It is
    `ok` while initial setup is incomplete (there is no credential to persist
    yet), and `ok` once an admin account change has been saved in this
-   process and nothing below applies.
+   process and nothing below applies. That `ok` states evidence, not a
+   promise: *the last admin roster save was written to disk and the file is
+   unchanged since* (viewers: *an admin roster file is configured; the file on
+   disk is the last one Culvert wrote, unchanged since*). See
+   [What this row does and does not guarantee](#what-this-row-does-and-does-not-guarantee).
 
    **After every restart it is `warn` — *not verified yet* — until the first
    admin account change is saved.** Culvert does not write the roster at
@@ -204,7 +238,10 @@ administrative decision was affected, and therefore what the operator must redo.
      `chmod 0555`, an ACL revocation, or a read-only remount — checked live
      with `faccessat(W_OK|X_OK, AT_EACCESS)` and `statfs`, never by creating a
      file; on non-Unix platforms there is no such live check, and a refused
-     save is what reports it);
+     save is what reports it). This check is advisory: it reports what it
+     detects, and passing it does not mean the next save is authorised (a
+     MAC policy, a server-side ACL or a quota can still refuse it, which the
+     refused count then reports);
    - the roster **cannot be replaced by any save** — immutable or append-only
      (`chattr +i`/`+a`; `lsattr` shows it), a bind-mounted file, or in an
      immutable or append-only directory; checked live and read-only on Linux

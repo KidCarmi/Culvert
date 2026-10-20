@@ -3,20 +3,19 @@ package main
 // roster_disk_identity.go — "the file on disk is still what Culvert last
 // wrote" (Codex P2s 4317365500, 4317730264 and 4317730279 on PR #1601).
 //
-// The admin_roster_durability row's write evidence (uiUsersWriteTried/Err)
-// says a write to the roster path CAN land. It does not say the file still
+// The admin_roster_durability row's write evidence (uiUsersWriteLanded)
+// says a write to the roster path landed. It does not say the file still
 // holds what Culvert wrote: a configuration manager or an operator can
-// replace ui_users.json afterwards, and the row would go on reading
-// "persisting to disk" while a restart would load the replacement — possibly
+// replace ui_users.json afterwards, and the row would go on reporting the
+// last save as on disk while a restart would load the replacement — possibly
 // restoring a revoked account or password, or dropping changes made since.
 //
 // So every landed roster save records the size and SHA-256 of the exact
-// bytes written, and the row compares the file with them. A content hash rather than the inode identity (dev+ino, size,
-// mtime): it also catches an in-place edit of the same inode, it does not
-// false-alarm on a touch, a chmod or an identical re-copy (none changes what a
-// restart loads), and it is cheap here — the roster is small, the size check
-// short-circuits a different-length file without reading it, and the row is
-// computed at diagnostics rate, not on a hot path.
+// bytes written, and the row compares the file with them. The content hash
+// catches an in-place edit of the same inode, and it is cheap here — the
+// roster is small, the size check short-circuits a different-length file
+// without reading it, and the row is computed at diagnostics rate, not on a
+// hot path.
 //
 // Identical bytes are not enough (Codex P2s 4317730264 and 4325019932 on PR
 // #1601): a same-UID replacement, or a same-inode SELinux label or NFSv4 ACL
