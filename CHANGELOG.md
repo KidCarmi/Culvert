@@ -202,6 +202,68 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The per-request category-group match no longer takes a lock or scans every
+  group.** `matchDestNorm` calls `categoryGroupMatchesHostScratch` once per
+  rule carrying a destination category group, inside the policy scan every
+  proxied request walks, and each call cost an `s.mu.RLock`/`RUnlock` pair —
+  two atomic read-modify-writes on one shared word — plus, on the ID leg, a
+  **linear scan of every group comparing ID strings**. Production rules do
+  carry `DestCategoryGroupID` (`ui_policy` stamps it from the client-supplied
+  name), so the scan was the live path, and `policy.go` documented that leg as
+  "amortized O(1) per rule" while `catgroup.Store` delivered O(groups).
+
+  The lock half is the throughput ceiling already found and fixed in
+  `internal/threatfeed`, `internal/urlcat`, `internal/connlimit`, the IP filter
+  and `topHosts`; `policy_category_bench_test.go` carried it as an **open**
+  finding (91.9% of samples in `GetByName`, 68.6% in its `RLock` atomic), and
+  `internal/catgroup` had no benchmark of its own to size it.
+
+  Both legs now read an immutable `readView` published under `s.mu`: a `byName`
+  map, a `byID` index that makes the ID leg genuinely O(1), and the `rev`
+  memo counter, which travels **inside** the view so contents and change
+  signal are one publication and cannot be observed out of step (published
+  separately, a reader that loaded the bumped counter and then the
+  pre-publication contents would memoize stale contents under the new revision
+  — permanently stale, because the counter will not move again).
+
+  Measured (medians of n=5, 4-core Xeon @2.80GHz, go1.26.9) per rule per
+  request: `MatchesCategoryByID` hit **107.9 → 42.4 ns at 8 groups, 455.0 →
+  42.2 at 64, 1690 → 41.9 at 256**; the miss leg, which cannot short-circuit a
+  scan, **2303 → 12.3 ns at 256**. End to end,
+  `BenchmarkPolicyEvaluate_CategoryGroupRulesParallel` with 50 category-group
+  rules and an uncategorized destination:
+
+  | GOMAXPROCS | 1 | 2 | 4 | 1→4 throughput |
+  |---|---|---|---|---|
+  | RLock | 1926 ns | 3699 ns | 3996 ns | 0.48x — cores *subtracted* throughput |
+  | read view | 1748 ns | 980 ns | 537 ns | 3.25x |
+
+  i.e. **7.4x the throughput at four cores**, and a curve that improves with
+  core count instead of degrading — the property that matters on the 16- and
+  32-core hardware this appliance ships onto. The honest part: at
+  `GOMAXPROCS=1` the name path is flat (55.0 → 56.7 ns on the hit), because an
+  uncontended `RLock` is traded for an atomic load plus an indirection. The win
+  is the scaling and the retired O(groups) scan, not the single-core figure.
+  Zero allocations on every path, before and after.
+
+  Two **ownership** corrections made the lock-free read safe, and each retires
+  a latent race the `RLock` never actually covered. `Update`, `UpdateByID` and
+  `Rename` now copy-on-write instead of editing the live `*Group`: `GetByName`
+  hands that pointer out and its doc comment claimed "catSet is immutable
+  between mutations", but the mutators edited it in place, so a caller reading
+  `g.catSet` or `g.Name` raced the writer. And `ReplaceAll` / `restoreSnapshot`
+  now copy each `Group` rather than publishing `&groups[i]`: aliasing the
+  *caller's* backing array cannot honour "a published Group is never mutated in
+  place", and handing the same slice to `ReplaceAll` twice wrote groups a
+  reader was mid-probe on. One behavioural consequence, deliberate: the
+  caller's slice no longer has its IDs backfilled in place — no call site reads
+  them back, and `Save()` persists them from the store.
+
+  The view contract is pinned three ways — behaviourally through every public
+  mutator including the `MutateDurable` rollback path, structurally by an AST
+  wall over the package with a pre-fix control and a writer inventory, and as a
+  differential oracle against a verbatim copy of the pre-fix linear scan.
+
 - The destination host is now canonicalized **once per policy scan** instead of
   once per category-scoped rule. `urlcat.Store.MatchesHost` /
   `MatchesHostAdmin` and `effectiveCategoryView.MatchesCategory` each opened
