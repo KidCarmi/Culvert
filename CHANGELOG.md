@@ -1563,6 +1563,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and the counters, metrics and Admin Users panel are unchanged. The identity
   probe reports content, owner and inode changes as independent facts, and the
   list ranks them.
+- A failed startup load of `ui_users.json` no longer pins the
+  `admin_roster_durability` row (Codex P2 4327431894). Before, the row kept
+  reporting "could not be loaded at startup" after a later save landed at the
+  same path, and it skipped the live probe. Now a landed save clears the load
+  error, under the same lock that records the save. Pointing at another path
+  resets it as before. The live probe now runs whether or not the load failed.
 - **Deferred:** the boot-time in-place rewrite of `ui_users.json` (which would
   verify persistence at startup instead of at the first admin change) is
   split out of this change into its own follow-up PR.

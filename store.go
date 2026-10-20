@@ -865,7 +865,8 @@ type Config struct {
 	uiUsersFile string
 
 	// uiUsersLoadErr is the outcome of the most recent LoadUIUsersFile for
-	// uiUsersFile (nil = loaded, or absent on first run). Startup continues
+	// uiUsersFile (nil = loaded, or absent on first run), until a roster
+	// write lands at that path (noteRosterWriteLanded clears it). Startup continues
 	// after a failed load, so without this the admin_roster_durability row
 	// would report a configured-but-unusable roster as persisted.
 	uiUsersLoadErr error
@@ -1567,6 +1568,11 @@ func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileI
 		c.uiUsersWriteLanded = true
 		c.uiUsersWritten = digestRosterWrite(path, data, landed)
 		c.uiUsersWriteSynced = dirSynced
+		// The file at this exact path now holds the roster in use, so a
+		// failed startup load of it no longer describes it (Codex P2
+		// 4327431894 on PR #1601). Cleared under the same lock as the
+		// evidence; SetUIUsersFile (another path) resets it on its own.
+		c.uiUsersLoadErr = nil
 		// Read inside the save transaction: a refusal is counted after its
 		// handler's transaction ends, so one racing this landing may still be
 		// counted as since it — the visible side, never a hidden refusal.

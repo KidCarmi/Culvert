@@ -213,8 +213,9 @@ test checks every pair of states against that list.
 4. Admin account changes refused since the last save that landed.
 5. Login-time writes failed since the last save that landed. Admins only:
    a viewer sees the state below it.
-6. The configured file is unusable: it failed to load, is not a regular file,
-   or its directory is missing.
+6. The configured file is unusable: it failed to load at startup (until a
+   save lands at that path, which replaces the file with the roster in use),
+   is not a regular file, or its directory is missing.
 7. The file is missing: removed after a save, or not created yet.
 8. The file was replaced or edited outside Culvert.
 9. The file is an identical copy owned by another account, and the next
@@ -272,7 +273,8 @@ Admin Users panel and in the metrics, and they clear on restart.
    - no `-ui-users-file` is configured (changes revert at restart; on a node
      with no local administrator it also names the missing break-glass
      account);
-   - the configured file failed to load at startup, or its path is not a
+   - the configured file failed to load at startup and no save has landed
+     at that path since (a landed save clears it), or its path is not a
      usable regular file (a directory, or a missing parent directory);
    - the configured file **does not exist yet** (its accounts are only in
      memory; the first admin account change creates it and clears this);

@@ -1193,15 +1193,18 @@ func readRosterDurabilityFacts() rosterDurabilityFacts {
 	}
 	f.refused = sinceBase(f.refusedTotal, refusedBase)
 	f.degraded = sinceBase(f.degradedTotal, degradedBase)
-	switch {
-	case path == "":
-	case loadErr != nil:
-		f.unusable = "the configured roster file could not be loaded at startup"
-	default:
-		pr, responded := cfg.sharedRosterProbe(path) // the row's only filesystem access
-		f.notResponding = !responded
-		f.applyProbe(pr)
+	if path == "" {
+		return f
 	}
+	if loadErr != nil {
+		// Until a write lands at this path (which clears loadErr).
+		f.unusable = "the configured roster file could not be loaded at startup"
+	}
+	// The probe runs either way: each of its findings is an independent fact,
+	// and rosterRowPrecedence alone decides what the row shows.
+	pr, responded := cfg.sharedRosterProbe(path) // the row's only filesystem access
+	f.notResponding = !responded
+	f.applyProbe(pr)
 	return f
 }
 
@@ -1217,6 +1220,8 @@ func sinceBase(total, base int64) int64 {
 // applyProbe copies the live probe's findings into the facts, one fact each.
 func (f *rosterDurabilityFacts) applyProbe(pr rosterProbeResult) {
 	switch {
+	case f.unusable != "":
+		// The startup load failure is kept: it is the more specific reason.
 	case pr.statProblem != "":
 		f.unusable = pr.statProblem
 	case pr.diskErr != nil:
