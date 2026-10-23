@@ -171,7 +171,10 @@ func (r *RevocationList) IsRevoked(token string) bool {
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
+	// SEC-REVEXP-1: the eviction test is Decode's acceptance test, so this
+	// entry cannot be dropped while a cookie it revokes would still be
+	// honoured. See revocation_expiry.go.
+	if revocationExpired(time.Now(), exp) {
 		delete(r.tokens, token) // lazy eviction
 		delete(r.verified, token)
 		return false
@@ -196,7 +199,8 @@ func (r *RevocationList) IsUserRevoked(username string) bool {
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
+	// SEC-REVEXP-1: same single oracle as the token list above.
+	if revocationExpired(time.Now(), exp) {
 		delete(r.users, username) // lazy eviction
 		return false
 	}
@@ -267,19 +271,23 @@ func (r *RevocationList) mergeUntrusted(entries []RevocationEntry, persisted boo
 	r.sweepLocked(now)
 	added := 0
 	for _, e := range entries {
+		exp := time.Unix(e.Expiry, 0)
+		// SEC-REVEXP-1: admit on the same oracle that retains. A peer's entry
+		// for a session Decode would still accept must not be refused as
+		// "already expired".
+		if revocationExpired(now, exp) {
+			continue // already expired
+		}
 		// A persisted entry carrying a valid provenance MAC is one this
 		// appliance verified itself (RevokeVerified) under the current signing
 		// key, so it reloads past the untrusted bounds: refusing it on size or
 		// capacity would resurrect a session an operator revoked (Codex P1/P2,
 		// CodeRabbit, PR #1591). Gossip never takes this branch.
 		if persisted && validProvenance(e) {
-			if !now.Before(time.Unix(e.Expiry, 0)) {
-				continue
-			}
 			if _, exists := r.tokens[e.Token]; !exists {
 				added++
 			}
-			r.tokens[e.Token] = time.Unix(e.Expiry, 0)
+			r.tokens[e.Token] = exp
 			r.verified[e.Token] = struct{}{}
 			continue
 		}

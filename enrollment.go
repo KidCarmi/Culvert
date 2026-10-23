@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
@@ -1106,16 +1107,36 @@ func backupCAFiles(dir string, certPEM []byte, key *ecdsa.PrivateKey) {
 	if e1 != nil || e2 != nil {
 		return
 	}
-	_ = os.WriteFile(certBak, certPEM, 0o600)
+	// SEC-SECRETWRITE-1: AtomicWrite, never os.WriteFile. Both .bak paths are
+	// FULLY PREDICTABLE (a fixed name beside the CA bundle), which is exactly
+	// where os.WriteFile is unsafe: it opens with O_WRONLY|O_CREATE|O_TRUNC and
+	// therefore FOLLOWS a symlink planted at the path, and its perm argument
+	// applies only on CREATION, so a 0666 file pre-created at
+	// "cluster-ca.key.bak" would receive the cluster CA private key and stay
+	// world-readable. AtomicWrite creates a RANDOM O_EXCL temp beside the
+	// target, chmods and fsyncs it, then renames over the target — so the
+	// descriptor is always a file this call made at this mode, and a planted
+	// link at the destination is replaced rather than written through.
+	//
+	// This closes the writer the original SEC-SECRETWRITE-1 sweep did not
+	// reach: that sweep was scoped to the four key writers introduced in its
+	// own review window, and backupCAFiles predates it. The asset here is the
+	// larger one — the cluster CA private key signs every Data Plane node
+	// certificate, so disclosure lets an attacker mint a node cert, impersonate
+	// a DP to the Control Plane and receive the full ConfigSnapshot (which
+	// carries SessionHMAC and the IdP secrets).
+	_ = fileutil.AtomicWrite(certBak, certPEM, 0o600)
 	if key != nil {
 		if der, err := x509.MarshalECPrivateKey(key); err == nil {
 			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
 			// CA-3: when encryption is enabled, the key .bak must not be left
 			// as plaintext on disk. Best-effort, consistent with this helper.
+			// The plaintext branch's POSTURE is unchanged here — only the write
+			// primitive is — and SealToFile already routes through AtomicWrite.
 			if clusterCAKeyEncryptionEnabled() {
 				_ = secret.SealToFile(keyBak, keyPEM, clusterCAKEKProvider(dir))
 			} else {
-				_ = os.WriteFile(keyBak, keyPEM, 0o600)
+				_ = fileutil.AtomicWrite(keyBak, keyPEM, 0o600)
 			}
 		}
 	}

@@ -165,9 +165,16 @@ func (f *fakeSluice) RevokeClient(_ context.Context, _ *pb.RevokeClientRequest) 
 // server impl and returns a dialed CDRClient.  The caller defers stop.
 func startFakeSluice(t *testing.T, srv *fakeSluice) (client *CDRClient, stop func()) {
 	t.Helper()
+	return startFakeSluiceWithServer(t, func(s *grpc.Server) { pb.RegisterSluiceServiceServer(s, srv) })
+}
+
+// startFakeSluiceWithServer is startFakeSluice for a caller that registers its
+// own SluiceService implementation (e.g. one that wraps fakeSluice).
+func startFakeSluiceWithServer(t *testing.T, register func(*grpc.Server)) (client *CDRClient, stop func()) {
+	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	pb.RegisterSluiceServiceServer(s, srv)
+	register(s)
 	go func() { _ = s.Serve(lis) }()
 
 	conn, err := grpc.NewClient(
