@@ -1186,6 +1186,15 @@ The audience suite now swaps the revocation list per test
 reason: SEC-POLICYDROP-1, above. The fix for it is a second round on this
 change, verified the same way, and the lesson is in §4 rather than here.
 
+**What the full root suite caught that the focused run did not**, in that second
+round: the new SEC-POLICYDROP-1 wall read and parsed `main.go` by its
+CWD-relative name, which `TestTestFileReadsAreCWDIndependent`
+(`static_read_wall_test.go`) forbids — a concurrent `os.Chdir` in another test
+would flake it. Anchored to `pkgSourceDir()`, reading once and handing the bytes
+to the parser. Worth recording because it is the second time in this change that
+a gate outside the focused selection found the problem: a focused run proves the
+new behaviour, not that the change sits correctly in the suite around it.
+
 **What CI caught that the local run did not**, recorded because it marks the
 limit of the pre-push checks: the `golangci-lint` gate (three findings in the
 new test files — the local binary predates the required toolchain and bails out
