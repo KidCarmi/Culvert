@@ -314,6 +314,17 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_proxy_oversize_host_rejected_total counter\nculvert_proxy_oversize_host_rejected_total %d\n",
 		proxyOversizeHostRejected.Load())
 
+	// Inner requests on a TLS-inspected tunnel whose Host/:authority did not
+	// name the CONNECT target policy authorized. Always emitted, for the same
+	// reason as the counter above: the pin is unconditional in every build, so a
+	// flat zero means "no client has done this", never "the gate is off". A
+	// conforming client cannot trip it — the forged leaf names exactly one host
+	// — so sustained growth is a client reusing an authorized tunnel to reach a
+	// destination the policy engine never evaluated.
+	fmt.Fprintf(w, "\n# HELP culvert_proxy_inner_host_mismatch_blocked_total Inner requests on an inspected tunnel refused because their Host/:authority did not match the authorized CONNECT destination. A conforming client cannot trip this; sustained growth means tunnel reuse against an unevaluated destination\n")
+	fmt.Fprintf(w, "# TYPE culvert_proxy_inner_host_mismatch_blocked_total counter\nculvert_proxy_inner_host_mismatch_blocked_total %d\n",
+		proxyInnerHostMismatchBlocked.Load())
+
 	// CHAOS-70: admin-roster durability. These are deliberately distinct from
 	// the storage plane's generic storage_write_failed, which says only that
 	// SOME durable write failed; these say WHICH administrative decision was
