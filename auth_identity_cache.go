@@ -161,6 +161,33 @@ func (c *identityResultCache[T]) get(key string) (val T, ok, hit bool) {
 // that cannot name its peer.
 func (c *identityResultCache[T]) set(key, client string, val T, ok bool, ttl time.Duration) {
 	now := time.Now()
+	c.store(key, client, val, ok, now, now.Add(ttl))
+}
+
+// setUntil records a verdict that stops being served at an ABSOLUTE deadline
+// the caller has already computed. Same fairness-key contract as set.
+//
+// It exists because re-deriving that deadline from a duration here would move
+// it. A caller that clamps a positive verdict to the token's own `exp`
+// (clampCacheTTLToTokenExpiry) measures the remaining lifetime against its own
+// clock sample, and every microsecond it then spends before reaching this
+// mutex — cloning the identity, contending with another request on the
+// credential path, waiting out a GC pause — would be added back to the entry's
+// life. The entry would outlive the credential it was derived from by exactly
+// that interval, which is the one thing the clamp exists to prevent, and the
+// pre-CHAOS-76 implementations avoided by construction: they wrote
+// `expiry: now.Add(ttl)` with the SAME now the clamp had used.
+//
+// Callers with no external deadline — an LDAP bind governed only by the
+// configured TTL — use set.
+func (c *identityResultCache[T]) setUntil(key, client string, val T, ok bool, expiry time.Time) {
+	c.store(key, client, val, ok, time.Now(), expiry)
+}
+
+// store inserts the entry under the cap and the fairness policy. now is the
+// insertion instant, which orders the client's bucket and ages the entry for
+// eviction; expiry is the absolute instant it stops being served.
+func (c *identityResultCache[T]) store(key, client string, val T, ok bool, now, expiry time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
@@ -191,7 +218,7 @@ func (c *identityResultCache[T]) set(key, client string, val T, ok bool, ttl tim
 	}
 	b.keys = append(b.keys, key)
 	c.entries[key] = &identityCacheEntry[T]{
-		val: val, ok: ok, client: client, added: now, expiry: now.Add(ttl),
+		val: val, ok: ok, client: client, added: now, expiry: expiry,
 		pos: len(b.keys) - 1,
 	}
 	b.live++

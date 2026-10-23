@@ -737,3 +737,59 @@ func TestChaos76_RefreshDoesNotMakeAnEntryLookLikeItsClientsOldest(t *testing.T)
 		t.Errorf("front entry's added = %s, want B's %s", front.added, addedB)
 	}
 }
+
+// A positive verdict clamped to the token's own `exp` must expire WITH the
+// token, not a scheduling delay later.
+//
+// clampCacheTTLToTokenExpiry measures the remaining lifetime against one clock
+// sample; the pre-CHAOS-76 stores then wrote `expiry: now.Add(ttl)` with that
+// SAME sample, so the recorded deadline was the token's exactly. Handing the
+// shared store a DURATION restarts the clock inside it, and everything the
+// caller spent in between — cloning the identity, contending for the store
+// mutex on a busy credential path, waiting out a GC pause — is added back to
+// the entry's life. Requests in that interval authenticate on a token that has
+// already expired, which is the one outcome the clamp exists to prevent.
+//
+// The oracle is exact equality, not a tolerance: post-fix the recorded deadline
+// IS time.Unix(exp, 0) by construction, so any re-derivation fails the gate
+// however small the interval. Repeated across insertions so that a coarse clock
+// returning two identical samples cannot hide it.
+func TestChaos76_AClampedVerdictExpiresWithItsTokenNotLater(t *testing.T) {
+	const inserts = 64
+	exp := time.Now().Add(30 * time.Second).Unix()
+	deadline := time.Unix(exp, 0)
+
+	// Both backends get a configured TTL far longer than the token, so the
+	// clamp is what bounds the entry and the defect is reachable.
+	t.Run("legacy OIDC introspection (auth_oidc.go)", func(t *testing.T) {
+		a := &OIDCAuth{ttl: time.Hour}
+		for i := range inserts {
+			k := cacheKey("", fmt.Sprintf("tok-%d", i))
+			a.oidcCacheSetIdentityWithExp(k, "client", &Identity{Sub: "alice"}, true, &exp)
+			assertExpiresWithToken(t, a.cache.entryForTest(k), deadline, i)
+		}
+	})
+
+	t.Run("registry OIDC introspection (auth_oidc_flow.go)", func(t *testing.T) {
+		p := &OIDCFlowProvider{profile: &IdPProfile{ID: "idp-a"}, ttl: time.Hour}
+		for i := range inserts {
+			k := cacheKey("", fmt.Sprintf("tok-%d", i))
+			p.introspectCacheSet(k, "client", &Identity{Sub: "alice"}, true, &exp)
+			assertExpiresWithToken(t, p.cache.entryForTest(k), deadline, i)
+		}
+	})
+}
+
+func assertExpiresWithToken(t *testing.T, e *identityCacheEntry[*Identity], deadline time.Time, i int) {
+	t.Helper()
+	if e == nil {
+		t.Fatalf("insert %d: no entry recorded", i)
+	}
+	if !e.expiry.Equal(deadline) {
+		t.Fatalf("insert %d: the cached positive expires %s AFTER the token's own exp "+
+			"(recorded %s, token deadline %s) — the clamped duration was re-derived against a "+
+			"later clock sample, so the verdict outlives the credential it came from and requests "+
+			"in that interval authenticate on an expired token (CHAOS-76)",
+			i, e.expiry.Sub(deadline), e.expiry, deadline)
+	}
+}

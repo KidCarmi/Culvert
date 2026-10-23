@@ -10857,10 +10857,10 @@ write-up claimed the signal before it existed.
 
 ### 45.6 Gates
 
-`auth_identity_cache_chaos_test.go`, sixteen gates (the last five from
+`auth_identity_cache_chaos_test.go`, seventeen gates (the last six from
 §45.9). **One gate = one top-level `TestChaos76_` function**; a subtest is not
 counted separately, so the per-backend runs of the headline gate are three
-subtests of one gate, not three gates. The table below lists all sixteen. **Every gate that pins a
+subtests of one gate, not three gates. The table below lists all seventeen. **Every gate that pins a
 defect was verified to FAIL against the pre-fix behaviour**, by restoring it (arbitrary map-range victim, a lookup
 that leaves expired entries, and a dispatch that drops the key) and re-running:
 
@@ -10881,6 +10881,7 @@ that leaves expired entries, and a dispatch that drops the key) and re-running:
 | `TestChaos76_RefreshDoesNotMakeAnEntryLookLikeItsClientsOldest` | §45.9 (4): the stale slot made `frontLocked` return the just-refreshed entry as the client's oldest, so eviction preferred a verdict written moments ago. Pre-fix `keys=[A B A]`, front `A` |
 | `TestChaos76_RegistryDispatchIsClientAttributed` | §45.9 (1): the `resolveIdentityAttributed` helper every data-plane caller goes through — the attributed provider receives the key, a bare-only provider still resolves, and every shipped registry credential provider implements the attributed form |
 | `TestChaos76_EvictionCounterCoversEveryCacheAndNeverFalls` | §45.9 (3) and (5): the exported total covers a REGISTRY-only deployment, and does not fall when the registry replaces a live provider with a freshly compiled one |
+| `TestChaos76_AClampedVerdictExpiresWithItsTokenNotLater` | §45.9 (6): a positive clamped to the token's `exp` is recorded with that exact deadline, for both introspection backends — not the clamped duration restarted against a later clock sample. Pre-fix drift measured at 1.1 µs (legacy) and 553 ns (registry) on the first insertion |
 | `TestChaos76_LegacyProviderEvictionsAreReportedOnConfig` | `Config.IdentityCacheEvictions` keeps its narrower meaning — the legacy provider's displacement only, never the local bcrypt cache's. The only gate on that accessor once §45.9 (5) moved the metric to a process-owned total; renamed from `..._IdentityCacheEvictionsReachTheActiveBackend`, which named the pre-(5) design |
 
 Two of these started life as probabilistic oracles — a flood against one honest
@@ -10934,16 +10935,18 @@ own section, and does not walk back to the summary table the next sweep
 actually reads first. An open High row is not free — it is the most expensive
 kind of stale, because it is exactly what draws the next sweep in.
 
-### 45.9 Review follow-up — five defects in the fix itself
+### 45.9 Review follow-up — six defects in the fix itself
 
 Codex review on PR #1633 raised three findings against this sweep's own change,
-and a second, manually requested pass on the corrected head raised two more.
-All five were traced to a real path and confirmed; all five are fixed, each
-with a gate verified failing against the state the finding described.
+a second, manually requested pass on the corrected head raised two more, and a
+third pass on the head after that raised (6). All six were traced to a real
+path and confirmed; all six are fixed, each with a gate verified failing
+against the state the finding described.
 
-That the second pass found more is worth recording plainly: findings (4) and
-(5) are both consequences of the fix for (2), and neither was visible from the
-code the first pass changed. A review round is not a filter you pass once.
+That each pass found more is worth recording plainly: findings (4) and (5) are
+both consequences of the fix for (2), and (6) is a consequence of the
+generalisation itself — none was visible from the code the previous pass
+changed. A review round is not a filter you pass once.
 
 **(1) P1 — the fix reached the wrong dispatch.** `proxy.go`'s credential path
 tries the IdP-REGISTRY providers first and only then the legacy fallback:
@@ -11033,3 +11036,40 @@ cannot regress. It also removes the registry walk (3) introduced — the right
 answer to (3) turned out not to be "read more places" but "count once, where
 the event happens". Verified by reverting: the gate reports the total falling
 from 48 to 0 on a provider replacement.
+
+**(6) P2 — a clamped verdict outlived its token.** The whole point of
+`clampCacheTTLToTokenExpiry` is that a cached "yes" can never outlive the
+credential it was derived from: an RFC 7662 positive is bounded by the token's
+own declared `exp`, not by the backend's configured TTL. Both pre-CHAOS-76
+stores held that deadline exactly, because they wrote `expiry: now.Add(ttl)`
+with the **same** `now` the clamp had measured against.
+
+Generalising them onto a shared store broke it. `identityResultCache.set` takes
+a DURATION and samples its own clock, so the absolute deadline became
+`now₂ + (exp − now₁)` = `exp + (now₂ − now₁)`: everything the caller spent in
+between — cloning the identity, contending for the store mutex on a busy
+credential path, waiting out a GC pause — was added back to the entry's life,
+and requests in that interval authenticate on a token that has already expired.
+
+The interval is small in the ordinary case and measured at 1.1 µs and 553 ns
+for the two backends, so this is a contract defect rather than an exploitable
+window: it is not attacker-controlled, and widening it means lengthening a path
+that holds no lock the attacker can reach. It is fixed because the invariant is
+stated in the clamp's own doc comment and in §45.5, and an invariant that holds
+only to within a scheduling delay is not the one the code claims.
+
+The store now distinguishes the two cases instead of making every caller
+express its deadline as a duration: `setUntil` takes an ABSOLUTE instant, which
+is what a token-clamped verdict has, and `set` keeps the duration form for a
+caller whose only bound is a configured TTL (the LDAP bind). Both share one
+`store` helper, so the cap, the fairness policy and the bucket index have a
+single implementation. The gate asserts exact equality with `time.Unix(exp, 0)`
+rather than a tolerance, so any re-derivation fails it however small the
+interval; pre-fix it fails on the first insertion for both backends.
+
+What this one says about the sweep: findings (1) and (3) came from not tracing
+the call graph, and (4), (5) and (6) all come from the same place — moving three
+implementations onto one abstraction silently re-decides the details each of
+them had got right locally. The duration-versus-deadline choice was never
+examined; it was inherited from whichever of the three stores the shared
+signature happened to be modelled on.

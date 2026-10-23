@@ -553,7 +553,10 @@ func (p *OIDCFlowProvider) introspectCacheSet(key, client string, identity *Iden
 	// pre-CHAOS-76 implementation got the first half right and evicted "an
 	// arbitrary entry" for the second — whichever entry Go's map order yielded
 	// first, live or expired.
-	p.cache.set(key, client, cloneIdentity(identity), ok, ttl)
+	// setUntil, not set: see oidcCacheSetIdentityWithExp. The clamped deadline
+	// belongs to the token, so it is passed as an absolute instant derived from
+	// the same `now`, never re-derived from a duration inside the store.
+	p.cache.setUntil(key, client, cloneIdentity(identity), ok, now.Add(ttl))
 	return cloneIdentity(identity), ok
 }
 

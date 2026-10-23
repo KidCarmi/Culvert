@@ -436,7 +436,10 @@ func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key, client string, identity *Ide
 	// The pre-CHAOS-76 implementation evicted "a random entry when the cache is
 	// full" — whichever entry Go's map order yielded first, live or expired, on
 	// a key space made entirely of caller-supplied bearer tokens.
-	a.cache.set(key, client, cloneIdentity(identity), ok, ttl)
+	// setUntil, not set: the deadline is the token's own, measured against the
+	// `now` the clamp above used. Handing set a duration would restart the
+	// clock here and let the entry outlive the token by the elapsed interval.
+	a.cache.setUntil(key, client, cloneIdentity(identity), ok, now.Add(ttl))
 	return cloneIdentity(identity), ok
 }
 

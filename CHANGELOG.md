@@ -1324,7 +1324,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the registry providers and cannot fall when an operator edits an IdP profile
   (editing one has the registry compile a fresh provider, and a Prometheus
   counter that decreases reads as a restart). It sits beside the existing
-  `culvert_auth_cache_evictions_total` for the local cache. Gates: sixteen,
+  `culvert_auth_cache_evictions_total` for the local cache.
+
+  One detail of the generalisation had to be unpicked again: a positive
+  introspection verdict is bounded by the token's own declared `exp` rather
+  than by the backend's configured TTL, and both original stores held that
+  deadline exactly because they recorded it against the same clock sample the
+  clamp had measured. Expressing it as a duration for the shared store
+  restarted that clock on insertion, so an entry outlived its token by whatever
+  elapsed in between (measured at 1.1 us and 553 ns for the two backends). The
+  store now takes an absolute deadline where the caller has one and keeps the
+  duration form only where the bound is a configured TTL. Gates: seventeen,
   with every gate that pins a defect verified failing against the behaviour
   that defect describes.
 
