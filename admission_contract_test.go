@@ -57,6 +57,49 @@ func TestAdmissionMigration_BenchgateSelectors(t *testing.T) {
 
 // Drive the actual floor script against real statement locations. Healthy
 // unrelated files and residual security shims cannot hide an omitted engine.
+// coverageFloorFixtureFiles returns the file column of coverage-floor.sh's
+// FLOORS table, so the fixture below covers exactly the rows the script
+// enforces.
+//
+// This list used to be restated here. That made the positive control silently
+// depend on the two staying in sync, and they did not: adding the
+// internal/ssrf + internal/hostutil rows (the SSRF guard and host
+// normalisation moved out of security.go under ADR-0002/0003 and their floor
+// never followed) left those rows with no fixture file, so they measured 0.0%,
+// the script exited 1, and the "covered" positive control failed — a gate
+// break with nothing wrong in the thing being gated. Deriving the list means a
+// new row needs no edit here, and a row naming a file the script cannot
+// measure still fails loudly.
+func coverageFloorFixtureFiles(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), ".github", "scripts", "coverage-floor.sh"))
+	if err != nil {
+		t.Fatalf("read coverage-floor.sh: %v", err)
+	}
+	var files []string
+	inTable := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !inTable {
+			// The table opens with `FLOORS="`; commentary lives above it,
+			// because the script's reader loop takes no inline comments.
+			inTable = strings.HasPrefix(line, "FLOORS=\"")
+			continue
+		}
+		if strings.HasPrefix(line, "\"") { // closing quote ends the table
+			break
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		files = append(files, fields[0])
+	}
+	if len(files) == 0 {
+		t.Fatal("parsed no rows from coverage-floor.sh FLOORS — the fixture would gate nothing")
+	}
+	return files
+}
+
 func TestAdmissionMigration_CoverageRejectsOmittedEngine(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) {
@@ -70,7 +113,7 @@ func TestAdmissionMigration_CoverageRejectsOmittedEngine(t *testing.T) {
 		}
 	}
 	write("go.mod", "module admission.test/floors\n\ngo 1.21\n")
-	files := []string{"totp.go", "security.go", "session.go", "lockout.go", "policy.go", "autoexclude.go", "autoexclude_resolve.go", "controlplane_delta.go", "controlplane_client.go", "internal/admission/engine.go", "internal/admission/freshness.go"}
+	files := coverageFloorFixtureFiles(t)
 	tests := map[string]string{}
 	for i, file := range files {
 		write(file, fmt.Sprintf("package floors\nfunc F%d() int { return %d }\n", i, i))
