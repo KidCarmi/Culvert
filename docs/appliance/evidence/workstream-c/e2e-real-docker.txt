@@ -1,0 +1,32 @@
+# 2026-10-23T20:31:49Z dockerd 29.6.2 compose 5.6.1 helper c843caa71fb66cf4
+proxy a=314441f0c0e6 b=e2532506926e
+00-helper-initial-load                       rc=0   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=EXPECTED volume=MISSING
+01-agent-up-baseline                         rc=0   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=314441f0c0e6 tag=EXPECTED volume=MISSING
+marker=e2e-1792787529
+10-apply-agent-up                            rc=0   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=e2532506926e tag=EXPECTED volume=e2e-1792787529
+10: clamav container untouched by apply
+11-rollback-agent-up                         rc=0   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=314441f0c0e6 tag=EXPECTED volume=e2e-1792787529
+20-inspect-absent rc=1 stderr=Error response from daemon: No such image: culvert/clamav:1.5.4-culvert.1
+20: matches imageNotFoundRE
+21-agent-up-while-tag-missing                rc=1   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=314441f0c0e6 tag=absent volume=e2e-1792787529
+22-helper-restores-running                   rc=0   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=314441f0c0e6 tag=EXPECTED volume=e2e-1792787529
+30-stack-stop                                rc=0   build=0 session=0 pull=0 clamav=exited(EXPECTED) proxy_img=314441f0c0e6 tag=EXPECTED volume=e2e-1792787529
+31-helper-ensure-after-stop                  rc=0   build=0 session=0 pull=0 clamav=exited(EXPECTED) proxy_img=314441f0c0e6 tag=EXPECTED volume=e2e-1792787529
+32-up-no-build-after-stop                    rc=0   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=314441f0c0e6 tag=EXPECTED volume=e2e-1792787529
+40-down-keep-volumes                         rc=0   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=EXPECTED volume=e2e-1792787529
+41-helper-ensure-after-loss                  rc=0   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=EXPECTED volume=e2e-1792787529
+42-up-no-build-after-loss                    rc=0   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=92c1bf650327 tag=EXPECTED volume=e2e-1792787529
+50-down-keep-volumes                         rc=0   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=EXPECTED volume=e2e-1792787529
+51-helper-refuses-tampered                   rc=2   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=absent volume=e2e-1792787529
+status=refused
+reason=archive_hash_mismatch
+ref=culvert/clamav:1.5.4-culvert.1
+expected_id=sha256:ea362f9b2f7722aaaef4149ac945ebb1d182dde54e32792d8277e5126cc63bfd
+at=2026-10-23T20:33:01Z
+52-up-no-build-refused                       rc=1   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=absent volume=e2e-1792787529
+53-helper-refuses-missing-archive            rc=2   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=absent volume=e2e-1792787529
+reason=archive_missing
+54-recover-real-archive                      rc=0   build=0 session=0 pull=0 clamav=absent(absent) proxy_img= tag=EXPECTED volume=e2e-1792787529
+55-up-after-recover                          rc=0   build=0 session=0 pull=0 clamav=running(EXPECTED) proxy_img=78b143aa09dc tag=EXPECTED volume=e2e-1792787529
+final marker expected=e2e-1792787529 got=e2e-1792787529
+done

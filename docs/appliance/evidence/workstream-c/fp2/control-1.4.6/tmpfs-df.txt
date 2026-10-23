@@ -1,0 +1,2 @@
+Filesystem     1B-blocks  Used Available Use% Mounted on
+/dev/loop0     234594304 24576 229203968   1% $SCRATCH/wsc/fp2/arms/control-1.4.6/tmpfs

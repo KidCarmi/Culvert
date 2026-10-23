@@ -21,6 +21,11 @@ import (
 // only an explicit "unhealthy" refuses.
 func (s *Server) preflightDependencies() stageRun {
 	return func(ctx context.Context) ([]byte, []byte, error) {
+		if missing := s.absentLocalOnlyImages(ctx); len(missing) > 0 {
+			msg := fmt.Sprintf("preflight_dependencies: REFUSED — required local image absent: %s. This host runs `compose up --no-build`, so the image is never built here and the recreate would fail; nothing was changed. Restore it from the verified local archive (`sudo culvert-clamav-image ensure`), then retry",
+				strings.Join(missing, ","))
+			return []byte(msg), nil, fmt.Errorf("local_image_absent: %s", strings.Join(missing, ","))
+		}
 		res, err := s.opts.Runner.ComposeStatus(ctx)
 		if err != nil || res == nil {
 			return []byte("preflight_dependencies: compose ps unavailable (" + errString(err) + "); proceeding"), nil, nil
@@ -36,4 +41,24 @@ func (s *Server) preflightDependencies() stageRun {
 		}
 		return []byte("preflight_dependencies: no unhealthy dependency"), nil, nil
 	}
+}
+
+// absentLocalOnlyImages returns the configured local-only images that are
+// explicitly absent on a compose_no_build host. Same evidence rule as the
+// upgrade check's local_inspect: only the daemon's own "no such image"
+// signature means absent. An inspect that cannot answer (daemon, permission,
+// timeout) does not refuse — `compose up --no-build` still cannot build, so
+// proceeding can only fail explicitly, never produce new image bytes.
+func (s *Server) absentLocalOnlyImages(ctx context.Context) []string {
+	if s.opts.Cfg == nil || !s.opts.Cfg.ComposeNoBuild {
+		return nil
+	}
+	var missing []string
+	for _, ref := range s.opts.Cfg.LocalOnlyImages {
+		res, err := s.opts.Runner.ComposeImageInspect(ctx, ref)
+		if err != nil && res != nil && imageNotFoundRE.Match(res.Stderr) {
+			missing = append(missing, ref)
+		}
+	}
+	return missing
 }

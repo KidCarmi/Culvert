@@ -235,10 +235,11 @@ install -m 0755 "$APPL/provision/culvert-issue-update"            "$APPL/bin/cul
 install -m 0755 "$APPL/provision/culvert-appliance-reset-identity" "$APPL/bin/culvert-appliance-reset-identity"
 install -m 0755 "$APPL/provision/culvert-sudo-policy"             "$APPL/bin/culvert-sudo-policy"
 install -m 0755 "$APPL/os-maintenance/culvert-os-update"          "$APPL/bin/culvert-os-update"
+install -m 0755 "$APPL/provision/culvert-clamav-image"            "$APPL/bin/culvert-clamav-image"
 install -m 0755 "$APPL/install.sh"                                "$APPL/bin/culvert-install.sh"
 # culvert-firstboot is on PATH for its explicit repair verb only
 # (`sudo culvert-firstboot --repair-agent`); the unit still runs it by path.
-for b in culvert-status culvert-net culvert-os-update culvert-appliance-reset-identity culvert-sudo-policy culvert-firstboot; do
+for b in culvert-status culvert-net culvert-os-update culvert-appliance-reset-identity culvert-sudo-policy culvert-firstboot culvert-clamav-image; do
   ln -sf "$APPL/bin/$b" "/usr/local/sbin/$b"
 done
 

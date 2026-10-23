@@ -60,6 +60,7 @@ export DEBIAN_FRONTEND=noninteractive
 exec > >(trap '' TERM HUP INT; exec tee -a "$LOG") 2>&1
 log() { printf '%s culvert-os-update[%s]: %s\n' "$(date -u +%FT%TZ)" "$mode" "$*"; }
 DOCKER_PKGS=(docker-ce docker-ce-cli containerd.io docker-compose-plugin)
+CLAMAV_IMAGE_TOOL="${CULVERT_CLAMAV_IMAGE_TOOL:-/usr/local/sbin/culvert-clamav-image}"
 
 # guard_maintenance: called by every mutating mode before it changes anything.
 guard_maintenance() {
@@ -178,13 +179,24 @@ stack_stop() {
   log "stopping the Culvert stack gracefully (compose stop_grace_period=60s for the proxy)"
   ( cd "$STACK" && docker compose stop )   # no -t: each service's stop_grace_period applies
 }
+# stack_start: `up --no-build` only. The compose file still names a build
+# context for the ClamAV sidecar (quick-start hosts build it), and without
+# --no-build a missing tag makes Compose rebuild it from source — new,
+# unscanned bytes (measured: every missing-tag state, running, stopped or
+# removed). An engine upgrade is exactly when the image store can lose it, so
+# the sidecar is first restored from the verified baked archive, or the start
+# is refused with the reason recorded (culvert-clamav-image).
 stack_start() {
   [[ -f "$STACK/docker-compose.yml" ]] || return 0
+  if ! "$CLAMAV_IMAGE_TOOL" ensure; then
+    log "the verified ClamAV sidecar image is not available (see above); the stack was NOT started"
+    return 1
+  fi
   log "starting the Culvert stack"
   if [[ -f "$STACK/docker-compose.maint-agent.yml" ]] && grep -q '^CULVERT_MAINT_GID=' "$STACK/.env" 2>/dev/null; then
-    ( cd "$STACK" && docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d )
+    ( cd "$STACK" && docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d --no-build )
   else
-    ( cd "$STACK" && docker compose up -d )
+    ( cd "$STACK" && docker compose up -d --no-build )
   fi
 }
 # stack_start_required: the recovery paths' start. A missing compose file is

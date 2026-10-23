@@ -51,6 +51,18 @@ type Config struct {
 	// survives an agent-driven recreate. Empty ⇒ single-file recreate.
 	ComposeOverrideFile string
 
+	// ComposeNoBuild makes the proxy-recreate `docker compose up` pass
+	// --no-build. Appliance hosts set it: their ClamAV sidecar is a scanned,
+	// baked image, and a missing tag must never be rebuilt from source,
+	// because a rebuild produces new, unscanned bytes. Quick-start hosts leave
+	// it false and keep Compose's build fallback.
+	ComposeNoBuild bool
+
+	// LocalOnlyImages are images that must already be present locally on a
+	// ComposeNoBuild host. An image change is refused before anything is
+	// mutated when one is explicitly absent.
+	LocalOnlyImages []string
+
 	// UDS path. Default "/run/culvert-maint/culvert-maint.sock" (under the
 	// systemd RuntimeDirectory the service user owns). Mode is fixed at
 	// 0660 regardless of config.
@@ -148,6 +160,8 @@ type rawConfig struct {
 	ComposeProjectDir   string   `toml:"compose_project_dir"`
 	ComposeFile         string   `toml:"compose_file"`
 	ComposeOverrideFile string   `toml:"compose_override_file"`
+	ComposeNoBuild      bool     `toml:"compose_no_build"`
+	LocalOnlyImages     []string `toml:"local_only_images"`
 	SocketPath          string   `toml:"socket_path"`
 	StateDir            string   `toml:"state_dir"`
 	DockerRoot          string   `toml:"docker_root"`
@@ -279,6 +293,13 @@ func validate(raw *rawConfig) (*Config, error) {
 		}
 		cfg.ComposeOverrideFile = of
 	}
+
+	cfg.ComposeNoBuild = raw.ComposeNoBuild
+	imgs, err := validateLocalOnlyImages(raw.LocalOnlyImages, raw.ComposeNoBuild)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LocalOnlyImages = imgs
 
 	// socket_path — default /run/culvert-maint/culvert-maint.sock. Must be absolute.
 	sp := raw.SocketPath
@@ -493,4 +514,36 @@ func validateHealthPath(name, supplied, def string) (string, error) {
 		}
 	}
 	return v, nil
+}
+
+// localImageRefRE is a local repo:tag reference. local_only_images entries flow
+// into a sudo argv token (docker image inspect), so they are held to this shape.
+var localImageRefRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,199}:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
+
+// maxLocalOnlyImages bounds the preflight: each entry is one inspect.
+const maxLocalOnlyImages = 8
+
+// validateLocalOnlyImages checks local_only_images. The list only has meaning
+// on a compose_no_build host (elsewhere Compose can still build a missing
+// image), so setting it without compose_no_build is refused rather than
+// silently ignored.
+func validateLocalOnlyImages(refs []string, noBuild bool) ([]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if !noBuild {
+		return nil, errors.New("config: local_only_images requires compose_no_build = true")
+	}
+	if len(refs) > maxLocalOnlyImages {
+		return nil, fmt.Errorf("config: local_only_images allows at most %d entries, got %d", maxLocalOnlyImages, len(refs))
+	}
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		r = strings.TrimSpace(r)
+		if !localImageRefRE.MatchString(r) {
+			return nil, fmt.Errorf("config: local_only_images entry must be a local repo:tag reference, got %q", r)
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }

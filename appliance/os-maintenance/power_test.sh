@@ -51,6 +51,11 @@ new_case() {
 #!/usr/bin/env bash
 echo 0
 STUB
+    cat >"$case_dir/bin/culvert-clamav-image" <<'STUB'
+#!/usr/bin/env bash
+echo "clamav-image $*" >>"$CALLS"
+STUB
+    export CULVERT_CLAMAV_IMAGE_TOOL="$case_dir/bin/culvert-clamav-image"
     cat >"$case_dir/bin/assert-locks" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -89,7 +94,7 @@ case "$*" in
         fi
         [[ ${FAIL_STOP:-0} == 0 ]] || exit 41
         ;;
-    'compose up -d') [[ ${FAIL_START:-0} == 0 ]] || exit 42 ;;
+    'compose up -d --no-build') [[ ${FAIL_START:-0} == 0 ]] || exit 42 ;;
     *) echo 'UNEXPECTED DOCKER COMMAND' >>"$CALLS"; exit 97 ;;
 esac
 STUB
@@ -144,7 +149,7 @@ for mode in reboot poweroff; do
     next_boot
     run_case resume-stack
     status_is 0
-    contains 'docker compose up -d'
+    contains 'docker compose up -d --no-build'
     marker_absent
     fence_absent
 
@@ -152,21 +157,21 @@ for mode in reboot poweroff; do
     FAIL_STOP=1 run_case "$mode"
     status_is 1
     absent systemctl
-    contains 'docker compose up -d'
+    contains 'docker compose up -d --no-build'
     marker_absent
     fence_absent
 
     new_case "$mode-interrupted-stop"
     TERM_DURING_STOP=1 run_case "$mode"
     status_is 1
-    [[ $(cat "$CALLS") == $'docker compose stop\ndocker compose up -d' ]] || fail 'SIGTERM during stop did not recover without power dispatch'
+    [[ $(cat "$CALLS") == $'docker compose stop\nclamav-image ensure\ndocker compose up -d --no-build' ]] || fail 'SIGTERM during stop did not recover without power dispatch'
     marker_absent
     fence_absent
 
     new_case "$mode-interrupted-stop-group"
     TERM_DURING_STOP=1 SIGNAL_SCOPE=group run_case "$mode"
     status_is 1
-    [[ $(cat "$CALLS") == $'docker compose stop\ndocker compose up -d' ]] || fail 'group SIGTERM during stop did not recover (including logging pipe)'
+    [[ $(cat "$CALLS") == $'docker compose stop\nclamav-image ensure\ndocker compose up -d --no-build' ]] || fail 'group SIGTERM during stop did not recover (including logging pipe)'
     marker_absent
     fence_absent
 
@@ -188,7 +193,7 @@ for mode in reboot poweroff; do
     TERM_DURING_STOP=1 FAIL_START=1 run_case "$mode"
     status_is 1
     absent systemctl
-    contains 'docker compose up -d'
+    contains 'docker compose up -d --no-build'
     marker_present
     grep -q ' aborted$' "$TEST_SHUTDOWN_FENCE" || fail 'known aborted recovery not persisted'
     run_case resume-stack
@@ -199,14 +204,14 @@ for mode in reboot poweroff; do
     new_case "$mode-power-failure"
     FAIL_POWER=1 run_case "$mode"
     status_is 1
-    [[ $(cat "$CALLS") == $'docker compose stop\nsystemctl '"$mode"$'\ndocker compose up -d' ]] || fail 'failed power did not restart after dispatch'
+    [[ $(cat "$CALLS") == $'docker compose stop\nsystemctl '"$mode"$'\nclamav-image ensure\ndocker compose up -d --no-build' ]] || fail 'failed power did not restart after dispatch'
     marker_absent
     fence_absent
 
     new_case "$mode-recovery-failure"
     FAIL_POWER=1 FAIL_START=1 run_case "$mode"
     status_is 1
-    contains 'docker compose up -d'
+    contains 'docker compose up -d --no-build'
     marker_present
     grep -q ' aborted$' "$TEST_SHUTDOWN_FENCE" || fail 'rejected power recovery not persisted'
     run_case resume-stack

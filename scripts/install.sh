@@ -1291,6 +1291,35 @@ sidecar_image_of() {
   sudo sed -n 's/^[[:space:]]*image:[[:space:]]*\(culvert\/clamav:[^[:space:]#]*\).*/\1/p' "$1" | head -n 1
 }
 
+# ── Appliance: the ClamAV sidecar is never built here ───────────────────────
+# A Culvert appliance (OVA) ships its sidecar as a scanned, baked archive and
+# records the image ID in its manifest. The compose file still names a build
+# context because quick-start hosts build the sidecar locally; on an appliance
+# any build would produce new, unscanned bytes from Docker Hub and the Alpine
+# CDN. So on an appliance every `compose up` runs with --no-build, a missing
+# sidecar is restored only from the verified archive (culvert-clamav-image),
+# and a bundle that names a sidecar this host does not have is not adopted.
+# The manifest, not an environment variable, decides: an operator re-running
+# this installer by hand carries no first-boot environment.
+APPLIANCE_STATE_DIR="${CULVERT_APPLIANCE_STATE_DIR:-/var/lib/culvert-appliance}"
+CLAMAV_IMAGE_TOOL="${CULVERT_CLAMAV_IMAGE_TOOL:-/usr/local/sbin/culvert-clamav-image}"
+is_appliance() {
+  sudo grep -qE '^CLAMAV_SIDECAR_ID=sha256:[0-9a-f]{64}$' "$APPLIANCE_STATE_DIR/manifest.env" 2>/dev/null
+}
+COMPOSE_NO_BUILD=()
+if is_appliance; then
+  COMPOSE_NO_BUILD=(--no-build)
+fi
+
+# ensure_appliance_sidecar — on an appliance, restore the baked sidecar from
+# its verified archive before `compose up`, or stop. No-op elsewhere.
+ensure_appliance_sidecar() {
+  is_appliance || return 0
+  info "Appliance: verifying the baked ClamAV sidecar (restored from its verified archive if missing; never built)..."
+  sudo "$CLAMAV_IMAGE_TOOL" ensure \
+    || error "The verified ClamAV sidecar image is not available (see above). An appliance never rebuilds it, so the stack was not started. Restore the archive or redeploy the appliance image."
+}
+
 # staged_bundle_differs DIR — true when any host component the staged bundle
 # would install is missing from $INSTALL_DIR or differs from it.
 staged_bundle_differs() {
@@ -1327,6 +1356,14 @@ refresh_deploy_bundle() {
     return 0
   fi
   tag="$(sidecar_image_of "$tmp/docker-compose.yml")"
+  if [[ -n "$tag" ]] && is_appliance && ! sudo docker image inspect "$tag" >/dev/null 2>&1; then
+    sudo rm -rf "$tmp"
+    warn "The new bundle names the ClamAV sidecar $tag, which this appliance does not have."
+    warn "An appliance only runs the scanned sidecar baked into its image and never builds one,"
+    warn "so host components were NOT refreshed; the stack keeps its previous compose file and"
+    warn "sidecar. A new sidecar arrives with a new appliance image."
+    return 3
+  fi
   if [[ -n "$tag" ]] && ! sudo docker image inspect "$tag" >/dev/null 2>&1; then
     info "Building the ClamAV sidecar $tag from the new bundle (needs Docker Hub and the Alpine package CDN)..."
     if ! sudo docker build -t "$tag" "$tmp/appliance/clamav"; then
@@ -2025,12 +2062,13 @@ info "Pulling images and starting services (first run may take a few minutes —
 # ClamAV is still downloading signatures. Keep in sync with docker-compose.yml
 # (pinned by TestInstallScript_ComposeWaitTimeout_CoversClamAVStartPeriod).
 COMPOSE_UP_OK=0
-if sudo docker compose up -d --wait --wait-timeout 330; then
+ensure_appliance_sidecar
+if sudo docker compose up -d ${COMPOSE_NO_BUILD[@]+"${COMPOSE_NO_BUILD[@]}"} --wait --wait-timeout 330; then
   COMPOSE_UP_OK=1
 else
   # Fallback for older Compose versions that don't support --wait.
   warn "'docker compose up --wait' failed or is unsupported. Falling back to manual health check."
-  if sudo docker compose up -d; then
+  if sudo docker compose up -d ${COMPOSE_NO_BUILD[@]+"${COMPOSE_NO_BUILD[@]}"}; then
     info "Waiting up to 90s for services to become healthy..."
     for i in $(seq 1 45); do
       # Treat any exited container as a hard failure
@@ -2559,6 +2597,21 @@ wire_release_agent_for_compose() {
     info "Maintenance agent will carry docker-compose.maint-agent.yml on recreate (socket survives updates)."
   fi
 
+  # Appliance: the agent's recreate carries --no-build, its sudoers keeps ONLY
+  # the --no-build `up` forms, and an image change is refused before anything
+  # moves if the baked sidecar is absent. Same delete-then-append as above.
+  sudo sed -i -e '/^[[:space:]]*compose_no_build[[:space:]]*=/d' -e '/^[[:space:]]*local_only_images[[:space:]]*=/d' "$cfg"
+  if is_appliance; then
+    local sidecar_ref
+    sidecar_ref="$(sidecar_image_of "$INSTALL_DIR/docker-compose.yml")"
+    sudo sed -i -e '$a\' "$cfg"   # end in a newline (adds one only when missing)
+    printf 'compose_no_build = true\n' | sudo tee -a "$cfg" >/dev/null
+    if [[ -n "$sidecar_ref" ]]; then
+      printf 'local_only_images = ["%s"]\n' "$sidecar_ref" | sudo tee -a "$cfg" >/dev/null
+    fi
+    info "Maintenance agent: appliance mode (compose up --no-build; sidecar ${sidecar_ref:-unnamed} must be present locally)."
+  fi
+
   # Re-render sudoers after the config patch, then start the service.
   if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
     warn "Release Management auto-wiring skipped: maint-agent sudoers/config re-render failed."
@@ -2595,7 +2648,7 @@ wire_release_agent_for_compose() {
   fi
 
   info "Mounting the maint-agent UDS into the proxy with the safe override..."
-  if ! sudo docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d; then
+  if ! sudo docker compose -f docker-compose.yml -f docker-compose.maint-agent.yml up -d ${COMPOSE_NO_BUILD[@]+"${COMPOSE_NO_BUILD[@]}"}; then
     warn "Release Management auto-wiring skipped: compose override failed."
     return 0
   fi

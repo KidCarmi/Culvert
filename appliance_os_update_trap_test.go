@@ -115,9 +115,12 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 		"apt-cache":          `echo "Candidate: 29.0"; exit 0`,
 		"unattended-upgrade": `echo "unattended-upgrade $*" >> "$CALLS"; exit 0`,
 		// dpkg --configure -a replays (empties) the journal unless told to fail.
-		"dpkg":      `echo "dpkg $*" >> "$CALLS"; [[ "$*" == *--configure* ]] && { [[ "${FAIL_DPKG_CONFIGURE:-0}" == 1 ]] && exit 1; rm -f "$DPKG_UPDATES_DIR"/[0-9]*; }; exit 0`,
-		"systemctl": `echo "systemctl $*" >> "$CALLS"; [[ "$1" == restart && "${FAIL_RESTART:-0}" == 1 ]] && exit 1; [[ "$1" == reboot && "${FAIL_REBOOT:-0}" == 1 ]] && exit 1; exit 0`,
-		"docker":    `echo "docker $*" >> "$CALLS"; [[ "$1 $2" == "compose stop" ]] && { [[ -e "$RESUME_MARKER" ]] && echo "resume-marker:armed" >> "$CALLS" || echo "resume-marker:absent" >> "$CALLS"; [[ -e "$OSU_MAINT_STATE/host-shutdown.pending" ]] && echo "shutdown-fence:armed" >> "$CALLS" || echo "shutdown-fence:absent" >> "$CALLS"; }; [[ "$1 $2" == "compose stop" && "${FAIL_STOP:-0}" == 1 ]] && exit 1; [[ "$1 $2" == "compose up" && "${FAIL_START:-0}" == 1 ]] && exit 1; exit 0`,
+		"dpkg": `echo "dpkg $*" >> "$CALLS"; [[ "$*" == *--configure* ]] && { [[ "${FAIL_DPKG_CONFIGURE:-0}" == 1 ]] && exit 1; rm -f "$DPKG_UPDATES_DIR"/[0-9]*; }; exit 0`,
+		// The verified-sidecar helper: records its call so order against
+		// `docker compose up` is observable; FAIL_CLAMAV_IMAGE=1 makes it refuse.
+		"culvert-clamav-image": `echo "clamav-image $*" >> "$CALLS"; [[ "${FAIL_CLAMAV_IMAGE:-0}" == 1 ]] && exit 2; exit 0`,
+		"systemctl":            `echo "systemctl $*" >> "$CALLS"; [[ "$1" == restart && "${FAIL_RESTART:-0}" == 1 ]] && exit 1; [[ "$1" == reboot && "${FAIL_REBOOT:-0}" == 1 ]] && exit 1; exit 0`,
+		"docker":               `echo "docker $*" >> "$CALLS"; [[ "$1 $2" == "compose stop" ]] && { [[ -e "$RESUME_MARKER" ]] && echo "resume-marker:armed" >> "$CALLS" || echo "resume-marker:absent" >> "$CALLS"; [[ -e "$OSU_MAINT_STATE/host-shutdown.pending" ]] && echo "shutdown-fence:armed" >> "$CALLS" || echo "shutdown-fence:absent" >> "$CALLS"; }; [[ "$1 $2" == "compose stop" && "${FAIL_STOP:-0}" == 1 ]] && exit 1; [[ "$1 $2" == "compose up" && "${FAIL_START:-0}" == 1 ]] && exit 1; exit 0`,
 	}
 	for name, body := range stubs {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/bash\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // PATH stub in a test temp dir: must be executable
@@ -127,7 +130,8 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 	callsPath := filepath.Join(dir, "calls")
 	cmd := exec.CommandContext(t.Context(), "bash", append([]string{scriptPath}, args...)...) //nolint:gosec // test-owned copy of the script in t.TempDir(); args are test constants
 	cmd.Env = append([]string{"PATH=" + bin + ":" + os.Getenv("PATH"), "CALLS=" + callsPath, "RESUME_MARKER=" + resume,
-		"OSU_MAINT_STATE=" + mstate, "DPKG_UPDATES_DIR=" + dpkgUpdates}, env...)
+		"OSU_MAINT_STATE=" + mstate, "DPKG_UPDATES_DIR=" + dpkgUpdates,
+		"CULVERT_CLAMAV_IMAGE_TOOL=" + filepath.Join(bin, "culvert-clamav-image")}, env...)
 	b, _ := cmd.CombinedOutput()
 	code = cmd.ProcessState.ExitCode()
 	c, _ := os.ReadFile(callsPath)

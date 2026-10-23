@@ -113,7 +113,7 @@ func (h *hostRefreshHarness) run(env ...string) (out string, rc int) {
 	h.t.Helper()
 	var fns []string
 	for _, name := range []string{"copy_bundle_file", "stage_deploy_bundle", "install_staged_bundle",
-		"sidecar_image_of", "staged_bundle_differs", "refresh_deploy_bundle"} {
+		"sidecar_image_of", "is_appliance", "staged_bundle_differs", "refresh_deploy_bundle"} {
 		fns = append(fns, extractShellFunction(h.t, "scripts/install.sh", name))
 	}
 	script := `set -uo pipefail
@@ -139,6 +139,7 @@ docker() {
   esac
 }
 PINNED_TAG=culvert/proxy:pinned
+APPLIANCE_STATE_DIR="$ROOT/appliance-state"
 ` + strings.Join(fns, "\n") + `
 refresh_deploy_bundle; echo "RC=$?"
 `

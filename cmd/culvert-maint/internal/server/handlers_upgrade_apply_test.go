@@ -93,6 +93,12 @@ type applyRig struct {
 	// pinnedDigest is what `docker image inspect culvert/proxy:pinned`
 	// resolves to (bare digest); "" ⇒ the tag is absent (inspect fails).
 	pinnedDigest string
+	// absentRefs: non-digest refs (e.g. a local-only sidecar tag) that
+	// `docker image inspect` reports with the daemon's own "No such image"
+	// signature on stderr. inspectErrRefs: refs whose inspect fails WITHOUT
+	// that signature (daemon/permission/timeout). Keyed by the exact ref.
+	absentRefs     map[string]bool
+	inspectErrRefs map[string]bool
 	// dockerDown makes EVERY docker command fail (daemon not up).
 	dockerDown atomic.Bool
 	// stackDown makes `compose ps` report no containers at all.
@@ -237,6 +243,14 @@ func (r *applyRig) inspectAbsent(argv []string) bool {
 	return false
 }
 
+// inspectedRef returns the ref of a `docker image inspect <ref>` argv, or "".
+func inspectedRef(argv []string) string {
+	if len(argv) < 3 || !argvHas(argv, "image") || !argvHas(argv, "inspect") {
+		return ""
+	}
+	return argv[len(argv)-1]
+}
+
 // currentRunning returns the digest the fake stack is currently running.
 func (r *applyRig) currentRunning() string {
 	r.mu.Lock()
@@ -293,6 +307,15 @@ func startApplyRigAt(t *testing.T, tmp string) *applyRig {
 
 func startApplyRigWithTrustAt(t *testing.T, tmp string, trust ReleaseTrust) *applyRig {
 	t.Helper()
+	return startApplyRigCfg(t, tmp, trust, nil)
+}
+
+// startApplyRigCfg is startApplyRigWithTrustAt with a hook that adjusts the
+// agent config before the server starts (e.g. compose_no_build hosts).
+//
+//nolint:funlen // test rig setup; splitting hides the wiring sequence
+func startApplyRigCfg(t *testing.T, tmp string, trust ReleaseTrust, mutate func(*config.Config)) *applyRig {
+	t.Helper()
 	sockPath := filepath.Join(tmp, "agent.sock")
 	auditPath := filepath.Join(tmp, "audit.jsonl")
 
@@ -316,6 +339,9 @@ func startApplyRigWithTrustAt(t *testing.T, tmp string, trust ReleaseTrust) *app
 		ImageAllowlist:    regexp.MustCompile(`^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`),
 		ProxyRepo:         repo, // config.Load always sets it; the reconcile trust gate is repo-bound
 	}
+	if mutate != nil {
+		mutate(cfg)
+	}
 
 	rig := &applyRig{
 		sockPath:     sockPath,
@@ -334,6 +360,7 @@ func startApplyRigWithTrustAt(t *testing.T, tmp string, trust ReleaseTrust) *app
 		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase},
 		EnvOverlayOnly:    []string{runner.EnvCulvertBackupPassphrase},
 		DockerBinary:      "/usr/bin/docker",
+		ComposeNoBuild:    cfg.ComposeNoBuild, // main.go wires the same field
 	})
 	if err != nil {
 		t.Fatalf("runner: %v", err)
@@ -410,6 +437,9 @@ func (r *applyRig) execStart(cmd *exec.Cmd) error {
 	if out := r.canned(cmd.Args); out != nil {
 		_, _ = cmd.Stdout.Write(out)
 	}
+	if ref := inspectedRef(cmd.Args); r.absentRefs[ref] && cmd.Stderr != nil {
+		_, _ = cmd.Stderr.Write([]byte("Error response from daemon: No such image: " + ref + "\n"))
+	}
 	if r.blockUp != nil && argvHas(cmd.Args, "up") {
 		<-r.blockUp
 	}
@@ -424,6 +454,9 @@ func (r *applyRig) execWait(cmd *exec.Cmd) error {
 	}
 	if r.inspectAbsent(cmd.Args) {
 		return errors.New("simulated: no such image")
+	}
+	if ref := inspectedRef(cmd.Args); r.absentRefs[ref] || r.inspectErrRefs[ref] {
+		return errors.New("simulated non-zero exit (image inspect)")
 	}
 	if r.failFn != nil && r.failFn(cmd.Args, cmd.Env) {
 		return errors.New("simulated non-zero exit (failFn)")
