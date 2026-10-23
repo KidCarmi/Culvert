@@ -24,6 +24,11 @@ package catdb
 //     not reuse that rule — see storeguard.Policy.
 
 import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+
 	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
@@ -43,6 +48,9 @@ const (
 	TriggerPoisonMarker = storeguard.TriggerPoisonMarker
 	// TriggerOpenError means badger.Open returned an identified corruption error.
 	TriggerOpenError = storeguard.TriggerOpenError
+	// TriggerRuntimeFault means a previous run contained a memory fault on the
+	// store's mapped tables after a healthy open (CHAOS-74).
+	TriggerRuntimeFault = storeguard.TriggerRuntimeFault
 )
 
 // communityStorePolicy is deliberately EMPTY: this store is never opened with an
@@ -63,15 +71,94 @@ var communityStorePolicy = storeguard.Policy{}
 //
 // Direct `catdb.Open` remains the entry point for callers that already know the
 // directory is sound.
+//
+// The configured path is resolved through symlinks ONCE, here, and every
+// recovery step — markers, the quarantine rename, the rebuild — acts on the
+// real target. If it used the configured path instead, an alias such as
+// `/var/lib/catdb -> /mnt/data/catdb` would have the SYMLINK renamed aside.
+// badger would then create a plain directory at the alias, so the rebuilt feed
+// would silently leave the persistent volume while the damaged target stayed
+// where it was. The alias itself is never renamed or replaced.
 func OpenResilient(dir string) (*CommunityDB, Recovery, error) {
-	return storeguard.Open(dir, communityStorePolicy, Open)
+	return openResilientWith(dir, Open)
+}
+
+// openResilientWith is OpenResilient with the opener injected, so a recovery
+// whose replacement cannot be created (ENOSPC after the quarantine) can be
+// exercised.
+func openResilientWith(dir string, open func(string) (*CommunityDB, error)) (*CommunityDB, Recovery, error) {
+	return storeguard.Open(resolveStoreDir(dir), communityStorePolicy, open)
 }
 
 // QuarantinedCopies returns the `.corrupt.*` siblings of dir, newest last.
 // Exported so the caller can re-surface an unreconciled quarantine from a
 // PRIOR boot: the in-memory record is process-local, so without this a
 // self-healed store looks pristine on the next restart while the evidence — and
-// the disk it occupies — is still sitting there.
+// the disk it occupies — is still sitting there. dir is resolved the same way
+// OpenResilient resolves it, because that is where the copies are.
 func QuarantinedCopies(dir string) []string {
-	return storeguard.QuarantinedCopies(dir)
+	return storeguard.QuarantinedCopies(resolveStoreDir(dir))
+}
+
+// resolveStoreDir returns the store's real directory: dir with symlinks
+// resolved, or, when dir is an alias whose target does not exist, that target.
+// Otherwise (a first start before a plain directory exists, or a path that
+// cannot be read) dir is returned unchanged.
+//
+// The dangling-alias case is not hypothetical. A recovery that quarantines the
+// target and then cannot create its replacement (ENOSPC) leaves the alias
+// pointing at nothing. Handing badger the alias would fail on every later start
+// (MkdirAll refuses a path that exists as a symlink), so Layer 2 would never come
+// back even after space was freed. Following the link instead lets badger
+// recreate the target directory where the alias says it belongs. The alias
+// itself is never replaced.
+func resolveStoreDir(dir string) string {
+	if dir == "" {
+		return dir
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
+	if target, ok := danglingAliasTarget(dir); ok {
+		return target
+	}
+	return dir
+}
+
+// maxAliasHops bounds how far danglingAliasTarget follows a chain of links, so
+// a symlink loop terminates.
+const maxAliasHops = 8
+
+// danglingAliasTarget follows dir through symlinks to a final path that does
+// not exist and whose parent does. ok is false for anything else: not a
+// symlink, a loop, an unreadable link, or a target whose parent is also missing
+// (an unmounted volume, where creating the store would put it on the wrong
+// filesystem).
+func danglingAliasTarget(dir string) (target string, ok bool) {
+	p := filepath.Clean(dir)
+	for i := 0; i < maxAliasHops; i++ {
+		fi, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			if i == 0 {
+				return "", false // not an alias at all
+			}
+			parent, perr := filepath.EvalSymlinks(filepath.Dir(p))
+			if perr != nil {
+				return "", false
+			}
+			return filepath.Join(parent, filepath.Base(p)), true
+		case err != nil || fi.Mode()&os.ModeSymlink == 0:
+			return "", false
+		}
+		link, err := os.Readlink(p)
+		if err != nil {
+			return "", false
+		}
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(filepath.Dir(p), link)
+		}
+		p = filepath.Clean(link)
+	}
+	return "", false
 }

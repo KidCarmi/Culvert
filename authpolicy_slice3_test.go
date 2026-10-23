@@ -254,6 +254,7 @@ func TestPolicyTest_SkipsAcceptedAuthRule(t *testing.T) {
 // ── Cluster ConfigSnapshot ───────────────────────────────────────────────────
 
 func TestApplyConfigSnapshot_RoundTripsValidAuthRule(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	withFreshPolicyStore(t)
 	applyConfigSnapshot(ConfigSnapshot{
 		PolicyRules: []PolicyRule{

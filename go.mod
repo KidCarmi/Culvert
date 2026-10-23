@@ -9,12 +9,12 @@ go 1.26.6
 // disagreement. The `go` line above is the module's minimum language version,
 // not the build compiler, and is not raised to match. Upgrade procedure:
 // roadmap/CI-REDESIGN.md §20.
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f
-	github.com/andybalholm/brotli v1.2.4
-	github.com/beevik/etree v1.8.0
+	github.com/andybalholm/brotli v1.2.6
+	github.com/beevik/etree v1.8.1
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/getkin/kin-openapi v0.151.0
@@ -22,15 +22,15 @@ require (
 	github.com/goccy/go-yaml v1.19.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.3
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/playwright-community/playwright-go v0.6000.0
 	github.com/sigstore/protobuf-specs v0.5.2
 	github.com/sigstore/sigstore-go v1.3.0
-	go.etcd.io/etcd/api/v3 v3.7.1
-	go.etcd.io/etcd/client/v3 v3.7.1
-	go.etcd.io/etcd/server/v3 v3.7.1
+	go.etcd.io/etcd/api/v3 v3.7.2
+	go.etcd.io/etcd/client/v3 v3.7.2
+	go.etcd.io/etcd/server/v3 v3.7.2
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
@@ -133,8 +133,8 @@ require (
 	github.com/xiang90/probing v0.0.0-20221125231312-a49e3df8f510 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
-	go.etcd.io/etcd/client/pkg/v3 v3.7.1 // indirect
-	go.etcd.io/etcd/pkg/v3 v3.7.1 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.7.2 // indirect
+	go.etcd.io/etcd/pkg/v3 v3.7.2 // indirect
 	go.etcd.io/raft/v3 v3.7.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.68.0 // indirect
