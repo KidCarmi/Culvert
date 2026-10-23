@@ -21,17 +21,20 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
+	// One locked snapshot: the CP supervisor claims the role asynchronously,
+	// so separate field reads could mix two states (and race).
+	view := clusterRoleSnapshot()
 	result := map[string]any{
-		"role":                   clusterRole.role,
-		"nodeID":                 clusterRole.nodeID,
-		"grpcAddr":               clusterRole.grpcAddr,
+		"role":                   view.role,
+		"nodeID":                 view.nodeID,
+		"grpcAddr":               view.grpcAddr,
 		"uptime":                 time.Since(startTime).Round(time.Second).String(),
 		"enrollEnabled":          globalClusterCA.Ready(),
 		"caFingerprint":          globalClusterCA.CACertFingerprint(),
 		"ha":                     globalHA.Status(),
 		"grpcCompressionEnabled": clusterGRPCCompression,
 	}
-	if clusterRole.role == "control-plane" {
+	if view.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
 		result["enrolledNodes"] = globalClusterStore.ListNodes()
 		result["activeTokens"] = countActiveTokens()
@@ -149,6 +152,35 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 	}
 }
 
+// validateEnrollmentTokenRequest checks the node prefix (alphanumeric + _-
+// only, at most 255 characters) and the TTL (default 24 h, capped at 8760 h =
+// 1 year). Returns the effective TTL, or a client-facing error message.
+// Extracted from apiClusterTokenCreate unchanged, to keep that handler inside
+// the cyclomatic budget.
+func validateEnrollmentTokenRequest(nodePrefix string, ttlHours int) (ttl time.Duration, errMsg string) {
+	if len(nodePrefix) > 255 {
+		return 0, "node_prefix must be <= 255 characters"
+	}
+	for _, c := range nodePrefix {
+		if !isNodePrefixRune(c) {
+			return 0, "node_prefix must contain only alphanumeric characters, underscores, and dashes"
+		}
+	}
+	const maxTTLHours = 8760
+	if ttlHours > maxTTLHours {
+		return 0, fmt.Sprintf("ttl_hours must be <= %d (1 year)", maxTTLHours)
+	}
+	if ttlHours > 0 {
+		return time.Duration(ttlHours) * time.Hour, ""
+	}
+	return 24 * time.Hour, ""
+}
+
+// isNodePrefixRune reports whether c may appear in an enrollment node prefix.
+func isNodePrefixRune(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+}
+
 // apiClusterTokenCreate mints a one-shot node-enrollment token.
 //
 // Intentionally OUT of the config-version rollback surface — tokens
@@ -160,7 +192,8 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if clusterRole.role != "control-plane" {
+	view := clusterRoleSnapshot()
+	if view.role != "control-plane" {
 		http.Error(w, "enrollment only available on Control Plane", http.StatusBadRequest)
 		return
 	}
@@ -179,29 +212,10 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate node_prefix: alphanumeric + _- only, max 255 chars.
-	if req.NodePrefix != "" {
-		if len(req.NodePrefix) > 255 {
-			http.Error(w, "node_prefix must be <= 255 characters", http.StatusBadRequest)
-			return
-		}
-		for _, c := range req.NodePrefix {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
-				http.Error(w, "node_prefix must contain only alphanumeric characters, underscores, and dashes", http.StatusBadRequest)
-				return
-			}
-		}
-	}
-
-	// Cap TTL at 8760 hours (1 year).
-	const maxTTLHours = 8760
-	ttl := 24 * time.Hour
-	if req.TTLHours > 0 {
-		if req.TTLHours > maxTTLHours {
-			http.Error(w, fmt.Sprintf("ttl_hours must be <= %d (1 year)", maxTTLHours), http.StatusBadRequest)
-			return
-		}
-		ttl = time.Duration(req.TTLHours) * time.Hour
+	ttl, verr := validateEnrollmentTokenRequest(req.NodePrefix, req.TTLHours)
+	if verr != "" {
+		http.Error(w, verr, http.StatusBadRequest)
+		return
 	}
 
 	// SEC-BOOTSTRAP-HOST-1 — bootstrap_cmd below is a `curl … | sudo bash`
@@ -223,7 +237,7 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build enrollment URL.
-	cpAddr := clusterRole.grpcAddr
+	cpAddr := view.grpcAddr
 	caFP := globalClusterCA.CACertFingerprint()
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
 
@@ -381,13 +395,14 @@ func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
 	// node stopped consulting because the Control Plane went away" — the second
 	// is the state in which a 429 on this node has nothing to do with the
 	// client's current request rate.
-	crl := clusterRateLimitFreshness()
+	limiter := rl
+	crl := limiter.ClusterFreshness()
 	body := map[string]any{
-		"enabled":                      clusterRateLimitEnabled.Load(),
+		"enabled":                      limiter.ClusterEnabled(),
 		"syncing_nodes":                nodes,
 		"hot_ips":                      hotIPs,
-		"remote_ips":                   clusterCounts.Count(),
-		"rate_limit_rpm":               rl.Limit(),
+		"remote_ips":                   limiter.RemoteIPCount(),
+		"rate_limit_rpm":               limiter.Limit(),
 		"threshold_pct":                hotThresholdPct,
 		"remote_counts_stale":          crl.Stale,
 		"remote_counts_max_age_secs":   crl.MaxAge.Seconds(),
@@ -424,7 +439,7 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"local_revoked": sessionRevoked.Count(),
-		"cluster_mode":  audit.DPMode() || clusterRole.role == "control-plane",
+		"cluster_mode":  audit.DPMode() || isControlPlaneRole(),
 	})
 }
 
