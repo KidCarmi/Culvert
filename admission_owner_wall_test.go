@@ -4,12 +4,20 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/admission"
 )
+
+// pkgSourcePath anchors a package source filename to the package source
+// directory, so a parse resolves the same file whatever the process working
+// directory is. pkgSourceDir() is itself anchored via runtime.Caller.
+func pkgSourcePath(filename string) string {
+	return filepath.Join(pkgSourceDir(), filename)
+}
 
 // ── SEC-ADMISSION-OWNER-1 ───────────────────────────────────────────────────
 //

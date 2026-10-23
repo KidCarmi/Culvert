@@ -143,13 +143,13 @@ tree restored after each):
 | `rateLimitGossipLoop` reassigns its `limiter` | GossipLoopIsFedTheEnforcingLimiter | FAIL — **green before round 2** |
 | `proxy.go` shadows `rl := newRateLimiter()` | RequestPathUsesClusterAwareEntryPoint | FAIL — **green before round 1** |
 | `socks5.go` uses `rl.Allow` | RequestPathUsesClusterAwareEntryPoint | FAIL (as required) |
-| a helper reassigns `rl = newRateLimiter()` | NoProductionReassignmentOfTheOwner | FAIL — **green before round 3** |
-| the same reassignment in a separate file | NoProductionReassignmentOfTheOwner | FAIL — **green before round 3** |
+| a helper reassigns `rl = newRateLimiter()` | TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles (main) | FAIL — **green before round 3** |
+| the same reassignment in a separate file | TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles (main) | FAIL — **green before round 3** |
 | §4 reinstates "Allow panics" | ZeroValueResidual_DocumentMatchesTheEngine | FAIL — **green before round 4** |
 | §4 adds a row the gate cannot run | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (no silent skip) |
 | §4 deletes a row the gate knows | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (as required) |
 | §4's table header renamed | ZeroValueResidual_DocumentMatchesTheEngine | FAIL (parser cannot match nothing and pass) |
-| global write beside an inner shadow | NoProductionReassignmentOfTheOwner | FAIL — **green before round 5** |
+| global write beside an inner shadow | TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles (main) | FAIL — **green before round 5** |
 | owner walls run from another CWD | GossipLoopIsFedTheEnforcingLimiter, RequestPathUsesClusterAwareEntryPoint | FAIL — **green before round 5** (parse error, not a verdict) |
 
 ### Review rounds — the wall checked the SPELLING, not the BINDING
@@ -196,10 +196,14 @@ new limiter, gossip keeps feeding the old one, and the live budget is
 discarded. Reproduced: adding such a function left every `TestAdmissionOwner_`
 test passing. ADR-0038's boundary map already said "No production reassignment
 of `rl`", so this was a recorded invariant with nothing enforcing it —
-`admission_owner_reassign_wall_test.go` now scans every non-test file in the
-package for an assignment to the handle (the declaration is the one permitted
-write; a local of the same name is not the handle), with controls in both
-directions and two mutations verified failing.
+`admission_owner_reassign_wall_test.go` was added to scan every non-test file
+in the package for an assignment to the handle, with controls in both
+directions and two mutations verified failing. That file has since been
+deleted: main gained
+`TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles` with RISK-030,
+which flags every assignment to `ipf` or `rl` in package main's non-test files
+(stricter — it does not exempt a local of the same name), and the three
+reassignment mutations in the table above were re-run against it.
 
 **The shape of these three rounds is the lesson, not any one of them.** Each
 fix was correct and each left the next hop unguarded: resolve the caller's
@@ -440,9 +444,11 @@ complete — not a weakening of the wall.
    the package-level `ipf` pointer, which request goroutines read at
    `proxy.go:1477` and `socks5.go:430` with no synchronisation. Identical at
    baseline (`1f7f42c:controlplane_snapshot.go:875`); the engine's own internal
-   state is atomic, it is the handle swap that is not. Out of scope here —
-   closing it means an `atomic.Pointer` handle, a behavioural change to the
-   composition root.
+   state is atomic, it is the handle swap that is not. Out of scope here.
+   **Since closed on main as RISK-030** (PR #1635): the snapshot apply now
+   replaces the filter in place (`IPFilter.Replace`), and
+   `TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles` forbids
+   reassigning either handle.
 3. **`ExportHotDeltas` is misnamed**, exporting absolute in-window counts rather
    than deltas. ADR-0038 records this as a documentation defect deliberately
    left alone, because changing it would change cluster accounting. The new
@@ -453,19 +459,11 @@ complete — not a weakening of the wall.
 
 - `admission_owner_wall_test.go` — new, test-only: two structural walls with
   controls, plus the documented-residual behavioural test.
-- `admission_owner_reassign_wall_test.go` — new, test-only (round 3): the
-  package handle itself is walled against production reassignment. Kept in its
-  own file so it merges cleanly alongside concurrent edits to the other walls.
-  **Merge disposition:** PR #1635 carries
-  `TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles`, a strict
-  superset — it scans package `main` for assignments to `ipf` *and* `rl`, where
-  this one covers `rl` only. The wall is kept here rather than deferred to
-  #1635 because an already-reproduced gap should not depend on another open PR
-  merging; if #1635 is reworked or dropped, the hole stays named. **Whichever
-  of #1584 / #1635 merges second should delete this file**, since #1635's wall
-  covers everything it does. One redundant test is the cheaper failure mode
-  than a security property with an external dependency, but it is not meant to
-  be permanent.
+- `admission_owner_reassign_wall_test.go` — added in round 3 and **deleted
+  when main was merged in**, per its recorded merge disposition: PR #1635
+  merged first with `TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles`, a strict superset (it covers `ipf` *and* `rl`, and
+  does not exempt locals). The package-handle half of the one-owner contract
+  is now that wall's; the round-3 mutations were re-run against it.
 - `internal/admission/zero_value_doc_test.go` — new, test-only (round 4): binds
   §4's zero-value table to the engine, so this document cannot drift from the
   behaviour it reports.
@@ -476,7 +474,9 @@ complete — not a weakening of the wall.
   written on CLAUDE.md's "Admission engine" bullet and moved when main's
   agent-context decomposition (#1592) reduced CLAUDE.md to a pointer stub;
   `internal/admission/AGENTS.md` names this file as the current contract.
-- `docs/engineering/TECHNICAL-RISK-REGISTER.md` — RISK-030 (MEDIUM, CLOSED).
+- `docs/engineering/TECHNICAL-RISK-REGISTER.md` — RISK-031 (MEDIUM, CLOSED).
+  Drafted as RISK-030; renumbered because a different finding merged first
+  under that number.
 - `policy.go` — comment-only: two references to `prefixFromIPNet` /
   `ipFilterView.contains` in `security.go` repointed to their new home; a stale
   pointer in a security-relevant comment sends the next reviewer to the wrong
