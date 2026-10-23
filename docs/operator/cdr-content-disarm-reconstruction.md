@@ -17,8 +17,10 @@ reference** below).
 
 Sluice is a standalone project (`github.com/KidCarmi/Sluice`) that Culvert
 talks to as a client — it is not bundled into the Culvert binary or image.
-Sluice must be deployed and reachable (typically as a Docker sidecar) before
-CDR can be enabled. See `roadmap/SLUICE-CDR-HANDOFF.md` for the Sluice-side
+It is typically deployed as a Docker sidecar. **Sluice does not need to be
+reachable to enable CDR** — the gRPC dial is lazy (see **Failure behavior**
+below) — but it must be reachable before you can rely on CDR actually
+sanitizing anything. See `roadmap/SLUICE-CDR-HANDOFF.md` for the Sluice-side
 protocol and deployment shape; this page covers only the Culvert-side
 integration an operator manages.
 
