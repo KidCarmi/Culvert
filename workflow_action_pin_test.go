@@ -42,7 +42,23 @@ import (
 // repository's own commit and need no pin.
 
 // actionUsesLine captures the ref of a `uses:` step: `uses: <owner>/<repo>[/<path>]@<ref>`.
+// Submatch 1 is the target, 2 is the ref; usesTargetRef below is the only reader.
 var actionUsesLine = regexp.MustCompile(`^uses:\s*([^\s@]+)@([^\s#]+)`)
+
+// usesTargetRef parses one already-trimmed line into (target, ref, ok).
+//
+// It guards on the submatch COUNT rather than on nil. A nil check happens to be
+// sufficient for the pattern as written, but both callers then index m[2], so a
+// later edit that drops or reorders a capture group would turn a lint-clean
+// regex change into a panic inside the gate meant to outlive such edits. One
+// parser, one length guard, and neither test indexes a submatch itself.
+func usesTargetRef(trimmed string) (target, ref string, ok bool) {
+	m := actionUsesLine.FindStringSubmatch(trimmed)
+	if len(m) < 3 {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
 
 // actionSHARef matches an immutable 40-hex commit pin.
 var actionSHARef = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -65,7 +81,7 @@ var mutableRefExceptions = map[string]string{
 
 // exactSemverTag matches the one tag shape an exception may carry: a fully
 // qualified release, not a mutable `@v2`-style major alias.
-var exactSemverTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
+var exactSemverTag = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 
 // actionRefFiles returns every workflow and composite-action definition under
 // .github/, so a new file is covered the moment it lands rather than when
@@ -108,11 +124,10 @@ func TestWorkflowActionRefsArePinnedBySHA(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		for i, line := range strings.Split(string(raw), "\n") {
-			m := actionUsesLine.FindStringSubmatch(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- ")))
-			if m == nil {
+			target, ref, ok := usesTargetRef(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- ")))
+			if !ok {
 				continue
 			}
-			target, ref := m[1], m[2]
 			if strings.HasPrefix(target, "./") || strings.HasPrefix(target, "docker://") {
 				// This repository's own tree, or an image ref governed by the
 				// registry digest rules rather than by an action pin.
@@ -161,13 +176,13 @@ func TestWorkflowActionSHAPinsCarryAVersionComment(t *testing.T) {
 		}
 		for i, line := range strings.Split(string(raw), "\n") {
 			trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
-			m := actionUsesLine.FindStringSubmatch(trimmed)
-			if m == nil || !actionSHARef.MatchString(m[2]) {
+			target, ref, ok := usesTargetRef(trimmed)
+			if !ok || !actionSHARef.MatchString(ref) {
 				continue
 			}
 			if !strings.Contains(trimmed, "#") {
 				t.Errorf("%s:%d pins %s by SHA with no `# vX.Y.Z` comment — the pin is immutable but "+
-					"unreviewable:\n\t%s", path, i+1, m[1], trimmed)
+					"unreviewable:\n\t%s", path, i+1, target, trimmed)
 			}
 		}
 	}
