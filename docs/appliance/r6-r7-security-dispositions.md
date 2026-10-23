@@ -26,6 +26,7 @@ Prepared 2026-10-23. **Preparation only**: no build, no lab run, no VM change, n
 | Symbol-reachable advisories | **12**: GO-2026-6599, 6600, 6603, 6605, 6607, 6608, 6610, 6611, 6612, 6613 (stdlib), 6617 (x/net), 6809 (x509) | **4**: GO-2026-6603, 6611, 6612, 6617, **all in `golang.org/x/net/http2` only** |
 | GO-2026-6607 (ECH, crypto/tls) | symbol-reachable | **fixed** (stdlib) |
 | GO-2026-6609 (Range) | package-level only (no symbol reached) | fixed |
+| Remaining non-symbol rows | — | **GO-2026-6610** (x/net, package-level) and **GO-2026-5932** (x/crypto `openpgp`, module-level, no fix). 5.6.1 is **not** a zero-finding binary |
 | GO-2026-6611 (SETTINGS CPU) | stdlib and x/net | x/net only |
 
 ### Linked code (`linked-symbols.tsv`, `go tool nm`)
@@ -59,7 +60,14 @@ The x/net fixes (v0.58 → v0.60) are mostly in the server/transport files, whic
 - No step in either version opened a TCP/UDP connection from Compose (`*.strace.net`). The only listeners are the docker CLI's own abstract Unix plugin-signal socket (`@docker_cli_…`).
 - In an earlier, superseded attempt (before the relay was in place), the 5.6.0 build path showed one loopback connect (`127.0.0.1:41247`). It did not recur in the recorded run and is noted for completeness.
 
-**Consequence.** The vulnerable `x/net/http2` Framer and grpc server code runs **only** on the build fallback, and its peer is the local root dockerd/BuildKit. That is the same trust boundary as Compose itself, since Compose runs as root through the agent's sudo allowlist. No remote party is ever an HTTP/2 or gRPC peer of Compose on any appliance path that was measured.
+**Consequence, within the measured scope.** Of the cases measured, only the build fallback exercised the HTTP/2 client and server roles (and with them the `x/net/http2` Framer and grpc server code), and its peer was the local root dockerd/BuildKit. That is the same trust boundary as Compose itself, which runs as root through the agent's sudo allowlist.
+
+What the measurement does **not** cover:
+- Docker 29.6.2 with stand-in images, not the appliance's Engine 29.9.0;
+- only `--list-backups` for the `cli` service, not every backup, restore or cleanup argument or error path;
+- the delivered traces are filtered (network syscalls only).
+
+This supports "only the build fallback **among the measured cases**", not "the only possible appliance HTTP/2 path".
 
 ### Privilege, environment, egress and resources (exact config)
 
@@ -81,7 +89,7 @@ The x/net fixes (v0.58 → v0.60) are mostly in the server/transport files, whic
 ### Recommendation (for owner decision; nothing is changed here)
 
 1. **Adopt Compose 5.6.1 in the R4 replacement.** It removes every stdlib finding, including ECH and Range, and leaves 4 x/net rows reachable only on the build fallback. Per ASTRA's R6 rule, new Compose bytes need an exact scan, offline load, apply/rollback, state/volume preservation and reboot compatibility as part of R4.
-2. **Close the build fallback on the appliance.** Have the agent's `up -d` template pass `--no-build` (appliance-scoped only, because quick-start compose installs rely on the fallback). Recovery from a missing sidecar tag would then reload the scanned archive `/var/lib/culvert-appliance/images/clamav.tar.gz`, which first boot already loads, instead of building fresh bytes. This removes the only HTTP/2 path **and** the unscanned-sidecar risk. It is a code change for the R4 tree, so it is proposed, not made.
+2. **Close the build fallback on the appliance.** Have the agent's `up -d` template pass `--no-build` (appliance-scoped only, because quick-start compose installs rely on the fallback). Recovery from a missing sidecar tag would then reload the scanned archive `/var/lib/culvert-appliance/images/clamav.tar.gz`, which first boot already loads, instead of building fresh bytes. This removes the one HTTP/2 path **observed in the measured cases** and the unscanned-sidecar risk. It is not proof that no other HTTP/2 path exists. It is a code change for the R4 tree, so it is proposed, not made.
 3. **Residual for a limited pilot on the frozen OVA:** if the owner accepts 5.6.0 for a bounded pilot, the exposure is the build fallback with a local root peer. That needs a named owner and an end date; no dates are invented here.
 
 ---
@@ -107,7 +115,11 @@ That closes ASTRA's R7 binding gap. The image ID E1 observed is now tied, throug
 - **Coverage limit:** trivy inventoried OS packages only. ClamAV's own C/Rust binaries carry no language-package metadata, so they are covered only by Alpine's package records.
 - **Earlier evidence:** the lab's exact scan of `27006cf4` (artifact `12233103035`) did **not** include the sidecar image. This is the first scan bound to these sidecar bytes.
 
-**Disposition:** RESIDUAL (unknown impact, fix available). Remediation: pin `musl=1.2.6-r3` alongside the existing `pcre2`/`zlib`/`nghttp2` pins in `appliance/clamav/Dockerfile` at the R4 rebuild, then re-scan and run F-P2 on the new sidecar bytes. F-P2 (functional clamd behaviour) is **not** re-run here. The bytes are now bound, so whether earlier F-P2 evidence applies depends on whether it ran against `ea362f9b…`. That is ASTRA's call under the R7 reuse rule.
+**Disposition:** RESIDUAL (unknown impact, fix available). Remediation: pin `musl=1.2.6-r3` alongside the existing `pcre2`/`zlib`/`nghttp2` pins in `appliance/clamav/Dockerfile` at the R4 rebuild, then re-scan and run F-P2 on the new sidecar bytes. **F-P2 (functional clamd behaviour): no reuse is claimed.**
+- F-P2 was **not** re-run here.
+- The earlier controlled F-P2 evidence belongs to a **different candidate's** sidecar, not to `ea362f9b…`, and version 1.5.4 alone does not carry it over.
+- Reuse first needs an engine/config/library/signature delta map from that proof to `ea362f9b…`. Only unmatched or changed behaviour then needs an affected check, in the owner-selected R4.
+- E1's exact-`27006cf4` content and outage passes remain credited.
 
 ---
 
@@ -131,7 +143,11 @@ Sources: the lab's exact scan of `27006cf4` (artifact `12233103035`, zip `8fec30
 
 `linux-libc-dev` and `linux-tools-common` duplicate these rows but contain no running kernel code.
 
-**All 8 CRITICAL rows: NOT REACHABLE on these bytes.** The basis is kmod dry-runs against the disk's own indexes (`modprobe-dryrun.txt`) and `modules.dep`:
+**All 8 CRITICAL rows: a conditional *static* disposition of "not reachable".** The basis is kmod dry-runs against the disk's own indexes (`modprobe-dryrun.txt`) and `modules.dep`. It holds only on two assumptions:
+- the relevant dependencies are not already loaded;
+- loading goes through the supported modprobe path that obeys `culvert-unused.conf`.
+
+Disk dry-runs do **not** establish a live system's loaded-module state. Kernel config defaults (below) are not live sysctl or capability proof either.
 
 | CVE | Subsystem | Why not reachable |
 |---|---|---|
@@ -145,9 +161,11 @@ The bypass is a root `insmod` of the dependency chain, and root is already the t
 
 **120 present HIGH rows: RESIDUAL, in two groups. They are not individually triaged here.**
 
-- **Hardware and filesystem modules an appliance VM does not use** (ocfs2, ntfs3, smc, Wi-Fi mt76/mac80211/cfg80211, DRM amdgpu/nouveau/vc4/v3d/vmwgfx, f2fs, exfat, btrfs, erofs, ublk, nvme-tcp, ipvlan, slip, …).
+- **Hardware and filesystem modules that are candidates for the denylist** (ocfs2, ntfs3, smc, Wi-Fi mt76/mac80211/cfg80211, DRM amdgpu/nouveau/vc4/v3d, f2fs, exfat, btrfs, erofs, ublk, nvme-tcp, ipvlan, slip, …). **`vmwgfx` is excluded from this list**: it is VMware's display driver, and the appliance runs on ESXi.
   - These are loadable today. Note the scan's own `kernel-review-not-holding.txt`: 41 modules an older review called "not shipped" **are on this disk**.
-  - **Closure:** extend `culvert-unused.conf` in the R4 build. This is the mechanism already demonstrated above for nfsd and ksmbd.
+  - **Proposed closure:** extend `culvert-unused.conf` in the R4 build, the mechanism already used for nfsd and ksmbd. This is **not automatically safe**:
+    - it must keep broad NIC support and the `MODULES=list` deferral;
+    - each display, VM or storage driver needs an explicit supported-hardware impact decision before it is denied.
 - **Core kernel** (BPF ×17, net core, netfilter, tls, xfrm, sched, futex, mm, …).
   - **No newer kernel exists:** `linux-image-generic-hwe-24.04` in noble-updates and noble-security is still `7.0.0-38.38~24.04.4` (checked 2026-10-23).
   - **Controls observed on these bytes:** `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` (unprivileged BPF off; the BPF rows need `CAP_BPF`/`CAP_SYS_ADMIN`), `kernel.apparmor_restrict_unprivileged_userns=1`, and `CONFIG_SECURITY_DMESG_RESTRICT=y`.
