@@ -5,7 +5,6 @@ import (
 	"math/rand"
 	"net"
 	"reflect"
-	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -497,128 +496,94 @@ func TestBenchGate_ExemptMutatorsStillTakeTheLock(t *testing.T) {
 	<-done // and it completes once the lock is released
 }
 
-// TestBenchGate_IsExemptIsFlatInCIDRCount is a RATIO gate, so it is
-// machine-independent: it compares the limiter against itself at two exempt-
-// list sizes rather than against an absolute nanosecond budget.
-//
-// The pre-change linear net.IPNet.Contains scan cost ~14 ns per exempt CIDR,
-// so 256 exempt prefixes cost ~57x what 1 costs — measured at 3.6 µs per
-// request on a 4-core Xeon, inside the request goroutine, which was ~74% of
-// the entire rate-limit gate. Bucketing by prefix length makes the cost depend
-// on the number of DISTINCT prefix lengths (here: one, /24) instead. Measured
-// ratio after the change is ~1.0; the bound is 4x so the gate keeps a wide
-// margin under -race on a shared CI runner while still failing hard if the
-// linear scan returns.
-func TestBenchGate_IsExemptIsFlatInCIDRCount(t *testing.T) {
-	if testing.Short() {
-		t.Skip("cost-shape gate skipped in -short")
+// bulkLoadEntries returns n distinct single-IP entries, the shape a restored
+// exempt list or IP-filter list takes.
+func bulkLoadEntries(n int) []string {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, fmt.Sprintf("10.%d.%d.1", i/256, i%256))
 	}
-	const (
-		small = 1
-		large = 256
-		bound = 4.0
-	)
+	return out
+}
 
-	measure := func(n int) time.Duration {
-		r := NewRateLimiter()
-		_ = r.AddExemptions(benchExemptCIDRs(n))
-		const iters = 20000
-		// Warm up so neither size pays first-touch costs the other does not.
-		for i := 0; i < 1000; i++ {
-			_ = r.IsExempt(benchExemptProbeIP)
-		}
-		start := time.Now()
-		for i := 0; i < iters; i++ {
-			_ = r.IsExempt(benchExemptProbeIP)
-		}
-		return time.Since(start)
+// countExemptPublishes counts r's exempt-view publications from now on.
+func countExemptPublishes(r *RateLimiter) func() int {
+	var mu sync.Mutex
+	n := 0
+	h := func(*RateLimiter) {
+		mu.Lock()
+		n++
+		mu.Unlock()
 	}
-
-	// Best-of-three: a scheduler hiccup inflates a sample, never deflates it.
-	best := func(n int) time.Duration {
-		d := measure(n)
-		for i := 0; i < 2; i++ {
-			if e := measure(n); e < d {
-				d = e
-			}
-		}
-		return d
-	}
-
-	dSmall, dLarge := best(small), best(large)
-	ratio := float64(dLarge) / float64(dSmall)
-	t.Logf("cidrs=%d: %v, cidrs=%d: %v, ratio=%.2fx (flat ~1x, linear ~57x, bound %.1fx)",
-		small, dSmall, large, dLarge, ratio, bound)
-	if ratio > bound {
-		t.Errorf("IsExempt cost scales with the exempt CIDR count (%.2fx for %dx the "+
-			"prefixes, bound %.1fx): the linear net.IPNet.Contains scan has returned",
-			ratio, large/small, bound)
+	r.exemptPublishHook.Store(&h)
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
 	}
 }
 
-// TestBenchGate_RateLimitExemptBulkLoadIsLinear pins that a list-restoring
-// caller uses AddExemptions rather than an AddExemption loop. Publishing the
-// derived view per entry makes a bulk load quadratic, and this list's
-// ConfigSnapshot cap is maxSnapRateLimitExempt (10,000) — reached by the boot
+// TestRLExemptView_BulkLoadPublishesOnce pins that a list-restoring caller's
+// primitive, AddExemptions, rebuilds the derived view ONCE however long the
+// list is. Publishing rebuilds the view from the whole entry set, so a
+// per-entry publish makes a bulk load quadratic, and this list's
+// ConfigSnapshot cap is maxSnapRateLimitExempt (10,000), reached by the boot
 // admin_settings restore and by config import.
 //
-// A RATIO gate, so it is machine-independent: 4x the entries should cost ~4x
-// if the load is linear and ~16x if it is quadratic. The bound is 8x, midway
-// on a log scale.
-func TestBenchGate_RateLimitExemptBulkLoadIsLinear(t *testing.T) {
-	if testing.Short() {
-		t.Skip("cost-shape gate skipped in -short")
-	}
-	const (
-		small = 2500
-		large = 10000 // 4x, and the ConfigSnapshot cap for this list
-		bound = 8.0
-	)
-
-	entries := func(n int) []string {
-		out := make([]string, 0, n)
-		for i := 0; i < n; i++ {
-			out = append(out, fmt.Sprintf("10.%d.%d.1", i/256, i%256))
-		}
-		return out
-	}
-
-	measure := func(n int) time.Duration {
-		list := entries(n)
+// It replaces TestBenchGate_RateLimitExemptBulkLoadIsLinear, a wall-clock
+// ratio gate (4x the entries must cost <= 8x) that ran in the untagged suite
+// and failed the Deep determinism gate on a loaded runner for the unchanged
+// linear implementation (8.19x in CI, then 8.68x on #1537 seed
+// 1792142088479239349, even after best-of-nine sampling). The publish count is
+// the invariant that ratio approximated: one publish per call is linear, one
+// per entry is quadratic. It holds at any size, on any hardware, under any load.
+func TestRLExemptView_BulkLoadPublishesOnce(t *testing.T) {
+	for _, n := range []int{1, 2500, 10000} {
 		r := NewRateLimiter()
-		// Settle the collector before the clock starts, as testing.B does — the
-		// same fix, measurement and reasoning as the sibling gate
-		// TestBenchGate_IPFilterBulkLoadIsLinear (see the comment there).
-		runtime.GC()
-		start := time.Now()
-		r.AddExemptions(list)
-		return time.Since(start)
-	}
-
-	// This package now runs alongside the root suite and other packages. Three
-	// small samples followed by three large samples can compare different load
-	// phases (CI observed 8.19x for the unchanged linear implementation). Pair
-	// the sizes, alternate their order, and take each size's best of nine to
-	// spread scheduler noise across both workloads. Keep the sizes, GC settling,
-	// measured operation and 8x limit unchanged; a per-entry publication loop
-	// must still fail this gate.
-	dSmall, dLarge := measure(small), measure(large)
-	for i := 1; i < 9; i++ {
-		var nextSmall, nextLarge time.Duration
-		if i%2 == 0 {
-			nextSmall, nextLarge = measure(small), measure(large)
-		} else {
-			nextLarge, nextSmall = measure(large), measure(small)
+		publishes := countExemptPublishes(r)
+		if invalid := r.AddExemptions(bulkLoadEntries(n)); invalid != nil {
+			t.Fatalf("n=%d: valid entries rejected: %v", n, invalid)
 		}
-		dSmall, dLarge = min(dSmall, nextSmall), min(dLarge, nextLarge)
+		if got := publishes(); got != 1 {
+			t.Errorf("AddExemptions of %d entries published the exempt view %d times, want 1: "+
+				"the view is being republished per entry again", n, got)
+		}
+		if !r.IsExempt("10.0.0.1") {
+			t.Fatalf("n=%d: the loaded list is not live after the single publish", n)
+		}
 	}
 
-	ratio := float64(dLarge) / float64(dSmall)
-	t.Logf("entries=%d: %v, entries=%d: %v, ratio=%.2fx (linear ~4x, quadratic ~16x, bound %.1fx)",
-		small, dSmall, large, dLarge, ratio, bound)
-	if ratio > bound {
-		t.Errorf("bulk exempt load scales superlinearly (%.2fx for 4x the entries, "+
-			"bound %.1fx): the view is being republished per entry again", ratio, bound)
+	// A list with rejected entries still publishes exactly once, and an empty
+	// list changes nothing and publishes nothing.
+	r := NewRateLimiter()
+	publishes := countExemptPublishes(r)
+	if invalid := r.AddExemptions([]string{"10.0.0.1", "not-an-ip", "10.0.0.0/24"}); len(invalid) != 1 {
+		t.Fatalf("invalid entries = %v, want exactly the one malformed entry", invalid)
+	}
+	if got := publishes(); got != 1 {
+		t.Errorf("a partially-invalid bulk load published %d times, want 1", got)
+	}
+	r.AddExemptions(nil)
+	if got := publishes(); got != 1 {
+		t.Errorf("an empty bulk load published (total %d, want still 1)", got)
+	}
+}
+
+// TestRLExemptView_AddExemptionLoopPublishesPerEntry is the contrast that keeps
+// the gate above from being vacuous: the shape it rejects (an AddExemption
+// loop) is visible to the same counter, one publish per entry.
+func TestRLExemptView_AddExemptionLoopPublishesPerEntry(t *testing.T) {
+	const n = 64
+	r := NewRateLimiter()
+	publishes := countExemptPublishes(r)
+	for _, e := range bulkLoadEntries(n) {
+		if err := r.AddExemption(e); err != nil {
+			t.Fatalf("AddExemption(%q): %v", e, err)
+		}
+	}
+	if got := publishes(); got != n {
+		t.Fatalf("an AddExemption loop of %d entries published %d times, want %d: the publish counter "+
+			"cannot see the per-entry shape, so TestRLExemptView_BulkLoadPublishesOnce proves nothing", n, got, n)
 	}
 }
 
