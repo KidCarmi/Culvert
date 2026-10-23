@@ -481,3 +481,44 @@ func TestSECUISESS1_LocalSessionForDeletedUserRefused(t *testing.T) {
 		t.Errorf("status = %d, want 401 for a deleted user's session", code)
 	}
 }
+
+// TestSECUISESS1_SSERevalidationSharesTheAdmissionDecision pins that the
+// mid-stream SSE re-check (sseAuthStillValid) applies the same decision as the
+// connect-time gate rather than restating it. Before this it carried its own
+// copy of the PRE-FIX predicate (`Provider == "local" && !UIUserExists`), so a
+// foreign-provider token for a roster member, or a local session naming a role
+// this build does not enroll, kept the stream alive.
+func TestSECUISESS1_SSERevalidationSharesTheAdmissionDecision(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+	if !cfg.AuthEnabled() {
+		t.Fatal("precondition: auth must be enabled, or the re-check short-circuits to true")
+	}
+	exp := time.Now().Add(time.Hour).Unix()
+	for _, tc := range []struct {
+		name string
+		sess *Session
+		want bool
+	}{
+		{"foreign provider, roster member", &Session{Sub: "bob", Provider: "oidc-corp", Exp: exp}, false},
+		{"foreign provider, admin role", &Session{Sub: "bob", Provider: "saml-okta", Role: string(RoleAdmin), Exp: exp}, false},
+		{"local, role not enrolled", &Session{Sub: "bob", Provider: uiSessionProvider, Role: "superuser", Exp: exp}, false},
+		{"local, deleted user", &Session{Sub: "gone", Provider: uiSessionProvider, Role: string(RoleViewer), Exp: exp}, false},
+		// CONTROLS: the sessions the gate admits keep their stream.
+		{"local, enrolled role", &Session{Sub: "bob", Provider: uiSessionProvider, Role: string(RoleViewer), Exp: exp}, true},
+		{"local, pre-RBAC empty role", &Session{Sub: "bob", Provider: uiSessionProvider, Exp: exp}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.sess.Jti = newSessionJti()
+			value, err := encodeSession(tc.sess)
+			if err != nil {
+				t.Fatalf("encodeSession: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/events", http.NoBody)
+			req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+			if got := sseAuthStillValid(req); got != tc.want {
+				t.Errorf("sseAuthStillValid = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -146,10 +146,12 @@ func sseAuthStillValid(r *http.Request) bool {
 		return false // revoked, expired, or tampered session
 	}
 	if sess != nil {
-		if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
-			return false
-		}
-		return true
+		// The SAME admission decision the connect-time gate made
+		// (classifyUISession, SEC-UISESS-1), not a restatement of it: a
+		// deleted user, a foreign-provider token or a role this build does
+		// not enroll ends the stream.
+		_, verdict := classifyUISession(sess)
+		return verdict == uiSessionValid
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
 	if user, pass, ok := r.BasicAuth(); ok {

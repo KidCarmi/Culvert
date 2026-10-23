@@ -19,7 +19,7 @@ const uiSessionCookieName = "ps_ui_session"
 // without this check the cookie NAME — which the caller chooses — was the only
 // thing separating a proxy end user's session from an admin operator's.
 //
-// Read by setUISessionCookie and by uiAuthMiddleware. Keep it ONE constant: a
+// Read by setUISessionCookie and by classifyUISession. Keep it ONE constant: a
 // second spelling at either site is how the issuer and the gate drift into
 // disagreeing, and the direction that drift fails is open.
 const uiSessionProvider = "local"
@@ -92,7 +92,8 @@ const (
 //
 // A second copy of this decision is how that divergence happened, and the
 // direction it diverges is toward reporting more authority than is granted.
-// Both call sites now read the verdict from here.
+// Both call sites now read the verdict from here, and sseAuthStillValid's
+// mid-stream re-check reads it from classifyUISession.
 func resolveUISession(r *http.Request) (*Session, UIRole, uiSessionVerdict) {
 	sess, err := readUISessionCookie(r)
 	if err != nil || sess == nil {
@@ -101,19 +102,28 @@ func resolveUISession(r *http.Request) (*Session, UIRole, uiSessionVerdict) {
 		// an assertion about identity, only as absent.
 		return nil, "", uiSessionAbsent
 	}
+	role, verdict := classifyUISession(sess)
+	return sess, role, verdict
+}
+
+// classifyUISession is resolveUISession's decision over an already VERIFIED
+// payload, for a caller that has decoded the cookie itself (sseAuthStillValid
+// must tell "no longer verifies" apart from "absent"). It never returns
+// uiSessionAbsent.
+func classifyUISession(sess *Session) (UIRole, uiSessionVerdict) {
 	// The admin plane is the only minter of this cookie and always stamps
 	// uiSessionProvider; anything else is a token issued for the proxy plane,
 	// whose sessions set no Role and would take sessionRoleOrReject's
 	// pre-RBAC compatibility branch to RoleAdmin.
 	if sess.Provider != uiSessionProvider || !cfg.UIUserExists(sess.Sub) {
-		return sess, "", uiSessionRefused
+		return "", uiSessionRefused
 	}
 	role, ok := sessionRoleOrReject(sess.Role)
 	if !ok {
 		// A signed session naming a role this build does not enroll.
-		return sess, "", uiSessionRefused
+		return "", uiSessionRefused
 	}
-	return sess, role, uiSessionValid
+	return role, uiSessionValid
 }
 
 func readUISessionCookie(r *http.Request) (*Session, error) {
