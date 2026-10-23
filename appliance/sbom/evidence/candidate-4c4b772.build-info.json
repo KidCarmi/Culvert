@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "appliance": {
+    "name": "culvert-appliance",
+    "version": "dev-candidate.4c4b7728c0e6",
+    "arch": "x86_64",
+    "ova": "culvert-appliance-dev-candidate.4c4b7728c0e6-ubuntu-24.04.ova",
+    "product": "Culvert Secure Web Gateway appliance (CANDIDATE \u2014 qualification build, not for production)"
+  },
+  "source": {
+    "git_commit": "4c4b7728c0e6a1746e968d935b635fc652647e6f",
+    "git_dirty": false,
+    "source_date_epoch": 1791031838,
+    "build_timestamp": "2026-10-03T12:50:38Z",
+    "build_wallclock": "2026-10-03T12:56:08Z",
+    "install_sh_sha256": "8c7d2d6e58901726f23e74dd9f1f890c9b7519954bd119c7eba743257427a4c8"
+  },
+  "guest_os": {
+    "id": "ubuntu-24.04",
+    "name": "Ubuntu 24.04 LTS",
+    "codename": "noble",
+    "base_image_url": "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img",
+    "base_image_sha256": "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2",
+    "base_image_serial": "20260926",
+    "base_image_gpg": "verified (using RSA key D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81)",
+    "standard_support_until": "2029-04-30",
+    "esm_support_until": "2034-04-30",
+    "package_sources": [
+      "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img (preinstalled)",
+      "https://download.docker.com/linux/ubuntu noble stable (key 9DC858229FC7DD38854AE2D88D81803C0EBFCD88)"
+    ]
+  },
+  "host_components_pinned": {
+    "docker-ce": "5:29.8.2-1~ubuntu.24.04~noble",
+    "docker-ce-cli": "5:29.8.2-1~ubuntu.24.04~noble",
+    "containerd.io": "2.3.6-1~ubuntu.24.04~noble",
+    "docker-compose-plugin": "5.5.1-1~ubuntu.24.04~noble",
+    "culvert-maint (from image deploy bundle)": "dev"
+  },
+  "application": {
+    "image": "culvert/candidate",
+    "tag": "sha-4c4b7728c0e6",
+    "index_digest": "sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04",
+    "amd64_digest": "sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04",
+    "app_version_file": "dev",
+    "cosign": "not applicable \u2014 CANDIDATE build from an unsigned CI artifact; provenance = image tar sha256:bb8a2c75369ca3397aaf84566eeee6222f30ca5c3b791de7d60bfecac9a8c3a4, source 4c4b7728c0e6a1746e968d935b635fc652647e6f, CI run 37124197333",
+    "baked_tar_sha256": "9d752118c9d3a9257173efae9fd1bd063e448d9a025964590a40e3b7486fba20",
+    "clamav_image": "docker.io/clamav/clamav",
+    "clamav_tag": "1.4",
+    "clamav_index_digest": "sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23",
+    "clamav_amd64_digest": "sha256:da8463f630e2c9467c74f3da1dee6f096e61a71650e4e9f1ff9b5f687ba91aa0",
+    "clamav_baked_tar_sha256": "c8d19667d636d2fc4533d9fb6b296cac9309f3ada9cccc96c27f83155c182a07"
+  },
+  "virtual_hardware": {
+    "vcpus": 2,
+    "memory_mb": 4096,
+    "disk_gb": 40,
+    "hw_version": "vmx-13",
+    "nic": "E1000 x1",
+    "disk_format": "vmdk streamOptimized (thin)"
+  },
+  "build_tools": {
+    "qemu-img": "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)",
+    "libguestfs": "virt-customize 1.52.0",
+    "docker": "29.6.2",
+    "cosign_image": "ghcr.io/sigstore/cosign/cosign:v3.0.6",
+    "build_host": "Ubuntu 24.04.4 LTS",
+    "kvm": "no (TCG)"
+  },
+  "candidate": {
+    "candidate": true,
+    "not_for_production": true,
+    "image_source_git_commit": "4c4b7728c0e6a1746e968d935b635fc652647e6f",
+    "provisioning_git_commit": "4c4b7728c0e6a1746e968d935b635fc652647e6f",
+    "provisioning_drift": false,
+    "image_tar_sha256": "bb8a2c75369ca3397aaf84566eeee6222f30ca5c3b791de7d60bfecac9a8c3a4",
+    "ci_run_id": "37124197333",
+    "image_signature": "none (unsigned CI artifact; release signature verification is not bypassed, it is inapplicable)",
+    "agent_trust": "culvert-firstboot exports CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 because the manifest carries CANDIDATE_BUILD=1 (candidate-scoped; a release OVA never sets it)"
+  },
+  "artifact": {
+    "ova": "culvert-appliance-dev-candidate.4c4b7728c0e6-ubuntu-24.04.ova",
+    "size_bytes": 1223895040,
+    "sha256": "e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4"
+  }
+}

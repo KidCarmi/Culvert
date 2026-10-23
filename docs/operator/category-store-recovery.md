@@ -18,9 +18,12 @@ Culvert categorises hosts in two tiers:
 | Layer 2 | community store (BadgerDB, `-cat-feed-db`) | a **cache** of the downloadable UT1 feed | none — it re-syncs |
 
 Layer 2 holds no authoritative state. Everything in it came from a feed the
-node can download again, and the syncer performs an immediate sync when it
-finds the store empty. That is why the recovery below is safe: re-creating the
-store costs one feed sync, not data.
+node can download again, and the syncer performs an immediate sync at start
+whenever the store holds no certified complete import of its feed — an empty
+store, a re-created one, a legacy store from before completion records, or one
+whose import was interrupted part-way (a durable completion record is written
+only after the whole import is fsynced; F-FEED-1). That is why the recovery
+below is safe: re-creating the store costs one feed sync, not data.
 
 ## What happens when the store is damaged
 
@@ -70,6 +73,7 @@ the path and cause.
 | store re-created this boot | `warn` |
 | quarantined copies still on the volume | `warn` |
 | store unavailable, running Layer-1 only | `warn` |
+| an import was abandoned mid-write — restart required | `warn` |
 
 The row never reports `fail`: a node on Layer-1-only categorisation is fully
 able to serve traffic — it is the same posture as a node started without
@@ -88,11 +92,54 @@ culvert_catfeeddb_quarantined_copies   N     # .corrupt.* directories still on t
 A useful alert is `culvert_catfeeddb_quarantined_copies > 0` **for more than a
 day** — that is disk nobody has reclaimed and an incident nobody has looked at.
 
+```
+culvert_category_feed_write_abandoned  0|1   # 1 = an import was abandoned mid-write; restart required
+```
+
+`culvert_category_feed_write_abandoned` is emitted only when the community
+feed is configured. Page on `== 1`: unlike every other feed failure it does
+**not** clear by itself (see below).
+
+### An import abandoned mid-write (restart required)
+
+If a feed import's bulk write stops making progress — it does not return within
+its deadline (90 s), typically because the data volume is full or unresponsive,
+or the store latches a contained memory fault while the write is blocked — the
+syncer stops waiting for it and reports the import as failed. The write itself
+**cannot be cancelled** (the storage engine's write takes no deadline), so it
+may still be holding the store. To stop it racing a second import, the syncer
+then refuses **every** further import until the node restarts. The `/api/diagnostics`
+row says so (`community category import abandoned mid-write … further imports
+are refused until this node restarts`) together with whether earlier data is
+still serving, and the gauge above reads `1`.
+
+What the store holds meanwhile: the abandoned import was writing into the live
+store, and it may still complete some or all of its writes after it was
+abandoned. Until the node restarts, community lookups can therefore return a
+partial, **uncertified** mix of the earlier data and entries from the abandoned
+import. The store is never marked complete from this state.
+
+What you should do: check the data volume (free space, I/O errors, mount), fix
+it, then **restart the node**. At the next start the half-written store is
+detected through a durable import-pending marker, quarantined as
+`catfeeddb.corrupt.*`, re-created empty and re-synced; Layer 1 is unaffected.
+
+What has been demonstrated about the restart, and what has not: in source-level
+Linux tests with a write parked inside the store, a SIGTERM closed the store and
+the process exited within milliseconds without waiting for the parked write, the
+import-pending marker survived both that exit and a SIGKILL, and the next open
+quarantined the store. Those tests stand in for the write with a test hook and
+replicate only the store-close step of shutdown; they do not cover a write stuck
+inside the storage engine's own flush, a physically full disk, or a stop issued
+by Docker or systemd on an appliance. If a restart does not complete on its own,
+the container's stop timeout ends it, and the marker still triggers the
+quarantine at the next start.
+
 ## What you should do
 
 1. **Nothing urgent.** The gateway is serving. Category rules that depend on
    the community feed will not match until the next sync completes (default
-   cadence 24 h; a re-created empty store syncs immediately on start).
+   cadence 24 h; a re-created store syncs immediately on start).
 
 2. **Find out why the volume was damaged.** A quarantine is evidence of an
    unclean stop or a sick disk, not of a Culvert bug. Check the host for OOM

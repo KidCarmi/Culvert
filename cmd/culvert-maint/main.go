@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -23,12 +24,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KidCarmi/Culvert/releaseproof"
+
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
+	"culvert-maint/internal/releasetrust"
 	"culvert-maint/internal/runner"
 	"culvert-maint/internal/server"
 	"culvert-maint/internal/status"
@@ -38,12 +42,26 @@ func main() {
 	var (
 		configPath = flag.String("config", "/etc/culvert-maint/config.toml", "Path to config.toml")
 		printVer   = flag.Bool("version", false, "Print version and exit")
+		recoverRT  = flag.Bool("recover-release-trust", false, "Offline, root-only repair of a refused release-trust ledger (dry run unless --confirm); keeps the replay floor and quarantines the old ledger")
+		confirm    = flag.Bool("confirm", false, "With --recover-release-trust: apply the recovery instead of a dry run")
+		floorVer   = flag.Int("floor-catalog-version", 0, "With --recover-release-trust: operator-stated replay floor catalog_version (required for a corrupt ledger; may only raise a readable floor)")
+		floorAt    = flag.String("floor-generated-at", "", "With --recover-release-trust: operator-stated replay floor generated_at (RFC 3339)")
 	)
 	flag.Parse()
 
 	if *printVer {
 		fmt.Println(server.Version)
 		return
+	}
+	if *recoverRT {
+		f := recoverFlags{confirm: *confirm, floorVersion: *floorVer, floorAt: *floorAt}
+		if err := runRecoverReleaseTrust(*configPath, f, os.Stdout); err != nil {
+			log.Fatalf("culvert-maint: release-trust recovery refused: %v", err)
+		}
+		return
+	}
+	if *confirm || *floorVer != 0 || *floorAt != "" {
+		log.Fatalf("culvert-maint: --confirm/--floor-* are only valid with --recover-release-trust")
 	}
 
 	if err := run(*configPath); err != nil {
@@ -133,6 +151,7 @@ func run(configPath string) error {
 	if err != nil {
 		return err
 	}
+	initIdempotencyIndex(cfg.StateDir, mgr)
 
 	r, err := newRunner(cfg)
 	if err != nil {
@@ -153,6 +172,8 @@ func run(configPath string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	reconcileOnStartup(ctx, cfg, srv)
+
 	startOpLogRetention(ctx, cfg.StateDir, cfg.LogRetentionDays, mgr.IsRunning)
 
 	log.Printf("culvert-maint: listening on %s (privilege_mode=%s)", cfg.SocketPath, cfg.PrivilegeMode)
@@ -164,19 +185,25 @@ func run(configPath string) error {
 }
 
 // initJournal opens the crash-recovery journal (RISK-022) and marks any op that
-// was in flight at the last stop. It reads the journal FAIL-CLOSED: a corrupt
-// record means we cannot tell whether a destructive op was interrupted, so the
-// agent refuses to serve rather than silently ignore it. Orphaned records are
-// marked failed(agent_restart_interrupted) so GET /v1/operations/{id} answers;
-// Docker reconciliation of the danger window is a later slice.
+// was in flight at the last stop as failed(agent_restart_interrupted) so
+// GET /v1/operations/{id} answers. A record that cannot be read is
+// QUARANTINED (renamed aside, logged loudly, surfaced on /v1/status as
+// attention_required) rather than fatal: a single rotted file used to make
+// startup fail → systemd restart → fail again, a crash loop with no admin
+// surface left to fix it. The fail-closed property that matters is kept — a
+// quarantined record is never acted on. Docker reconciliation of the readable
+// records is server.ReconcileOnStartup.
 func initJournal(stateDir string, mgr *ops.Manager) (*journal.Journal, error) {
 	jnl, err := journal.New(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("journal: %w", err)
 	}
-	recs, err := jnl.List()
+	recs, quarantined, err := jnl.ListQuarantining(time.Now().UTC())
 	if err != nil {
 		return nil, fmt.Errorf("journal: refusing to serve — %w", err)
+	}
+	for _, q := range quarantined {
+		log.Printf("culvert-maint: WARN journal record %q is unreadable — quarantined as %s.corrupt.<unixnano> under %s; it will NOT be acted on (inspect and remove it manually)", q, q, jnl.Dir())
 	}
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
 	for i := range recs {
@@ -188,20 +215,55 @@ func initJournal(stateDir string, mgr *ops.Manager) (*journal.Journal, error) {
 	return jnl, nil
 }
 
+// initIdempotencyIndex arms the persisted idempotency index (journaled kinds
+// only): a CP retry with the same idempotency_key after an agent restart
+// dedupes to the prior op's terminal outcome instead of admitting a second
+// stack mutation. Loaded AFTER MarkAllInterrupted so an interrupted op keeps
+// its journal-derived verdict; the index only fills in ops the journal no
+// longer knows. Never fatal.
+func initIdempotencyIndex(stateDir string, mgr *ops.Manager) {
+	mgr.EnableIdempotencyPersistence(filepath.Join(stateDir, "idempotency.json"))
+	if n, err := mgr.LoadIdempotencyIndex(); err != nil {
+		log.Printf("WARN: %v", err)
+	} else if n > 0 {
+		log.Printf("culvert-maint: restored %d idempotency entr(y/ies) from disk", n)
+	}
+}
+
+// reconcileOnStartup runs the crash-recovery reconcile (RISK-022 PR-E E3):
+// classify every interrupted record against Docker truth and auto-resolve ONLY
+// the non-mutating verdicts; everything else is surfaced on /v1/status
+// (attention_required) for the explicit POST /v1/reconcile/{op_id}. Bounded by
+// the stage timeout; never fatal. reconcile_on_startup=false ⇒ mark-only.
+func reconcileOnStartup(ctx context.Context, cfg *config.Config, srv *server.Server) {
+	if !cfg.ReconcileOnStartup {
+		log.Printf("culvert-maint: reconcile_on_startup=false — interrupted operations are marked only (not classified)")
+		return
+	}
+	if n := srv.ReconcileOnStartup(ctx); n > 0 {
+		log.Printf("culvert-maint: WARN %d interrupted operation(s) need attention — see GET /v1/status interrupted_operations", n)
+	}
+}
+
 // newServer wires the agent HTTP server from its already-constructed
 // dependencies. Extracted from run() to keep that function within the funlen
 // budget; no behavior change.
 func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal) (*server.Server, error) {
+	trust, err := newReleaseTrust(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("release authorization: %w", err)
+	}
 	return server.New(server.Options{
-		Cfg:       cfg,
-		Auth:      pol,
-		Audit:     al,
-		Ops:       mgr,
-		Status:    stp,
-		StateDir:  cfg.StateDir,
-		AuditPath: auditPath,
-		Journal:   jnl,
-		Runner:    r,
+		ReleaseTrust: trust,
+		Cfg:          cfg,
+		Auth:         pol,
+		Audit:        al,
+		Ops:          mgr,
+		Status:       stp,
+		StateDir:     cfg.StateDir,
+		AuditPath:    auditPath,
+		Journal:      jnl,
+		Runner:       r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
 				BaseURL:    cfg.HealthBaseURL,
@@ -243,4 +305,39 @@ func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int
 			}
 		}
 	}()
+}
+
+// newReleaseTrust constructs host policy independently of socket caller state.
+func newReleaseTrust(cfg *config.Config) (*releasetrust.Store, error) {
+	policy, err := releaseTrustPolicy(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return releasetrust.New(cfg.StateDir, policy)
+}
+
+// releaseTrustPolicy builds the host release-trust policy from root-controlled
+// configuration. Startup and offline recovery use the SAME policy.
+func releaseTrustPolicy(cfg *config.Config) (releaseproof.Policy, error) {
+	policy := releaseproof.DefaultPolicy(cfg.ReleaseCatalogRepo, cfg.ProxyRepo)
+	if cfg.ReleaseTrustRoot != "" {
+		b, err := releasetrust.ReadPolicyFile(cfg.ReleaseTrustRoot)
+		if err != nil {
+			return policy, err
+		}
+		policy.TrustedRootJSON = b
+	}
+	if cfg.ReleaseTrustKeys != "" {
+		b, err := releasetrust.ReadPolicyFile(cfg.ReleaseTrustKeys)
+		if err != nil {
+			return policy, err
+		}
+		if err = json.Unmarshal(b, &policy.Ed25519Keys); err != nil {
+			return policy, fmt.Errorf("invalid release signing keyring: %w", err)
+		}
+		if len(policy.Ed25519Keys) == 0 {
+			return policy, fmt.Errorf("empty release signing keyring")
+		}
+	}
+	return policy, nil
 }

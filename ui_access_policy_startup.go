@@ -11,21 +11,21 @@ import (
 	"strings"
 )
 
-// loadUIAccessPolicy applies cfg. Returns an error only for the
-// IdP-profiles load path — the shim log.Fatalf's it verbatim to match
-// the pre-pilot "IdP profiles load error:" message. Allowlist-parse
-// failures are logged and do NOT fail startup, preserving original
-// behaviour.
+// loadUIAccessPolicy applies configured access policy. Blank entries (a
+// trailing comma in --ui-allow-ip, an empty YAML item) carry no intent and are
+// skipped, as they always were. A genuinely invalid entry REFUSES the admin UI
+// until the configuration is fixed: an operator typo must never expose an
+// unrestricted admin UI, and it must never terminate the proxy either — the
+// management plane may not take the data plane down with it (CHAOS-57).
 func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
-	allowList := cfg.AllowList
+	allowList := nonBlankUIAllowEntries(cfg.AllowList)
 	if cfg.AllowIPCLI != "" {
-		for _, cidr := range strings.Split(cfg.AllowIPCLI, ",") {
-			allowList = append(allowList, strings.TrimSpace(cidr))
-		}
+		allowList = append(allowList, nonBlankUIAllowEntries(strings.Split(cfg.AllowIPCLI, ","))...)
 	}
 	if len(allowList) > 0 {
 		if err := SetUIAllowedCIDRs(allowList); err != nil {
-			logger.Printf("UIGuard: invalid IP/CIDR (%v) — allowing all IPs", err)
+			refuseLoadedUIAccessPolicy(nil)
+			logger.Printf("UIGuard: invalid ui_allow_ips / --ui-allow-ip (%v) — admin UI refused until the configuration is corrected and the node restarted; proxy traffic is unaffected", err)
 		} else {
 			logger.Printf("UIGuard: admin panel restricted to %v", allowList)
 		}
@@ -63,4 +63,15 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		logger.Printf("IdP: loaded from %s (%d profiles)", cfg.IdPProfilesFile, len(idpRegistry.All()))
 	}
 	return nil
+}
+
+// nonBlankUIAllowEntries trims startup allowlist entries and drops blanks.
+func nonBlankUIAllowEntries(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }

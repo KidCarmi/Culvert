@@ -30,7 +30,8 @@ func (p testSAMLServiceProviderProvider) GetServiceProvider(_ *http.Request, _ s
 func TestSAMLExchangeAssertionAcceptsSignedResponse(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err != nil {
 		t.Fatalf("ExchangeAssertion failed: %v", err)
 	}
@@ -62,7 +63,8 @@ func TestSAMLExchangeAssertionAcceptsPersistentNameIDResponse(t *testing.T) {
 		},
 	})
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err != nil {
 		t.Fatalf("ExchangeAssertion failed: %v", err)
 	}
@@ -85,7 +87,8 @@ func TestSAMLExchangeAssertionRejectsTransientOnlyNameIDResponse(t *testing.T) {
 		},
 	})
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected transient-only response to fail")
 	}
@@ -105,7 +108,8 @@ func TestSAMLExchangeAssertionRejectsWrongRequestID(t *testing.T) {
 		providerID: fixture.provider.profile.ID,
 	})
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected request ID mismatch to fail")
 	}
@@ -123,7 +127,8 @@ func TestSAMLExchangeAssertionRejectsWrongRequestID(t *testing.T) {
 func TestSAMLExchangeAssertionRejectsSignedResponseWithoutRelayState(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequestWithoutRelayState(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequestWithoutRelayState(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected signed response without RelayState to fail")
 	}
@@ -138,7 +143,8 @@ func TestSAMLExchangeAssertionRejectsSignedResponseWithoutRelayState(t *testing.
 func TestSAMLExchangeAssertionRejectsReplayedSignedResponse(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err != nil {
 		t.Fatalf("first ExchangeAssertion failed: %v", err)
 	}
@@ -146,7 +152,8 @@ func TestSAMLExchangeAssertionRejectsReplayedSignedResponse(t *testing.T) {
 		t.Fatalf("first ExchangeAssertion got id=%+v relay=%q, want identity and relay %q", id, relayURL, fixture.relayURL)
 	}
 
-	id, relayURL, err = fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex2, err2 := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL, err = ex2.id, ex2.relayURL, err2
 	if err == nil {
 		t.Fatal("expected replayed signed response to fail")
 	}
@@ -162,7 +169,8 @@ func TestSAMLExchangeAssertionRejectsUnsignedResponse(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
 	fixture.samlResponse = stripSAMLResponseSignatures(t, fixture.samlResponse)
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected unsigned response to fail")
 	}
@@ -179,7 +187,8 @@ func TestSAMLExchangeAssertionRejectsAudienceMismatch(t *testing.T) {
 		metadata.EntityID = "https://wrong-sp.example"
 	})
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected audience mismatch to fail")
 	}
@@ -196,7 +205,8 @@ func TestSAMLExchangeAssertionRejectsExpiredSignedAssertion(t *testing.T) {
 		assertionMaker: expiredSAMLAssertionMaker{},
 	})
 
-	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	ex, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
+	id, relayURL := ex.id, ex.relayURL
 	if err == nil {
 		t.Fatal("expected expired signed assertion to fail")
 	}
@@ -275,7 +285,7 @@ func newSignedSAMLFixtureWithSession(t *testing.T, opts signedSAMLFixtureOptions
 	provider.sp.IDPMetadata = idp.Metadata()
 
 	relayURL := "https://app.example/protected"
-	loginURL := provider.CaptiveLoginURL(relayURL, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
+	loginURL := provider.CaptiveLoginURL(relayURL, boundLogin(t, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)))
 	if loginURL == "" {
 		t.Fatal("CaptiveLoginURL returned empty URL")
 	}

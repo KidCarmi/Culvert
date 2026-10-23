@@ -173,6 +173,14 @@ const (
 	// store's mapped tables after a healthy open and recorded it with
 	// RecordFault (CHAOS-74).
 	TriggerRuntimeFault RecoveryTrigger = "runtime_fault"
+	// TriggerInterruptedImport means a previous run began a bulk import
+	// (MarkImportPending) and never reached ClearImportPending — it was killed,
+	// faulted, or filled the disk mid-write. The partial store is thrown away
+	// and rebuilt (F-DISK-RECOVERY-1). Unlike TriggerRuntimeFault this needs no
+	// fault-time write: the intent marker is laid down BEFORE the risky write,
+	// while the disk still has space, so recovery never depends on writing to a
+	// full filesystem after the failure.
+	TriggerInterruptedImport RecoveryTrigger = "interrupted_import"
 )
 
 // Recovery reports what Open had to do. It is data, not logging: the caller
@@ -272,6 +280,13 @@ func openWith[T any](dir string, policy Policy, open func(string) (T, error), fs
 func recoverBeforeOpen(dir string, rec *Recovery, fsys markerFS) error {
 	poison := AbandonedMarkers(dir)
 	faulted := faultRecorded(dir)
+	// F-DISK-RECOVERY-1: an import-pending marker still present means the last
+	// bulk import was interrupted before it was certified complete. It is the
+	// LEAST severe of the three signals (poison and fault both say the store
+	// damaged a process), so it is consulted last; but it still quarantines,
+	// because a partial rebuildable cache is thrown away rather than re-opened.
+	// It needs no fault-time write — it was laid down before the risky write.
+	interrupted := importPending(dir)
 	switch {
 	case len(poison) > 0:
 		rec.Trigger = TriggerPoisonMarker
@@ -287,10 +302,30 @@ func recoverBeforeOpen(dir string, rec *Recovery, fsys markerFS) error {
 				rec.Cause = "a previous run recorded a memory fault on this store"
 				return fmt.Errorf("the faulted store is gone but its fault marker could not be cleared, refusing to create a replacement that the next start would quarantine: %w", cerr)
 			}
+			// A stale import-pending marker beside a store that is gone is also
+			// resolved; clear it so it does not quarantine the replacement.
+			if interrupted {
+				if cerr := clearImportPending(dir, fsys); cerr != nil {
+					return fmt.Errorf("the store is gone but its import-pending marker could not be cleared, refusing to create a replacement that the next start would quarantine: %w", cerr)
+				}
+			}
 			return nil
 		}
 		rec.Trigger = TriggerRuntimeFault
 		rec.Cause = "a previous run contained a memory fault reading the store's mapped tables after a healthy open (damaged or vanished data volume)"
+	case interrupted:
+		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+			// The store an interrupted import belonged to is gone; the marker
+			// is a phantom. Clear it so a fresh empty store is not quarantined.
+			if cerr := clearImportPending(dir, fsys); cerr != nil {
+				rec.Trigger = TriggerInterruptedImport
+				rec.Cause = "a previous run left an interrupted import on this store"
+				return fmt.Errorf("the interrupted-import store is gone but its marker could not be cleared, refusing to create a replacement that the next start would quarantine: %w", cerr)
+			}
+			return nil
+		}
+		rec.Trigger = TriggerInterruptedImport
+		rec.Cause = "a previous run began a bulk import and never certified it complete (killed, faulted, or filled the disk mid-write); the partial store is rebuilt"
 	default:
 		return nil
 	}
@@ -308,6 +343,14 @@ func recoverBeforeOpen(dir string, rec *Recovery, fsys markerFS) error {
 	if faulted {
 		if err := clearFault(dir, fsys); err != nil {
 			return fmt.Errorf("quarantined the faulted store to %s but could not clear its fault marker, refusing to create a replacement that the next start would quarantine: %w", rec.QuarantinePath, err)
+		}
+	}
+	// The import-pending marker is a sibling, so the quarantine rename does not
+	// carry it; clear it explicitly in every case it was present (whichever
+	// trigger drove the quarantine), or the fresh store is quarantined again.
+	if interrupted {
+		if err := clearImportPending(dir, fsys); err != nil {
+			return fmt.Errorf("quarantined the store to %s but could not clear its import-pending marker, refusing to create a replacement that the next start would quarantine: %w", rec.QuarantinePath, err)
 		}
 	}
 	return nil

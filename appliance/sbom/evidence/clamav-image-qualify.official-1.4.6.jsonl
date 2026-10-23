@@ -1,0 +1,9 @@
+{"check":"image-identity","result":"pass","detail":"clamav=sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23 proxy=sha256:ad2d417e65575e4056c66f14427e6d2ad98f3287f69840c35e3b290b3cc805c1"}
+{"check":"pcre2-version","result":"pass","detail":"pcre2-10.48-r0"}
+{"check":"clamd-up","result":"pass","detail":"clamd answered PING"}
+{"check":"clean-delivered","result":"pass","detail":"200|clean-body-ok"}
+{"check":"eicar-blocked","result":"pass","detail":"403|"}
+{"check":"pcre-signature-blocked","result":"pass","detail":"403|"}
+{"check":"pcre-control-delivered","result":"pass","detail":"200|header culvert-qual-abcdef-pcre trailer"}
+{"check":"pcre-signature-named","result":"pass","detail":"Culvert.Qual.PCRE-1 named in clamd/proxy logs"}
+{"check":"clamd-down-posture-is-fail-open","result":"pass","detail":"200|X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FI (body delivered unscanned while clamd is down)"}

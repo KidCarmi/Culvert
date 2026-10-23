@@ -111,6 +111,7 @@ func TestAPIAuthChangePassword_DoesNotCreateConfigVersion(t *testing.T) {
 	cookieValue, err := encodeSession(&Session{
 		Sub:      testUser,
 		Provider: "local",
+		Audience: uiSessionAudience,
 		Role:     "admin",
 		Exp:      time.Now().Add(time.Hour).Unix(),
 		Jti:      newSessionJti(),

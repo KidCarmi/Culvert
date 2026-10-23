@@ -1,0 +1,161 @@
+# Copyright 2025 The Sigstore Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Extract version of Go to use
+        run: echo "GOVERSION=$(awk -F'[:@]' '/FROM golang/{print $2; exit}' Dockerfile)" >> $GITHUB_ENV
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ env.GOVERSION }}
+      - name: Build
+        run: make -C $GITHUB_WORKSPACE all
+      - name: Ensure no files were modified as a result of the build
+        run: git update-index --refresh && git diff-index --quiet HEAD -- || git diff --exit-code
+
+  container-build:
+    name: Build container
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        storage: [ 'gcp', 'posix', 'aws', 'gcpcloudsql' ]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Extract version of Go to use
+        run: echo "GOVERSION=$(awk -F'[:@]' '/FROM golang/{print $2; exit}' Dockerfile)" >> $GITHUB_ENV
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ env.GOVERSION }}
+
+      - uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
+
+      - name: container
+        run: |
+          make ko-local STORAGE_BACKEND=${{ matrix.storage }}
+          docker run --rm $(cat rekorImagerefs-${{ matrix.storage }}) version
+
+  unit-tests:
+    name: Run unit tests
+    permissions:
+      contents: read
+      id-token: write # to authenticate with codecov
+    runs-on: ubuntu-latest
+
+    env:
+      OS: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: './go.mod'
+          check-latest: true
+      - name: Run Go tests
+        run: go test -covermode atomic -coverprofile coverage.txt $(go list ./... | grep -v third_party/)
+      - name: Workaround buggy Codecov OIDC auth
+        run: |
+          # only set CODECOV_TOKEN if OIDC token is available
+          [ -z $ACTIONS_ID_TOKEN_REQUEST_TOKEN ] && exit 0
+
+          TOKEN_RESPONSE=$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://codecov.io")
+          CODECOV_TOKEN=$(echo $TOKEN_RESPONSE | jq -r .value)
+          echo "CODECOV_TOKEN=$CODECOV_TOKEN" >> "$GITHUB_ENV"
+      - name: Upload Coverage Report
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
+        with:
+          env_vars: OS
+          fail_ci_if_error: true
+          # When github.com/codecov/codecov-action/issues/1791 is fixed,
+          # remove workaround step above and uncomment:
+          # use_oidc: true
+      - name: Run Go tests w/ `-race`
+        if: ${{ runner.os == 'Linux' }}
+        run: go test -race $(go list ./... | grep -v third_party/)
+
+  e2e-tests:
+    name: Run E2E tests - ${{ matrix.storage.name }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        storage: [ {name: 'GCP', compose: 'compose.yml', test: 'TestGCPSpanner'},
+                   {name: 'POSIX', compose: 'posix-compose.yml', test: 'TestPOSIX'},
+                   {name: 'AWS', compose: 'aws-compose.yml', test: 'TestAWS'},
+                   {name: 'GCP Cloud SQL', compose: 'cloudsql-compose.yml', test: 'TestGCPCloudSQL'} ]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run ${{ matrix.storage.name }} docker compose
+        run: docker compose -f ${{ matrix.storage.compose }} up -d --build --wait --wait-timeout 60
+      - name: Run ${{ matrix.storage.name }} e2e tests
+        run: go test -v -tags=e2e -run ${{ matrix.storage.test }} ./tests/
+      - name: Stop ${{ matrix.storage.name }} docker compose
+        run: docker compose -f ${{ matrix.storage.compose }} down --volumes
+
+  sharding-freeze:
+    name: Run freeze log tests
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run freeze tests
+        run:
+          ./tests/freeze-test.sh
+
+  sharding-e2e:
+    name: Run sharding E2E tests
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Install faketime
+        run: sudo apt install faketime -y
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: './go.mod'
+          check-latest: true
+      - name: Run tests
+        working-directory: ./tests/sharding
+        run: ./test.sh

@@ -1,0 +1,128 @@
+{
+  "named_parseable_key_files": [
+    {
+      "path": "/usr/lib/python3/dist-packages/twisted/test/key.pem.no_trailing_newline",
+      "file_sha256": "380626aa2b5e4a799153f2c8faf6f38f080765fe0b2ab59c7865bf6167f26604",
+      "key_count": 1,
+      "algorithms": [
+        "RSAPrivateKey"
+      ],
+      "public_key_sha256": [
+        "94d71115241286373b1f722831bc4ec8abf377b222d618051e931cb7f8a57efa"
+      ],
+      "distro_package_md5_match": true,
+      "package_manifest": "python3-twisted.md5sums"
+    },
+    {
+      "path": "/usr/lib/python3/dist-packages/twisted/test/server.pem",
+      "file_sha256": "a681b6146651477236c7c50f318fd3f397af3b015f1830a3b9d6dcd7027eb049",
+      "key_count": 1,
+      "algorithms": [
+        "RSAPrivateKey"
+      ],
+      "public_key_sha256": [
+        "94d71115241286373b1f722831bc4ec8abf377b222d618051e931cb7f8a57efa"
+      ],
+      "distro_package_md5_match": true,
+      "package_manifest": "python3-twisted.md5sums"
+    },
+    {
+      "path": "/usr/lib/python3/dist-packages/twisted/conch/test/keydata.py",
+      "file_sha256": "051e191cfb8f08c209bf7c7fc1f4776e3d17102ae012206983cc392bb1f88fef",
+      "key_count": 10,
+      "algorithms": [
+        "DSAPrivateKey",
+        "ECPrivateKey",
+        "Ed25519PrivateKey",
+        "RSAPrivateKey"
+      ],
+      "public_key_sha256": [
+        "0a8e708c63073c79a888ea33c3d65d704cf5b5aedd1baea4c45043716aad61d5",
+        "173cfd71a8e276b2163268c31671dfac3e5d48f65f8803623236722d58298999",
+        "4b8c7bc1ccd88b61622ed72ccf917962515d594839be28c3d5c6add6e6c4bd8b",
+        "7362c1b343cbbdacd975f842d05e40cfcd32b4b514c27ccca9a6c4e7b3e9026f",
+        "7c405038cca18e98d351c62b23375aea331b15e5d36751a87f8833f4a56d0985",
+        "c813513363b6cdabb996c99b577babaed3d288b66ab962948f963a759489d670"
+      ],
+      "distro_package_md5_match": true,
+      "package_manifest": "python3-twisted.md5sums"
+    },
+    {
+      "path": "/usr/lib/python3/dist-packages/twisted/conch/test/test_keys.py",
+      "file_sha256": "596d587fff700bbe04c652dfda6c7c868877e7893f4fe5e97d11e056cf778e2e",
+      "key_count": 2,
+      "algorithms": [
+        "DSAPrivateKey"
+      ],
+      "public_key_sha256": [
+        "bc18bc5012394e8471463241515cbb374b11537047ed3825520e7ae12bfb4cdb"
+      ],
+      "distro_package_md5_match": true,
+      "package_manifest": "python3-twisted.md5sums"
+    },
+    {
+      "path": "/usr/lib/python3/dist-packages/twisted/conch/test/__pycache__/keydata.cpython-312.pyc",
+      "file_sha256": "32b327f7392be87cb677180c1e5fe728f07997a0c95d0f6f167122613f71b340",
+      "key_count": 10,
+      "algorithms": [
+        "DSAPrivateKey",
+        "ECPrivateKey",
+        "Ed25519PrivateKey",
+        "RSAPrivateKey"
+      ],
+      "public_key_sha256": [
+        "0a8e708c63073c79a888ea33c3d65d704cf5b5aedd1baea4c45043716aad61d5",
+        "173cfd71a8e276b2163268c31671dfac3e5d48f65f8803623236722d58298999",
+        "4b8c7bc1ccd88b61622ed72ccf917962515d594839be28c3d5c6add6e6c4bd8b",
+        "7362c1b343cbbdacd975f842d05e40cfcd32b4b514c27ccca9a6c4e7b3e9026f",
+        "7c405038cca18e98d351c62b23375aea331b15e5d36751a87f8833f4a56d0985",
+        "c813513363b6cdabb996c99b577babaed3d288b66ab962948f963a759489d670"
+      ],
+      "distro_package_md5_match": null
+    },
+    {
+      "path": "/usr/lib/python3/dist-packages/twisted/conch/test/__pycache__/test_keys.cpython-312.pyc",
+      "file_sha256": "1b2163a0b7149f9b225809373703a072127ec2a9ded5adb477126571438a316c",
+      "key_count": 1,
+      "algorithms": [
+        "DSAPrivateKey"
+      ],
+      "public_key_sha256": [
+        "bc18bc5012394e8471463241515cbb374b11537047ed3825520e7ae12bfb4cdb"
+      ],
+      "distro_package_md5_match": null
+    },
+    {
+      "path": "/usr/lib/x86_64-linux-gnu/libgnutls.so.30.37.1",
+      "file_sha256": "ddbae2995750875c07bc218d12a062d73f8250678f54dedda7e9be5068781c98",
+      "key_count": 3,
+      "algorithms": [
+        "DSAPrivateKey",
+        "ECPrivateKey",
+        "RSAPrivateKey"
+      ],
+      "public_key_sha256": [
+        "5a9214aa789ffe021992636dd17ca313f340948e604d4122735160f3d46688a0",
+        "5bd7bad40971be901e68d9b97405c3a3e996adbede885869b270185ad499108e",
+        "dd0701715ac41b7b96a2c8fe7a762b0ee05215f4f21c44d9458f1d2e2d57427d"
+      ],
+      "distro_package_md5_match": true,
+      "package_manifest": "libgnutls30t64:amd64.md5sums"
+    }
+  ],
+  "all_shadow_accounts_locked_or_empty": true,
+  "machine_id_empty": true,
+  "named_ssh_host_key_count": 0,
+  "build_log": {
+    "size": 8309,
+    "sha256": "4bb5a49a9e5e9a3bb61188671980f495fd8ec78b9860d104cd258b3cdca42800",
+    "private_pem_markers": false,
+    "private_ipv4_pattern_present": false
+  },
+  "raw_key_occurrences": 28,
+  "raw_distinct_public_keys": 11,
+  "named_distinct_public_keys": 11,
+  "raw_keys_not_matched_to_named_files": 0,
+  "shadow_empty_password_fields": 0,
+  "shadow_unlocked_password_fields": 0
+}

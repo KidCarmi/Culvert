@@ -10,11 +10,13 @@ package main
 //   - Replay detection via one-time use of the assertion ID.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +28,7 @@ import (
 	"time"
 
 	"github.com/crewjam/saml"
-	"github.com/crewjam/saml/samlsp"
+	xrv "github.com/mattermost/xml-roundtrip-validator"
 
 	"github.com/KidCarmi/Culvert/internal/authstate"
 )
@@ -36,11 +38,17 @@ import (
 // ---------------------------------------------------------------------------
 
 // SAMLProvider wraps a crewjam/saml Service Provider for one IdP profile.
+//
+// Culvert runs its own AuthnRequest-state + ACS flow, so it needs only the
+// ServiceProvider. It is assembled directly (newSAMLServiceProvider) rather
+// than through samlsp.New: samlsp's Middleware, cookie session provider and
+// request tracker were never mounted, but linking the package compiled their
+// CodeQL findings (RelayState open redirect, cookies without a forced Secure
+// flag) into the binary. TestSAMLSPIsNotLinked keeps samlsp out of the build.
 type SAMLProvider struct {
-	profile    *IdPProfile
-	cfg        *SAMLProfileConfig
-	sp         *saml.ServiceProvider
-	middleware *samlsp.Middleware
+	profile *IdPProfile
+	cfg     *SAMLProfileConfig
+	sp      *saml.ServiceProvider
 }
 
 // NewSAMLProvider builds a SAMLProvider from an IdPProfile.
@@ -68,25 +76,65 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] base url: %w", p.ID, err)
 	}
 
-	middleware, err := samlsp.New(samlsp.Options{
-		URL:               *rootURL,
-		Key:               spKey,
-		Certificate:       spCert,
-		IDPMetadata:       idpMeta,
-		AllowIDPInitiated: false, // SP-initiated only for security
-	})
-	if err != nil {
-		return nil, fmt.Errorf("saml[%s] sp init: %w", p.ID, err)
-	}
-	configureSAMLServiceProviderURLs(&middleware.ServiceProvider, rootURL)
-	middleware.ServiceProvider.AuthnNameIDFormat = saml.NameIDFormat(requestedSAMLNameIDFormat(cfg))
+	sp := newSAMLServiceProvider(rootURL, spKey, spCert, idpMeta)
+	configureSAMLServiceProviderURLs(&sp, rootURL)
+	sp.AuthnNameIDFormat = saml.NameIDFormat(requestedSAMLNameIDFormat(cfg))
 
 	return &SAMLProvider{
-		profile:    p,
-		cfg:        cfg,
-		sp:         &middleware.ServiceProvider,
-		middleware: middleware,
+		profile: p,
+		cfg:     cfg,
+		sp:      &sp,
 	}, nil
+}
+
+// newSAMLServiceProvider builds the ServiceProvider exactly as samlsp's
+// DefaultServiceProvider did for the options Culvert used (SP-initiated only,
+// unsigned AuthnRequests, POST logout binding, "/" default redirect), without
+// linking samlsp. EntityID and AcsURL are then set by
+// configureSAMLServiceProviderURLs. Pinned field by field by
+// TestNewSAMLServiceProvider_MatchesSAMLSPDefaults.
+func newSAMLServiceProvider(rootURL *url.URL, key *rsa.PrivateKey, cert *x509.Certificate, idp *saml.EntityDescriptor) saml.ServiceProvider {
+	at := func(p string) url.URL { return *rootURL.ResolveReference(&url.URL{Path: p}) }
+	return saml.ServiceProvider{
+		Key:                key,
+		Certificate:        cert,
+		MetadataURL:        at("saml/metadata"),
+		AcsURL:             at("saml/acs"),
+		SloURL:             at("saml/slo"),
+		IDPMetadata:        idp,
+		AllowIDPInitiated:  false, // SP-initiated only for security
+		DefaultRedirectURI: "/",
+		LogoutBindings:     []string{saml.HTTPPostBinding},
+	}
+}
+
+// parseSAMLMetadata is samlsp.ParseMetadata without linking samlsp: the XML
+// must survive an encoding/xml round trip unchanged (the
+// xml-roundtrip-validator guard against XML signature-wrapping ambiguities),
+// and an EntitiesDescriptor yields its first entity that has an IdP role.
+func parseSAMLMetadata(data []byte) (*saml.EntityDescriptor, error) {
+	if err := xrv.Validate(bytes.NewBuffer(data)); err != nil {
+		return nil, err
+	}
+	entity := &saml.EntityDescriptor{}
+	err := xml.Unmarshal(data, entity)
+	// encoding/xml reports the root element mismatch only as this text.
+	if err != nil && err.Error() == "expected element type <EntityDescriptor> but have <EntitiesDescriptor>" {
+		entities := &saml.EntitiesDescriptor{}
+		if err := xml.Unmarshal(data, entities); err != nil {
+			return nil, err
+		}
+		for i := range entities.EntityDescriptors {
+			if len(entities.EntityDescriptors[i].IDPSSODescriptors) > 0 {
+				return &entities.EntityDescriptors[i], nil
+			}
+		}
+		return nil, errors.New("no entity found with IDPSSODescriptor")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return entity, nil
 }
 
 func configureSAMLServiceProviderURLs(sp *saml.ServiceProvider, rootURL *url.URL) {
@@ -123,6 +171,15 @@ func (p *SAMLProvider) ResolveIdentity(_, _ string) (*Identity, bool) { return n
 // CaptiveLoginURL generates a SAML AuthnRequest and returns the redirect URL.
 // relayURL is stored server-side; RelayState carries an opaque request handle.
 func (p *SAMLProvider) CaptiveLoginURL(relayURL string, r *http.Request) string {
+	// Minted only for a request carrying a browser binding (/auth/select);
+	// see auth_login_binding.go.
+	if r == nil {
+		return ""
+	}
+	bind, ok := loginBindingFrom(r.Context())
+	if !ok {
+		return ""
+	}
 	authReq, err := p.sp.MakeAuthenticationRequest(
 		p.sp.GetSSOBindingLocation(saml.HTTPRedirectBinding),
 		saml.HTTPRedirectBinding,
@@ -139,6 +196,7 @@ func (p *SAMLProvider) CaptiveLoginURL(relayURL string, r *http.Request) string 
 		requestID:  authReq.ID,
 		relayURL:   relayURL,
 		providerID: p.profile.ID,
+		bind:       bind,
 	})
 	redirectURL, err := authReq.Redirect(state, p.sp)
 	if err != nil {
@@ -149,36 +207,46 @@ func (p *SAMLProvider) CaptiveLoginURL(relayURL string, r *http.Request) string 
 	return redirectURL.String()
 }
 
+// samlExchange is a validated assertion that is NOT yet a session: the ACS
+// cannot see the browser binding (the POST is cross-site), so the session is
+// issued only after /auth/saml/complete proves it.
+type samlExchange struct {
+	id       *Identity
+	relayURL string
+	bind     [32]byte
+}
+
 // ExchangeAssertion validates the SAMLResponse POST, extracts attributes,
-// and returns the Identity + relay URL (original destination).
-func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (*Identity, string, error) {
+// and returns the Identity + relay URL (original destination) together with
+// the browser binding the login was started under.
+func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (samlExchange, error) {
 	if err := r.ParseForm(); err != nil {
-		return nil, "", fmt.Errorf("saml callback: form parse: %w", err)
+		return samlExchange{}, fmt.Errorf("saml callback: form parse: %w", err)
 	}
 	state := r.FormValue("RelayState")
 	entry, ok := globalSAMLStateStore.Peek(state)
 	if !ok {
-		return nil, "", fmt.Errorf("saml callback: invalid or expired state")
+		return samlExchange{}, fmt.Errorf("saml callback: invalid or expired state")
 	}
 	if entry.providerID != p.profile.ID {
-		return nil, "", fmt.Errorf("saml callback: state belongs to different provider")
+		return samlExchange{}, fmt.Errorf("saml callback: state belongs to different provider")
 	}
 	// authSAMLCallback tries each SAML provider; consume only after the
 	// state proves this provider owns the original AuthnRequest.
 	entry, ok = globalSAMLStateStore.Pop(state)
 	if !ok {
-		return nil, "", fmt.Errorf("saml callback: invalid or expired state")
+		return samlExchange{}, fmt.Errorf("saml callback: invalid or expired state")
 	}
 
 	assertion, err := p.sp.ParseResponse(r, []string{entry.requestID})
 	if err != nil {
-		return nil, "", fmt.Errorf("saml response validation: %w", samlValidationError(err))
+		return samlExchange{}, fmt.Errorf("saml response validation: %w", samlValidationError(err))
 	}
 	id := extractSAMLIdentity(assertion, p.cfg, p.profile.ID)
 	if err := requireStableSAMLIdentity(id); err != nil {
-		return nil, "", err
+		return samlExchange{}, err
 	}
-	return id, entry.relayURL, nil
+	return samlExchange{id: id, relayURL: entry.relayURL, bind: entry.bind}, nil
 }
 
 func samlValidationError(err error) error {
@@ -193,6 +261,7 @@ type samlStateEntry struct {
 	requestID  string
 	relayURL   string
 	providerID string
+	bind       [32]byte // see pkceEntry.bind
 }
 
 // samlStateStore is the bounded, fair-share store for in-flight SAML
@@ -262,7 +331,7 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 		xmlData = []byte(cfg.MetadataXML)
 	}
 
-	return samlsp.ParseMetadata(xmlData)
+	return parseSAMLMetadata(xmlData)
 }
 
 // ---------------------------------------------------------------------------

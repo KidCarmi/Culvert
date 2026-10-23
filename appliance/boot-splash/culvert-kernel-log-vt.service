@@ -1,0 +1,16 @@
+[Unit]
+Description=Culvert: kernel messages to the kernel-log console (tty12), not tty1
+Documentation=file:///opt/culvert-appliance/boot-splash/culvert-kernel-log-vt
+DefaultDependencies=no
+After=systemd-vconsole-setup.service
+# Before the splash ends: from then on the kernel would draw on tty1.
+Before=sysinit.target plymouth-quit.service plymouth-quit-wait.service getty@tty1.service
+ConditionPathExists=/dev/tty12
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/culvert-appliance/bin/culvert-kernel-log-vt
+
+[Install]
+WantedBy=sysinit.target

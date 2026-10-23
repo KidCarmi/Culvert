@@ -97,6 +97,12 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		{SrcPath: p("pac_profiles_lifecycle.reset.json"), TarPath: "data/pac_profiles_lifecycle.reset.json"},
 		{SrcPath: p("pac_exceptions.json"), TarPath: "data/pac_exceptions.json"},
 		{SrcPath: p("scan_exclusions.json"), TarPath: "data/scan_exclusions.json"},
+		// Admin-managed threat-domain allowlist, persisted independently of the
+		// disposable (NOT backed up) threat-feed DB so a restore onto a fresh
+		// appliance preserves the administrator's exemptions — including an
+		// explicit full clear (owner P1 review, PR #1528). Absent-vs-empty is
+		// carried in the file itself (internal/threatfeed domainAllowlistFile).
+		{SrcPath: p("threat_domain_allowlist.json"), TarPath: "data/threat_domain_allowlist.json"},
 		{SrcPath: p("alert_settings.json"), TarPath: "data/alert_settings.json"},
 		{SrcPath: p("admin_settings.json"), TarPath: "data/admin_settings.json"},
 		{SrcPath: p("ssl_bypass.json"), TarPath: "data/ssl_bypass.json"},

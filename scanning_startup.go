@@ -15,6 +15,9 @@ import "context"
 // ClamAV/YARA off, threat feeds still local); otherwise local scanning
 // initialises when enabled or any backend is configured.
 func loadScanning(cfg scanningStartupConfig, ctx context.Context) *ScanService {
+	// The av_unavailable boot posture applies to whichever back end runs
+	// (local ClamAV or the sidecar), so it is installed before the mode split.
+	applyAVUnavailableBootPosture(cfg.AVUnavailableEnv)
 	switch {
 	case cfg.RemoteScanURL != "":
 		globalRemoteScanner.Init(cfg.RemoteScanURL)
@@ -58,7 +61,7 @@ func startThreatFeedIfEnabled(cfg scanningStartupConfig, ctx context.Context) {
 	if !cfg.ThreatFeedEnabled {
 		return
 	}
-	globalThreatFeed.Init(cfg.FeedDB, cfg.SyncInterval)
+	globalThreatFeed.InitWithAllowlist(cfg.FeedDB, cfg.DomainAllowlistPath, cfg.SyncInterval)
 	// Arm the staleness plane BEFORE Start: Start may run an immediate sync
 	// (empty on-disk DB), and that round's outcome — the cold-start case where
 	// a failure leaves the node enforcing with no threat intelligence at all —

@@ -1,0 +1,252 @@
+{
+  "kind": "Go console lifecycle and installer hardening overlay validation; not full appliance qualification",
+  "implementation": "Go",
+  "compiler": "go1.26.8",
+  "tested_at_utc": "2026-10-03T22:29:26Z",
+  "base_ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+  "base_provisioning_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+  "base_image_source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+  "provisioning_drift": true,
+  "runtime_overlay": true,
+  "overlay_sha256": {
+    "command.test": "c82db5672cb36936add2cb26f08198705482dfc753028ae4b4de08b836d1bda5",
+    "console.test": "b19ebe4cf64b275e44c55786980dd0e35054a8ae83e5a5d6562c31565112f793",
+    "culvert-console": "2e42e22fce8e71486e729bbbbdc24bd7617738dc1dda781246ef200fea341b15",
+    "getty-override.conf": "35810fefb598b901103ea840335ed4f32264d7cdfd4760efffd340c6e8329eda",
+    "install-lib.sh": "6b5b869bef23a9147eb453d51f9bb8f9edef34be4766852768f4eab856e764a4",
+    "install.sh": "82b5e4008913373f91e3fcb7f669ccbc0f2d1794dfc1e8b1abd8cb470271db66",
+    "install_test.sh": "ba41e687c9ecf2fb5d21deecff9ee26380cefc2a112bf0697cd484923a71d865",
+    "profile.sh": "2c1d0dcd0c535341972102440d688dce6877e82f7d744563c4a671d9380fade7"
+  },
+  "hypervisor": "ESXi 8.0.1 build-21813344",
+  "vm": "culvert-esxi-0f77ba007a81",
+  "vcpu": 2,
+  "memory_mib": 4096,
+  "disk_gib": 40,
+  "results": {
+    "ubuntu_go_tests": "PASS (domain and Linux command packages, shuffled, count=2)",
+    "installer_twice": "PASS",
+    "failed_firstboot_display": "PASS (live terminal buffer)",
+    "incorrect_console_password": "PASS",
+    "pam_login_to_admin_menu": "PASS",
+    "logout_to_public_menu": "PASS",
+    "docker_stopped_console_active": "PASS",
+    "real_reboot_menu_automatic": "PASS",
+    "machine_identity_retained": "PASS",
+    "full_appliance_qualification": "BLOCKED",
+    "four_public_views_live_buffer": "PASS",
+    "mismatched_terminal_rejected": "PASS"
+  },
+  "docker_stopped_snapshot": {
+    "hostname": "culvert-esxi-0f77ba007a81",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.116/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-03T22:28:39Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.116"
+    ],
+    "management_urls": [
+      "https://192.168.1.116:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "1",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "exit-code",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "failed",
+    "reason": "FIRSTBOOT_FAILED",
+    "message": "Provisioning failed; open diagnostics.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "after_reboot_snapshot": {
+    "hostname": "culvert-esxi-0f77ba007a81",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.116/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-03T22:29:26Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.116"
+    ],
+    "management_urls": [
+      "https://192.168.1.116:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "activating",
+      "ExecMainStatus": "0",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "success",
+      "SubState": "start"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "running",
+    "reason": "FIRSTBOOT_RUNNING",
+    "message": "Preparing the appliance...",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "limitations": [
+    "Existing incomplete ClamAV payload remains unfixed in this OVA.",
+    "Console password was set only in this disposable key-only guest to exercise PAM.",
+    "No new OVA built; console installed as an explicit development overlay.",
+    "Browser bootstrap and guided network rollback not implemented in this slice.",
+    "Journal send acknowledges transport only, not persistence/forwarding or power-loss durability.",
+    "Installer provides per-file atomic replacement and rollback for ordinary errors/catchable signals; not a power-loss-safe multi-file transaction.",
+    "Getty cgroup cleanup does not cover children moved to separate PAM/logind session scopes.",
+    "AegisDiff provider errors do not count as completed security review.",
+    "No new screenshot retained; prior ESXi capture limitation remains open."
+  ],
+  "memory_current_bytes": "11128832",
+  "cleanup": {
+    "owned_vm_deleted": true,
+    "earlier_validation_vm_deleted": true,
+    "remaining_matching_lab_vms": 0,
+    "private_run_files_removed": true
+  },
+  "lifecycle_results": {
+    "installer_fault_injection": "PASS",
+    "recovery_shell_terminal_restored": "PASS",
+    "journal_correlated_uid": "PASS",
+    "journal_excludes_output_canary": "PASS",
+    "getty_cleanup_policy": "PASS",
+    "rollback_failure_retains_named_backups": "PASS",
+    "interrupted_install_rollback": "PASS",
+    "live_executable_atomic_replacement": "PASS",
+    "concurrent_install_refused": "PASS",
+    "forced_child_termination_restores_terminal": "PASS (native PTY tests)",
+    "journal_backpressure_bounded": "PASS (native Unix socket tests)"
+  },
+  "implementation_commit": "0e0e5d7b03d19db9a23fe5222d0b59746905d177",
+  "linux_ci": {
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37158252080",
+    "result": "PASS",
+    "checks": [
+      "race tests shuffled count=2",
+      "vet",
+      "static build and compiler pin",
+      "642346 layout fuzz executions",
+      "installer fault injection as root",
+      "degraded-host CLI smoke"
+    ]
+  },
+  "local_validation": [
+    "repository golangci-lint v2.5.0: zero issues",
+    "Windows domain tests shuffled count=2",
+    "clean source build matched tested guest binary"
+  ],
+  "validation_history": [
+    "Initial journal test assumed a fixed queue size; corrected to exercise a shared deadline, then Linux CI and native tests passed.",
+    "Earlier VM post-reboot helper upload failed before checking the final installer revision; that VM was deleted and the exact final bundle was validated in a fresh VM.",
+    "One immediate live-screen assertion missed expected text. Subsequent snapshot/buffer agreed; final view checks passed with a bounded ten-second wait for rendering."
+  ],
+  "run_log_sha256": {
+    "install": "576dc92794928a304650f84f20ca10979f46fff73c316db73711f55487926034",
+    "auth": "0f9b372c1ed1677b86609232afcdd8787eafff632e93c7e033e013b5154956ba",
+    "reboot": "3d8d6bf3d04f1b7e64c91b138cef48c440e83fcdb33b6ed2176c9d7ed5cd773a",
+    "views": "e1854f0dc4f9790d7d1fa6270c1f927f6cef5038dcb758d08d7aec8a9030ec83"
+  }
+}

@@ -1,0 +1,245 @@
+{
+  "kind": "Go console development overlay smoke, not full appliance qualification",
+  "implementation": "Go",
+  "compiler": "go1.26.8",
+  "tested_at_utc": "2026-10-03T21:55:24Z",
+  "base_ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+  "base_provisioning_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+  "base_image_source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+  "provisioning_drift": true,
+  "runtime_overlay": true,
+  "overlay_sha256": {
+    "command.test": "e437a1268f0b7a4e8be2bdea6bb75d16cefca2d3e1bd901faf573c00a481b4c7",
+    "console.test": "b19ebe4cf64b275e44c55786980dd0e35054a8ae83e5a5d6562c31565112f793",
+    "culvert-console": "99009215c05f0f4b73c69d1801c87aacc2369be2b74b15f436e7500436e29091",
+    "getty-override.conf": "d9af020bec840a46357dcb9dacdff01e58b52bb914145be991f050f4ecbe2ca9",
+    "install.sh": "6cea7e6fe9baaa4e98df2e54405ea3f40360a2e2dfcf16f5fea80e0f1ae3d317",
+    "profile.sh": "2c1d0dcd0c535341972102440d688dce6877e82f7d744563c4a671d9380fade7"
+  },
+  "hypervisor": "ESXi 8.0.1 build-21813344",
+  "vm": "culvert-esxi-210e0cc01e7a",
+  "vcpu": 2,
+  "memory_mib": 4096,
+  "disk_gib": 40,
+  "results": {
+    "ubuntu_go_tests": "PASS (domain and Linux command packages, shuffled, count=2)",
+    "installer_twice": "PASS",
+    "failed_firstboot_display": "PASS (live terminal buffer)",
+    "incorrect_console_password": "PASS",
+    "pam_login_to_admin_menu": "PASS",
+    "logout_to_public_menu": "PASS",
+    "docker_stopped_console_active": "PASS",
+    "real_reboot_menu_automatic": "PASS",
+    "machine_identity_retained": "PASS",
+    "full_appliance_qualification": "BLOCKED",
+    "four_public_views_live_buffer": "PASS",
+    "mismatched_terminal_rejected": "PASS"
+  },
+  "docker_stopped_snapshot": {
+    "hostname": "culvert-esxi-210e0cc01e7a",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.156/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-03T21:54:39Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.156"
+    ],
+    "management_urls": [
+      "https://192.168.1.156:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "1",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "exit-code",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "failed",
+    "reason": "FIRSTBOOT_FAILED",
+    "message": "Provisioning failed; open diagnostics.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "after_reboot_snapshot": {
+    "hostname": "culvert-esxi-210e0cc01e7a",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.156/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-03T21:55:24Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.156"
+    ],
+    "management_urls": [
+      "https://192.168.1.156:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "0",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "success",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "waiting",
+    "reason": "FIRSTBOOT_NOT_RUNNING",
+    "message": "Provisioning is incomplete and is not running.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "limitations": [
+    "Existing incomplete ClamAV payload remains unfixed in this OVA.",
+    "Console password was set only in this disposable key-only guest to exercise PAM.",
+    "No new OVA built; console installed as an explicit development overlay.",
+    "Browser bootstrap and guided network rollback not implemented in this slice.",
+    "No new screenshot retained for this hardening run; prior ESXi screenshot capture limitation remains open.",
+    "AegisDiff provider error is not a completed security review.",
+    "Retry preflight and systemd dispatch are not atomic; firstboot owns serialization.",
+    "External PAM/sudo/recovery-shell session policy and durable recovery auditing remain follow-on work."
+  ],
+  "memory_current_bytes": "10493952",
+  "cleanup": {
+    "owned_vm_deleted": true,
+    "remaining_matching_lab_vms": 0,
+    "private_run_files_removed": true
+  },
+  "implementation_commit": "f64e9ec1f1d12376229639b240b23e97c03aa1b5",
+  "linux_ci": {
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37156507792",
+    "result": "PASS",
+    "checks": [
+      "race tests shuffled count=2",
+      "vet",
+      "static build and pinned compiler",
+      "shell syntax",
+      "degraded-host CLI smoke",
+      "layout fuzzing: 293928 executions in 10 seconds"
+    ]
+  },
+  "local_validation": [
+    "repository golangci-lint v2.5.0: zero issues",
+    "Windows domain tests shuffled count=2",
+    "Windows layout fuzzing: 688306 executions in 10 seconds"
+  ],
+  "hardening_regressions": [
+    "unterminated paste and malformed escape end session without action",
+    "fragmented function key after idle",
+    "SIGTERM during canonical confirmation input",
+    "terminal mode restoration after malformed input and cancellation",
+    "confirmation deadline and disconnected input",
+    "cancellation and identity recheck at recovery dispatch",
+    "cancellation between retry reset and start",
+    "uncertain completion markers refuse retry",
+    "FIFO and device metadata rejected without blocking",
+    "resolver symlink remains usable",
+    "IPv4/IPv6 family prefix and tentative/DAD/deprecation filtering",
+    "displayed NIC matches displayed address",
+    "layout bounds and pagination overflow"
+  ],
+  "run_log_sha256": {
+    "install": "999005a4b981ac361d07d69b91093140907a68ff3541c643c1054a94ccf91b25",
+    "auth": "865cab613e28f292eb5e61013d5a3a52a02e03785bed286acd0332a559b672bf",
+    "reboot": "a180f854ac06dce4f1a3da5986178bcf21a8089ecf5278c51e40324c228f874c",
+    "views": "e1854f0dc4f9790d7d1fa6270c1f927f6cef5038dcb758d08d7aec8a9030ec83"
+  }
+}

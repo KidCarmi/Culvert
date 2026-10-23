@@ -282,15 +282,16 @@ func TestRestartWithBarrier_CapturesTargetImageID(t *testing.T) {
 		func(*exec.Cmd) error { return nil },
 	)
 	srv, err := New(Options{
-		Cfg:       &config.Config{ComposeProjectDir: tmp, ComposeFile: "docker-compose.yml", SocketPath: filepath.Join(tmp, "s.sock"), StateDir: tmp, PrivilegeMode: config.PrivilegeSudoers, OperationTimeout: 30 * time.Second},
-		Auth:      pol,
-		Audit:     al,
-		Ops:       ops.NewManager(nil),
-		Status:    &fakeStatus{},
-		StateDir:  tmp,
-		AuditPath: auditPath,
-		Journal:   jnl,
-		Runner:    rn,
+		ReleaseTrust: allowReleaseTrustForTest{},
+		Cfg:          &config.Config{ComposeProjectDir: tmp, ComposeFile: "docker-compose.yml", SocketPath: filepath.Join(tmp, "s.sock"), StateDir: tmp, PrivilegeMode: config.PrivilegeSudoers, OperationTimeout: 30 * time.Second},
+		Auth:         pol,
+		Audit:        al,
+		Ops:          ops.NewManager(nil),
+		Status:       &fakeStatus{},
+		StateDir:     tmp,
+		AuditPath:    auditPath,
+		Journal:      jnl,
+		Runner:       rn,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

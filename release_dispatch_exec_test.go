@@ -113,7 +113,7 @@ func TestExec_AlreadyCurrentDoesNotApply(t *testing.T) {
 
 func TestExec_SendsExactApplyRequest(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil) // fresh dispatch
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil) // fresh dispatch
 	agent := &fakeAgent{applyOpID: "op-1", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}} // anchor, post (verifies)
 	res, err := newExec(agent, nil).Execute(context.Background(), plan)
@@ -138,7 +138,7 @@ func TestExec_SendsExactApplyRequest(t *testing.T) {
 
 func TestExec_IdempotencyKeyReusedOnRetry(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{
 		applyErrs:  []error{errors.New("transient"), nil}, // fail first, succeed second
 		applyOpID:  "op-2",
@@ -159,7 +159,7 @@ func TestExec_IdempotencyKeyReusedOnRetry(t *testing.T) {
 
 func TestExec_SuccessVerified(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{applyOpID: "op-3", waitState: agentStateSucceeded,
 		runningSeq: [][]string{{dispatchRepo + "@" + digB}, {dispatchRepo + "@" + digA}}} // prior rel_b, now target
 	res, _ := newExec(agent, nil).Execute(context.Background(), plan)
@@ -170,7 +170,7 @@ func TestExec_SuccessVerified(t *testing.T) {
 
 func TestExec_SuccessButVerifyMismatch(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	// Op says succeeded, but post-running is NOT the target digest.
 	agent := &fakeAgent{applyOpID: "op-4", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@sha256:" + strings.Repeat("c", 64)}}}
@@ -182,7 +182,7 @@ func TestExec_SuccessButVerifyMismatch(t *testing.T) {
 
 func TestExec_FailedRolledBack(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	prior := dispatchRepo + "@" + digB
 	// Op failed; the prior image is running again (inline auto-rollback restored it).
 	agent := &fakeAgent{applyOpID: "op-5", waitState: agentStateFailed,
@@ -195,7 +195,7 @@ func TestExec_FailedRolledBack(t *testing.T) {
 
 func TestExec_FailedNotRolledBackNeedsAttn(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	// Op failed and the node is NOT back on the prior image (rollback failed/disabled).
 	agent := &fakeAgent{applyOpID: "op-6", waitState: agentStateFailed,
 		runningSeq: [][]string{{dispatchRepo + "@" + digB}, {dispatchRepo + "@sha256:" + strings.Repeat("d", 64)}}}
@@ -213,7 +213,7 @@ func TestExec_FailedNotRolledBackNeedsAttn(t *testing.T) {
 // post_verify_read_failed. It stays FAILED_NEEDS_ATTN so it still alerts.
 func TestExec_AgentUnreachableAfterUpdate(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{
 		applyOpID:   "op-uar",
 		waitState:   agentStateSucceeded,
@@ -228,7 +228,7 @@ func TestExec_AgentUnreachableAfterUpdate(t *testing.T) {
 
 func TestExec_WatchTimeoutNeedsAttn(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{applyOpID: "op-7", waitErr: context.DeadlineExceeded,
 		runningSeq: [][]string{nil}}
 	res, _ := newExec(agent, nil).Execute(context.Background(), plan)
@@ -239,7 +239,7 @@ func TestExec_WatchTimeoutNeedsAttn(t *testing.T) {
 
 func TestExec_ConcurrentRejected(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	e := newExec(&fakeAgent{applyOpID: "op-8", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}, nil)
 
@@ -282,7 +282,7 @@ func TestExec_AlreadyCurrentRejectedWhenInFlight(t *testing.T) {
 // The onApplied hook fires exactly once with the op_id, before the watch.
 func TestExec_OnAppliedFiresWithOpID(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{applyOpID: "op-cb", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}
 	var ops []string
@@ -314,7 +314,7 @@ func TestExec_OnAppliedSilentOnAlreadyCurrent(t *testing.T) {
 // FAILED_NEEDS_ATTN/durable_record_failed and does NOT enter WaitOp.
 func TestExec_OnAppliedFailureNeedsAttn(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{applyOpID: "op-df", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}
 	res, err := newExec(agent, nil).Execute(context.Background(), plan,
@@ -337,7 +337,7 @@ func TestExec_OnAppliedFailureNeedsAttn(t *testing.T) {
 // never contacted and the outcome is failed_needs_attn/anchor_read_failed.
 func TestExec_AnchorReadFailureRefusesBeforeApply(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{applyOpID: "op-a", waitState: agentStateSucceeded,
 		runningErrs: []error{errors.New("status unavailable")}} // anchor read fails
 	var events []DispatchAuditEvent
@@ -362,7 +362,7 @@ func TestExec_AnchorReadFailureRefusesBeforeApply(t *testing.T) {
 // inferring mismatch/rolled-back from a missing read.
 func TestExec_PostVerifyReadFailureAfterSucceeded(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	// A DETERMINISTIC (non-transient, 4xx) post-read failure after a succeeded
 	// op stays the generic post_verify_read_failed — it is NOT the socket-loss
 	// fingerprint (that is a TRANSPORT failure, covered by
@@ -378,7 +378,7 @@ func TestExec_PostVerifyReadFailureAfterSucceeded(t *testing.T) {
 
 func TestExec_PostVerifyReadFailureAfterFailed(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{applyOpID: "op-pv2", waitState: agentStateCancelled,
 		runningSeq:  [][]string{{dispatchRepo + "@" + digB}}, // anchor (call 0) ok
 		runningErrs: []error{nil, errors.New("status gone")}} // post (call 1) errors
@@ -405,7 +405,7 @@ func TestExec_NilPlanReturnsErrorNotPanic(t *testing.T) {
 // Audit hook fires a dispatch event (with op_id) and an outcome event.
 func TestExec_AuditHook(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	var events []DispatchAuditEvent
 	agent := &fakeAgent{applyOpID: "op-9", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}
@@ -428,7 +428,7 @@ func TestExec_AuditHook(t *testing.T) {
 // verbatim — never overwritten with a freshly-minted one.
 func TestExec_HonorsPlannerSuppliedIdempotencyKey(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	plan.Apply.IdempotencyKey = "rel-rel_a-CALLER123" // orchestration-owned op identity
 	agent := &fakeAgent{applyOpID: "op-k", waitState: agentStateSucceeded,
 		runningSeq: [][]string{nil, {dispatchRepo + "@" + digA}}}
@@ -447,7 +447,7 @@ func TestExec_HonorsPlannerSuppliedIdempotencyKey(t *testing.T) {
 // When the planner supplied NO key, the executor mints rel-<release_id>-<ulid>.
 func TestExec_GeneratesIdempotencyKeyWhenEmpty(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	if plan.Apply.IdempotencyKey != "" {
 		t.Fatalf("precondition: want empty key from default options; got %q", plan.Apply.IdempotencyKey)
 	}
@@ -512,7 +512,7 @@ func TestExec_AlreadyCurrentRecheckReadFailure(t *testing.T) {
 // NOT retried — applyWithRetry returns after a single attempt.
 func TestExec_ApplyDoesNotRetry4xx(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{applyOpID: "op-4", applyErrs: []error{&agentHTTPError{Status: 400, Method: "POST", Path: "/v1/upgrades/apply"}}}
 	res, _ := newExec(agent, nil).Execute(context.Background(), plan)
 	if len(agent.applyReqs) != 1 {
@@ -526,7 +526,7 @@ func TestExec_ApplyDoesNotRetry4xx(t *testing.T) {
 // A transient 5xx IS retried (same key), then succeeds.
 func TestExec_ApplyRetriesTransient5xx(t *testing.T) {
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	agent := &fakeAgent{
 		applyErrs:  []error{&agentHTTPError{Status: 503, Method: "POST", Path: "/v1/upgrades/apply"}, nil},
 		applyOpID:  "op-5",
@@ -593,8 +593,8 @@ func TestExec_WatchDeadlineBoundsNeverTerminalOp(t *testing.T) {
 	client.pollInterval = 5 * time.Millisecond
 
 	cat := mustLoad(t, validSource())
-	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
-	exec := NewDispatchExecutor(client, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
+	exec := NewDispatchExecutor(client, DispatchConfig{ProxyRepo: dispatchRepo, SelfVersion: "1.9.0"}, nil)
 	exec.maxWatch = 40 * time.Millisecond // bound a deadline-less ctx
 
 	res, err := exec.Execute(context.Background(), plan)

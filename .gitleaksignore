@@ -1,0 +1,52 @@
+# Exact reviewed historical findings only: immutable commit:path:rule:line.
+# See docs/appliance/secret-scanning-policy.md for provenance and classification.
+# No commit-wide or path-wide suppression. New commits remain scanned.
+
+# Public SSH host-key SHA-256; not a bootstrap credential.
+6b7b5ab73bb8616569eb97685954a0fffc6d884c:docs/appliance/evidence/local-esxi-36b5407e-20261004.json:generic-api-key:713
+# Public upstream-entry resource ID inside an API credential route.
+ad9710acbf38e9bb06e69677f1cb64c11005f269:docs/appliance/evidence/predecessor-upgrade-235-to-259.md:generic-api-key:305
+# Public upstream-entry resource ID inside an API credential route.
+ad9710acbf38e9bb06e69677f1cb64c11005f269:docs/appliance/evidence/predecessor-upgrade-235-to-259.md:generic-api-key:306
+# Public upstream-entry resource ID inside an API credential route.
+ad9710acbf38e9bb06e69677f1cb64c11005f269:docs/appliance/evidence/predecessor-upgrade-258-to-259.md:generic-api-key:305
+# Public upstream-entry resource ID inside an API credential route.
+ad9710acbf38e9bb06e69677f1cb64c11005f269:docs/appliance/evidence/predecessor-upgrade-258-to-259.md:generic-api-key:306
+# Public upstream-entry resource ID inside an API credential route.
+ad9710acbf38e9bb06e69677f1cb64c11005f269:docs/appliance/evidence/predecessor-upgrade-250-to-259.md:generic-api-key:305
+# Public upstream-entry resource ID inside an API credential route.
+ad9710acbf38e9bb06e69677f1cb64c11005f269:docs/appliance/evidence/predecessor-upgrade-250-to-259.md:generic-api-key:306
+# Unit-test fake PEM marker; scanner spans escaped strings/test source, not a parseable key.
+4c71369fc3ebdb08c4da3c0c5e55ed2a336bd618:cdr_secretwrite_test.go:private-key:40
+# Unit-test fake PEM marker; scanner spans escaped strings/test source, not a parseable key.
+fe73c832545c20e4561e7d34031bf1a8bef5fab8:cdr_secretwrite_test.go:private-key:40
+# Synthetic authentication/redaction fixture in retired regression test.
+5c7be2d14264d3e453c320893404e9c0dd34005b:fe6a3c_red_test.go:generic-api-key:74
+# Synthetic authentication/redaction fixture in retired regression test.
+5c7be2d14264d3e453c320893404e9c0dd34005b:fe6a3c_red_test.go:generic-api-key:75
+# Synthetic authentication/redaction fixture in retired regression test.
+d5ff77257f2324f567e48893a0d52656bed3de02:fe6a2c_red_test.go:generic-api-key:55
+# Synthetic authentication/redaction fixture in retired regression test.
+d5ff77257f2324f567e48893a0d52656bed3de02:fe6a2c_red_test.go:generic-api-key:56
+# Synthetic authentication/redaction fixture in retired regression test.
+7bfdaa52cb878fcceaf153e3465e19931dec643b:frontend/src/test/fe6a2-red-admins.test.ts:generic-api-key:33
+# Synthetic authentication/redaction fixture in retired regression test.
+7bfdaa52cb878fcceaf153e3465e19931dec643b:frontend/src/test/fe6a2-red-page.test.tsx:generic-api-key:802
+# Synthetic authentication/redaction fixture in retired regression test.
+7bfdaa52cb878fcceaf153e3465e19931dec643b:frontend/src/test/fe6a2-red-page.test.tsx:generic-api-key:817
+# Synthetic authentication/redaction fixture in retired regression test.
+7bfdaa52cb878fcceaf153e3465e19931dec643b:frontend/src/test/fe6a2-red-page.test.tsx:generic-api-key:973
+# Synthetic authentication/redaction fixture in retired regression test.
+7bfdaa52cb878fcceaf153e3465e19931dec643b:frontend/src/test/fe6a2-red-page.test.tsx:generic-api-key:974
+# Synthetic authentication/redaction fixture in retired regression test.
+7bfdaa52cb878fcceaf153e3465e19931dec643b:frontend/src/test/fe6a2-red-page.test.tsx:generic-api-key:981
+# Synthetic authentication/redaction fixture in retired regression test.
+7bfdaa52cb878fcceaf153e3465e19931dec643b:frontend/src/test/fe6a2-red-page.test.tsx:generic-api-key:982
+# Synthetic authentication/redaction fixture in retired regression test.
+3247a8b0edb08f3f15c14e3897e57bad74aaec34:upstream_codex_r8_red_test.go:generic-api-key:28
+# Unit-test fake PEM marker; scanner spans escaped strings/test source, not a parseable key.
+9640e955f478db68b75fc59c954d975ad5ea2179:internal/secret/secret_test.go:private-key:338
+# Unit-test fake PEM marker; scanner spans escaped strings/test source, not a parseable key.
+d89b6b057d63bfc7545a0c22e9d986361b1744a3:kek_test.go:private-key:32
+# Documentation references to synthetic test identity.
+a6bde4eab76312a41570242f5aedebe1ddbccfa1:roadmap/RUNTIME-OWNERSHIP.md:generic-api-key:193

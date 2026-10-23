@@ -20,8 +20,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -189,6 +191,11 @@ type restoreOpts struct {
 	// detects encryption from magic bytes and demands a non-empty
 	// passphrase only when the magic matches.
 	BackupPassphrase string
+	// AcceptRootCAChange acknowledges that the commit replaces or REMOVES the
+	// inspection root CA (ca.bundle) — every client that trusts the current
+	// root loses inspected HTTPS, and a removed bundle is silently re-minted
+	// as a NEW root on the next boot (LoadOrInitCA). Appliance readiness D.
+	AcceptRootCAChange bool
 }
 
 // commitAnalysis is the read-only delta between current /data and the
@@ -197,6 +204,20 @@ type restoreOpts struct {
 // current /data; nothing is written.
 type commitAnalysis struct {
 	Mode restoreMode
+
+	// Root (inspection) CA delta — SHA-256 of the ca.bundle bytes (the
+	// bundle may be an encrypted envelope, so bytes are the honest identity:
+	// a re-encrypted-but-identical root reads as "changed", never the reverse).
+	CurrentRootCADigest   string // empty if current has no ca.bundle
+	RestoredRootCADigest  string // empty if the commit would leave no ca.bundle
+	RootCAChanged         bool   // current present and would be replaced or removed
+	RootCAGuardWouldBlock bool   // RootCAChanged && !AcceptRootCAChange
+
+	// Admin roster after the merge: a commit that leaves NO admin while the
+	// node has one today reopens unauthenticated first-time setup. Hard
+	// refusal — there is no acknowledgement for it (restore_test.go).
+	CurrentAdmins  int
+	RestoredAdmins int
 
 	// Cluster CA delta.
 	CurrentCAFingerprint  string // empty if current has no parseable cluster-ca.crt
@@ -671,6 +692,18 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	a.CAFingerprintChanged = a.CurrentCAFingerprint != "" &&
 		a.CurrentCAFingerprint != a.RestoredCAFingerprint
 
+	// Root CA delta (bytes identity; see commitAnalysis).
+	cur, err := fileDigestIfPresent(filepath.Join(dataDir, "ca.bundle"))
+	if err != nil {
+		return nil, err
+	}
+	a.CurrentRootCADigest = cur
+	if a.RestoredRootCADigest, err = restoredRootCADigest(files, dataDir, opts.Mode); err != nil {
+		return nil, err
+	}
+	a.RootCAChanged = a.CurrentRootCADigest != "" && a.CurrentRootCADigest != a.RestoredRootCADigest
+	a.RootCAGuardWouldBlock = a.RootCAChanged && !opts.AcceptRootCAChange
+
 	// Enrolled DPs in current cluster.json (read-only).
 	a.CurrentEnrolledNodes = currentEnrolledNodeCount(dataDir)
 
@@ -680,10 +713,23 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	a.DPGuardWouldBlock = dpWouldNeedFlag && !opts.AcceptDPReenrollment
 
 	// ui_users analysis (post-merge).
-	currentUsers := readUsersForAnalysis(currentUIUsersBody(dataDir))
-	restoredUsers := readUsersForAnalysis(restoredUIUsersBody(files, dataDir, opts.Mode))
+	curRoster, err := currentUIUsersBody(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	resRoster, err := restoredUIUsersBody(files, dataDir, opts.Mode)
+	if err != nil {
+		return nil, err
+	}
+	currentUsers := readUsersForAnalysis(curRoster)
+	restoredUsers := readUsersForAnalysis(resRoster)
 	a.CurrentUsers = sortedUsernames(currentUsers)
 	a.RestoredUsers = sortedUsernames(restoredUsers)
+	a.CurrentAdmins = rosterAdminCount(curRoster)
+	a.RestoredAdmins = rosterAdminCount(resRoster)
+	if a.RestoredAdmins < 0 {
+		a.RestoredAdmins = 0 // an unparseable restored roster yields no usable admin
+	}
 	a.UsersAddedByRestore = setDifference(a.RestoredUsers, a.CurrentUsers)
 	a.UsersRemovedByRestore = setDifference(a.CurrentUsers, a.RestoredUsers)
 
@@ -701,6 +747,60 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 	a.TOTPGuardWouldBlock = totpWouldNeedFlag && !opts.AllowCounterRollback
 
 	return a, nil
+}
+
+// fileDigestIfPresent returns hex SHA-256 of a file's bytes, or "" when the
+// file does not exist. Any OTHER read failure is returned: an existing
+// ca.bundle the restore cannot read (ownership drift after a manual
+// recovery, a directory in its place) is still a trust root the commit would
+// rename aside, so reading it as "absent" would disarm the root-CA guard and
+// let a full restore replace it without --accept-root-ca-change (Codex P1,
+// PR #1528). The restore refuses before any mutation instead.
+func fileDigestIfPresent(path string) (string, error) {
+	body, err := os.ReadFile(path) // #nosec G304 -- operator-controlled data dir
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("restore: cannot read the current %s to compare root CAs (fix its ownership/permissions and retry): %w", filepath.Base(path), err)
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// restoredRootCADigest answers "which ca.bundle would be live after the
+// commit?": the tarball's when the mode routes the bundle from the tarball
+// (full / trust-root-only — ABSENT there means REMOVED), else the current one.
+func restoredRootCADigest(files map[string][]byte, dataDir string, mode restoreMode) (string, error) {
+	const path = "data/ca.bundle"
+	if mode.fromTarball(path) {
+		body, ok := files[path]
+		if !ok {
+			return "", nil
+		}
+		sum := sha256.Sum256(body)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	return fileDigestIfPresent(filepath.Join(dataDir, "ca.bundle"))
+}
+
+// rosterAdminCount counts admin accounts in a ui_users.json body (0 for an
+// absent or unparseable roster — the fail-closed reading for the guard).
+// rosterAdminCount returns the admins in a ui_users.json body: 0 when the
+// body is empty (no roster), and -1 when a roster EXISTS but cannot be
+// parsed — "unknown", which the no-admin guard treats like "has admins"
+// (Codex P1, PR #1528: reading it as zero let a full restore of a pre-setup
+// backup move it aside and reopen unauthenticated setup). A restore that
+// brings an admin back still recovers a corrupt roster.
+func rosterAdminCount(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	n, err := validateUIUsersJSON(body)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 func currentCAFingerprint(dataDir string) string {
@@ -746,17 +846,24 @@ func currentEnrolledNodeCount(dataDir string) int {
 	return len(st.Nodes)
 }
 
-func currentUIUsersBody(dataDir string) []byte {
+// currentUIUsersBody reads the current admin roster: nil when it does not
+// exist, an error for any other read failure — an existing roster the
+// restore cannot read must not be counted as "no admins" (Codex P1,
+// PR #1528).
+func currentUIUsersBody(dataDir string) ([]byte, error) {
 	body, err := os.ReadFile(filepath.Join(dataDir, "ui_users.json")) // #nosec G304 -- operator-controlled
-	if err != nil {
-		return nil
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
 	}
-	return body
+	if err != nil {
+		return nil, fmt.Errorf("restore: cannot read the current ui_users.json to count admins (fix its ownership/permissions and retry): %w", err)
+	}
+	return body, nil
 }
 
-func restoredUIUsersBody(files map[string][]byte, dataDir string, mode restoreMode) []byte {
+func restoredUIUsersBody(files map[string][]byte, dataDir string, mode restoreMode) ([]byte, error) {
 	if mode.fromTarball("data/ui_users.json") {
-		return files["data/ui_users.json"]
+		return files["data/ui_users.json"], nil
 	}
 	return currentUIUsersBody(dataDir)
 }
@@ -855,6 +962,27 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 		fmt.Fprintf(w, "  CA fingerprint unchanged.\n")
 	}
 
+	_, _ = fmt.Fprintf(w, "\nInspection root CA (ca.bundle):\n")
+	if a.CurrentRootCADigest == "" {
+		_, _ = fmt.Fprintf(w, "  Current:    (none)\n")
+	} else {
+		_, _ = fmt.Fprintf(w, "  Current:    sha256:%s\n", a.CurrentRootCADigest[:16])
+	}
+	if a.RestoredRootCADigest == "" {
+		_, _ = fmt.Fprintf(w, "  Restored:   (none would be present — a NEW root is minted at the next boot)\n")
+	} else {
+		_, _ = fmt.Fprintf(w, "  Restored:   sha256:%s\n", a.RestoredRootCADigest[:16])
+	}
+	switch {
+	case a.RootCAGuardWouldBlock:
+		_, _ = fmt.Fprintf(w, "  ⚠ Root CA changes: clients trusting the current root lose inspected HTTPS.\n")
+		_, _ = fmt.Fprintf(w, "    Pass --accept-root-ca-change to allow commit, or --mode state-only to keep it.\n")
+	case a.RootCAChanged:
+		_, _ = fmt.Fprintf(w, "  ⓘ Root CA change accepted.\n")
+	default:
+		_, _ = fmt.Fprintf(w, "  Root CA unchanged.\n")
+	}
+
 	fmt.Fprintf(w, "\nAdmin accounts:\n")
 	fmt.Fprintf(w, "  Current:   %d (%s)\n", len(a.CurrentUsers), strings.Join(a.CurrentUsers, ", "))
 	fmt.Fprintf(w, "  Restored:  %d (%s)\n", len(a.RestoredUsers), strings.Join(a.RestoredUsers, ", "))
@@ -863,6 +991,9 @@ func printRestoreSummary(w io.Writer, s *restoreSummary, a *commitAnalysis) {
 	}
 	if len(a.UsersRemovedByRestore) > 0 {
 		fmt.Fprintf(w, "  Will be removed:  %s\n", strings.Join(a.UsersRemovedByRestore, ", "))
+	}
+	if a.CurrentAdmins != 0 && a.RestoredAdmins == 0 {
+		_, _ = fmt.Fprintf(w, "  ⚠ No admin would remain: commit is REFUSED (would reopen unauthenticated setup).\n")
 	}
 
 	fmt.Fprintf(w, "\nTOTP counter rollbacks:\n")
@@ -932,9 +1063,9 @@ var restoreNow = time.Now
 
 // runRestoreCommit performs a destructive restore: validate, analyze,
 // enforce guards, stage, swap. Caller must stop the proxy first
-// (offline restore only). On success, current /data has been replaced
-// by the restored content and the prior /data is preserved at
-// /data.bak.<timestamp>.
+// (offline restore only). On success, the data dir's content has been
+// replaced by the restored content and the prior content is preserved at
+// <dataDir>/.restore-bak.<timestamp>-<pid>/.
 //
 // Step ordering (single failure boundary at the swap):
 //
@@ -942,15 +1073,16 @@ var restoreNow = time.Now
 //  2. analyze   (D1.3b.2a; no /data writes)
 //  3. guards    (D1.3b.2a precomputed; reject if WouldBlock)
 //  4. summary   (mode-aware; informational)
-//  5. stage     (mkdir /data.staging.<ts>; write per mode predicate)
-//  6. rename A  (current /data → /data.bak.<ts>)
-//  7. rename B  (staging → /data) + parent-dir fsync
-//  8. final     (print success + .bak path)
+//  5. stage     (mkdir <dataDir>/.restore-staging.<ts>; write per mode predicate)
+//  6. evacuate  (journal; move every top-level entry → <dataDir>/.restore-bak.<ts>/)
+//  7. promote   (journal; move every staged entry → <dataDir>/) + dir fsync
+//  8. final     (remove journal; print success + bak path)
 //
-// If 1–5 fail: /data unchanged, staging cleaned up.
-// If 6 fails: /data unchanged, staging cleaned up.
-// If 7 fails (or process is killed between 6 and 7): /data does not
-// exist; error message names the exact `mv` recovery command.
+// If 1–5 fail: data dir unchanged, staging cleaned up.
+// If 6–7 fail (or the process is killed inside them): the journal stays,
+// the boot guard refuses to start, and --recover-restore resolves it in
+// either direction (restore_inplace.go). The swap is in-place because a
+// mounted /data cannot be renamed (restore_mountpoint_test.go).
 func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
 	// Steps 1–2 (reuse).
 	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase, opts.BackupPassphrase)
@@ -963,26 +1095,113 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	}
 
 	// Step 3: enforce guards before any destructive operation.
-	if analysis.DPGuardWouldBlock {
-		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
-			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
-	}
-	if analysis.TOTPGuardWouldBlock {
-		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
-			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	if err := enforceCommitGuards(analysis); err != nil {
+		return err
 	}
 
 	// Step 4: print summary so the operator sees the plan one last time.
 	printRestoreSummary(os.Stdout, summary, analysis)
 
+	// Quiescing is ENFORCED: the proxy holds <dataDir>/.culvert.lock for its
+	// lifetime (see restore_lock_unix.go), so a commit against a live stack
+	// is refused instead of racing it. The lock is taken BEFORE the journal
+	// and mount-point checks so two concurrent commits cannot both pass them.
+	release, lerr := acquireOfflineDataDirLock(dataDir)
+	if lerr != nil {
+		return fmt.Errorf("restore: %w", lerr)
+	}
+	defer release()
+	if err := refuseUnsafeCommitTopology(dataDir); err != nil {
+		return err
+	}
+	return commitRestoreStaged(dataDir, manifest, files, opts)
+}
+
+// acquireOfflineDataDirLock is the lock a restore COMMIT or --recover-restore
+// must hold, or refuse. It differs from the proxy's holdDataDirLock on purpose:
+// the proxy only reads and writes its own state, so an unusable lock file is a
+// warning there, but these paths MOVE the data directory's entries, and doing
+// that without the guard races a live proxy into an inconsistent restore.
+// Ownership or mode drift on .culvert.lock must therefore refuse, not degrade.
+// The single exception is a data directory that does not exist: nothing can be
+// running in it, so there is nothing to quiesce.
+func acquireOfflineDataDirLock(dataDir string) (func(), error) {
+	release, err := acquireDataDirLock(dataDir)
+	if err == nil {
+		return release, nil
+	}
+	if errors.Is(err, errDataDirLocked) {
+		return nil, err
+	}
+	if _, serr := os.Lstat(dataDir); errors.Is(serr, fs.ErrNotExist) {
+		return func() {}, nil
+	}
+	return nil, fmt.Errorf("cannot take the data-directory lock (%w); refusing to move data without the quiescing guard — fix the ownership/mode of %s and retry", err, filepath.Join(dataDir, dataDirLockName))
+}
+
+// enforceCommitGuards is Step 3 of runRestoreCommit: every guard that must
+// refuse BEFORE anything destructive happens, each with the flag that admits
+// it named in the error.
+func enforceCommitGuards(analysis *commitAnalysis) error {
+	if analysis.DPGuardWouldBlock {
+		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
+			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
+	}
+	if analysis.RootCAGuardWouldBlock {
+		what := "replaced"
+		if analysis.RestoredRootCADigest == "" {
+			what = "REMOVED (and silently re-minted as a NEW root on the next boot)"
+		}
+		return fmt.Errorf("restore: the inspection root CA (ca.bundle) would be %s; every client trusting the current root loses inspected HTTPS. Pass --accept-root-ca-change to proceed, or use --mode state-only to keep the current root", what)
+	}
+	if analysis.CurrentAdmins != 0 && analysis.RestoredAdmins == 0 {
+		have := fmt.Sprintf("current roster has %d", analysis.CurrentAdmins)
+		if analysis.CurrentAdmins < 0 {
+			have = "current roster exists but cannot be parsed"
+		}
+		return fmt.Errorf("restore: the commit would leave NO admin account (%s) and reopen unauthenticated first-time setup; use a backup that carries ui_users.json, or --mode trust-root-only to keep the current roster", have)
+	}
+	if analysis.TOTPGuardWouldBlock {
+		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
+			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	}
+	return nil
+}
+
+// refuseUnsafeCommitTopology refuses a commit whose data directory cannot be
+// swapped in place: an unresolved journal (the operator's recovery handle,
+// never to be clobbered) or a mount point nested inside dataDir (an entry
+// that rename(2) refuses — better to refuse now than half-way through
+// evacuation).
+func refuseUnsafeCommitTopology(dataDir string) error {
+	if _, present, jerr := readRestoreJournal(dataDir); present {
+		if jerr != nil {
+			return fmt.Errorf("restore: %w — resolve it first (--recover-restore)", jerr)
+		}
+		return fmt.Errorf("restore: an interrupted restore is pending in %s; resolve it first with --recover-restore --confirm=revert|complete", dataDir)
+	}
+	if nested := nestedMountPointsUnder(dataDir); len(nested) > 0 {
+		return fmt.Errorf("restore: refusing to commit — mount points inside the data directory cannot be moved aside: %s (unmount them for the restore, or remove the bind mounts from the cli service)", strings.Join(nested, ", "))
+	}
+	return nil
+}
+
+// commitRestoreStaged is Steps 5–8 of runRestoreCommit: stage the artifacts
+// into dataDir, run the journaled in-place swap, and finish. The caller holds
+// the data-dir lock.
+func commitRestoreStaged(dataDir string, manifest *backupManifest, files map[string][]byte, opts restoreOpts) error {
 	// Anchor paths now so failure messages can name them. Suffix is
 	// timestamp + PID so:
 	//   - same-second retries from different processes don't collide
 	//   - the operator can copy-paste the printed paths verbatim
 	//   - staging and bak share a correlated suffix
+	// Both live INSIDE dataDir (restore_inplace.go): a mounted /data cannot be
+	// renamed, and a sibling would land outside the volume.
 	suffix := fmt.Sprintf("%s-%d", restoreNow().UTC().Format("20060102T150405Z"), os.Getpid())
-	stagingDir := dataDir + ".staging." + suffix
-	bakPath := dataDir + ".bak." + suffix
+	stagingName := restoreStagingPrefix + suffix
+	bakName := restoreBakPrefix + suffix
+	stagingDir := filepath.Join(dataDir, stagingName)
+	bakPath := filepath.Join(dataDir, bakName)
 
 	// Collision pre-check: refuse to proceed if either path already
 	// exists on disk. Catches stale state from a prior failed restore
@@ -1001,7 +1220,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 
 	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
 	fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", stagingDir)
-	fmt.Fprintf(os.Stdout, "  Backup of current /data will be at: %s\n\n", bakPath)
+	_, _ = fmt.Fprintf(os.Stdout, "  Backup of current data will be at: %s\n\n", bakPath)
 
 	// Step 5: stage to disk.
 	if err := stageArtifacts(stagingDir, dataDir, files, manifest, opts.Mode); err != nil {
@@ -1009,41 +1228,27 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		return fmt.Errorf("restore: stage failed: %w", err)
 	}
 
-	// Step 6: rename current /data → .bak.
-	if err := os.Rename(dataDir, bakPath); err != nil {
-		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
-		return fmt.Errorf("restore: rename current %s → %s: %w", dataDir, bakPath, err)
+	// Steps 6–7: journaled in-place swap (evacuate → promote). Any failure
+	// past this point leaves a journal; the error names the recovery command
+	// and NOTHING is cleaned up, because both the previous data and the
+	// staged data are needed for the operator's choice.
+	j := &restoreJournal{
+		Suffix:     suffix,
+		StagingDir: stagingName,
+		BakDir:     bakName,
+		Mode:       opts.Mode.String(),
+		StartedAt:  restoreNow().UTC(),
 	}
-
-	// Critical window: /data does not exist between renames. On failure
-	// here, clean up staging so the operator's only recovery path is the
-	// .bak (no ambiguity between option A "revert via .bak" and option B
-	// "promote staging"). The .bak is preserved either way.
-	if commitInjectBetweenRenames != nil {
-		if err := commitInjectBetweenRenames(); err != nil {
-			_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
-			return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; injected: %w",
-				dataDir, bakPath, dataDir, err)
-		}
+	if err := swapInPlace(dataDir, stagingDir, bakPath, j); err != nil {
+		return fmt.Errorf("restore: COMMIT INTERRUPTED — %w; previous data is at %s, staged data at %s; resolve with: --recover-restore (inspect), then --recover-restore --confirm=revert | --confirm=complete",
+			err, bakPath, stagingDir)
 	}
-
-	// Step 7: rename staging → /data.
-	if err := os.Rename(stagingDir, dataDir); err != nil {
-		_ = os.RemoveAll(stagingDir) // #nosec G104 -- best-effort cleanup
-		return fmt.Errorf("restore: COMMIT INTERRUPTED — %s does not exist; manual recovery: mv %s %s ; rename staging→/data failed: %w",
-			dataDir, bakPath, dataDir, err)
-	}
-
-	// Parent-dir fsync (best-effort, mirrors atomicWriteFile pattern).
-	if d, derr := os.Open(filepath.Dir(dataDir)); derr == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
+	_ = fsyncDirBestEffort(dataDir)
 
 	// Step 8.
 	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
-	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
-	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
+	_, _ = fmt.Fprintf(os.Stdout, "  Previous data preserved at: %s\n", bakPath)
+	_, _ = fmt.Fprintf(os.Stdout, "  (never auto-deleted; remove with --cleanup-restore-leftovers --confirm when no longer needed.)\n")
 	return nil
 }
 
@@ -1066,6 +1271,21 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 // the guard returns nil and normal first-run initialization proceeds.
 func checkInterruptedRestore(dataDir string) error {
 	if _, err := os.Stat(dataDir); err == nil {
+		// In-place (mount-point-safe) commits leave a journal INSIDE dataDir
+		// while interrupted; the data directory then holds a mix of previous
+		// and restored entries and must not be served.
+		if j, present, jerr := readRestoreJournal(dataDir); present {
+			if jerr != nil {
+				return fmt.Errorf("interrupted restore detected: %v. Inspect %s and the .restore-* directories in %s by hand before starting Culvert again",
+					jerr, restoreJournalPath(dataDir), dataDir)
+			}
+			return fmt.Errorf("interrupted restore detected: a restore commit in %s was interrupted in phase %q "+
+				"(previous data at %s, staged data at %s). Resolve it with the stack stopped, then start Culvert again:\n"+
+				"    INSPECT:   --recover-restore\n"+
+				"    REVERT:    --recover-restore --confirm=revert\n"+
+				"    COMPLETE:  --recover-restore --confirm=complete",
+				dataDir, j.Phase, filepath.Join(dataDir, j.BakDir), filepath.Join(dataDir, j.StagingDir))
+		}
 		return nil // dataDir present — normal boot
 	} else if !os.IsNotExist(err) {
 		return nil // unexpected stat error — don't block boot on a transient FS issue
@@ -1182,6 +1402,22 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 	// manifest are still preserved (e.g. files added by features
 	// introduced after the backup snapshot, in non-full modes).
 	walkErr := filepath.Walk(dataDir, func(p string, info os.FileInfo, werr error) error {
+		// Never carry over (or descend into) the restore machinery's own
+		// top-level entries — the staging dir being written, previous
+		// .restore-bak.* leftovers, the journal and the lock file — nor the
+		// filesystem's own (`lost+found`). This check runs BEFORE the error
+		// check on purpose: filepath.Walk reads a directory before it calls
+		// the function for it, so an unreadable top-level directory arrives
+		// here WITH werr set (root-owned 0700 lost+found on a dedicated ext4
+		// volume: "open /data/lost+found: permission denied"), and an
+		// error-first shape fails the whole stage on an entry that must be
+		// skipped — measured against the real image in lifecycle scenario G.
+		if info != nil && filepath.Dir(p) == dataDir && (isRestoreInternalEntry(info.Name()) || isFilesystemFixtureEntry(info.Name())) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if werr != nil {
 			return werr
 		}

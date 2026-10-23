@@ -50,6 +50,12 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           reporter: github-pr-review          # inline comments on the diff
+          # The SAME linter version the blocking Fast gate installs: unpinned,
+          # the action runs `latest`, whose newer rules post findings the gate
+          # passes, one comment per CI round (PR #1528, gosec G703 under
+          # v2.14.0 vs v2.5.0). Bump both together, deliberately.
+          # ci_lint_pin_test.go fails if the two drift.
+          golangci_lint_version: v2.5.0
           golangci_lint_flags: >-
             --config=.golangci.yml
             --timeout=5m

@@ -439,3 +439,38 @@ func TestIsAllowedBackupPath(t *testing.T) {
 		}
 	}
 }
+
+// reconcile_on_startup defaults to true when absent and honours an explicit false.
+func TestLoad_ReconcileOnStartup(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimalValid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ReconcileOnStartup {
+		t.Fatal("reconcile_on_startup must default to true")
+	}
+	cfg, err = Load(writeConfig(t, minimalValid+"\nreconcile_on_startup = false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReconcileOnStartup {
+		t.Fatal("explicit reconcile_on_startup = false must be honoured")
+	}
+	if _, err := Load(writeConfig(t, minimalValid+"\nreconcile_on_startup = \"yes\"\n")); err == nil {
+		t.Fatal("a non-boolean reconcile_on_startup must fail closed")
+	}
+}
+
+func TestLoad_DockerRoot(t *testing.T) {
+	cfg, err := Load(writeConfig(t, minimalValid))
+	if err != nil || cfg.DockerRoot != "/var/lib/docker" {
+		t.Fatalf("default docker_root: %v %q", err, cfg.DockerRoot)
+	}
+	cfg, err = Load(writeConfig(t, minimalValid+"\ndocker_root = \"/data/docker/\""))
+	if err != nil || cfg.DockerRoot != "/data/docker" {
+		t.Fatalf("configured docker_root: %v %q", err, cfg.DockerRoot)
+	}
+	if _, err := Load(writeConfig(t, minimalValid+"\ndocker_root = \"docker\"")); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("a relative docker_root must be refused, got %v", err)
+	}
+}

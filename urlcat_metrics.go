@@ -66,4 +66,19 @@ func urlcatWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_category_feed_sync_failures_total UT1 category feed sync failures (download/parse or bulk-write errors)\n")
 	w.WriteString("# TYPE culvert_category_feed_sync_failures_total counter\n")
 	fmt.Fprintf(w, "culvert_category_feed_sync_failures_total %d\n", feedsync.SyncFailures())
+
+	// F-DISK-RECOVERY-1: an abandoned mid-write import is a process-lifetime
+	// latch (no further import runs until restart). The failure counter above
+	// counts it once and then stops moving, so it cannot carry "restart
+	// required"; this gauge does. Emitted only when the feed is configured, so
+	// the series exists exactly where the paging rule (== 1) can mean something.
+	if globalUT1FeedSyncer != nil {
+		abandoned := 0
+		if globalUT1FeedSyncer.Health().WriteAbandoned {
+			abandoned = 1
+		}
+		w.WriteString("\n# HELP culvert_category_feed_write_abandoned 1 when a community category import was abandoned mid-write; further imports are refused until restart\n")
+		w.WriteString("# TYPE culvert_category_feed_write_abandoned gauge\n")
+		fmt.Fprintf(w, "culvert_category_feed_write_abandoned %d\n", abandoned)
+	}
 }

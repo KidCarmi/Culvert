@@ -89,8 +89,14 @@ func startTestAdminUI(t *testing.T, port int, certFile, keyFile string) {
 	}()
 	t.Cleanup(func() {
 		close(stop)
-		_ = srv.Close()
-		<-done
+		_ = srv.Close() // a later Serve returns ErrServerClosed at once
+		// Bounded: an unbounded join would hang the whole test binary if the
+		// loop ever failed to return, instead of failing this test.
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("admin UI retry loop did not return after stop + Close")
+		}
 	})
 }
 

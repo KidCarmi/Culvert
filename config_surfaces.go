@@ -364,6 +364,7 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "session_timeout_hours", Kind: kindConfig, Owner: "session", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SessionTimeoutHours"}}},
 	{ID: "ui_allow_ips", Kind: kindConfig, Owner: "uiIPGuard", AdminDurable: true,
+		Note:     "ui_allow_ips_saved makes an explicit empty list authoritative over startup configuration; malformed stored policy refuses management access",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UIAllowIPs"}}},
 	{ID: "trusted_proxy_cidrs", Kind: kindConfig, Owner: "trustedProxyNets", AdminDurable: true,
 		Note:     "RISK-019 reverse-proxy trust set for admin-UI client-IP; admin-durable only (per-node topology), NOT cluster-synced; empty len-guarded apply",
@@ -455,6 +456,17 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAOnSaturation"}}},
 	{ID: "yara_alert_degraded", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAAlertDegraded"}}},
+	// Scanner av_unavailable posture (open|closed). AdminDurable-only, the
+	// same membership as the yara_* posture rows and for the same reasons:
+	// OFF rollback (a rollback could silently re-open a posture the admin
+	// closed); OFF export/import and OFF CP→DP because it is a per-node fault
+	// posture for THIS node's scanner (local ClamAV or its sidecar), set per
+	// node by appliance provisioning (CULVERT_AV_UNAVAILABLE) or the admin
+	// API — a CP or an imported file must never silently relax a node that
+	// was provisioned closed.
+	{ID: "av_unavailable", Kind: kindConfig, RollbackExclusion: "rolling back could silently re-open (fail-open) an AV-unavailable scan posture the admin chose to close", Owner: "secscan", AdminDurable: true,
+		Note:     "gated by av_unavailable_saved sentinel, which only an explicit admin save writes (an absent sentinel keeps the CULVERT_AV_UNAVAILABLE boot posture)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AVUnavailable"}}},
 
 	// Adaptive decryption-exclusion tunables (F10). AdminDurable-only — mirroring
 	// metrics_token / syslog_addr / yara_*: OFF export/import, OFF version-rollback,
@@ -480,6 +492,18 @@ var configSurfaces = []configSurfaceRow{
 	// hazard (the learned/tunable-state-is-node-local precedent). The node-local
 	// learning STATE (sessions/aggregates/recommendations + subject key) is off every
 	// config surface entirely — it is engine-owned files, not configuration.
+	// IP-bound sign-in (F-SSO-SCOPE-1). AdminDurable-only: node-local identity
+	// transport whose bindings are volatile and node-local; OFF export/import,
+	// rollback and CP→DP so no restore, rollback or sync can switch an identity
+	// transport on. Gated by sso_ip_binding_saved.
+	{ID: "sso_ip_binding_enabled", Kind: kindConfig, Owner: "ssoSurrogate", AdminDurable: true,
+		Note:     "gated by sso_ip_binding_saved sentinel; OFF by default — with it off the proxy withholds SSO sign-in redirects (a browser SSO session authenticates no proxied traffic)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateEnabled"}}},
+	{ID: "sso_ip_binding_ttl_minutes", Kind: kindConfig, Owner: "ssoSurrogate", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateTTLMinutes"}}},
+	{ID: "sso_ip_binding_exclude_cidrs", Kind: kindConfig, Owner: "ssoSurrogate", AdminDurable: true,
+		Note:     "no omitempty: an explicitly empty exclusion list survives the round trip",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateExcludeCIDRs"}}},
 	{ID: "policy_learning_enabled", Kind: kindConfig, Owner: "policyLearn", AdminDurable: true,
 		Note:     "gated by policy_learning_saved sentinel; enable ≠ start learning (observation arms only via an explicit session start)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "PolicyLearningEnabled"}}},
@@ -527,6 +551,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SupportRetentionMaxAgeDays"}}},
 
 	// ── AdminSettings sentinels + legacy migration inputs ────────────────
+	{ID: "ui_allow_ips_saved", Kind: kindSentinel,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UIAllowIPsSaved"}}},
 	{ID: "log_retention_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionSaved"}}},
 	{ID: "log_store_enabled_saved", Kind: kindSentinel, AdminDurable: true,
@@ -548,8 +574,12 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LegacyLDAPRetired"}}},
 	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
+	{ID: "av_unavailable_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AVUnavailableSaved"}}},
 	{ID: "autoexclude_tunables_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTunablesSaved"}}},
+	{ID: "sso_ip_binding_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SSOSurrogateSaved"}}},
 	{ID: "policy_learning_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "PolicyLearningSaved"}}},
 	{ID: "support_retention_saved", Kind: kindSentinel, AdminDurable: true,
@@ -699,11 +729,12 @@ var offRegistryRollbackExclusions = []rollbackExcludedSetting{
 // state IS a configSurfaces row (so it is already reported by the derivation)
 // to that row's ID.
 var rollbackMarkersCoveredByRegistry = map[string]string{
-	"ui_config.go:apiNetworkSettings":             "base_url",
-	"ui_policy.go:apiDecryptionExclusionTunables": "autoexclude_confirm_n",
-	"ui_policy.go:<file>":                         "alert_webhooks",
-	"ui_security.go:apiSecYARASettings":           "yara_enabled",
-	"ui_security.go:apiDomainAllowlist":           "threat_domain_allowlist",
+	"ui_config.go:apiNetworkSettings":               "base_url",
+	"ui_policy.go:apiDecryptionExclusionTunables":   "autoexclude_confirm_n",
+	"ui_policy.go:<file>":                           "alert_webhooks",
+	"ui_security.go:apiSecYARASettings":             "yara_enabled",
+	"av_unavailable_posture.go:apiSecAVSettingsPut": "av_unavailable",
+	"ui_security.go:apiDomainAllowlist":             "threat_domain_allowlist",
 }
 
 // rollbackMarkersRuntimeOnly are off-rollback markers on handlers that change

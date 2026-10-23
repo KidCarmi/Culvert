@@ -36,6 +36,18 @@ import (
 // on t.
 func uiE2EBrowser(t *testing.T) playwright.Browser {
 	t.Helper()
+	// --no-proxy-server: the environment may set HTTP(S)_PROXY, which Chromium
+	// otherwise honors — tunneling even loopback requests through an agent
+	// proxy that cannot reach the in-process httptest server (the long-lived
+	// SSE stream fails with ERR_TUNNEL_CONNECTION_FAILED). Force direct.
+	return uiE2EBrowserWithArgs(t, "--no-proxy-server")
+}
+
+// uiE2EBrowserWithArgs launches headless Chromium with extra command-line
+// arguments (e.g. an explicit --proxy-server for a journey that must go
+// THROUGH Culvert's proxy). --no-sandbox is always added.
+func uiE2EBrowserWithArgs(t *testing.T, args ...string) playwright.Browser {
+	t.Helper()
 
 	runOpts := &playwright.RunOptions{SkipInstallBrowsers: true}
 	if dir := os.Getenv("CULVERT_PW_DRIVER_DIR"); dir != "" {
@@ -52,11 +64,7 @@ func uiE2EBrowser(t *testing.T) playwright.Browser {
 	launch := playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(true),
 		// --no-sandbox: required in the CI/sandbox container.
-		// --no-proxy-server: the environment may set HTTP(S)_PROXY, which Chromium
-		// otherwise honors — tunneling even loopback requests through an agent
-		// proxy that cannot reach the in-process httptest server (the long-lived
-		// SSE stream fails with ERR_TUNNEL_CONNECTION_FAILED). Force direct.
-		Args: []string{"--no-sandbox", "--no-proxy-server"},
+		Args: append([]string{"--no-sandbox"}, args...),
 	}
 	if exe := chromiumExecutable(); exe != "" {
 		launch.ExecutablePath = playwright.String(exe)
@@ -233,6 +241,7 @@ func mintUISessionValue(t *testing.T, user string, role UIRole) string {
 	value, err := encodeSession(&Session{
 		Sub:      user,
 		Provider: "local",
+		Audience: uiSessionAudience,
 		Role:     string(role),
 		Exp:      time.Now().Add(getSessionTTL()).Unix(),
 		Jti:      newSessionJti(),
