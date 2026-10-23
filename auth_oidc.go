@@ -434,8 +434,8 @@ func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key, client string, identity *Ide
 		ok = false
 	}
 	// The pre-CHAOS-76 implementation evicted "a random entry when the cache is
-	// full" — a uniformly random LIVE entry, chosen by Go map order, on a key
-	// space made entirely of caller-supplied bearer tokens.
+	// full" — whichever entry Go's map order yielded first, live or expired, on
+	// a key space made entirely of caller-supplied bearer tokens.
 	a.cache.set(key, client, cloneIdentity(identity), ok, ttl)
 	return cloneIdentity(identity), ok
 }

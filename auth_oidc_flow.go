@@ -551,8 +551,8 @@ func (p *OIDCFlowProvider) introspectCacheSet(key, client string, identity *Iden
 	// The key space is token-derived and therefore caller-controlled, so the
 	// map must stay bounded AND the choice of victim must be fair. The
 	// pre-CHAOS-76 implementation got the first half right and evicted "an
-	// arbitrary entry" for the second — a uniformly random LIVE entry, chosen
-	// by Go map order.
+	// arbitrary entry" for the second — whichever entry Go's map order yielded
+	// first, live or expired.
 	p.cache.set(key, client, cloneIdentity(identity), ok, ttl)
 	return cloneIdentity(identity), ok
 }

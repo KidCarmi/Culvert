@@ -1265,8 +1265,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   credential path — the LDAP directory bind, the legacy RFC 7662 introspection
   backend and the IdP-registry introspection provider — evicted "an arbitrary
   entry" at their 5,000-entry cap: a Go map range that stops at the first key,
-  so a uniformly random **live** entry. That is the same defect CHAOS-57 closed
-  in the local credential cache, on three caches it was never ported to.
+  so whichever entry Go's randomised map iteration yielded — **live or already
+  expired**, and in either case unrelated to age, ownership or liveness. That
+  is the same defect CHAOS-57 closed in the local credential cache, on three
+  caches it was never ported to.
 
   The flood costs nothing to mount. The proxy credential path hands whatever
   username, password or bearer token the client supplied to the configured
@@ -1274,10 +1276,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   answers an unknown or expired token with `200 {"active":false}`, and a
   directory that answers "no such user" is authoritative — because not caching
   those would make every wrong credential a fresh round trip. So each bogus
-  credential writes an entry, and a specific honest entry survives `k`
-  insertions past the cap with probability `e^(-k/N)`: one cap-worth of flood
-  removes about 63% of the cached honest verdicts and three remove about 95%,
-  for roughly fifteen thousand requests carrying no credential at all. Nothing
+  credential writes an entry, so a sustained flood displaces the honest
+  verdicts: the gate measures a 3x-cap flood reliably removing a specific
+  honest entry, which is the evidence this rests on. (As a first-order model,
+  if each insertion past the cap took a uniform draw the survival probability
+  would be `(1 - 1/N)^k`, about 37% at one cap-worth and 5% at three; Go's map
+  iteration is randomised but gives no uniformity guarantee, so treat those
+  figures as an illustration of the shape, not a measurement.) Fifteen
+  thousand requests bearing nothing but bogus credentials is the whole
+  cost. Nothing
   reclaimed an expired entry either — a lookup reported a miss and left it in
   the map — so the steady state under a flood was a cache full of dead
   verdicts while eviction destroyed the few live ones.

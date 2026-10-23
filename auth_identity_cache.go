@@ -24,8 +24,12 @@ import (
 // the map.
 //
 // All three previously evicted "an arbitrary entry when the cache is full": a
-// Go map range that stops at the first key, i.e. a uniformly random LIVE
-// entry. That is register row AU-3c exactly, which CHAOS-57 closed in the
+// Go map range that stops at the first key, i.e. whichever entry Go's
+// randomised map iteration happened to yield, live or already expired. (Go
+// randomises where a range STARTS; it does not promise a uniform draw over
+// keys, so the victim is arbitrary rather than uniformly distributed — the
+// property that matters is only that it is unrelated to age, ownership or
+// liveness.) That is register row AU-3c exactly, which CHAOS-57 closed in the
 // LOCAL auth cache (store.go) and which was never ported to these three
 // siblings. Two consequences followed, both reachable by an anonymous client:
 //
@@ -51,8 +55,9 @@ import (
 // verdict ride out a short backend blip; a flood inverts that for exactly the
 // users it exists to serve. Failure stays CLOSED — there is no bypass — but
 // the gateway's authentication becomes remotely deniable by a client holding
-// no credential at all, which is the failure shape internal/authstate's
-// package doc was written for.
+// no VALID credential — bogus ones are all it needs, since those are what the
+// cache records — which is the failure shape internal/authstate's package doc
+// was written for.
 //
 // # The policy
 //

@@ -15,8 +15,9 @@ import (
 // All three caches on the credential path (the LDAP directory bind, the legacy
 // OIDC introspection backend, and the IdP-registry introspection provider)
 // evicted "one arbitrary entry" at the cap: a Go map range stopping at the
-// first key, i.e. a uniformly random LIVE entry, on a key space derived
-// entirely from caller-supplied credentials. That is register row AU-3c
+// first key, i.e. whichever entry Go's randomised map iteration yielded, live
+// or already expired, on a key space derived entirely from caller-supplied
+// credentials. That is register row AU-3c
 // exactly — closed by CHAOS-57 in the LOCAL auth cache and never ported to
 // these three siblings.
 //
@@ -123,7 +124,15 @@ func TestChaos76_FloodCannotDisplaceAnHonestClientsCachedVerdict(t *testing.T) {
 // so a cached verdict can ride out a short backend blip; a flood must not be
 // able to invert that for the users it is there to serve.
 func TestChaos76_FloodCannotTurnACachedPositiveIntoADenialDuringAnOutage(t *testing.T) {
+	// Reset AND restore: this test deliberately drives the backend DOWN, and
+	// noteAuthBackendUnavailable retains the down-backend entry, the counters
+	// and the alert/log timestamps. Without the cleanup the simulated outage
+	// outlives the test and is visible to every later health/metrics reader —
+	// the global-test cleanup rule in AGENTS.md and conventions.md, and the
+	// pattern the neighbouring backend-health tests already follow
+	// (auth_ldap_gate_test.go, auth_oidc_test.go, diagnostics_test.go).
 	resetAuthBackendHealthForTest()
+	t.Cleanup(resetAuthBackendHealthForTest)
 
 	var calls atomic.Int64
 	reachable := atomic.Bool{}
@@ -474,7 +483,16 @@ func TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent(t *testing.
 // An eviction counter nobody can read is not observability. culvert_auth_cache_
 // evictions_total has been on /metrics since CHAOS-57 for the local cache; the
 // identity backends' displacement needs the same surface, for the same reason.
-func TestChaos76_IdentityCacheEvictionsReachTheActiveBackend(t *testing.T) {
+// Config.IdentityCacheEvictions keeps a NARROWER meaning than the exported
+// metric: it reports only the legacy single provider on Config, and must not
+// claim the local bcrypt cache's count (that reports through
+// AuthCacheEvictions). After §45.9 (5) moved the metric to a process-owned
+// total, this is the only gate holding that accessor's contract, so it is
+// deliberately kept rather than folded into the metric gate.
+//
+// Renamed from ..._IdentityCacheEvictionsReachTheActiveBackend, which
+// described the pre-(5) design where the metric walked the active backend.
+func TestChaos76_LegacyProviderEvictionsAreReportedOnConfig(t *testing.T) {
 	engine, err := NewLDAPAuth(LDAPConfig{
 		URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com", CacheTTL: honestEntryTTL,
 	})
@@ -492,7 +510,7 @@ func TestChaos76_IdentityCacheEvictionsReachTheActiveBackend(t *testing.T) {
 	}
 	if got := cfg.IdentityCacheEvictions(); got < 32 {
 		t.Fatalf("IdentityCacheEvictions = %d after %d insertions past the cap, want >= 32 — "+
-			"displacement on the active identity backend is invisible to the operator (CHAOS-76)", got, 32)
+			"the legacy provider's displacement is not reported on Config (CHAOS-76)", got, 32)
 	}
 
 	// No external backend configured: the local cache reports through
