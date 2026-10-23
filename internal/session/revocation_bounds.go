@@ -244,8 +244,38 @@ func (r *RevocationList) RevokeVerified(cookieValue string) (changed bool, reaso
 	// revoke a real session is the one failure this control may not have.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.tokens[b64]; exists {
-		return false, RevokeAlreadyKnown
+	if prev, exists := r.tokens[b64]; exists {
+		// Reconcile with the signed expiry; do not simply no-op.
+		//
+		// An untrusted writer chooses the entry's Expiry FIELD, which the
+		// gossip wire carries as raw JSON independently of the expiry sealed
+		// inside the token, so a peer can register THIS session's token and
+		// name it short. Returning AlreadyKnown would leave that value in
+		// place: the sweep evicts on the untrusted expiry while Decode still
+		// honours the cookie, and the session the user just logged out of
+		// authenticates again for the rest of its real life. The pre-CHAOS-73
+		// logout wrote the signed expiry unconditionally and so could not lose
+		// this; the no-change path is what introduced it (Codex P2, PR #1591).
+		//
+		// The verified flag is reconciled for the same reason: an entry that
+		// arrived untrusted carries no provenance out through exportPersisted,
+		// so without this the reload puts this appliance's OWN revocation back
+		// under the untrusted bounds.
+		changed := false
+		if prev.Before(exp) {
+			r.tokens[b64] = exp
+			changed = true
+		}
+		if _, ok := r.verified[b64]; !ok {
+			r.verified[b64] = struct{}{}
+			changed = true
+		}
+		if !changed {
+			// A genuine replay of a logout that already landed in full:
+			// nothing moved, so nothing is written (CHAOS-70's rule).
+			return false, RevokeAlreadyKnown
+		}
+		return true, RevokeAccepted
 	}
 	r.tokens[b64] = exp
 	r.verified[b64] = struct{}{}
