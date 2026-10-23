@@ -67,6 +67,18 @@ func abandonParkedWrite(t *testing.T) (s *Syncer, db *catdb.CommunityDB, closeDB
 	return s, db, closeDB, dir, url, p, domains
 }
 
+// closeOnFatal registers an idempotent Close for a store the moment it is
+// opened, so a fatal assertion before the test's own Close never leaves a store
+// open (ASTRA 6359611097 #5). The returned func is the test's explicit Close.
+func closeOnFatal(t *testing.T, db *catdb.CommunityDB) func() error {
+	t.Helper()
+	var once sync.Once
+	var err error
+	closeDB := func() error { once.Do(func() { err = db.Close() }); return err }
+	t.Cleanup(func() { _ = closeDB() })
+	return closeDB
+}
+
 func markerPresent(t *testing.T, dir string) bool {
 	t.Helper()
 	_, err := os.Stat(dir + storeguard.ImportPendingSuffix)
@@ -141,6 +153,7 @@ func TestHeldWriter_RecoveryPersistsAcrossReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open #1: %v", err)
 	}
+	closeO1 := closeOnFatal(t, o1)
 	if rec.Trigger != catdb.TriggerInterruptedImport || !rec.Quarantined || rec.QuarantinePath == "" {
 		t.Fatalf("open #1 must quarantine as an interrupted import: trigger=%v quarantined=%v path=%q",
 			rec.Trigger, rec.Quarantined, rec.QuarantinePath)
@@ -158,7 +171,7 @@ func TestHeldWriter_RecoveryPersistsAcrossReopens(t *testing.T) {
 	if markerPresent(t, dir) {
 		t.Fatal("recovery must clear the import-pending marker")
 	}
-	if err := o1.Close(); err != nil {
+	if err := closeO1(); err != nil {
 		t.Fatalf("close after open #1: %v", err)
 	}
 
@@ -168,6 +181,7 @@ func TestHeldWriter_RecoveryPersistsAcrossReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open #2: %v", err)
 	}
+	closeO2 := closeOnFatal(t, o2)
 	if rec.Trigger != catdb.TriggerNone || rec.Quarantined {
 		t.Fatalf("open #2 must be clean: trigger=%v quarantined=%v", rec.Trigger, rec.Quarantined)
 	}
@@ -192,7 +206,7 @@ func TestHeldWriter_RecoveryPersistsAcrossReopens(t *testing.T) {
 	if markerPresent(t, dir) {
 		t.Fatal("a certified import must clear the import-pending marker")
 	}
-	if err := o2.Close(); err != nil {
+	if err := closeO2(); err != nil {
 		t.Fatalf("close after the fresh import: %v", err)
 	}
 
@@ -202,7 +216,7 @@ func TestHeldWriter_RecoveryPersistsAcrossReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open #3: %v", err)
 	}
-	defer o3.Close()
+	closeOnFatal(t, o3)
 	if rec.Trigger != catdb.TriggerNone || rec.Quarantined {
 		t.Fatalf("open #3 must be clean: trigger=%v quarantined=%v", rec.Trigger, rec.Quarantined)
 	}

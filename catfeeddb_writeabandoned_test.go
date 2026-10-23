@@ -121,3 +121,19 @@ func TestCategoryFeedMetrics_WriteAbandonedGauge(t *testing.T) {
 		t.Fatal("abandoned: gauge must read 1")
 	}
 }
+
+// With data already in the store, the abandoned write may still land in the
+// LIVE store, so the row must not claim the earlier data is what serves (ASTRA
+// 6359611097 #6): it says the content is an uncertified mix until restart.
+func TestCategoryFeedRow_WriteAbandonedNeverClaimsEarlierDataServes(t *testing.T) {
+	sy := swapAbandonTestSyncer(t)
+	sy.Sync() // load real data first, so the store is not empty
+	if sy.StoreEmpty() {
+		t.Fatal("precondition: the store must hold data")
+	}
+	sy.MarkWriteAbandonedForTest(feedsync.AbandonStalled)
+	c := checkCategoryFeedDB()
+	if !strings.Contains(c.Message, "partial, uncertified mix") || strings.Contains(c.Message, "keep serving") {
+		t.Fatalf("abandoned row over existing data must state uncertified content: %+v", c)
+	}
+}

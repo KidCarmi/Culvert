@@ -234,7 +234,10 @@ func checkCategoryFeedWriteAbandoned() (OperatorContractCheck, bool) {
 	if h.WriteAbandonedCause == feedsync.AbandonDegraded {
 		cause = "the store hit a contained memory fault while the write was in progress"
 	}
-	coverage := "the previously synced community categories keep serving"
+	// The abandoned write was into the LIVE store and may still land after it
+	// was abandoned, so the store's content is uncertified until the restart
+	// quarantines it — never claim the earlier data is what serves.
+	coverage := "until then community lookups may return a partial, uncertified mix of earlier and newly written entries"
 	if sy.StoreEmpty() {
 		coverage = "no community category data is loaded yet — category matching uses the admin-managed list only"
 	}

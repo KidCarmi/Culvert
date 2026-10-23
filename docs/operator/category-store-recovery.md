@@ -113,13 +113,27 @@ row says so (`community category import abandoned mid-write … further imports
 are refused until this node restarts`) together with whether earlier data is
 still serving, and the gauge above reads `1`.
 
+What the store holds meanwhile: the abandoned import was writing into the live
+store, and it may still complete some or all of its writes after it was
+abandoned. Until the node restarts, community lookups can therefore return a
+partial, **uncertified** mix of the earlier data and entries from the abandoned
+import. The store is never marked complete from this state.
+
 What you should do: check the data volume (free space, I/O errors, mount), fix
-it, then **restart the node**. Shutdown does not wait for the stuck write — it
-closes the store and exits normally. At the next start the half-written store
-is detected (a durable import-pending marker survives the stop, including a
-kill), quarantined as `catfeeddb.corrupt.*`, re-created empty, and re-synced.
-Until you restart, community categories stay as they were before the failed
-import (or absent, if there were none yet); Layer 1 is unaffected.
+it, then **restart the node**. At the next start the half-written store is
+detected through a durable import-pending marker, quarantined as
+`catfeeddb.corrupt.*`, re-created empty and re-synced; Layer 1 is unaffected.
+
+What has been demonstrated about the restart, and what has not: in source-level
+Linux tests with a write parked inside the store, a SIGTERM closed the store and
+the process exited within milliseconds without waiting for the parked write, the
+import-pending marker survived both that exit and a SIGKILL, and the next open
+quarantined the store. Those tests stand in for the write with a test hook and
+replicate only the store-close step of shutdown; they do not cover a write stuck
+inside the storage engine's own flush, a physically full disk, or a stop issued
+by Docker or systemd on an appliance. If a restart does not complete on its own,
+the container's stop timeout ends it, and the marker still triggers the
+quarantine at the next start.
 
 ## What you should do
 
