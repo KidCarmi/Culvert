@@ -374,6 +374,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
+  not distrust compromised intermediate certificates. Culvert reaches it
+  through certificate verification (`x509.Certificate.Verify`, for example
+  the MCP acceptance PKI check). The `go.mod` toolchain line and both
+  Docker builder images move together; the `go` language minimum is
+  unchanged.
+
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
   `Allow()` hands out a half-open probe reservation that only
