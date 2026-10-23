@@ -12861,3 +12861,37 @@ Checks run on the final tree, `go1.26.10` per `go.mod`'s `toolchain`:
 
 Not run locally: `golangci-lint`, which cannot execute against this repository
 here, and the hosted gates. A passing local check is not a passing merge gate.
+
+#### Round 18 — the CodeRabbit batch, and one residual
+
+Four Minor findings, every one correct, and every one the same class as the
+headline defects: **an operator surface claiming more than its evidence
+supports.** By label they do not start a push of their own, so they rode a
+single follow-up commit rather than cancelling the in-flight gate run (round
+17's lesson).
+
+- **Degradation is not only the loss-based rule.** `finishUnmetSyslogIntent`
+  overlays `Degraded = true` on an unmet intent with zero losses and no window
+  to wait out, so both the CHANGELOG entry and the runbook section titled "How
+  degradation is decided" gave one of two conditions as *the* definition. Both
+  now name the loss-based rule as the loss-based rule.
+- **`delivered` on TCP is a successful local write.** Stronger than the finding
+  put it: `Write` returning without error means the bytes reached the LOCAL
+  socket buffer, so a connection breaking before it drains loses a line already
+  counted as delivered — the remote kernel need never have seen it. The engine's
+  own `noteDelivered` comment says "the collector's kernel accepted the bytes";
+  the runbook had flattened that to "the collector accepted this event", and the
+  `tcp://` recommendation presented TCP as delivery evidence outright.
+- **The probe remediation step was transport-blind.** It told every operator to
+  look for `outcome: "delivered"`. UDP is the default when the address omits a
+  scheme and can only ever answer `sent`, so the step directed the majority of
+  deployments to wait for an outcome their transport cannot produce.
+
+**Residual, recorded not fixed:** the probe's own response `message` for
+`delivered` is the string *"the collector accepted the test event"*
+(`syslog_health.go`), which carries the same overstatement the runbook row just
+lost. It is a wire string with three test references and nobody raised it;
+changing it would widen this PR past what the findings asked for. The runbook
+now says explicitly that the row, not the message, is the accurate statement. If
+a later round touches that response, the message should become a claim about the
+write rather than about the collector.

@@ -2045,12 +2045,15 @@ endpoints for credentialed parents.
   timestamp and a bounded failure reason, and `syslog_health.go` exposes
   `culvert_syslog_*` (emitted only when a collector is configured),
   `syslogDrops` on `/healthz` when non-zero, a delivery verdict on the
-  diagnostics row and a fire-once `syslog_feed_down` alert. Degradation
-  requires an UNRESOLVED loss (losses since the last delivery, not the
-  cumulative count) plus five minutes without a delivery, so it cannot fire on
-  an idle node and a healed blip cannot mark a working feed as down; the
+  diagnostics row and a fire-once `syslog_feed_down` alert. LOSS-BASED
+  degradation requires an UNRESOLVED loss (losses since the last delivery, not
+  the cumulative count) plus five minutes without a delivery, so it cannot fire
+  on an idle node and a healed blip cannot mark a working feed as down; the
   transition is evaluated both on loss and on an independent 30-second timer, so
-  a collector that dies and is then followed by a quiet period still pages.
+  a collector that dies and is then followed by a quiet period still pages. An
+  UNMET INTENT — a configured collector with no writer, or one superseded by a
+  re-point whose dial failed — degrades on its own, with no loss required and
+  without waiting out that window, because nothing retries it.
   Recovery is declared only on an event that actually reaches the collector. `GET /api/syslog` gains `delivered`, `degraded`,
   `neverDelivered`, `lastSuccessUnix`, `secondsSinceEvent`,
   `lastFailureReason`, `queueDepth`, `queueCap` and `deliveryProvable`

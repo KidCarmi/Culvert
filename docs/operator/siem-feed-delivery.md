@@ -162,6 +162,14 @@ every event.
 
 ## How degradation is decided
 
+Two independent conditions report the feed as degraded. The loss-based one is
+the subject of this section; the other, an **unmet intent**, is described under
+[Alert](#alert) above and needs neither half of the rule below — a configured
+collector with no writer, or one superseded by a re-point whose dial failed, is
+degraded immediately and with zero losses, because nothing retries it.
+
+The loss-based rule:
+
 > **A loss is currently unresolved** *and* **nothing has been delivered for 5
 > minutes.**
 
@@ -261,12 +269,17 @@ POST /api/syslog/test        (admin)
 
 | Outcome | Meaning |
 | --- | --- |
-| `delivered` | the collector accepted **this** event (TCP only) |
+| `delivered` | the TCP write of **this** event returned without error (TCP only). That means the local kernel accepted the bytes — not that the collector application received or stored them |
 | `sent` | the datagram left this host; UDP cannot confirm receipt |
 | `dropped` | the event was lost before reaching the collector, with the bounded reason **from the writer that actually handled it** — after a re-point a queued probe can be handed to the replacement, and the answer names that collector, not the one the probe was submitted to |
 | `unknown` | still queued after the 3-second probe window — retry |
 | `unconfigured` | no collector is configured |
 | `superseded` | the collector you configured has no writer and forwarding is still serving a previous one, so a probe would exercise the wrong collector. Answered with `ok: false` and nothing is sent |
+
+The response's `message` for `delivered` reads *"the collector accepted the
+test event"*, which is looser than the row above. The row is the accurate
+statement; the message is a wire string this round left alone rather than widen
+the change.
 
 A probe submitted at the instant you re-point the collector is **not** reported
 as dropped: it follows the same successor chain an ordinary audit line follows,
@@ -320,8 +333,12 @@ nothing at all. On UDP, therefore:
 - The `syslog_feed` diagnostics row says so explicitly in its message, and
   `GET /api/syslog` reports `deliveryProvable: false`.
 
-**If you need delivery evidence, use `tcp://`.** This is a property of the
-protocol, not a limitation of the node.
+**If you need stronger evidence than UDP gives you, use `tcp://`** — but note
+what `tcp://` does and does not prove. A successful write means the local kernel
+accepted the bytes for a connection that was established; it is not an
+application-level acknowledgement, and a connection that breaks before the
+buffer drains loses them. For audit-grade certainty, verify receipt on the
+collector. Both limits are properties of the protocols, not of this node.
 
 ---
 
@@ -336,8 +353,12 @@ protocol, not a limitation of the node.
 3. **Re-save the target** (`POST /api/syslog`) or restart the proxy if the
    address itself is wrong. Re-saving reconnects immediately and resets the
    episode.
-4. **Confirm with `POST /api/syslog/test`** and look for `outcome:
-   "delivered"`. The diagnostics row clears on that event, not on time.
+4. **Confirm with `POST /api/syslog/test`.** For `tcp://` look for `outcome:
+   "delivered"`; for `udp://` — the default when the address omits a scheme —
+   look for `outcome: "sent"`, which is as much as UDP can report. Both return
+   `ok: true`. The diagnostics row clears on the writer's observed delivery of
+   that probe, not on time; on UDP that observation only proves this host sent
+   the datagram.
 5. **Accept the gap.** Events dropped while the feed was down are **not
    replayed**. The node-local audit JSONL (`-audit-log`) is unaffected and is
    the only place those events still exist — collect it if the gap matters for
