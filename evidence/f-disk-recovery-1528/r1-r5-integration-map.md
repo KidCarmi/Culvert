@@ -61,7 +61,10 @@ The truthful restart-required behaviour R1 asks for is the latched surface added
 
 - **Conflicts are pre-existing and are not caused by R1/R5.** `git merge-tree` conflicts on 5 identical paths for `4524311b`+main and for `cfae7d67`+main: `.github/workflows/_build-image.yml`, `d0_helpers_test.go`, `docs/api/API-INVENTORY.md`, `frontend/src/api/types.gen.ts` and `ui_routes_meta_test.go`. The fixes add none. Syncing with main is a separate step, and the owner decides when; resolving it now would go stale as main moves.
 - **No intervening ownership change.** Main's 133 commits touch none of: internal/feedsync, catdb, storeguard, shutdown, feedsched, hostutil, obs, third_party, the splash script or its test, or the R1 root files. Main's only dependency change is `toolchain go1.26.9 → go1.26.10` (GO-2026-6809, crypto/x509). go.sum is unchanged.
-- **The tested closure is byte-identical between cfae7d67 and the merged tree** (`git merge-tree --write-tree` = `1b44dd34e139560fef69e269ec6dfa247ef899f5`). The closure is the `go list -deps -test` module closure of feedsync, catdb and storeguard, plus third_party/badger, third_party/ristretto, go.mod, go.sum and the splash files. The receipt asserts this in-script.
+- **What is byte-identical, stated precisely** (corrected after ASTRA 6365334113):
+  - **cfae7d67 vs the merged tree:** the package sources (`go list -deps -test` module closure of feedsync, catdb and storeguard), third_party/badger, third_party/ristretto, go.sum and the splash files are byte-identical. **go.mod is not**: it differs by the toolchain line (`go1.26.9` → `go1.26.10`).
+  - **The receipt's working tree vs merge-tree `1b44dd34e139560fef69e269ec6dfa247ef899f5`:** the whole tested closure, go.mod included, is identical. The receipt asserts this in-script.
+  - The go1.26.10 run is the evidence for the toolchain change; it is not covered by the cfae7d67 receipt.
 
 ## Receipts
 
