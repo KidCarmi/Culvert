@@ -275,7 +275,7 @@ jobs:
         # Checksum-verified via the Go module proxy + sum.golang.org (v2 dropped
         # its replace directives so `go install` works) — replaces `curl … |
         # sh` off a mutable tag ref, whose fetched script was the trust root.
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
       - name: Run golangci-lint (new issues only)
         # Diff-scoped by design: the tree is not lint-clean under a full run
@@ -470,7 +470,7 @@ jobs:
       - name: golangci-lint
         # Checksum-verified install (sum.golang.org), not curl|sh off a tag ref.
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
           golangci-lint run --timeout=5m
 
       - name: staticcheck
