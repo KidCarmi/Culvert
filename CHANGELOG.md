@@ -9,6 +9,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Built with Go 1.27, the shutdown drain sent no GOAWAY to inspected HTTP/2
+  tunnels.** Under `go1.27 && !http2legacy`, x/net v0.61 compiles a different
+  `http2.Server` (`server_wrap.go`) that wraps net/http's HTTP/2 server. That
+  server serves a `ServeConn` call with a non-nil `BaseConfig` through a one-off
+  copy of the `http.Server`, so the shared base server's `Shutdown` never reached
+  the tunnel. Clients kept opening streams until the 15 s drain deadline
+  force-closed them along with their in-flight streams. This was not a policy
+  bypass, but it broke the graceful-drain contract;
+  `TestH2InspectDrain_GracefulGoawayCompletesInflightAndRefusesNew` failed 10/10
+  on go1.27.3 and passed on go1.26.10. Inspected tunnels are now served through a
+  single `serveConn` wiring that picks `BaseConfig` per implementation. The pick
+  uses the same build constraint x/net uses, so both always agree. The wrapping
+  server gets a nil `BaseConfig` and serves through the base server it was
+  configured with. The original server keeps the base server, which is the only
+  place it reads `MaxHeaderBytes` from. Both toolchains now get the GOAWAY and
+  keep every limit. New tests pin the advertised `MAX_CONCURRENT_STREAMS`,
+  `MAX_FRAME_SIZE` and `MAX_HEADER_LIST_SIZE`, a `431` for an over-cap header
+  list, the per-tunnel context, and the GOAWAY re-fire for a tunnel that starts
+  after the first wave. The default build (go1.26.10) is unchanged in behavior.
+
 - **A bodyless `POST`/`PUT` was forwarded upstream re-framed as
   `Transfer-Encoding: chunked` instead of the client's own `Content-Length: 0`.**
   Both legs that serialize an outbound request wrapped the request body
@@ -29,7 +49,6 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   through a real CONNECT / forged-leaf tunnel; reverting either guard alone
   fails its own test. The cost half of the same root cause is under
   **Performance**.
-
 - **go-ldap v3.4.15 would have reclassified malformed-packet faults as "the directory answered".** v3.4.15 adds `ErrorMalformedPacket` (207) for decode
   faults that v3.4.14 returned as plain errors, which `ldapUserBindIsUnreachable`
   treats as unreachable. With the client-error ceiling still at 206, those faults
