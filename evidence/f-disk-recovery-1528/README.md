@@ -71,3 +71,7 @@ records head, tree, clean porcelain before and after, the exact commands and
 exit 0 for each: convergence-oracle 23/23, recovery-custody 74/74 with
 REQUIRE_PROCESS_PROOF=1 (0 unsupported), and shellcheck clean. It is
 source-level local proof, not a lab run.
+
+## 67694982: archive reuse/deletion requires recoverable bytes (ASTRA 6361214485)
+
+`67694982-harness-proof.log` was self-generated on Linux: head, tree, clean porcelain before and after, exact commands and their exits. It covers convergence-oracle 23/23, recovery-custody 81/81 with REQUIRE_PROCESS_PROOF=1, and shellcheck. Source-level local proof, not a lab run.
