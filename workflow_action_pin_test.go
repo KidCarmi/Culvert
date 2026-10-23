@@ -61,12 +61,43 @@ import (
 // scans". Line numbers are recovered afterwards, for the message only, and
 // never decide a verdict.
 //
-// Scope is every workflow and every composite action under .github/. Local
-// refs (`./.github/actions/...`) are this repository's own tree at this
-// repository's own commit and need no pin.
+// ── Each occurrence is bound to its OWN line ─────────────────────────────────
+//
+// The revision-comment check reads the source line, because YAML discards
+// comments. Binding a value to "the first line that contains it" was a second
+// measured hole (CodeRabbit on PR #1689, verified): a file may use the SAME
+// pinned action many times — `ci.yml` and `pr-fast-gate.yml` each carry 14
+// `actions/checkout` steps, `qa-gate.yml` 11, and `pr-api-governance.yml`, which
+// this very change edits, has two `actions/setup-go` steps. Every repeat
+// resolved to the FIRST occurrence's line, so a later pin with no comment at all
+// was checked against an earlier pin's `# v7.0.1` and passed. Reproduced by
+// stripping the comment from the second `setup-go` in pr-api-governance.yml: the
+// gate still reported ok. One ref is now emitted PER MATCHING LINE, so every
+// occurrence is judged on its own text.
+//
+// ── Scope ────────────────────────────────────────────────────────────────────
+//
+// Every workflow and every composite action under .github/. Local refs
+// (`./.github/actions/...`) are this repository's own tree at this repository's
+// own commit and need no pin.
+//
+// A `docker://` ref is a container action and gets its own immutability rule —
+// an image digest, not a commit SHA. It is checked rather than skipped
+// (CodeRabbit on PR #1689): the first revision waved every `docker://` value
+// through on the grounds that registry digest rules governed it, but those rules
+// cover the RELEASE CATALOG's images, not a workflow's `uses`. Nothing in
+// .github/ uses one today, so this closes a hole in the stated guarantee before
+// it is exercised rather than after. See TestWorkflowDockerActionRefsArePinnedByDigest.
 
 // actionSHARef matches an immutable 40-hex commit pin.
 var actionSHARef = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// dockerDigestRef matches an immutable OCI image digest, the `docker://` form of
+// the same guarantee a commit SHA gives a repository action.
+var dockerDigestRef = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// dockerRefPrefix is the `uses:` scheme for a container action.
+const dockerRefPrefix = "docker://"
 
 // exactSemverTag matches the one tag shape an exception may carry: a fully
 // qualified release, not a mutable `@v2`-style major alias.
@@ -181,10 +212,18 @@ func collectUsesValues(node any, out *[]string) {
 
 // actionRefsIn parses one file and returns its third-party `uses:` refs.
 //
-// A local (`./…`) ref or a `docker://` image is skipped: the first is this
-// repository's own tree at this commit, the second is governed by registry
-// digest rules rather than by an action pin. A `uses` value with no `@` is
-// skipped the same way — a local composite action may legitimately carry none.
+// A local (`./…`) ref is skipped: it is this repository's own tree at this
+// commit. Everything else is returned, INCLUDING a `docker://` container action
+// and including a value with no `@` at all — `docker://alpine:latest` is exactly
+// the mutable shape a gate must see, so "no @" cannot mean "skip".
+//
+// One ref is emitted PER MATCHING SOURCE LINE, not per YAML occurrence, so a
+// file that uses the same pinned action fourteen times has each of those lines
+// judged on its own comment instead of all fourteen inheriting the first one's.
+// A value the YAML holds but whose text appears on NO line is returned with
+// line 0 and an empty raw, which the comment check treats as "cannot verify"
+// and refuses — the fail-closed direction, since the alternative is to pass a
+// pin whose comment was never read.
 func actionRefsIn(t *testing.T, path string) []actionRef {
 	t.Helper()
 	raw, err := os.ReadFile(path) //nolint:gosec // repository-local path from the .github walk
@@ -203,25 +242,30 @@ func actionRefsIn(t *testing.T, path string) []actionRef {
 
 	lines := strings.Split(string(raw), "\n")
 	refs := make([]actionRef, 0, len(values))
+	seen := map[string]bool{}
 	for _, val := range values {
-		if strings.HasPrefix(val, "./") || strings.HasPrefix(val, "docker://") {
+		if strings.HasPrefix(val, "./") || seen[val] {
 			continue
 		}
-		at := strings.LastIndex(val, "@")
-		if at <= 0 || at == len(val)-1 {
-			continue
+		seen[val] = true // distinct values only; the line walk below covers repeats
+		target, ref := val, ""
+		if at := strings.LastIndex(val, "@"); at > 0 && at < len(val)-1 {
+			target, ref = val[:at], val[at+1:]
 		}
-		r := actionRef{file: path, target: val[:at], ref: val[at+1:]}
-		// Line number and source text for the message and the comment check.
-		// Located, never trusted for the verdict: a miss leaves line 0 and an
-		// empty raw, which the comment check treats as "no comment present".
+		matched := false
 		for i := range lines {
-			if strings.Contains(lines[i], val) {
-				r.line, r.raw = i+1, strings.TrimSpace(lines[i])
-				break
+			if !strings.Contains(lines[i], val) {
+				continue
 			}
+			matched = true
+			refs = append(refs, actionRef{
+				file: path, line: i + 1, target: target, ref: ref,
+				raw: strings.TrimSpace(lines[i]),
+			})
 		}
-		refs = append(refs, r)
+		if !matched {
+			refs = append(refs, actionRef{file: path, target: target, ref: ref})
+		}
 	}
 	return refs
 }
@@ -239,6 +283,15 @@ func allActionRefs(t *testing.T) []actionRef {
 	return all
 }
 
+// spec renders the `uses:` value as written, so a ref with no `@` at all —
+// `docker://alpine:latest` — is not reported with a dangling separator.
+func (r actionRef) spec() string {
+	if r.ref == "" {
+		return r.target
+	}
+	return r.target + "@" + r.ref
+}
+
 // where renders a ref's location for a failure message.
 func (r actionRef) where() string {
 	if r.line == 0 {
@@ -253,6 +306,9 @@ func TestWorkflowActionRefsArePinnedBySHA(t *testing.T) {
 	usedExceptions := map[string]bool{}
 
 	for _, r := range allActionRefs(t) {
+		if strings.HasPrefix(r.target, dockerRefPrefix) {
+			continue // container action: its own immutability rule, below
+		}
 		if reason, exempt := mutableRefExceptions[r.target]; exempt {
 			usedExceptions[r.target] = true
 			if !exactSemverTag.MatchString(r.ref) {
@@ -263,10 +319,10 @@ func TestWorkflowActionRefsArePinnedBySHA(t *testing.T) {
 			continue
 		}
 		if !actionSHARef.MatchString(r.ref) {
-			t.Errorf("REGRESSION: %s uses %s@%s — a MUTABLE ref. Whoever controls that tag "+
+			t.Errorf("REGRESSION: %s uses %s — a MUTABLE ref. Whoever controls that tag "+
 				"controls what runs in this job, and this file feeds a merge gate. Pin the "+
 				"40-char commit SHA with a `# %s` comment, as every other ref in .github/ does.",
-				r.where(), r.target, r.ref, r.ref)
+				r.where(), r.spec(), r.ref)
 		}
 	}
 
@@ -287,6 +343,12 @@ func TestWorkflowActionRefsArePinnedBySHA(t *testing.T) {
 func TestWorkflowActionSHAPinsCarryARevisionComment(t *testing.T) {
 	for _, r := range allActionRefs(t) {
 		if !actionSHARef.MatchString(r.ref) {
+			continue
+		}
+		if r.line == 0 {
+			t.Errorf("%s holds a SHA pin for %s that could not be located in the source text, so "+
+				"its revision comment cannot be read — refusing rather than assuming one is present",
+				r.file, r.target)
 			continue
 		}
 		if !pinRevisionComment.MatchString(r.raw) {
@@ -324,6 +386,79 @@ func TestWorkflowActionRefEnumerationSeesEveryUsesKey(t *testing.T) {
 		collectUsesValues(tree, &got)
 		if len(got) != 1 || got[0] != "o/r@v1.2.3" {
 			t.Errorf("enumerator missed a YAML-valid `uses` key: got %v, want [o/r@v1.2.3]\n%s", got, doc)
+		}
+	}
+}
+
+// TestWorkflowDockerActionRefsArePinnedByDigest holds a `docker://` container
+// action to the same immutability standard as a repository action, by the means
+// that applies to an image: a `@sha256:` digest rather than a commit SHA.
+//
+// WHY IT EXISTS WITH NOTHING TO CHECK. `.github/` currently contains no
+// `docker://` ref, and the first revision of this gate skipped the scheme on the
+// stated grounds that "registry digest rules" covered it. Those rules
+// (release_catalog.go and its tests) govern the RELEASE CATALOG's published
+// images — not what a workflow step pulls. So the gate's claim, that every
+// third-party ref under .github/ is immutable, had a scheme-shaped hole in it:
+// `uses: docker://alpine:latest` would have satisfied every applicable check.
+//
+// Writing the rule now, while the answer is "none", is cheap and is the only
+// time it can be done without also having to fix a live ref. The fixture test
+// below is what keeps this from being decoration: the real-file loop can be
+// legitimately empty, so the FIXTURES are where the rule is proven to bite.
+func TestWorkflowDockerActionRefsArePinnedByDigest(t *testing.T) {
+	for _, r := range allActionRefs(t) {
+		if !strings.HasPrefix(r.target, dockerRefPrefix) {
+			continue
+		}
+		if !dockerDigestRef.MatchString(r.ref) {
+			t.Errorf("REGRESSION: %s uses %s — a container action pinned by TAG, not by digest. "+
+				"A tag is mutable in a registry exactly as it is in git, and the release catalog's "+
+				"digest rules do not cover a workflow's `uses`. Pin it as "+
+				"`%s…@sha256:<64 hex>`.", r.where(), r.spec(), dockerRefPrefix)
+		}
+	}
+}
+
+// TestWorkflowDockerDigestRuleBites proves the digest rule on fixtures, because
+// the repository has no `docker://` ref for it to act on yet — without this the
+// test above would pass vacuously for as long as that stays true, which is
+// precisely how a rule written early rots before it is ever needed.
+func TestWorkflowDockerDigestRuleBites(t *testing.T) {
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name   string
+		uses   string
+		wantOK bool
+	}{
+		{"digest pinned", dockerRefPrefix + "alpine@" + digest, true},
+		{"floating tag", dockerRefPrefix + "alpine:latest", false},
+		{"pinned tag is still mutable", dockerRefPrefix + "alpine:3.21", false},
+		{"no tag at all", dockerRefPrefix + "alpine", false},
+		{"registry host with digest", dockerRefPrefix + "ghcr.io/o/i@" + digest, true},
+		{"registry host with tag", dockerRefPrefix + "ghcr.io/o/i:v1", false},
+		{"commit SHA is not an image digest", dockerRefPrefix + "alpine@3d3c42e5aac5ba805825da76410c181273ba90b1", false},
+		{"short digest", dockerRefPrefix + "alpine@sha256:0123456789abcdef", false},
+		{"uppercase digest", dockerRefPrefix + "alpine@SHA256:" + strings.Repeat("A", 64), false},
+	} {
+		doc := "jobs:\n  j:\n    steps:\n      - uses: " + tc.uses + "\n"
+		var tree any
+		if err := yaml.Unmarshal([]byte(doc), &tree); err != nil {
+			t.Errorf("%s: fixture does not parse: %v", tc.name, err)
+			continue
+		}
+		var values []string
+		collectUsesValues(tree, &values)
+		if len(values) != 1 {
+			t.Errorf("%s: enumerator saw %v, want one value", tc.name, values)
+			continue
+		}
+		ref := ""
+		if at := strings.LastIndex(values[0], "@"); at > 0 && at < len(values[0])-1 {
+			ref = values[0][at+1:]
+		}
+		if got := dockerDigestRef.MatchString(ref); got != tc.wantOK {
+			t.Errorf("%s: %q → accepted=%v, want %v (ref %q)", tc.name, tc.uses, got, tc.wantOK, ref)
 		}
 	}
 }

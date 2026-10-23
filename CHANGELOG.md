@@ -44,6 +44,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   an action with no releases); the first revision accepted any `#`, so `# TODO`
   passed a check whose own message promised it named a release.
 
+  Two further holes in the same gate, both measured: a repeated pin was checked
+  against the FIRST occurrence's line, so in a file with fourteen
+  `actions/checkout` steps — or the two `actions/setup-go` steps in
+  `pr-api-governance.yml` — a later pin with no comment inherited an earlier
+  one's `# v7.0.1` and passed; one ref is now emitted per matching source line.
+  And a `docker://` container action was skipped entirely, on the incorrect
+  grounds that registry digest rules covered it (they govern the release
+  catalog's images, not a workflow's `uses`), so `docker://alpine:latest` would
+  have satisfied every applicable check; it now needs an `@sha256:` digest, with
+  `TestWorkflowDockerDigestRuleBites` proving the rule on fixtures because
+  nothing in `.github/` uses the scheme yet.
+
   `slsa-framework/slsa-github-generator` is a recorded exception with its reason:
   the generator verifies its own provenance against the invoking tag and refuses
   to run from a SHA, so pinning it would disable release provenance rather than
