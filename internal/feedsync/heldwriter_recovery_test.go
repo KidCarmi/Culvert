@@ -41,19 +41,31 @@ func skipOffLinux(t *testing.T) {
 // syncRound that must abandon it (pure stall path: the store is not degraded),
 // and returns with the writer still parked. The DB Close is registered before
 // the parked-writer helper, so teardown is release -> join -> close.
-func abandonParkedWrite(t *testing.T) (s *Syncer, db *catdb.CommunityDB, closeDB func() error, dir, url string, p *parkedWriter, domains []string) {
+// abandonedWrite is what abandonParkedWrite leaves behind: the syncer whose
+// round abandoned, its store, and the still-parked writer.
+type abandonedWrite struct {
+	s       *Syncer
+	db      *catdb.CommunityDB
+	closeDB func() error
+	dir     string
+	url     string
+	p       *parkedWriter
+	domains []string
+}
+
+func abandonParkedWrite(t *testing.T) abandonedWrite {
 	t.Helper()
 	withWatchdogTimings(t, time.Second, 20*time.Millisecond) // stall fires fast; no degrade poll
-	url, domains, _ = controlledFeed(t, 30)
-	dir = t.TempDir()
-	db = openStore(t, dir)
+	url, domains, _ := controlledFeed(t, 30)
+	dir := t.TempDir()
+	db := openStore(t, dir)
 	var once sync.Once
 	var closeErr error
-	closeDB = func() error { once.Do(func() { closeErr = db.Close() }); return closeErr }
+	closeDB := func() error { once.Do(func() { closeErr = db.Close() }); return closeErr }
 	t.Cleanup(func() { _ = closeDB() }) // idempotent; runs AFTER the writer teardown
-	p = newParkedWriter(t)              // registered after Close => its teardown runs first
+	p := newParkedWriter(t)             // registered after Close => its teardown runs first
 	db.SetBulkWriteFaultForTest(p.hook(nil))
-	s = New(db, url, 24*time.Hour)
+	s := New(db, url, 24*time.Hour)
 	p.attach(s)
 	if s.syncRound() {
 		t.Fatal("a stalled import must not count as a sync")
@@ -64,7 +76,7 @@ func abandonParkedWrite(t *testing.T) (s *Syncer, db *catdb.CommunityDB, closeDB
 	if !p.started.Load() {
 		t.Fatal("the BulkWrite never reached the parked write")
 	}
-	return s, db, closeDB, dir, url, p, domains
+	return abandonedWrite{s: s, db: db, closeDB: closeDB, dir: dir, url: url, p: p, domains: domains}
 }
 
 // closeOnFatal registers an idempotent Close for a store the moment it is
@@ -94,7 +106,8 @@ func markerPresent(t *testing.T, dir string) bool {
 // and quiescence admits no other writer.
 func TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker(t *testing.T) {
 	skipOffLinux(t)
-	s, db, _, dir, _, p, domains := abandonParkedWrite(t)
+	a := abandonParkedWrite(t)
+	s, db, dir, p, domains := a.s, a.db, a.dir, a.p, a.domains
 
 	if s.ImportComplete() {
 		t.Fatal("an abandoned import must not be certified")
@@ -137,7 +150,8 @@ func TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker(t *testing.T) {
 // a unit-level simulation of successive boots, not a booted appliance.
 func TestHeldWriter_RecoveryPersistsAcrossReopens(t *testing.T) {
 	skipOffLinux(t)
-	_, _, closeDB, dir, url, p, domains := abandonParkedWrite(t)
+	a := abandonParkedWrite(t)
+	closeDB, dir, url, p, domains := a.closeDB, a.dir, a.url, a.p, a.domains
 
 	p.release()
 	if err := p.join(); err != nil {
