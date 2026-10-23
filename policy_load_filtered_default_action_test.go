@@ -324,10 +324,19 @@ func TestSECPOLICYDROP1_ConfiguredRuleCountIsRaceFree(t *testing.T) {
 // of the loader can see — loadRewriteAndDefaultAction is correct either way, it
 // just answers the question it was asked. This asserts the question.
 func TestSECPOLICYDROP1_ShimPassesTheConfiguredCount(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "main.go", nil, parser.SkipObjectResolution)
+	// Anchored to pkgSourceDir(), not the CWD: a concurrent os.Chdir in another
+	// test would otherwise flake this (static_read_wall_test.go enforces it).
+	// Reading once and handing the bytes to the parser also keeps the offsets
+	// below in step with the source they index.
+	path := filepath.Join(pkgSourceDir(), "main.go")
+	src, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("parse main.go: %v", err)
+		t.Fatalf("read %s: %v", path, err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
 	}
 
 	var body string
@@ -336,13 +345,7 @@ func TestSECPOLICYDROP1_ShimPassesTheConfiguredCount(t *testing.T) {
 		if !ok || fn.Name == nil || fn.Name.Name != "initRewriteAndDefaultAction" || fn.Body == nil {
 			return true
 		}
-		start := fset.Position(fn.Body.Pos()).Offset
-		end := fset.Position(fn.Body.End()).Offset
-		src, readErr := os.ReadFile("main.go")
-		if readErr != nil {
-			t.Fatalf("read main.go: %v", readErr)
-		}
-		body = string(src[start:end])
+		body = string(src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
 		return false
 	})
 
