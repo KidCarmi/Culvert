@@ -253,7 +253,7 @@ func upstreamAuthenticatedLegacyURL(e *upstream.ManagedEntry, pw string) string 
 // (durable when runPrepareDowngradeCommand opened one; best-effort).
 func auditPrepareDowngrade(plan downgradePlan) {
 	defer func() { _ = recover() }()
-	audit.Add(audit.Entry{
+	auditAdd(AuditEntry{
 		Actor: "cli", Action: "upstream.prepare_downgrade", Object: "admin_settings.json",
 		Detail: fmt.Sprintf("entries=%d credentials=%d target_schema=%d scope=node-local", plan.Entries, plan.Credentials, adminSettingsSchemaPredecessor),
 	})
