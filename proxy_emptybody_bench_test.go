@@ -92,8 +92,17 @@ func wrapEmptyBodyLegacy(r *http.Request) {
 	r.Body = &countingReader{r: http.MaxBytesReader(nil, r.Body, maxRequestBody)}
 }
 
-// benchEmptyBodyForward drives the real forward step. wrap selects the frozen
-// legacy shape; the shipped path leaves the sentinel alone.
+// benchEmptyBodyForward drives a real *http.Transport round trip against a
+// local origin, with the request body either left as the sentinel or wrapped in
+// the frozen legacy shape. What it measures is the FRAMING decision net/http
+// makes from that body and the exchange that follows.
+//
+// It deliberately does NOT call prepareHTTPForward: routing through it would
+// fold the scrub, rewrite and policy-adjacent work of the real handler into a
+// number that is supposed to isolate the framing cost. The consequence is that
+// this benchmark cannot notice a wrapper reintroduced inside
+// prepareHTTPForward — it wraps the request itself. That contract is held by
+// TestPrepareHTTPForward_EmptyBodyKeepsSentinel in the normal suite.
 func benchEmptyBodyForward(b *testing.B, method string, wrap bool) {
 	origin := benchForwardOrigin(b)
 	tr := &http.Transport{MaxIdleConnsPerHost: 4}
@@ -144,6 +153,11 @@ func BenchmarkEmptyBodyForward_POSTWrapped(b *testing.B) {
 // Request.Write onto a buffer, which is the step proxy_tunnel.go performs onto
 // the upstream TLS conn. No network, so the gap between the two variants is the
 // framing decision and nothing else.
+//
+// Isolation cuts the same way as the forward pair above: the inspected loop is
+// not run here, so a wrapper reintroduced inside it would not show up in this
+// number. TestInspectInnerLeg_EmptyBodyKeepsClientFraming drives the real
+// tunnel and is what holds that contract.
 // The request is built ONCE, outside the measurement, so what is timed is the
 // framing decision and the serialization — nothing else. Re-serializing one
 // request is safe and deterministic for both arms: an empty body yields

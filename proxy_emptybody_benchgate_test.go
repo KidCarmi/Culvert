@@ -18,10 +18,21 @@ package main
 //
 // Each gate asserts the RELATIONSHIP as well as an absolute bound: both shapes
 // are measured in the same run on the same machine, so a slow or
-// differently-tuned runner cannot make the comparison lie. The relationship is
-// the part that actually catches a regression — a new wrapper added to either
-// leg without a sentinel check closes the gap, whatever the absolute numbers
-// have drifted to across Go releases.
+// differently-tuned runner cannot make the comparison lie, whatever the
+// absolute numbers have drifted to across Go releases.
+//
+// WHAT THESE GATES DO NOT COVER. The workloads here build and wrap their own
+// requests; they do NOT call prepareHTTPForward or the inspected inner loop,
+// deliberately, so that the measurement is the framing and serialization cost
+// and not proxy or inspection overhead. A wrapper reintroduced in PRODUCTION
+// code would therefore leave both gates passing. What catches that is the
+// normal suite: TestPrepareHTTPForward_EmptyBodyKeepsSentinel calls the real
+// prepareHTTPForward and asserts the sentinel survives it, and
+// TestInspectInnerLeg_EmptyBodyKeepsClientFraming drives a real CONNECT /
+// forged-leaf tunnel (both in proxy_emptybody_test.go). These gates measure the
+// cost that skip is worth; those tests prove the skip is still there. Neither
+// substitutes for the other, and neither should be deleted on the strength of
+// the other passing.
 
 import (
 	"testing"
@@ -46,11 +57,11 @@ func TestBenchGate_EmptyBodyForwardAllocs(t *testing.T) {
 	t.Logf("empty-body forward wrapped:  %d allocs/op, %d B/op", wa, wrapped.AllocedBytesPerOp())
 
 	if sa > maxAllocs {
-		t.Errorf("bodyless forward allocates %d/op, bound %d — a wrapper on the http.NoBody sentinel is back on the forward path, so net/http is probing the body again",
+		t.Errorf("bodyless forward allocates %d/op, bound %d — the isolated cost of a preserved http.NoBody has grown; net/http may be probing the body again (this gate does not call prepareHTTPForward, so check proxy_emptybody_test.go for the production-path contract)",
 			sa, maxAllocs)
 	}
 	if sa >= wa {
-		t.Errorf("bodyless forward (%d allocs/op) is no cheaper than the pre-change wrapping (%d allocs/op) — the sentinel skip has stopped firing",
+		t.Errorf("preserving the sentinel (%d allocs/op) is no cheaper than the frozen pre-change wrapping (%d allocs/op) — the saving this PR measured has gone",
 			sa, wa)
 	}
 }
@@ -70,11 +81,11 @@ func TestBenchGate_EmptyBodyInnerWriteAllocs(t *testing.T) {
 	t.Logf("inner-leg write wrapped:  %d allocs/op, %d B/op, %d ns/op", wa, wrapped.AllocedBytesPerOp(), wrapped.NsPerOp())
 
 	if sa > maxAllocs {
-		t.Errorf("bodyless inner-leg write allocates %d/op, bound %d — a wrapper on the http.NoBody sentinel is back on the inspected path",
+		t.Errorf("bodyless inner-leg write allocates %d/op, bound %d — the isolated serialization cost of a preserved http.NoBody has grown (this gate does not run the inspected loop, so check proxy_emptybody_test.go for the production-path contract)",
 			sa, maxAllocs)
 	}
 	if sa >= wa {
-		t.Errorf("bodyless inner-leg write (%d allocs/op) is no cheaper than the pre-change wrapping (%d allocs/op) — the sentinel skip has stopped firing",
+		t.Errorf("preserving the sentinel (%d allocs/op) is no cheaper than the frozen pre-change wrapping (%d allocs/op) — the saving this PR measured has gone",
 			sa, wa)
 	}
 }
