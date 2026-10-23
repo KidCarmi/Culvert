@@ -990,8 +990,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and persisted them. The admin server sets no `MaxHeaderBytes`, and the 1 MiB
   `MaxBytesReader` bounds the body rather than the `Cookie` header, so each of
   the 60 requests/min/IP the API limiter allows could carry ~1 MiB of
-  permanently retained key. Logout now acts only on an admissible session, which
-  also stops it revoking across audiences; clearing the cookie stays
+  permanently retained key. The revocation write now requires a cookie whose
+  HMAC actually **verified** — and deliberately not an *admissible* session: a
+  token this build refuses (a deleted user's, or one minted for the proxy plane)
+  is still a token the appliance signed, and revoking it is right. A signed
+  token can only revoke itself, and whoever holds it could already use it. What
+  must not be revocable is a payload nobody signed. Clearing the cookie stays
   unconditional and the answer stays 200, so a browser holding a junk cookie can
   still get rid of it and the endpoint is not an oracle.
 

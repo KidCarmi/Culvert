@@ -57,17 +57,31 @@ found by Codex review on PR #1651, not by this run — the run's own blind spot 
 composition: each fix was verified against the contract it changed, and this one
 was unsound only in combination with a contract it did not touch.
 
+**Reconciliation, 2026-10-23.** `main` moved 510 commits while this change
+waited for review, and it landed its own fix for the headline finding —
+**SEC-UISESS-1** (`81f967d`). `main`'s is the better shape (a three-state
+verdict over one shared resolver, and it closes the unenrolled-role case and
+the `/api/auth/status` drift more completely), so it was taken whole and this
+change's version of that fix, including its 640-line suite, was **withdrawn**.
+Carrying two spellings of one admission decision forward is the hazard
+`main`'s own commit message warns about. SEC-REVOKE-1 is **not** fixed on
+`main` and is re-applied here in `main`'s vocabulary — with the gate corrected
+from admissibility to verification alone, because refusing to revoke a deleted
+user's signed token is worse, not better. The other five findings and
+SEC-POLICYDROP-1 are untouched by `main` and still this change's.
+
 **Verdict: no security regression in the reviewed delta. Six pre-existing
-fail-open defects, all closed fail-closed in this change, each with a defect
-gate verified failing against the verbatim pre-fix body (§6) — plus
-SEC-POLICYDROP-1, introduced by one of those fixes and closed here under the
-same standard.** A further eight findings are recorded in §3 rather than fixed,
+fail-open defects, each with a defect gate verified failing against the
+verbatim pre-fix body (§6) — plus SEC-POLICYDROP-1, introduced by one of those
+fixes and closed here under the same standard. Five of the six are closed by
+this change; the sixth, SEC-UISESSION-AUD-1, is closed on `main` as
+SEC-UISESS-1 and its fix here is withdrawn in favour of that one.** A further eight findings are recorded in §3 rather than fixed,
 because each needs an owner decision or a migration larger than this change
 should carry.
 
 | ID | Severity | What fails open |
 |---|---|---|
-| [SEC-UISESSION-AUD-1](#sec-uisession-aud-1) | **Critical** | Portal token replayed as the admin cookie resolves to `RoleAdmin` |
+| [SEC-UISESSION-AUD-1](#sec-uisession-aud-1) | **Critical** | Portal token replayed as the admin cookie resolves to `RoleAdmin` — **fixed independently on `main` as SEC-UISESS-1; this branch's fix is withdrawn** |
 | [SEC-HATOKEN-1](#sec-hatoken-1) | **High** | A viewer reads the HA join token → cluster CA private key |
 | [SEC-GEOHOST-1](#sec-geohost-1) | **High** | Host-header case variation evades every `destCountry` deny rule |
 | [SEC-POLICYACTION-1](#sec-policyaction-1) | **High** | An unrecognised rule action allows, and shadows every deny rule under it |
@@ -87,7 +101,7 @@ should carry.
 | **CWE** | CWE-287 Improper Authentication; CWE-345 Insufficient Verification of Data Authenticity (missing audience binding / token confusion); CWE-269 Improper Privilege Management |
 | **OWASP** | A01:2021 Broken Access Control; A07:2021 Identification and Authentication Failures |
 | **Regression risk** | Pre-existing; **not** introduced by this window |
-| **Status** | Fixed in this change |
+| **Status** | **Fixed on `main` as SEC-UISESS-1 (`81f967d`), independently and in a better shape.** This change's own fix is withdrawn; the analysis below stands and was confirmed independently. See [Fix](#sec-uisession-aud-1-fix) |
 
 #### Mechanism
 
@@ -157,59 +171,61 @@ surface), `sseAuthStillValid` (mid-stream SSE re-check), and `mcpLivePrincipal`
 The admin control plane in its entirety; the cluster CA and config via the admin
 surfaces; MCP four-eyes separation of duties.
 
-#### Fix
+#### Fix — withdrawn in favour of `main`'s, which landed first and is better {#sec-uisession-aud-1-fix}
 
-One predicate, in the owner position, used by every consumer that makes a trust
-decision. `ui_session.go` gains `uiSessionProvider` (shared with the minter, so
-the two cannot disagree) and:
+**This finding is no longer fixed by this change.** While the PR waited,
+`main` moved 510 commits and landed the same defect as **SEC-UISESS-1**
+(`81f967d`, "an admin session must be one the admin plane minted"). On
+reconciliation `main`'s fix was taken whole and this branch's was dropped:
+`ui_session.go`, `ui_middleware.go`, `events.go`, `ui_auth.go` and the
+640-line `ui_session_audience_test.go` are `main`'s files, not this branch's.
+
+That was not a close call. This branch added a single `uiSessionAdmissible`
+predicate; `main` introduced `resolveUISession` / `classifyUISession` with a
+**three-state verdict** — absent, refused, valid — because "no usable cookie"
+and "a cookie that must not authorize" need different handling: the middleware
+falls through to HTTP Basic on the first and answers 401 on the second, and
+`apiAuthStatus` reports the second as logged out rather than as the role the
+cookie claims. `main` also closed two things this branch did not:
+a session naming a **role this build does not enroll**, and the
+`isPublicUIAuthPath` drift in full (this branch fixed `apiAuthStatus`'s
+predicate; `main` removed the second copy of the decision that allowed the
+drift to happen at all).
+
+Carrying both spellings forward would have been the actual hazard here, and
+`main`'s own commit message names it: a second copy of this decision is how the
+divergence arose, and the direction it diverges is toward reporting more
+authority than is granted. So the finding stands as analysis — the mechanism,
+scenario and impact below are unchanged and were confirmed independently — but
+the implementation credit and the executable contract belong to SEC-UISESS-1.
+
+**What survived from this branch.** Only `mcpLivePrincipal`, and only as
+defence in depth, re-expressed with `main`'s own discriminator rather than a
+helper `main` does not have:
 
 ```go
-func uiSessionAdmissible(sess *Session) bool {
-	if sess == nil || sess.Provider != uiSessionProvider {
-		return false
-	}
-	return cfg.UIUserExists(sess.Sub)
-}
+if err != nil || sess == nil || sess.Provider != uiSessionProvider || sess.Sub == "" {
 ```
 
-Both conditions are now required at every surface that resolves a **role** from
-the cookie: `ui_middleware.go`, `events.go`, and `ui_auth.go`
-(`apiAuthStatus` **and** `apiAuthLogout`).
+Only the provider is re-tested, deliberately **not** `classifyUISession`'s
+roster and role halves — the gate has applied those, and repeating them refuses
+a principal it admitted (`TestLiveTrustHTTP_FourEyesAndRBAC`, which is what
+caught this the first time round: the live four-eyes flow legitimately names
+principals that are not rows in the caller's roster view). With SEC-UISESS-1 in
+place `apiMCPToolApprovalCreate` is already unreachable with a proxy-plane
+token — `requireRole` reads the role the middleware put in the context — so
+this is a second layer on a four-eyes principal, not the gate.
 
-`uiSessionAudience` is the audience half on its own, for a surface that needs
-the audience and nothing more because it already runs **behind** the gate that
-applied the roster half. `mcpLivePrincipal` uses it. Applying full
-admissibility there would re-test roster existence inside a handler the gate had
-already admitted, and it broke `TestLiveTrustHTTP_FourEyesAndRBAC` — the live
-four-eyes flow legitimately names principals that are not rows in the caller's
-roster view. That failure is what distinguished the two halves; the wall test
-below accepts either predicate and records which surface may use which.
+#### Required tests
 
-**This is behaviour-preserving for every legitimate admin session.**
-`ps_ui_session` has exactly one minter (`setUISessionCookie`, two call sites),
-it hard-codes `uiSessionProvider`, and a local session whose `Sub` is absent
-from the roster was already refused. Only the non-local branch tightens. There
-is no admin-SSO path through `ps_ui_session` in this build.
-
-Attribution is deliberately **not** routed through the predicate:
-`sessionAdmin` and `auditActor` gate nothing, and recording the identity a
-refused session claimed is more useful than recording `unknown`.
-
-#### Required tests — `ui_session_audience_test.go`
-
-Portal tokens over five IdP-shaped providers × four roles × three subjects
-(including a subject colliding with a real admin's name) refused at the
-middleware; refused end-to-end by `apiAuthUsers` with the roster unchanged;
-positive controls that a local roster session still passes **at its exact
-role**, the pre-RBAC empty-role case still resolves to admin, and a local
-session for an absent user is still refused; exact-comparison boundary rows
-(`""`, `Local`, `LOCAL`, ` local`, `local `, `local\t`, `locale`, `loca`,
-`local\x00`, `local\n`); the predicate's own nil/empty-subject shapes;
-`apiAuthStatus`, `sseAuthStillValid` and `mcpLivePrincipal` each with a defect
-gate and a positive control; a 400-way concurrent mixed-token run (meaningful
-under `-race`); and two structural walls — every `readUISessionCookie` consumer
-must be classified gating-or-attribution, and `encodeSession` must have exactly
-two minters, one per audience.
+`main`'s `ui_session_audience_test.go` (`TestSECUISESS1_*`, 13 tests) is the
+executable contract, and it is a superset of what this branch wrote: the portal
+token refused at the middleware and at `/api/auth/status`, the deleted-user
+case on both, the refused cookie not falling back to Basic, the SSE re-check
+sharing the decision, and five positive controls (enrolled roles pass at their
+exact role, the pre-RBAC empty-role compat survives, Basic fallback survives,
+pre-setup bootstrap survives). This branch's own suite for the finding is
+removed with its fix.
 
 ---
 
@@ -720,14 +736,13 @@ CHAOS-69 and SEC-REQID-1.
 
 #### Fix
 
-Act only on a session this plane may honour, reusing the SEC-UISESSION-AUD-1
-predicate — which also stops logout acting **across audiences** (a portal token
-replayed under this cookie's name must not revoke the real portal session that
-shares its payload):
+Revoke only what actually **verified**. `readUISessionCookie` returns a session
+only when `decodeSession` accepted the HMAC, so moving the revocation write
+inside the existing non-nil branch is the whole gate:
 
 ```go
-sess, err := readUISessionCookie(r)
-if err == nil && uiSessionAdmissible(sess) {
+sess, _ := readUISessionCookie(r)
+if sess != nil {
 	auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
 	revokeSessionCookie(uiSessionCookieName, r)
 }
@@ -738,15 +753,30 @@ Clearing stays unconditional and the answer stays 200: a browser holding a junk
 or foreign cookie must still be able to get rid of it, and a logout that
 reported why it refused would be an oracle.
 
+**The gate was drawn in the wrong place first, and the correction matters.**
+The initial attempt routed this through full admissibility (audience + roster),
+which also refused to revoke a **deleted user's** session and one naming an
+unenrolled role — strictly worse security, because those are precisely the
+tokens most worth revoking, and they are tokens this appliance signed. The
+cross-audience case the first attempt also blocked turns out not to need
+blocking: a signed proxy-plane token can only revoke **itself**, and whoever
+holds it can already use it, so nothing is gained by refusing. What must never
+be revocable is a payload **nobody signed** — that is what let an
+unauthenticated caller choose both the key and its expiry in an unbounded,
+persisted, gossiped map. Verification is exactly that line, and nothing more.
+
 #### Required tests — `auth_logout_revocation_test.go`
 
 25 forged 2 KB-subject logouts add zero entries while still answering 200 and
 still clearing the cookie; a forged payload prefix never reads back as revoked;
 nine malformed cookie shapes plus the no-cookie case are absorbed with no
 entries; a not-vacuous control that a genuine admin logout **does** revoke and
-its cookie then fails `decodeSession` with `"revoked"`; and a cross-audience
-control that a replayed portal token revokes nothing and leaves the portal
-session usable.
+its cookie then fails `decodeSession` with `"revoked"`; and
+`AnySignedTokenIsRevocable`, the boundary on the other side, over three
+signed-but-refused shapes (a proxy-plane token, an admin token naming no roster
+account, an admin token naming an unenrolled role). That last one exists to say
+the looser gate is a decision rather than an oversight — it replaced a test
+that asserted the opposite.
 
 ---
 
@@ -986,7 +1016,10 @@ traced to its origin:
 
 - SEC-UISESSION-AUD-1 — the `Provider == "local" &&` conditional predates the
   window; the window's own RBAC work (#1448, `sessionRoleOrReject`) *narrowed*
-  the compat branch and is what made the remaining hole analysable.
+  the compat branch and is what made the remaining hole analysable. Fixed on
+  `main` as SEC-UISESS-1 while this change waited; two independent reviews
+  reaching the same defect from different directions is corroboration, and the
+  fix that landed first and resolved more of it is the one that stands.
 - SEC-SECPARTIAL-1 — `git log -L` puts the `>= 0` guard in `ui_security.go`'s
   creating commit (PR #1256).
 - SEC-HATOKEN-1, SEC-GEOHOST-1, SEC-POLICYACTION-1, SEC-REVOKE-1 — all older
@@ -1152,12 +1185,12 @@ finding's suite:
 
 | Finding | Pre-fix result |
 |---|---|
-| SEC-UISESSION-AUD-1 | eight gates FAIL, led by `DEFECT: handler reached with injected role "admin"` for every portal provider × `role=""` row — and the explicit-role rows came through at their requested role too. The three positive controls PASS pre-fix, which is what a control must do. |
+| SEC-UISESSION-AUD-1 | eight gates FAIL, led by `DEFECT: handler reached with injected role "admin"` for every portal provider × `role=""` row — and the explicit-role rows came through at their requested role too. The three positive controls PASS pre-fix, which is what a control must do. **This evidence is retained as the record of the finding; the gates themselves are withdrawn with the fix, and `main`'s `TestSECUISESS1_*` is the contract now in force.** |
 | SEC-HATOKEN-1 | `NonAdminRolesNeverSeeTheJoinToken` and `UnenrolledRoleSeesNoToken` both FAIL |
 | SEC-GEOHOST-1 | all four canonicalisation/cache suites FAIL |
 | SEC-POLICYACTION-1 | `UnknownActionBlocksAndIsTerminal` and `ResolvedActionsDispatchToTheirBranch` FAIL with `proxy.go` taken from `origin/main`; `PersistableRefusesUnknownAction` and `ReplaceAllDropsUnknownActionKeepsValid` FAIL with the install check disabled |
 | SEC-POLICYDROP-1 | `ShimPassesTheConfiguredCount` FAILS on both assertions with `main.go`'s pre-fix argument restored; `PreFixCountWouldHaveSelectedAllow` shows the pre-fix input deriving `allow` where the configured count derives `deny`, on the same store |
-| SEC-REVOKE-1 | `UnsignedCookieIsNotRevoked`, `ForgedPayloadNeverBecomesRevoked` and `PortalTokenDoesNotRevokeAcrossAudiences` all FAIL |
+| SEC-REVOKE-1 | `UnsignedCookieIsNotRevoked` and `ForgedPayloadNeverBecomesRevoked` both FAIL. (`PortalTokenDoesNotRevokeAcrossAudiences` was a third gate in the first attempt and is **removed**: it asserted a line the reconciliation showed to be wrong — see the finding's fix section. `AnySignedTokenIsRevocable` replaces it and pins the corrected contract; it is a boundary, not a defect gate, and passes both before and after.) |
 | SEC-SECPARTIAL-1 | `PartialUpdateLeavesTheRateLimiterAlone`, `NegativeLimitIsRefusedAndChangesNothing` and `ExplicitNullIsTreatedAsAbsent` all FAIL |
 
 Each revert was taken from `origin/main` rather than from the index — an earlier
@@ -1238,13 +1271,23 @@ local check is not a passing merge gate.
   accepted, just not cached. Bounded and far below the ~1.3 ms that CHAOS-69
   already accepts at the 1 KiB raw cap, so no change is proposed; the comment is
   what is imprecise.
-- **SEC-UISESSION-AUD-1's fix rests on `Provider` identifying the audience.**
-  That holds while each cookie has exactly one minter; the two structural walls
-  added here fail the build if a third minter or an unclassified
-  `readUISessionCookie` consumer appears. The stronger form — an explicit
-  `aud` claim on `Session`, accepted as empty only on the `Provider=="local"`
-  path for the pre-RBAC window — remains the right follow-up, and would let the
-  empty-role compat branch be retired.
+- **SEC-UISESS-1's fix rests on `Provider` identifying the audience**, as
+  this change's withdrawn one did. That holds while each cookie has exactly one
+  minter. The two structural walls this change had added — every
+  `readUISessionCookie` consumer classified gating-or-attribution, and
+  `encodeSession` having exactly two minters, one per audience — went with the
+  withdrawn fix and `main` does not carry an equivalent, so **nothing fails the
+  build today if a third minter or an unclassified consumer appears**. That is
+  the one thing lost in the reconciliation and it is worth re-adding to
+  `main`'s shape; it is a test-only addition and would not have belonged in
+  this change's merge. The stronger form — an explicit `aud` claim on
+  `Session`, accepted as empty only on the `Provider=="local"` path for the
+  pre-RBAC window — remains the right follow-up, and would let the empty-role
+  compat branch be retired.
+- **`mcpLivePrincipal` re-tests only the provider.** With SEC-UISESS-1 in place
+  the handler is unreachable with a proxy-plane token, so this is a second
+  layer rather than the gate; it deliberately does not repeat the roster and
+  role halves, which would refuse a four-eyes principal the gate admitted.
 - **R2 means ten support-bundle routes run on a single RBAC layer.** Their
   handler checks are present and correct, so this is a defence-in-depth loss,
   but the C2 counters cannot see it.
