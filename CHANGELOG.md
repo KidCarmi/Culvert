@@ -511,6 +511,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   U-label/A-label, ports, IPv6 brackets, empty hosts, unnormalizable input), the
   403 wire bytes on each protocol responder, and 400 concurrent refusals under
   `-race`.
+- An admin session was any session the cookie was *named* after
+  (SEC-UISESS-1). `ps_session` (the proxy end-user cookie,
+  `setSessionCookie`) and `ps_ui_session` (the admin operator cookie,
+  `setUISessionCookie`) are signed with the same HMAC key and carry the same
+  `Session` payload, with no audience or purpose field between them — so the
+  cookie name was the only separation, and the caller picks the name.
+
+  Both fields that could have refused the replay declined instead.
+  `sessionRoleOrReject("")` resolves to `RoleAdmin`, deliberately, for
+  pre-RBAC sessions minted before the role field existed — and a proxy
+  session never sets `Role`, so every `ps_session` carried exactly the empty
+  string that branch promotes. The roster-existence backstop that would have
+  caught the unknown subject was gated on `sess.Provider == "local"`, and a
+  proxy IdP session carries the IdP profile id, so the check was skipped
+  rather than failed.
+
+  The result was reproduced end to end by minting through the real proxy
+  issuer and re-presenting the cookie value under the admin cookie name:
+  HTTP 200 with injected role `admin`. An ordinary proxy end user who
+  completed a normal captive-portal OIDC/SAML login with their own corporate
+  credentials — no forgery, no XSS, no MITM, no knowledge of the signing key
+  — was a control-plane admin, above every handler `requireRole` gate and
+  every C2 metadata role. The CP distributes one signing key to every DP, so
+  the token was admin on every node in the cluster. This contradicted
+  `docs/enterprise/IDENTITY-AND-ACCESS-DEPLOYMENT.md`, which states that
+  external IdPs authenticate proxy end users and "never issue an admin
+  session" (GAP-IAM-02).
+
+  The fix is the narrowest one available. `setUISessionCookie` is the only
+  minter of `ps_ui_session` and has always stamped `Provider "local"`, so
+  that value becomes the named constant `uiSessionProvider` — read by the
+  issuer and by `uiAuthMiddleware`, deliberately one constant so the two
+  cannot drift open — and a UI session naming any other provider is refused.
+  The roster check loses its provider guard, which is not a widening: it
+  already applied to every local session, and a non-local one is now refused
+  by the clause before it. Together they leave the empty-role compatibility
+  branch reachable only for a local session whose user is still on the
+  roster, which is the pre-RBAC single-admin deployment it was written for.
+  Nothing on the wire or on disk changes — admin cookies already carry
+  `Provider "local"` — so no operator session is invalidated. An explicit
+  `aud` claim would be the deeper fix and is recorded for follow-up; it would
+  refuse every cookie currently in flight.
+
+  Gates: a defect gate that mints through the production proxy issuer and
+  asserts 401, a class gate over foreign providers crossed with every role
+  value (including an explicitly elevated one, which a restored proxy-side
+  roster could carry), and three controls — the pre-RBAC empty-role local
+  session still resolves to admin, enrolled local roles pass through at their
+  exact role, and a local session for a deleted user is still refused, so the
+  fix did not trade one bypass for another.
 
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
