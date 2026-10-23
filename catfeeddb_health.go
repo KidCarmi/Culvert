@@ -28,7 +28,10 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
 // catFeedDBHealth is the process-wide record of how the community store came
@@ -55,6 +58,20 @@ type catFeedDBHealth struct {
 	// the open — including any this boot created. Non-zero is the operator's
 	// cue that there is disk to reclaim and an incident to reconcile.
 	ResidualCopies int
+
+	// CHAOS-74 runtime overlay. Every field above describes the BOOT, is
+	// written once by loadCommunityFeedDB and never changes again — which left
+	// the whole surface blind to a store that opened cleanly and then stopped
+	// being readable. These three are read live from the store on each call.
+	//
+	// RuntimeFaults counts lookups that failed with a badger error rather than
+	// a clean miss. RuntimeMemoryFaults counts contained memory faults on the
+	// store's mapped tables. RuntimeDegraded is latched after the first such
+	// fault, at which point Layer-2 categorisation is off for the life of the
+	// process.
+	RuntimeFaults       uint64
+	RuntimeMemoryFaults uint64
+	RuntimeDegraded     bool
 }
 
 var (
@@ -69,11 +86,21 @@ func noteCatFeedDBState(h catFeedDBHealth) {
 	catFeedDBHealthMu.Unlock()
 }
 
-// catFeedDBState returns a copy of the recorded boot outcome.
+// catFeedDBState returns the store's current health: the recorded boot outcome
+// overlaid with the live runtime counters.
+//
+// The overlay exists because a boot-only record reports a store that died at
+// 03:00 as healthy forever (CHAOS-74). It is a side-effect-free read of state
+// the process already has — three atomic loads — so both callers (the
+// diagnostics row and /metrics) stay safe to call from a request handler.
 func catFeedDBState() catFeedDBHealth {
 	catFeedDBHealthMu.RLock()
-	defer catFeedDBHealthMu.RUnlock()
-	return catFeedDBHealthy
+	h := catFeedDBHealthy
+	catFeedDBHealthMu.RUnlock()
+	if db := communityDB; db != nil {
+		h.RuntimeFaults, h.RuntimeMemoryFaults, h.RuntimeDegraded = db.LookupFaults()
+	}
+	return h
 }
 
 // resetCatFeedDBHealthForTest clears the record. Test isolation only.
@@ -95,6 +122,20 @@ func resetCatFeedDBHealthForTest() {
 //     would report a healthy gateway as broken.
 func checkCategoryFeedDB() OperatorContractCheck {
 	h := catFeedDBState()
+	row := categoryFeedDBRow(h)
+	// CHAOS-74 containment of mapping faults is Linux-only (the deployment
+	// target). On another build a damaged mapped table still behaves as it did
+	// before the fix, so a store that is serving says so rather than implying a
+	// fallback that does not exist there. Status is left alone: this is a
+	// property of the build, not a fault of this node.
+	if h.Configured && h.Available && !storeguard.FaultContainmentSupported {
+		row.Message += "; runtime fault containment: unavailable on " + runtime.GOOS
+	}
+	return row
+}
+
+// categoryFeedDBRow is the severity decision for checkCategoryFeedDB.
+func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 	if !h.Configured {
 		return OperatorContractCheck{
 			Code:    "category_feed_db",
@@ -108,6 +149,30 @@ func checkCategoryFeedDB() OperatorContractCheck {
 			Status:         diagWarn,
 			Message:        "community category store unavailable — category matching is running on the admin-managed list only",
 			OperatorAction: "Check the data volume for the community category store (space, permissions, mount) and restart; see server logs for the cause.",
+		}
+	}
+	// A store that opened and then lost its backing mapping has exactly the
+	// impact of one that never opened — Layer-1-only categorisation — so it
+	// reuses that severity and that operator vocabulary rather than inventing
+	// a second one. It is reported BEFORE the recovery rows because a
+	// self-heal at boot is not the operator's current problem if the store has
+	// since failed.
+	if h.RuntimeDegraded {
+		return OperatorContractCheck{
+			Code:   "category_feed_db",
+			Status: diagWarn,
+			Message: fmt.Sprintf("community category store stopped being readable after startup (%d memory fault(s) on its mapped tables) — category matching is running on the admin-managed list only until this node restarts",
+				h.RuntimeMemoryFaults),
+			OperatorAction: "The data volume damaged the store while it was open: check the volume for I/O errors, space and whether it is still mounted, then restart this node so the store is re-opened (and quarantined if it is corrupt).",
+		}
+	}
+	if h.RuntimeFaults > 0 {
+		return OperatorContractCheck{
+			Code:   "category_feed_db",
+			Status: diagWarn,
+			Message: fmt.Sprintf("community category store returned %d lookup error(s) since startup; the affected hosts were treated as uncategorised",
+				h.RuntimeFaults),
+			OperatorAction: "Check the data volume holding the community category store for I/O errors and space; see server logs for the reported cause.",
 		}
 	}
 	if h.Recovered {
