@@ -336,6 +336,7 @@ func TestServePACProfileFile_CustomProfile(t *testing.T) {
 // ─── Cluster sync ─────────────────────────────────────────────────────────────
 
 func TestClusterSnapshot_PACProfilesSyncAndWipe(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	resetPACProfilesGlobals(t)
 	seedProfilesConfig(t)
 	if err := pacStore.Set(PACConfig{ProxyHost: "cp.example", ProxyPort: 8080,

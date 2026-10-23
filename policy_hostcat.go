@@ -41,12 +41,26 @@ import "strings"
 // category-group scope — the common deployment — computes nothing and the
 // scratch stays a zeroed stack value.
 //
-// The per-CATEGORY halves are deliberately NOT memoized. catStore.MatchesHost /
-// MatchesHostAdmin depend on the rule's category as well as the host, and they
-// are index lookups (O(labels)), not scans — memoizing them would trade a cheap
-// map probe for a map allocation.
+// The per-CATEGORY halves are deliberately NOT memoized. catStore.MatchesHostNorm
+// / MatchesHostAdminNorm depend on the rule's category as well as the host, and
+// they are index lookups (O(labels)), not scans — memoizing them would trade a
+// cheap map probe for a map allocation.
+//
+// Their HOST-ONLY half is hoisted, though, and that is what normHost is for.
+// The pre-hoist matchers took the RAW host and canonicalized it themselves, so
+// a scan paid one hostutil.NormalizeHost per category-scoped rule (two when the
+// signed-feed view is armed, since the view's matcher normalized as well) for a
+// value that depends on the request and not the rule. Measured on the shipped
+// taxonomy against a 3-label uncategorized destination, that re-derivation was
+// 45.97 ns of a 105.8 ns probe — 43%, and the largest single term in it.
 type hostCatScratch struct {
 	host string
+
+	// normHost memoizes hostutil.NormalizeHost(host) for the scan. It is the
+	// request-invariant value the per-RULE membership matchers used to
+	// re-derive on every call — see normHost() below.
+	normHostSet bool
+	normHostVal string
 
 	viewSet bool
 	view    *effectiveCategoryView
@@ -69,6 +83,52 @@ type hostCatScratch struct {
 // request; the non-scan callers (matchDest, the admin URL-lookup API) build a
 // throwaway one and are byte-identical to the pre-hoist behaviour.
 func newHostCatScratch(host string) hostCatScratch { return hostCatScratch{host: host} }
+
+// newHostCatScratchNorm is newHostCatScratch for the callers that ALREADY hold
+// normalizeHost(host), which every scan entry point does: PolicyStore.Evaluate
+// and the Policy Tester carry it as accessEvalInput.normHost, CDRPolicyStore
+// .Evaluate computes it one line above its scratch, and authMatchScratch keeps
+// it as its own memo. Seeding it here is what makes the hoist complete — the
+// lazy form below would otherwise re-derive, per scan, a value the scan had in
+// hand, which is the entire cost of the one-category-rule case (the memo's
+// bookkeeping with none of its saving).
+//
+// THE CONTRACT IS normHost == normalizeHost(host), AND IT IS NOT COSMETIC.
+// hostutil.NormalizeHost is NOT idempotent (an empty ACE label decodes to
+// nothing, so NormalizeHost("a.xn--") == "a." and NormalizeHost("a.") == "a"),
+// so a seed taken from a DIFFERENT normalization lineage — normalizeHostStrict,
+// a port-stripped host, a host from a neighbouring variable — would silently
+// change which rules match rather than failing loudly. Callers must pass the
+// output of normalizeHost applied to THIS host and nothing else.
+//
+// The invariant is pinned two ways rather than left to caller discipline:
+// TestNormHoist_EverySeedingCallerSuppliesTheCanonicalHost asserts it directly
+// for every production supplier, and TestNormHoist_SeededScratchMatchesLazy
+// drives the real entry points over the non-idempotent witnesses, where a
+// mismatched seed is exactly what would diverge.
+func newHostCatScratchNorm(host, normHost string) hostCatScratch {
+	return hostCatScratch{host: host, normHostSet: true, normHostVal: normHost}
+}
+
+// normHost returns hostutil.NormalizeHost(sc.host), computed at most once per
+// scan — or zero times, when the scratch was built by newHostCatScratchNorm
+// with the value the caller already held. A scan whose rules carry no category
+// or category-group scope and whose scratch was not seeded never calls it and
+// normalizes nothing.
+//
+// This is a pure HOIST, not a reinterpretation: every consumer below is handed
+// normalizeHost(sc.host) — byte-for-byte the value each of them used to compute
+// from sc.host itself — so no idempotence property of NormalizeHost is relied
+// on and no matching decision can change. The empty string is a legitimate
+// normalized result (NormalizeHost("") == ""), so the memo is guarded by its
+// own bool rather than by emptiness.
+func (sc *hostCatScratch) normHost() string {
+	if !sc.normHostSet {
+		sc.normHostVal = normalizeHost(sc.host)
+		sc.normHostSet = true
+	}
+	return sc.normHostVal
+}
 
 // effectiveView returns the signed-feed effective category view, loading the
 // atomic pointer at most once per scan. nil means the lifecycle is unarmed (the
@@ -139,14 +199,14 @@ func (sc *hostCatScratch) resolveFusion() (category, tier, matchedBy string) {
 			return name, "admin", pattern
 		}
 		if c, ok := sc.viewLookup(); ok {
-			return c, "saas", normalizeHost(sc.host)
+			return c, "saas", sc.normHost()
 		}
 	} else if name, pattern, ok := catStore.LookupHost(sc.host); ok {
 		return name, "admin", pattern
 	}
 
 	// Layer 2: community BadgerDB feed.
-	h := normalizeHost(sc.host)
+	h := sc.normHost()
 	if communityDB != nil {
 		if foundCat, ok := sc.communityLookup(); ok {
 			return foundCat, "community", h
@@ -161,7 +221,7 @@ func (sc *hostCatScratch) resolveFusion() (category, tier, matchedBy string) {
 // falls through to the UT1 layer.
 func (sc *hostCatScratch) matchesCategory(cat URLCategory) bool {
 	if view := sc.effectiveView(); view != nil {
-		if catStore.MatchesHostAdmin(cat, sc.host) {
+		if catStore.MatchesHostAdminNorm(cat, sc.normHost()) {
 			return true
 		}
 		// MEMBERSHIP, not classification. sc.viewLookup answers "what is this
@@ -175,14 +235,17 @@ func (sc *hostCatScratch) matchesCategory(cat URLCategory) bool {
 		// exactly: exact key then every suffix key, no shadowing by a more
 		// specific key in a different category. Deliberately NOT memoized on
 		// the scratch — it depends on the rule's category and is an O(labels)
-		// index probe, same policy as MatchesHost/MatchesHostAdmin.
+		// index probe, same policy as MatchesHostNorm/MatchesHostAdminNorm.
+		// Only its HOST-ONLY half is hoisted: sc.normHost() canonicalizes the
+		// destination once per scan instead of once per rule here (and, on
+		// this branch, once more inside the view's matcher).
 		//
 		// Still not a short-circuit: a non-match must fall through to the UT1
 		// layer, matching the original cross-layer OR semantics.
-		if view.MatchesCategory(string(cat), sc.host) {
+		if view.MatchesCategoryNorm(string(cat), sc.normHost()) {
 			return true
 		}
-	} else if catStore.MatchesHost(cat, sc.host) {
+	} else if catStore.MatchesHostNorm(cat, sc.normHost()) {
 		return true
 	}
 	// Layer 2: community BadgerDB feed — domain-walking point lookups.

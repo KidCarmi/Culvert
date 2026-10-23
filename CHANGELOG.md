@@ -7,7 +7,876 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Control Plane gRPC listener fault terminated the whole appliance, and a
+  listener that died after binding was silent and terminal (CHAOS-71).** The CP
+  boot path had exactly one error branch — `logFatalf("ControlPlane gRPC: %v",
+  err)` — reached from `initCluster`, which `main.go` runs **before**
+  `initSOCKS5`, `startAdminUI` and `buildAndStartProxyServer`. So an occupied
+  gRPC address or an unreadable mTLS pair meant no proxy, no SOCKS5, no admin
+  UI and no health endpoint; under `restart: unless-stopped`, an unattended
+  crash loop recoverable only with shell access.
+
+  Both triggers were reproduced against the real binary (`EXIT CODE: 1`,
+  `proxy http_code=000`, `adminui http_code=000`). Neither is visible to
+  `validatePortCollisions`, which compares the proxy, UI and SOCKS5 ports to
+  each other — the CP gRPC address is not even among the three it knows about.
+  Process death is *not* "fail closed": it delegates the posture to your
+  topology (an explicit-proxy fleet loses all egress; a PAC/WPAD fleet with a
+  `DIRECT` fallback goes unfiltered).
+
+  Separately, `srv.Serve(ln)` ran in a bare goroutine whose only branch was one
+  log line, so a listener that died after a successful bind never rebound —
+  while `clusterRole.role` and `grpcAddr` stayed set, so
+  `GET /api/cluster/status` reported a healthy Control Plane with its listening
+  address, forever, on a node with no listener. This was the only listener in
+  the appliance with no health plane at all.
+
+  The listener now has a supervisor owning bind → serve → rebind: the boot path
+  is non-fatal and retries at a bounded rate (1 s doubling to 30 s, ±20 %
+  jitter, interruptible by shutdown), the mTLS material is re-read on every
+  attempt so a cert-manager/certbot rotation self-heals with no restart, and a
+  serve that ends is counted, classified and rebound. **The node's role is
+  claimed only on an observed bind** — while the listener is down it reports
+  `standalone`, so every surface says what is true — and the HA leadership
+  resume rides the same rule, so a node never asserts a term it cannot
+  exercise. The live admin path (`POST /api/cluster/mode`) keeps its
+  synchronous `409`: an admin at the keyboard can retype an address, and a
+  background retry there would report success for a Control Plane that may
+  never exist.
+
+  New surfaces, all on the **proxy** port (the CP's own gRPC port cannot report
+  that it is unreachable): a `cp_grpc_listener` diagnostics row with a
+  per-reason operator action, a **report-only** `/ready cp_grpc` row, a
+  `cp_grpc` field on `/health`, and
+  `culvert_cp_grpc_{up,unavailable,bind_failures_total,binds_total,bind_backoff_seconds}`
+  — emitted only on a node that asked to be a Control Plane. Page on
+  `culvert_cp_grpc_unavailable == 1`, not on `up == 0`, which drops for the few
+  seconds of rebinding after an ordinary rollout.
+
+  **Action required for alerting:** `cp_grpc_listener_down` is a new alert event
+  (named per the `<contract-row>_down` convention) and will not reach existing
+  webhooks until you add it to their subscriptions — the admin UI's webhook
+  editor now lists it. See `docs/operator/cp-grpc-listener-recovery.md`.
+
+  Also fixed in the same change: `StopControlPlaneGRPC` read
+  `clusterRole.grpcSrv` with no lock — latent while that field was written once
+  per process, a real data race once anything rebinds. The handle now lives on
+  the supervisor under its own mutex.
+
+  **HA interaction.** A lease-mode HA leader whose CP gRPC listener has been
+  unavailable past the 30 s threshold (or whose listener supervisor stopped)
+  now **stops renewing its fencing lease**: the fence no longer vouches for a
+  leader no Data Plane or standby can reach, the node self-fences when its
+  last confirmed window ends, and the standby acquires the lapsed lease
+  through its ordinary fence-gated promotion. Renewal resumes if the listener
+  serves again before the window ends. HA promotion through the synchronous
+  `enableControlPlane` no longer risks main's `clusterRoleMu` self-deadlock
+  (the pre-bind snapshot is taken with the role lock released), a promote whose
+  listener cannot bind leaves the node a retryable standby, and once the role
+  is committed the Data Planes' CP address list is updated to name the
+  promoted node instead of only the dead leader (the CHAOS-71
+  address-republish rider, ported from #1618). That update MERGES onto the
+  latest committed config snapshot (it can no longer roll back an admin
+  publish that committed in between), and a rejected update fails the
+  activation — the role is rolled back and the listener retries — instead of
+  reporting success. Because a retried bind can land long after boot, the
+  activation also aborts once shutdown has begun (no HA resume after
+  `globalHA.Stop`), never replaces an established Data Plane role (refused,
+  alerted as `cp_grpc_listener_down`, reason `role_conflict`), and re-reads the
+  persisted HA config before resuming leadership. The other way round,
+  Data-Plane startup no longer overwrites a Control Plane role the listener
+  already claimed: every role write goes through one arbiter, the role claimed
+  first wins, and the refused claim is reported FAIL by the `cluster_posture`
+  diagnostics row; every reader of the role takes one locked snapshot.
+  A serve that ends on its own now stops the retired gRPC server (closing the
+  Data Planes' transports to it) before rebinding, shares the bind path's
+  threshold clamp and alert latch, and a full config publish can no longer
+  overwrite the CP address list the activation published. A self-fenced
+  ex-leader whose CP listener is still dark is no longer AUTO-promoted
+  (manual promotion unchanged). Every exit of the listener supervisor —
+  including a panic between bind and serve — now releases the server, the
+  socket and the role claim it holds; a terminal listener failure pages even
+  after a recoverable episode already paged; and a full publish validates the
+  snapshot with the CP address list it actually commits. With HA on, every
+  Control Plane RPC is now leader-gated: a self-fenced standby whose listener
+  rebinds refuses Data Planes with a retriable error, so they fail over to the
+  new leader instead of staying on its stale config; and a listener alert
+  raised before the webhooks load at boot is queued, not lost. Every HA
+  transition (enable, resume, standby entry, promote, self-fence) now
+  republishes the Control Plane address list itself, so a persisted leader
+  whose listener bound late no longer hands Data Planes a list without its
+  standby. If that republish is rejected (a config at its sync size cap),
+  the transition still stands; a new `cp_address_list` diagnostics row reports
+  the pending list until a background retry publishes it. An unreadable
+  Control Plane TLS file now reports `tls_certificate` instead of the
+  bind-permission advice. Address-list publishes now carry the current
+  fencing epoch, so Data Planes accept the new list after HA is enabled, and
+  they no longer clear the "config publish rejected" banner left by an
+  earlier rejected config change. A listener-down alert raised before the
+  webhooks loaded is dropped if the listener recovered first. Concurrent config
+  publishes now commit only onto the exact version they validated against, so a
+  publish racing an HA promotion can no longer ship a stale fencing epoch. A
+  re-promoted former leader no longer republishes below the version it
+  replicated from the new leader. A Control Plane listener whose socket dies
+  right after every bind is now treated as one continuous outage, so it pages
+  and (in lease mode) gives up the fencing lease instead of resetting each
+  cycle. An outage closes only after 60 s of stable serving. An admin HA
+  enable made while a restarted leader is still re-acquiring its fencing lease
+  is no longer overwritten by the restart's resume. A node whose Control Plane
+  listener ends terminally (a Data Plane role won, or the loop crashed) no
+  longer reports itself as an active Control Plane. The rebind-backoff gauge
+  reads 0 while the listener serves. A restarted leader that is still waiting
+  out its fencing lease when shutdown begins now stops at once instead of
+  outliving the shutdown watchdog. A `role_conflict` listener alert now
+  describes a local CP/DP configuration conflict rather than a fleet outage. A
+  Control Plane address list that keeps being rejected at commit now pages
+  once per episode instead of every 30 s. A refused admin/promote
+  activation (409) now leaves the listener health plane unconfigured instead
+  of reporting `stopped`. The rebind backoff now resets to its 1 s floor after
+  a serve that stayed up for 60 s, so a one-off socket loss after a long
+  healthy run is not charged the 30 s ceiling. The `ha_resume_unfenced` page
+  for an HA config that cannot be read at boot and the read-only
+  leader-resume page are now queued until the alert webhooks load, so they
+  are no longer lost at boot; each is dropped if its condition cleared first.
+  A fencing grant that a leader resume, promotion or lease recovery took but
+  did not install (the HA config changed during the acquisition, shutdown
+  began, another HA transition claimed the node, or the promotion failed) no
+  longer leaves the node advertising that epoch with no role; the lease still
+  runs out its TTL. An ordinary config publish no longer re-adds a Control
+  Plane address that a terminal listener exit withdrew: a full publish now
+  always carries the committed address list, and only the owned address
+  publish changes it. While rewrite management identity is degraded, a
+  Control Plane activation or HA promotion no longer fails at its address
+  publish (full config publishes are still refused). A Control Plane listener
+  that ends terminally is reported down, and stops renewing the fencing lease,
+  before its address is withdrawn rather than after.
+
+- A damaged data volume could kill the gateway outright from the proxy request
+  path, with no log line and no containment available (CHAOS-74, §41 of the
+  chaos register). badger v4 reads every `.sst` table through a memory mapping
+  and removed the option to do otherwise, so when the pages behind that mapping
+  stop existing — the file shrinks, the volume detaches, a page fault returns
+  EIO — the read raises SIGBUS. Go delivers that as `fatal error: fault` rather
+  than a panic, so neither `recover()` nor `crashguard.go` could see it. The
+  Layer-2 community category lookup runs on the data path for every request that
+  resolves a host category, which made one damaged table a total, evidence-free
+  outage and, the damage being on disk, a restart loop rather than a recovery.
+
+  Reproduced against the real store and contained with
+  `debug.SetPanicOnFault`, which delivers a fault on mapped memory as a
+  recoverable panic; the guard is armed once per domain walk and re-panics
+  anything that is not a mapping fault, so a genuine bug still reaches
+  `crashguard` instead of being reported as a failing disk. A Linux node that
+  takes such a fault now latches Layer-2 categorisation off and keeps serving on the
+  admin-managed Layer 1, which is the existing posture for a store that never
+  opened. **The policy outcome is unchanged** — an affected host is still
+  "uncategorised", not denied.
+
+  Visibility was the other half. `culvert_catfeeddb_available` promises in its
+  own HELP text to mean "open and serving lookups" but was sourced purely from
+  the boot record, so it reported `1` for a store whose every lookup had stopped
+  answering. It now reports `0` on a latched degradation, alongside two new
+  counters — `culvert_catfeeddb_lookup_errors_total` and
+  `culvert_catfeeddb_memory_faults_total` — and a `category_feed_db` diagnostics
+  row that names the Layer-1-only impact and the restart that re-opens (and
+  quarantines) the store. The fault is recorded durably beside the store
+  (`<store>.faulted`), so that restart quarantines it with trigger
+  `runtime_fault` and re-creates it empty for the feed to re-sync — badger's
+  reopen error for a truncated table is not a recognised corruption signal, and
+  without the record every later start stayed Layer-1-only.
+  `culvert_catfeeddb_memory_faults_total > 0` is the
+  alerting rule to add: it means a node's data volume is damaging a live store.
+
+  Containment is **Linux-only**. A fault is contained only when its address can
+  be shown to lie in one of the store's mapped files, which is checked against
+  `/proc/self/maps`; anything else re-panics. On the Darwin and Windows release
+  binaries a mapping fault keeps the prior behaviour, and the
+  `category_feed_db` row says `runtime fault containment: unavailable on
+  <GOOS>`. Production deployments (Docker/OVA) are Linux.
+
+  Known limit: `SetPanicOnFault` is per-goroutine, so badger's own compaction
+  goroutines remain exposed. This closes the reachable, request-driven exposure,
+  not the class.
+
+### Performance
+
+- The destination host is now canonicalized **once per policy scan** instead of
+  once per category-scoped rule. `urlcat.Store.MatchesHost` /
+  `MatchesHostAdmin` and `effectiveCategoryView.MatchesCategory` each opened
+  with `host = hostutil.NormalizeHost(host)`, and
+  `hostCatScratch.matchesCategory` calls one of them per category-scoped access
+  rule per proxied request — so a scan re-derived the same canonical host once
+  per rule, and **twice** per rule on a signed-feed-armed deployment, where the
+  `catStore` and view matchers normalized independently.
+
+  Decomposing the probe (shipped taxonomy, 3-label uncategorized destination —
+  the clean-traffic case that cannot short-circuit; medians of n=5, 4-core Xeon
+  @2.10GHz, go1.26.8) put `NormalizeHost` at **45.97 ns of a 105.8 ns total,
+  43%** and the largest single term. The per-rule `RLock` previously recorded
+  as this path's open item is ~10.2 ns of it — the fourth-largest term. The
+  scan already held the value: `matchDestNorm` receives a once-per-request
+  `normHost` as a parameter and handed the matchers the *raw* host beside it.
+
+  `hostCatScratch.normHost()` memoizes it lazily (a scan with no
+  category-scoped rule still normalizes nothing) and the three matchers gained
+  `*Norm` entry points taking the canonical host; the old names survive as
+  normalizing wrappers, so every caller outside the scan is unchanged in cost
+  and behaviour. The hoist relies on **no idempotence property** —
+  `NormalizeHost` is not idempotent, since an empty ACE label decodes to
+  nothing (`NormalizeHost("a.xn--") == "a."`, `NormalizeHost("a.") == "a"`) —
+  because every consumer is handed `NormalizeHost(sc.host)`, the same function
+  on the same input the pre-hoist body used. Only *where* it is computed moves,
+  so no matching decision can change.
+
+  The scan entry points already held that value — `accessEvalInput.normHost`,
+  a `normHost :=` one line above the CDR scratch, and `authMatchScratch`'s own
+  memo — so the scratch is **seeded** from it rather than re-deriving it
+  (`newHostCatScratchNorm`), which also collapses the auth path's two memos of
+  one value into one. The seed's contract is `normHost == normalizeHost(host)`,
+  checked at all five production pairs and pinned by a gate that drives the
+  real `Evaluate` with hosts whose raw and canonical forms differ.
+
+  Measured: the per-rule probe **112.6 → 71.0 ns (−37%)**, both arms timed in
+  ONE run. The real `DestCategory` policy scan cannot be timed same-run (that
+  would need two production trees in one binary), so it is an **adjacent pair**
+  — identical command, identical machine state: **1 rule 191.7 → 157.6 ns,
+  10 rules 1035 → 933, 50 rules 2809 → 2519, 200 rules 9617 → 8452**, i.e.
+  **~10–18%**, with **0 allocations preserved on every path**.
+
+  An earlier draft of this entry quoted −28%/−38.6%/−44.3% for that scan.
+  Those were **cross-run and overstated the gain by roughly 3–4x**: the
+  baseline was measured hours before the post arm and this hardware drifted
+  enough to move the same pre-change tree from 17292 ns to 9617 ns at 200
+  rules. Run-to-run drift is up to ~12% even between adjacent pairs, so the
+  claim is the direction and rough magnitude, not a precise percentage.
+
+  One limit recorded rather than rounded away: the gain shrinks with core
+  count (50-rule interleaved parallel scan, same-run: −39.5% at 1 core,
+  −14.8% at 2, −8.7% at 4), because removing CPU work from a probe whose
+  critical section is unchanged moves the bottleneck onto `catStore.mu`. Both
+  arms take exactly the same number of read locks, so they converge under
+  saturation and the hoist is never the slower of the two. (Those figures
+  predate the lock-free membership probe in the next entry; the `*Norm` entry
+  points now read the same published forward view, so neither arm takes
+  `catStore.mu` any more.)
+
+  Relationship to the IDNA memo landed separately in this window: that memo
+  sits strictly BELOW `NormalizeHostStrict`'s already-canonical ASCII fast
+  path, so it makes the *slow* (A-label / U-label) branch cheap and leaves
+  the ASCII branch these figures were measured on untouched. The two are
+  complementary rather than alternatives: the memo collapses a repeat across
+  INDEPENDENT engines, which is the fan-out it was written for, while this
+  hoist removes the repeat inside ONE scan's per-rule loop, where the
+  multiplier is the rule count rather than the engine count. Re-measured on
+  the merged tree, the same-run per-rule probe reproduces at 141.8 → 89.9 ns
+  (−36.6%) against the −37% published here — the absolutes moved because the
+  hardware did, the ratio did not, which is why this entry quotes ratios.
+
+  Equivalence is the deliverable, not the speed: a divergence here is a
+  silently mis-enforced Allow/Deny rule. Both differentials run against
+  **verbatim frozen copies of the pre-hoist bodies** (comparing the new wrapper
+  against the new `Norm` function would be vacuous, since the wrapper is now
+  defined in terms of it), with randomized sweeps, their own not-vacuous
+  checks, and two fuzz targets (299k and 101k executions, no divergence). The
+  regression gate is **structural** because re-introducing a per-rule
+  `NormalizeHost` changes no decision at all — every differential and control
+  keeps passing while the cost silently returns — so
+  `TestWall_PerRuleCategoryMatchersTakeTheHoistedHost` AST-walks
+  `matchesCategory` and requires every membership matcher to be a `*Norm` entry
+  point handed `sc.normHost()`, tracked PER MATCHER rather than as an aggregate
+  count — a count of three is satisfied by three calls to the same entry point,
+  so the aggregate form passed when `MatchesHostAdminNorm` was replaced by a
+  duplicate `MatchesHostNorm`, leaving the admin tier unguarded (verified: the
+  old form returned `ok` against that mutation, the new one fails it).
+
+  A second structural wall pins that every SCAN seeds the memo
+  (`TestWall_ScanEntryPointsSeedTheCanonicalHost`). Swapping
+  `newHostCatScratchNorm` back to the lazy constructor is semantically
+  identical — the scratch then derives the same value itself — so every
+  differential, control, fuzz target and real-`Evaluate` gate keeps passing
+  while the scan canonicalizes the destination twice again. It covers all
+  three scan entry points (access-rule, CDR, Stage-1 auth) rather than the one
+  that was reported; the three single-shot callers hold no precomputed
+  `normHost` and are deliberately excluded.
+
+  Thirteen reintroduced defects were each verified failing — four against the
+  matcher wall, four against the differentials, two against the seeding
+  behaviour, and three against the seeding wall (one per scan entry point).
+
+  A pre-existing asymmetry is confirmed unchanged and now asserted so it is
+  not mistaken for a regression: the forward index keys a pattern without
+  IDNA-normalizing it while a query is normalized, so a unicode pattern is
+  stored verbatim and never matches the A-label form its own queries
+  canonicalize to.
+
+- The per-rule URL-category **membership** probe no longer takes a read lock.
+  `urlcat.Store.MatchesHost` / `MatchesHostAdmin` answer "is this host in
+  category C?" and are called once per category-scoped access rule per proxied
+  request (`hostCatScratch.matchesCategory`, deliberately not memoized — the
+  answer depends on the rule's category, not just the host). Each took
+  `s.mu.RLock` purely to read **one outer map entry**, and `RLock`/`RUnlock`
+  are two atomic read-modify-writes on one shared word — so every request in
+  the process wrote the same cache line once per category rule.
+
+  That is a throughput **ceiling**, not a constant cost. A 4-core CPU profile
+  of `BenchmarkStoreMatchesHost_Parallel` put **80.6% of all samples in the
+  `RLock`/`RUnlock` atomic** (41.1% + 39.8% cumulative) against ~15% doing the
+  real work, and the scaling curve is the finding: `MatchesHost` delivered
+  **0.56x** the throughput at four cores that it did at one — adding cores
+  *subtracted* throughput.
+
+  Both entry points now read an immutable view through an `atomic.Pointer`: a
+  single pointer load, with no read-modify-write on any shared word. Measured
+  on a 4-core Xeon @2.30GHz with **both arms timed in one run** (the `_Legacy`
+  benchmark arms call a verbatim copy of the pre-view body), medians of n=7:
+
+  | | 1 core | 2 cores | 4 cores | scaling 1→4 |
+  |---|---|---|---|---|
+  | `MatchesHost` before | 85.2 ns | 158.1 ns | 151.0 ns | **0.56x** |
+  | `MatchesHost` after | 83.7 ns | 43.0 ns | **21.3 ns** | **3.94x** |
+  | `MatchesHostAdmin` before | 97.1 ns | 109.7 ns | 154.6 ns | 0.63x |
+  | `MatchesHostAdmin` after | 95.1 ns | 47.4 ns | 23.8 ns | 4.00x |
+
+  End to end through the real policy scan
+  (`BenchmarkPolicyEvaluate_CategoryRulesParallel`, 50 `DestCategory` rules
+  over 12 categories / 480 patterns, uncategorized destination — the
+  clean-traffic case that cannot short-circuit): **8764 → 1025 ns/op at four
+  cores (8.55x)**, scaling **0.46x → 3.71x**, allocations unchanged at 0.
+
+  There is **no low-concurrency price and no gain either** — the serial arms
+  measure 1.007x / 0.991x / 1.020x, i.e. parity. An uncontended `RLock` is
+  cheap, so the entire win is the scaling, which is the axis the hardware this
+  appliance ships to actually runs on.
+
+  Semantics are unchanged exactly, which is the deliverable rather than the
+  speed: this is a policy membership matcher, so a divergence would be a
+  silently mis-enforced — or silently **unenforced** — Allow/Deny rule. The
+  equivalence is pinned by a differential against verbatim copies of the
+  pre-view bodies, and the publication contract three further ways (structurally
+  per writer, structurally as an inventory, and behaviourally through all twelve
+  public mutators), because a forgotten publish would leave the policy path
+  probing a stale view — a Deny rule keyed on a just-added category host would
+  fail **open**. The structural scan covers every non-test source file in
+  `internal/urlcat` and any receiver name, so a writer added in a new file or
+  under a renamed receiver is still caught. The two entry points now share one
+  probe body (`matchesHostIn`) so they cannot drift apart.
+
+  The publish's cost is a **benchmark, not a gate**. A wall-clock ratio bounded
+  at 1.25x was tried and removed: run the way CI runs every non-root package
+  (race detector + coverage + ~115 packages at once) it measured the shipped
+  implementation at 1.453x and, in the same run, the deep-copy defect it existed
+  to catch at 1.43x — converged, so it failed CI while no longer able to
+  distinguish health from the pathology it asserted against. The invariant is
+  asserted structurally instead, by map identity, which catches that defect
+  deterministically including under `-race`.
+
 ### Security
+
+- Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
+  not distrust compromised intermediate certificates. Culvert reaches it
+  through certificate verification (`x509.Certificate.Verify`, for example
+  the MCP acceptance PKI check). The `go.mod` toolchain line and both
+  Docker builder images move together; the `go` language minimum is
+  unchanged.
+- An inspected (TLS-decrypted) tunnel enforced policy on the CONNECT authority
+  but forwarded each inner request's own `Host` / `:authority` upstream verbatim,
+  and nothing compared the two (SEC-TUNHOST-1). A CONNECT is authorized **once**:
+  `handleTunnelInspect` derives `hostOnly` from the CONNECT line and everything
+  downstream is decided against it — `policyStore.Evaluate` ran on it, the
+  decryption profile resolved on it, the upstream TLS `ServerName` is it, and
+  every log row, scan verdict and CDR decision the tunnel produces is attributed
+  to it, because `runInspectExchange` threads `ex.host` and never `ex.req.Host`.
+
+  The decrypted stream, however, carries its own destination on every request.
+  `rq.Write` writes `req.Host` on the H1 leg and `upstreamCC.RoundTrip` sends it
+  as `:authority` on the H2 leg, so a client could open a tunnel to a destination
+  policy allowed and then ask that connection for a different one:
+
+      CONNECT allowed.example.com:443   → evaluated, allowed, MITM established
+        GET / Host: blocked.example.com → forwarded verbatim
+
+  The upstream connection is pinned to the CONNECT target's address, so this is
+  not SSRF — but any shared front end (a CDN, a cloud load balancer, any
+  multi-tenant vhost) routes by `Host`/`:authority`, so the response is the one
+  the **client** named, not the one policy allowed. Policy is consulted once, on
+  a host the client then declines to use, and the request log records the
+  authorized host for a retrieval of the unauthorized one, so the bypass is also
+  invisible to the operator reviewing traffic afterwards. Scan and CDR verdicts
+  are mis-keyed the same way. The H2 path's own comment had recorded the gap as a
+  pending refinement ("strict `:authority` pinning / 421 handling").
+
+  The inner host is now pinned to the CONNECT authority in `runInspectExchange`,
+  ahead of the round trip and of the header scrub — so an unauthorized
+  destination is never fetched, and the refusal does not depend on anything the
+  scrub rewrites. Both sides are reduced identically (port and IPv6 brackets
+  stripped, then IDNA-canonicalized), so the spellings the matchers already fold
+  to one destination still pass: case, a trailing dot, an explicit port, and a
+  U-label against the A-label the CONNECT carried. The pin anchors on the CONNECT
+  authority rather than the client's SNI deliberately: a client controls both its
+  SNI and its `Host`, so it can make them agree with each other and still name a
+  destination policy never saw — only the authorizing value is a safe anchor.
+  Fail-closed: a host that cannot be canonicalized on either side is refused
+  rather than compared loosely. Refusing cannot break a conforming client, since
+  the forged leaf carries a single SAN (`DNSNames` is exactly `[]string{host}`),
+  so HTTP/2 connection reuse for a second origin (RFC 9113 §9.1.1) is never
+  certificate-authorized; the client may open a tunnel for the host it actually
+  wants, which then receives its own policy decision. One gate serves both
+  protocols because `runInspectExchange` is the shared enforcement seam
+  (invariant C5).
+
+  **Scope, stated rather than implied:** the pin does not fire when the CONNECT
+  authority is an IP literal. A client that resolved the name itself legitimately
+  CONNECTs to an address and names the origin in SNI and `Host` (`curl
+  --resolve`, any client with its own resolver, and the shape this repository's
+  own inspect harness models by passing `target` and `serverName` separately to
+  `connectAndTLS`), so there is no name to compare and refusing would break
+  supported traffic. A deployment whose rules authorize by IP or CIDR therefore
+  still gets no name-level enforcement on the inner request, exactly as before.
+  Closing that means *evaluating* policy on the inner host rather than comparing
+  it — re-running the rulebase, the decryption profile and the attribution per
+  inner request — which is a policy-engine change, not a gate, and is the
+  recorded follow-up. This change closes the case that is both exploitable today
+  and decidable at this seam: a tunnel authorized for a **name**, reused for a
+  different name.
+
+  **Correction round — an absent inner authority is not harmless (Codex P1, PR
+  #1632).** The first revision treated an empty inner host as pinned, reasoning
+  that it names no competing destination and that an origin requiring a `Host`
+  would reject it anyway. The second half was the real error: it assumed the
+  ORIGIN's behaviour instead of enforcing here, which is the same fail-open
+  asymmetry this gate exists to remove. Measured against the tree rather than
+  argued — `runH1InspectLoop` reads inner requests with `http.ReadRequest`, NOT
+  through an `http.Server`, so the server's "missing required Host header" 400
+  never runs; `ReadRequest` accepts `"GET / HTTP/1.1\r\n\r\n"` and yields
+  `req.Host == ""`, and `Request.Write` then serializes a literal `Host: ` and
+  returns no error. A shared front end with a default or fallback virtual host
+  (an nginx `server_name _`, a CDN catch-all) answers such a request from that
+  vhost — a destination policy never evaluated, with the scan verdicts and the
+  log row still attributed to the CONNECT host. Empty inner hosts are now
+  refused, ahead of the IP-literal scope skip, because the default-vhost concern
+  does not depend on the tunnel target being a name. Substituting the authorized
+  authority was considered and rejected: it would have the gateway synthesize a
+  `Host` the client never sent. `TestInnerHostPin_EmptyInnerHostIsRefused` gates
+  it and states the mechanism rather than trusting the claim — it proves against
+  the real stdlib that the request is both accepted by the reader this path uses
+  and serialized with an empty `Host`, then asserts the refusal, so the branch
+  cannot be reverted by repeating the original reasoning.
+
+  **Correction round 2 — the comparison must not repair what the wire keeps
+  (Codex P1, PR #1632).** Square brackets are legal only around an IP literal,
+  but `hostutil.StripHostPort` ends in `strings.Trim(host, "[]")` — correct for
+  its own callers, which must accept the de-bracketed IPv6 shapes that reach
+  scan/bypass lookups — so it turned `Host: [allowed.example.com]` into the bare
+  authorized name. Measured, not argued: `http.ReadRequest` accepts that header
+  and keeps the brackets in `req.Host`, and `Request.Write` forwards those bytes
+  **verbatim**. So the pin saw a match for the authorized host and forwarded a
+  bracketed authority no vhost is configured for, letting a shared front end
+  answer from its default vhost — this gate's own bypass, reached *through* the
+  comparison rather than around it. The inner authority's bracket syntax is now
+  validated before anything is stripped: brackets must enclose a value that
+  parses as an IP, and a stray, unmatched or nested bracket is refused. The
+  check sits in this gate, not in `StripHostPort`, because that helper is a
+  shared seam the threat feed, DPI scanner, scan-exclusion matcher, autoexclude
+  cache and traffic redactor all read through. Only the inner side is checked:
+  `handleTunnelInspect` derives `hostOnly` through `net.SplitHostPort`, so a
+  bracketed CONNECT authority is already de-bracketed consistently for policy,
+  the dial and the upstream `ServerName`.
+
+  The sibling spellings were measured too, and are deliberately still accepted
+  because they are not this defect: a U-label is sent as the A-label by
+  `Request.Write` (`bücher.example.com` goes out as `xn--bcher-kva.example.com`),
+  so its forwarded bytes already match what was authorized; the `Host` field is
+  case-insensitive; and a trailing root dot is a valid authority for the same DNS
+  name. `TestInnerHostPin_BracketedDNSAuthorityIsRefused` gates the refusal and
+  pins the U-label control beside it, both asserted against the real stdlib
+  before the predicate is consulted, since the defect is exactly that the
+  comparison and the wire disagreed.
+
+  New counter `culvert_proxy_inner_host_mismatch_blocked_total` (always emitted,
+  so a flat zero means "no client has done this", never "the gate is off") and an
+  `INNER_HOST_MISMATCH` log line naming **both** hosts, since either alone says
+  nothing; both are client-influenced and go through `sanitizeLog` + `%q`
+  (CWE-117). Gates: the defect gate asserts the upstream was never *contacted*,
+  not merely that the exchange was blocked — a refusal taken after the round trip
+  would still have fetched the unauthorized resource — and was verified failing
+  against the verbatim pre-fix body. Controls pin that the authorized
+  destination still flows, that the client-resolved-address shape still flows on
+  both IPv4 and IPv6, that a self-consistent SNI/`Host` pair naming an
+  unauthorized destination is still refused (this fails CI if the pin is ever
+  "simplified" to compare against the SNI), and that `MatchFQDNNorm`'s
+  subdomain-inclusive semantics — correct for a policy rule, wrong here — are not
+  reused for the comparison. Plus the boundary table (case, trailing dot,
+  U-label/A-label, ports, IPv6 brackets, empty hosts, unnormalizable input), the
+  403 wire bytes on each protocol responder, and 400 concurrent refusals under
+  `-race`.
+- An admin session was any session the cookie was *named* after
+  (SEC-UISESS-1). `ps_session` (the proxy end-user cookie,
+  `setSessionCookie`) and `ps_ui_session` (the admin operator cookie,
+  `setUISessionCookie`) are signed with the same HMAC key and carry the same
+  `Session` payload, with no audience or purpose field between them — so the
+  cookie name was the only separation, and the caller picks the name.
+
+  Both fields that could have refused the replay declined instead.
+  `sessionRoleOrReject("")` resolves to `RoleAdmin`, deliberately, for
+  pre-RBAC sessions minted before the role field existed — and a proxy
+  session never sets `Role`, so every `ps_session` carried exactly the empty
+  string that branch promotes. The roster-existence backstop that would have
+  caught the unknown subject was gated on `sess.Provider == "local"`, and a
+  proxy IdP session carries the IdP profile id, so the check was skipped
+  rather than failed.
+
+  The result was reproduced end to end by minting through the real proxy
+  issuer and re-presenting the cookie value under the admin cookie name:
+  HTTP 200 with injected role `admin`. An ordinary proxy end user who
+  completed a normal captive-portal OIDC/SAML login with their own corporate
+  credentials — no forgery, no XSS, no MITM, no knowledge of the signing key
+  — was a control-plane admin, above every handler `requireRole` gate and
+  every C2 metadata role. The CP distributes one signing key to every DP, so
+  the token was admin on every node in the cluster. This contradicted
+  `docs/enterprise/IDENTITY-AND-ACCESS-DEPLOYMENT.md`, which states that
+  external IdPs authenticate proxy end users and "never issue an admin
+  session" (GAP-IAM-02).
+
+  The fix is the narrowest one available. `setUISessionCookie` is the only
+  minter of `ps_ui_session` and has always stamped `Provider "local"`, so
+  that value becomes the named constant `uiSessionProvider` — read by the
+  issuer and by `uiAuthMiddleware`, deliberately one constant so the two
+  cannot drift open — and a UI session naming any other provider is refused.
+  The roster check loses its provider guard, which is not a widening: it
+  already applied to every local session, and a non-local one is now refused
+  by the clause before it. Together they leave the empty-role compatibility
+  branch reachable only for a local session whose user is still on the
+  roster, which is the pre-RBAC single-admin deployment it was written for.
+  Nothing on the wire or on disk changes — admin cookies already carry
+  `Provider "local"` — so no operator session is invalidated. An explicit
+  `aud` claim would be the deeper fix and is recorded for follow-up; it would
+  refuse every cookie currently in flight.
+
+  Gates: a defect gate that mints through the production proxy issuer and
+  asserts 401, a class gate over foreign providers crossed with every role
+  value (including an explicitly elevated one, which a restored proxy-side
+  roster could carry), and three controls — the pre-RBAC empty-role local
+  session still resolves to admin, enrolled local roles pass through at their
+  exact role, and a local session for a deleted user is still refused, so the
+  fix did not trade one bypass for another.
+
+- The CDR circuit breaker could strand itself in half-open for the whole
+  process lifetime, silently disabling content sanitization (CHAOS-72).
+  `Allow()` hands out a half-open probe reservation that only
+  `OnSuccess`/`OnFailure`/`Reset` release, and the half-open branch had no
+  timer of its own — the `ResetTimeout` re-check lives only under
+  `cbStateOpen`. A single caller that took a reservation and never recorded
+  an outcome therefore denied every later `Allow()`, verified to still deny a
+  simulated year later.
+
+  `runCDRStage` guaranteed exactly that unpaired `Allow()` on the first
+  inspected upload past `ResetTimeout`: its liveness gate ran
+  `cdrActiveClient()` → `Pick()` → `Allow()`, which issues no RPC and so can
+  never report an outcome, and `safeCDRSanitize`'s own `Pick()` was then
+  denied and took the skip-CDR branch. `Reset()` has no production caller and
+  `cdrClientPool.replace` deliberately carries breaker state across pool
+  rebuilds, so nothing cleared it short of a restart. Under the default
+  fail-OPEN `cdr.fail_mode` every document was then forwarded **unsanitized**,
+  indefinitely, signalled only by the `culvert_cdr_pool_breaker_state` gauge.
+
+  Two independent guarantees now hold. `HalfOpenProbeTimeout` re-arms a budget
+  whose reserved probe never reported an outcome, so the breaker self-heals
+  against any non-recording caller; it is the larger of 2×`ResetTimeout` and
+  the configured per-file deadline (`cdr.timeout_sec`, seeded from the config
+  being applied) plus a 30s grace, with a 90s floor, so it cannot preempt a
+  probe that is merely slow, and each re-arm is counted as `staleProbes` in the
+  breaker stats because a non-zero value means some caller is taking a
+  reservation it cannot release. And `Breaker.Available()` /
+  `cdrAnyInstanceAvailable()` give the hot path a non-consuming liveness gate,
+  leaving the probe for the call that can record the outcome. No persisted
+  state, wire format or configuration default changes.
+
+  The same reservation leaked on two more paths. Inside `safeCDRSanitize`
+  the instance is picked (reserving the probe) before the oversize gate,
+  which needs that instance's profile cap, and before the cache lookup —
+  both return without calling Sluice and so without an outcome, so an
+  oversize file arriving first after each re-arm kept the breaker half-open
+  indefinitely. And the status/UI/diagnostic selectors (`cdrActiveClient()`
+  behind `GET /api/cdr/config` and five other admin handlers, plus the
+  revoke/recovery client pickers) reserved through `Pick()`/`Allow()` for a
+  read. The API is now split by whether the caller issues the data-path
+  RPC. Every `Sanitize` caller — `safeCDRSanitize` and the admin
+  `POST /api/cdr/test` — reserves (`cdrPickPooledReserved`), owns the
+  reservation, records the outcome on its RPC paths, and hands it back
+  through a deferred, outcome-neutral, generation-scoped `Release` on every
+  return that records none (oversize, cache hit, client-side
+  `file_too_large`, panic). An admin test that finds no free probe slot gets
+  `503 CDR is recovering; retry shortly` instead of running uncounted beside
+  the recovery probe. `Pick()`, `cdrActiveClient()` and every other caller
+  select through the non-consuming `Available()`; the control-plane RPCs
+  (Health, RenewCert, RevokeClient, EnrollStatus) are deliberately outside
+  the data-path breaker and never feed it. Two AST walls pin both
+  directions: no production code reserves except the Sanitize callers
+  (`TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath`), and every
+  Sanitize call reserves and defers its Release, while every control-plane
+  call site is individually classified
+  (`TestCDRRPC_EverySanitizeCallOwnsAReservation`).
+
+  The breaker's coupled state — state, reset timer, half-open generation,
+  newest-reservation stamp, probe budget — is now changed under ONE
+  per-breaker mutex per transition instead of as independent atomics, which
+  had admitted a failed probe's cleanup erasing a concurrently re-armed
+  half-open episode (half-open with no generation: every reserver spun) and
+  two stale re-armers both admitted past a one-probe budget. The critical
+  sections are a few loads and stores, never span the RPC, and run once per
+  inspected document against a sanitize RPC measured in milliseconds. The
+  wedge escape measures staleness from the newest reservation rather than
+  the arm time, so a slot handed back and re-taken is never reclaimed while
+  live.
+
+  Probe age and the reset timer now run on a monotonic clock. They had been
+  differences of wall-clock `UnixNano` readings while the probe's own deadline
+  is monotonic, so a forward wall-clock step of `HalfOpenProbeTimeout` (NTP
+  correction, VM resume) declared a live probe stale and admitted a
+  replacement, and a backward step held an open breaker open for the size of
+  the step. Outcomes are also generation-aware: `OnSuccess`/`OnFailure` take
+  the reservation the RPC ran under, and a reservation that no longer belongs
+  to the current episode — a probe the wedge escape reclaimed, or a request
+  admitted before the breaker opened — is dropped and counted as
+  `staleOutcomes` in the breaker stats. Its late failure previously reopened
+  the breaker under the replacement probe (a fail-open window), and its late
+  success closed it past the probe budget. `openedAt` in the stats stays wall
+  time for display. The same rule covers closed-state reservations: every
+  reservation records the state episode it was admitted under, the episode
+  advances on every transition (closed→open, open→half-open, half-open→closed
+  or open, `Reset`), and an outcome counts only for its own episode. Without
+  that, closed-state RPCs still in flight when the breaker tripped and then
+  recovered fed their late failures into the new closed episode's threshold,
+  and `FailureThreshold` of them reopened a just-recovered breaker.
+
+  `cdr.timeout_sec` is bounded below (30s) but not above, and its conversions
+  wrapped instead of saturating. At `9223372036` the deadline fits but
+  deadline + 30s grace wrapped negative, so `HalfOpenProbeTimeout` fell to the
+  90s floor and could reclaim a live probe; one second more and the
+  seconds→duration conversion itself wrapped, giving the Sluice client and the
+  per-call context a negative deadline that expired every `Sanitize` at once.
+  Every conversion of the setting (client deadline, call context, breaker
+  seed) and the probe-timeout arithmetic now saturate at the largest
+  `time.Duration`; accepted values and the configuration surface are unchanged.
+
+- The viewer-readable operator contract rendered **admin-only roster state**
+  (SEC-DIAG-ROSTER-1). `GET /api/diagnostics` is deliberately `RoleViewer` — a
+  management-plane health surface must not require admin — but the oversize
+  admin-username row added in this window became the first contract row derived
+  from the admin roster (`cfg.ListUIUsers`/`GetUser`/`UserHasTOTP`), which
+  `GET /api/auth/users` gates at `RoleAdmin` on every method. With no role
+  filtering in `apiDiagnostics`, a viewer or operator could read the affected
+  account count, the longest username's byte length, that a legacy single-user
+  login exists and is oversize, whether it is mirrored into the roster, that
+  login's effective role interpolated verbatim, and **whether at least one
+  affected account has TOTP enrolled**.
+
+  The second-factor fact is the one with real attacker value: it tells a
+  lower-privileged insider — or a stolen read-only monitoring session — whether
+  a high-value administrator is single-factor, which is precisely the input to
+  choosing a credential-stuffing or phishing target. Before the row existed the
+  only signal was a one-shot boot log line, not reachable through the API at
+  all, so this was a new cross-role flow (CWE-497/CWE-200/CWE-1220,
+  OWASP A01:2021). `TestApiDiagnostics_NoSensitiveValues` did not catch it and
+  is not vacuous — it is a secret-*material* wall (session-secret symbols, PEM,
+  `/data/` paths, long hex runs) and identity metadata was outside its scope.
+
+  `redactContractForRole` now withholds that detail below admin. The row stays
+  **visible** at every role (code, `warn` status and the rolled-up verdict are
+  unchanged, so monitoring and the SPA still see the condition) and only the
+  roster-derived detail is withheld — hiding the row would conceal a live
+  management-plane fault and is pinned by a control. The redacted message is a
+  constant carrying no roster-derived value, an `ok` row is never redacted, and
+  the decision is fail-closed by construction: the only input that un-redacts
+  is a proven admin. No allow/deny decision, proxy path, or admission behaviour
+  changes. **Operator-visible change:** viewers and operators now see this one
+  row without its remediation text; sign in as an admin for the full
+  remediation.
+
+  **Review round (P1):** the first version wired the redaction into
+  `/api/diagnostics` only, while `GET /api/health/explain` renders the same
+  contract at the same viewer floor and returned it raw — a complete bypass
+  through the alternate endpoint. Both renderers are now redacted, and a wall
+  enumerates every caller of `buildOperatorContract` repo-wide so a third
+  renderer fails the build until it is redacted or granted a stated exception
+  (the support-bundle collector is the one recorded exception: a separate,
+  admin-approved trust boundary that writes through the bundle redactor).
+
+- The **rendered audit `Actor` is now bounded** (`boundAuditActor`, applied to
+  every `AuditEntry` at the single audit write chokepoint `addAuditEntry` behind
+  `auditAdd`, `store.go`).
+  `truncateForAudit` was being applied by call sites to the audit **Object**,
+  which made each one look bounded, while `auditEvent` derives the **Actor**
+  independently and rebuilt `name + "@" + ip` from the session with no bound —
+  so a CONFIGURED account name longer than the 64-byte cap (which
+  `-user`/`auth.user` and `--reset-password` can persist, and which is
+  deliberately never refused for its length) was retained full-length in the
+  audit ring. Measured: a 300-byte name produced a 314-byte Actor. Low severity
+  (the name is configured, not attacker-chosen: a retention bound, not an
+  unauthenticated amplifier). Found by Codex review of the
+  `auth.password_change.fail` entry added in this same window, whose first
+  version claimed in its comment that the actor was "still truncated" and whose
+  gate was named `AuditActorIsBounded` while asserting only on `Object`. The
+  bound (`boundAuditIdentity`) keeps a 64-byte prefix plus the original length
+  AND a short SHA-256 digest of the full name, so two distinct oversize accounts
+  stay distinguishable in the trail. **`auditActor` itself stays the full,
+  unbounded principal**: a first version of this fix bounded it, and Codex
+  review showed that is not display-only — the MCP publication and approval
+  handlers cast it to `approval.PrincipalID`, so two distinct admins sharing the
+  bounded prefix and length compared equal and the second one's legitimate
+  four-eyes approval was refused as self-approval. Non-audit consumers (MCP
+  four-eyes and tool-trust, policy learning, CDR receipts, release dispatch,
+  support recipients) therefore keep main's behaviour, and so does the PAC
+  intent's `AuditActor`, which is bounded when its entry is rendered. A second
+  Codex round found that a bound living only in `auditEventDiffID` was bypassed
+  by every producer that builds an `AuditEntry` itself — the release
+  `DispatchService` handed the full `auditActor` straight to `auditAdd` — so the
+  bound moved to the one write chokepoint every producer reaches, the two direct
+  `audit.Add` callers were routed through it, and `TestAuditActorBoundWall`
+  fails if any non-test file in main or `internal/` reaches `audit.Add` another
+  way or `auditAdd` stops pointing at the chokepoint. Gates: `auth_change_password_reauth_audit_test.go` asserts both rendered
+  fields and that `auditActor` is unbounded, with a control requiring an
+  ordinary name to pass through verbatim; `audit_actor_principal_test.go` drives
+  the four-eyes publication flow with two colliding names (verified failing
+  against the bound-at-`auditActor` tree) plus a self-approval control. **The
+  rules: a gate must assert the property it is named for, and a length bound
+  belongs to the rendering, never to a value something compares for identity.**
+
+- The **cluster CA private key** backup completed SEC-SECRETWRITE-1. That sweep
+  was scoped to the four key writers introduced in its own review window, so
+  `backupCAFiles` (`enrollment.go`) — which predates it — still wrote
+  `cluster-ca.key.bak` and `cluster-ca.crt.bak` with `os.WriteFile` on a fully
+  predictable path, with both halves of the same defect reachable: the open
+  follows a symlink planted at the path, and `perm` applies only on *creation*,
+  so a `0666` file pre-created at `cluster-ca.key.bak` receives the key and
+  stays world-readable. The asset is larger than any of the four already fixed —
+  the cluster CA signs every Data Plane node certificate, so disclosure lets an
+  attacker mint a node cert, impersonate a DP to the Control Plane and receive
+  the full `ConfigSnapshot`, which carries `SessionHMAC` and the IdP secrets.
+  Both writes now use `fileutil.AtomicWrite` (random `O_EXCL` temp beside the
+  target, chmod + fsync, rename over it). The POSTURE is unchanged: the
+  plaintext branch is still plaintext (the recorded CA-3 trade) and the
+  encrypted branch already routed through `secret.SealToFile` → `AtomicWrite`;
+  only the primitive changed. Gates: `enrollment_ca_backup_secretwrite_test.go`
+  — 3 defect gates verified failing against the reintroduced `os.WriteFile`
+  shape, plus 4 controls verified failing against a `backupCAFiles` that writes
+  nothing, because deleting the dual-CA overlap recovery copy is the cheapest
+  way to pass every defect gate.
+
+- A **failed re-authentication on the admin plane is now audited**
+  (SEC-REAUTH-AUDIT-1). `POST /api/auth/change-password` re-verifies the
+  caller's current password, and by SEC-BASIC-1's own analysis it is the only
+  credential check in the admin API that consults no lockout — a deliberate
+  trade, since charging `loginLimiter` there would let a session holder lock
+  themselves out of the login flow. But it audited only on SUCCESS, so the one
+  unlocked password oracle was also the only silent one: a caller holding a
+  stolen or hijacked session could guess the account's password at the mutating
+  `apiLimiter`'s rate, indefinitely, with no trace in the compliance record —
+  and the password is durable persistence that outlives the session being
+  revoked (CWE-778 / OWASP A09:2021). The rejection now emits
+  `auth.password_change.fail` with a bounded actor and object, deliberately
+  NOT reusing `auth.password_change.refused` (which `refuseRosterChange` already
+  uses for the persistence refusal — an operator must be able to tell "wrong
+  password" from "the disk failed"). The lockout trade-off is unchanged; this
+  adds the missing EVIDENCE and alters no authentication decision. Gates:
+  `auth_change_password_reauth_audit_test.go` — 4 defect gates verified failing
+  against the pre-fix branch, plus 3 controls, two of them verified failing
+  against the obvious wrong fix of auditing unconditionally on entry.
+- An explicitly logged-out session cookie was still accepted for up to one
+  second (SEC-REVEXP-1). Two predicates decided whether a session's lifetime
+  had ended and they disagreed in the fail-open direction: `Decode` accepts
+  while `time.Now().Unix() <= s.Exp`, while the revocation list retained an
+  entry only while `!time.Now().After(exp)`. Every production revocation
+  expiry is a whole second (`revokeSessionCookie` stores `time.Unix(s.Exp, 0)`,
+  `MergeRevocations` stores `time.Unix(e.Expiry, 0)`) and `time.Now()` carries
+  a sub-second remainder, so for the whole wall-clock second numbered `s.Exp`
+  the revocation was evicted — and `delete`d — while the cookie it named was
+  still honoured.
+
+  Reproduced against the real `Decode`: a session with `Exp == time.Now().Unix()`,
+  revoked the way the logout path revokes it, reported `IsRevoked=false` and
+  `Decode err=<nil>`. `ExportRevocations` applied the same test, so the hole
+  also propagated: the entry vanished from the on-disk revocations file and
+  from the next DP→CP gossip export on the same tick. The window is predictable
+  to anyone holding the cookie, because `exp` is in it.
+
+  There is now one oracle (`internal/session/revocation_expiry.go`) and the
+  revocation list is the side that moved, because a revocation must outlive the
+  session it revokes and never the reverse. `Decode` was deliberately left
+  alone: tightening it would shorten every session and change the meaning of
+  the `exp` claim this appliance signs into a cookie. The change can only
+  retain an entry longer — by under one second — and never drop one sooner, so
+  it cannot resurrect a session, refuse a legitimate logout, or unbound the
+  list. Applied at all four sites that decided the question: `IsRevoked`,
+  `IsUserRevoked`, `ExportRevocations` and `MergeRevocations`.
+
+  Gates: 9 new tests in `internal/session/revocation_expiry_test.go` — **7
+  regression gates**, each measured to fail against the pre-fix predicate and
+  pass after it (the differential against `Decode`, the map-level boundary, the
+  persistence and cluster-merge paths, the username-keyed list that gates a
+  deleted account, and a concurrent storm across all five entry points under
+  `-race`), plus **2 controls** that pass under both predicates by design and
+  are therefore not regression evidence: `UnambiguouslyPastEntriesStillEvict`
+  (2 s / 1 min / 24 h old entries still evict — had it flipped, the fix would
+  have made the list an unbounded leak) and `MalformedPeerExpiries` (`Expiry` of
+  `0`, `-1`, `-(1<<40)` refused, none panics — widening retention must not
+  widen what a peer can inject). An earlier revision of this entry claimed all
+  of them failed pre-fix; that was wrong and is corrected here, because
+  presenting a control as a regression gate makes the evidence irreproducible.
+
+  One pre-existing assertion (`TestRevocationList_PastExpiryEvicts`) used a
+  `-1ms` expiry, which is inside the current second and therefore no longer
+  expired; it now uses `-1m` and the boundary it used to straddle is pinned by
+  two of the new gates.
+
+  Review of the rest of the in-flight change set — the IDNA memo, the urlcat
+  lock-free read view, the config BOM fix, and four reported findings against
+  branches this change does not own — is recorded in
+  `docs/engineering/security-reviews/2026-10-11-in-flight-session-and-category-plane-window.md`.
+
+- Distributed rate limiting could admit a request over the cluster-wide limit
+  whenever a Control Plane broadcast landed in the middle of a decision.
+  `AllowClusterAware` samples its clock before taking the shard lock and hands
+  that instant to `FreshCount`; the gossip loop's `ApplyRemoteCounts` stamps
+  the broadcast with its own `time.Now()`. A broadcast applied between the two
+  steps therefore carried a stamp a few microseconds *ahead* of the decision's
+  clock, `FreshCount` computed a negative age, and CHAOS-61's clock-rollback
+  rule zeroed the remote half of the decision — the node decided on its local
+  count alone and admitted (observed in CI as
+  `TestDistributedAdmission_ProductionWiring` admitting the SOCKS5 leg, 6 local
+  + 2 remote against a limit of 8, with gossip every millisecond).
+  `ClusterFreshness` never had the defect because it loads the stamp and then
+  reads the clock, so diagnostics reported "fresh" while enforcement treated
+  the same instant as stale. `FreshCount` now re-reads the clock once, only on
+  a negative age and after the stamp was loaded: a stamp still in the future
+  against that read is a genuine rollback and stays stale (all 17 CHAOS-61
+  gates unchanged); one that merely postdates the caller's clock is fresh. The
+  steady-state hot path takes no extra clock read. Gates:
+  `internal/admission/cluster_ratelimit_inflight_broadcast_test.go`
+  (deterministic injected-clock gate RED on the previous code; an end-to-end
+  gate through `AllowClusterAware` that caught 2 fail-open admissions in 5000
+  on the previous code; and the rollback control).
+
+- The Control Plane → data-plane snapshot apply replaced the IP filter by
+  storing a freshly built filter into the package-level `ipf` handle, which
+  `proxy.go` and `socks5.go` read on every request with no synchronization
+  (RISK-030). That is a data race on the first admission gate of an inline
+  gateway — undefined behaviour under the Go memory model — reproduced with
+  `go test -race` on main. The apply now replaces the live filter's contents in
+  place through the new `IPFilter.Replace`: one writer lock, one immutable view
+  publish, so a lock-free reader observes the previous configuration or the new
+  one and never an intermediate, and the handle itself is never written after
+  its declaration (the posture `rl` and `bl` already had). No allow/deny verdict
+  changes: a differential gate compares every mode, including the fail-closed
+  corrupt one, against the previous fresh-filter shape. A source wall now
+  rejects any production reassignment of `ipf` or `rl`, and the snapshot test
+  fixtures bind fresh owners into both handles instead of restoring the object
+  the apply mutated. Gates: `controlplane_snapshot_ipf_race_test.go`
+  (`TestRISK030_*`, RED under `-race` against the previous code),
+  `TestIPFilterReplace_*` and the `Replace` republish case in the IPFilter
+  mutator inventory.
 
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
@@ -68,8 +937,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   rather than dropping the account, and the session resolver splits the compat
   branch so `""` still means admin for pre-RBAC deployments while every other
   unenrolled value is refused with a 401 and a cleared cookie. The clamp is
-  surfaced as `culvert_ui_roster_role_clamped_total` and as
-  `uiRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero.
+  surfaced as `culvert_admin_roster_role_clamped_total` and as
+  `adminRosterRoleClamped` on `/healthz` and `/api/stats` when non-zero. The
+  earlier names `culvert_ui_roster_role_clamped_total` and
+  `uiRosterRoleClamped` (T-64) are still emitted with the same value as
+  deprecated aliases for one release window.
 - An unauthenticated client could park a gateway core for minutes with one
   request by choosing a very long destination host (CHAOS-69, register rows
   PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,
@@ -151,6 +1023,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   disagree, and an unusable incoming secret never counts as evidence that the
   key changed.
 
+- **The tracing-header bound is now proven over a socket, and one of its stated
+  exposures was not reachable (SEC-REQID-2).** Every SEC-REQID-1 gate drove
+  `httptest.NewRequest` + `Header.Set`, which installs a header value the wire
+  may not be able to deliver — the trap `bootstrap_host_injection_test.go`
+  already exists for, and the reason the Host-header bound carries an empirical
+  wall while these headers carried none. Measured against a real `net/http`
+  server: of 256 byte values, **224 are delivered into a header value verbatim
+  and 32 draw a 400 before the handler runs** — exactly `0x00`–`0x1F` minus
+  `TAB`, plus `0x7F` — because `textproto.ReadMIMEHeader` refuses them, and
+  `setupRequestTracing` has exactly one caller whose request always comes from
+  that parser. So `ESC`, `NUL` and `BEL` never reached a log line by any path,
+  and the claim that they did (in the code comment, this changelog and the
+  operator runbook) came from measuring the function rather than the wire; all
+  three are corrected. The archived agent note still carries it
+  (`docs/agent-context/history/observability-and-alerts.md`), and that copy is
+  hash-frozen by design — all 108 preserved blocks must reconstruct the
+  original `CLAUDE.md` byte for byte — so the correction is recorded in
+  `docs/agent-context/errata.md`, the mechanism that tree provides for a
+  verified conflict in the preserved guide, rather than by editing the
+  archive. The bound is **not** redundant for it: it is
+  load-bearing on 130 delivered byte values — `TAB`, `SPACE` and every byte
+  `0x80`–`0xFF` — and the length half is reachable in full. Seven new gates
+  drive the real `setupRequestTracing` behind a real listener and pin the
+  delivered/refused partition in both directions, so a future Go release that
+  widens what a header value may carry fails the build instead of quietly
+  widening what reaches the forensic log. No behaviour change: bound, charset,
+  counters and emitted bytes are untouched.
+
 - Client-supplied tracing headers reached the process log unbounded
   (SEC-REQID-1). `setupRequestTracing` runs on 100% of proxied traffic — the
   second statement in `handleRequest`, ahead of the connection limiter, the IP
@@ -162,9 +1062,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   header, and the forwarded request. The only sanitisation was `strings.ReplaceAll`
   for CR and LF — the CWE-117 barrier, which correctly stops whole-record forgery
   but is not what `sanitizeLog` does, since `sanitizeLog` scrubs every byte below
-  `0x20` and `0x7F`. So `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` reached the
-  forensic log verbatim, and a space could inject extra `key=value` tokens into
-  the decision line's brace block. Nothing bounded the length at all: the proxy
+  `0x20` and `0x7F`. A space or a `TAB` could therefore inject extra `key=value`
+  tokens into the decision line's brace block, and any byte `0x80`–`0xFF` reached
+  the log unchecked. (No other control character was among the reachable cases —
+  see the SEC-REQID-2 entry above, which corrects an earlier version of this
+  paragraph.) Nothing bounded the length at all: the proxy
   listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default was the only
   ceiling, and eight requests carrying a 512 KiB request id wrote 4,194,968 bytes
   into the process log — the same amplification CHAOS-63 measured against the
@@ -466,6 +1368,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   itself is a repository-settings action an owner must still take; this change
   touches repository content only.
 
+- The MCP live side-effect boundary's pre-send re-ask is documented and its
+  concurrency premise is now pinned. PR #1370 added a second authority re-ask
+  inside the upstream client's TLS dialer, after the handshake and before
+  anything is written — the right place for the check, but net/http runs a dial
+  on its own goroutine (`Transport.queueForDial` → `go dialConnFor`), and that
+  goroutine is not joined to the request. When the caller's context is cancelled
+  while a dial is in flight — an ordinary client disconnect or request timeout —
+  `Call` unwinds at once while the dial goroutine completes its handshake and
+  invokes the hook, so `CallOptions.PreSend` can still be running after `Call`
+  has returned. Reading a refusal back out of variables the hook captured is
+  therefore a data race, and synchronising them removes the race without
+  establishing a hand-off, since a late hook can still write after the only
+  reader has gone; the executor consequently carries the verdict in the returned
+  error instead. That correction shipped with the read-first identity-band change;
+  what is added here is the evidence and the contract it rests on.
+  `TestPreSend_MayStillBeRunningAfterCallReturns` pins the lifetime property
+  deterministically against the real transport — the executor's own gates use a
+  fixture that joins the hook's goroutine, which is exactly the happens-before
+  edge production lacks, so nothing else asserts it — and `CallOptions.PreSend`
+  now states the contract for every future caller: it is a pure predicate whose
+  lifetime is not `Call`'s, so everything a verdict needs in order to be
+  diagnosed belongs on the error. What the gate asserts is the HAZARD, not the
+  schedule: a transport that NARROWS the hook's lifetime by joining its dial
+  goroutine leaves the carrier correct — conservative rather than required — so
+  the gate skips with that finding rather than failing, and only a `Call` that
+  will not return even once the hook is released is a real failure. Asserting
+  that the hook DOES outlive `Call` would have made a safe narrowing look like a
+  regression, and would have reported it as a 30-second deadlock.
+
 - OCSP revocation checking accepted responses it should have refused
   (CHAOS-65). Every input the checker acts on comes from the peer's own
   certificate — the responder URLs live in its AIA extension — so the party
@@ -516,8 +1447,119 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- Two security-regression gates added for the memoized IDNA slow path
+  (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
+  and each verified failing in both against the specific defect it claims to
+  catch. No runtime behaviour changes; ported from the closed PR #1617.
+
+  `NormalizeHostStrict` is the fail-closed dispatch gate: `ok=false` means the
+  request is REFUSED, so a host that cannot be canonicalized never reaches FQDN,
+  blocklist or category matching un-normalized (RISK-013). The memo's slots are
+  shared by design — each tier is direct-mapped and a colliding host overwrites
+  the entry that was there — so the crossing that matters is a REJECTED host
+  meeting a resident ACCEPTED entry, which the existing collision test cannot
+  observe because it alternates two accepted hosts.
+  `TestIDNMemo_RejectionIsNeverUpgradedToAcceptance` pins that crossing in
+  both directions in the main tier, and in the long tier (which never retains a
+  rejection) on every round. Against a memo whose hit skips the full-key
+  re-verification, `xn--0.example.com` is answered as another host's A-label
+  with `ok=true` — a client-chosen unnormalizable authority admitted and
+  evaluated as a different destination than the one it names.
+
+  `TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer` pins that the stored key is
+  a CLONE of the caller's string. The key arrives as a substring of whatever
+  buffer the caller holds — on the request path, net/http's header buffer — so
+  an entry that kept it would pin that whole backing array per slot while every
+  byte-counting test still reported a short key. The gate drops every
+  reference it holds to a 16 MiB buffer the probe host was sliced out of and
+  asks the collector what is still reachable: a few hundred bytes when the key
+  is cloned, ~16.8 MB against the un-cloned shape, for a 25-byte main-tier key
+  and a 505-byte long-tier key alike. The review is
+  `docs/engineering/security-reviews/2026-10-13-idna-memo-and-host-bounds-window.md`;
+  its single-tier "un-memoized band is deliberate" finding is superseded by the
+  long tier and its gate for that gap is intentionally not ported.
+### Performance
+
+- Category-group membership is now resolved by index instead of by walking
+  every group. `categoryGroupMatchesHostScratch` runs once per category-group
+  access rule per proxied request and prefers the rule's
+  `DestCategoryGroupID` — the authoritative, rename-safe link the admin API
+  stamps on every rule saved against an existing group — but
+  `MatchesCategoryByID` resolved that id by ranging the whole group map
+  comparing IDs, with the store's read lock held across the walk, because the
+  map is keyed by *name*. So the path production takes was O(number of groups)
+  while the denormalized-name fallback it supersedes was already an O(1)
+  probe, and the store is capped at 1000 groups.
+
+  Measured on a 4-core Xeon @2.10 GHz (medians of n=3, both arms in one
+  session), one resolve: **117.6 → 89.5 ns at 4 groups, 349.3 → 82.2 at 64,
+  1317 → 89.0 at 256, 5298 → 86.6 at 1000** — linear at ~5 ns/group before,
+  flat after. End to end through the policy scan with 20 category-group rules
+  and a categorized destination: **121 µs → 2.25 µs per request** at the
+  1000-group cap (53.8×). An *uncategorized* destination — clean traffic to a
+  host no tier classifies, and the common case — now short-circuits the whole
+  per-rule probe at the call site, because neither branch can match an empty
+  category: **125 µs → 395 ns** (317×). Verdicts are unchanged; the index is
+  derived state rebuilt wholesale at the one content-mutation chokepoint, and
+  a stale index degrades to "not resolved" rather than to a wrong group.
+
+  Also fixes a **data race** on the same path, reported by the race detector:
+  `MatchesCategory` resolved through `GetByName`, which releases the lock
+  before returning the live group, and then read that group's category set
+  with no lock held — while `Update`, `UpdateByID`, `Load`, `ReplaceAll` and
+  the rollback path all *reassign* that field under the write lock. Reachable
+  as proxy traffic evaluating an un-migrated category-group rule concurrent
+  with an admin edit of that group. The probe now happens inside the single
+  read-lock critical section, which also removes the old shape's second lock
+  round trip. Only deployments using category groups in policy rules are
+  affected; no configuration, API or metric surface changes.
+
 ### Changed
 
+- A panic in either of the release-dispatch plane's detached worker goroutines
+  no longer takes the appliance down, and no longer reports an upgrade that
+  never started as a success (CHAOS-75). `POST /api/releases/dispatch` and
+  `.../dispatch/resume` hand the upgrade to a goroutine that outlives its
+  request — correctly, since the 202 ships before the watch finishes — and
+  neither goroutine had a panic tap, so a fault anywhere under
+  `DispatchService` killed the proxy data plane, the admin plane and `/healthz`
+  together from one authenticated admin POST.
+
+  Containment alone would have made it worse, which is the part that shaped the
+  fix. The worker's only `defer` was `close(done)`, and a defer fires *during*
+  unwinding — before the outcome assignment lands — so a panicking worker woke
+  the parked handler on a zero report/error pair and `respondPreApply` fell
+  through to its `default` arm: **`200 {"status":"ok"}`** for an upgrade that
+  never started. That false success shipped in 6 of 30 runs against the
+  pre-fix tree before the process died; with the panic merely contained it
+  shipped in 10 of 10, because the process now survives to deliver it.
+
+  Both workers now run under `runGuarded` (the existing background-worker
+  primitive, so the panic lands on `culvert_crash_records_total{component}`
+  under the new `release_dispatch` / `release_resume` labels, plus a
+  `system`-actor `panic_recovered` audit entry), and the panic is converted
+  into an explicit outcome rather than a silent one: **HTTP 500
+  `{"status":"internal_error"}`** when no op had started, or a
+  `FAILED_NEEDS_ATTN` status record over the live `op_id` — telling the
+  operator to *resume*, not re-dispatch — when the agent had already accepted
+  the apply. A no-outcome pair is now rejected ahead of `respondPreApply`'s
+  switch independently of that, so a future detached writer cannot reproduce
+  the 200. No route, request body, or successful-response shape changes.
+
+  Left open with the reasoning recorded in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §43: `DispatchResumeContext` is
+  documented as a persistable restart-recovery record but lives only in an
+  in-memory map, so a restart mid-upgrade still loses the `op_id` and recovery
+  degrades to hand-assembling a `resume_context` from the audit trail.
+
+- `GET /api/diagnostics` now carries a `saas_feed` row when the signed SaaS feed
+  is stale, failing to refresh, waiting for authority, or critical. Previously
+  that state was visible only on `/ready` and the Signed SaaS Feed tab, so the
+  one-page health report read as an all-clear. It also reports an enabled feed
+  that has never activated while every refresh fails. The row names the source
+  actually serving and keys its remedy on the failure class. Additive and
+  report-only; no row is emitted when the feed is healthy, disabled or serving
+  the embedded baseline without failures.
 - The pinned Go compiler moves from 1.26.8 to **1.26.9** (`go.mod` `toolchain`
   line and the digest-pinned `golang:1.26.9-alpine` builder images, index
   `sha256:cdfd4fe2…`, verified against Docker Hub), and `golang.org/x/net`
@@ -591,6 +1633,108 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The per-IP connection limiter now does its whole job in ONE critical section
+  per call, and stores the counter by value. `Acquire` + a deferred `Release`
+  run on every proxied request (`handleRequest`, `socks5.go`), not once per TCP
+  connection. Sharding the limiter reduced contention between distinct clients
+  and left the per-request lock COUNT at three, because `Release` took the shard
+  lock twice: once to look the counter up and again to delete the entry after an
+  unlocked decrement returned zero. On a keep-alive connection with no second
+  request in flight — the ordinary shape — the count returns to zero on every
+  request, so every request paid an 8-byte allocation, a map insert, a map
+  delete, three lock acquisitions and two atomic read-modify-writes.
+
+  The profile named it. On the distinct-IP parallel benchmark at GOMAXPROCS=1,
+  mutex `Lock`+`Unlock` was 34% of all samples and `mapdelete_faststr` 28%, with
+  `Release` at 62% of cumulative time against `Acquire`'s 34% — the cheaper half
+  of the pair costing nearly twice as much, structurally. In the single-NAT-
+  egress case at four cores, mutex machinery was 64% of all samples, with
+  `procyieldAsm` and `futex` showing real parking. That case is an ordinary
+  enterprise deployment and the package header had recorded it, together with
+  the three lock acquisitions, as deliberately unfixed.
+
+  Storing the count as `map[string]int64` and collapsing both halves removes the
+  allocation, the pointer chase, the GC write barriers, the per-counter atomics,
+  one of `Release`'s two lock acquisitions, and `Acquire`'s increment-then-undo
+  dance on the reject path (it simply never commits the count — the same net
+  accounting with no window to guard). Measured with the pre-change shape frozen
+  in-tree as the `_Legacy` benchmark arms so both are timed in one run (4-core
+  Xeon @2.10GHz, Go 1.26.8, medians of n=6, ns/op per `Acquire`+`Release` pair):
+  single NAT egress **103.2 → 66.3 (−35.8%)** at one core and **267.6 → 199.6
+  (−25.4%)** at four; distinct IPs **105.7 → 70.0 (−33.8%)** and **108.3 → 85.6
+  (−21.0%)**; entry churn **99.8 → 67.4 (−32.5%)** and **105.9 → 68.0
+  (−35.8%)**; the reject path **62.6 → 29.6 (−52.7%)** and **245.1 → 101.3
+  (−58.7%)** — with **1 → 0 allocs/op** on the shapes that create an entry per
+  operation (distinct IPs and entry churn at both core counts, single NAT
+  egress at one core). The reject and retained-entry arms, and single NAT
+  egress at four cores, already report **0 allocs/op in both forms**: the entry
+  exists before the timed operation, so neither form allocates a counter for
+  it. End to end,
+  `BenchmarkPerfQual_ProxyHTTPForward` goes 177 → 176 allocs/op and `connlimit`
+  leaves the `alloc_objects` profile entirely.
+
+  One of the ten measured shapes regressed and is recorded rather than rounded
+  away: the retained-entry case (an IP with a second request already in flight,
+  so the count never returns to zero) is 58.3 → 60.7 ns at one core, **+4.2%**
+  with overlapping distributions at n=15, and parity at four cores — there the
+  old form did a lookup plus an atomic add through the pointer already in hand,
+  where this one does a lookup plus a `mapassign` in each half. It is bought
+  with the two shapes that dominate a real gateway: entry churn, and the reject
+  path an attacker drives, where a flood used to cost the limiter more per
+  refusal than per admission.
+
+  It is also a **fail-open fix**. `Release`'s second pass re-checked the
+  counter's *value* without re-checking its *identity*, while `Acquire`'s reject
+  path carried exactly that guard (`cur == ctr`) — the pattern was known and
+  applied in one of the two places that needed it. Release A reads the counter,
+  unlocks, decrements 1 → 0 and is descheduled; B acquires and releases,
+  deleting the entry; C then misses, allocates a fresh counter and takes it to 1
+  (a live, admitted connection); A re-locks, loads its stale pointer, sees 0,
+  and deletes C's entry. C's accounting is destroyed and the IP goes on to hold
+  `limit+1` concurrent connections — past a configured per-IP cap, the same
+  direction as the #503 bug the unconditional-accounting contract exists to
+  close (measured: 3 admitted against a cap of 2). Reproduced deterministically
+  by `TestRelease_LegacyTwoPhaseLosesALiveSlot`, which owns a verbatim legacy
+  copy with one injected pause point rather than racing for the interleaving.
+  Every behavioural test in the package keeps passing against the two-phase
+  shape, so the regression instruments are deliberately structural: an AST wall
+  requiring exactly one `sh.mu.Lock()` and zero per-counter atomics in each half
+  (with a not-vacuous control that rejects a verbatim pre-fix copy), and a
+  `testing.AllocsPerRun` gate across the churning, steady-state and reject
+  postures — the churn posture is load-bearing, since a gate measuring only the
+  retained entry reads zero against the defect too. Both were verified failing
+  against the reverted implementation. The admit/reject boundary, the
+  unconditional-accounting contract and the delete-when-last behaviour are
+  unchanged.
+
+- The request log's JSONL persistence gate no longer takes a process-wide
+  mutex on every logged request. `reqlog.Add` runs once per logged request on
+  the proxy request goroutine, and the `enqueue` it calls opened with an
+  unconditional `persistMu.Lock()` purely to read two pointers that are `nil`
+  for the whole life of the process in the **default** configuration — no
+  request-log file is configured, so no drain goroutine is ever started. A
+  `sync.Mutex` Lock/Unlock pair is two atomic read-modify-writes on one shared
+  word, so every request in the process was writing the same cache line to
+  discover that persistence is switched off: a throughput ceiling rather than a
+  constant cost, the same shape already removed from `internal/threatfeed`,
+  `internal/connlimit` and the top-hosts counter. A lock-free `atomic.Bool`
+  gate now short-circuits the disabled path. Measured on a 4-core Xeon @
+  2.80 GHz, both arms in one run, medians of `-count=5`: in `RunParallel` arms
+  (where ns/op is wall time per op across all workers, so a genuinely parallel
+  cost *falls* as cores are added) the gate goes from **15.5 / 28.6 / 74.4 ns**
+  at GOMAXPROCS 1/2/4 — rising 4.8×, because it serialises — to **1.72 / 0.86 /
+  0.43 ns**, halving as the cores double. That is the sharper statement of the
+  defect: the mutex converted a read every core could do at once into a word
+  every core had to take turns owning. One whole logged request goes from
+  **52.2 / 104.1 / 185.5 ns** to **49.0 / 96.1 / 157.4 ns** — ~6% serially,
+  ~15% at four cores, zero allocations either way. No entry, field or byte on
+  any sink changes, and the enabled path is untouched: the shutdown-sweep
+  invariant (every sender registered in the same critical section that
+  published the channel) still holds, because the gate can only short-circuit
+  ahead of that section. `Add` remains flat in core count; the ceiling left is
+  the ring's own lock, which guards real shared state and is recorded on
+  `BenchmarkAddParallel` rather than changed.
+
 - Destination-host IDNA normalization is memoized, so an internationalized
   destination no longer re-runs `idna.ToASCII` once per engine on every request.
   `hostutil.NormalizeHostStrict` already had an already-canonical fast path
@@ -621,23 +1765,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from recomputing. The existing `FuzzNormalizeHostStrict` differential against
   the pre-optimization reference ran 598k executions with no divergence.
 
-  The key is a client-chosen authority, so the table is direct-mapped with 1024
-  fixed slots and a per-process random slot seed, and no entry retains a string
-  longer than the 253-byte DNS name maximum. That last bound is load-bearing
-  rather than decorative: `handleRequest`'s raw pre-cap admits a 1 KiB
-  authority and the 253-byte canonical refusal runs *after* `canonicalDestHost`
-  has normalized it, while the zero-option `idna.ToASCII` profile enforces no
-  length limit of its own, so an oversize A-label host would otherwise be
-  retained whole (~2.1 MB across a full table). Refusing to memoize one costs
-  nothing — no DNS server can resolve a longer name, and both dispatch gates
-  refuse it immediately, so it never reaches the fan-out the memo exists to
-  collapse. The table therefore cannot grow — 104 KB retained after 65 536
-  distinct IDN hosts, against a 554 KB absolute ceiling —
-  a collision costs a recomputation rather than a wrong answer, because every
-  hit re-verifies the full key, and an adversary who could force collisions
-  would obtain today's behaviour. Ordinary ASCII traffic is untouched: it
-  returns from the fast path above the memo and never reads or writes the
-  table, pinned by `TestIDNMemo_FastPathNeverTouchesMemo`.
+  The key is a client-chosen authority, so the table is direct-mapped with
+  fixed slots and a per-process random slot seed, and no entry retains a
+  canonical value longer than the 253-byte DNS name maximum. That value bound
+  is load-bearing rather than decorative: `handleRequest`'s raw pre-cap admits
+  a 1 KiB authority and the 253-byte canonical refusal runs *after*
+  `canonicalDestHost` has normalized it, while the zero-option `idna.ToASCII`
+  profile enforces no length limit of its own, so an oversize A-label host
+  would otherwise be retained whole (~2.1 MB across a full table). The table
+  therefore cannot grow — 103 KiB retained after 65 536 distinct IDN hosts,
+  against a 720 KiB absolute ceiling across both tiers — a collision costs a
+  recomputation rather than a wrong answer, because every hit re-verifies the
+  full key, and an adversary who could force collisions would obtain the
+  pre-memo behaviour. Ordinary ASCII traffic is untouched: it returns from the
+  fast path above the memo and never reads or writes the table, pinned by
+  `TestIDNMemo_FastPathNeverTouchesMemo`.
+
+  **Retention is bounded on two tiers, because one bound could not do both
+  jobs.** The first version measured the 253-byte bound on the KEY as the
+  client spelled it, on the stated reasoning that refusing such a host "costs
+  nothing" because "no DNS server can resolve a longer name, and both dispatch
+  gates refuse it immediately". Both halves were wrong, and the mistake was
+  reading a bound on the raw spelling as a bound on the name. IDNA *shrinks* a
+  U-label authority: `proxy_host_bounds.go`'s own derivation records the worst
+  legitimate case as **883 raw bytes collapsing to a 251-byte A-label**, which
+  is precisely why the raw pre-cap is 1 KiB and not 253. So a host whose raw
+  spelling exceeded the bound could canonicalize comfortably inside the DNS
+  limit, with every label inside the 63-byte A-label limit too — a resolvable,
+  ordinary internationalized destination — and **both dispatch gates accepted
+  it**. It was not refused; it walked the full ~10x fan-out with nothing
+  memoized, which is the asymmetry the memo exists to close. Measured per
+  normalization of one such accepted destination (eight U-labels of 20 CJK code
+  points, 499 raw bytes against 227 canonical): `idna.ToASCII` **5.32 µs and 18
+  allocations**, i.e. ~53 µs and 180 allocations per request across the
+  fan-out, against **71 ns and 0 allocations** for a memo hit. Such a key is
+  now retained in a separately bounded long tier — 128 slots, keys to 1024
+  bytes, values still to 253 — which adds ~165 KiB to the ceiling and leaves
+  the main tier's capacity untouched. The key bound is the request path's raw
+  pre-cap itself, not the 883-byte empirical maximum, so "every authority a
+  dispatch gate admits is memoizable" holds by construction rather than by a
+  measurement; the root gate asserts that relation between the two constants,
+  so raising the raw pre-cap fails there instead of re-opening the asymmetry
+  for the newly admitted band.
+  Per-request fan-out for that destination, both measured through the full
+  `NormalizeHostStrict` body: **~85–94 µs and 200 allocations before, ~27–29 µs
+  and 0 allocations after**. Verdicts are unchanged in both tiers — a host past *both*
+  key bounds is still normalized, just not retained.
+
+  Gates, both verified failing against the pre-fix bound:
+  `TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained` (proves the probe host
+  is DNS-valid and that both gate predicates admit it *before* asserting it is
+  retained, so the test cannot pass by accident) and the root
+  `TestHostutilLongRawULabelReachesTheMemo`, which calls the real
+  `rawAuthorityOversize` / `canonicalHostOversize` so the two bounds cannot
+  drift apart again. Plus `TestIDNMemo_LongTierHitIsAllocationFree`,
+  `TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained` (outer boundary,
+  including one byte over), `TestIDNMemo_LongTierBoundedFootprint` and
+  `TestIDNMemo_LongTierConcurrentStress`;
+  `TestIDNMemo_StoredEntriesRespectTheBound` now asserts the invariant over
+  every live entry in both tiers against that tier's key bound.
+
+  **What this does not fix, stated plainly.** `strings.ToLower` runs
+  `strings.Map(unicode.ToLower, …)` for a non-ASCII input — a per-rune table
+  walk over the whole authority — and it sits in `NormalizeHostStrict` *ahead*
+  of both the fast path and the memo, so no tier can collapse it. At **2.84 µs
+  per call** it is ~28 µs per request across the fan-out, against ~50 ns for an
+  ASCII destination, and the client selects it with ~500 header bytes. That
+  residual asymmetry is left open deliberately: narrowing or hoisting the
+  lowering pass changes what canonicalization does to non-ASCII input, which is
+  the IDN-homograph contract `NormalizeHost` exists to enforce (RISK-013), and
+  that belongs to the differential fuzz harness and review rather than to a
+  performance patch.
 
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
@@ -658,6 +1856,105 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- The operator contract (`GET /api/diagnostics`, `GET /api/health/explain`)
+  now carries an `admin_roster_durability` row (CHAOS-70 evidence): `warn`
+  when no `-ui-users-file` is configured, so admin account deletes, role
+  changes and password rotations revert on restart; when the configured file
+  failed to load at startup or is not a usable regular-file target (a
+  read-only check); when no write to the roster file has landed since
+  startup (*not verified yet*); and when admin-roster
+  changes were refused or login-time roster writes failed since process
+  start. Counts, the remedy and the degraded login-write state are shown to
+  admins only. Viewers and operators get a fixed message for "not durable" and
+  "a change was refused", and the row shows nothing for a degraded write
+  (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
+  `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
+  Admin Users panel hint and are deliberately absent from `/api/stats`.
+- The `admin_roster_durability` row reports persistence only on evidence: a
+  roster save that landed in this process. Culvert does not write the roster
+  at startup, so after every restart the row reads `warn` with the distinct,
+  non-alarming *not verified yet* state ("the next admin account change
+  verifies that it persists"; viewers see a fixed message) until the first
+  admin account change lands, which turns it `ok`. That `ok` states evidence,
+  never capability: "the last admin roster save was written to disk and the
+  file is unchanged since" (viewers: "an admin roster file is configured; the
+  file on disk is the last one Culvert wrote, unchanged since"). It does not
+  claim that the roster "is persisting" or that the next save will be allowed.
+  No read-only check can authorise that: an SELinux `add_name`/`remove_name`
+  denial, AppArmor, an NFSv4 or server-side ACL, or a quota can refuse it
+  while `faccessat` passes. The live checks below are advisory: they report
+  what they detect, and passing them is no claim. A refused save is rolled
+  back, answers `500` and is counted, and the next read of the row reports it
+  in place of `ok`. A stat is not evidence: a
+  readable roster on a read-only mount, or one owned by another user in a
+  sticky directory, stats like a writable one. Hard problems found by the
+  row's one live probe take precedence over *not verified yet*: a configured
+  roster file that does not exist yet, a directory that no longer lets
+  Culvert create and replace files (`faccessat(W_OK|X_OK, AT_EACCESS)` and
+  `statfs`: a `chmod 0555`, a revoked ACL, a read-only remount), a roster no
+  save can replace (immutable or append-only, a bind-mounted file, or an
+  immutable or append-only directory; Linux, read-only
+  `fileutil.ReplacementBlocked`), and storage that does not answer within
+  2 s. After a landed save the row also warns when the roster file is
+  removed, replaced or edited outside Culvert (each landed save records the
+  size and SHA-256 of the bytes written), replaced by an identical copy owned
+  by another account where that makes the next save's rename be refused,
+  changed or replaced outside Culvert in any other way, or when the save's
+  directory could not be synced. A landed save is evidence only for the exact
+  file it wrote, unchanged since: on Linux and macOS it also records that
+  file's device, inode and `ctime` (fstat of the written file after the
+  rename), and any difference — a new inode, or a same-inode `touch`, `chmod`,
+  `chown`, ACL, extended attribute or label change — reports the new
+  `warn` *the roster file was changed or replaced outside Culvert since its
+  last save* (no action needed if intentional; the next admin account change
+  re-verifies). Deliberately, a `touch`, a `chmod` or an identical re-copy
+  now warns instead of reading `ok`. Changed contents, a refused-rename owner
+  change, a missing or immutable file and an unwritable directory take
+  precedence. Other Unix systems compare size, SHA-256 and owner; Windows
+  compares size and SHA-256 only. The probe runs on its own
+  goroutine, holds no roster lock, runs at most once at a time, is reused for
+  5 s, and is read once per diagnostics request (the viewer rendering reuses
+  it), so a stalled volume costs a request at most one 2 s wait and never
+  blocks admin changes or TOTP logins. `fileutil.AtomicWriteInfo` returns
+  the landed file's own `FileInfo` and whether its directory was synced;
+  `fileutil.AtomicWrite` is unchanged for its callers.
+- The `admin_roster_durability` row now picks its state from one ordered list,
+  and the admin and viewer renderings both use that list (Codex P2 4326470080).
+  Previously each renderer ranked the states in its own order. That let a
+  refused first save after a restart hide behind *not verified yet* ("No action
+  is needed now"). The order is:
+  1. setup incomplete
+  2. no roster file
+  3. storage not responding
+  4. refused saves
+  5. failed login-time writes (admin-only)
+  6. unusable target
+  7. missing target
+  8. replaced
+  9. owner changed
+  10. immutable
+  11. directory not writable
+  12. changed externally
+  13. directory not synced
+  14. not verified yet
+  15. ok
+
+  The admin remedy for a refusal also names the highest-ranked problem the live
+  checks see below it. The row now counts refused and failed writes from the
+  last save that landed (from startup before the first one), so a refusal stays
+  visible until a later save lands. The since-startup totals are still shown,
+  and the counters, metrics and Admin Users panel are unchanged. The identity
+  probe reports content, owner and inode changes as independent facts, and the
+  list ranks them.
+- A failed startup load of `ui_users.json` no longer pins the
+  `admin_roster_durability` row (Codex P2 4327431894). Before, the row kept
+  reporting "could not be loaded at startup" after a later save landed at the
+  same path, and it skipped the live probe. Now a landed save clears the load
+  error, under the same lock that records the save. Pointing at another path
+  resets it as before. The live probe now runs whether or not the load failed.
+- **Deferred:** the boot-time in-place rewrite of `ui_users.json` (which would
+  verify persistence at startup instead of at the first admin change) is
+  split out of this change into its own follow-up PR.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already
@@ -780,6 +2077,32 @@ endpoints for credentialed parents.
   misses is still the number of `GetCert` calls — but is no longer the same
   thing as the sign count, for which
   `culvert_cert_sign_duration_seconds_count` is exact.
+
+- The per-request policy publication check is O(1) instead of O(rulebase).
+  `PolicyStore.Evaluate` runs on every proxied request, and its first act —
+  `evaluationSnapshot` — scanned the entire rulebase for a rule with a nil
+  counters cell before returning. Production rules always carry one, so the
+  scan never short-circuited: it ran to completion on every request to prove a
+  negative, under the process-wide policy read lock. On a 4-core box the
+  snapshot measured 15.4 ns at 10 rules, 51.3 ns at 100, 524 ns at 1 000 and
+  29 761 ns at 10 000 — superlinear, because the scan is a pointer chase that
+  leaves cache as the rulebase grows. Because it ran *before* evaluation it
+  taxed even requests the engine decides in O(1): a request matching the
+  highest-priority rule cost 465 ns at 10 rules and 30 900 ns at 10 000, so at
+  10 000 rules roughly 98% of `Evaluate` was the pre-scan and 2% was the
+  policy decision. The question the scan was really asking — "has this slice
+  been published?" — is a property of the slice, so it is now answered once
+  per publication instead of once per request: the snapshot is flat at ~13 ns
+  from 10 to 10 000 rules (2 294x at 10 000) and the O(1)-match request is
+  flat at ~390-460 ns (81x at 10 000), with zero allocations throughout.
+  Verdicts are unchanged — pinned by a differential against a verbatim frozen
+  copy of the pre-change body over 400 randomized mutation sequences, by
+  per-mutator immediate-visibility tests, and by a race-detector reader/mutator
+  run; the memo fails safe by construction (any write to the rulebase installs
+  a different slice, so a stale memo costs one scan, never a wrong verdict).
+  Operators with large rulebases see the largest gain; nothing about policy
+  semantics, ordering or default-deny changes.
+
 - The per-request policy decision line is built by appending rather than by
   `logger.Printf`, and the benchmark that measured it was measuring a disabled
   logger. `applyPolicyDecision` emits exactly one `POLICY_*` line per proxied

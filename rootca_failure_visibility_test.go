@@ -35,7 +35,7 @@ func captureStartupAlerts(t *testing.T) *[]queuedStartupAlert {
 
 	captured := &[]queuedStartupAlert{}
 	startupAlertFire = func(event string, p AlertPayload) {
-		*captured = append(*captured, queuedStartupAlert{event, p})
+		*captured = append(*captured, queuedStartupAlert{event: event, payload: p})
 	}
 	t.Cleanup(func() {
 		startupAlertMu.Lock()
