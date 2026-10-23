@@ -1080,7 +1080,12 @@ culvert_upstream_direct_fallback_total %d
 	// visible across restarts even after the store self-healed.
 	cfdb := catFeedDBState()
 	cfdbAvailable, cfdbRecovered := 0, 0
-	if cfdb.Available {
+	// CHAOS-74: this gauge's contract is "open and SERVING LOOKUPS", and it was
+	// sourced purely from the boot record — so a store that lost its mapped
+	// tables at 03:00 kept reporting 1 while every lookup returned
+	// "uncategorised". A latched runtime degradation is reported as 0, which is
+	// what the HELP text already promised.
+	if cfdb.Available && !cfdb.RuntimeDegraded {
 		cfdbAvailable = 1
 	}
 	if cfdb.Recovered {
@@ -1097,10 +1102,20 @@ culvert_catfeeddb_recovered %d
 # HELP culvert_catfeeddb_quarantined_copies Quarantined (.corrupt.*) copies of the community category store still on the data volume
 # TYPE culvert_catfeeddb_quarantined_copies gauge
 culvert_catfeeddb_quarantined_copies %d
+
+# HELP culvert_catfeeddb_lookup_errors_total Community category lookups that failed with a store error instead of a clean miss since startup
+# TYPE culvert_catfeeddb_lookup_errors_total counter
+culvert_catfeeddb_lookup_errors_total %d
+
+# HELP culvert_catfeeddb_memory_faults_total Contained memory faults reading the community category store's mapped tables; non-zero means the data volume damaged the store while it was open and Layer-2 categorisation is off until this node restarts
+# TYPE culvert_catfeeddb_memory_faults_total counter
+culvert_catfeeddb_memory_faults_total %d
 `,
 		cfdbAvailable,
 		cfdbRecovered,
 		cfdb.ResidualCopies,
+		cfdb.RuntimeFaults,
+		cfdb.RuntimeMemoryFaults,
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is
@@ -1194,15 +1209,25 @@ culvert_logstore_quarantined_copies %d
 	// error or a contained panic) — terminal, restart required. A listener
 	// that is retrying stays up=1 with `accept_degraded 1`, because it recovers
 	// on its own the moment descriptors free up.
+	//
+	// CHAOS-66 extends `up` symmetrically to the BIND: it is 0 when the accept
+	// loop stopped OR when the listener has been unable to bind for longer than
+	// socks5BindUnavailableAfter. A listener that is merely RETRYING its bind
+	// stays up=1 with `unavailable 0`, exactly as a listener retrying its
+	// accepts stays up=1 with `accept_degraded 1` — an ordinary redeploy in
+	// which a predecessor still holds the port must not page.
 	if sk := socks5ListenerState(); sk.Configured {
-		up, degraded := 1, 0
-		if sk.Down {
+		up, degraded, unavailable := 1, 0, 0
+		if sk.Down || sk.BindUnavailable {
 			up = 0
 		}
 		if sk.Degraded {
 			degraded = 1
 		}
-		_, _ = fmt.Fprintf(w, `# HELP culvert_socks5_listener_up 1 while the SOCKS5 accept loop is running; 0 once it has stopped and the port is closed
+		if sk.BindUnavailable {
+			unavailable = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_socks5_listener_up 1 while the SOCKS5 listener is bound and its accept loop is running; 0 once it has stopped or has been unbindable past the threshold
 # TYPE culvert_socks5_listener_up gauge
 culvert_socks5_listener_up %d
 
@@ -1217,11 +1242,31 @@ culvert_socks5_accept_degraded %d
 # HELP culvert_socks5_accept_backoff_seconds Current SOCKS5 accept retry backoff; 0 when accepts are succeeding
 # TYPE culvert_socks5_accept_backoff_seconds gauge
 culvert_socks5_accept_backoff_seconds %g
+
+# HELP culvert_socks5_unavailable 1 while the SOCKS5 listener has been unable to bind its port for longer than the threshold
+# TYPE culvert_socks5_unavailable gauge
+culvert_socks5_unavailable %d
+
+# HELP culvert_socks5_bind_failures_total Failed SOCKS5 listener bind attempts since startup
+# TYPE culvert_socks5_bind_failures_total counter
+culvert_socks5_bind_failures_total %d
+
+# HELP culvert_socks5_binds_total Successful SOCKS5 listener binds since startup
+# TYPE culvert_socks5_binds_total counter
+culvert_socks5_binds_total %d
+
+# HELP culvert_socks5_bind_backoff_seconds Current SOCKS5 rebind backoff; 0 when the listener is bound
+# TYPE culvert_socks5_bind_backoff_seconds gauge
+culvert_socks5_bind_backoff_seconds %g
 `,
 			up,
 			sk.Total,
 			degraded,
 			sk.Backoff.Seconds(),
+			unavailable,
+			sk.BindTotal,
+			sk.Binds,
+			sk.BindBackoff.Seconds(),
 		)
 	}
 
@@ -1237,7 +1282,7 @@ culvert_socks5_accept_backoff_seconds %g
 	// stops a frozen broadcast from denying a client forever — but it is a
 	// degradation of the distributed limit and should be visible for as long as
 	// it lasts.
-	if crl := clusterRateLimitFreshness(); crl.Armed {
+	if crl := rl.ClusterFreshness(); crl.Armed {
 		stale := 0
 		if crl.Stale {
 			stale = 1
@@ -1259,6 +1304,30 @@ culvert_cluster_ratelimit_stale_episodes_total %d
 			crl.Episodes,
 		)
 	}
+
+	// SEC-BOOTSTRAP-HOST-1: DP-bootstrap artifact renders refused because the
+	// request's derived authority was not a plain host[:port].
+	//
+	// A COUNTER, so it is emitted unconditionally at 0 (counters only move up,
+	// so zero is unambiguous — unlike the conditional gauges above). Non-zero
+	// means either a reverse proxy in front of this Control Plane is forwarding
+	// a Host / X-Forwarded-Host this appliance cannot name itself by, or the
+	// bootstrap surface is being probed with a crafted authority. Both need the
+	// same first look, which is why they share one series.
+	//
+	// The token series beside it is SEPARATE on purpose: it means the token
+	// store is carrying something it did not write, which sends the operator
+	// somewhere else entirely. One series that could mean either is a series
+	// nobody can act on.
+	_, _ = fmt.Fprintf(w, `# HELP culvert_bootstrap_host_refused_total DP-bootstrap artifacts refused because the request's derived authority was not a plain host[:port]
+# TYPE culvert_bootstrap_host_refused_total counter
+culvert_bootstrap_host_refused_total %d
+
+# HELP culvert_bootstrap_token_unusable_total DP-bootstrap artifacts refused because the stored enrollment token is not in the format this appliance mints
+# TYPE culvert_bootstrap_token_unusable_total counter
+culvert_bootstrap_token_unusable_total %d
+
+`, bootstrapHostRefusedCount(), bootstrapTokenUnusableCount())
 
 	// CHAOS-57: admin UI listener health. Emitted only when an admin UI was
 	// configured, for the reason the socks5 block states: `up 0` on a node that
@@ -1309,6 +1378,9 @@ culvert_admin_ui_listen_backoff_seconds %g
 			au.Backoff.Seconds(),
 		)
 	}
+
+	// CHAOS-71: Control Plane gRPC listener health (cp_grpc_health.go).
+	writeCPGRPCMetrics(w)
 
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
@@ -1497,6 +1569,16 @@ culvert_storage_write_last_failure_age_seconds %d
 	// _unavailable is 1 while a backend is in its cooldown, and
 	// _gated_denials_total is the blast radius — requests denied without
 	// contacting the backend while it was gated.
+	//
+	// Terminology note: this is the SAME condition the "identity_backend_unreachable"
+	// alert (internal/alerts/store.go) and the "identity_backend" operator-contract
+	// row (diagnostics.go checkIdentityBackend) name. The metric prefix is still
+	// "auth_backend": dashboards and alert rules key off these exact series names,
+	// so it is not renamed in place. A rename is tracked as terminology finding
+	// T-61 and would need a dual-emission window, as the T-31 ClamAV rename did
+	// (culvert_clam_scan_errors_total, pinned by clamav_metrics_dualemit_test.go).
+	// Until then, read this comment as the cross-reference from the alert or the
+	// contract row to the PromQL series.
 	abSnap := authBackendHealthStatus()
 	abDegraded := 0
 	if abSnap.Degraded {

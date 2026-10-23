@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -86,6 +87,60 @@ type Entry struct {
 	BuiltIn bool     `json:"builtIn"` // seeded from built-in defaults; editable by admin
 }
 
+// forwardView is the IMMUTABLE read view of the two FORWARD indices — the pair
+// MatchesHost / MatchesHostAdmin probe. It exists because those two are the
+// per-RULE half of destination-category resolution: package main's
+// hostCatScratch.matchesCategory (policy_hostcat.go) calls one of them once per
+// category-scoped access rule per proxied request, and deliberately does not
+// memoize the result.
+//
+// THE FINDING. Each call took s.mu.RLock purely to read one OUTER map entry.
+// RLock/RUnlock are two atomic read-modify-writes on one shared word, so every
+// request in the process wrote the same cache line once per category rule — not
+// a constant cost but a THROUGHPUT CEILING, the shape already closed in
+// internal/threatfeed, internal/connlimit, internal/blocklist, the IP filter
+// and internal/rewrite. Measured on a 4-core Xeon @2.30GHz against the shipped
+// default taxonomy (BenchmarkStoreMatchesHost_Parallel, medians of n=5):
+// 90.5 / 130.1 / 142.5 ns/op at GOMAXPROCS 1 / 2 / 4 — four cores delivered
+// 0.63x the throughput of ONE, i.e. adding cores SUBTRACTED throughput. A CPU
+// profile of the 4-core run put 80.6% of ALL samples in the RLock/RUnlock
+// atomic (41.1% RLock + 39.8% RUnlock cumulative) against ~15% doing the real
+// work. Reading the view instead is a single atomic POINTER LOAD, with no
+// read-modify-write on any shared word.
+//
+// WHY A VIEW AND NOT THE internal/blocklist hotRW SHARD. Sharding spreads the
+// contention; a view removes it, and the hard half of the view's contract was
+// ALREADY satisfied here. addHostToIndexes has cloned-and-swapped the touched
+// category's INNER host set since it was written, with its comment recording
+// exactly why ("probed OUTSIDE the lock by MatchesHost/MatchesHostAdmin ...
+// never mutated in place"), and rebuildIndex builds every map fresh. So no
+// inner set reachable from a published view was ever mutated in place; only the
+// OUTER map was, in one statement, in one function. Sharding would also have
+// meant either copying blocklist's unexported hotRW — a second dialect of one
+// mechanism, the rot risk internal/storeguard was extracted to avoid — or
+// extracting it, which is a wider change than this finding warrants.
+//
+// THE CONTRACT IS ONE LINE AND IT IS A SECURITY CONTRACT, NOT A COST ONE:
+// a map reachable from a published forwardView is NEVER mutated in place, and
+// every writer of s.index / s.adminIndex must call publishForwardLocked before
+// releasing s.mu. A category host that silently never matches is a policy rule
+// that silently never fires — a Deny rule keyed on that category fails OPEN.
+// There are exactly TWO such writers (rebuildIndex, addHostToIndexes) and both
+// are pinned per writer by TestForwardView_EveryWriterRepublishes, with
+// TestForwardView_WriterInventoryIsComplete failing when a third appears.
+//
+// The outer maps hold ONE ENTRY PER CATEGORY and the inner sets are ALIASED,
+// never copied, so a publish is O(categories) — bounded by the category count,
+// not the host count (the shipped taxonomy is 27 categories over 657 patterns,
+// and MaxHostsPerCategory alone is 10000). That is what makes clone-on-publish
+// affordable on the one incremental writer, AddHost, which the legacy SaaS feed
+// sync calls once per merged host; the bound is pinned by
+// TestBenchGate_AddHostBulkLoadIsLinear.
+type forwardView struct {
+	index      map[string]map[string]bool
+	adminIndex map[string]map[string]bool
+}
+
 // Store manages URL categories with thread-safe, file-backed persistence.
 // index maps lowercase(category-name) → set of lowercase host strings for O(1)
 // host membership checks during policy evaluation. adminIndex is the same,
@@ -97,6 +152,11 @@ type Store struct {
 	entries    []*Entry
 	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
+	// fwd is the lock-free publication of index+adminIndex above, consumed
+	// ONLY by MatchesHost / MatchesHostAdmin. See forwardView for the
+	// contract; a nil view means "no categories", the same answer a
+	// zero-value Store's nil maps already gave.
+	fwd atomic.Pointer[forwardView]
 	// hostIndex / adminHostIndex are the REVERSE direction: lowercase host
 	// pattern → the position of the first entry that declares it. They serve
 	// LookupHost / LookupHostAdmin; see patternRef.
@@ -150,6 +210,24 @@ type Store struct {
 // Revision returns the process-local semantic-mutation counter. Monotonic
 // within a process; resets on restart — a fence key, not an identity.
 func (s *Store) Revision() uint64 { return s.rev.Load() }
+
+// publishForwardLocked installs the CURRENT s.index / s.adminIndex as the
+// lock-free read view. Caller must hold s.mu for writing (or be the sole owner
+// during construction).
+//
+// It ALIASES both maps rather than copying them, which is what makes it O(1)
+// here: every caller has just finished producing maps nothing else references,
+// so the aliasing is safe by construction and the whole cost of the view falls
+// on whoever had to produce a fresh outer map in the first place.
+func (s *Store) publishForwardLocked() {
+	s.fwd.Store(&forwardView{index: s.index, adminIndex: s.adminIndex})
+}
+
+// forward returns the published read view, or nil when nothing has been
+// published yet (a zero-value &Store{}). Callers treat nil as "no categories",
+// which is byte-identical to what the zero-value Store's nil maps answered
+// before the view existed — pinned by TestForwardView_ZeroValueStoreMatchesNothing.
+func (s *Store) forward() *forwardView { return s.fwd.Load() }
 
 // patternRef locates one host pattern inside s.entries: entry position, then
 // position within that entry's Hosts. Positions — not the resolved strings —
@@ -394,6 +472,10 @@ func (s *Store) rebuildIndex() {
 	s.adminIndex = admin
 	s.hostIndex = hostIdx
 	s.adminHostIndex = adminHostIdx
+	// Publish the forward pair for the lock-free MatchesHost / MatchesHostAdmin
+	// read path. Free here: idx and admin were just built and nothing else
+	// references them, so the view aliases rather than copies.
+	s.publishForwardLocked()
 }
 
 // defaultCategoriesJSON is the embedded SaaS category seed list.
@@ -909,6 +991,18 @@ func (s *Store) addHostMem(category, host string) error {
 	return fmt.Errorf("category %q not found", category)
 }
 
+// cloneOuter copies one forward index's OUTER map, ALIASING every inner host
+// set. Aliasing is correct — and is the whole point — because an inner set
+// reachable from a published forwardView is never mutated in place: rebuildIndex
+// builds each one fresh and addHostToIndexes replaces the one it touches.
+func cloneOuter(src map[string]map[string]bool, hint int) map[string]map[string]bool {
+	dst := make(map[string]map[string]bool, hint+1)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 // addHostToIndexes folds ONE host just APPENDED to s.entries[ei].Hosts into
 // every derived index, instead of rebuilding the whole taxonomy.
 //
@@ -923,11 +1017,13 @@ func (s *Store) addHostMem(category, host string) error {
 // precedes the current holder in scan order. Removal has no such property,
 // which is why RemoveHost/Delete/Set still rebuild wholesale.
 //
-// Lock discipline mirrors rebuildIndex exactly: the forward inner sets are
-// probed OUTSIDE the lock by MatchesHost/MatchesHostAdmin (pointer snapshot
-// under RLock), so the touched category's set is cloned-and-swapped, never
-// mutated in place; the reverse indices are only ever probed under RLock
-// (lookupIn), so an in-place insert under the write lock is safe.
+// Lock discipline mirrors rebuildIndex exactly: the forward indices are probed
+// with NO lock at all by MatchesHost/MatchesHostAdmin, through the immutable
+// forwardView, so BOTH levels are cloned-and-swapped here rather than mutated
+// in place — the touched category's inner host set (as it always was) and now
+// the outer map too, which the published view aliases. The reverse indices are
+// still only ever probed under RLock (lookupIn), so an in-place insert under
+// the write lock remains safe for them.
 //
 // Degenerate config note: with DUPLICATE category names (already-recorded
 // review follow-up; first-wins vs last-wins was inconsistent before the
@@ -941,9 +1037,23 @@ func (s *Store) addHostToIndexes(ei int, e *Entry, key, host string) {
 		set[h] = true
 	}
 	set[strings.ToLower(strings.TrimSuffix(host, "."))] = true
-	s.index[key] = set
+
+	// CLONE-then-swap the OUTER map, never assign into it: the live outer map
+	// is aliased by the currently published forwardView, so `s.index[key] = set`
+	// would mutate a map concurrent readers are probing. The clone is
+	// O(categories) with the inner sets ALIASED — see forwardView.
+	//
+	// adminIndex is cloned only when this entry is admin-created, because that
+	// is the only case the statement below touches it. That asymmetry is the
+	// bulk path: the legacy SaaS feed sync merges into BuiltIn=true categories,
+	// so the per-host loop clones ONE outer map, not two.
+	idx := cloneOuter(s.index, len(s.index))
+	idx[key] = set
+	s.index = idx
 	if !e.BuiltIn {
-		s.adminIndex[key] = set
+		admin := cloneOuter(s.adminIndex, len(s.adminIndex))
+		admin[key] = set
+		s.adminIndex = admin
 	}
 
 	// Same deliberate normalization split as rebuildIndex: the reverse key
@@ -959,6 +1069,13 @@ func (s *Store) addHostToIndexes(ei int, e *Entry, key, host string) {
 			s.adminHostIndex[pk] = ref
 		}
 	}
+
+	// LAST, so the view is only ever published over a COMPLETED fold. The
+	// reverse indices above are not in the view today and are reachable only
+	// under s.mu, so publishing earlier would be correct too — but a publish
+	// placed at the end stays correct if the view is ever widened to cover
+	// them, and it costs nothing to put it where it cannot be wrong.
+	s.publishForwardLocked()
 }
 
 // RemoveHost deletes a host from the named category. LEGACY wrapper:
@@ -1008,30 +1125,149 @@ func (s *Store) GetByName(name string) *Entry {
 	return nil
 }
 
-// MatchesHost checks whether host belongs to the named URL category.
-// Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
-func (s *Store) MatchesHost(cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
-	catKey := strings.ToLower(string(cat))
+// ─── Category index keys ──────────────────────────────────────────────────────
 
-	s.mu.RLock()
-	hostSet := s.index[catKey]
-	s.mu.RUnlock()
+// maxInlineCategoryKey sizes the stack scratch the callers hand categoryKey to
+// case-fold a category name into. The longest shipped name is 24 bytes
+// ("Automation & Integration"); 64 covers every realistic admin-created name
+// and anything longer simply takes the allocating fallback.
+const maxInlineCategoryKey = 64
 
-	if hostSet == nil {
-		return false
-	}
-	// Exact match.
-	if hostSet[host] {
-		return true
-	}
-	// Subdomain match: foo.example.com → check "example.com", "com", etc.
-	for i, ch := range host {
-		if ch == '.' && hostSet[host[i+1:]] {
-			return true
+// categoryKey folds cat into the form rebuildIndex keys the host-set indexes by
+// — strings.ToLower(name) — WITHOUT allocating, on either path.
+//
+// This is the per-RULE half of destination-category resolution: package main's
+// hostCatScratch.matchesCategory calls MatchesHost/MatchesHostAdmin once per
+// category-scoped access rule per proxied request, and deliberately does not
+// memoize the result because — in its own words — they "are index lookups
+// (O(labels)), not scans", so memoizing would trade a cheap map probe for a map
+// allocation. That reasoning is right and the probe was not actually cheap:
+// both entry points spelled the key strings.ToLower(string(cat)), which
+// allocates whenever the name carries an uppercase letter — and ALL 21 shipped
+// SaaS category names do. So a rulebase with N category rules charged N heap
+// allocations to every proxied request in order to re-derive a value that is
+// pure CONFIGURATION: the rule's category name is fixed when the admin writes
+// the rule and is identical on every request that consults it.
+//
+// The fix keeps the key derivation where it is (the alternative — precomputing
+// a folded key onto PolicyRule — would put a urlcat implementation detail into
+// the policy struct and leave every other caller of these two methods paying
+// the allocation) and makes it free instead: for a short ASCII name the folded
+// bytes go into the CALLER's stack array and the probe is spelled
+// idx[string(b)] on it, which the compiler resolves against the bytes directly
+// — no copy, no allocation, and therefore no escape, so the array stays on the
+// stack.
+//
+// TWO RETURN FORMS, BECAUSE ONE WOULD COST ONE OF THE TWO PATHS.
+// The obvious shape is a single []byte, which forces the fallback to spell
+// itself []byte(strings.ToLower(cat)). Strings are immutable, so that
+// conversion COPIES, and measured against the pre-optimization code it is a
+// REGRESSION rather than a smaller win: an already-lowercase name past the
+// buffer goes 0 allocations → 1, and an uppercase or non-ASCII one goes 1 → 2.
+// The admin API accepts category names up to 256 bytes (ui_policy.go), so a
+// name past maxInlineCategoryKey is ordinary configuration, not a corner case,
+// and a rule carrying one pays that on every proxied request (Codex review,
+// PR #1410). So the fallback keeps the STRING strings.ToLower already produced
+// and is probed as a string; only the inline path uses bytes.
+//
+// THE FOLD STAYS OUTSIDE s.mu, AND THAT IS MEASURED, NOT ASSUMED.
+// Folding inside the read lock reads more simply — one helper taking (idx, cat),
+// one call per entry point — and the hold it adds looks negligible: a bounded
+// loop over at most maxInlineCategoryKey bytes, on a lock where readers do not
+// block readers and the only writers are admin-rate category CRUD. It is not
+// negligible. Interleaved same-run comparisons of the two shapes (n=11 each,
+// identical except for where the fold runs) put the hoisted form ahead on the
+// 4-way parallel path in both rounds with NON-OVERLAPPING distributions:
+// 83.8 vs 91.4 ns/op on a quiet box and 125.8 vs 155.0 ns/op on a busier one.
+// The serial path is unchanged either way. (Since forwardView the probe takes
+// no lock at all, so the shared helper matchesHostIn now carries the fold with
+// no critical section to lengthen; the measurement above is why it was not
+// folded into one under the old RLock.)
+//
+// Quote the RATIO, never those absolutes: between the two rounds the box drifted
+// by half again, which is precisely why both arms must be timed in ONE run. An
+// earlier cross-run reading of this same question said "53%" and was wrong by an
+// order of magnitude — the arms had simply been measured minutes apart.
+//
+// The returned inline slice ALIASES buf, so it is valid only inside the
+// caller's frame — all a map probe needs. useInline discriminates explicitly
+// rather than leaving the caller to test inline == nil. A nil test would in fact
+// be correct — the fallback is the only path that returns nil, and an empty
+// category name folds to buf[:0], which is non-nil — but it is correct only
+// BECAUSE of that second clause, which a reader has to know to trust it. The
+// bool says what is meant without resting on it.
+//
+// Semantics are unchanged, exactly: for a pure-ASCII name strings.ToLower is
+// byte-wise 'A'-'Z' + 32, which is what lowerASCIIInto writes; anything
+// non-ASCII falls back to strings.ToLower itself, so Unicode folding is still
+// done by the standard library and never reimplemented here.
+func categoryKey(buf []byte, cat string) (inline []byte, str string, useInline bool) {
+	if n := len(cat); n <= len(buf) {
+		if lowerASCIIInto(buf[:n], cat) {
+			return buf[:n], "", true
 		}
 	}
-	return false
+	return nil, strings.ToLower(cat), false
+}
+
+// lowerASCIIInto writes the ASCII-lowercased form of s into dst (which the
+// caller sizes to len(s)) and reports whether s was pure ASCII. It returns
+// false at the FIRST non-ASCII byte, leaving dst partially written — the caller
+// discards it and falls back to strings.ToLower, so a partial write is never
+// observable.
+func lowerASCIIInto(dst []byte, s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			return false
+		}
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		dst[i] = c
+	}
+	return true
+}
+
+// MatchesHost checks whether host belongs to the named URL category.
+// Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
+//
+// It is the NORMALIZING wrapper over MatchesHostNorm: host is canonicalized
+// here and the membership decision is made there. Callers that already hold
+// hostutil.NormalizeHost(host) — the per-request policy scan does, see
+// MatchesHostNorm — should call that directly and skip this.
+func (s *Store) MatchesHost(cat Category, host string) bool {
+	return s.MatchesHostNorm(cat, hostutil.NormalizeHost(host))
+}
+
+// MatchesHostNorm is MatchesHost over a host the CALLER has already run through
+// hostutil.NormalizeHost. It is the per-rule entry point for the policy hot
+// path. LOCK-FREE: it probes the published forwardView, never s.mu.
+//
+// Why it exists: package main's hostCatScratch.matchesCategory
+// (policy_hostcat.go) calls a membership matcher once per category-scoped
+// access rule per proxied request, and MatchesHost re-canonicalized the SAME
+// destination on every one of those calls. Normalization is a pure function of
+// the host, so it is request-invariant — the same class of value as the
+// normalized host, the parsed client IP and the one clock read that Evaluate
+// already hoists out of its rule scan, and the most expensive of them:
+// measured at 45.97 ns against MatchesHost's 105.8 ns total, i.e. 43% of the
+// probe was re-deriving a value the scan already had (that measurement predates
+// forwardView; the RLock it then included was ~10 ns of it).
+//
+// The hoist needs NO idempotence assumption about NormalizeHost, which is what
+// makes it a pure cost change: the value matched against is
+// hostutil.NormalizeHost(host) either way — the same function applied to the
+// same input — so only WHERE it is computed moves. Equivalence is pinned
+// against this file's own wrapper by urlcat_matcheshost_norm_test.go (named
+// shapes + randomized sweep + FuzzMatchesHostNorm), so a future change to
+// either body that breaks the identity fails the build.
+func (s *Store) MatchesHostNorm(cat Category, normHost string) bool {
+	v := s.forward()
+	if v == nil {
+		return false
+	}
+	return matchesHostIn(v.index, cat, normHost)
 }
 
 // MatchesHostAdmin is MatchesHost restricted to admin-created (BuiltIn=false)
@@ -1039,23 +1275,52 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 // embedded SaaS taxonomy is served exclusively by the atomic effective view and
 // never double-served (or served stale) from this store after a signed
 // activation supersedes it. Same normalization + exact-then-suffix semantics as
-// MatchesHost.
+// MatchesHost, and LOCK-FREE on the same contract.
 func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
-	host = hostutil.NormalizeHost(host)
-	catKey := strings.ToLower(string(cat))
+	return s.MatchesHostAdminNorm(cat, hostutil.NormalizeHost(host))
+}
 
-	s.mu.RLock()
-	hostSet := s.adminIndex[catKey]
-	s.mu.RUnlock()
+// MatchesHostAdminNorm is MatchesHostAdmin over an already-normalized host —
+// the admin-tier twin of MatchesHostNorm, and the entry point the policy scan
+// uses when the signed-feed effective view is armed. See MatchesHostNorm for
+// why the normalization is hoisted to the caller. LOCK-FREE, as MatchesHostNorm.
+func (s *Store) MatchesHostAdminNorm(cat Category, normHost string) bool {
+	v := s.forward()
+	if v == nil {
+		return false
+	}
+	return matchesHostIn(v.adminIndex, cat, normHost)
+}
 
+// matchesHostIn is the SHARED probe body behind MatchesHostNorm and
+// MatchesHostAdminNorm (and so, through them, MatchesHost and MatchesHostAdmin):
+// fold the category key without allocating (categoryKey), then
+// exact-then-every-suffix membership of the ALREADY-NORMALIZED normHost against
+// ONE forward index taken from an already-loaded forwardView. Sharing it keeps
+// the entry points from drifting apart; idx is immutable (see forwardView), so
+// no lock is needed and none is taken. The walk deliberately does NOT stop at
+// the first key that carries any category — see MatchesHostAdmin's callers and
+// effectiveCategoryView.MatchesCategory, which reproduce the same grammar.
+func matchesHostIn(idx map[string]map[string]bool, cat Category, normHost string) bool {
+	var keyBuf [maxInlineCategoryKey]byte
+	inlineKey, strKey, inlineOK := categoryKey(keyBuf[:], string(cat))
+
+	var hostSet map[string]bool
+	if inlineOK {
+		hostSet = idx[string(inlineKey)]
+	} else {
+		hostSet = idx[strKey]
+	}
 	if hostSet == nil {
 		return false
 	}
-	if hostSet[host] {
+	// Exact match.
+	if hostSet[normHost] {
 		return true
 	}
-	for i, ch := range host {
-		if ch == '.' && hostSet[host[i+1:]] {
+	// Subdomain match: foo.example.com → check "example.com", "com", etc.
+	for i, ch := range normHost {
+		if ch == '.' && hostSet[normHost[i+1:]] {
 			return true
 		}
 	}

@@ -434,7 +434,7 @@ export function RuleEditor(props: RuleEditorProps): JSX.Element {
         <fieldset className={styles.editorGroup}>
           <legend>TLS / Decryption</legend>
           <SelectField
-            label="SSL action"
+            label="TLS action"
             help="Inspect decrypts matching tunnels; Bypass relays them opaquely."
             value={w.sslAction}
             onChange={(e) => {
@@ -505,7 +505,7 @@ export function RuleEditor(props: RuleEditorProps): JSX.Element {
             }}
           />
           <Checkbox
-            label="Log the full request URI (HTTPS requires SSL Inspect)"
+            label="Log the full request URI (HTTPS requires TLS Inspect)"
             checked={w.logFullUri}
             onChange={(e) => {
               setW({ logFullUri: e.target.checked });

@@ -98,6 +98,7 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 		t.Fatalf("downstream ALPN = %q, want h2 (native inspection must not downgrade)", proto)
 	}
 
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	cc, err := (&http2.Transport{}).NewClientConn(tc)
 	if err != nil {
 		t.Fatalf("h2 client conn: %v", err)
@@ -157,6 +158,7 @@ func TestMITM_NativeH2_AttachesDecBlock(t *testing.T) {
 	if proto != "h2" {
 		t.Fatalf("downstream ALPN = %q, want h2", proto)
 	}
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	cc, err := (&http2.Transport{}).NewClientConn(tc)
 	if err != nil {
 		t.Fatalf("h2 client conn: %v", err)
@@ -220,6 +222,7 @@ func TestMITM_NativeH2_BlocksFileDownload(t *testing.T) {
 	if proto != "h2" {
 		t.Fatalf("downstream ALPN = %q, want h2", proto)
 	}
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	cc, err := (&http2.Transport{}).NewClientConn(tc)
 	if err != nil {
 		t.Fatalf("h2 client conn: %v", err)
@@ -304,6 +307,8 @@ func TestH2DeliverResponse_StripsHopByHopTrailers(t *testing.T) {
 // nativeH2ClientConn wires the common native-h2 fixture: proxy CA, an h2 origin
 // running `handler`, a native-inspect rule, and an h2 client conn through the
 // proxy CONNECT tunnel. It asserts h2 was negotiated downstream.
+//
+//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 func nativeH2ClientConn(t *testing.T, handler http.Handler) *http2.ClientConn {
 	t.Helper()
 	allowLoopbackTunnel(t)
@@ -318,6 +323,7 @@ func nativeH2ClientConn(t *testing.T, handler http.Handler) *http2.ClientConn {
 	if proto != "h2" {
 		t.Fatalf("downstream ALPN = %q, want h2", proto)
 	}
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	cc, err := (&http2.Transport{}).NewClientConn(tc)
 	if err != nil {
 		t.Fatalf("h2 client conn: %v", err)

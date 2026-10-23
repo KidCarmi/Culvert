@@ -183,6 +183,19 @@ var errPseudonymKeyMint = errors.New("pseudonym key mint failed")
 // posture. GET (viewer) reports the current setting; PUT (admin) sets it. The flag apply
 // is an infallible atomic store, so it is set first and rolled back only if the durable
 // write fails (the setting is node-local — off export/import, rollback, and CP→DP).
+//
+//	GET/PUT /api/traffic/redaction       — canonical path (terminology governance T-17)
+//	GET/PUT /api/decryption/redaction    — deprecated alias, retained for compat
+//
+// The posture governs destination privacy across EVERY traffic-log sink (plain HTTP and
+// TUNNEL_CLOSED entries included, not just decrypted sessions), so "traffic," not
+// "decryption," is the canonical name; see T-17 in
+// docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-07-19.md. The underlying
+// AdminSettings field (`decryption_redact_hosts`) and internal identifiers
+// (decRedactHostsFlag/decRedactHosts/setDecRedactHosts) are deliberately unchanged in
+// this pass — they interact with the config-surfaces reflection registry
+// (config_surfaces.go) and need the same shadow-type/alias-on-read treatment T-10 left
+// as a separate follow-up for its own persisted-field residual.
 func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

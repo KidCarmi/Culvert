@@ -77,7 +77,23 @@ jobs:
       # committed-dist porcelain drift gate, generated-bundle security scan,
       # license policy, vulnerability policy.
       - name: Verify (canonical contract)
-        run: npm run verify
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run verify 2>&1 | tee "$RUNNER_TEMP/frontend-verify.log"
+
+      - name: Annotate canonical verification failure
+        if: failure()
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const path = `${process.env.RUNNER_TEMP}/frontend-verify.log`;
+          if (fs.existsSync(path)) {
+            const detail = fs.readFileSync(path, 'utf8').split('\n').slice(-80).join('\n').slice(-12000)
+              .replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+            console.log(`::error title=Frontend verification failure details::${detail}`);
+          }
+          JS
 
       # The drift gates themselves are regression-tested: tamper classes
       # A–D (modified byte, committed deletion + untracked regeneration,

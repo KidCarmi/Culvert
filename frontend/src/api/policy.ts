@@ -161,6 +161,9 @@ export interface PolicySnapshot {
   updatedAt: string;
   /** true ⇒ the returned rulebase is the staged draft candidate, not running */
   draft: boolean;
+  /** false ⇒ the rulebase is in-memory only (no -policy / policy_file
+   * configured) and every add/edit/delete/reorder is lost on restart. */
+  persisted: boolean;
 }
 
 export const decodePolicySnapshot: Decoder<PolicySnapshot> = (
@@ -179,6 +182,7 @@ export const decodePolicySnapshot: Decoder<PolicySnapshot> = (
     version: field(o, "version", readNumber, path),
     updatedAt: field(o, "updatedAt", readString, path),
     draft: field(o, "draft", readBoolean, path),
+    persisted: field(o, "persisted", readBoolean, path),
   };
 };
 

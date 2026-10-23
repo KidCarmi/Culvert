@@ -1530,10 +1530,28 @@ env_put() {
 }
 
 gen_passphrase() {
-  local p
-  p="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  [[ -n "$p" ]] || p="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | head -c 40 || true)"
-  [[ -n "$p" ]] || error "Could not generate a passphrase (openssl and /dev/urandom both unavailable)."
+  local raw p=""
+  # Validate the GENERATOR's raw output BEFORE filtering/truncating it. A
+  # degraded openssl (FIPS-mode engine warning, a stubbed binary in a hardened
+  # image) can print a deterministic diagnostic to stdout ahead of — or
+  # instead of — the base64 data. Filtering to alnum and truncating to 40 first
+  # hides that: a short diagnostic ("FIPSmodeselftestfailed", 22 chars) would
+  # pass validate_passphrase_for_env_file's 12-char floor, and a LONG one (50
+  # zeroes) would be cut to exactly 40 and look like real key material (Codex
+  # review, PR #1491). 48 random bytes base64-encode to exactly 64 characters
+  # of [A-Za-z0-9+/] on ONE line with no padding, so anything else — a
+  # non-zero exit, extra lines, a different length, foreign characters — is
+  # rejected and the /dev/urandom path is tried instead.
+  if raw="$(openssl rand -base64 48 2>/dev/null)" && [[ "$raw" =~ ^[A-Za-z0-9+/]{64}$ ]]; then
+    p="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9' | head -c 40)"
+  fi
+  if [[ "${#p}" -ne 40 ]]; then
+    p=""
+    if raw="$(head -c 48 /dev/urandom 2>/dev/null | base64 2>/dev/null)" && [[ "$raw" =~ ^[A-Za-z0-9+/]{64}$ ]]; then
+      p="$(printf '%s' "$raw" | tr -dc 'A-Za-z0-9' | head -c 40)"
+    fi
+  fi
+  [[ "${#p}" -eq 40 ]] || error "Could not generate a 40-character passphrase (openssl and /dev/urandom both unavailable or degraded)."
   printf '%s' "$p"
 }
 
@@ -1782,6 +1800,15 @@ setup_at_rest_encryption() {
       ;;
     *)
       pass="$(gen_passphrase)"
+      # gen_passphrase()'s only guard is "non-empty" (it falls back to
+      # /dev/urandom, then error(), only on a fully empty result) — a
+      # degraded `openssl` (e.g. a FIPS-mode build that writes an engine
+      # warning ahead of the base64 data on stdout) can still yield a
+      # short-but-non-empty alnum string. Apply the same floor/charset
+      # contract enforced on the operator-typed and host-env-supplied
+      # passphrases so a degraded auto-generate can never silently persist
+      # a weak CA/log encryption key instead of failing loudly.
+      validate_passphrase_for_env_file "Auto-generated passphrase" "$pass"
       info "Generated a random 40-character passphrase."
       ;;
   esac
@@ -1864,7 +1891,12 @@ else
       if sudo docker compose ps -a --format '{{.State}}' 2>/dev/null | grep -qw exited; then
         break
       fi
-      if sudo docker compose ps --format '{{.Health}}' 2>/dev/null | grep -qw healthy; then
+      # Scoped to the `proxy` service specifically — an unscoped `ps
+      # --format '{{.Health}}'` prints one line per service, so ClamAV
+      # reporting healthy alone would satisfy a bare `grep -qw healthy` while
+      # the proxy itself is still starting (or stuck there, e.g.
+      # crash-looping), declaring a broken install a success.
+      if sudo docker compose ps proxy --format '{{.Health}}' 2>/dev/null | grep -qw healthy; then
         COMPOSE_UP_OK=1
         break
       fi
@@ -2050,6 +2082,17 @@ ensure_agent_traversal() {
   return 1
 }
 
+# set_maint_compose_project_dir CFG DIR — rewrite compose_project_dir in the
+# agent's config.toml. DIR lands in the REPLACEMENT side of a sed s|…|…|, where
+# an unescaped `&` expands to the whole matched line and `\` starts an escape;
+# escape them (and the `|` delimiter) as sed_escape_replacement does in
+# packaging/culvert-maint/install.sh.
+set_maint_compose_project_dir() {
+  local cfg="$1" dir="$2" esc
+  esc="$(printf '%s' "$dir" | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g')"
+  sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$esc\"|" "$cfg"
+}
+
 maint_toml_string() {
   local key="$1" file="${2:-/etc/culvert-maint/config.toml}"
   # Strip from the first quote onward (rather than requiring the closing
@@ -2058,12 +2101,25 @@ maint_toml_string() {
   # leak into the extracted value. Mirrors extract_toml_string() in
   # packaging/culvert-maint/install.sh.
   sudo awk -v k="$key" '
+    BEGIN { q = sprintf("%c", 39); qq = q q q }
     /^[[:space:]]*#/ { next }
     $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
       line=$0
       sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
-      sub(/^"/, "", line)
-      sub(/".*$/, "", line)
+      if (substr(line, 1, 3) == qq) {
+        # TOML multi-line literal string on one line: ends at the next triple quote.
+        line = substr(line, 4)
+        idx = index(line, qq)
+        if (idx > 0) line = substr(line, 1, idx - 1)
+      } else if (substr(line, 1, 1) == q) {
+        # TOML literal string: value ends at the next single quote.
+        line = substr(line, 2)
+        idx = index(line, q)
+        if (idx > 0) line = substr(line, 1, idx - 1)
+      } else {
+        sub(/^"/, "", line)
+        sub(/".*$/, "", line)
+      }
       print line
       exit
     }
@@ -2753,7 +2809,7 @@ install_maint_agent() {
   if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
      && sudo grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
-    sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$INSTALL_DIR\"|" /etc/culvert-maint/config.toml
+    set_maint_compose_project_dir /etc/culvert-maint/config.toml "$INSTALL_DIR"
     if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
       warn "Re-rendering the sudoers binding for $INSTALL_DIR failed."
       warn "Fix compose_project_dir in /etc/culvert-maint/config.toml and re-run the installer."

@@ -238,6 +238,18 @@ func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
 	if logger != nil {
 		logger.Printf("SCAN: response from %s exceeds scan limit (%d bytes), forwarded unscanned", sanitizeLog(host), maxBytes)
 	}
+	// HasSubscriber gate: unlike scan_timeout — whose rate is bounded by
+	// construction, since every fire costs a multi-second scan budget — this
+	// producer's rate is set by TRAFFIC. An origin chooses its own response
+	// size, so a client can put every request on this path, and ungated each
+	// one pays a goroutine, a payload build, an RFC3339 format and a round trip
+	// through the process-wide dedup mutex to deliver an alert to nobody in the
+	// default posture (no webhooks configured). The Detail was already bounded,
+	// so the dedup window suppresses the deliveries; the gate removes the work
+	// done before the window is ever consulted.
+	if !globalAlertStore.HasSubscriber("scan_skipped") {
+		return
+	}
 	go alerts.Fire("scan_skipped", alerts.Payload{
 		Actor:  clientIP,
 		Host:   host,
@@ -335,6 +347,7 @@ func secScanStatusMap() map[string]interface{} {
 		"yara_inflight":            yaraInflightLoad(),         // Tier 1.3
 		"yara_inflight_max":        yaraGetMaxInflight(),       // Tier 1.3
 		"yara_match_panics":        yaraMatchPanicsLoad(),      // CHAOS-25: a match panicked (crashed) and was contained; distinct from a timeout
+		"yara_saturation_skips":    yaraSaturationSkipsLoad(),  // matches skipped at the in-flight cap; the rate-limited log no longer repeats the magnitude
 		"yara_enabled":             yaraGetEnabled(),
 		"yara_timeout_secs":        yaraGetTimeoutSecs(),
 		"yara_on_timeout":          yaraGetOnTimeout(),

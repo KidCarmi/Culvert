@@ -299,3 +299,51 @@ func TestPermit_RequestVariableFieldsAreNotBound(t *testing.T) {
 		}
 	}
 }
+
+// ── winner expiry: the verdict must not have a scheduled end ──────────────────
+
+// TestPermit_WinnerWithAnExpiryIsNotInvariant is the unit half of the winner-expiry rule. The
+// permit already refuses a rule REJECTED on expiry (the trace's fixed "expiry" label names no
+// bound field); a WINNER that expires is the same clock dependency on the other side of the
+// match, and it leaves no trace entry at all — it matched. So it is read from the rule.
+//
+// Positive, negative and the independence of the check are all pinned here: the ONLY difference
+// between the two cases is WinnerHasExpiry, so a fix that refused everything, or that leaned on
+// some other check, cannot pass both halves.
+func TestPermit_WinnerWithAnExpiryIsNotInvariant(t *testing.T) {
+	base := okPermit()
+	if got := EvaluateExactPermit(base); got != PermitOK {
+		t.Fatalf("control: the baseline must be a permit, got %q", got)
+	}
+	expiring := okPermit()
+	expiring.WinnerHasExpiry = true
+	if got := EvaluateExactPermit(expiring); got != PermitVerdictNotInvariant {
+		t.Fatalf("a winner that expires mid-window is not an invariant verdict, got %q", got)
+	}
+}
+
+// TestPermit_WinnerExpiryIsCheckedEvenWhenEveryFieldIsBound proves the check is not redundant
+// with the bound-field scan: a winner reading ONLY bound fields, with a clean untruncated trace,
+// is still refused when it carries an expiry. Without the fix this input is PermitOK.
+func TestPermit_WinnerExpiryIsCheckedEvenWhenEveryFieldIsBound(t *testing.T) {
+	in := okPermit()
+	in.WinnerConditionFields = []string{"tool.name", "principal.tenant", "server.id"}
+	in.Trace.Truncated = false
+	in.WinnerHasExpiry = true
+	if got := EvaluateExactPermit(in); got != PermitVerdictNotInvariant {
+		t.Fatalf("every condition field bound does not make an expiring winner invariant, got %q", got)
+	}
+}
+
+// TestPermit_WinnerExpiryIsNotReachedWhenTheWinnerIsUnresolved keeps the ordering honest: an
+// unresolved winner is already an unknown dependency, and a caller that could not find the rule
+// also could not read its expiry. The unknown must win, so the refusal does not depend on a
+// field the caller had no way to populate.
+func TestPermit_WinnerExpiryIsNotReachedWhenTheWinnerIsUnresolved(t *testing.T) {
+	in := okPermit()
+	in.WinnerResolved = false
+	in.WinnerHasExpiry = false
+	if got := EvaluateExactPermit(in); got != PermitVerdictNotInvariant {
+		t.Fatalf("an unresolved winner is never a permit, got %q", got)
+	}
+}

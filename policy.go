@@ -195,7 +195,7 @@ type PolicyRule struct {
 	srcIPNet *net.IPNet
 
 	// srcPrefix is srcIPNet expressed as a netip.Prefix, precomputed by
-	// sortLocked() from the SAME *net.IPNet via prefixFromIPNet (security.go) —
+	// sortLocked() from the SAME *net.IPNet via prefixFromIPNet (admission.go, over internal/admission) —
 	// the helper the IP filter already uses, so both matchers inherit one
 	// pinned conversion (including the 4-in-6 subtlety its differential test
 	// covers) instead of two hand-rolled ones.
@@ -263,12 +263,24 @@ type PolicySchedule struct {
 // definitions. Published revisions are immutable except for each rule's shared
 // atomic hit-accounting cell.
 type PolicyStore struct {
-	mu        sync.RWMutex
-	saveMu    sync.Mutex // serializes snapshot-through-policy-and-meta publication
-	rules     []*PolicyRule
+	mu     sync.RWMutex
+	saveMu sync.Mutex // serializes snapshot-through-policy-and-meta publication
+	rules  []*PolicyRule
+	// verified is the rule slice for which evaluationSnapshot's publication
+	// check has already passed. It is a memo of a property publication
+	// establishes, never a second source of truth: `rules` alone decides what
+	// the evaluator sees. See evaluationSnapshot for why it is compared by
+	// slice identity and why a stale value is always safe.
+	verified  []*PolicyRule
 	path      string
 	version   int64  // incremented on every mutation
 	updatedAt string // RFC3339 timestamp of last mutation
+	// adoptUnsaved is set when Load adopted a path whose file did not exist
+	// and the immediate write of the current in-memory rules FAILED: the path
+	// is configured but nothing is on disk, so Persisted() must keep reporting
+	// false (the GUI warning stays up) until a later write succeeds. Only a
+	// successful SaveErr, or a later Load, clears it.
+	adoptUnsaved atomic.Bool
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -276,6 +288,22 @@ func (ps *PolicyStore) policyVersion() (int64, string) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return ps.version, ps.updatedAt
+}
+
+// Path returns the store's current persistence path ("" when in-memory).
+func (ps *PolicyStore) Path() string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.path
+}
+
+// Persisted reports whether rule changes are written to disk. False means the
+// store is in-memory only (no -policy / policy_file configured) and every
+// add/edit/delete/reorder is lost on restart — mirrors IdPRegistry.Persisted.
+func (ps *PolicyStore) Persisted() bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.path != "" && !ps.adoptUnsaved.Load()
 }
 
 // bumpVersion must be called under ps.mu.Lock().
@@ -317,17 +345,57 @@ func (ps *PolicyStore) ensureVersionAbove(floor int64) {
 var policyStore = &PolicyStore{}
 
 // Load reads rules from a JSON file. Missing file is treated as empty ruleset.
+//
+// ps.path is adopted ONLY on a definite outcome — a successful adopt-write
+// below, or a successfully parsed existing file — never merely because Load
+// was CALLED with a path. A read/parse failure leaves path and adoptUnsaved
+// exactly as they were: applyHotReload survives a Load error and keeps
+// running (only initPolicy's boot-time call treats one as fatal), so a
+// malformed reload target must not make the store silently claim a path
+// that was never actually adopted while the OLD rules stay live in memory.
+// Every assignment to ps.path is under ps.mu — Persisted(), SaveErr(),
+// loadMeta() and saveMeta() all read it from a different goroutine
+// (concurrent HTTP handlers) than the one running a SIGHUP reload.
 func (ps *PolicyStore) Load(path string) error {
-	ps.path = path
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Adopting a path with no file yet — a fresh install, or a hot
+			// reload (applyHotReload) that just turned persistence on for a
+			// store that may already hold in-memory-only rules from before
+			// the switch. Persisted() reports durability from ps.path alone,
+			// so without this write it would start claiming true the instant
+			// the path is set, even though the current rules exist nowhere
+			// on disk — silencing the GUI warning while a crash before the
+			// next mutation would still discard them. Best-effort and never
+			// fatal: SaveErr's own atomic-write failure (e.g. the parent
+			// directory doesn't exist) must not turn a graceful load into a
+			// boot failure at initPolicy — that failure surfaces the normal
+			// way, on the next rule mutation's own persist attempt.
+			// adoptUnsaved is set BEFORE the path is exposed, and only
+			// SaveErr's own successful write (via saveTo) clears it — never
+			// here. Clearing it here first and only re-setting it on a
+			// failed save left a window, between the unlock below and
+			// SaveErr returning, where a concurrent GET /api/policy read
+			// path != "" && !adoptUnsaved and reported persisted:true for
+			// rules that had not yet reached disk (Codex review, PR #1445).
+			ps.mu.Lock()
+			ps.path = path
+			ps.adoptUnsaved.Store(true)
+			ps.mu.Unlock()
+			if saveErr := ps.SaveErr(); saveErr != nil {
+				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
+			}
 			return nil
 		}
+		// A real read failure (permissions, I/O error): the OLD path/rules
+		// stand untouched, exactly as if this call had never happened.
 		return err
 	}
 	var rules []*PolicyRule
 	if err := json.Unmarshal(data, &rules); err != nil {
+		// Malformed file: same reasoning — do not adopt a path whose content
+		// was never actually loaded.
 		return err
 	}
 	// Auth-aware fail-closed load gate (Phase 1 Slice 3, shared with ReplaceAll via
@@ -353,6 +421,7 @@ func (ps *PolicyStore) Load(path string) error {
 	}
 	rules = kept
 	ps.mu.Lock()
+	ps.path = path
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
 	for _, current := range ps.rules {
 		if validRuleID(current.ID) && current.counters != nil {
@@ -367,6 +436,8 @@ func (ps *PolicyStore) Load(path string) error {
 		}
 	}
 	ps.sortLocked()
+	// A successfully parsed, existing file is durable by definition.
+	ps.adoptUnsaved.Store(false)
 	ps.mu.Unlock()
 	// Restore persisted version from sidecar .meta file.
 	ps.loadMeta()
@@ -419,10 +490,13 @@ type policyMeta struct {
 }
 
 func (ps *PolicyStore) loadMeta() {
-	if ps.path == "" {
+	ps.mu.RLock()
+	path := ps.path
+	ps.mu.RUnlock()
+	if path == "" {
 		return
 	}
-	metaPath := ps.path + ".meta"
+	metaPath := path + ".meta"
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
 		return
@@ -439,7 +513,10 @@ func (ps *PolicyStore) loadMeta() {
 }
 
 func (ps *PolicyStore) saveMeta() {
-	if ps.path == "" {
+	ps.mu.RLock()
+	path := ps.path
+	ps.mu.RUnlock()
+	if path == "" {
 		return
 	}
 	ps.saveMu.Lock()
@@ -447,12 +524,12 @@ func (ps *PolicyStore) saveMeta() {
 	ps.mu.RLock()
 	m := policyMeta{Version: ps.version, UpdatedAt: ps.updatedAt}
 	ps.mu.RUnlock()
-	ps.saveMetaSnapshot(m)
+	ps.saveMetaSnapshot(path, m)
 }
 
-func (ps *PolicyStore) saveMetaSnapshot(m policyMeta) {
+func (ps *PolicyStore) saveMetaSnapshot(path string, m policyMeta) {
 	data, _ := json.Marshal(m)
-	_ = atomicWriteFile(ps.path+".meta", data, 0o600)
+	_ = atomicWriteFile(path+".meta", data, 0o600)
 }
 
 // Per-rule hit counters + lastHit are persisted by the metrics-layer system
@@ -472,9 +549,21 @@ func (ps *PolicyStore) Save() { _ = ps.SaveErr() }
 // so a restart silently reverted the commit and stranded a learning
 // acceptance with no durable target).
 func (ps *PolicyStore) SaveErr() error {
-	if ps.path == "" {
+	ps.mu.RLock()
+	path := ps.path
+	ps.mu.RUnlock()
+	if path == "" {
 		return nil
 	}
+	return ps.saveTo(path)
+}
+
+// saveTo persists the current rules to path, a value SaveErr snapshotted
+// before waiting on saveMu. A concurrent Load may adopt a DIFFERENT path in
+// that window, so a successful write clears adoptUnsaved only when path is
+// still the store's current path — a save that landed on a superseded path
+// says nothing about whether the current one is durable.
+func (ps *PolicyStore) saveTo(path string) error {
 	// Mutations may proceed while persistence runs, but saves themselves must be
 	// ordered end-to-end. Otherwise an older snapshot can rename after a newer
 	// save and regress durable policy state.
@@ -498,10 +587,15 @@ func (ps *PolicyStore) SaveErr() error {
 	// Atomic + durable write — temp file, fsync, rename, parent-dir fsync.
 	// Skip saveMeta on failure so the .meta sidecar can't record a newer
 	// version/timestamp than the rules actually on disk.
-	if err := atomicWriteFile(ps.path, data, 0o600); err != nil {
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write policy rules: %w", err)
 	}
-	ps.saveMetaSnapshot(meta)
+	ps.mu.Lock()
+	if ps.path == path {
+		ps.adoptUnsaved.Store(false)
+	}
+	ps.mu.Unlock()
+	ps.saveMetaSnapshot(path, meta)
 	return nil
 }
 
@@ -1162,6 +1256,11 @@ func (ps *PolicyStore) sortLocked() {
 		precomputeSubjectNets(r.SubjectMatch)
 	}
 	ps.rules = next
+	// Publication is what establishes "every rule carries a counters cell", so
+	// it is also what records that this slice needs no further checking. Every
+	// other assignment to ps.rules leaves the memo naming a different slice,
+	// which is the fail-safe direction (one scan, never a stale verdict).
+	ps.verified = next
 }
 
 // copyPolicyRuleForPublication detaches every mutable nested value that the
@@ -1261,18 +1360,60 @@ type PolicyMatch struct {
 	ruleSnapshot      PolicyRule
 }
 
+// sameRuleSlice reports whether a and b are the same slice — same backing
+// array and same length — and therefore the same sequence of rule pointers.
+//
+// Identity, not equality: this is a memo key, and the only question it has to
+// answer is "is this the exact slice a previous check already accepted?".
+func sameRuleSlice(a, b []*PolicyRule) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+// evaluationSnapshot returns the published rule slice for ONE evaluation.
+//
+// This runs on the per-request hot path (PolicyStore.Evaluate, i.e. every
+// proxied request on every protocol), so its cost must not scale with the
+// rulebase. It used to: the fast path scanned EVERY rule for a nil counters
+// cell before returning, and since production rules always have one, the scan
+// never short-circuited — it ran to completion on every request to prove a
+// negative. Measured on a 4-core Xeon @2.10GHz: 14 ns at 10 rules, 52 ns at
+// 100, 470 ns at 1 000 and 28 985 ns at 10 000 — superlinear, because the scan
+// is a pointer chase that leaves cache once the rulebase is large. It was paid
+// BEFORE evaluation, so it taxed even requests the engine decides in O(1): a
+// request matching the highest-priority rule cost 465 ns at 10 rules and
+// 30 900 ns at 10 000, i.e. at 10 000 rules ~98% of Evaluate was this scan and
+// ~2% was the policy decision.
+//
+// What the scan was actually asking is "has this slice been through
+// sortLocked?" — nil counters were only ever a PROXY for that, because
+// sortLocked is what allocates the cells (copyPolicyRuleForPublication) along
+// with normFQDN, srcIPNet, matchedConds and the Stage-1 subject nets. That is a
+// property of the SLICE, established once when it is published, so it is
+// checked once per publication instead of once per request: ps.verified
+// records the slice the check last accepted and the hot path compares slice
+// identity, which is O(1) at any rule count.
+//
+// Three properties make the memo safe, and they are why this is not the
+// atomic.Pointer read-view pattern used elsewhere in the tree:
+//
+//   - It FAILS SAFE. Every assignment to ps.rules installs a different slice
+//     (the mutators are copy-on-write), so the memo stops matching on its own
+//     and the next evaluator falls back to the full scan below. There is no
+//     "mutator forgot to republish" failure mode — the class of silent
+//     security failure the read-view pattern has to be walled against —
+//     because a stale memo costs one scan, never a wrong verdict.
+//   - It cannot be fooled by address reuse. ps.verified keeps the accepted
+//     backing array alive, so a later allocation can never land on it while
+//     the memo still names it.
+//   - It memoizes the EXISTING predicate rather than replacing it. The slow
+//     path below runs the same nil-counters scan and the same conditional
+//     sortLocked as before; the only change is that its verdict now sticks.
 func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 	ps.mu.RLock()
 	rules := ps.rules
-	needsPublication := false
-	for _, rule := range rules {
-		if rule.counters == nil {
-			needsPublication = true
-			break
-		}
-	}
+	verified := sameRuleSlice(ps.verified, rules)
 	ps.mu.RUnlock()
-	if !needsPublication {
+	if verified {
 		return rules
 	}
 
@@ -1287,6 +1428,9 @@ func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 			break
 		}
 	}
+	// The slice in hand has now passed exactly the check the pre-change fast
+	// path ran per request, so record it and let later evaluations skip it.
+	ps.verified = ps.rules
 	rules = ps.rules
 	ps.mu.Unlock()
 	return rules
@@ -1356,7 +1500,10 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 	// host→category fusion depends only on the host, so running it per rule
 	// multiplied an O(all host patterns) taxonomy scan — plus a BadgerDB read
 	// per domain label on a feed-backed deployment — by the rule count.
-	catScratch := newHostCatScratch(in.host)
+	// Seeded, not lazy: in.normHost IS normalizeHost(in.host) (the field's own
+	// contract, set that way at every construction site), so re-deriving it
+	// here would normalize the destination twice per scan.
+	catScratch := newHostCatScratchNorm(in.host, in.normHost)
 	// The control flow is deliberately the parent enforcement loop's exact
 	// continue-based structure: on the nil-trace path (enforcement) it is
 	// branch-for-branch identical to the pre-extraction scan, and the skip-reason
@@ -1719,7 +1866,7 @@ func newClientSource(clientIP string) clientSource {
 // zone here restores net.ParseIP's verdict exactly, so a zoned address still
 // matches no source-scoped rule rather than newly matching one. This is the
 // same parser swap, with the same explicit zone rejection, that the IP filter
-// already makes (ipFilterView.contains, security.go); the equivalence is
+// already makes (ipFilterView.contains, internal/admission); the equivalence is
 // pinned here by TestSrcPrefix_DifferentialAgainstLegacyMatcher, whose oracle
 // is still net.ParseIP.
 //

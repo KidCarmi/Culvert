@@ -265,26 +265,30 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// Check session cookie (browser login via login overlay).
-		sess, err := readUISessionCookie(r)
-		if err == nil && sess != nil {
-			// Reject sessions for deleted users (Finding 5.2).
-			if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
-				clearUISessionCookie(w, r)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			role := UIRole(sess.Role)
-			if !role.HasRole(RoleViewer) {
-				role = RoleAdmin // backwards compat: sessions without role = admin
-			}
+		//
+		// SEC-UISESS-1: the admission decision lives in resolveUISession, which
+		// /api/auth/status shares — see that function for why a second copy of
+		// it was a privilege-escalation surface. A REFUSED cookie answers 401
+		// here rather than falling through to Basic: the holder presented an
+		// admin session this build will not honour, so clear it and make them
+		// re-authenticate. Only an ABSENT (missing or unverifiable) cookie
+		// leaves the Basic scheme a turn.
+		switch _, role, verdict := resolveUISession(r); verdict {
+		case uiSessionValid:
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		case uiSessionRefused:
+			clearUISessionCookie(w, r)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		// Fallback: HTTP Basic Auth for programmatic / CLI access.
 		user, pass, ok := r.BasicAuth()
 		if ok {
-			if role, valid := cfg.VerifyUIUser(user, pass); valid {
+			// SEC-BASIC-1: verifyUIBasicAuth applies the login path's lockout,
+			// TOTP and audit controls. Never call cfg.VerifyUIUser here.
+			if role, valid := verifyUIBasicAuth(r, user, pass); valid {
 				// Store the authenticated username too (no cookie exists on this path), so admin-action
 				// attribution resolves the real actor instead of "unknown" (Codex P2).
 				ctx := context.WithValue(r.Context(), uiRoleKey{}, role)

@@ -1111,6 +1111,26 @@ type inspectExchange struct {
 // enforcement, SSRF-guarded upstream access, scanning, and CDR are identical to
 // the H1 path because this is the exact code the H1 loop used to run inline.
 func runInspectExchange(ex *inspectExchange) exchangeOutcome {
+	// Pin the inner request to the destination this tunnel was AUTHORIZED for
+	// before anything is forwarded. The CONNECT authority is what policy
+	// evaluated and what every row below records; the decrypted request carries
+	// its own Host/:authority and was forwarded verbatim, so a client could
+	// reuse an allowed tunnel to reach a different vhost on the same front end
+	// while the log named the allowed one. See inspect_host_pin.go for why the
+	// anchor is that authority rather than the client's SNI, and why refusing
+	// cannot break a conforming client.
+	//
+	// It runs FIRST, ahead of the round trip and of the header scrub: a request
+	// for an unauthorized destination must not reach the upstream at all, and a
+	// refusal must not depend on anything the scrub rewrites.
+	if !innerHostPinnedToTunnel(ex.req.Host, ex.host) {
+		if ex.req.Body != nil {
+			ex.req.Body.Close() //nolint:errcheck // best-effort; nothing was forwarded
+		}
+		blockInnerHostMismatch(ex.responder, ex.clientIP, ex.host, ex.req.Host)
+		return exchangeOutcome{kind: exBlocked}
+	}
+
 	// Scrub client-spoofable forwarded/identity headers on the DECRYPTED inner
 	// request (prevents X-User-Identity spoofing / private XFF leakage), then
 	// strip hop-by-hop headers before forwarding upstream.
@@ -1378,20 +1398,55 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	return scanClean
 }
 
+// hopByHopHeaderNames are the RFC 7230 §6.1 hop-by-hop header names an
+// intermediary must strip before forwarding, spelled EXACTLY as
+// textproto.CanonicalMIMEHeaderKey renders them — note "Te", not "TE".
+//
+// The spelling is load-bearing, not cosmetic. http.Header.Del routes its
+// argument through CanonicalMIMEHeaderKey, which has a fast path that scans an
+// already-canonical key and returns it verbatim, and a slow path that copies
+// the key into a []byte and rewrites the casing — allocating. "TE" fails the
+// scan, so the pre-change spelling paid that rewrite on every call, i.e. four
+// times per proxied exchange. This is the same finding, and the same fix, as
+// the "X-Request-ID" vs "X-Request-Id" one in setupRequestTracing.
+//
+// Changing a name here is BYTE-IDENTICAL on the wire: Del canonicalises either
+// way, so only the re-derivation is removed. TestHopByHopHeaderNames_AreCanonical
+// pins the table against net/textproto itself so a future respelling — or an
+// upstream Go change — fails the build instead of silently reintroducing the
+// cost, and TestHopByHopHeaderNames_CoverRFC7230 pins the set so that gate can
+// never be satisfied by dropping a name.
+var hopByHopHeaderNames = [...]string{
+	"Connection", "Keep-Alive", "Proxy-Authenticate",
+	"Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+}
+
 func removeHopHeaders(h http.Header) {
 	// RFC 7230 §6.1: the Connection header itself lists additional hop-by-hop
 	// headers that intermediaries MUST remove before forwarding.
+	//
+	// The comma-separated list is walked in place rather than through
+	// strings.Split, which allocates a slice per Connection value on a path
+	// that runs four times per exchange. The two forms are equivalent,
+	// including for the degenerate values Split renders as a one-element slice
+	// (""), a lone "," and a trailing "," — pinned by the divergence shapes in
+	// TestRemoveHopHeaders_MatchesLegacy. The field names themselves are
+	// peer-supplied and arbitrarily spelled, so their Del stays on the
+	// canonicalising path by necessity.
 	for _, v := range h["Connection"] {
-		for _, f := range strings.Split(v, ",") {
+		for v != "" {
+			f := v
+			if i := strings.IndexByte(v, ','); i >= 0 {
+				f, v = v[:i], v[i+1:]
+			} else {
+				v = ""
+			}
 			if f = strings.TrimSpace(f); f != "" {
 				h.Del(f)
 			}
 		}
 	}
-	for _, hdr := range []string{
-		"Connection", "Keep-Alive", "Proxy-Authenticate",
-		"Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade",
-	} {
+	for _, hdr := range hopByHopHeaderNames {
 		h.Del(hdr)
 	}
 }

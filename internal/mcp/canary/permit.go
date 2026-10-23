@@ -177,6 +177,10 @@ type PermitInput struct {
 	// False with a non-empty MatchedRule means the snapshot and the decision disagree, which is
 	// not a permit: the fields the winner read are then unknown, and unknown is never satisfied.
 	WinnerResolved bool
+	// WinnerHasExpiry reports that the winning rule carries an expiry instant, read from the
+	// SAME snapshot the decision came from. True ⇒ the verdict is not invariant: the rule stops
+	// matching when the clock passes it, with no operator action and nothing to audit.
+	WinnerHasExpiry bool
 	// OperationClass is the class the evaluated tuple carried — the reviewed, four-eyes class
 	// bound to this exact fingerprint (blocker #4), never a default.
 	OperationClass policy.OperationClass
@@ -271,10 +275,31 @@ func permitReadFirstClass(c policy.OperationClass) bool {
 // request-variable — it is the clock. That is reported as not-invariant rather than accepted:
 // a rule that expires mid-window would change the verdict, and a permit must not be certified
 // against a rulebase whose outcome has a scheduled change built into it.
+//
+// THE SAME RULE APPLIES TO THE WINNER, and it is a separate check because it is a separate
+// side of the match. The two are not symmetric in the evidence they leave: a rejection on
+// expiry is visible in the trace as the fixed label "expiry", whereas a WINNER's expiry leaves
+// no trace entry at all — it matched. So the winner's expiry is read from the rule itself
+// (WinnerHasExpiry) rather than inferred from the trace.
+//
+// It is load-bearing rather than tidy, because the engine stops at the FIRST match: every
+// lower-priority rule is shadowed by the winner and therefore never considered, never traced,
+// and never examined here. Those rules become reachable the instant the winner expires, and
+// they are under no constraint at all — a shadowed MONITOR or ALLOW_WITH_REDACTION (actions
+// FirstCanaryRequiresPlainAllow refuses precisely because they still reach EffectExecute), a
+// rule carrying an obligation no runtime consumer enforces, or a rule keyed on an unbound
+// request-variable field can each take over the exact First-Canary request with no operator
+// action and nothing to audit. Certifying a permit whose winner has a scheduled end is
+// therefore certifying a rule nobody looked at.
 func permitVerdictInvariant(in PermitInput) PermitReason {
 	if !in.WinnerResolved {
 		// The decision named a rule the snapshot does not contain. The fields it read are
 		// unknowable, and an unknown dependency is never satisfied.
+		return PermitVerdictNotInvariant
+	}
+	if in.WinnerHasExpiry {
+		// The winner stops matching when the clock passes its expiry, which no bound field can
+		// hold steady. The verdict then falls to rules this check never saw.
 		return PermitVerdictNotInvariant
 	}
 	for _, f := range in.WinnerConditionFields {

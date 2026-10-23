@@ -339,7 +339,7 @@ func TestCPServerOption_NoTLS_NoInsecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = false
 
-	_, err := cpServerOption(":50051", "", "", "")
+	_, err := cpServerOption("", "", "")
 	if err == nil {
 		t.Fatal("expected error when no TLS and not insecure")
 	}
@@ -350,7 +350,7 @@ func TestCPServerOption_Insecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = true
 
-	opt, err := cpServerOption(":50051", "", "", "")
+	opt, err := cpServerOption("", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -362,6 +362,7 @@ func TestCPServerOption_Insecure(t *testing.T) {
 // ── applyConfigSnapshot Tests ──────────────────────────────────────────────
 
 func TestApplyConfigSnapshot(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	// Save and restore global state.
 	origBL := bl
 	origIPF := ipf
@@ -374,7 +375,7 @@ func TestApplyConfigSnapshot(t *testing.T) {
 
 	// Initialize required globals.
 	bl = blocklist.New()
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	rl = &RateLimiter{}
 
 	snap := ConfigSnapshot{
@@ -414,7 +415,7 @@ func TestCurrentConfigSnapshot(t *testing.T) {
 
 	bl = blocklist.New()
 	bl.Add("test.com")
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	ipf.SetMode("block") // valid mode; snapshot must round-trip it
 	rl = &RateLimiter{}
 	rl.Configure(200, time.Minute)

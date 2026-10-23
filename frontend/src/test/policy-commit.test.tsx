@@ -27,6 +27,7 @@ const RUNNING_POLICY = {
   version: 12,
   updatedAt: "2026-08-28T12:00:00Z",
   draft: false,
+  persisted: true,
 };
 const DRAFT_POLICY = { ...RUNNING_POLICY, version: 9, draft: true };
 

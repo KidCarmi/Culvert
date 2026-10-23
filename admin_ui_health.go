@@ -279,8 +279,17 @@ func classifyAdminUIListenError(err error) string {
 	if errors.Is(err, errAdminUITLSMaterial) {
 		return "tls_certificate"
 	}
+	// CHAOS-66 narrowed this branch. `network_error` requires an actual
+	// TIMEOUT, not merely an error the net package wrapped: a bind failure
+	// arrives as *net.OpError, which satisfies net.Error unconditionally
+	// (Timeout() false for, say, EINVAL), so the unqualified form reported
+	// every unrecognised errno as `network_error` — pointing the operator at
+	// network troubleshooting for a socket or permission fault — and made
+	// `listen_failed` unreachable for any error the net package produced. The
+	// original gate passed only a bare errors.New, which is the one shape that
+	// does reach `listen_failed`, so the branch looked correct.
 	var ne net.Error
-	if errors.As(err, &ne) {
+	if errors.As(err, &ne) && ne.Timeout() {
 		return "network_error"
 	}
 	return "listen_failed"

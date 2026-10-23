@@ -234,6 +234,10 @@ func getMCPRollout() *mcpRollout {
 // runtime file exists and this is a no-op that leaves the runtime dormant (generation 0,
 // nothing armed) — it composes no executor and reaches no upstream.
 func initMCPRollout(_ *startupState) {
+	// Re-surface unreconciled MCP journal quarantines from a prior boot
+	// BEFORE any loader runs (a same-boot quarantine records the richer
+	// detail and is never clobbered by this residual row).
+	noteResidualMCPStateQuarantines()
 	getMCPRollout().restore()
 	globalCanaryRuntime.restore()
 	// Reconcile the two independently-restored durable domains: disarm any Canary runtime whose
@@ -386,17 +390,18 @@ func (r *mcpRollout) commitRolloutTransitionCore(tgt commitTransitionTarget, cfg
 		// approval/budget past the gate.
 		ai := canaryActivationInputsProbe(cfg.Capability, cfg.Scope, cfg.ScopeRevision)
 		rd := evaluateCanaryActivationPreflightLocked(r, CanaryActivationInput{
-			Capability:                cfg.Capability,
-			Scope:                     cfg.Scope,
-			ScopeRev:                  cfg.ScopeRevision,
-			ToolApprovals:             ai.ToolApprovals,
-			Budget:                    ai.Budget,
-			ServerUsable:              ai.ServerUsable,
-			FingerprintCurrent:        ai.FingerprintCurrent,
-			ToolCatalogUsable:         ai.ToolCatalogUsable,
-			ExactPolicyPermit:         ai.ExactPolicyPermit,
-			FirstCanaryCredentialFree: ai.FirstCanaryCredentialFree,
-			Now:                       now,
+			Capability:                   cfg.Capability,
+			Scope:                        cfg.Scope,
+			ScopeRev:                     cfg.ScopeRevision,
+			ToolApprovals:                ai.ToolApprovals,
+			Budget:                       ai.Budget,
+			ServerUsable:                 ai.ServerUsable,
+			FingerprintCurrent:           ai.FingerprintCurrent,
+			ToolCatalogUsable:            ai.ToolCatalogUsable,
+			ExactPolicyPermit:            ai.ExactPolicyPermit,
+			FirstCanaryCredentialFree:    ai.FirstCanaryCredentialFree,
+			FirstCanaryPeerObservedFresh: ai.FirstCanaryPeerObservedFresh,
+			Now:                          now,
 		})
 		if !rd.Ready {
 			logger.Printf("MCP rollout: %s transition to %s refused by Canary activation preflight %v (fail-closed)",
@@ -634,8 +639,9 @@ func (r *mcpRollout) restore() {
 					ToolApprovals: ai.ToolApprovals, Budget: ai.Budget,
 					ServerUsable: ai.ServerUsable, FingerprintCurrent: ai.FingerprintCurrent,
 					ToolCatalogUsable: ai.ToolCatalogUsable, ExactPolicyPermit: ai.ExactPolicyPermit,
-					FirstCanaryCredentialFree: ai.FirstCanaryCredentialFree,
-					Now:                       time.Now(),
+					FirstCanaryCredentialFree:    ai.FirstCanaryCredentialFree,
+					FirstCanaryPeerObservedFresh: ai.FirstCanaryPeerObservedFresh,
+					Now:                          time.Now(),
 				})
 				if !rd.Ready {
 					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
@@ -821,4 +827,26 @@ func rolloutCapabilityMatches(cfg *rollout.SignedConfig, capb cpdp.Capability) b
 		return true
 	}
 	return (cfg.Capability == rollout.CapabilityManagement) == (capb == cpdp.CapabilityManagement)
+}
+
+// noteResidualMCPStateQuarantines re-surfaces unreconciled quarantines of
+// the MCP canary journals from a PRIOR boot. Those loaders quarantine on a
+// corrupt read like every other state file, but they run lazily (admin reads,
+// the activation commit) rather than once at load, so without this boot-time
+// scan a corruption visible on the boot that quarantined it vanished from
+// /readyz, the alert stream and /api/diagnostics on the next restart while the
+// .corrupt.* evidence stayed on disk. Called once from initMCPRollout.
+func noteResidualMCPStateQuarantines() {
+	caps := []rollout.Capability{rollout.CapabilityGateway, rollout.CapabilityManagement}
+	perCap := func(f func(rollout.Capability) string) []string {
+		out := make([]string, 0, len(caps))
+		for _, c := range caps {
+			out = append(out, f(c))
+		}
+		return out
+	}
+	noteResidualQuarantinePaths("mcp_canary_runtime", perCap(canaryRuntimeStatePath)...)
+	noteResidualQuarantinePaths("mcp_coordinator_rollback_rehearsal", perCap(coordinatorRehearsalPath)...)
+	noteResidualQuarantinePaths("mcp_rollback_rehearsal", perCap(rollbackRehearsalPath)...)
+	noteResidualQuarantinePaths("mcp_shadow_exit_review", shadowExitAttestationPath())
 }

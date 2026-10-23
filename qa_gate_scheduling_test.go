@@ -41,15 +41,18 @@ import (
 // aggregate verdict implementation — the composite action the aggregate job
 // actually `uses:` — rather than a re-implementation of its jq logic.
 //
-// KNOWN LIMITATION, deliberately NOT changed here and NOT asserted away:
+// RESIDUAL LIMITATION, deliberately NOT changed here and NOT asserted away:
 // .github/actions/needs-verdict treats a `skipped` need as a pass on EVERY
 // event, not only on pull requests, unless the caller passes `require-success`.
-// The QA aggregate passes no `require-success` on ordinary runs, so an
-// all-skipped main-push run would report APPROVED. (Audit runs — the stage-6B
-// weekly schedule and an `unsharded_audit` dispatch — DO pass one; see
-// ci_perf_report_test.go.) That is pre-existing behaviour shared by every gate
-// aggregate in the repository; tightening it is a policy change to a shared
-// action and belongs in its own reviewed diff (recorded as a follow-up in
+// The QA aggregate now passes one on the two executions where "nothing ran"
+// must not read as approval — a MAIN PUSH (release evidence) and an AUDIT (the
+// stage-6B weekly schedule or an `unsharded_audit` dispatch); both are pinned
+// in ci_perf_report_test.go. A pull request and an ordinary dispatch still
+// require nothing: a PR must keep reporting success (pass-through) and a
+// dispatch is never release evidence. The shared action's DEFAULT is still
+// skipped-as-pass, which every other gate aggregate in the repository relies
+// on; tightening that default is a policy change to a shared action and
+// belongs in its own reviewed diff (recorded as a follow-up in
 // roadmap/CI-REDESIGN.md §8). TestQAGateVerdict_RealActionBehaviour pins the
 // behaviour as it IS, including that gap, so a future fix is a visible diff.
 // Live validation of this stage must therefore confirm that all nine jobs
@@ -499,11 +502,15 @@ func TestQAGateVerdict_RealActionBehaviour(t *testing.T) {
 		if !ok {
 			t.Fatalf("all-skipped needs (the PR shape) must still approve or branch protection wedges at \"Expected\"; output:\n%s", out)
 		}
-		// Honest record of the KNOWN LIMITATION described in this file's header:
-		// the action cannot tell a PR skip from a main-push skip, because the
-		// event is not part of its input. Non-PR validation must therefore check
-		// that the jobs RAN, not just that this verdict was green.
-		t.Log("known limitation (follow-up, CI-REDESIGN §8): needs-verdict accepts `skipped` on every event unless the caller passes require-success; the QA aggregate passes none")
+		// Honest record of the RESIDUAL LIMITATION described in this file's
+		// header: the action cannot tell a PR skip from a main-push skip,
+		// because the event is not part of its input. The QA aggregate
+		// therefore supplies the event distinction itself, by passing
+		// require-success on a push and on an audit — see
+		// TestCIPerf_MainPushRefusesJobsThatNeverRan, which drives this same
+		// shell with that value and requires it to REFUSE. This sub-case
+		// exercises the no-requirement (pull-request) arm only.
+		t.Log("residual limitation (follow-up, CI-REDESIGN §8): needs-verdict's DEFAULT accepts `skipped` on every event; the QA aggregate passes require-success on pushes and audits, so only the PR arm relies on the default")
 	})
 
 	// Failure and cancellation must refuse, for EVERY substantive job — the

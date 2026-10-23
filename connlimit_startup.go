@@ -97,6 +97,7 @@ func rateLimitCleanupLoop(ctx context.Context) {
 				ssrf.CacheCleanup()
 				loginLimiter.Cleanup()
 				apiLimiter.Cleanup()
+				basicAuthFailLimiter.Cleanup()
 				enrollRateLimitCleanup()
 			})
 		}
