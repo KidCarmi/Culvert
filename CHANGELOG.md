@@ -1447,6 +1447,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- Two security-regression gates added for the memoized IDNA slow path
+  (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
+  and each verified failing in both against the specific defect it claims to
+  catch. No runtime behaviour changes; ported from the closed PR #1617.
+
+  `NormalizeHostStrict` is the fail-closed dispatch gate: `ok=false` means the
+  request is REFUSED, so a host that cannot be canonicalized never reaches FQDN,
+  blocklist or category matching un-normalized (RISK-013). The memo's slots are
+  shared by design — each tier is direct-mapped and a colliding host overwrites
+  the entry that was there — so the crossing that matters is a REJECTED host
+  meeting a resident ACCEPTED entry, which the existing collision test cannot
+  observe because it alternates two accepted hosts.
+  `TestIDNMemo_RejectionIsNeverUpgradedToAcceptance` pins that crossing in
+  both directions in the main tier, and in the long tier (which never retains a
+  rejection) on every round. Against a memo whose hit skips the full-key
+  re-verification, `xn--0.example.com` is answered as another host's A-label
+  with `ok=true` — a client-chosen unnormalizable authority admitted and
+  evaluated as a different destination than the one it names.
+
+  `TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer` pins that the stored key is
+  a CLONE of the caller's string. The key arrives as a substring of whatever
+  buffer the caller holds — on the request path, net/http's header buffer — so
+  an entry that kept it would pin that whole backing array per slot while every
+  byte-counting test still reported a short key. The gate drops every
+  reference it holds to a 16 MiB buffer the probe host was sliced out of and
+  asks the collector what is still reachable: a few hundred bytes when the key
+  is cloned, ~16.8 MB against the un-cloned shape, for a 25-byte main-tier key
+  and a 505-byte long-tier key alike. The review is
+  `docs/engineering/security-reviews/2026-10-13-idna-memo-and-host-bounds-window.md`;
+  its single-tier "un-memoized band is deliberate" finding is superseded by the
+  long tier and its gate for that gap is intentionally not ported.
+
 ### Changed
 
 - A panic in either of the release-dispatch plane's detached worker goroutines
@@ -1624,23 +1656,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from recomputing. The existing `FuzzNormalizeHostStrict` differential against
   the pre-optimization reference ran 598k executions with no divergence.
 
-  The key is a client-chosen authority, so the table is direct-mapped with 1024
-  fixed slots and a per-process random slot seed, and no entry retains a string
-  longer than the 253-byte DNS name maximum. That last bound is load-bearing
-  rather than decorative: `handleRequest`'s raw pre-cap admits a 1 KiB
-  authority and the 253-byte canonical refusal runs *after* `canonicalDestHost`
-  has normalized it, while the zero-option `idna.ToASCII` profile enforces no
-  length limit of its own, so an oversize A-label host would otherwise be
-  retained whole (~2.1 MB across a full table). Refusing to memoize one costs
-  nothing — no DNS server can resolve a longer name, and both dispatch gates
-  refuse it immediately, so it never reaches the fan-out the memo exists to
-  collapse. The table therefore cannot grow — 104 KB retained after 65 536
-  distinct IDN hosts, against a 554 KB absolute ceiling —
-  a collision costs a recomputation rather than a wrong answer, because every
-  hit re-verifies the full key, and an adversary who could force collisions
-  would obtain today's behaviour. Ordinary ASCII traffic is untouched: it
-  returns from the fast path above the memo and never reads or writes the
-  table, pinned by `TestIDNMemo_FastPathNeverTouchesMemo`.
+  The key is a client-chosen authority, so the table is direct-mapped with
+  fixed slots and a per-process random slot seed, and no entry retains a
+  canonical value longer than the 253-byte DNS name maximum. That value bound
+  is load-bearing rather than decorative: `handleRequest`'s raw pre-cap admits
+  a 1 KiB authority and the 253-byte canonical refusal runs *after*
+  `canonicalDestHost` has normalized it, while the zero-option `idna.ToASCII`
+  profile enforces no length limit of its own, so an oversize A-label host
+  would otherwise be retained whole (~2.1 MB across a full table). The table
+  therefore cannot grow — 103 KiB retained after 65 536 distinct IDN hosts,
+  against a 720 KiB absolute ceiling across both tiers — a collision costs a
+  recomputation rather than a wrong answer, because every hit re-verifies the
+  full key, and an adversary who could force collisions would obtain the
+  pre-memo behaviour. Ordinary ASCII traffic is untouched: it returns from the
+  fast path above the memo and never reads or writes the table, pinned by
+  `TestIDNMemo_FastPathNeverTouchesMemo`.
+
+  **Retention is bounded on two tiers, because one bound could not do both
+  jobs.** The first version measured the 253-byte bound on the KEY as the
+  client spelled it, on the stated reasoning that refusing such a host "costs
+  nothing" because "no DNS server can resolve a longer name, and both dispatch
+  gates refuse it immediately". Both halves were wrong, and the mistake was
+  reading a bound on the raw spelling as a bound on the name. IDNA *shrinks* a
+  U-label authority: `proxy_host_bounds.go`'s own derivation records the worst
+  legitimate case as **883 raw bytes collapsing to a 251-byte A-label**, which
+  is precisely why the raw pre-cap is 1 KiB and not 253. So a host whose raw
+  spelling exceeded the bound could canonicalize comfortably inside the DNS
+  limit, with every label inside the 63-byte A-label limit too — a resolvable,
+  ordinary internationalized destination — and **both dispatch gates accepted
+  it**. It was not refused; it walked the full ~10x fan-out with nothing
+  memoized, which is the asymmetry the memo exists to close. Measured per
+  normalization of one such accepted destination (eight U-labels of 20 CJK code
+  points, 499 raw bytes against 227 canonical): `idna.ToASCII` **5.32 µs and 18
+  allocations**, i.e. ~53 µs and 180 allocations per request across the
+  fan-out, against **71 ns and 0 allocations** for a memo hit. Such a key is
+  now retained in a separately bounded long tier — 128 slots, keys to 1024
+  bytes, values still to 253 — which adds ~165 KiB to the ceiling and leaves
+  the main tier's capacity untouched. The key bound is the request path's raw
+  pre-cap itself, not the 883-byte empirical maximum, so "every authority a
+  dispatch gate admits is memoizable" holds by construction rather than by a
+  measurement; the root gate asserts that relation between the two constants,
+  so raising the raw pre-cap fails there instead of re-opening the asymmetry
+  for the newly admitted band.
+  Per-request fan-out for that destination, both measured through the full
+  `NormalizeHostStrict` body: **~85–94 µs and 200 allocations before, ~27–29 µs
+  and 0 allocations after**. Verdicts are unchanged in both tiers — a host past *both*
+  key bounds is still normalized, just not retained.
+
+  Gates, both verified failing against the pre-fix bound:
+  `TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained` (proves the probe host
+  is DNS-valid and that both gate predicates admit it *before* asserting it is
+  retained, so the test cannot pass by accident) and the root
+  `TestHostutilLongRawULabelReachesTheMemo`, which calls the real
+  `rawAuthorityOversize` / `canonicalHostOversize` so the two bounds cannot
+  drift apart again. Plus `TestIDNMemo_LongTierHitIsAllocationFree`,
+  `TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained` (outer boundary,
+  including one byte over), `TestIDNMemo_LongTierBoundedFootprint` and
+  `TestIDNMemo_LongTierConcurrentStress`;
+  `TestIDNMemo_StoredEntriesRespectTheBound` now asserts the invariant over
+  every live entry in both tiers against that tier's key bound.
+
+  **What this does not fix, stated plainly.** `strings.ToLower` runs
+  `strings.Map(unicode.ToLower, …)` for a non-ASCII input — a per-rune table
+  walk over the whole authority — and it sits in `NormalizeHostStrict` *ahead*
+  of both the fast path and the memo, so no tier can collapse it. At **2.84 µs
+  per call** it is ~28 µs per request across the fan-out, against ~50 ns for an
+  ASCII destination, and the client selects it with ~500 header bytes. That
+  residual asymmetry is left open deliberately: narrowing or hoisting the
+  lowering pass changes what canonicalization does to non-ASCII input, which is
+  the IDN-homograph contract `NormalizeHost` exists to enforce (RISK-013), and
+  that belongs to the differential fuzz harness and review rather than to a
+  performance patch.
 
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
