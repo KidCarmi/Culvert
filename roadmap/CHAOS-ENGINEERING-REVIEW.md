@@ -10971,6 +10971,7 @@ In `backup_chaos82_test.go` (root) and
 | `TestChaos82_PublishedArchiveIsOwnerOnly` | both writers publish 0600 | `mode = 0644` |
 | `TestChaos82_PlantedSymlinkAtFixedTmpIsNotFollowed` | the archive is not written through a planted link | canary overwritten with 687 archive bytes |
 | `TestChaos82_StaleTmpAtFixedPathIsUntouched` | `os.Create`'s truncation of the fixed path | stale file consumed |
+| `TestChaos82_TempNameDoesNotInheritBasenameLength` | the temp name is not derived from the destination basename (the fix's own regression, §45.4b) | `create output: … file name too long` at a 247-byte basename |
 | `TestChaos82_UnencryptedWriterLeavesNoFixedTmp` | no temp litter | *(vacuous — see §45.2)* |
 | `TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet` | the BKP-1 downgrade | plaintext archive accepted |
 | `TestChaos82_PlaintextArchiveStillAcceptedWithoutPassphrase` | negative control: the legitimate plaintext restore | — |
