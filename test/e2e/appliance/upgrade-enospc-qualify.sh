@@ -179,8 +179,16 @@ api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Exempt"}' | t
 api POST /api/default-action '{"action":"deny"}' | tail -n1 >/dev/null
 api POST /api/policy '{"name":"qual-allow-origin","priority":10,"action":"Allow","destFQDN":"origin-allowed","sslAction":"Bypass","enabled":true}' | tail -n1 >/dev/null
 through_proxy(){ curl -sS -m 10 -x http://127.0.0.1:18080 -o /dev/null -w '%{http_code}' "http://$1/" 2>/dev/null || echo 000; }
-assert_enforcement(){ local a b; a="$(through_proxy origin-allowed)"; b="$(through_proxy origin-blocked)"
-  if [[ "$a" == 200 && "$b" != 200 && "$b" != 000 ]]; then check "$1" "${2:-enforcement}" pass "allowed=$a blocked=$b (default-deny + allow rule, real traffic through the proxy)"; else check "$1" "${2:-enforcement}" fail "allowed=$a blocked=$b"; fi; }
+# ASTRA 6359611097 #4: the blocked origin must answer EXACTLY 403 with Culvert's
+# default-deny block page; a 5xx/000 is an outage and must never pass. The
+# decision is enforcement_verdict (recovery-custody.sh), proven with negative
+# controls in recovery-custody_test.sh.
+assert_enforcement(){ local a b v f="$EVID/deny-body.$$.html"
+  a="$(through_proxy origin-allowed)"
+  b="$(curl -sS -m 10 -x http://127.0.0.1:18080 -o "$f" -w '%{http_code}' "http://origin-blocked/" 2>/dev/null || echo 000)"
+  if v="$(enforcement_verdict "$a" "$b" "$f")"; then check "$1" "${2:-enforcement}" pass "${v#pass } (real traffic through the proxy)"
+  else check "$1" "${2:-enforcement}" fail "${v#fail } — body: $(head -c 160 "$f" 2>/dev/null | tr -d '\r\n')"; fi
+  rm -f "$f"; }
 ca_fp(){ api GET /api/ca-cert | sed '$d' | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2; }
 health_version(){ curl -fsS -m 5 http://127.0.0.1:18080/health | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])'; }
 PRED_VER="$(health_version)"
@@ -240,16 +248,7 @@ running_id(){ IN docker inspect -f '{{.Image}}' culvert; }
 # diagnose: what the stack looks like when a probe fails (container state,
 # restarts, OOM, recent logs of the proxy and of the bounded host's dockerd,
 # free space). Evidence only — never changes the verdict.
-diagnose(){ local tag="$1"; {
-    echo "== $tag $(date -u +%FT%TZ)"; df -k "$MNT" | tail -1
-    IN docker ps -a --format '{{.Names}} {{.Status}}' 2>&1
-    IN docker inspect -f 'status={{.State.Status}} restarting={{.State.Restarting}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}} err={{.State.Error}} started={{.State.StartedAt}}' culvert 2>&1
-    echo "-- proxy crash head (first panic/fatal/signal line + 30)"
-    IN docker logs culvert 2>&1 | grep -m1 -A30 -E '^(panic:|fatal error:|SIG[A-Z]+:|runtime: |\[signal )' | cut -c1-300
-    echo "-- proxy log"; IN docker logs --tail 40 culvert 2>&1 | cut -c1-300
-    echo "-- /data usage"; IN docker run --rm -v culvert_proxy-data:/data:ro busybox:stable du -sk /data/* 2>&1 | sort -n | tail -8
-    echo "-- bounded dockerd log"; docker logs --tail 40 "$DIND" 2>&1 | cut -c1-300
-  } >> "$EVID/diagnose.log" 2>&1 || true; }
+# diagnose: recovery-custody.sh (bounded; ASTRA 6359611097 #1).
 
 # fill_bounded: the ONLY fill in this harness — a file inside the loop mount,
 # so the runner's own disk never fills. Leaves QUAL_ENOSPC_LEAVE_KB free.
@@ -259,7 +258,7 @@ fill_bounded(){ local avail fill
   fallocate -l "$((fill * 1024))" "$MNT/.qual-fill"; }
 
 write_report_and_exit(){
-  IN cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
+  timeout --kill-after=5 40 docker exec "$DIND" timeout -s KILL 30 cat /var/lib/culvert-maint/agent.log > "$EVID/agent.log" 2>/dev/null || true
   # ASTRA §2 mandatory convergence verdict. Emitted BEFORE the report is built so
   # the row appears and INCONCLUSIVE is set before the exit decision. A recovery
   # scenario that EXERCISED convergence but never PROVED it (only a lab-sizing or
@@ -505,7 +504,18 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # import — no CompleteImport runs — so the interrupted state was there to catch;
   # run 39391241768 was inconclusive 3× for exactly that reason).
   MP="$(IN docker volume inspect culvert_proxy-data -f '{{.Mountpoint}}' 2>/dev/null)"; [ -n "$MP" ] || MP=/var/lib/docker/volumes/culvert_proxy-data/_data
-  marker_present(){ IN sh -c "[ -e '$MP/catfeeddb.importing' ]" >/dev/null 2>&1; }
+  # ASTRA 6359611097 #2: the marker is TRI-STATE. present/absent come only from a
+  # check that itself ran; a failed transport, a missing volume or a timeout is
+  # "error", which FAILS the run instead of reading as "absent".
+  marker_state(){ local o
+    o="$(rx 20 "if [ -e catfeeddb.importing ]; then echo present; else echo absent; fi" 2>/dev/null)" || { echo error; return 0; }
+    case "$o" in present|absent) echo "$o" ;; *) echo error ;; esac; }
+  marker_present(){ local m; m="$(marker_state)"
+    case "$m" in present) return 0 ;; absent) return 1 ;; esac
+    check K marker-observation fail "could not observe $MARKER (bounded check failed) — not treated as absent"; diagnose K-marker; write_report_and_exit; }
+  # INB <secs> <cmd…>: a bounded read inside the bounded host (remote KILL at
+  # <secs>, local bound <secs>+10) — the scenario's own reads must not hang it.
+  INB(){ local b="$1"; shift; timeout --kill-after=5 "$((b + 10))" docker exec "$DIND" timeout -s KILL "$b" "$@"; }
   metric(){ curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | awk -v k="$1" '$1==k{print $2}'; }
   # wait_serving <sc> <name> <secs>: /health must answer within the bound, else FAIL.
   wait_serving(){ local t=$((SECONDS + $3))
@@ -516,17 +526,31 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # must not add, drop or rewrite config history. Non-200 is an error, not a value.
   hist_sum(){ local out code disk
     out="$(api GET /api/config/versions)" || return 1; code="$(tail -n1 <<<"$out")"; [[ "$code" == 200 ]] || return 1
-    disk="$(IN docker exec culvert sh -c 'cd /data && for f in config_versions/*; do [ -f "$f" ] && sha256sum "$f"; done; true')" || return 1
+    disk="$(INB 30 docker exec culvert sh -c 'cd /data || exit 3; for f in config_versions/*; do if [ -f "$f" ]; then sha256sum "$f" || exit 4; fi; done')" || return 1
     printf '%s\n%s\n' "$(sed '$d' <<<"$out")" "$disk" | sha256sum | cut -c1-16; }
   hist_count(){ api GET /api/config/versions | sed '$d' | python3 -c 'import json,sys;print(len(json.load(sys.stdin) or []))' 2>/dev/null || echo '?'; }
-  # Domains the UT1 community feed carries and the built-in admin taxonomy does
-  # NOT (bet365/pokerstars are built-in Gambling, so they resolve tier=admin and
-  # prove nothing about Layer 2). community_probe prints the first that resolves
-  # tier=community, so a pass names the domain AND category actually served.
-  COMMUNITY_PROBES="${QUAL_COMMUNITY_PROBES:-pornhub.com xvideos.com xhamster.com redtube.com youporn.com}"
-  community_probe(){ local h t
-    for h in ${1:-$COMMUNITY_PROBES}; do
-      t="$(api GET "/api/urlcat/lookup?host=$h" | sed '$d' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("tier",""),d.get("category",""))' 2>/dev/null || true)"
+  # Probes come FROM THE FEED THE NODE DOWNLOADED (feed_probe_candidates): the
+  # harness fetches the same URL the product logged and takes the first domains
+  # of each mapped category present. Every lookup response is recorded raw in
+  # probes.txt, so a miss is diagnosable from the evidence. A candidate that
+  # resolves tier=admin is skipped (built-in taxonomy: proves nothing about
+  # Layer 2); a pass names the domain AND the category the community store served.
+  PROBE_CATS="gambling adult phishing malware social_networks games shopping dating streamingmedia news"
+  PROBEFILE="$EVID/probes.txt"; PROBE_CANDIDATES=""
+  derive_probes(){ local url tgz="$EVID/.feed-probe.tar.gz"
+    url="$(INB 30 docker logs culvert 2>&1 | grep -oE 'FeedSync: starting UT1 sync from [^ "]+' | tail -1 | awk '{print $NF}')"
+    [[ "$url" =~ ^https?:// ]] || { echo "no feed URL in the proxy log" >> "$PROBEFILE"; return 1; }
+    timeout --kill-after=10 900 curl -fsSL -m 880 -o "$tgz" "$url" || { echo "feed download failed: $url" >> "$PROBEFILE"; return 1; }
+    { echo "feed $url sha256 $(sha256sum "$tgz" | cut -d' ' -f1)"; } >> "$PROBEFILE"
+    PROBE_CANDIDATES="$(feed_probe_candidates "$tgz" 5 $PROBE_CATS | tr '\n' ' ')"
+    rm -f "$tgz"
+    echo "candidates: ${PROBE_CANDIDATES:-none}" >> "$PROBEFILE"
+    [[ -n "${PROBE_CANDIDATES// /}" ]]; }
+  community_probe(){ local h raw t
+    for h in ${1:-$PROBE_CANDIDATES}; do
+      raw="$(api GET "/api/urlcat/lookup?host=$h" | tr '\n' ' ')"
+      printf '%s lookup %s -> %s\n' "$(date -u +%FT%TZ)" "$h" "${raw:0:400}" >> "$PROBEFILE"
+      t="$(sed 's/ [0-9]*[[:space:]]*$//' <<<"$raw" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("tier",""),d.get("category",""))' 2>/dev/null || true)"
       [[ "$t" == community\ * ]] && { echo "$h ${t#community }"; return 0; }
     done; return 1; }
   # final_integrity <sc> <phase>: the end-state contract. Admin/Layer-1 state, the
@@ -544,7 +568,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     assert_enforcement "$sc" "$ph-enforcement"
     av="$(metric culvert_catfeeddb_available)"
     if [[ "$av" == 1 ]] && ! marker_present; then check "$sc" "$ph-layer2-durable" pass "community store available=1, no import-pending marker"
-    else check "$sc" "$ph-layer2-durable" fail "available='$av' marker_present=$(marker_present && echo yes || echo no)"; fi; }
+    else check "$sc" "$ph-layer2-durable" fail "available='$av' marker=$(marker_state)"; fi; }
   HIST0="$(hist_sum || echo error)"; HIST0_N="$(hist_count)"
   [[ "$HIST0" != error ]] && check K pre-kill-history pass "config history digest $HIST0 ($HIST0_N version(s))" \
     || { check K pre-kill-history fail "could not read the config history before the kill"; write_report_and_exit; }
@@ -553,13 +577,14 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # Every step below is bounded and enforced (step), and leftovers from earlier
   # incidents are inventoried and hashed BEFORE deletion (custody), never
   # globbed away unrecorded.
-  step K compose-stop 180 docker exec "$DIND" sh -c 'cd /srv/culvert && docker compose stop proxy'
+  dstep K compose-stop 180 'cd /srv/culvert && docker compose stop proxy'
   quarantine_custody K pre-run; delete_custodied K pre-run
-  step K reset-cache 300 docker exec "$DIND" sh -c "rm -rf -- '$MP/catfeeddb' '$MP/catfeeddb.importing'"
-  if IN sh -c "[ -e '$MP/catfeeddb' ] || [ -e '$MP/catfeeddb.importing' ]"; then check K reset-cache fail "derived cache or marker still present after the reset"; write_report_and_exit; fi
+  dstep K reset-cache 300 "cd '$MP' || exit 3; rm -rf -- catfeeddb catfeeddb.importing"
+  rs="$(rx 20 'if [ -e catfeeddb ] || [ -e catfeeddb.importing ]; then echo present; else echo absent; fi' 2>/dev/null || echo error)"
+  [[ "$rs" == absent ]] || { check K reset-cache fail "after the reset the derived cache/marker are '$rs' (want absent from a successful check)"; write_report_and_exit; }
   LOGS_SINCE="$(IN date -u +%Y-%m-%dT%H:%M:%SZ)"
-  step K compose-start 180 docker exec "$DIND" sh -c 'cd /srv/culvert && docker compose start proxy'
-  wlogs(){ IN docker logs --since "$LOGS_SINCE" culvert 2>&1; }
+  dstep K compose-start 180 'cd /srv/culvert && docker compose start proxy'
+  wlogs(){ INB 30 docker logs --since "$LOGS_SINCE" culvert 2>&1; }
   done_re='FeedSync: sync complete'                               # the ONLY line that clears the marker
   beginfail='FeedSync: could not begin the import'                # BeginImport itself failed: no marker, nothing to interrupt
   r0="$(IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null || echo 0)"
@@ -571,7 +596,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   for _ in $(seq 1 2400); do
     if marker_present; then
       check K import-pending-marker pass "C1: $MARKER present and the import not yet certified — BeginImport wrote the durable intent BEFORE completing the bulk write; restarts=$r0"
-      step K sigkill 60 docker exec "$DIND" docker rm -f culvert   # SIGKILL + no restart-policy race
+      dstep K sigkill 60 'docker rm -f culvert'   # SIGKILL + no restart-policy race
       killed=1; break
     fi
     wlogs | grep -qE "$done_re" && break     # import completed → marker already cleared; window missed
@@ -590,7 +615,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # quarantine the interrupted store and rebuild — breaking the re-fault loop that
   # was the original failure.
   REC_AT="$(date -u +%FT%TZ)"
-  step K compose-up 300 docker exec "$DIND" sh -c 'cd /srv/culvert && docker compose up -d'
+  dstep K compose-up 300 'cd /srv/culvert && docker compose up -d'
   wait_serving K recovered 120
   v="$(health_version 2>/dev/null || echo unreachable)"
   [[ "$v" == "$PRED_VER" ]] && check K recovered-serving pass "/health 200 version=$v after one restart (compose up -d)" || check K recovered-serving fail "version=$v after restart (want $PRED_VER)"
@@ -654,7 +679,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   esac
   # Bounded + idempotent (owner req 5): a SECOND clean restart must NOT re-quarantine.
   qc1="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | awk '/^culvert_catfeeddb_quarantined_copies /{print $2}')"
-  step K restart-idempotence 180 docker exec "$DIND" sh -c 'cd /srv/culvert && docker compose restart proxy'
+  dstep K restart-idempotence 180 'cd /srv/culvert && docker compose restart proxy'
   wait_serving K restart-idempotence 120
   qc2="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null | awk '/^culvert_catfeeddb_quarantined_copies /{print $2}')"
   [[ -n "$qc2" && "$qc2" == "$qc1" ]] && check K idempotent-no-reloop pass "a second clean restart did not re-quarantine (quarantined_copies stayed ${qc1:-?}) — recovery is bounded, not a loop" || check K idempotent-no-reloop fail "quarantined_copies changed on a clean restart: ${qc1:-?} -> ${qc2:-?} (possible re-quarantine loop)"
@@ -675,7 +700,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     delete_custodied K pre-free
     freeAf="$(IN df -k "$MP" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
     REC_AT="$(date -u +%FT%TZ)"
-    step K restart-after-free 180 docker exec "$DIND" sh -c 'cd /srv/culvert && docker compose restart proxy'
+    dstep K restart-after-free 180 'cd /srv/culvert && docker compose restart proxy'
     wait_serving K restart-after-free 120
     t0=$SECONDS; res2=""
     while (( SECONDS - t0 < conv )); do
@@ -698,22 +723,23 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # neither re-quarantines, re-syncs nor loses the certified store.
   final_integrity K post-convergence
   if [[ "$CONV_VERDICT" == proven ]]; then
-    probe="$(community_probe || true)"
-    if [[ -n "$probe" ]]; then check K converged-store-serves pass "/api/urlcat/lookup resolves ${probe%% *} -> tier=community category='${probe#* }' — the converged import is what serves"
-    else check K converged-store-serves fail "a sync completed, but none of [$COMMUNITY_PROBES] resolves to the community tier"; fi
+    probe=""
+    if derive_probes; then probe="$(community_probe || true)"; fi
+    if [[ -n "$probe" ]]; then check K converged-store-serves pass "/api/urlcat/lookup resolves ${probe%% *} (taken from the downloaded feed) -> tier=community category='${probe#* }' — the converged import is what serves; raw responses in probes.txt"
+    else check K converged-store-serves fail "a sync completed, but no feed-derived candidate [${PROBE_CANDIDATES:-none derived}] resolves to the community tier (raw responses in probes.txt)"; fi
     qcF="$(metric culvert_catfeeddb_quarantined_copies)"; RS_AT="$(date -u +%FT%TZ)"
-    step K clean-restart 180 docker exec "$DIND" sh -c 'cd /srv/culvert && docker compose restart proxy'
+    dstep K clean-restart 180 'cd /srv/culvert && docker compose restart proxy'
     wait_serving K clean-restart 120
     # Settle window: a boot that did NOT recognise the store as certified would
     # start a feed sync immediately (RunNow); a certified store waits a full
     # interval, so no "FeedSync: starting" may appear here.
     sleep "${QUAL_CLEAN_RESTART_SETTLE_SECS:-60}"
-    rlog="$(IN docker logs --since "$RS_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,120}|community category store [^"]{0,100}' | tr '\n' '|' || true)"
+    rlog="$(INB 30 docker logs --since "$RS_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,120}|community category store [^"]{0,100}' | tr '\n' '|' || true)"
     rec="$(metric culvert_catfeeddb_recovered)"; qcR="$(metric culvert_catfeeddb_quarantined_copies)"
     if [[ "$rec" == 0 && -n "$qcR" && "$qcR" == "$qcF" ]] && ! marker_present && ! grep -q 'FeedSync: starting' <<<"$rlog"; then
       check K clean-restart-after-convergence pass "restart from the converged state: no quarantine (recovered=$rec, quarantined_copies $qcF->$qcR), no marker, no re-sync in ${QUAL_CLEAN_RESTART_SETTLE_SECS:-60}s; log: ${rlog:-quiet}"
     else
-      check K clean-restart-after-convergence fail "recovered='$rec' quarantined_copies $qcF->'$qcR' marker=$(marker_present && echo present || echo absent); log: ${rlog:-none}"
+      check K clean-restart-after-convergence fail "recovered='$rec' quarantined_copies $qcF->'$qcR' marker=$(marker_state); log: ${rlog:-none}"
     fi
     # Fresh session after the restart, so a lookup failure can only mean the store.
     api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' >/dev/null || true

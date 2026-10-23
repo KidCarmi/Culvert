@@ -865,7 +865,7 @@ jobs:
             echo "attempt $attempt: exit $rc"
             [ "$rc" = 2 ] || break
           done
-          sudo cp "$RUNNER_TEMP/killimport/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log,steps.log,cleanup.log} "$RUNNER_TEMP/killimport/" 2>/dev/null || true
+          sudo cp "$RUNNER_TEMP/killimport/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log,steps.log,cleanup.log,probes.txt} "$RUNNER_TEMP/killimport/" 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/killimport"
           exit "$rc"
       - name: Report
@@ -881,9 +881,23 @@ jobs:
             ${{ runner.temp }}/killimport/**/diagnose.log
             ${{ runner.temp }}/killimport/**/steps.log
             ${{ runner.temp }}/killimport/**/cleanup.log
+            ${{ runner.temp }}/killimport/**/probes.txt
             ${{ runner.temp }}/killimport/**/custody/**
+            !${{ runner.temp }}/killimport/**/custody/**/quarantine.tar.gz
           retention-days: 30
           if-no-files-found: warn
+      # The COMPLETE quarantined bytes the harness preserved and re-verified
+      # before deleting them (ASTRA 6359611097 #3), kept apart from the small
+      # evidence artifact. Verify with custody/<tag>/quarantine.tar.gz.sha256 and
+      # manifest.sha256 from the evidence artifact.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-fdisk-midimport-kill-quarantine
+          path: ${{ runner.temp }}/killimport/**/custody/**/quarantine.tar.gz
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
 
   # ASTRA/owner round 3 on #1528: F-DISK must qualify the agent the OVA actually
   # ships, and that identity must be proven from the OVA's own bytes — not from
