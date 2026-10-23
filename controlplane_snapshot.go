@@ -1350,7 +1350,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	refScanDeleteLock()
 	defer refScanDeleteUnlock()
 
-	// CHAOS-71: everything below this point MUTATES live enforcement state with
+	// CHAOS-79: everything below this point MUTATES live enforcement state with
 	// no rollback, so a round that dies partway leaves two config generations
 	// blended. Bracket the region so an interrupted apply is distinguishable
 	// from one refused before any mutation. end… is NOT deferred on purpose: a
@@ -1367,7 +1367,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 
 // applySnapshotMutations is applyConfigSnapshot's mutating region: every call
 // here replaces live enforcement state. Order is preserved verbatim from before
-// the CHAOS-71 extraction, and the caller holds the reference-integrity gate.
+// the CHAOS-79 extraction, and the caller holds the reference-integrity gate.
 func applySnapshotMutations(snap ConfigSnapshot) error {
 	applySnapshotPolicyAndTraffic(snap)
 	applySnapshotClusterRuntime(snap)
@@ -1703,7 +1703,7 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 
 // reportDroppedStartupOrderSlices logs any CP-authoritative snapshot slice that
 // applySnapshotExtendedState could not apply because its store does not exist
-// yet (CHAOS-72).
+// yet (CHAOS-80).
 //
 // The `!= nil` store guards in applySnapshotExtendedState carry TWO different
 // conditions, and only one of them is a no-op. A nil FIELD is the presence

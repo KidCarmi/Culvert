@@ -81,7 +81,7 @@ type DataPlaneClient struct {
 	// but its persist has not completed. It exists because MergeRevocations
 	// counts only NEWLY added tokens, so a save that is skipped once can never
 	// be re-triggered by a later identical full-set response — see
-	// revocationSyncRound (CHAOS-71, Codex P1). Atomic because the gate and the
+	// revocationSyncRound (CHAOS-79, Codex P1). Atomic because the gate and the
 	// revocation loop are different goroutines under -race.
 	revocationsUnsaved atomic.Bool
 }
@@ -212,11 +212,11 @@ func (c *DataPlaneClient) failover() bool {
 	return false
 }
 
-// ── CHAOS-71: the DP control-plane sync plane runs its rounds guarded ────────
+// ── CHAOS-79: the DP control-plane sync plane runs its rounds guarded ────────
 //
 // Run launches FIVE long-lived workers inside the proxy's own process, and Go
 // terminates that process on an unrecovered panic in ANY goroutine. Until
-// CHAOS-71 none of the five ran its round under the per-round guard CHAOS-24
+// CHAOS-79 none of the five ran its round under the per-round guard CHAOS-24
 // (crashguard.go, runGuarded) established for every other background worker in
 // the tree — including dpCertRenewalLoop, started by the SAME startDataPlane a
 // line below Run. These five were simply never in that sweep's scope, so they
@@ -292,7 +292,7 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 // step can fail WITHOUT reaching any of them: the round dies before
 // markConfigSnapshotApplyOK, which leaves the surface reporting the PREVIOUS
 // success while the node enforces a half-applied snapshot — blocklist and IP
-// filter swapped, policy rules or URL categories not. Before CHAOS-71 that
+// filter swapped, policy rules or URL categories not. Before CHAOS-79 that
 // state was unreachable (the process died), so containment creates it; the
 // surface must therefore learn about it in the same commit. Recovery is the
 // existing one: lastVersion is advanced only after a complete apply, so the
@@ -430,7 +430,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		return // nothing changed
 	}
 	snapForDisk := snap
-	// CHAOS-71: the full path's mutations START HERE, not at applyConfigSnapshot
+	// CHAOS-79: the full path's mutations START HERE, not at applyConfigSnapshot
 	// — external-auth settings and the IdP registry are live state, and the IdP
 	// sync compiles every enabled provider. Bracketing only the inner region
 	// left a panic in either of them looking like a clean apply. One begin and
@@ -453,7 +453,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 
 // applyFullSnapshotMutations is the full path's mutating sequence: every call
 // here replaces live enforcement state. Extracted so fetchAndApply brackets it
-// with exactly one begin/end (CHAOS-71); order is preserved verbatim.
+// with exactly one begin/end (CHAOS-79); order is preserved verbatim.
 //
 // snap is taken by pointer only because the caller's copy must observe the
 // IdPProfiles clearing between the sync and the snapshot apply, which the
@@ -574,7 +574,7 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// mutation happens for a delta whose blocklist is rejected. snapForDisk keeps
 	// the full remainder (incl. IdP profiles) for the last-good file.
 	snapForDisk := remainder
-	// CHAOS-71: the delta path never calls applyConfigSnapshot, so it needs its
+	// CHAOS-79: the delta path never calls applyConfigSnapshot, so it needs its
 	// OWN bracket — applyBlocklistDeltaSnapshot swaps the blocklist chain and
 	// then the non-blocklist remainder, and an interrupted delta previously left
 	// the apply-health surface reporting success over mixed-generation state.
@@ -860,7 +860,7 @@ func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Durat
 
 // auditPushRound forwards one drained batch of local audit events to the CP.
 //
-// The deferred requeue is the fail-closed half of the CHAOS-71 guard, and it is
+// The deferred requeue is the fail-closed half of the CHAOS-79 guard, and it is
 // why this round could not simply be wrapped. Drain REMOVES the batch from the
 // pending queue, so between the drain and a successful push the only copy of
 // those events is this local slice. Before the guard, a panic in here killed the

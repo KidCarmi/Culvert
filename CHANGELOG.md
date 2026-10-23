@@ -1269,7 +1269,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Fixed
 
 - **A fault in any of the Data Plane's five control-plane sync workers killed
-  the whole gateway** (CHAOS-71). `DataPlaneClient.Run` starts the config poll,
+  the whole gateway** (CHAOS-79). `DataPlaneClient.Run` starts the config poll,
   the heartbeat, the rate-limit gossip, the revocation sync and the audit push
   inside the proxy's own process, and Go terminates the process on an
   unrecovered panic in any goroutine — so a fault in one auxiliary sync round
@@ -1338,7 +1338,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   still needs.
 - A Data Plane boot **silently discarded the bandwidth/QoS and node-group
   slices** of its last-known-good config snapshot and still recorded a complete,
-  version-advancing apply (CHAOS-72). `initCluster` replays that snapshot
+  version-advancing apply (CHAOS-80). `initCluster` replays that snapshot
   synchronously, 27 lines of `main()` before `initPersistentAdminState`
   constructs either store, so the apply's `!= nil` store guards — which read
   like the presence contract beside them — dropped both slices on every boot;

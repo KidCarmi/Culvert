@@ -1,7 +1,13 @@
 # Chaos Engineering Review — 2026-10-14
 
-## CHAOS-71 — The Data Plane's control-plane sync plane had no panic containment
-## CHAOS-72 — A Data Plane boot silently drops two CP-authoritative config slices
+## CHAOS-79 — The Data Plane's control-plane sync plane had no panic containment
+## CHAOS-80 — A Data Plane boot silently drops two CP-authoritative config slices
+
+**Id note.** Written as `CHAOS-71`/`CHAOS-72` and renumbered to `CHAOS-79`/`CHAOS-80`
+in merge order when main was brought in: `CHAOS-71` (the CP gRPC listener, §44
+of the register) and `CHAOS-72` (#1611, the CDR breaker) had merged, and open
+sweeps held `CHAOS-73` and `CHAOS-76`–`78`. Cite these findings by this
+document's date as well as by id (see the register's §0 collision warning).
 
 **Scope.** `controlplane_client.go` (`DataPlaneClient.Run` and the five workers it
 launches), `controlplane_snapshot.go` (`applySnapshotExtendedState`), and the
@@ -14,7 +20,7 @@ that does the same thing, and nothing in the tree was checking"* — so this swe
 took the repository's own most load-bearing worker rule (CHAOS-24: every
 long-lived background worker runs its round under `runGuarded`) and audited it
 for sites the original sweep never enumerated. The DP control-plane sync plane
-is one. Reading its startup path for a second time produced CHAOS-72.
+is one. Reading its startup path for a second time produced CHAOS-80.
 
 ---
 
@@ -75,7 +81,7 @@ inside the finding.** Naive containment makes them *worse* than the crash:
   containment *creates* it; the surface therefore had to learn about it in the
   same commit.
 
-**CHAOS-72, found while reading the same startup path: a Data Plane boot
+**CHAOS-80, found while reading the same startup path: a Data Plane boot
 silently discards two CP-authoritative config slices, and records the apply as a
 complete success.** `applySnapshotExtendedState` guards the bandwidth and
 node-group applies on a non-nil field **and** a non-nil store. The two guards
@@ -115,7 +121,7 @@ reporting a current config.
 | 3 | Fault merging a rate-limit broadcast | Process death | Round contained as `dp_ratelimit_gossip`; the per-tick CHAOS-61 freshness evaluation stays armed, so cluster limiting degrades to local and *says so* |
 | 4 | Fault merging a revocation set | Process death | Round contained as `dp_revocation_sync`; the next tick re-sends the full local set (`ExportRevocations` is a full export, not a delta) |
 | 5 | Fault pushing an audit batch | Process death, batch lost once | Round contained as `dp_audit_push`, **batch returned to the queue** and retried next tick |
-| 6 | DP restart with a last-known-good snapshot carrying bandwidth policies / node groups (CHAOS-72) | Both slices silently dropped; apply recorded as complete; version ratchet suppresses re-apply | Drop is **reported** with the slice and config version; enforcement unchanged pending the ordering fix |
+| 6 | DP restart with a last-known-good snapshot carrying bandwidth policies / node groups (CHAOS-80) | Both slices silently dropped; apply recorded as complete; version ratchet suppresses re-apply | Drop is **reported** with the slice and config version; enforcement unchanged pending the ordering fix |
 
 **Why "guard the round, never the goroutine" is unchanged here.** A `recover` at
 the top of any of these five goroutines would convert a loud crash into a
@@ -134,12 +140,12 @@ limiting on cancellation *after* contained panics.
 
 | ID | Finding | Severity | Reachable in the stock container? | State |
 |---|---|---|---|---|
-| CHAOS-71 | Five DP↔CP sync workers run unguarded rounds; a panic in any kills the gateway | **High** | Yes — any node run with `-dp-addr` / an enrollment config | **Fixed** here |
-| CHAOS-71a | Contained audit round would destroy a drained batch per interval | **High** (data integrity) | Yes, once containment exists | **Fixed** in the same commit |
-| CHAOS-71b | Contained config round would report a half-applied snapshot as healthy | **Medium** | Yes, once containment exists | **Fixed** in the same commit |
-| CHAOS-72 | DP boot drops CP-authoritative bandwidth + node-group slices and records a complete apply | **Low** | Yes, every DP boot; impact masked by node-local persistence | **Reported**, not repaired — see §7 |
+| CHAOS-79 | Five DP↔CP sync workers run unguarded rounds; a panic in any kills the gateway | **High** | Yes — any node run with `-dp-addr` / an enrollment config | **Fixed** here |
+| CHAOS-79a | Contained audit round would destroy a drained batch per interval | **High** (data integrity) | Yes, once containment exists | **Fixed** in the same commit |
+| CHAOS-79b | Contained config round would report a half-applied snapshot as healthy | **Medium** | Yes, once containment exists | **Fixed** in the same commit |
+| CHAOS-80 | DP boot drops CP-authoritative bandwidth + node-group slices and records a complete apply | **Low** | Yes, every DP boot; impact masked by node-local persistence | **Reported**, not repaired — see §7 |
 
-Severity for CHAOS-71 is availability-led: a single auxiliary worker could take
+Severity for CHAOS-79 is availability-led: a single auxiliary worker could take
 the whole in-line gateway down, which is the blast-radius property the CHAOS-24
 sweep rated Critical for the fifteen workers it did cover.
 
@@ -205,7 +211,7 @@ Branch `claude/serene-cerf-4brbca`, three files:
 - `controlplane_snapshot.go` — `reportDroppedStartupOrderSlices`, called at the
   end of `applySnapshotExtendedState`, reports a CP-authoritative slice dropped
   because its store does not exist yet.
-- `chaos71_dp_sync_worker_panic_test.go` — 13 gates (§8).
+- `chaos79_dp_sync_worker_panic_test.go` — 13 gates (§8).
 
 No behavior changes on any healthy path: a clean round is byte-identical to
 before, and the `continue`→`return` rewrites inside the extracted rounds
@@ -316,7 +322,7 @@ catch a bracket that starts too late.
 
 ## 7. Residual Risk / deliberately left
 
-- **CHAOS-72 is reported, not repaired.** The real fix is to construct the
+- **CHAOS-80 is reported, not repaired.** The real fix is to construct the
   node-group and bandwidth stores before `initCluster` can replay a snapshot
   into them — a startup-**ordering** change, which this repository treats as a
   contract needing its own analysis (`loadPersistentAdminState` documents
@@ -334,7 +340,7 @@ catch a bracket that starts too late.
   each is the same process-death shape and each needs its own fail-closed
   reading — `enrollment.go`'s loop in particular, since it runs on the **control
   plane** and a panic there stops every DP in the fleet from syncing. Recorded
-  as the CHAOS-73 candidate rather than swept blind here.
+  as the next sweep's candidate (no id claimed) rather than swept blind here.
 - **`crashThrottleEvery` (1 s per component)** still means a tight panic loop
   reports a fraction of its rounds to the SIEM; the unthrottled counter remains
   the lossless signal (M1 anti-forensics-DoS trade-off, inherited unchanged).
@@ -371,7 +377,7 @@ catch a bracket that starts too late.
   inject at `callForTest`, i.e. pre-mutation. That is a new unauthenticated
   operator contract changing when a node leaves the load-balancer pool, so it
   belongs in its own change with its own fail-closed analysis, not bundled into
-  a containment diff. Tracked alongside the CHAOS-72 ordering fix.
+  a containment diff. Tracked alongside the CHAOS-80 ordering fix.
 
 ---
 
@@ -383,34 +389,34 @@ test binary*, which is the defect itself:
 
 | Gate | Pre-fix result |
 |---|---|
-| `TestChaos71_ConfigRoundPanicIsContainedAndMarksApplyRejected` | FAIL — binary died inside `fetchAndApply` |
-| `TestChaos71_PollLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
-| `TestChaos71_MetricsLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
-| `TestChaos71_RevocationLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
-| `TestChaos71_AuditPushLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
-| `TestChaos71_GossipLoopSurvivesPanicsAndStillDisarmsOnCancel` | FAIL — binary died on round 1 |
-| `TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue` | FAIL — `pending audit events after a panicking push = 0, want 3` (mutated by removing only the deferred requeue, with the loop guards intact) |
-| `TestChaos72_DroppedBandwidthSliceIsReported` | FAIL — `a dropped bandwidth slice must be reported, got:` then nothing (empty capture) |
+| `TestChaos79_ConfigRoundPanicIsContainedAndMarksApplyRejected` | FAIL — binary died inside `fetchAndApply` |
+| `TestChaos79_PollLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
+| `TestChaos79_MetricsLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
+| `TestChaos79_RevocationLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
+| `TestChaos79_AuditPushLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
+| `TestChaos79_GossipLoopSurvivesPanicsAndStillDisarmsOnCancel` | FAIL — binary died on round 1 |
+| `TestChaos79_AuditRoundPanicReturnsTheDrainedBatchToTheQueue` | FAIL — `pending audit events after a panicking push = 0, want 3` (mutated by removing only the deferred requeue, with the loop guards intact) |
+| `TestChaos80_DroppedBandwidthSliceIsReported` | FAIL — `a dropped bandwidth slice must be reported, got:` then nothing (empty capture) |
 
 **CONTROLS** — a passing gate must not be able to mean the mechanism simply
 stopped firing, or that it fires unconditionally:
 
-- `TestChaos71_CleanConfigRoundRecordsNothingAndLeavesApplyHealthOK` — a clean
+- `TestChaos79_CleanConfigRoundRecordsNothingAndLeavesApplyHealthOK` — a clean
   round records no crash and leaves apply-health healthy, so the fail-closed
   marking is caused by the panic and not by the guard existing.
-- `TestChaos71_DeliveredAuditBatchIsNotRequeued` — a delivered batch stays
+- `TestChaos79_DeliveredAuditBatchIsNotRequeued` — a delivered batch stays
   delivered; without this, the requeue gate would pass against a round that
   never clears the queue and duplicates every event forever.
-- `TestChaos71_FailedAuditPushStillRequeues` — pins the pre-existing error-path
+- `TestChaos79_FailedAuditPushStillRequeues` — pins the pre-existing error-path
   retry that the deferred requeue replaced.
-- `TestChaos72_OmittedSlicesAreNotReportedAsDropped` — an omitted slice is the
+- `TestChaos80_OmittedSlicesAreNotReportedAsDropped` — an omitted slice is the
   presence contract, so it must stay quiet; otherwise the report would fire on
   every poll from a CP that ships neither slice.
-- `TestChaos71_SyncPlaneComponentsAreDistinct` — five distinct non-empty crash
+- `TestChaos79_SyncPlaneComponentsAreDistinct` — five distinct non-empty crash
   components, so a config fault can never be mistaken for an audit fault in
   `culvert_crash_records_total{component}`.
 
-**Counts.** 13 new gates (11 CHAOS-71, 2 CHAOS-72) in one new root file.
+**Counts.** 13 new gates (11 CHAOS-79, 2 CHAOS-80) in one new root file.
 
 **Commands and results** (Go 1.26.9 from `go.mod`'s `toolchain`):
 
@@ -419,8 +425,8 @@ stopped firing, or that it fires unconditionally:
 | `go build ./...` | pass |
 | `go vet .` | pass |
 | `gofmt -l` on the three changed files | clean |
-| `go test -run 'TestChaos71\|TestChaos72' -count=1 .` | pass (13/13) |
-| `go test -run 'TestChaos71\|TestChaos72\|Chaos24' -count=1 -race .` | pass, race-clean |
+| `go test -run 'TestChaos79\|TestChaos80' -count=1 .` | pass (13/13) |
+| `go test -run 'TestChaos79\|TestChaos80\|Chaos24' -count=1 -race .` | pass, race-clean |
 | `go test -run 'Chaos24\|FetchAndApply\|Revocation\|Gossip\|RateLimit\|AuditPush\|Admission\|DeltaApply\|LastGood\|Heartbeat\|Epoch' -count=1 .` | pass |
 | `go test -count=1 .` (full root package, 410 s) | **9 pre-existing failures, no new ones** |
 
@@ -428,7 +434,7 @@ stopped firing, or that it fires unconditionally:
 installed binary is built with Go 1.25 and panics with *"package requires newer
 Go version go1.26"* on this module. The changed functions were kept inside the
 configured budgets by hand instead — longest new function 35 lines against
-`funlen: 80`, and the CHAOS-72 reporting was extracted to its own helper
+`funlen: 80`, and the CHAOS-80 reporting was extracted to its own helper
 specifically so `applySnapshotExtendedState` stays at 47 lines rather than
 crossing 80. The hosted Fast PR Gate remains the authority.
 
@@ -448,7 +454,7 @@ was found by reading a list rather than by reasoning about a subsystem.** The
 previous review closed with *"a rule adopted in one place is a checklist item
 for every other place that does the same thing, and nothing in the tree was
 checking."* Mechanically checking that one rule — count `runGuarded` call sites
-(18), count long-lived ticker loops (37) — located CHAOS-71 in minutes, without
+(18), count long-lived ticker loops (37) — located CHAOS-79 in minutes, without
 any hypothesis about what the DP sync plane does.
 
 The second half is sharper, and it is the half a mechanical sweep would have got
@@ -461,7 +467,7 @@ containment test, shipped a gateway that destroys an audit batch every ten
 seconds, and reported a half-applied config as healthy. §12.2 said this once
 about the fencing lease; it is a property of containment, not of that lease.
 
-CHAOS-72 arrived the same way. **Reading the startup path to answer "when does
+CHAOS-80 arrived the same way. **Reading the startup path to answer "when does
 this worker first run?" is a different question from "what does this worker
 do?", and it is the one that finds ordering bugs.** The `globalBandwidth != nil`
 guard looks like defensive hygiene and reads like the presence contract beside

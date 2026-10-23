@@ -51,11 +51,11 @@ func markConfigSnapshotApplyOK() { configSnapshotApplyFailing.Store(false) }
 // nothing to invalidate.
 func lastConfigSnapshotApplyOK() bool { return !configSnapshotApplyFailing.Load() }
 
-// ── Did a round die INSIDE the mutating apply? (CHAOS-71, Codex P2) ──────────
+// ── Did a round die INSIDE the mutating apply? (CHAOS-79, Codex P2) ──────────
 //
 // configSnapshotApplyInterrupted separates the two ways a config round can
 // fail, which the outcome model above deliberately does not distinguish because
-// until CHAOS-71 only one of them was survivable.
+// until CHAOS-79 only one of them was survivable.
 //
 // A PRE-mutation failure (transport, parse, validate, fence, or a panic in any
 // of them) leaves the node enforcing its last-known-good config, whole and
@@ -94,7 +94,7 @@ func lastConfigSnapshotApplyOK() bool { return !configSnapshotApplyFailing.Load(
 // the pre-mutation rejections that must never gate readiness (gating on those
 // would eject healthy nodes serving last-known-good config — see
 // readyz_dp_health.go on why its DP rows are report-only). That row is NOT
-// added here; see the CHAOS-71 review's residual risk.
+// added here; see the CHAOS-79 review's residual risk.
 // It is a DEPTH COUNTER, not a flag, because the mutating regions NEST and
 // because there is more than one of them — the correction to this marker's
 // first shape (Codex, second pass). Bracketing only applyConfigSnapshot's

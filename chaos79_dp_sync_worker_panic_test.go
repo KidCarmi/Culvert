@@ -1,6 +1,6 @@
 package main
 
-// chaos71_dp_sync_worker_panic_test.go — CHAOS-71: panic containment for the
+// chaos79_dp_sync_worker_panic_test.go — CHAOS-79: panic containment for the
 // Data Plane's control-plane sync plane.
 //
 // DataPlaneClient.Run launches five long-lived workers inside the proxy's own
@@ -46,7 +46,7 @@ import (
 func panickingCall(rounds *atomic.Int64) func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 	return func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 		rounds.Add(1)
-		panic("CHAOS-71: injected control-plane round fault")
+		panic("CHAOS-79: injected control-plane round fault")
 	}
 }
 
@@ -87,18 +87,18 @@ func runLoopUntilRounds(t *testing.T, want int64, what string, loop func(context
 
 // ── 1. Config poll: contained, counted, and FAILED CLOSED on apply health ────
 
-// TestChaos71_ConfigRoundPanicIsContainedAndCounted pins the containment half
+// TestChaos79_ConfigRoundPanicIsContainedAndCounted pins the containment half
 // of the config round: the panic does not reach the runtime, and it is recorded
 // under its own crash component so an operator can tell WHICH worker faulted.
 //
 // Whether the round additionally fails the apply-health surface closed depends
 // on how far it got, and that is deliberately NOT asserted here — it is the
-// subject of TestChaos71_PreMutationPanicDoesNotClaimAContentRejection and
-// TestChaos71_PostMutationInterruptionMarksTheApplyRejected. This test's own
+// subject of TestChaos79_PreMutationPanicDoesNotClaimAContentRejection and
+// TestChaos79_PostMutationInterruptionMarksTheApplyRejected. This test's own
 // first shape asserted the apply WAS marked rejected for a fault at the RPC,
 // which Codex correctly identified as wrong in both directions: it mis-reports
 // a transport fault as rejected CONTENT, and the claim would never clear.
-func TestChaos71_ConfigRoundPanicIsContainedAndCounted(t *testing.T) {
+func TestChaos79_ConfigRoundPanicIsContainedAndCounted(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	resetConfigSnapshotApplyHealth(t)
@@ -130,7 +130,7 @@ func TestChaos71_ConfigRoundPanicIsContainedAndCounted(t *testing.T) {
 // CONTROL: the fail-closed marking must be caused by the PANIC, not by the
 // guard running at all. A clean round leaves the surface healthy and records
 // no crash, so a passing gate above cannot mean the surface is simply stuck.
-func TestChaos71_CleanConfigRoundRecordsNothingAndLeavesApplyHealthOK(t *testing.T) {
+func TestChaos79_CleanConfigRoundRecordsNothingAndLeavesApplyHealthOK(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	resetConfigSnapshotApplyHealth(t)
@@ -155,10 +155,10 @@ func TestChaos71_CleanConfigRoundRecordsNothingAndLeavesApplyHealthOK(t *testing
 	}
 }
 
-// TestChaos71_PollLoopSurvivesEveryPanickingRound requires the config loop to
+// TestChaos79_PollLoopSurvivesEveryPanickingRound requires the config loop to
 // keep ticking through a deterministic fault. Un-guarded this kills the test
 // BINARY on the first round, which is the defect itself.
-func TestChaos71_PollLoopSurvivesEveryPanickingRound(t *testing.T) {
+func TestChaos79_PollLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	resetConfigSnapshotApplyHealth(t)
@@ -174,18 +174,18 @@ func TestChaos71_PollLoopSurvivesEveryPanickingRound(t *testing.T) {
 
 // ── 2. Audit push: containment must not destroy the drained batch ────────────
 
-// TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue is the fail-closed
+// TestChaos79_AuditRoundPanicReturnsTheDrainedBatchToTheQueue is the fail-closed
 // half of the audit round: Drain already removed the batch, so containment
 // without a requeue would destroy evidence once per interval, forever, with the
 // process alive and every surface green.
-func TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue(t *testing.T) {
+func TestChaos79_AuditRoundPanicReturnsTheDrainedBatchToTheQueue(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	t.Cleanup(audit.ResetPendingForTest())
 
 	const queued = 3
 	for i := 0; i < queued; i++ {
-		audit.QueueForClusterForTest(audit.Entry{Action: "chaos71_evidence", ObjectID: "dp"})
+		audit.QueueForClusterForTest(audit.Entry{Action: "chaos79_evidence", ObjectID: "dp"})
 	}
 
 	var rounds atomic.Int64
@@ -202,7 +202,7 @@ func TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue(t *testing.T) {
 			"containment must not consume the batch Drain already removed", len(back), queued)
 	}
 	for i := range back {
-		if back[i].Action != "chaos71_evidence" {
+		if back[i].Action != "chaos79_evidence" {
 			t.Fatalf("requeued entry %d = %q, want the original event", i, back[i].Action)
 		}
 	}
@@ -211,10 +211,10 @@ func TestChaos71_AuditRoundPanicReturnsTheDrainedBatchToTheQueue(t *testing.T) {
 // CONTROL: the requeue must be caused by the FAILURE, not by every round. A
 // delivered batch stays delivered — otherwise the gate above would pass with a
 // round that simply never clears the queue, duplicating every event forever.
-func TestChaos71_DeliveredAuditBatchIsNotRequeued(t *testing.T) {
+func TestChaos79_DeliveredAuditBatchIsNotRequeued(t *testing.T) {
 	t.Cleanup(audit.ResetPendingForTest())
 
-	audit.QueueForClusterForTest(audit.Entry{Action: "chaos71_delivered", ObjectID: "dp"})
+	audit.QueueForClusterForTest(audit.Entry{Action: "chaos79_delivered", ObjectID: "dp"})
 
 	var calls atomic.Int64
 	c := &DataPlaneClient{callForTest: func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
@@ -237,10 +237,10 @@ func TestChaos71_DeliveredAuditBatchIsNotRequeued(t *testing.T) {
 
 // A failed RPC must still requeue — the deferred requeue replaced an explicit
 // call on that branch, so this pins the pre-existing retry behaviour.
-func TestChaos71_FailedAuditPushStillRequeues(t *testing.T) {
+func TestChaos79_FailedAuditPushStillRequeues(t *testing.T) {
 	t.Cleanup(audit.ResetPendingForTest())
 
-	audit.QueueForClusterForTest(audit.Entry{Action: "chaos71_retry", ObjectID: "dp"})
+	audit.QueueForClusterForTest(audit.Entry{Action: "chaos79_retry", ObjectID: "dp"})
 
 	c := &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 		return nil, errors.New("controlled CP outage")
@@ -253,17 +253,17 @@ func TestChaos71_FailedAuditPushStillRequeues(t *testing.T) {
 	}
 }
 
-// TestChaos71_AuditPushLoopSurvivesEveryPanickingRound is the loop-level form:
+// TestChaos79_AuditPushLoopSurvivesEveryPanickingRound is the loop-level form:
 // the requeue keeps a batch available, so every subsequent tick panics again and
 // the loop must survive all of them.
-func TestChaos71_AuditPushLoopSurvivesEveryPanickingRound(t *testing.T) {
+func TestChaos79_AuditPushLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	t.Cleanup(audit.ResetPendingForTest())
 
 	// One queued event is enough: the panicking round requeues it, so every
 	// subsequent tick has a batch to drain and can panic again.
-	audit.QueueForClusterForTest(audit.Entry{Action: "chaos71_loop", ObjectID: "dp"})
+	audit.QueueForClusterForTest(audit.Entry{Action: "chaos79_loop", ObjectID: "dp"})
 
 	runLoopUntilRounds(t, 3, "auditPushLoop", func(ctx context.Context, rounds *atomic.Int64) {
 		c := &DataPlaneClient{callForTest: panickingCall(rounds)}
@@ -273,10 +273,10 @@ func TestChaos71_AuditPushLoopSurvivesEveryPanickingRound(t *testing.T) {
 
 // ── 3. The remaining three loops ─────────────────────────────────────────────
 
-// TestChaos71_MetricsLoopSurvivesEveryPanickingRound requires the heartbeat loop
+// TestChaos79_MetricsLoopSurvivesEveryPanickingRound requires the heartbeat loop
 // to keep ticking through a deterministic fault; a missing heartbeat is already
 // loud via the CP-side timeout, a dead process is not.
-func TestChaos71_MetricsLoopSurvivesEveryPanickingRound(t *testing.T) {
+func TestChaos79_MetricsLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 
@@ -286,10 +286,10 @@ func TestChaos71_MetricsLoopSurvivesEveryPanickingRound(t *testing.T) {
 	})
 }
 
-// TestChaos71_RevocationLoopSurvivesEveryPanickingRound requires the revocation
+// TestChaos79_RevocationLoopSurvivesEveryPanickingRound requires the revocation
 // loop to keep ticking: a loop that stops leaves revoked sessions live
 // fleet-wide while the node reports healthy, which is a silent fail-OPEN.
-func TestChaos71_RevocationLoopSurvivesEveryPanickingRound(t *testing.T) {
+func TestChaos79_RevocationLoopSurvivesEveryPanickingRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 
@@ -305,7 +305,7 @@ func TestChaos71_RevocationLoopSurvivesEveryPanickingRound(t *testing.T) {
 // again — the frozen-broadcast blackhole CHAOS-61 closed, manufactured by the
 // recovery. So this gate requires the loop to survive AND to clear the flag on
 // cancellation afterwards.
-func TestChaos71_GossipLoopSurvivesPanicsAndStillDisarmsOnCancel(t *testing.T) {
+func TestChaos79_GossipLoopSurvivesPanicsAndStillDisarmsOnCancel(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 
@@ -313,7 +313,7 @@ func TestChaos71_GossipLoopSurvivesPanicsAndStillDisarmsOnCancel(t *testing.T) {
 	limiter.Configure(100, time.Minute) // Enabled() must be true to reach the RPC
 
 	var rounds atomic.Int64
-	c := &DataPlaneClient{nodeID: "chaos71", callForTest: panickingCall(&rounds)}
+	c := &DataPlaneClient{nodeID: "chaos79", callForTest: panickingCall(&rounds)}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); c.rateLimitGossipLoop(ctx, time.Millisecond, limiter) }()
@@ -337,7 +337,7 @@ func TestChaos71_GossipLoopSurvivesPanicsAndStillDisarmsOnCancel(t *testing.T) {
 // The component label is the operator's only handle on which worker is faulting
 // (culvert_crash_records_total{component}). Two loops sharing one label would
 // make a config-apply fault indistinguishable from an audit-push fault.
-func TestChaos71_SyncPlaneComponentsAreDistinct(t *testing.T) {
+func TestChaos79_SyncPlaneComponentsAreDistinct(t *testing.T) {
 	components := []string{
 		dpComponentConfigPoll,
 		dpComponentMetricsPush,
@@ -360,7 +360,7 @@ func TestChaos71_SyncPlaneComponentsAreDistinct(t *testing.T) {
 	}
 }
 
-// ── 5. CHAOS-72: a dropped CP-authoritative slice is reported, not silent ────
+// ── 5. CHAOS-80: a dropped CP-authoritative slice is reported, not silent ────
 //
 // applySnapshotExtendedState guards the bandwidth and node-group applies on
 // BOTH a non-nil field (the presence contract: an older CP omitting a slice
@@ -372,11 +372,11 @@ func TestChaos71_SyncPlaneComponentsAreDistinct(t *testing.T) {
 // version-advancing success. These gates pin the reporting; the ordering fix
 // itself is tracked separately (see the review).
 
-// TestChaos72_DroppedBandwidthSliceIsReported requires a CP-authoritative slice
+// TestChaos80_DroppedBandwidthSliceIsReported requires a CP-authoritative slice
 // dropped for a startup-order reason to be reported with its slice and config
 // version, rather than discarded silently behind a guard that reads like the
 // presence contract next to it.
-func TestChaos72_DroppedBandwidthSliceIsReported(t *testing.T) {
+func TestChaos80_DroppedBandwidthSliceIsReported(t *testing.T) {
 	origBW, origNG := globalBandwidth, globalNodeGroups
 	globalBandwidth, globalNodeGroups = nil, nil
 	t.Cleanup(func() { globalBandwidth, globalNodeGroups = origBW, origNG })
@@ -384,8 +384,8 @@ func TestChaos72_DroppedBandwidthSliceIsReported(t *testing.T) {
 	out := captureLogger(t, func() {
 		applySnapshotExtendedState(ConfigSnapshot{
 			Version:           7,
-			BandwidthPolicies: []BandwidthPolicy{{Name: "chaos72", MaxBytesPerSec: 1024}},
-			NodeGroups:        []NodeGroup{{Name: "chaos72-group"}},
+			BandwidthPolicies: []BandwidthPolicy{{Name: "chaos80", MaxBytesPerSec: 1024}},
+			NodeGroups:        []NodeGroup{{Name: "chaos80-group"}},
 		})
 	})
 
@@ -403,7 +403,7 @@ func TestChaos72_DroppedBandwidthSliceIsReported(t *testing.T) {
 // CONTROL: the report must be caused by the DROP, not by every apply. An
 // omitted slice (the presence contract) is a legitimate no-op and must stay
 // quiet, or the log would fire on every poll from a CP that ships neither.
-func TestChaos72_OmittedSlicesAreNotReportedAsDropped(t *testing.T) {
+func TestChaos80_OmittedSlicesAreNotReportedAsDropped(t *testing.T) {
 	origBW, origNG := globalBandwidth, globalNodeGroups
 	globalBandwidth, globalNodeGroups = nil, nil
 	t.Cleanup(func() { globalBandwidth, globalNodeGroups = origBW, origNG })
@@ -437,10 +437,10 @@ func withRevocationsPath(t *testing.T, path string) func() {
 // a restart loads a file that never received those revocations and accepts the
 // revoked cookies. These gates pin the retry.
 
-// TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound requires a round that
+// TestChaos79_RevocationSaveIsRetriedAfterAPanickedRound requires a round that
 // died between the merge and a completed save to leave the write OWED, and the
 // next round to discharge it even though that round's merge adds nothing new.
-func TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
+func TestChaos79_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	t.Cleanup(sessionRevoked.SwapForTest())
@@ -448,7 +448,7 @@ func TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
 	dir := t.TempDir()
 	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
 
-	entry := RevocationEntry{Token: "chaos71-token", Expiry: time.Now().Add(time.Hour).Unix()}
+	entry := RevocationEntry{Token: "chaos79-token", Expiry: time.Now().Add(time.Hour).Unix()}
 	reply, err := json.Marshal(struct {
 		Entries []RevocationEntry `json:"entries"`
 	}{Entries: []RevocationEntry{entry}})
@@ -459,7 +459,7 @@ func TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
 	// Round 1: the CP's set merges, then the round dies before the save lands.
 	// The panic is injected by a save that cannot succeed (unwritable path).
 	var round int
-	c := &DataPlaneClient{nodeID: "chaos71", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	c := &DataPlaneClient{nodeID: "chaos79", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 		round++
 		return reply, nil
 	}}
@@ -480,7 +480,7 @@ func TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the owed revocation persist was never retried: %v", err)
 	}
-	if !strings.Contains(string(data), "chaos71-token") {
+	if !strings.Contains(string(data), "chaos79-token") {
 		t.Errorf("persisted revocations = %s, want the merged token", data)
 	}
 }
@@ -488,12 +488,12 @@ func TestChaos71_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
 // CONTROL: the retry must be driven by the OWED flag, not run unconditionally
 // on every round — a clean round with nothing new must not keep rewriting the
 // file, and must not leave the flag set.
-func TestChaos71_RevocationSaveIsNotOwedAfterACleanRound(t *testing.T) {
+func TestChaos79_RevocationSaveIsNotOwedAfterACleanRound(t *testing.T) {
 	t.Cleanup(sessionRevoked.SwapForTest())
 	dir := t.TempDir()
 	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
 
-	c := &DataPlaneClient{nodeID: "chaos71", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	c := &DataPlaneClient{nodeID: "chaos79", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"entries":[]}`), nil
 	}}
 	c.revocationSyncRound(context.Background())
@@ -508,13 +508,13 @@ func TestChaos71_RevocationSaveIsNotOwedAfterACleanRound(t *testing.T) {
 
 // ── 7. Codex P2: only a POST-mutation interruption is a content rejection ────
 
-// TestChaos71_PreMutationPanicDoesNotClaimAContentRejection requires a round
+// TestChaos79_PreMutationPanicDoesNotClaimAContentRejection requires a round
 // that died before any mutation to leave the apply-health surface alone. The
 // first shape of guardedConfigRound latched it on ANY panic, which both
 // mis-reported a transport fault as rejected CONTENT and stuck: the "unchanged"
 // sentinel and the delta no-op never reach markConfigSnapshotApplyOK, so on a
 // steady-state cluster nothing would clear it.
-func TestChaos71_PreMutationPanicDoesNotClaimAContentRejection(t *testing.T) {
+func TestChaos79_PreMutationPanicDoesNotClaimAContentRejection(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	resetConfigSnapshotApplyHealth(t)
@@ -534,10 +534,10 @@ func TestChaos71_PreMutationPanicDoesNotClaimAContentRejection(t *testing.T) {
 	}
 }
 
-// TestChaos71_PostMutationInterruptionMarksTheApplyRejected is the other half:
+// TestChaos79_PostMutationInterruptionMarksTheApplyRejected is the other half:
 // once the mutating region has begun, an interrupted round MUST fail the
 // surface closed, because the node now holds a blend of two config generations.
-func TestChaos71_PostMutationInterruptionMarksTheApplyRejected(t *testing.T) {
+func TestChaos79_PostMutationInterruptionMarksTheApplyRejected(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	resetConfigSnapshotApplyHealth(t)
@@ -546,7 +546,7 @@ func TestChaos71_PostMutationInterruptionMarksTheApplyRejected(t *testing.T) {
 	// marker is what the production bracket leaves set when a panic crosses it.
 	beginConfigSnapshotApplyMutation()
 	c := &DataPlaneClient{callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-		panic("CHAOS-71: fault after live mutation began")
+		panic("CHAOS-79: fault after live mutation began")
 	}}
 	c.lastVersion.Store(0)
 
@@ -560,7 +560,7 @@ func TestChaos71_PostMutationInterruptionMarksTheApplyRejected(t *testing.T) {
 // CONTROL: the marker must not outlive the round that set it, or one
 // interrupted apply would make every later pre-mutation panic look like a
 // content rejection too.
-func TestChaos71_InterruptedMarkerIsConsumedByTheRoundThatReadsIt(t *testing.T) {
+func TestChaos79_InterruptedMarkerIsConsumedByTheRoundThatReadsIt(t *testing.T) {
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 	resetConfigSnapshotApplyHealth(t)
@@ -590,11 +590,11 @@ func TestChaos71_InterruptedMarkerIsConsumedByTheRoundThatReadsIt(t *testing.T) 
 // apply-health surface reporting SUCCESS over mixed-generation enforcement.
 // The marker is now a depth counter so the paths can nest.
 
-// TestChaos71_MutationMarkerNestsWithoutFalseClear pins the counter semantics
+// TestChaos79_MutationMarkerNestsWithoutFalseClear pins the counter semantics
 // that make nesting safe. With a flag, the inner region's end would clear a
 // marker the outer region still needs — so an interrupted outer region would
 // report clean purely because an inner one finished.
-func TestChaos71_MutationMarkerNestsWithoutFalseClear(t *testing.T) {
+func TestChaos79_MutationMarkerNestsWithoutFalseClear(t *testing.T) {
 	resetConfigSnapshotApplyHealth(t)
 	if consumeConfigSnapshotApplyInterrupted() {
 		t.Fatal("precondition: the marker must start clear")
@@ -619,7 +619,7 @@ func TestChaos71_MutationMarkerNestsWithoutFalseClear(t *testing.T) {
 	}
 }
 
-// TestChaos71_EachMutatingPathLeavesTheMarkerBalanced drives the REAL full and
+// TestChaos79_EachMutatingPathLeavesTheMarkerBalanced drives the REAL full and
 // delta paths to a successful apply and requires each bracket to balance.
 //
 // It calls fetchAndApply / applyDeltaReply DIRECTLY rather than through
@@ -627,7 +627,10 @@ func TestChaos71_MutationMarkerNestsWithoutFalseClear(t *testing.T) {
 // marker at the end of every round, so routing through it would absorb an
 // unbalanced bracket and make this assertion unfalsifiable. Called directly,
 // nothing consumes, so a missing or skipped end is visible here.
-func TestChaos71_EachMutatingPathLeavesTheMarkerBalanced(t *testing.T) {
+func TestChaos79_EachMutatingPathLeavesTheMarkerBalanced(t *testing.T) {
+	// Both paths apply a snapshot, which mutates ipf and rl in place
+	// (RISK-030): bind fresh owners so the next test inherits neither.
+	bindFreshAdmissionOwners(t)
 	t.Run("full path", func(t *testing.T) {
 		resetConfigSnapshotApplyHealth(t)
 		restoreEpoch := resetDPLastSeenEpochForTest()
