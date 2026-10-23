@@ -124,6 +124,11 @@ func TestReviewedAntiVacuity_DriftDenialIsObservedNotAssumed(t *testing.T) {
 func TestReviewedAntiVacuity_ExpiredApprovalDenialIsObservedAndLatchesNothing(t *testing.T) {
 	r := newReviewedRig(t)
 	expired := r.now.Add(48 * time.Hour)
+	// The peer is re-observed AT the expired instant, so the only authority missing there is the
+	// approval. Without this the observation is 48h stale too, admission refuses it first
+	// (round 13 — freshness is asked before the approval, as at the boundary), and this case would
+	// quietly stop proving anything about approval expiry.
+	observeSeededToolTrustPeerAt(t, r.sid, expired)
 
 	before := denialObservations()
 	d := r.g.AdmitSideEffect(driftGateInput(r.sid, r.tool, r.fp1, expired))
@@ -135,7 +140,10 @@ func TestReviewedAntiVacuity_ExpiredApprovalDenialIsObservedAndLatchesNothing(t 
 		t.Fatalf("SECURITY: an expired approval on an unchanged target must not stop the Canary "+
 			"(abort code %q)", r.rt.abortCodeNow(r.capb))
 	}
-	// And the activation is still genuinely alive — the counterpart to "nothing latched".
+	// And the activation is still genuinely alive — the counterpart to "nothing latched". The
+	// observation above was stamped at `expired`, which is in the FUTURE of r.now; re-observe at
+	// r.now so this control is asked about the approval's life and nothing else.
+	observeSeededToolTrustPeerAt(t, r.sid, r.now)
 	if !r.request(r.fp1, r.now) {
 		t.Fatal("the experiment must continue: the same request inside the approval's life is admitted")
 	}
