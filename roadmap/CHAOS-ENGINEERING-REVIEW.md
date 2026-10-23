@@ -10926,6 +10926,32 @@ Every other gate in this sweep was mutation-tested the same way, and each fails
 with its fix reverted. That is the only evidence that distinguishes a gate from
 a comment.
 
+**A third instance of the same family, found in review rather than by me.** The
+BKP-1 change also had to update `TestBackupEncrypt_TamperedMagic`, whose
+assertion this sweep first widened to accept *either* the new downgrade refusal
+*or* the old `gunzip`/`tarball` error — reasoning that the gunzip path was still
+reachable. It is, but not in that test, which supplies a passphrase: there the
+downgrade refusal fires deterministically (measured 5/5). The widened assertion
+was therefore dead slack, and CodeRabbit established the consequence precisely —
+with the BKP-1 guard deleted, the test still passed, because it accepted exactly
+the `gunzip: gzip: invalid header` the unguarded path produces. A test covering
+a security control that stays green when that control is removed.
+
+It is now a two-case table pinning the whole partition — passphrase set ⇒
+downgrade refusal, passphrase unset ⇒ gunzip — and mutation-testing the guard
+away fails the first case with that exact gunzip error. Nothing else covered
+this path: the dedicated `TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet`
+pins a genuinely plaintext archive, not a tampered encrypted one.
+
+**Three defects in this sweep were of one kind, and none was in the production
+change.** A gate copied from a sibling writer that kept its shape and lost its
+discriminating power (§45.2); a fix copied from the hardened chokepoint that
+inherited its length coupling (§45.4b); and an assertion widened "to be safe"
+that admitted the very failure it guarded. All three passed self-review because
+each looked like deference to existing, careful code. Worth stating as the
+sweep's finding about its own method, not buried as three nits: *checks that
+pass are not evidence; only checks that fail when the fix is removed are.*
+
 ---
 
 ### 45.3 What shipped

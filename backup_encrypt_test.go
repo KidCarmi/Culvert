@@ -202,28 +202,47 @@ func TestBackupEncrypt_TamperedMagic(t *testing.T) {
 	if err := os.WriteFile(out, body, 0o600); err != nil { // #nosec G304 G703 -- test temp path under t.TempDir()
 		t.Fatalf("write: %v", err)
 	}
-	dataDir := t.TempDir()
-	_, err = captureStdout(t, func() error {
-		return runRestoreDryRun(out, dataDir, "", restoreOpts{
-			Mode:             modeFull,
-			BackupPassphrase: testBackupPassphrase,
+	// A tampered blob is refused either way, but by DIFFERENT guards depending
+	// on whether a passphrase is supplied, and both halves are pinned so
+	// neither can regress silently. With the magic broken the blob looks like
+	// neither gzip nor encrypted:
+	//
+	//   - passphrase SET   → since CHAOS-82 (BKP-1) the encryption-downgrade
+	//     refusal fires before any gunzip is attempted, where this previously
+	//     fell through to an opaque "gunzip: invalid header". Asserted exactly,
+	//     not as one of several accepted errors: CodeRabbit's review of #1690
+	//     pointed out that accepting `gunzip` here as an alternative would let a
+	//     future change bypass the downgrade guard for malformed magic with this
+	//     test still green, and that nothing else covers THIS path (the
+	//     dedicated TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet pins a
+	//     genuinely plaintext archive, not a tampered encrypted one).
+	//   - passphrase UNSET → the downgrade guard does not apply, so the blob
+	//     reaches the gunzip path, which is the behaviour CHAOS-82 left alone.
+	//
+	// Same fail-closed outcome in both, by the guard that should own it.
+	for _, tc := range []struct {
+		name       string
+		passphrase string
+		wantErr    string
+	}{
+		{"passphrase set — downgrade refusal", testBackupPassphrase, "NOT encrypted"},
+		{"passphrase unset — gunzip path", "", "gunzip"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			_, rerr := captureStdout(t, func() error {
+				return runRestoreDryRun(out, dataDir, "", restoreOpts{
+					Mode:             modeFull,
+					BackupPassphrase: tc.passphrase,
+				})
+			})
+			if rerr == nil {
+				t.Fatal("expected error on tampered magic")
+			}
+			if !strings.Contains(rerr.Error(), tc.wantErr) {
+				t.Fatalf("expected an error containing %q after magic break, got: %v", tc.wantErr, rerr)
+			}
 		})
-	})
-	if err == nil {
-		t.Fatal("expected error on tampered magic")
-	}
-	// The tamper is refused, and since CHAOS-82 (BKP-1) it is refused EARLIER
-	// and more precisely than it used to be. With the magic broken the blob
-	// looks like neither gzip nor encrypted, so this restore — which supplies
-	// a passphrase — is now rejected as an encryption downgrade before any
-	// gunzip is attempted, instead of falling through to an opaque
-	// "gunzip: invalid header". Same fail-closed outcome, a message that names
-	// the actual condition. The gunzip path is still the one a tampered blob
-	// reaches when NO passphrase is supplied; that case is unchanged.
-	if !strings.Contains(err.Error(), "NOT encrypted") &&
-		!strings.Contains(err.Error(), "gunzip") &&
-		!strings.Contains(err.Error(), "tarball") {
-		t.Fatalf("expected a downgrade refusal or gunzip/tarball error after magic break, got: %v", err)
 	}
 }
 
