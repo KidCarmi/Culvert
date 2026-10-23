@@ -164,30 +164,64 @@ func TestSECREVOKE1_GenuineLogoutStillRevokes(t *testing.T) {
 	}
 }
 
-// TestSECREVOKE1_PortalTokenDoesNotRevokeAcrossAudiences is the
-// SEC-UISESSION-AUD-1 half of the same predicate: a portal token replayed under
-// the admin cookie's name verifies (same key, same type), so a bare
-// signature check would let it revoke the real portal session that shares its
-// payload. Routing logout through uiSessionAdmissible closes that too.
-func TestSECREVOKE1_PortalTokenDoesNotRevokeAcrossAudiences(t *testing.T) {
+// TestSECREVOKE1_AnySignedTokenIsRevocable is the BOUNDARY on the other side of
+// the gate, and it pins a decision that was made the other way first.
+//
+// The first version of this fix routed logout through a full admissibility test
+// (audience + roster), and this test asserted that a replayed portal token must
+// NOT revoke. Reconciling with SEC-UISESS-1 on main showed that to be the wrong
+// line: admissibility also refuses a DELETED user's session and one naming an
+// unenrolled role, and declining to revoke those is strictly worse security —
+// they are exactly the tokens most worth revoking, and they are real tokens
+// this appliance signed.
+//
+// So verification alone is the gate. What the defect allowed was the insertion
+// of a key NOBODY signed, with an attacker-chosen expiry; a signed token can
+// only revoke itself, and whoever holds it could already use it. Revoking a
+// token minted for the proxy plane is therefore permitted here, and this test
+// says so out loud rather than leaving the looser gate looking like an
+// oversight.
+func TestSECREVOKE1_AnySignedTokenIsRevocable(t *testing.T) {
 	revocationProbeEnv(t)
 
-	value, err := encodeSession(&Session{
-		Sub: "mallory@corp.example", Provider: "oidc-profile-01",
-		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
-	})
-	if err != nil {
-		t.Fatalf("encodeSession: %v", err)
-	}
-	before := sessionRevoked.Count()
-	if rec := postLogout(t, value); rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if after := sessionRevoked.Count(); after != before {
-		t.Errorf("DEFECT: a replayed portal token revoked across audiences (count %d -> %d)", before, after)
-	}
-	// The portal session itself must still be usable.
-	if _, derr := decodeSession(value); derr != nil {
-		t.Errorf("the portal session was revoked by an admin-plane logout: %v", derr)
+	for _, tc := range []struct {
+		name string
+		sess *Session
+	}{
+		{
+			name: "a token minted for the proxy plane",
+			sess: &Session{Sub: "mallory@corp.example", Provider: "oidc-profile-01"},
+		},
+		{
+			name: "an admin token naming no roster account",
+			sess: &Session{Sub: "deleted-admin", Provider: uiSessionProvider, Role: string(RoleAdmin)},
+		},
+		{
+			name: "an admin token naming an unenrolled role",
+			sess: &Session{Sub: "bob", Provider: uiSessionProvider, Role: "superuser"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.sess.Exp = time.Now().Add(time.Hour).Unix()
+			tc.sess.Jti = newSessionJti()
+			value, err := encodeSession(tc.sess)
+			if err != nil {
+				t.Fatalf("encodeSession: %v", err)
+			}
+			if _, derr := decodeSession(value); derr != nil {
+				t.Fatalf("precondition: the token should verify, got %v", derr)
+			}
+
+			before := sessionRevoked.Count()
+			if rec := postLogout(t, value); rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if after := sessionRevoked.Count(); after != before+1 {
+				t.Errorf("a signed token must be revocable: count %d -> %d", before, after)
+			}
+			if _, derr := decodeSession(value); derr == nil {
+				t.Error("the token still decodes after logout — it was not revoked")
+			}
+		})
 	}
 }

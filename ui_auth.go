@@ -229,21 +229,30 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
-	sess, err := readUISessionCookie(r)
-	if err == nil && uiSessionAdmissible(sess) {
-		// Same fail-closed resolution uiAuthMiddleware applies, including
-		// uiSessionAdmissible above (SEC-UISESSION-AUD-1): this endpoint is on
-		// the PUBLIC allowlist, so without that test it answered
-		// {"loggedIn":true,"role":"admin"} for a replayed portal token and the
-		// console rendered the full admin surface off the back of it.
-		// Reporting a session whose role this build does not enroll as
-		// `role: admin` would have the same effect for a principal every gated
-		// endpoint is about to refuse; treating it as not-logged-in is both
-		// honest and the safe direction.
-		if role, ok := sessionRoleOrReject(sess.Role); ok {
-			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
-			return
-		}
+	// The SAME admission decision uiAuthMiddleware applies, now by sharing it
+	// rather than by restating it (resolveUISession, SEC-UISESS-1). This
+	// endpoint is on the public allowlist, so the middleware never runs for it
+	// and this is the only gate on what it reports. Reporting more authority
+	// than the middleware will honour has the console render the full admin
+	// surface for a principal every gated endpoint is about to refuse with 401
+	// — dishonest, and the unsafe direction. A refused session is reported as
+	// logged out; it is not cleared here, because this is a status read and
+	// clearing stays the middleware's and logout's business.
+	//
+	// The REFUSED verdict returns before the Basic fallback below, because the
+	// middleware does the same: it answers 401 and never reaches its own Basic
+	// branch. Falling through here would report `loggedIn: true` for a request
+	// carrying a refused cookie AND valid Basic credentials — promising access
+	// that every gated route then denies, which is this endpoint's whole
+	// contract inverted one branch over from where it was first fixed.
+	// Only ABSENT (no cookie, or one that did not verify) leaves Basic a turn.
+	switch sess, role, verdict := resolveUISession(r); verdict {
+	case uiSessionValid:
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
+		return
+	case uiSessionRefused:
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": false})
+		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
@@ -265,33 +274,31 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// SEC-REVOKE-1: act ONLY on a session this plane may honour. The decode
-	// error used to be discarded here (`sess, _ :=`) while
-	// revokeSessionCookie ran unconditionally — and that function does its own
-	// base64+JSON decode with NO signature check, on the stated premise that
-	// "HMAC already verified by decodeSession". The premise was false on this
-	// path, and this route is on the PUBLIC allowlist, so an unauthenticated
-	// POST carrying `base64({"sub":"...","exp":9999999999}).garbage` inserted
-	// an attacker-chosen key into the revocation list with an attacker-chosen
-	// (far-future, so never evicted) expiry. That list is an unbounded map; the
-	// insert is then persisted by SaveRevocations and gossiped to every node in
-	// the cluster, so one unauthenticated client could grow permanent heap on
-	// every node and make each request rewrite the whole revocations file.
+	// SEC-REVOKE-1: the revocation write requires a cookie whose HMAC actually
+	// VERIFIED. This route is on the public allowlist (isPublicUIAuthPath), and
+	// revokeSessionCookie does its own base64+JSON decode with no signature
+	// check — on the stated premise that the "HMAC [was] already verified by
+	// decodeSession", which was false on exactly this path because the error
+	// was discarded. A cookie shaped
+	// base64({"sub":"…","exp":9999999999}).garbage therefore let an
+	// unauthenticated caller insert an attacker-chosen key, with an
+	// attacker-chosen expiry, into an unbounded map that is persisted on every
+	// insert and gossiped to every node in the cluster.
 	//
-	// uiSessionAdmissible rather than a bare `sess != nil` also keeps logout
-	// from acting across audiences (SEC-UISESSION-AUD-1): a portal token
-	// replayed under this cookie's name must not revoke the real portal
-	// session that shares its payload.
-	sess, err := readUISessionCookie(r)
-	if err == nil && uiSessionAdmissible(sess) {
+	// Verification is the whole gate, and deliberately not admissibility: a
+	// token this build REFUSES (a deleted user's, or one minted for the proxy
+	// plane) is still a token the appliance signed, and revoking it is right.
+	// What must not be revocable is a payload nobody signed.
+	//
+	// Clearing stays UNCONDITIONAL, and the answer stays 200: logout must
+	// always discard the browser's cookie, whatever it was carrying.
+	sess, _ := readUISessionCookie(r)
+	if sess != nil {
 		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
 		// Revoke the session token so it cannot be reused even if the cookie is
 		// replayed before it naturally expires.
 		revokeSessionCookie(uiSessionCookieName, r)
 	}
-	// Clearing stays UNCONDITIONAL and the answer stays 200: a browser holding
-	// a junk or foreign cookie must still be able to get rid of it, and a
-	// logout that reported why it refused would be an oracle.
 	clearUISessionCookie(w, r)
 	jsonOK(w, map[string]any{"ok": true})
 }
@@ -307,7 +314,16 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		jsonOK(w, map[string]any{"users": cfg.ListUIUsers()})
+		jsonOK(w, map[string]any{
+			"users": cfg.ListUIUsers(),
+			// CHAOS-70 roster-write evidence for the Users panel hint. Served
+			// HERE, on the admin-only route, and deliberately NOT on the
+			// viewer-readable /api/stats: refused-change and degraded
+			// login-write counts are admin-only (SEC-DIAG-ROSTER-1 policy,
+			// PR #1545). Since process start; the counters are not persisted.
+			"adminRosterPersistFailures": rosterPersistRefused.Load(),
+			"adminRosterPersistDegraded": rosterPersistBestEffort.Load(),
+		})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -458,6 +474,38 @@ func apiAuthChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify current password.
 	if _, ok := cfg.VerifyUIUser(username, body.CurrentPass); !ok {
+		// SEC-REAUTH-AUDIT-1: a FAILED re-authentication on the admin plane is
+		// audited, like every other credential rejection in this file
+		// (auth.login.fail, auth.basic.fail). Without this entry the only
+		// unlocked, unthrottled-by-lockout password oracle in the admin API was
+		// also the only one that left no trace: a caller holding a stolen or
+		// hijacked session could guess this account's password at the mutating
+		// apiLimiter's rate and the operator had no signal at all — the
+		// password is durable persistence that outlives the session being
+		// revoked (CWE-778 / OWASP A09:2021).
+		//
+		// The entry is NOT a change of the recorded lockout trade-off
+		// (TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller explains why
+		// charging loginLimiter here would let a session holder lock themselves
+		// out of the login flow): it adds the missing EVIDENCE without altering
+		// any authentication decision.
+		//
+		// Not a write amplifier (CHAOS-63): this path needs a VALID SESSION and
+		// is a POST, so securityMiddleware's mutating-method apiLimiter bounds
+		// its rate exactly as it bounds apiAuthLogin's own audited failures.
+		//
+		// The identity is bounded in BOTH rendered fields: boundAuditIdentity
+		// here for the Object, and boundAuditActor (applied to every entry by
+		// auditAdd) for the Actor it rebuilds from the session. The first version of this
+		// comment claimed the actor was "still truncated" on the strength of
+		// this call alone — false, because auditEvent derives the Actor
+		// independently, so an oversize CONFIGURED name (-user /
+		// --reset-password persist one, and it is deliberately never refused
+		// for its length) was retained full-length (Codex review, PR #1532).
+		// The bound is on the rendered entry only: auditActor stays the full
+		// principal, because MCP four-eyes compares it for identity.
+		auditEvent(r, "auth.password_change.fail", boundAuditIdentity(username),
+			"self-service password change refused: current password incorrect")
 		http.Error(w, "current password is incorrect", http.StatusForbidden)
 		return
 	}

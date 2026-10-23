@@ -10,10 +10,18 @@ import (
 
 const uiSessionCookieName = "ps_ui_session"
 
-// uiSessionProvider is the Provider value setUISessionCookie stamps on every
-// admin-UI session it mints, and the ONLY value the admin plane honours. The
-// minter below and uiSessionAdmissible share this constant so the two can
-// never disagree about what an admin-UI session looks like.
+// uiSessionProvider is the Provider stamped on every session the ADMIN plane
+// mints, and the token-class discriminator uiAuthMiddleware requires (
+// SEC-UISESS-1). setUISessionCookie below is the only minter of
+// uiSessionCookieName and has always set this value; the proxy end-user
+// cookie (ps_session, session.go setSessionCookie) carries the IdP profile id
+// instead. Both cookies share one signing key and one payload schema, so
+// without this check the cookie NAME — which the caller chooses — was the only
+// thing separating a proxy end user's session from an admin operator's.
+//
+// Read by setUISessionCookie and by classifyUISession. Keep it ONE constant: a
+// second spelling at either site is how the issuer and the gate drift into
+// disagreeing, and the direction that drift fails is open.
 const uiSessionProvider = "local"
 
 // isSecureRequest returns true when the request was received over TLS, either
@@ -47,6 +55,77 @@ func setUISessionCookie(w http.ResponseWriter, r *http.Request, username string,
 	return nil
 }
 
+// uiSessionVerdict is the outcome of resolving the admin UI session cookie.
+//
+// The three states are NOT collapsible to a bool: "no usable cookie" and "a
+// cookie that must not authorize" lead to different handling. uiAuthMiddleware
+// falls through to the HTTP Basic scheme on the first and answers 401 (clearing
+// the cookie) on the second, and apiAuthStatus reports the second as logged out
+// rather than as the role the cookie claims.
+type uiSessionVerdict int
+
+const (
+	// uiSessionAbsent: no cookie, or one that did not verify/decode. The
+	// caller may try another authentication scheme.
+	uiSessionAbsent uiSessionVerdict = iota
+	// uiSessionRefused: a cookie is present and verified, but it is not an
+	// admin session this build will honour.
+	uiSessionRefused
+	// uiSessionValid: the session authorizes the returned role.
+	uiSessionValid
+)
+
+// resolveUISession is the ONE admission decision for the admin UI session
+// cookie, shared by uiAuthMiddleware and by apiAuthStatus (SEC-UISESS-1).
+//
+// It exists because those two had drifted apart. /api/auth/status is on the
+// uiAuthMiddleware public allowlist (isPublicUIAuthPath), so it never passes
+// through the middleware and resolved the cookie itself — and its own comment
+// claimed it applied "the same fail-closed resolution uiAuthMiddleware
+// applies" while checking strictly less. A proxy-issued ps_session replayed
+// under the admin cookie name was refused by the middleware but still reported
+// by the status endpoint as `loggedIn: true, role: admin`, so the console
+// rendered the full admin surface for a principal every gated endpoint then
+// refused with 401. The same drift already mis-reported a DELETED user's
+// session as an admin, because the roster check (Finding 5.2) lived only in the
+// middleware.
+//
+// A second copy of this decision is how that divergence happened, and the
+// direction it diverges is toward reporting more authority than is granted.
+// Both call sites now read the verdict from here, and sseAuthStillValid's
+// mid-stream re-check reads it from classifyUISession.
+func resolveUISession(r *http.Request) (*Session, UIRole, uiSessionVerdict) {
+	sess, err := readUISessionCookie(r)
+	if err != nil || sess == nil {
+		// No cookie, or one that failed to verify. Indistinguishable to the
+		// caller by design: a forged or stale cookie must not be treated as
+		// an assertion about identity, only as absent.
+		return nil, "", uiSessionAbsent
+	}
+	role, verdict := classifyUISession(sess)
+	return sess, role, verdict
+}
+
+// classifyUISession is resolveUISession's decision over an already VERIFIED
+// payload, for a caller that has decoded the cookie itself (sseAuthStillValid
+// must tell "no longer verifies" apart from "absent"). It never returns
+// uiSessionAbsent.
+func classifyUISession(sess *Session) (UIRole, uiSessionVerdict) {
+	// The admin plane is the only minter of this cookie and always stamps
+	// uiSessionProvider; anything else is a token issued for the proxy plane,
+	// whose sessions set no Role and would take sessionRoleOrReject's
+	// pre-RBAC compatibility branch to RoleAdmin.
+	if sess.Provider != uiSessionProvider || !cfg.UIUserExists(sess.Sub) {
+		return "", uiSessionRefused
+	}
+	role, ok := sessionRoleOrReject(sess.Role)
+	if !ok {
+		// A signed session naming a role this build does not enroll.
+		return "", uiSessionRefused
+	}
+	return role, uiSessionValid
+}
+
 func readUISessionCookie(r *http.Request) (*Session, error) {
 	c, err := r.Cookie(uiSessionCookieName)
 	if err == http.ErrNoCookie {
@@ -56,59 +135,6 @@ func readUISessionCookie(r *http.Request) (*Session, error) {
 		return nil, err
 	}
 	return decodeSession(c.Value)
-}
-
-// uiSessionAdmissible reports whether a cryptographically VERIFIED
-// ps_ui_session payload may be honoured as an admin-UI session. Every admin
-// surface that resolves a role, an identity or a trust decision from that
-// cookie must pass through here.
-//
-// SEC-UISESSION-AUD-1. The admin-UI cookie (ps_ui_session) and the proxy-user
-// portal cookie (ps_session) are the SAME signed token type under the SAME
-// HMAC key, and the signature covers the PAYLOAD ONLY — not the cookie name.
-// So a token this appliance minted for an ordinary IdP-authenticated proxy
-// user verifies perfectly when it is replayed under the admin cookie's name.
-// The payload carries no audience claim, so the only field that distinguishes
-// the two is Provider: setUISessionCookie is the ONLY minter of
-// ps_ui_session and stamps uiSessionProvider on every one, while the portal
-// minter (setSessionCookie, session.go) copies the IdP profile id out of the
-// asserted Identity and sets no Role at all.
-//
-// The pre-fix predicate was `Provider == "local" && !UIUserExists(Sub)`, which
-// made the roster-existence requirement CONDITIONAL on the very field that
-// tells the two cookies apart. A replayed portal token therefore skipped the
-// existence check outright, and — because setSessionCookie sets no Role — the
-// empty-role pre-RBAC compatibility branch in sessionRoleOrReject then
-// resolved it to RoleADMIN. Any directory user who could complete
-// captive-portal SSO held full admin on the control plane, with no forgery and
-// no key: the appliance signed the token itself. It also bypassed admin TOTP
-// and admin lockout, both of which live in the login handler and are never
-// consulted on the cookie path.
-//
-// Both conditions are now REQUIRED, and that is behaviour-preserving for every
-// legitimate admin session: ps_ui_session has exactly one minter, it hard-codes
-// uiSessionProvider, and a local session whose Sub is absent from the roster
-// was already refused before this change. Only the non-local branch tightens.
-//
-// Attribution is deliberately NOT routed through here: sessionAdmin (ui_rbac.go)
-// and auditActor (ui_helpers.go) gate nothing, and recording the identity a
-// refused session claimed is more useful than recording "unknown".
-func uiSessionAdmissible(sess *Session) bool {
-	return uiSessionAudience(sess) && cfg.UIUserExists(sess.Sub)
-}
-
-// uiSessionAudience is the AUDIENCE half on its own: it reports whether a
-// verified payload was minted as an admin-UI session rather than as the
-// proxy-user portal cookie. It is for a surface that needs the audience and
-// nothing more — one that already runs BEHIND uiAuthMiddleware, which has
-// applied the full uiSessionAdmissible test (roster existence included) before
-// the handler is reached. Re-testing roster existence there would be redundant,
-// and would make the surface refuse a principal the gate had already admitted.
-//
-// Everything that resolves a ROLE from the cookie must use uiSessionAdmissible,
-// not this.
-func uiSessionAudience(sess *Session) bool {
-	return sess != nil && sess.Provider == uiSessionProvider
 }
 
 func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {

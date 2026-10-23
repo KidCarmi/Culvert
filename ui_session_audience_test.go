@@ -1,622 +1,524 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/KidCarmi/Culvert/internal/session"
 )
 
-// SEC-UISESSION-AUD-1 — the admin-UI cookie must not honour a portal token.
+// ── SEC-UISESS-1: the admin cookie is a token CLASS, not just a cookie name ──
 //
-// ps_ui_session and the proxy-user ps_session are the same signed token type
-// under the same HMAC key, and the MAC covers the payload, not the cookie
-// name. The payload has no audience claim, so Provider is the only field that
-// tells them apart: setUISessionCookie stamps uiSessionProvider on every
-// admin-UI session, while setSessionCookie copies the IdP profile id out of the
-// asserted Identity and sets NO Role.
+// ps_session (proxy end-user, session.go setSessionCookie) and ps_ui_session
+// (admin operator, ui_session.go setUISessionCookie) are signed with the SAME
+// HMAC key, carry the SAME Session struct, and have NO audience/purpose
+// discriminator between them. The cookie NAME was the only separation, and a
+// name is attacker-chosen: whoever holds a ps_session value can present it as
+// ps_ui_session.
 //
-// The pre-fix gate was `Provider == "local" && !UIUserExists(Sub)`, which made
-// the roster-existence requirement conditional on exactly that field. A
-// replayed portal token skipped the check, and the empty-role pre-RBAC branch
-// in sessionRoleOrReject then resolved it to RoleAdmin — full control-plane
-// admin for any directory user who could complete captive-portal SSO, with no
-// forgery, and bypassing admin TOTP and admin lockout along the way.
+// That mattered because the two fields that would have caught it both declined:
 //
-// Every test below that asserts a REFUSAL is a defect gate: each one passes
-// against the fixed tree and fails against the verbatim pre-fix predicate.
+//   - sessionRoleOrReject("") resolves to RoleAdmin (ui_session.go). A proxy
+//     session never sets Role, so every ps_session carries exactly the empty
+//     string the pre-RBAC compatibility branch promotes to admin.
+//   - the roster-existence backstop was gated on sess.Provider == "local"
+//     (uiAuthMiddleware), and a proxy IdP session carries the IdP profile id,
+//     so the check was skipped rather than failed.
+//
+// Net effect: an ORDINARY proxy end user who completed a normal captive-portal
+// OIDC/SAML login — their own corporate credentials, no forgery, no XSS, no
+// MITM, no knowledge of the signing key — could replay the cookie the appliance
+// itself minted under the admin cookie name and be injected as RoleAdmin, which
+// is above every requireRole gate and every C2 metadata role. The CP ships one
+// signing key to every DP (controlplane_snapshot.go), so the token was admin on
+// every node in the cluster.
+//
+// This contradicted an explicit written contract —
+// docs/enterprise/IDENTITY-AND-ACCESS-DEPLOYMENT.md: "External IdPs
+// (LDAP/OIDC/SAML) authenticate PROXY end-users, never admin operators …
+// they never issue an admin session", with no admin SSO (GAP-IAM-02).
+//
+// The fix is the token-class check these gates are named for: the admin plane
+// is the only minter of ps_ui_session and it has always stamped
+// Provider "local" (ui_session.go, both call sites passing a roster-backed
+// username), so a UI session whose provider is anything else was not issued as
+// an admin session and is refused. The roster-existence check then applies
+// unconditionally rather than only to local sessions.
+//
+// The DEFECT GATE below fails against the pre-fix middleware (200, role
+// "admin"). The CONTROLS pin that the narrow fix did not take away the
+// pre-RBAC compatibility case it had to preserve.
 
-// portalProviders are IdP profile ids of the shape setSessionCookie stamps
-// (auth_oidc_flow.go `Provider: p.profile.ID`, auth_saml.go `providerID`).
-var portalProviders = []string{"oidc-profile-01", "saml-corp", "ldap-01", "okta", "entra-id"}
-
-// audienceEnv installs the signing key and a configured cfg, AND isolates the
-// process-wide revocation list.
-//
-// The swap is load-bearing, not hygiene theatre. apiAuthUsers' DELETE branch
-// calls sessionRevoked.RevokeUser, and that list is a package singleton — so
-// when the roster-endpoint gate below runs against a PRE-FIX tree the portal
-// token is admitted, the delete succeeds, and "bob" stays user-revoked for the
-// session TTL. Every later test minting a session for bob then fails inside
-// Decode with "user revoked" rather than for the reason it is testing, which
-// made one of the positive controls look like a defect gate.
-func audienceEnv(t *testing.T) {
+// driveUISessionMiddleware runs one /api request carrying sess under the ADMIN
+// cookie name and reports the status, the role the middleware injected, and
+// whether the inner handler was reached at all.
+func driveUISessionMiddleware(t *testing.T, sess *Session) (int, UIRole, bool) {
 	t.Helper()
-	withSessionKey(t)
-	configuredCfg(t)
-	t.Cleanup(session.Revoked.SwapForTest())
-}
-
-// uiSessionCookieValue mints a signed cookie value for an arbitrary payload.
-// It deliberately does NOT go through setUISessionCookie: the whole point is to
-// produce the shapes only the portal minter produces.
-func uiSessionCookieValue(t *testing.T, sub, provider, role string) string {
-	t.Helper()
-	value, err := encodeSession(&Session{
-		Sub: sub, Provider: provider, Role: role,
-		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
-	})
+	value, err := encodeSession(sess)
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
 	}
-	return value
-}
-
-// driveUISession runs one GET /api request carrying the given cookie value
-// through uiAuthMiddleware and reports the status, the injected role, and
-// whether the inner handler was reached at all.
-func driveUISession(t *testing.T, value string) (code int, role UIRole, reached bool) {
-	t.Helper()
+	var seen UIRole
+	reached := false
 	h := uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reached, role = true, uiRole(r)
+		reached, seen = true, uiRole(r)
 	}))
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/stats", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	return rec.Code, role, reached
+	return rec.Code, seen, reached
 }
 
-// ─── 1. DEFECT GATE: the escalation itself ───────────────────────────────────
-
-// TestSECUISESSIONAUD1_PortalTokenReplayedAsUICookieIsRefused is the headline
-// gate. Pre-fix, every `role=""` row returned 200 with the injected role
-// "admin"; the non-empty rows are included so a portal token cannot smuggle an
-// explicit role either.
-func TestSECUISESSIONAUD1_PortalTokenReplayedAsUICookieIsRefused(t *testing.T) {
-	audienceEnv(t)
-
-	for _, provider := range portalProviders {
-		// "" is what setSessionCookie actually produces (it sets no Role);
-		// the rest prove an explicit role does not rescue a portal token.
-		for _, role := range []string{"", "admin", "operator", "viewer"} {
-			// Both an identity absent from the roster (the ordinary portal
-			// user) and one that COLLIDES with a real admin's name: a
-			// directory user called "root" must not inherit root's authority
-			// just because the names match.
-			for _, sub := range []string{"mallory@corp.example", "root", "bob"} {
-				name := fmt.Sprintf("%s/role=%q/sub=%s", provider, role, sub)
-				t.Run(name, func(t *testing.T) {
-					code, got, reached := driveUISession(t, uiSessionCookieValue(t, sub, provider, role))
-					if reached {
-						t.Fatalf("DEFECT: handler reached with injected role %q for a %s portal token (sub=%q role=%q)",
-							got, provider, sub, role)
-					}
-					if code != http.StatusUnauthorized {
-						t.Errorf("status = %d, want %d", code, http.StatusUnauthorized)
-					}
-				})
-			}
+// proxyIssuedSessionValue mints a token through the REAL proxy-user issuer
+// (setSessionCookie), so this gate tests the bytes the appliance actually hands
+// an end user at the end of a captive-portal IdP login — not a hand-built
+// struct that merely resembles one. It returns the cookie VALUE, which is all
+// an attacker needs to re-present under another cookie name.
+func proxyIssuedSessionValue(t *testing.T, id *Identity) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	if err := setSessionCookie(rec, req, id); err != nil {
+		t.Fatalf("setSessionCookie: %v", err)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			return c.Value
 		}
 	}
+	t.Fatalf("setSessionCookie wrote no %s cookie", sessionCookieName)
+	return ""
 }
 
-// TestSECUISESSIONAUD1_PortalTokenIsRefusedByTheAdminRosterEndpoint carries the
-// gate past the middleware to a real admin-only handler, so the assertion is
-// "the roster was not readable or writable", not merely "the middleware said
-// 401". apiAuthUsers is the most sensitive shape available: it reads every
-// account and, on DELETE, removes one.
-func TestSECUISESSIONAUD1_PortalTokenIsRefusedByTheAdminRosterEndpoint(t *testing.T) {
-	audienceEnv(t)
-	value := uiSessionCookieValue(t, "mallory@corp.example", "oidc-profile-01", "")
+// TestSECUISESS1_ProxyIssuedTokenIsNotAnAdminSession is the DEFECT GATE.
+//
+// Pre-fix: 200 with injected role "admin" — privilege escalation from an
+// ordinary proxy end user to control-plane admin.
+func TestSECUISESS1_ProxyIssuedTokenIsNotAnAdminSession(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
 
-	before := len(cfg.ListUIUsers())
-	if before == 0 {
-		t.Fatalf("precondition: roster must be non-empty")
+	// An ordinary proxy end user: a real IdP subject, deliberately NOT a member
+	// of the admin roster seeded by configuredCfg (root, bob).
+	value := proxyIssuedSessionValue(t, &Identity{
+		Sub:      "browsing-user@corp.example",
+		Email:    "browsing-user@corp.example",
+		Provider: "oidc-corp",
+		Groups:   []string{"everyone"},
+	})
+	if cfg.UIUserExists("browsing-user@corp.example") {
+		t.Fatal("precondition: the proxy user must not be in the admin roster")
 	}
 
-	h := uiAuthMiddleware(http.HandlerFunc(apiAuthUsers))
-	for _, tc := range []struct{ method, target string }{
-		{http.MethodGet, "/api/auth/users"},
-		{http.MethodDelete, "/api/auth/users?username=bob"},
-	} {
-		req := httptest.NewRequestWithContext(context.Background(), tc.method, tc.target, http.NoBody)
-		req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s %s: status = %d, want %d; body=%s",
-				tc.method, tc.target, rec.Code, http.StatusUnauthorized, strings.TrimSpace(rec.Body.String()))
-		}
-		if strings.Contains(rec.Body.String(), "\"users\"") {
-			t.Errorf("DEFECT: %s %s disclosed the roster to a replayed portal token", tc.method, tc.target)
-		}
+	// Premise: the token the proxy issuer minted really does verify and really
+	// does carry an empty Role. If either stops holding, this gate is testing
+	// something other than the escalation it was written for.
+	sess, err := decodeSession(value)
+	if err != nil || sess == nil {
+		t.Fatalf("premise: proxy-issued token does not decode: %v", err)
 	}
-	if after := len(cfg.ListUIUsers()); after != before {
-		t.Errorf("DEFECT: roster changed from %d to %d accounts via a replayed portal token", before, after)
+	if sess.Role != "" {
+		t.Fatalf("premise: proxy-issued session carries Role %q, expected empty", sess.Role)
 	}
-}
 
-// ─── 2. CONTROLS: the fix must not narrow a legitimate admin session ────────
+	var seen UIRole
+	reached := false
+	h := uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached, seen = true, uiRole(r)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
 
-// TestSECUISESSIONAUD1_LocalRosterSessionStillPassesAtItsExactRole is the
-// not-vacuous control. If this regressed, the gate above would "pass" simply by
-// refusing everything.
-func TestSECUISESSIONAUD1_LocalRosterSessionStillPassesAtItsExactRole(t *testing.T) {
-	audienceEnv(t)
-
-	for _, tc := range []struct {
-		sub, role string
-		want      UIRole
-		note      string
-	}{
-		{"bob", string(RoleViewer), RoleViewer, "enrolled role passes through unchanged"},
-		{"root", string(RoleAdmin), RoleAdmin, "admin session keeps admin"},
-		// The documented pre-RBAC compatibility case: a session minted before
-		// the Role field existed carries "" and must STILL resolve to admin.
-		// The fix must not take this away — it only requires the provider and
-		// the roster entry, both of which a real pre-RBAC session has.
-		{"bob", "", RoleAdmin, "pre-RBAC empty role still resolves to admin"},
-	} {
-		t.Run(tc.note, func(t *testing.T) {
-			code, got, reached := driveUISession(t, uiSessionCookieValue(t, tc.sub, uiSessionProvider, tc.role))
-			if !reached {
-				t.Fatalf("legitimate local session refused (status %d) — the fix narrowed admin access", code)
-			}
-			if got != tc.want {
-				t.Errorf("injected role = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestSECUISESSIONAUD1_LocalSessionForAbsentUserStillRefused pins the
-// pre-existing half of the predicate (Finding 5.2, deleted users), so a future
-// edit cannot drop it while keeping the provider half.
-func TestSECUISESSIONAUD1_LocalSessionForAbsentUserStillRefused(t *testing.T) {
-	audienceEnv(t)
-	code, role, reached := driveUISession(t, uiSessionCookieValue(t, "deleted-admin", uiSessionProvider, string(RoleAdmin)))
 	if reached {
-		t.Fatalf("handler reached with role %q for a local session naming no roster account", role)
+		t.Errorf("a proxy-issued ps_session replayed as %s reached the admin handler with injected role %q — "+
+			"an ordinary proxy end user is a control-plane admin", uiSessionCookieName, seen)
 	}
-	if code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", code, http.StatusUnauthorized)
+	if seen == RoleAdmin {
+		t.Errorf("proxy-issued token was injected as %q", RoleAdmin)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 for a session the admin plane never issued", rec.Code)
 	}
 }
 
-// ─── 3. BOUNDARY / MALFORMED provider values ────────────────────────────────
+// TestSECUISESS1_ForeignProviderUISessionRefused covers the class rather than
+// the one issuer: ANY verified session naming a provider the admin plane does
+// not mint is refused, at every role value — including an explicitly elevated
+// one, which a compromised or restored proxy-side roster could carry.
+func TestSECUISESS1_ForeignProviderUISessionRefused(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
 
-// TestSECUISESSIONAUD1_ProviderComparisonIsExact pins the comparison as a byte
-// equality against uiSessionProvider. A case-folded or trimmed comparison would
-// let an operator name an IdP profile "Local" and re-open the escalation.
-func TestSECUISESSIONAUD1_ProviderComparisonIsExact(t *testing.T) {
-	audienceEnv(t)
-	for _, provider := range []string{
-		"",        // absent Provider — the zero value, and what a hand-built token carries
-		"Local",   // case
-		"LOCAL",   // case
-		" local",  // leading space
-		"local ",  // trailing space
-		"local\t", // tab
-		"locale",  // prefix of a longer value
-		"loca",    // truncation
-		"local\x00",
-		"local\n",
-	} {
-		t.Run(fmt.Sprintf("%q", provider), func(t *testing.T) {
-			code, role, reached := driveUISession(t, uiSessionCookieValue(t, "bob", provider, ""))
-			if reached {
-				t.Fatalf("DEFECT: provider %q accepted as an admin-UI session (injected role %q)", provider, role)
+	for _, provider := range []string{"oidc-corp", "saml-okta", "ldap-main", "", "LOCAL", "local "} {
+		for _, role := range []string{"", string(RoleViewer), string(RoleOperator), string(RoleAdmin)} {
+			name := provider + "/" + role
+			t.Run(name, func(t *testing.T) {
+				// Sub is a roster member, so the ONLY thing refusing this
+				// session can be its provider — the roster backstop cannot be
+				// what fires here.
+				code, got, reached := driveUISessionMiddleware(t, &Session{
+					Sub: "bob", Provider: provider, Role: role,
+					Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+				})
+				if reached {
+					t.Errorf("session with provider %q role %q reached the handler as %q", provider, role, got)
+				}
+				if code != http.StatusUnauthorized {
+					t.Errorf("status = %d, want 401 for provider %q role %q", code, provider, role)
+				}
+			})
+		}
+	}
+}
+
+// TestSECUISESS1_LocalEmptyRoleCompatSurvives is the CONTROL that keeps the fix
+// narrow. The pre-RBAC compatibility case — a session minted before the Role
+// field existed, by the admin plane, for a roster member — must still resolve
+// to admin. Refusing it would pass the defect gate above while locking legacy
+// single-admin deployments out mid-session, which is the exact trade
+// sessionRoleOrReject's comment refuses to make.
+func TestSECUISESS1_LocalEmptyRoleCompatSurvives(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	code, role, reached := driveUISessionMiddleware(t, &Session{
+		Sub: "bob", Provider: "local", Role: "",
+		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+	})
+	if !reached || code != http.StatusOK {
+		t.Fatalf("legacy local role-less session refused: status=%d reached=%v", code, reached)
+	}
+	if role != RoleAdmin {
+		t.Fatalf("legacy local role-less session resolved to %q, want %q", role, RoleAdmin)
+	}
+}
+
+// TestSECUISESS1_LocalEnrolledRolesPassThrough is the CONTROL for the ordinary
+// path: a real admin login is untouched, at its exact role.
+func TestSECUISESS1_LocalEnrolledRolesPassThrough(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	for _, want := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
+		t.Run(string(want), func(t *testing.T) {
+			code, got, reached := driveUISessionMiddleware(t, &Session{
+				Sub: "bob", Provider: "local", Role: string(want),
+				Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+			})
+			if !reached || code != http.StatusOK {
+				t.Fatalf("local %q session refused: status=%d reached=%v", want, code, reached)
 			}
-			if code != http.StatusUnauthorized {
-				t.Errorf("status = %d, want %d", code, http.StatusUnauthorized)
+			if got != want {
+				t.Fatalf("injected role = %q, want %q", got, want)
 			}
 		})
 	}
 }
 
-// TestSECUISESSIONAUD1_AdmissiblePredicateDirectly exercises the predicate at
-// its own boundary, including the nil and empty-subject shapes its callers rely
-// on it to absorb.
-func TestSECUISESSIONAUD1_AdmissiblePredicateDirectly(t *testing.T) {
-	audienceEnv(t)
+// ── /api/auth/status: the public endpoint the middleware never sees ─────────
+//
+// Codex P2 on this PR, and correct: /api/auth/status is on
+// isPublicUIAuthPath, so uiAuthMiddleware never runs for it and the handler
+// resolved the cookie itself. Its comment claimed it applied "the same
+// fail-closed resolution uiAuthMiddleware applies" while checking strictly
+// less, so the first version of this fix refused the replayed proxy token on
+// every gated route and still reported it here as `loggedIn: true,
+// role: admin` — the console renders the whole admin surface for a principal
+// that then gets 401 on every call it makes. The same drift already
+// mis-reported a DELETED user as an admin, because the roster check lived
+// only in the middleware.
+//
+// Both call sites now share resolveUISession. These gates pin the status
+// endpoint's half of that contract.
+
+// statusFor drives apiAuthStatus with sess under the admin cookie name and
+// returns the decoded body.
+func statusFor(t *testing.T, sess *Session) map[string]any {
+	t.Helper()
+	value, err := encodeSession(sess)
+	if err != nil {
+		t.Fatalf("encodeSession: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apiAuthStatus status = %d, want 200", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	return body
+}
+
+// TestSECUISESS1_StatusRefusesProxyIssuedToken is the DEFECT GATE for the
+// status endpoint. Pre-fix it answered loggedIn=true, role=admin.
+func TestSECUISESS1_StatusRefusesProxyIssuedToken(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	// Premise: this endpoint really is public, so the middleware really is not
+	// standing in front of it. If that changes, this gate's reasoning changes.
+	if !isPublicUIAuthPath("/api/auth/status") {
+		t.Fatal("premise broken: /api/auth/status is no longer on the public allowlist")
+	}
+
+	value := proxyIssuedSessionValue(t, &Identity{
+		Sub:      "browsing-user@corp.example",
+		Email:    "browsing-user@corp.example",
+		Provider: "oidc-corp",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, req)
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if body["loggedIn"] != false {
+		t.Errorf("loggedIn = %v, want false — the status endpoint reports a proxy-issued token as an "+
+			"authenticated principal while every gated route refuses it", body["loggedIn"])
+	}
+	if got, ok := body["role"]; ok {
+		t.Errorf("role = %v was reported for a refused session; want no role at all", got)
+	}
+	if got, ok := body["user"]; ok {
+		t.Errorf("user = %v was reported for a refused session; want no user at all", got)
+	}
+}
+
+// TestSECUISESS1_StatusRefusesDeletedUser pins the half of the drift that
+// predates this PR: the roster check (Finding 5.2) lived only in the
+// middleware, so a deleted admin's own cookie still reported role=admin here.
+func TestSECUISESS1_StatusRefusesDeletedUser(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	body := statusFor(t, &Session{
+		Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+	})
+	if body["loggedIn"] != false {
+		t.Errorf("loggedIn = %v for a user absent from the roster, want false", body["loggedIn"])
+	}
+}
+
+// TestSECUISESS1_StatusReportsLocalSessions is the CONTROL: a real admin login
+// still reports its exact role, and the pre-RBAC empty-role session still
+// reports admin. Refusing either would pass the gates above while breaking the
+// console for legitimate operators.
+func TestSECUISESS1_StatusReportsLocalSessions(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
 	for _, tc := range []struct {
 		name string
-		sess *Session
-		want bool
+		role string
+		want UIRole
 	}{
-		{"nil session", nil, false},
-		{"local + roster user", &Session{Sub: "bob", Provider: uiSessionProvider}, true},
-		{"local + empty subject", &Session{Sub: "", Provider: uiSessionProvider}, false},
-		{"local + absent user", &Session{Sub: "nobody", Provider: uiSessionProvider}, false},
-		{"portal + roster user", &Session{Sub: "bob", Provider: "oidc-profile-01"}, false},
-		{"portal + empty subject", &Session{Sub: "", Provider: "oidc-profile-01"}, false},
-		{"empty provider + roster user", &Session{Sub: "bob"}, false},
+		{"pre-RBAC empty role", "", RoleAdmin},
+		{"viewer", string(RoleViewer), RoleViewer},
+		{"operator", string(RoleOperator), RoleOperator},
+		{"admin", string(RoleAdmin), RoleAdmin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := uiSessionAdmissible(tc.sess); got != tc.want {
-				t.Errorf("uiSessionAdmissible = %v, want %v", got, tc.want)
+			body := statusFor(t, &Session{
+				Sub: "bob", Provider: "local", Role: tc.role,
+				Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+			})
+			if body["loggedIn"] != true {
+				t.Fatalf("loggedIn = %v, want true for a local roster session", body["loggedIn"])
+			}
+			if body["user"] != "bob" {
+				t.Errorf("user = %v, want %q", body["user"], "bob")
+			}
+			if body["role"] != string(tc.want) {
+				t.Errorf("role = %v, want %q", body["role"], tc.want)
 			}
 		})
 	}
+}
 
-	// uiSessionAudience is the audience half ALONE: it must not consult the
-	// roster, and it must still refuse every portal provider.
+// TestSECUISESS1_StatusRefusedCookieDoesNotFallBackToBasic is the second
+// Codex P2, and a distinct case from the one above: MIXED auth.
+//
+// uiAuthMiddleware answers 401 on uiSessionRefused and returns — it never
+// reaches its own Basic fallback. The first version of this fix only
+// short-circuited the VALID verdict here, so a refused cookie fell through to
+// Basic, and a request carrying both a refused ps_ui_session and valid Basic
+// credentials was reported `loggedIn: true` while every gated route refused it
+// with 401. Same contract break as the cookie-only case, one branch over.
+//
+// Reachable without an attacker: an operator whose account was deleted, or
+// whose browser still holds a proxy-issued cookie, driving the API with Basic
+// credentials. No escalation — Basic still has to verify — but the endpoint
+// promises access the middleware will not grant, which is the direction that
+// matters.
+func TestSECUISESS1_StatusRefusedCookieDoesNotFallBackToBasic(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	// Premise: these Basic credentials really do verify, so a loggedIn=false
+	// below is the refused COOKIE talking and not a bad password.
+	probe := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	probe.SetBasicAuth("bob", "Sup3rSecret!x")
+	if _, valid := verifyUIBasicAuth(probe, "bob", "Sup3rSecret!x"); !valid {
+		t.Fatal("premise broken: the Basic credentials used by this gate no longer verify")
+	}
+
+	for _, tc := range []struct {
+		name string
+		sess *Session
+	}{
+		{"proxy-issued provider", &Session{
+			Sub: "browsing-user@corp.example", Provider: "oidc-corp", Role: "",
+			Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+		}},
+		{"deleted local user", &Session{
+			Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+			Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value, err := encodeSession(tc.sess)
+			if err != nil {
+				t.Fatalf("encodeSession: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+			req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+			req.SetBasicAuth("bob", "Sup3rSecret!x")
+			rec := httptest.NewRecorder()
+			apiAuthStatus(rec, req)
+
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+			}
+			if body["loggedIn"] != false {
+				t.Errorf("loggedIn = %v with a REFUSED cookie plus valid Basic credentials, want false — "+
+					"uiAuthMiddleware answers 401 for this request and never tries Basic, so reporting it "+
+					"as logged in promises access no gated route will grant", body["loggedIn"])
+			}
+		})
+	}
+}
+
+// TestSECUISESS1_StatusBasicFallbackSurvives is the CONTROL that keeps the fix
+// from over-refusing: with NO cookie at all, the Basic fallback is the
+// documented CLI/API path and must still report the credential's real role.
+// uiSessionAbsent is the verdict that leaves Basic its turn, in the middleware
+// and here alike.
+func TestSECUISESS1_StatusBasicFallbackSurvives(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+	req.SetBasicAuth("bob", "Sup3rSecret!x")
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, req)
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if body["loggedIn"] != true {
+		t.Fatalf("loggedIn = %v for Basic credentials with no cookie, want true — the CLI/API path "+
+			"must survive the refused-cookie fix", body["loggedIn"])
+	}
+	if body["user"] != "bob" || body["role"] != string(RoleViewer) {
+		t.Errorf("Basic fallback reported user=%v role=%v, want bob/%s", body["user"], body["role"], RoleViewer)
+	}
+}
+
+// TestSECUISESS1_StatusPreSetupStillBootstraps is the CONTROL for the
+// bootstrap window: before setup completes the endpoint reports admin with no
+// cookie at all, and sharing resolveUISession must not have disturbed that
+// branch — it runs before any cookie is read.
+func TestSECUISESS1_StatusPreSetupStillBootstraps(t *testing.T) {
+	withSessionKey(t)
+	prev := cfg
+	t.Cleanup(func() { cfg = prev })
+	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	if cfg.IsConfigured() {
+		t.Fatal("precondition: cfg must be unconfigured")
+	}
+
+	rec := httptest.NewRecorder()
+	apiAuthStatus(rec, httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody))
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if body["loggedIn"] != true || body["role"] != string(RoleAdmin) {
+		t.Fatalf("pre-setup status = %v, want loggedIn=true role=admin (the setup wizard reads this)", body)
+	}
+}
+
+// TestSECUISESS1_LocalSessionForDeletedUserRefused is the CONTROL for the
+// roster backstop (Finding 5.2), which the fix moves out from behind the
+// provider guard. A local session whose user no longer exists must still be
+// refused — the fix must not have traded one bypass for another.
+func TestSECUISESS1_LocalSessionForDeletedUserRefused(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+
+	code, got, reached := driveUISessionMiddleware(t, &Session{
+		Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
+	})
+	if reached {
+		t.Errorf("session for a user absent from the roster reached the handler as %q", got)
+	}
+	if code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 for a deleted user's session", code)
+	}
+}
+
+// TestSECUISESS1_SSERevalidationSharesTheAdmissionDecision pins that the
+// mid-stream SSE re-check (sseAuthStillValid) applies the same decision as the
+// connect-time gate rather than restating it. Before this it carried its own
+// copy of the PRE-FIX predicate (`Provider == "local" && !UIUserExists`), so a
+// foreign-provider token for a roster member, or a local session naming a role
+// this build does not enroll, kept the stream alive.
+func TestSECUISESS1_SSERevalidationSharesTheAdmissionDecision(t *testing.T) {
+	withSessionKey(t)
+	configuredCfg(t)
+	if !cfg.AuthEnabled() {
+		t.Fatal("precondition: auth must be enabled, or the re-check short-circuits to true")
+	}
+	exp := time.Now().Add(time.Hour).Unix()
 	for _, tc := range []struct {
 		name string
 		sess *Session
 		want bool
 	}{
-		{"nil session", nil, false},
-		{"local + roster user", &Session{Sub: "bob", Provider: uiSessionProvider}, true},
-		{"local + absent user", &Session{Sub: "nobody", Provider: uiSessionProvider}, true},
-		{"local + empty subject", &Session{Sub: "", Provider: uiSessionProvider}, true},
-		{"portal + roster user", &Session{Sub: "bob", Provider: "oidc-profile-01"}, false},
-		{"empty provider", &Session{Sub: "bob"}, false},
+		{"foreign provider, roster member", &Session{Sub: "bob", Provider: "oidc-corp", Exp: exp}, false},
+		{"foreign provider, admin role", &Session{Sub: "bob", Provider: "saml-okta", Role: string(RoleAdmin), Exp: exp}, false},
+		{"local, role not enrolled", &Session{Sub: "bob", Provider: uiSessionProvider, Role: "superuser", Exp: exp}, false},
+		{"local, deleted user", &Session{Sub: "gone", Provider: uiSessionProvider, Role: string(RoleViewer), Exp: exp}, false},
+		// CONTROLS: the sessions the gate admits keep their stream.
+		{"local, enrolled role", &Session{Sub: "bob", Provider: uiSessionProvider, Role: string(RoleViewer), Exp: exp}, true},
+		{"local, pre-RBAC empty role", &Session{Sub: "bob", Provider: uiSessionProvider, Exp: exp}, true},
 	} {
-		t.Run("audience/"+tc.name, func(t *testing.T) {
-			if got := uiSessionAudience(tc.sess); got != tc.want {
-				t.Errorf("uiSessionAudience = %v, want %v", got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			tc.sess.Jti = newSessionJti()
+			value, err := encodeSession(tc.sess)
+			if err != nil {
+				t.Fatalf("encodeSession: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/api/events", http.NoBody)
+			req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie, never sent to a browser
+			if got := sseAuthStillValid(req); got != tc.want {
+				t.Errorf("sseAuthStillValid = %v, want %v", got, tc.want)
 			}
 		})
 	}
-}
-
-// ─── 4. The sibling surfaces that shared the same predicate ─────────────────
-
-// TestSECUISESSIONAUD1_AuthStatusDoesNotReportAPortalTokenAsAdmin covers the
-// PUBLIC allowlisted endpoint. Pre-fix it had no provider or existence check at
-// all, so it answered {"loggedIn":true,"role":"admin"} and the console rendered
-// the whole admin surface for an ordinary proxy user.
-func TestSECUISESSIONAUD1_AuthStatusDoesNotReportAPortalTokenAsAdmin(t *testing.T) {
-	audienceEnv(t)
-
-	status := func(value string) map[string]any {
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/status", http.NoBody)
-		req.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
-		rec := httptest.NewRecorder()
-		apiAuthStatus(rec, req)
-		var out map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatalf("decode %q: %v", rec.Body.String(), err)
-		}
-		return out
-	}
-
-	got := status(uiSessionCookieValue(t, "mallory@corp.example", "oidc-profile-01", ""))
-	if got["loggedIn"] == true {
-		t.Errorf("DEFECT: /api/auth/status reports a replayed portal token as logged in: %v", got)
-	}
-	if got["role"] == string(RoleAdmin) {
-		t.Errorf("DEFECT: /api/auth/status reports role=admin for a replayed portal token: %v", got)
-	}
-
-	// CONTROL: a real admin session is still reported, at its real role.
-	ok := status(uiSessionCookieValue(t, "root", uiSessionProvider, string(RoleAdmin)))
-	if ok["loggedIn"] != true || ok["role"] != string(RoleAdmin) {
-		t.Errorf("legitimate admin session no longer reported: %v", ok)
-	}
-}
-
-// TestSECUISESSIONAUD1_SSERevalidationRejectsAPortalToken covers the mid-stream
-// re-check: an SSE stream outlives its connect-time check, so this predicate is
-// what terminates a stream whose session stopped being admissible.
-func TestSECUISESSIONAUD1_SSERevalidationRejectsAPortalToken(t *testing.T) {
-	audienceEnv(t)
-
-	req := func(value string) *http.Request {
-		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/events", http.NoBody)
-		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
-		return r
-	}
-
-	if sseAuthStillValid(req(uiSessionCookieValue(t, "mallory@corp.example", "oidc-profile-01", ""))) {
-		t.Error("DEFECT: sseAuthStillValid accepted a replayed portal token")
-	}
-	// CONTROL: a real admin session keeps its stream.
-	if !sseAuthStillValid(req(uiSessionCookieValue(t, "bob", uiSessionProvider, string(RoleViewer)))) {
-		t.Error("sseAuthStillValid refused a legitimate local session — the fix broke live telemetry")
-	}
-}
-
-// TestSECUISESSIONAUD1_MCPLivePrincipalRejectsAPortalToken covers the four-eyes
-// principal: live-execution trust may not be attributed to a portal identity.
-func TestSECUISESSIONAUD1_MCPLivePrincipalRejectsAPortalToken(t *testing.T) {
-	audienceEnv(t)
-
-	req := func(value string) *http.Request {
-		r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/mcp/tool-trust/decision", http.NoBody)
-		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: value}) // #nosec G124 -- request-side test cookie
-		return r
-	}
-
-	if principal, err := mcpLivePrincipal(req(uiSessionCookieValue(t, "mallory@corp.example", "oidc-profile-01", ""))); err == nil {
-		t.Errorf("DEFECT: mcpLivePrincipal accepted a replayed portal token as principal %q", principal)
-	}
-	// CONTROL: a real admin session is still a valid principal.
-	principal, err := mcpLivePrincipal(req(uiSessionCookieValue(t, "root", uiSessionProvider, string(RoleAdmin))))
-	if err != nil || principal != "root" {
-		t.Errorf("mcpLivePrincipal(local admin) = %q, %v; want \"root\", nil", principal, err)
-	}
-
-	// CONTROL, and a deliberate boundary: this surface is AUDIENCE-only. It runs
-	// behind uiAuthMiddleware, which has already applied the roster half, so a
-	// local session whose subject is not in this test's roster must still be
-	// accepted here. Folding uiSessionAdmissible in would refuse a principal the
-	// gate admitted and break the four-eyes flow — which is exactly what
-	// TestLiveTrustHTTP_FourEyesAndRBAC caught.
-	principal, err = mcpLivePrincipal(req(uiSessionCookieValue(t, "operator-not-in-test-roster", uiSessionProvider, string(RoleOperator))))
-	if err != nil || principal != "operator-not-in-test-roster" {
-		t.Errorf("mcpLivePrincipal(local, non-roster subject) = %q, %v; want the subject and nil — this surface must not re-apply the roster check",
-			principal, err)
-	}
-
-	// An empty subject is still refused: four-eyes over an anonymous actor is
-	// not a separation of duties.
-	if p, perr := mcpLivePrincipal(req(uiSessionCookieValue(t, "", uiSessionProvider, string(RoleAdmin)))); perr == nil {
-		t.Errorf("mcpLivePrincipal accepted an empty subject as principal %q", p)
-	}
-}
-
-// ─── 5. Concurrency ─────────────────────────────────────────────────────────
-
-// TestSECUISESSIONAUD1_ConcurrentMixedSessionsDoNotCrossTalk runs admissible and
-// replayed tokens through the middleware in parallel. The predicate reads cfg
-// under its RWMutex while other requests read it too, and the per-request role
-// travels in the request context — this asserts no outcome leaks between
-// goroutines. Meaningful under -race.
-func TestSECUISESSIONAUD1_ConcurrentMixedSessionsDoNotCrossTalk(t *testing.T) {
-	audienceEnv(t)
-
-	legit := uiSessionCookieValue(t, "bob", uiSessionProvider, string(RoleViewer))
-	portal := uiSessionCookieValue(t, "mallory@corp.example", "oidc-profile-01", "")
-
-	const iterations = 200
-	var wg sync.WaitGroup
-	var escalations, refusedLegit int64
-	var mu sync.Mutex
-
-	for i := 0; i < iterations; i++ {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			_, role, reached := driveUISession(t, portal)
-			if reached {
-				mu.Lock()
-				escalations++
-				mu.Unlock()
-				_ = role
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			_, role, reached := driveUISession(t, legit)
-			if !reached || role != RoleViewer {
-				mu.Lock()
-				refusedLegit++
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-
-	if escalations != 0 {
-		t.Errorf("DEFECT: %d/%d concurrent portal tokens reached the handler", escalations, iterations)
-	}
-	if refusedLegit != 0 {
-		t.Errorf("%d/%d concurrent legitimate sessions were refused or got the wrong role", refusedLegit, iterations)
-	}
-}
-
-// ─── 6. Structural wall ─────────────────────────────────────────────────────
-
-// TestSECUISESSIONAUD1_EveryUISessionConsumerIsAccountedFor is the wall. The
-// defect was not one wrong line: it was FOUR independent consumers of
-// readUISessionCookie, three carrying their own copy of the predicate (one of
-// them missing it entirely). Behavioural tests can only cover the consumers
-// that exist today, so this fails the build when a FIFTH appears, forcing
-// whoever adds it to decide — in this list — whether it gates or merely
-// attributes.
-func TestSECUISESSIONAUD1_EveryUISessionConsumerIsAccountedFor(t *testing.T) {
-	// Gating consumers MUST route the session through one of the two
-	// predicates. Anything that resolves a ROLE needs the full
-	// uiSessionAdmissible; a surface that only needs the audience, and that runs
-	// behind the gate which already applied the roster half, may use
-	// uiSessionAudience.
-	gating := map[string]string{
-		"uiAuthMiddleware":  "THE admin-plane gate; injects the role every requireRole check reads (admissible)",
-		"apiAuthStatus":     "PUBLIC allowlist; its answer decides what the console renders (admissible)",
-		"sseAuthStillValid": "mid-stream SSE re-check; a stream outlives its connect-time check (admissible)",
-		// Logout decides whether to write into the persisted, cluster-gossiped
-		// revocation list, so it is a trust decision too (SEC-REVOKE-1).
-		"apiAuthLogout": "decides whether to insert into the revocation list; PUBLIC allowlist (admissible)",
-		// Runs behind the gate, so it needs the audience and nothing more.
-		"mcpLivePrincipal": "supplies one of the two eyes for live-execution trust (audience)",
-	}
-	// Attribution-only consumers gate NOTHING. Recording the identity a
-	// refused session claimed is more useful than recording "unknown", and
-	// with the gate fixed a non-admissible session never reaches a handler
-	// that audits. Routing these through the predicate would be churn.
-	attribution := map[string]string{
-		"sessionAdmin": "audit/config-version actor attribution only (ui_rbac.go)",
-		"auditActor":   "audit-ring actor attribution only (ui_helpers.go)",
-	}
-
-	callers := uiSessionCookieConsumers(t)
-	if len(callers) < len(gating)+len(attribution) {
-		t.Fatalf("wall found only %d readUISessionCookie consumer(s), expected at least %d — the selector has drifted and the wall proves nothing",
-			len(callers), len(gating)+len(attribution))
-	}
-
-	var unknown, ungated []string
-	for fn, where := range callers {
-		_, isGating := gating[fn]
-		_, isAttribution := attribution[fn]
-		switch {
-		case !isGating && !isAttribution:
-			unknown = append(unknown, fmt.Sprintf("  %s (%s)", fn, where))
-		case isGating && !fnCalls(t, fn, "uiSessionAdmissible") && !fnCalls(t, fn, "uiSessionAudience"):
-			ungated = append(ungated, fmt.Sprintf("  %s (%s)", fn, where))
-		}
-	}
-	if len(unknown) > 0 {
-		t.Errorf("readUISessionCookie has %d consumer(s) this wall does not know about:\n%s\n\n"+
-			"ps_ui_session and the proxy-user ps_session are the same signed token under the same key, and the MAC "+
-			"does not cover the cookie NAME (SEC-UISESSION-AUD-1). A consumer that makes a trust decision must call "+
-			"uiSessionAdmissible; add it to `gating` here. One that only names an actor belongs in `attribution`.",
-			len(unknown), strings.Join(unknown, "\n"))
-	}
-	if len(ungated) > 0 {
-		t.Errorf("%d gating consumer(s) of readUISessionCookie call neither uiSessionAdmissible nor uiSessionAudience:\n%s",
-			len(ungated), strings.Join(ungated, "\n"))
-	}
-}
-
-// TestSECUISESSIONAUD1_ExactlyTwoSessionMintersOnePerAudience pins the premise
-// the whole fix rests on: uiSessionAdmissible trusts that Provider identifies
-// the audience, which holds only while each cookie has exactly one minter and
-// each minter stamps its own Provider. encodeSession is the chokepoint both go
-// through, so counting its callers counts the minters.
-func TestSECUISESSIONAUD1_ExactlyTwoSessionMintersOnePerAudience(t *testing.T) {
-	minters := map[string]string{
-		"setUISessionCookie": "the admin-UI cookie (ps_ui_session); must stamp uiSessionProvider",
-		"setSessionCookie":   "the proxy-user portal cookie (ps_session); stamps the IdP profile id",
-	}
-	found := fnsCalling(t, "encodeSession")
-	if len(found) < len(minters) {
-		t.Fatalf("wall found only %d encodeSession caller(s) %v, expected at least %d — the selector has drifted and the wall proves nothing",
-			len(found), found, len(minters))
-	}
-	for fn, where := range found {
-		if _, ok := minters[fn]; !ok {
-			t.Errorf("%s (%s) mints a session token outside the two known minters.\n\n"+
-				"SEC-UISESSION-AUD-1: ps_ui_session and ps_session are the same signed type under the same key, "+
-				"and the MAC does not cover the cookie NAME — uiSessionAdmissible can only tell them apart by Provider. "+
-				"A third minter breaks that. Add it here and state which audience it stamps.", fn, where)
-		}
-	}
-	// And the admin-UI minter must actually stamp the provider the gate tests.
-	if !fnReferences(t, "setUISessionCookie", "uiSessionProvider") {
-		t.Error("setUISessionCookie no longer sets Provider from uiSessionProvider — uiSessionAdmissible would refuse every admin session")
-	}
-}
-
-// ─── wall-test machinery (AST over this package's non-test sources) ─────────
-
-// forEachPkgFunc parses every non-test .go file in this package and calls visit
-// for each top-level function/method body.
-func forEachPkgFunc(t *testing.T, visit func(file string, fn *ast.FuncDecl, fset *token.FileSet)) {
-	t.Helper()
-	fset := token.NewFileSet()
-	dir := pkgSourceDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read package dir: %v", err)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, perr := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
-		if perr != nil {
-			t.Fatalf("parse %s: %v", name, perr)
-		}
-		for _, decl := range f.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-				visit(name, fn, fset)
-			}
-		}
-	}
-}
-
-// uiSessionCookieConsumers maps each function that calls readUISessionCookie to
-// "file:line".
-func uiSessionCookieConsumers(t *testing.T) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	forEachPkgFunc(t, func(file string, fn *ast.FuncDecl, fset *token.FileSet) {
-		if fn.Name.Name == "readUISessionCookie" {
-			return
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "readUISessionCookie" {
-				out[fn.Name.Name] = fmt.Sprintf("%s:%d", file, fset.Position(n.Pos()).Line)
-			}
-			return true
-		})
-	})
-	return out
-}
-
-// fnReferences reports whether the named function's body mentions ident.
-func fnReferences(t *testing.T, fnName, ident string) bool {
-	t.Helper()
-	found := false
-	forEachPkgFunc(t, func(_ string, fn *ast.FuncDecl, _ *token.FileSet) {
-		if fn.Name.Name != fnName {
-			return
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && id.Name == ident {
-				found = true
-			}
-			return true
-		})
-	})
-	return found
-}
-
-// fnCalls reports whether the named function's body calls callee.
-func fnCalls(t *testing.T, fnName, callee string) bool {
-	t.Helper()
-	return fnReferences(t, fnName, callee)
-}
-
-// fnsCalling maps each function that calls callee to "file:line".
-func fnsCalling(t *testing.T, callee string) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	forEachPkgFunc(t, func(file string, fn *ast.FuncDecl, fset *token.FileSet) {
-		if fn.Name.Name == callee {
-			return
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == callee {
-				out[fn.Name.Name] = fmt.Sprintf("%s:%d", file, fset.Position(n.Pos()).Line)
-			}
-			return true
-		})
-	})
-	return out
 }

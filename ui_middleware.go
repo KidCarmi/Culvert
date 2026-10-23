@@ -265,32 +265,22 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// Check session cookie (browser login via login overlay).
-		sess, err := readUISessionCookie(r)
-		if err == nil && sess != nil {
-			// Reject a session this plane may not honour: a deleted user
-			// (Finding 5.2) or a portal token replayed under the admin
-			// cookie's name (SEC-UISESSION-AUD-1 — see uiSessionAdmissible,
-			// which owns both halves of the test).
-			if !uiSessionAdmissible(sess) {
-				clearUISessionCookie(w, r)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			role, ok := sessionRoleOrReject(sess.Role)
-			if !ok {
-				// A signed session naming a role this build does not enroll.
-				// It used to take the compat branch below and come out ADMIN,
-				// because that branch was keyed on `!HasRole(RoleViewer)` —
-				// true of every unenrolled string, not just the empty one it
-				// was written for. Fail closed and clear the cookie so the
-				// holder re-authenticates and is re-issued a role this build
-				// can actually evaluate.
-				clearUISessionCookie(w, r)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		//
+		// SEC-UISESS-1: the admission decision lives in resolveUISession, which
+		// /api/auth/status shares — see that function for why a second copy of
+		// it was a privilege-escalation surface. A REFUSED cookie answers 401
+		// here rather than falling through to Basic: the holder presented an
+		// admin session this build will not honour, so clear it and make them
+		// re-authenticate. Only an ABSENT (missing or unverifiable) cookie
+		// leaves the Basic scheme a turn.
+		switch _, role, verdict := resolveUISession(r); verdict {
+		case uiSessionValid:
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, role)
 			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		case uiSessionRefused:
+			clearUISessionCookie(w, r)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		// Fallback: HTTP Basic Auth for programmatic / CLI access.

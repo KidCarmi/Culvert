@@ -294,6 +294,7 @@ func TestAPIClusterMetrics(t *testing.T) {
 // ── Apply Config Snapshot with Full Policy ──────────────────────────────────
 
 func TestApplyConfigSnapshot_FullPolicy(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origRules := policyStore.List()
 	origCats := catStore.All()
 	origProfiles := globalProfileStore.List()
@@ -379,6 +380,7 @@ func TestApplyConfigSnapshot_FullPolicy(t *testing.T) {
 // policyStore via applyConfigSnapshot from accidentally writing to a stale
 // tempdir.
 func TestApplyConfigSnapshot_PolicyRulesPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origRules := policyStore.List()
 	origPath := policyStore.path
 	t.Cleanup(func() {
