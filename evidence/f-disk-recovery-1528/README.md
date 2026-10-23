@@ -18,3 +18,14 @@ using the per-package seed from the log.
 Scope: unit/package-level tests on a Linux container (producer-run, not an
 independent execution). Not a booted appliance, service-manager restart,
 physical ENOSPC, mmap/SIGBUS, power loss or ESXi result.
+
+## f9db48fd — item 4 (cancellation and bounded shutdown)
+
+`f9db48fd-item4-race-run.log`: `go test -race -count=2 -shuffle=on -v` over
+internal/feedsync, internal/catdb, internal/storeguard, plus the root
+category-feed row/metrics tests. Shuffle seeds and the two SIGTERM→exit
+measurements are in the log. Under `-race` the ~1 s exit is dominated by the
+race runtime's default 1 s exit sleep (`atexit_sleep_ms`); the store close was
+22–26 ms, and 61 ms SIGTERM→exit was measured without `-race`. Source-level
+Linux evidence only. Not covered: service-manager stop, physical ENOSPC, a
+booted appliance.

@@ -1,0 +1,935 @@
+source: f9db48fd (run on the working tree immediately before commit; tree byte-identical — `git diff f9db48fd` empty for all run packages)
+go version go1.26.9 linux/amd64
+Linux 6.18.44-fc-v153
+2026-10-23T06:10:28Z
+-test.shuffle 1792735829997595842
+=== RUN   TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker
+--- PASS: TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker (0.12s)
+=== RUN   TestDownloadAndParse_OK
+--- PASS: TestDownloadAndParse_OK (0.06s)
+=== RUN   TestSyncer_WaitJoinsTheLoop
+--- PASS: TestSyncer_WaitJoinsTheLoop (0.08s)
+=== RUN   TestLastFailureIsBounded
+--- PASS: TestLastFailureIsBounded (0.00s)
+=== RUN   TestRetryBoundsAreSaneRelativeToTheInterval
+--- PASS: TestRetryBoundsAreSaneRelativeToTheInterval (0.00s)
+=== RUN   TestHeldWriter_RecoveryPersistsAcrossReopens
+--- PASS: TestHeldWriter_RecoveryPersistsAcrossReopens (0.59s)
+=== RUN   TestFFeed1_FailedWriteDoesNotAdvanceSuccess
+--- PASS: TestFFeed1_FailedWriteDoesNotAdvanceSuccess (0.20s)
+=== RUN   TestShutdown_SIGTERMExitsBoundedWithAbandonedWriter
+    shutdown_subprocess_test.go:236: SIGTERM -> exit 1.08s; FEEDSYNC-CHILD SHUTDOWN-DONE close_ms=22 writers=1 err=<nil>
+--- PASS: TestShutdown_SIGTERMExitsBoundedWithAbandonedWriter (1.23s)
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/ample
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/no_probe
+--- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable (0.16s)
+=== RUN   TestParseDomainFile_Basic
+--- PASS: TestParseDomainFile_Basic (0.00s)
+=== RUN   TestScheduler_FailedRoundRetriesLongBeforeTheInterval
+--- PASS: TestScheduler_FailedRoundRetriesLongBeforeTheInterval (0.00s)
+=== RUN   TestNewFeedSyncer_Defaults
+--- PASS: TestNewFeedSyncer_Defaults (0.04s)
+=== RUN   TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood
+--- PASS: TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood (0.12s)
+=== RUN   TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks
+--- PASS: TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks (0.05s)
+=== RUN   TestDownloadAndParse_HTTPError
+--- PASS: TestDownloadAndParse_HTTPError (0.00s)
+=== RUN   TestSync_DeferredFirstSyncReportsNoCoverage
+--- PASS: TestSync_DeferredFirstSyncReportsNoCoverage (0.20s)
+=== RUN   TestWriteBulkWatched_NormalWriteUnaffected
+--- PASS: TestWriteBulkWatched_NormalWriteUnaffected (0.04s)
+=== RUN   TestSync_RefusesTheWriteBelowTheFreeSpaceFloor
+--- PASS: TestSync_RefusesTheWriteBelowTheFreeSpaceFloor (0.06s)
+=== RUN   TestShutdownHelperProcess
+    shutdown_subprocess_test.go:62: helper process for the shutdown subprocess tests
+--- SKIP: TestShutdownHelperProcess (0.00s)
+=== RUN   TestSyncRound_FailureIsCountedAndClassified
+--- PASS: TestSyncRound_FailureIsCountedAndClassified (0.00s)
+=== RUN   TestFeedSyncer_Start_CancelContext
+--- PASS: TestFeedSyncer_Start_CancelContext (0.06s)
+=== RUN   TestClassifyTarEntry
+--- PASS: TestClassifyTarEntry (0.00s)
+=== RUN   TestWriteBulkWatched_StallSurfaced
+--- PASS: TestWriteBulkWatched_StallSurfaced (0.07s)
+=== RUN   TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus
+--- PASS: TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus (0.11s)
+=== RUN   TestParseDomainFile_CRLFLineEndings
+--- PASS: TestParseDomainFile_CRLFLineEndings (0.00s)
+=== RUN   TestParseTarball_SkipsNonFileEntries
+--- PASS: TestParseTarball_SkipsNonFileEntries (0.02s)
+=== RUN   TestFFeed1_InterruptedImportIsCompletedAfterRestart
+--- PASS: TestFFeed1_InterruptedImportIsCompletedAfterRestart (0.13s)
+=== RUN   TestParseTarball_Basic
+--- PASS: TestParseTarball_Basic (0.04s)
+=== RUN   TestFeedSyncer_Sync_OK
+--- PASS: TestFeedSyncer_Sync_OK (0.07s)
+=== RUN   TestHealth_OnAFreshSyncerIsZeroNotGarbage
+--- PASS: TestHealth_OnAFreshSyncerIsZeroNotGarbage (0.00s)
+=== RUN   TestParseDomainFile_NoTrailingNewline
+--- PASS: TestParseDomainFile_NoTrailingNewline (0.00s)
+=== RUN   TestFeedSyncer_Sync_Failure
+--- PASS: TestFeedSyncer_Sync_Failure (0.05s)
+=== RUN   TestSyncRound_QuiescesAfterAbandonedWrite
+--- PASS: TestSyncRound_QuiescesAfterAbandonedWrite (0.13s)
+=== RUN   TestNewFeedSyncer_CustomValues
+--- PASS: TestNewFeedSyncer_CustomValues (0.03s)
+=== RUN   TestParseTarball_BadGzip
+--- PASS: TestParseTarball_BadGzip (0.00s)
+=== RUN   TestDownloadAndParse_BadBody
+--- PASS: TestDownloadAndParse_BadBody (0.00s)
+=== RUN   TestSyncSpaceNeeded
+--- PASS: TestSyncSpaceNeeded (0.00s)
+=== RUN   TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen
+--- PASS: TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen (0.16s)
+=== RUN   TestWriteBulkWatched_ReturnedErrorPropagates
+--- PASS: TestWriteBulkWatched_ReturnedErrorPropagates (0.04s)
+=== RUN   TestFeedSyncer_Stats_Initial
+--- PASS: TestFeedSyncer_Stats_Initial (0.03s)
+=== RUN   TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept
+--- PASS: TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept (0.07s)
+=== RUN   TestFFeed1_RecordForAnotherFeedIsNotComplete
+--- PASS: TestFFeed1_RecordForAnotherFeedIsNotComplete (0.08s)
+=== RUN   TestFFeed1_SpaceRefusalKeepsTheCertifiedImport
+--- PASS: TestFFeed1_SpaceRefusalKeepsTheCertifiedImport (0.12s)
+=== RUN   TestParseDomainFile_CaseNormalization
+--- PASS: TestParseDomainFile_CaseNormalization (0.00s)
+=== RUN   TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing
+--- PASS: TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing (0.79s)
+=== RUN   TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker
+--- PASS: TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker (0.11s)
+=== RUN   TestDownloadAndParse_OK
+--- PASS: TestDownloadAndParse_OK (0.05s)
+=== RUN   TestSyncer_WaitJoinsTheLoop
+--- PASS: TestSyncer_WaitJoinsTheLoop (0.19s)
+=== RUN   TestLastFailureIsBounded
+--- PASS: TestLastFailureIsBounded (0.00s)
+=== RUN   TestRetryBoundsAreSaneRelativeToTheInterval
+--- PASS: TestRetryBoundsAreSaneRelativeToTheInterval (0.00s)
+=== RUN   TestHeldWriter_RecoveryPersistsAcrossReopens
+--- PASS: TestHeldWriter_RecoveryPersistsAcrossReopens (0.39s)
+=== RUN   TestFFeed1_FailedWriteDoesNotAdvanceSuccess
+--- PASS: TestFFeed1_FailedWriteDoesNotAdvanceSuccess (0.15s)
+=== RUN   TestShutdown_SIGTERMExitsBoundedWithAbandonedWriter
+    shutdown_subprocess_test.go:236: SIGTERM -> exit 1.091s; FEEDSYNC-CHILD SHUTDOWN-DONE close_ms=26 writers=1 err=<nil>
+--- PASS: TestShutdown_SIGTERMExitsBoundedWithAbandonedWriter (1.34s)
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/ample
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/no_probe
+--- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable (0.15s)
+=== RUN   TestParseDomainFile_Basic
+--- PASS: TestParseDomainFile_Basic (0.00s)
+=== RUN   TestScheduler_FailedRoundRetriesLongBeforeTheInterval
+--- PASS: TestScheduler_FailedRoundRetriesLongBeforeTheInterval (0.00s)
+=== RUN   TestNewFeedSyncer_Defaults
+--- PASS: TestNewFeedSyncer_Defaults (0.03s)
+=== RUN   TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood
+--- PASS: TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood (0.11s)
+=== RUN   TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks
+--- PASS: TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks (0.04s)
+=== RUN   TestDownloadAndParse_HTTPError
+--- PASS: TestDownloadAndParse_HTTPError (0.00s)
+=== RUN   TestSync_DeferredFirstSyncReportsNoCoverage
+--- PASS: TestSync_DeferredFirstSyncReportsNoCoverage (0.06s)
+=== RUN   TestWriteBulkWatched_NormalWriteUnaffected
+--- PASS: TestWriteBulkWatched_NormalWriteUnaffected (0.05s)
+=== RUN   TestSync_RefusesTheWriteBelowTheFreeSpaceFloor
+--- PASS: TestSync_RefusesTheWriteBelowTheFreeSpaceFloor (0.10s)
+=== RUN   TestShutdownHelperProcess
+    shutdown_subprocess_test.go:62: helper process for the shutdown subprocess tests
+--- SKIP: TestShutdownHelperProcess (0.00s)
+=== RUN   TestSyncRound_FailureIsCountedAndClassified
+--- PASS: TestSyncRound_FailureIsCountedAndClassified (0.00s)
+=== RUN   TestFeedSyncer_Start_CancelContext
+--- PASS: TestFeedSyncer_Start_CancelContext (0.08s)
+=== RUN   TestClassifyTarEntry
+--- PASS: TestClassifyTarEntry (0.00s)
+=== RUN   TestWriteBulkWatched_StallSurfaced
+--- PASS: TestWriteBulkWatched_StallSurfaced (0.06s)
+=== RUN   TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus
+--- PASS: TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus (0.19s)
+=== RUN   TestParseDomainFile_CRLFLineEndings
+--- PASS: TestParseDomainFile_CRLFLineEndings (0.00s)
+=== RUN   TestParseTarball_SkipsNonFileEntries
+--- PASS: TestParseTarball_SkipsNonFileEntries (0.02s)
+=== RUN   TestFFeed1_InterruptedImportIsCompletedAfterRestart
+--- PASS: TestFFeed1_InterruptedImportIsCompletedAfterRestart (0.12s)
+=== RUN   TestParseTarball_Basic
+--- PASS: TestParseTarball_Basic (0.17s)
+=== RUN   TestFeedSyncer_Sync_OK
+--- PASS: TestFeedSyncer_Sync_OK (0.24s)
+=== RUN   TestHealth_OnAFreshSyncerIsZeroNotGarbage
+--- PASS: TestHealth_OnAFreshSyncerIsZeroNotGarbage (0.00s)
+=== RUN   TestParseDomainFile_NoTrailingNewline
+--- PASS: TestParseDomainFile_NoTrailingNewline (0.00s)
+=== RUN   TestFeedSyncer_Sync_Failure
+--- PASS: TestFeedSyncer_Sync_Failure (0.06s)
+=== RUN   TestSyncRound_QuiescesAfterAbandonedWrite
+--- PASS: TestSyncRound_QuiescesAfterAbandonedWrite (0.14s)
+=== RUN   TestNewFeedSyncer_CustomValues
+--- PASS: TestNewFeedSyncer_CustomValues (0.04s)
+=== RUN   TestParseTarball_BadGzip
+--- PASS: TestParseTarball_BadGzip (0.00s)
+=== RUN   TestDownloadAndParse_BadBody
+--- PASS: TestDownloadAndParse_BadBody (0.00s)
+=== RUN   TestSyncSpaceNeeded
+--- PASS: TestSyncSpaceNeeded (0.00s)
+=== RUN   TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen
+--- PASS: TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen (0.76s)
+=== RUN   TestWriteBulkWatched_ReturnedErrorPropagates
+--- PASS: TestWriteBulkWatched_ReturnedErrorPropagates (0.04s)
+=== RUN   TestFeedSyncer_Stats_Initial
+--- PASS: TestFeedSyncer_Stats_Initial (0.03s)
+=== RUN   TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept
+--- PASS: TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept (0.07s)
+=== RUN   TestFFeed1_RecordForAnotherFeedIsNotComplete
+--- PASS: TestFFeed1_RecordForAnotherFeedIsNotComplete (0.08s)
+=== RUN   TestFFeed1_SpaceRefusalKeepsTheCertifiedImport
+--- PASS: TestFFeed1_SpaceRefusalKeepsTheCertifiedImport (0.10s)
+=== RUN   TestParseDomainFile_CaseNormalization
+--- PASS: TestParseDomainFile_CaseNormalization (0.00s)
+=== RUN   TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing
+--- PASS: TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing (0.88s)
+PASS
+ok  	github.com/KidCarmi/Culvert/internal/feedsync	11.877s
+-test.shuffle 1792735830001449713
+=== RUN   TestDanglingAliasTarget
+--- PASS: TestDanglingAliasTarget (0.00s)
+=== RUN   TestLookup_VolumeDamageAfterHealthyOpenIsContained
+--- PASS: TestLookup_VolumeDamageAfterHealthyOpenIsContained (0.58s)
+=== RUN   TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen
+--- PASS: TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen (0.79s)
+=== RUN   TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget
+--- PASS: TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget (0.60s)
+=== RUN   TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart
+--- PASS: TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart (0.16s)
+=== RUN   TestBulkWriteFault_LeavesAPartialStore
+--- PASS: TestBulkWriteFault_LeavesAPartialStore (0.04s)
+=== RUN   TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison
+--- PASS: TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison (0.08s)
+=== RUN   TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot
+--- PASS: TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot (0.08s)
+=== RUN   TestCommunityDB_BulkWrite_And_Lookup
+--- PASS: TestCommunityDB_BulkWrite_And_Lookup (0.05s)
+=== RUN   TestImportRecord_KeyIsUnreachableFromLookups
+--- PASS: TestImportRecord_KeyIsUnreachableFromLookups (0.04s)
+=== RUN   TestImportRecord_InvalidRecordsAreRejected
+--- PASS: TestImportRecord_InvalidRecordsAreRejected (0.04s)
+=== RUN   TestOpen_CreateAndClose
+--- PASS: TestOpen_CreateAndClose (0.03s)
+=== RUN   TestOpenResilient_NonRegularMarkerIsIgnored
+--- PASS: TestOpenResilient_NonRegularMarkerIsIgnored (0.08s)
+=== RUN   TestOpenResilient_QuarantinedCopiesAreBounded
+--- PASS: TestOpenResilient_QuarantinedCopiesAreBounded (0.36s)
+=== RUN   TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot
+--- PASS: TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot (1.17s)
+=== RUN   TestOpenResilient_QuarantineReleasesTheStoreLock
+--- PASS: TestOpenResilient_QuarantineReleasesTheStoreLock (0.11s)
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/mid-import
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/after-complete
+--- PASS: TestImportRecord_ConsistentAfterUncleanExit (0.13s)
+=== RUN   TestOpenResilient_FirstRunCreatesTheStore
+--- PASS: TestOpenResilient_FirstRunCreatesTheStore (0.03s)
+=== RUN   TestBeginImport_WritesDurableIntentBeforeData
+--- PASS: TestBeginImport_WritesDurableIntentBeforeData (0.05s)
+=== RUN   TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds
+--- PASS: TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds (0.07s)
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_truncated
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_emptied
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/table_missing
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/KEYREGISTRY_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/value-log_truncation_needed
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/block_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/dir_lock_held
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/path_is_a_file
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/read-only_volume
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/no_permission
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/volume_full
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/fd_exhaustion
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/failing_device
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/unrecognised
+--- PASS: TestClassifyOpenError_EmpiricalBadgerMessages (0.00s)
+=== RUN   TestBadgerFork_MemtableIDOutOfRangeIsAnError
+--- PASS: TestBadgerFork_MemtableIDOutOfRangeIsAnError (0.00s)
+=== RUN   TestImportRecord_FsyncOrderIsStructural
+--- PASS: TestImportRecord_FsyncOrderIsStructural (0.00s)
+=== RUN   TestImportRecord_BeginImportWithdrawsTheRecord
+--- PASS: TestImportRecord_BeginImportWithdrawsTheRecord (0.07s)
+=== RUN   TestOpenResilient_HeldStoreLockRefusesACompetingOpen
+--- PASS: TestOpenResilient_HeldStoreLockRefusesACompetingOpen (0.07s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.05s)
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/retry
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/close-full
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/vlog-grow
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/sst-full
+--- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS (80.25s)
+=== RUN   TestStoreFilesAreFullyAllocated
+--- PASS: TestStoreFilesAreFullyAllocated (0.04s)
+=== RUN   TestCommunityDB_Stats
+--- PASS: TestCommunityDB_Stats (0.04s)
+=== RUN   TestCommunityDB_DegradedStoreNeverReachesBadger
+--- PASS: TestCommunityDB_DegradedStoreNeverReachesBadger (0.00s)
+=== RUN   TestBadgerFork_LogArgumentsCannotForgeLines
+--- PASS: TestBadgerFork_LogArgumentsCannotForgeLines (0.00s)
+=== RUN   TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine
+--- PASS: TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine (0.00s)
+=== RUN   TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot
+--- PASS: TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot (0.06s)
+=== RUN   TestStats_FirstFaultLatchesTheStore
+--- PASS: TestStats_FirstFaultLatchesTheStore (0.54s)
+=== RUN   TestCompleteImport_ClearsIntent_NoFalseQuarantine
+--- PASS: TestCompleteImport_ClearsIntent_NoFalseQuarantine (0.07s)
+=== RUN   TestLookup_OrdinaryMissIsNotAFault
+--- PASS: TestLookup_OrdinaryMissIsNotAFault (0.10s)
+=== RUN   TestCommunityDB_EveryBadgerAccessIsGuarded
+--- PASS: TestCommunityDB_EveryBadgerAccessIsGuarded (0.00s)
+=== RUN   TestOpenResilient_CleanOpenLeavesNoTrace
+--- PASS: TestOpenResilient_CleanOpenLeavesNoTrace (0.08s)
+=== RUN   TestOpenResilient_MarkerIsASiblingNotAChild
+--- PASS: TestOpenResilient_MarkerIsASiblingNotAChild (0.00s)
+=== RUN   TestCommunityDB_HasEntries
+--- PASS: TestCommunityDB_HasEntries (0.04s)
+=== RUN   TestCommunityDB_Lookup_TrailingDot
+--- PASS: TestCommunityDB_Lookup_TrailingDot (0.04s)
+=== RUN   TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore
+--- PASS: TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore (0.08s)
+=== RUN   TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt
+--- PASS: TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt (0.00s)
+=== RUN   TestOpenResilient_ResidualQuarantinesAreReported
+--- PASS: TestOpenResilient_ResidualQuarantinesAreReported (0.11s)
+=== RUN   TestImportRecord_RoundTripSurvivesReopen
+--- PASS: TestImportRecord_RoundTripSurvivesReopen (0.08s)
+=== RUN   TestClassifyOpenError_NilIsUnknown
+--- PASS: TestClassifyOpenError_NilIsUnknown (0.00s)
+=== RUN   TestOpenResilient_LiveAttemptMarkerIsNotAbandoned
+--- PASS: TestOpenResilient_LiveAttemptMarkerIsNotAbandoned (0.00s)
+=== RUN   TestCommunityDB_Lookup_DomainWalking
+--- PASS: TestCommunityDB_Lookup_DomainWalking (0.04s)
+=== RUN   TestClassifyOpenError_EnvironmentalWinsOverCorruption
+--- PASS: TestClassifyOpenError_EnvironmentalWinsOverCorruption (0.00s)
+=== RUN   TestInterruptedImport_QuarantinesAndRebuildsInOneRestart
+--- PASS: TestInterruptedImport_QuarantinesAndRebuildsInOneRestart (0.12s)
+=== RUN   TestCommunityDB_Lookup_StopsAtTLD
+--- PASS: TestCommunityDB_Lookup_StopsAtTLD (0.04s)
+=== RUN   TestBadgerFork_TableFileIDIsUnsigned32
+--- PASS: TestBadgerFork_TableFileIDIsUnsigned32 (0.00s)
+=== RUN   TestBeginImport_RefusesWhenIntentNotDurable
+--- PASS: TestBeginImport_RefusesWhenIntentNotDurable (0.04s)
+=== RUN   TestCommunityDB_BulkWrite_Empty
+--- PASS: TestCommunityDB_BulkWrite_Empty (0.03s)
+=== RUN   TestLookupFaults_DegradedImpliesACountedFault
+--- PASS: TestLookupFaults_DegradedImpliesACountedFault (0.06s)
+=== RUN   TestDanglingAliasTarget
+--- PASS: TestDanglingAliasTarget (0.00s)
+=== RUN   TestLookup_VolumeDamageAfterHealthyOpenIsContained
+--- PASS: TestLookup_VolumeDamageAfterHealthyOpenIsContained (0.61s)
+=== RUN   TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen
+--- PASS: TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen (0.60s)
+=== RUN   TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget
+--- PASS: TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget (0.59s)
+=== RUN   TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart
+--- PASS: TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart (0.11s)
+=== RUN   TestBulkWriteFault_LeavesAPartialStore
+--- PASS: TestBulkWriteFault_LeavesAPartialStore (0.04s)
+=== RUN   TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison
+--- PASS: TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison (0.07s)
+=== RUN   TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot
+--- PASS: TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot (0.07s)
+=== RUN   TestCommunityDB_BulkWrite_And_Lookup
+--- PASS: TestCommunityDB_BulkWrite_And_Lookup (0.04s)
+=== RUN   TestImportRecord_KeyIsUnreachableFromLookups
+--- PASS: TestImportRecord_KeyIsUnreachableFromLookups (0.03s)
+=== RUN   TestImportRecord_InvalidRecordsAreRejected
+--- PASS: TestImportRecord_InvalidRecordsAreRejected (0.03s)
+=== RUN   TestOpen_CreateAndClose
+--- PASS: TestOpen_CreateAndClose (0.04s)
+=== RUN   TestOpenResilient_NonRegularMarkerIsIgnored
+--- PASS: TestOpenResilient_NonRegularMarkerIsIgnored (0.06s)
+=== RUN   TestOpenResilient_QuarantinedCopiesAreBounded
+--- PASS: TestOpenResilient_QuarantinedCopiesAreBounded (0.22s)
+=== RUN   TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot
+--- PASS: TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot (1.16s)
+=== RUN   TestOpenResilient_QuarantineReleasesTheStoreLock
+--- PASS: TestOpenResilient_QuarantineReleasesTheStoreLock (0.08s)
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/mid-import
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/after-complete
+--- PASS: TestImportRecord_ConsistentAfterUncleanExit (0.13s)
+=== RUN   TestOpenResilient_FirstRunCreatesTheStore
+--- PASS: TestOpenResilient_FirstRunCreatesTheStore (0.03s)
+=== RUN   TestBeginImport_WritesDurableIntentBeforeData
+--- PASS: TestBeginImport_WritesDurableIntentBeforeData (0.08s)
+=== RUN   TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds
+--- PASS: TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds (0.11s)
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_truncated
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_emptied
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/table_missing
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/KEYREGISTRY_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/value-log_truncation_needed
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/block_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/dir_lock_held
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/path_is_a_file
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/read-only_volume
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/no_permission
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/volume_full
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/fd_exhaustion
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/failing_device
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/unrecognised
+--- PASS: TestClassifyOpenError_EmpiricalBadgerMessages (0.00s)
+=== RUN   TestBadgerFork_MemtableIDOutOfRangeIsAnError
+--- PASS: TestBadgerFork_MemtableIDOutOfRangeIsAnError (0.00s)
+=== RUN   TestImportRecord_FsyncOrderIsStructural
+--- PASS: TestImportRecord_FsyncOrderIsStructural (0.00s)
+=== RUN   TestImportRecord_BeginImportWithdrawsTheRecord
+--- PASS: TestImportRecord_BeginImportWithdrawsTheRecord (0.16s)
+=== RUN   TestOpenResilient_HeldStoreLockRefusesACompetingOpen
+--- PASS: TestOpenResilient_HeldStoreLockRefusesACompetingOpen (0.07s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.57s)
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/retry
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/close-full
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/vlog-grow
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/sst-full
+--- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS (76.64s)
+=== RUN   TestStoreFilesAreFullyAllocated
+--- PASS: TestStoreFilesAreFullyAllocated (0.05s)
+=== RUN   TestCommunityDB_Stats
+--- PASS: TestCommunityDB_Stats (0.07s)
+=== RUN   TestCommunityDB_DegradedStoreNeverReachesBadger
+--- PASS: TestCommunityDB_DegradedStoreNeverReachesBadger (0.00s)
+=== RUN   TestBadgerFork_LogArgumentsCannotForgeLines
+--- PASS: TestBadgerFork_LogArgumentsCannotForgeLines (0.00s)
+=== RUN   TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine
+--- PASS: TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine (0.00s)
+=== RUN   TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot
+--- PASS: TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot (0.07s)
+=== RUN   TestStats_FirstFaultLatchesTheStore
+--- PASS: TestStats_FirstFaultLatchesTheStore (0.57s)
+=== RUN   TestCompleteImport_ClearsIntent_NoFalseQuarantine
+--- PASS: TestCompleteImport_ClearsIntent_NoFalseQuarantine (0.08s)
+=== RUN   TestLookup_OrdinaryMissIsNotAFault
+--- PASS: TestLookup_OrdinaryMissIsNotAFault (0.12s)
+=== RUN   TestCommunityDB_EveryBadgerAccessIsGuarded
+--- PASS: TestCommunityDB_EveryBadgerAccessIsGuarded (0.01s)
+=== RUN   TestOpenResilient_CleanOpenLeavesNoTrace
+--- PASS: TestOpenResilient_CleanOpenLeavesNoTrace (0.52s)
+=== RUN   TestOpenResilient_MarkerIsASiblingNotAChild
+--- PASS: TestOpenResilient_MarkerIsASiblingNotAChild (0.00s)
+=== RUN   TestCommunityDB_HasEntries
+--- PASS: TestCommunityDB_HasEntries (0.04s)
+=== RUN   TestCommunityDB_Lookup_TrailingDot
+--- PASS: TestCommunityDB_Lookup_TrailingDot (0.03s)
+=== RUN   TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore
+--- PASS: TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore (0.06s)
+=== RUN   TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt
+--- PASS: TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt (0.00s)
+=== RUN   TestOpenResilient_ResidualQuarantinesAreReported
+--- PASS: TestOpenResilient_ResidualQuarantinesAreReported (0.10s)
+=== RUN   TestImportRecord_RoundTripSurvivesReopen
+--- PASS: TestImportRecord_RoundTripSurvivesReopen (0.08s)
+=== RUN   TestClassifyOpenError_NilIsUnknown
+--- PASS: TestClassifyOpenError_NilIsUnknown (0.00s)
+=== RUN   TestOpenResilient_LiveAttemptMarkerIsNotAbandoned
+--- PASS: TestOpenResilient_LiveAttemptMarkerIsNotAbandoned (0.00s)
+=== RUN   TestCommunityDB_Lookup_DomainWalking
+--- PASS: TestCommunityDB_Lookup_DomainWalking (0.07s)
+=== RUN   TestClassifyOpenError_EnvironmentalWinsOverCorruption
+--- PASS: TestClassifyOpenError_EnvironmentalWinsOverCorruption (0.00s)
+=== RUN   TestInterruptedImport_QuarantinesAndRebuildsInOneRestart
+--- PASS: TestInterruptedImport_QuarantinesAndRebuildsInOneRestart (0.11s)
+=== RUN   TestCommunityDB_Lookup_StopsAtTLD
+--- PASS: TestCommunityDB_Lookup_StopsAtTLD (0.05s)
+=== RUN   TestBadgerFork_TableFileIDIsUnsigned32
+--- PASS: TestBadgerFork_TableFileIDIsUnsigned32 (0.00s)
+=== RUN   TestBeginImport_RefusesWhenIntentNotDurable
+--- PASS: TestBeginImport_RefusesWhenIntentNotDurable (0.05s)
+=== RUN   TestCommunityDB_BulkWrite_Empty
+--- PASS: TestCommunityDB_BulkWrite_Empty (0.04s)
+=== RUN   TestLookupFaults_DegradedImpliesACountedFault
+--- PASS: TestLookupFaults_DegradedImpliesACountedFault (0.05s)
+PASS
+ok  	github.com/KidCarmi/Culvert/internal/catdb	171.333s
+-test.shuffle 1792735829995362652
+=== RUN   TestMarkImportPending_IsASibling
+--- PASS: TestMarkImportPending_IsASibling (0.00s)
+=== RUN   TestOpen_RecordedFaultQuarantinesBeforeOpening
+--- PASS: TestOpen_RecordedFaultQuarantinesBeforeOpening (0.01s)
+=== RUN   TestOpen_UnknownErrorDegrades
+--- PASS: TestOpen_UnknownErrorDegrades (0.01s)
+=== RUN   TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery (0.00s)
+=== RUN   TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce
+--- PASS: TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce (0.00s)
+=== RUN   TestOpen_InterruptedImportQuarantinesAndRebuilds
+--- PASS: TestOpen_InterruptedImportQuarantinesAndRebuilds (0.00s)
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist[1]
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist?
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist*
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist\x
+--- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath (0.01s)
+=== RUN   TestPolicy_OnlySubtracts
+--- PASS: TestPolicy_OnlySubtracts (0.00s)
+=== RUN   TestOpen_DirectoryAtFaultMarkerPathIsIgnored
+--- PASS: TestOpen_DirectoryAtFaultMarkerPathIsIgnored (0.00s)
+=== RUN   TestOpen_NoImportMarkerNeverQuarantines
+--- PASS: TestOpen_NoImportMarkerNeverQuarantines (0.00s)
+=== RUN   TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker
+--- PASS: TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker (0.00s)
+=== RUN   TestDiscovery_DoesNotClaimANeighboursMarker
+--- PASS: TestDiscovery_DoesNotClaimANeighboursMarker (0.00s)
+=== RUN   TestBeginAttempt_MarkerIsASibling
+--- PASS: TestBeginAttempt_MarkerIsASibling (0.00s)
+=== RUN   TestOpen_InterruptedImportMarkerClearedWhenStoreGone
+--- PASS: TestOpen_InterruptedImportMarkerClearedWhenStoreGone (0.00s)
+=== RUN   TestContainFault_UnreadableMapsRePanics
+--- PASS: TestContainFault_UnreadableMapsRePanics (0.00s)
+=== RUN   TestOpen_RecordedFaultRespectsALiveLockHolder
+--- PASS: TestOpen_RecordedFaultRespectsALiveLockHolder (0.00s)
+=== RUN   TestContainFault_StoreReachedThroughASymlinkIsContained
+--- PASS: TestContainFault_StoreReachedThroughASymlinkIsContained (0.00s)
+=== RUN   TestClassifyOpenError_Table
+=== RUN   TestClassifyOpenError_Table/nil
+=== RUN   TestClassifyOpenError_Table/torn_manifest
+=== RUN   TestClassifyOpenError_Table/corrupt_manifest
+=== RUN   TestClassifyOpenError_Table/checksum
+=== RUN   TestClassifyOpenError_Table/missing_table
+=== RUN   TestClassifyOpenError_Table/keyregistry
+=== RUN   TestClassifyOpenError_Table/truncate
+=== RUN   TestClassifyOpenError_Table/invalid_magic
+=== RUN   TestClassifyOpenError_Table/live_owner
+=== RUN   TestClassifyOpenError_Table/not_a_dir
+=== RUN   TestClassifyOpenError_Table/permission
+=== RUN   TestClassifyOpenError_Table/read-only
+=== RUN   TestClassifyOpenError_Table/no_space
+=== RUN   TestClassifyOpenError_Table/emfile
+=== RUN   TestClassifyOpenError_Table/eio
+=== RUN   TestClassifyOpenError_Table/unrecognised
+--- PASS: TestClassifyOpenError_Table (0.00s)
+=== RUN   TestContainFault_RestoresPanicOnFault
+--- PASS: TestContainFault_RestoresPanicOnFault (0.00s)
+=== RUN   TestContainFault_PassesErrorsAndSuccessThrough
+--- PASS: TestContainFault_PassesErrorsAndSuccessThrough (0.00s)
+=== RUN   TestOpen_InterruptedImportIsLeastSevere
+--- PASS: TestOpen_InterruptedImportIsLeastSevere (0.00s)
+=== RUN   TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason
+--- PASS: TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason (0.00s)
+=== RUN   TestOpen_RecordedFaultForAMissingStoreIsCleared
+--- PASS: TestOpen_RecordedFaultForAMissingStoreIsCleared (0.00s)
+=== RUN   TestEmptyPathIsInert
+--- PASS: TestEmptyPathIsInert (0.00s)
+=== RUN   TestClassifyOpenError_StructuralEnvironmentalFaults
+--- PASS: TestClassifyOpenError_StructuralEnvironmentalFaults (0.00s)
+=== RUN   TestOpen_EnvironmentalFaultNeverQuarantines
+--- PASS: TestOpen_EnvironmentalFaultNeverQuarantines (0.00s)
+=== RUN   TestOpenAttempt_EndIsSafeOnAZeroValue
+--- PASS: TestOpenAttempt_EndIsSafeOnAZeroValue (0.00s)
+=== RUN   TestClassifyOpenError_EnvironmentalOutranksEverything
+--- PASS: TestClassifyOpenError_EnvironmentalOutranksEverything (0.00s)
+=== RUN   TestContainFault_FaultOutsideTheStoreIsRePanicked
+--- PASS: TestContainFault_FaultOutsideTheStoreIsRePanicked (0.00s)
+=== RUN   TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery
+--- PASS: TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery (0.00s)
+=== RUN   TestOpen_ReplacementFailureIsReportedNotRetried
+--- PASS: TestOpen_ReplacementFailureIsReportedNotRetried (0.00s)
+=== RUN   TestQuarantineDir_PrunesToTheCap
+--- PASS: TestQuarantineDir_PrunesToTheCap (0.00s)
+=== RUN   TestRecordFault_DirectorySyncFailureIsReported
+--- PASS: TestRecordFault_DirectorySyncFailureIsReported (0.00s)
+=== RUN   TestContainFault_NilDerefIsNotAStoreFault
+--- PASS: TestContainFault_NilDerefIsNotAStoreFault (0.00s)
+=== RUN   TestContainFault_InStoreAddressFromInjectedMapsIsContained
+--- PASS: TestContainFault_InStoreAddressFromInjectedMapsIsContained (0.00s)
+=== RUN   TestOpen_HealthyStoreTouchesNothing
+--- PASS: TestOpen_HealthyStoreTouchesNothing (0.00s)
+=== RUN   TestAddrInStoreMapping_RequiresAPathBoundary
+--- PASS: TestAddrInStoreMapping_RequiresAPathBoundary (0.00s)
+=== RUN   TestParseMapsLine
+--- PASS: TestParseMapsLine (0.00s)
+=== RUN   TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery (0.00s)
+=== RUN   TestOpen_ExemptedErrorIsNeverQuarantined
+--- PASS: TestOpen_ExemptedErrorIsNeverQuarantined (0.00s)
+=== RUN   TestContainFault_MemoryFaultBecomesError
+--- PASS: TestContainFault_MemoryFaultBecomesError (0.00s)
+=== RUN   TestAbandonedMarkers_LiveAttemptIsNotAbandoned
+--- PASS: TestAbandonedMarkers_LiveAttemptIsNotAbandoned (0.00s)
+=== RUN   TestQuarantinedCopies_IsChronological
+--- PASS: TestQuarantinedCopies_IsChronological (0.00s)
+=== RUN   TestOpen_AbandonedMarkerQuarantinesBeforeOpening
+--- PASS: TestOpen_AbandonedMarkerQuarantinesBeforeOpening (0.00s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.00s)
+=== RUN   TestMarkImportPending_IsASibling
+--- PASS: TestMarkImportPending_IsASibling (0.00s)
+=== RUN   TestOpen_RecordedFaultQuarantinesBeforeOpening
+--- PASS: TestOpen_RecordedFaultQuarantinesBeforeOpening (0.00s)
+=== RUN   TestOpen_UnknownErrorDegrades
+--- PASS: TestOpen_UnknownErrorDegrades (0.00s)
+=== RUN   TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery (0.00s)
+=== RUN   TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce
+--- PASS: TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce (0.00s)
+=== RUN   TestOpen_InterruptedImportQuarantinesAndRebuilds
+--- PASS: TestOpen_InterruptedImportQuarantinesAndRebuilds (0.00s)
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist[1]
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist?
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist*
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist\x
+--- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath (0.01s)
+=== RUN   TestPolicy_OnlySubtracts
+--- PASS: TestPolicy_OnlySubtracts (0.00s)
+=== RUN   TestOpen_DirectoryAtFaultMarkerPathIsIgnored
+--- PASS: TestOpen_DirectoryAtFaultMarkerPathIsIgnored (0.00s)
+=== RUN   TestOpen_NoImportMarkerNeverQuarantines
+--- PASS: TestOpen_NoImportMarkerNeverQuarantines (0.00s)
+=== RUN   TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker
+--- PASS: TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker (0.00s)
+=== RUN   TestDiscovery_DoesNotClaimANeighboursMarker
+--- PASS: TestDiscovery_DoesNotClaimANeighboursMarker (0.00s)
+=== RUN   TestBeginAttempt_MarkerIsASibling
+--- PASS: TestBeginAttempt_MarkerIsASibling (0.00s)
+=== RUN   TestOpen_InterruptedImportMarkerClearedWhenStoreGone
+--- PASS: TestOpen_InterruptedImportMarkerClearedWhenStoreGone (0.00s)
+=== RUN   TestContainFault_UnreadableMapsRePanics
+--- PASS: TestContainFault_UnreadableMapsRePanics (0.00s)
+=== RUN   TestOpen_RecordedFaultRespectsALiveLockHolder
+--- PASS: TestOpen_RecordedFaultRespectsALiveLockHolder (0.01s)
+=== RUN   TestContainFault_StoreReachedThroughASymlinkIsContained
+--- PASS: TestContainFault_StoreReachedThroughASymlinkIsContained (0.00s)
+=== RUN   TestClassifyOpenError_Table
+=== RUN   TestClassifyOpenError_Table/nil
+=== RUN   TestClassifyOpenError_Table/torn_manifest
+=== RUN   TestClassifyOpenError_Table/corrupt_manifest
+=== RUN   TestClassifyOpenError_Table/checksum
+=== RUN   TestClassifyOpenError_Table/missing_table
+=== RUN   TestClassifyOpenError_Table/keyregistry
+=== RUN   TestClassifyOpenError_Table/truncate
+=== RUN   TestClassifyOpenError_Table/invalid_magic
+=== RUN   TestClassifyOpenError_Table/live_owner
+=== RUN   TestClassifyOpenError_Table/not_a_dir
+=== RUN   TestClassifyOpenError_Table/permission
+=== RUN   TestClassifyOpenError_Table/read-only
+=== RUN   TestClassifyOpenError_Table/no_space
+=== RUN   TestClassifyOpenError_Table/emfile
+=== RUN   TestClassifyOpenError_Table/eio
+=== RUN   TestClassifyOpenError_Table/unrecognised
+--- PASS: TestClassifyOpenError_Table (0.00s)
+=== RUN   TestContainFault_RestoresPanicOnFault
+--- PASS: TestContainFault_RestoresPanicOnFault (0.00s)
+=== RUN   TestContainFault_PassesErrorsAndSuccessThrough
+--- PASS: TestContainFault_PassesErrorsAndSuccessThrough (0.00s)
+=== RUN   TestOpen_InterruptedImportIsLeastSevere
+--- PASS: TestOpen_InterruptedImportIsLeastSevere (0.01s)
+=== RUN   TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason
+--- PASS: TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason (0.00s)
+=== RUN   TestOpen_RecordedFaultForAMissingStoreIsCleared
+--- PASS: TestOpen_RecordedFaultForAMissingStoreIsCleared (0.00s)
+=== RUN   TestEmptyPathIsInert
+--- PASS: TestEmptyPathIsInert (0.00s)
+=== RUN   TestClassifyOpenError_StructuralEnvironmentalFaults
+--- PASS: TestClassifyOpenError_StructuralEnvironmentalFaults (0.00s)
+=== RUN   TestOpen_EnvironmentalFaultNeverQuarantines
+--- PASS: TestOpen_EnvironmentalFaultNeverQuarantines (0.00s)
+=== RUN   TestOpenAttempt_EndIsSafeOnAZeroValue
+--- PASS: TestOpenAttempt_EndIsSafeOnAZeroValue (0.00s)
+=== RUN   TestClassifyOpenError_EnvironmentalOutranksEverything
+--- PASS: TestClassifyOpenError_EnvironmentalOutranksEverything (0.00s)
+=== RUN   TestContainFault_FaultOutsideTheStoreIsRePanicked
+--- PASS: TestContainFault_FaultOutsideTheStoreIsRePanicked (0.00s)
+=== RUN   TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery
+--- PASS: TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery (0.00s)
+=== RUN   TestOpen_ReplacementFailureIsReportedNotRetried
+--- PASS: TestOpen_ReplacementFailureIsReportedNotRetried (0.01s)
+=== RUN   TestQuarantineDir_PrunesToTheCap
+--- PASS: TestQuarantineDir_PrunesToTheCap (0.01s)
+=== RUN   TestRecordFault_DirectorySyncFailureIsReported
+--- PASS: TestRecordFault_DirectorySyncFailureIsReported (0.00s)
+=== RUN   TestContainFault_NilDerefIsNotAStoreFault
+--- PASS: TestContainFault_NilDerefIsNotAStoreFault (0.00s)
+=== RUN   TestContainFault_InStoreAddressFromInjectedMapsIsContained
+--- PASS: TestContainFault_InStoreAddressFromInjectedMapsIsContained (0.00s)
+=== RUN   TestOpen_HealthyStoreTouchesNothing
+--- PASS: TestOpen_HealthyStoreTouchesNothing (0.00s)
+=== RUN   TestAddrInStoreMapping_RequiresAPathBoundary
+--- PASS: TestAddrInStoreMapping_RequiresAPathBoundary (0.00s)
+=== RUN   TestParseMapsLine
+--- PASS: TestParseMapsLine (0.00s)
+=== RUN   TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery (0.00s)
+=== RUN   TestOpen_ExemptedErrorIsNeverQuarantined
+--- PASS: TestOpen_ExemptedErrorIsNeverQuarantined (0.00s)
+=== RUN   TestContainFault_MemoryFaultBecomesError
+--- PASS: TestContainFault_MemoryFaultBecomesError (0.00s)
+=== RUN   TestAbandonedMarkers_LiveAttemptIsNotAbandoned
+--- PASS: TestAbandonedMarkers_LiveAttemptIsNotAbandoned (0.00s)
+=== RUN   TestQuarantinedCopies_IsChronological
+--- PASS: TestQuarantinedCopies_IsChronological (0.00s)
+=== RUN   TestOpen_AbandonedMarkerQuarantinesBeforeOpening
+--- PASS: TestOpen_AbandonedMarkerQuarantinesBeforeOpening (0.00s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.00s)
+PASS
+ok  	github.com/KidCarmi/Culvert/internal/storeguard	1.213s
+-test.shuffle 1792736081396690044
+--- PASS: TestClusterMetrics_HAFailover_FailedDoesNotIncrement (0.00s)
+--- PASS: TestTelemetryGoldenFixtureMetricsCopyCannotAffectBytes (0.00s)
+--- PASS: TestResolveURLCategories_Defaults (0.00s)
+--- PASS: TestConfigVersion_URLCategories_RoundTrip (0.01s)
+--- PASS: TestCAMetrics_CacheHitMissAndSize (0.00s)
+--- PASS: TestOTLPRuleMetrics_Empty (0.00s)
+--- PASS: TestOCSP8_MetricsAreSilentUntilEnabled (0.00s)
+--- PASS: TestChaos61_MetricsOnlyOnAnArmedNode (0.00s)
+--- PASS: TestEnrollmentMetrics_Rendered (0.01s)
+--- PASS: TestChaos60_MetricsAppearOnlyWhenGeoIPIsLoaded (0.00s)
+--- PASS: TestThreatFeedMetrics_ExposeFreshnessWhenConfigured (0.00s)
+--- PASS: TestBuildMetricsReport_StampsAppliedSnapshotFacts (0.00s)
+--- PASS: TestConfigVersion_URLCategories_HazardURLA (0.01s)
+--- PASS: TestThreatFeedMetrics_CarryNoFeedURLsOrErrorText (0.00s)
+--- PASS: TestAPIClusterMetrics (0.00s)
+--- PASS: TestRuleMetricsView_ConcurrentReadersAndWriters (0.00s)
+--- PASS: TestMCPHealth_MetricsAbsentWhenNeverRequested (0.00s)
+--- PASS: TestThreatFeedMetrics_AbsentWhenNotConfigured (0.00s)
+--- PASS: TestOTLPGaugeMetrics (0.00s)
+--- PASS: TestReportCatFeedDBUnavailable_DoesNotClaimRecovery (0.00s)
+--- PASS: TestAPIURLCat_Update_CreatesConfigVersion (0.00s)
+--- PASS: TestRuleMetrics_WritePrometheusEmpty (0.00s)
+--- PASS: TestChaos66_BindMetricsAppearOnlyWhenConfigured (0.00s)
+--- PASS: TestTelemetry_StatusAndMetricsTruthful (2.36s)
+--- PASS: TestSupportMetricsCollector_PrivacyClassNeverExceedsDeclaredRedactionClass (0.00s)
+--- PASS: TestClusterMetrics_HARoleGauge (0.00s)
+--- PASS: TestReportCatFeedDBOpened_WordsTheOutcome (0.00s)
+--- PASS: TestEnrollmentMetrics_TokenOutcomes (0.00s)
+--- PASS: TestApiURLCat_FencedDelete (0.01s)
+--- PASS: TestChaos54_MetricsAppearOnlyWhenConfigured (0.00s)
+--- PASS: TestCategoryFeedRow_ReportsDeferredSyncAndCoverage (0.22s)
+--- PASS: TestMetrics_ExposesLogSinkWriteErrors (0.00s)
+--- PASS: TestResolveMetricsTokenStartupConfig_FallbackToFileConfig (0.00s)
+--- PASS: TestSECBootstrapHost1_RefusalCounterIsOnMetrics (0.00s)
+--- PASS: TestClusterMetrics_HAFailover_EnableAsLeaderDoesNotIncrement (0.00s)
+--- PASS: TestRuleMetricsView_AllocFree (0.00s)
+--- PASS: TestURLCatMetrics_AllNamesRendered (0.00s)
+--- PASS: TestClusterMetrics_PR3Rendered (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_SaaSEnabledReportsConfiguredTrue (0.00s)
+--- PASS: TestReleaseCatalogMetrics (0.00s)
+--- PASS: TestConfigVersion_URLCategories_EmptyMarshalsAsArray (0.00s)
+--- PASS: TestChaos50_MetricsExposeLoadPosture (0.00s)
+--- PASS: TestApplyConfigSnapshot_URLCategoriesPersist (0.00s)
+--- PASS: TestClusterMetrics_HAFailover_SuccessIncrements (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_MethodNotAllowed (0.00s)
+--- PASS: TestLoginState_MetricsExposeEvictionPressure (0.00s)
+--- PASS: TestURLCatMetrics_NeverSyncedRendersZero (0.00s)
+--- PASS: TestApiURLCatHost_FencedAddRemove (0.01s)
+--- PASS: TestMetrics_CatFeedDBRuntimeDegradationIsVisible (0.56s)
+--- PASS: TestResolveMetricsTokenStartupConfig_Empty (0.00s)
+--- PASS: TestMetrics_ExposesAuditWriteErrors (0.00s)
+--- PASS: TestURLCatMetrics_PopulatedRendersValues (0.00s)
+--- PASS: TestRecordDecryptFailure_CountsBothMetrics (0.00s)
+--- PASS: TestAPIURLCat_Delete_CreatesConfigVersion (0.01s)
+--- PASS: TestRuleMetricsView_EveryMutatorRepublishes (0.00s)
+--- PASS: TestRuleMetricsView_InPlaceDeleteRepublishes (0.00s)
+--- PASS: TestMetrics_StorageWriteSeries (0.00s)
+--- PASS: TestConfigVersion_URLCategories_BuiltInPreserved (0.01s)
+--- PASS: TestTelemetryGoldenFixtureMetricsAreFlatFiniteNumbers (0.00s)
+--- PASS: TestClusterMetrics_HeartbeatDisconnects (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_NotConfigured (0.00s)
+--- PASS: TestAPIURLCat_HostRemove_CreatesConfigVersion (0.00s)
+--- PASS: TestConfigVersion_URLCategories_NilSnapshotIsNoOp (0.00s)
+--- PASS: TestCAUsabilityMetrics (0.00s)
+--- PASS: TestChaos50_MetricsExposeUsabilityAndExpiry (0.00s)
+--- PASS: TestAPIURLCat_Create_CreatesConfigVersion (0.00s)
+--- PASS: TestRuleMetrics_WritePrometheus (0.00s)
+--- PASS: TestAPIURLCat_HostAdd_CreatesConfigVersion (0.00s)
+--- PASS: TestCARotationMetrics_Rendered (0.00s)
+--- PASS: TestConfigSnapshotSizeMetrics_AllSlices (0.00s)
+--- PASS: TestURLCatMetrics_UT1FailureCounterIncrements (0.00s)
+--- PASS: TestRuleMetrics_EmptyName (0.00s)
+--- PASS: TestCategoryFeedRow_WriteAbandonedOutranksDeferral (0.05s)
+--- PASS: TestClusterMetrics_PR2Rendered (0.00s)
+--- PASS: TestHandleMetrics_NoToken (0.00s)
+--- PASS: TestApiURLCatState_ContractMatchesLegacyRead (0.00s)
+--- PASS: TestValidateConfigSnapshot_RejectsURLCategoryHostOverflow (0.01s)
+--- PASS: TestRuleMetricsView_ResetLeavesNoStaleView (0.00s)
+--- PASS: TestCategoryFeedMetrics_WriteAbandonedGauge (0.05s)
+--- PASS: TestMetrics_ClamAVScanErrorsDualEmit (0.00s)
+--- PASS: TestResolveURLCategories_ConfigAndFlags (0.00s)
+--- PASS: TestApiURLCat_DeleteBlockedWhileReferenced (0.01s)
+--- PASS: TestRuleMetrics_RecordHit (0.00s)
+--- PASS: TestCovIsoSec_MetricsReportIdentityBackendUnavailable (0.00s)
+--- PASS: TestCategoryFeedRow_WriteAbandonedSaysRestartRequired (0.11s)
+--- PASS: TestChaos57_MetricsExposeEveryClass (0.00s)
+--- PASS: TestClusterMetrics_StoreSaves_DirectSaveLockedPath (0.00s)
+--- PASS: TestApiURLCat_FencedPut_CapEnforcedAtStoreBoundary (0.07s)
+--- PASS: TestClusterMetrics_StoreSaves_SavePath (0.00s)
+--- PASS: TestOTLPCounterMetrics (0.00s)
+--- PASS: TestMCPShadowMetricsSerializationDistinct (0.00s)
+--- PASS: TestHandleMetrics_NoBearer (0.00s)
+--- PASS: TestHandleMetrics_WithToken_Unauthorized (0.00s)
+--- PASS: TestResolveMetricsTokenStartupConfig_CLIWinsOverFileConfig (0.00s)
+--- PASS: TestMetricsReport_VersionFields_WireRoundTrip (0.00s)
+--- PASS: TestConfigVersion_URLCategories_DiffEmptyReportsWipe (0.00s)
+--- PASS: TestLoadMetricsToken_EmptyClearsGlobal (0.00s)
+--- PASS: TestRuleMetricsView_BehaviourMatchesPreViewSemantics (0.00s)
+--- PASS: TestMetrics_LiveFeedExposition (0.00s)
+--- PASS: TestSupportMetricsCollector_PresentAndMatchesRegistry (0.09s)
+--- PASS: TestF3b4Wiring_APIURLCatHostRecomposesArmedRuntime (0.01s)
+--- PASS: TestChaos55_UnfencedLeaderIsVisibleOnMetrics (1.20s)
+--- PASS: TestCovIsoPolicy_OTLPRuleMetricsReportsRegisteredRules (0.00s)
+--- PASS: TestLiveTier_ComposeReusesRunningShadowMetricsSink (2.24s)
+--- PASS: TestRuleMetrics_CardinalityCap (0.00s)
+--- PASS: TestAVSettings_StatusAndMetricsSurfaces (0.00s)
+--- PASS: TestF3b4_UT1MetricsUnaffected (0.00s)
+--- PASS: TestResolveURLCategories_IntervalVerbatimSemantics (0.00s)
+--- PASS: TestChaos57_MetricsCarryTheGovernor (0.77s)
+--- PASS: TestHandleMetrics_ScanCacheHitsMisses (0.00s)
+--- PASS: TestConfigVersion_URLCategories_EmptySnapshotWipes (0.00s)
+--- PASS: TestMetrics_CatFeedDBSeries (0.00s)
+--- PASS: TestLoadMetricsToken_SetsGlobal (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_UT1ConfiguredReportsStatsAndFailures (0.00s)
+--- PASS: TestConfigVersion_URLCategories_DiffReportsChanges (0.00s)
+--- PASS: TestChaos63_RejectionIsOnTheMetricsSurface (0.12s)
+--- PASS: TestURLCatMetrics_SaaSFailureCounterIncrements (0.00s)
+--- PASS: TestApiURLCat_FencedCreate_StrictAndStructured409 (0.00s)
+--- PASS: TestPushMetrics_StampsVersionFacts (0.00s)
+--- PASS: TestMCPHealth_MetricsReportAFaultedCapability (0.00s)
+--- PASS: TestRuleMetrics_ConcurrentRecordHit (0.00s)
+--- PASS: TestConfigVersion_URLCategories_DiffNilSkipsField (0.00s)
+--- PASS: TestCoherentRead_URLCatStateRevisionDescribesReturnedRows (5.41s)
+--- PASS: TestHandleMetrics_WithToken_Authorized (0.00s)
+--- PASS: TestClusterMetrics_HAFailover_FailedDoesNotIncrement (0.00s)
+--- PASS: TestTelemetryGoldenFixtureMetricsCopyCannotAffectBytes (0.00s)
+--- PASS: TestResolveURLCategories_Defaults (0.00s)
+--- PASS: TestConfigVersion_URLCategories_RoundTrip (0.01s)
+--- PASS: TestCAMetrics_CacheHitMissAndSize (0.00s)
+--- PASS: TestOTLPRuleMetrics_Empty (0.00s)
+--- PASS: TestOCSP8_MetricsAreSilentUntilEnabled (0.00s)
+--- PASS: TestChaos61_MetricsOnlyOnAnArmedNode (0.00s)
+--- PASS: TestEnrollmentMetrics_Rendered (0.01s)
+--- PASS: TestChaos60_MetricsAppearOnlyWhenGeoIPIsLoaded (0.00s)
+--- PASS: TestThreatFeedMetrics_ExposeFreshnessWhenConfigured (0.00s)
+--- PASS: TestBuildMetricsReport_StampsAppliedSnapshotFacts (0.00s)
+--- PASS: TestConfigVersion_URLCategories_HazardURLA (0.01s)
+--- PASS: TestThreatFeedMetrics_CarryNoFeedURLsOrErrorText (0.00s)
+--- PASS: TestAPIClusterMetrics (0.00s)
+--- PASS: TestRuleMetricsView_ConcurrentReadersAndWriters (0.02s)
+--- PASS: TestMCPHealth_MetricsAbsentWhenNeverRequested (0.00s)
+--- PASS: TestThreatFeedMetrics_AbsentWhenNotConfigured (0.00s)
+--- PASS: TestOTLPGaugeMetrics (0.00s)
+--- PASS: TestReportCatFeedDBUnavailable_DoesNotClaimRecovery (0.00s)
+--- PASS: TestAPIURLCat_Update_CreatesConfigVersion (0.00s)
+--- PASS: TestRuleMetrics_WritePrometheusEmpty (0.00s)
+--- PASS: TestChaos66_BindMetricsAppearOnlyWhenConfigured (0.00s)
+--- PASS: TestTelemetry_StatusAndMetricsTruthful (2.22s)
+--- PASS: TestSupportMetricsCollector_PrivacyClassNeverExceedsDeclaredRedactionClass (0.00s)
+--- PASS: TestClusterMetrics_HARoleGauge (0.00s)
+--- PASS: TestReportCatFeedDBOpened_WordsTheOutcome (0.00s)
+--- PASS: TestEnrollmentMetrics_TokenOutcomes (0.00s)
+--- PASS: TestApiURLCat_FencedDelete (0.01s)
+--- PASS: TestChaos54_MetricsAppearOnlyWhenConfigured (0.00s)
+--- PASS: TestCategoryFeedRow_ReportsDeferredSyncAndCoverage (0.15s)
+--- PASS: TestMetrics_ExposesLogSinkWriteErrors (0.00s)
+--- PASS: TestResolveMetricsTokenStartupConfig_FallbackToFileConfig (0.00s)
+--- PASS: TestSECBootstrapHost1_RefusalCounterIsOnMetrics (0.00s)
+--- PASS: TestClusterMetrics_HAFailover_EnableAsLeaderDoesNotIncrement (0.00s)
+--- PASS: TestRuleMetricsView_AllocFree (0.00s)
+--- PASS: TestURLCatMetrics_AllNamesRendered (0.00s)
+--- PASS: TestClusterMetrics_PR3Rendered (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_SaaSEnabledReportsConfiguredTrue (0.00s)
+--- PASS: TestReleaseCatalogMetrics (0.00s)
+--- PASS: TestConfigVersion_URLCategories_EmptyMarshalsAsArray (0.00s)
+--- PASS: TestChaos50_MetricsExposeLoadPosture (0.00s)
+--- PASS: TestApplyConfigSnapshot_URLCategoriesPersist (0.00s)
+--- PASS: TestClusterMetrics_HAFailover_SuccessIncrements (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_MethodNotAllowed (0.00s)
+--- PASS: TestLoginState_MetricsExposeEvictionPressure (0.00s)
+--- PASS: TestURLCatMetrics_NeverSyncedRendersZero (0.00s)
+--- PASS: TestApiURLCatHost_FencedAddRemove (0.12s)
+--- PASS: TestMetrics_CatFeedDBRuntimeDegradationIsVisible (0.55s)
+--- PASS: TestResolveMetricsTokenStartupConfig_Empty (0.00s)
+--- PASS: TestMetrics_ExposesAuditWriteErrors (0.00s)
+--- PASS: TestURLCatMetrics_PopulatedRendersValues (0.00s)
+--- PASS: TestRecordDecryptFailure_CountsBothMetrics (0.00s)
+--- PASS: TestAPIURLCat_Delete_CreatesConfigVersion (0.00s)
+--- PASS: TestRuleMetricsView_EveryMutatorRepublishes (0.00s)
+--- PASS: TestRuleMetricsView_InPlaceDeleteRepublishes (0.00s)
+--- PASS: TestMetrics_StorageWriteSeries (0.00s)
+--- PASS: TestConfigVersion_URLCategories_BuiltInPreserved (0.01s)
+--- PASS: TestTelemetryGoldenFixtureMetricsAreFlatFiniteNumbers (0.00s)
+--- PASS: TestClusterMetrics_HeartbeatDisconnects (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_NotConfigured (0.00s)
+--- PASS: TestAPIURLCat_HostRemove_CreatesConfigVersion (0.00s)
+--- PASS: TestConfigVersion_URLCategories_NilSnapshotIsNoOp (0.00s)
+--- PASS: TestCAUsabilityMetrics (0.00s)
+--- PASS: TestChaos50_MetricsExposeUsabilityAndExpiry (0.00s)
+--- PASS: TestAPIURLCat_Create_CreatesConfigVersion (0.00s)
+--- PASS: TestRuleMetrics_WritePrometheus (0.00s)
+--- PASS: TestAPIURLCat_HostAdd_CreatesConfigVersion (0.00s)
+--- PASS: TestCARotationMetrics_Rendered (0.00s)
+--- PASS: TestConfigSnapshotSizeMetrics_AllSlices (0.00s)
+--- PASS: TestURLCatMetrics_UT1FailureCounterIncrements (0.00s)
+--- PASS: TestRuleMetrics_EmptyName (0.00s)
+--- PASS: TestCategoryFeedRow_WriteAbandonedOutranksDeferral (0.09s)
+--- PASS: TestClusterMetrics_PR2Rendered (0.00s)
+--- PASS: TestHandleMetrics_NoToken (0.00s)
+--- PASS: TestApiURLCatState_ContractMatchesLegacyRead (0.00s)
+--- PASS: TestValidateConfigSnapshot_RejectsURLCategoryHostOverflow (0.00s)
+--- PASS: TestRuleMetricsView_ResetLeavesNoStaleView (0.00s)
+--- PASS: TestCategoryFeedMetrics_WriteAbandonedGauge (0.21s)
+--- PASS: TestMetrics_ClamAVScanErrorsDualEmit (0.00s)
+--- PASS: TestResolveURLCategories_ConfigAndFlags (0.00s)
+--- PASS: TestApiURLCat_DeleteBlockedWhileReferenced (0.01s)
+--- PASS: TestRuleMetrics_RecordHit (0.00s)
+--- PASS: TestCovIsoSec_MetricsReportIdentityBackendUnavailable (0.00s)
+--- PASS: TestCategoryFeedRow_WriteAbandonedSaysRestartRequired (0.08s)
+--- PASS: TestChaos57_MetricsExposeEveryClass (0.01s)
+--- PASS: TestClusterMetrics_StoreSaves_DirectSaveLockedPath (0.00s)
+--- PASS: TestApiURLCat_FencedPut_CapEnforcedAtStoreBoundary (0.08s)
+--- PASS: TestClusterMetrics_StoreSaves_SavePath (0.00s)
+--- PASS: TestOTLPCounterMetrics (0.00s)
+--- PASS: TestMCPShadowMetricsSerializationDistinct (0.00s)
+--- PASS: TestHandleMetrics_NoBearer (0.00s)
+--- PASS: TestHandleMetrics_WithToken_Unauthorized (0.00s)
+--- PASS: TestResolveMetricsTokenStartupConfig_CLIWinsOverFileConfig (0.00s)
+--- PASS: TestMetricsReport_VersionFields_WireRoundTrip (0.00s)
+--- PASS: TestConfigVersion_URLCategories_DiffEmptyReportsWipe (0.00s)
+--- PASS: TestLoadMetricsToken_EmptyClearsGlobal (0.00s)
+--- PASS: TestRuleMetricsView_BehaviourMatchesPreViewSemantics (0.01s)
+--- PASS: TestMetrics_LiveFeedExposition (0.00s)
+--- PASS: TestSupportMetricsCollector_PresentAndMatchesRegistry (0.11s)
+--- PASS: TestF3b4Wiring_APIURLCatHostRecomposesArmedRuntime (0.01s)
+--- PASS: TestChaos55_UnfencedLeaderIsVisibleOnMetrics (0.99s)
+--- PASS: TestCovIsoPolicy_OTLPRuleMetricsReportsRegisteredRules (0.00s)
+--- PASS: TestLiveTier_ComposeReusesRunningShadowMetricsSink (2.16s)
+--- PASS: TestRuleMetrics_CardinalityCap (0.00s)
+--- PASS: TestAVSettings_StatusAndMetricsSurfaces (0.00s)
+--- PASS: TestF3b4_UT1MetricsUnaffected (0.00s)
+--- PASS: TestResolveURLCategories_IntervalVerbatimSemantics (0.00s)
+--- PASS: TestChaos57_MetricsCarryTheGovernor (0.82s)
+--- PASS: TestHandleMetrics_ScanCacheHitsMisses (0.00s)
+--- PASS: TestConfigVersion_URLCategories_EmptySnapshotWipes (0.00s)
+--- PASS: TestMetrics_CatFeedDBSeries (0.00s)
+--- PASS: TestLoadMetricsToken_SetsGlobal (0.00s)
+--- PASS: TestAPIURLCatFeedStatus_UT1ConfiguredReportsStatsAndFailures (0.00s)
+--- PASS: TestConfigVersion_URLCategories_DiffReportsChanges (0.00s)
+--- PASS: TestChaos63_RejectionIsOnTheMetricsSurface (0.09s)
+--- PASS: TestURLCatMetrics_SaaSFailureCounterIncrements (0.00s)
+--- PASS: TestApiURLCat_FencedCreate_StrictAndStructured409 (0.00s)
+--- PASS: TestPushMetrics_StampsVersionFacts (0.00s)
+--- PASS: TestMCPHealth_MetricsReportAFaultedCapability (0.00s)
+--- PASS: TestRuleMetrics_ConcurrentRecordHit (0.00s)
+--- PASS: TestConfigVersion_URLCategories_DiffNilSkipsField (0.00s)
+--- PASS: TestCoherentRead_URLCatStateRevisionDescribesReturnedRows (5.47s)
+--- PASS: TestHandleMetrics_WithToken_Authorized (0.00s)
+ok  	github.com/KidCarmi/Culvert	30.317s
