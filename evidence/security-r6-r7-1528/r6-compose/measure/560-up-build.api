@@ -1,0 +1,17 @@
+      4 HTTP2-PREFACE
+     53 REQ GET /containers/<id>/json
+      2 REQ GET /containers/json
+      2 REQ GET /images/<x>/clamav:1.5.4-culvert.1/json
+      1 REQ GET /images/<x>/proxy:pinned/json
+      1 REQ GET /info
+      1 REQ GET /networks
+      1 REQ GET /networks/<x>
+      1 REQ GET /version
+      1 REQ GET /volumes
+      6 REQ HEAD /_ping
+      2 REQ POST /containers/<id>/start
+      1 REQ POST /containers/create
+      3 REQ POST /grpc
+      1 REQ POST /networks/<x>
+      2 REQ POST /session
+     10 UPGRADE h2c

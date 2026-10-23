@@ -1,0 +1,57 @@
+ Image culvert/clamav:1.5.4-culvert.1 Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 675B done
+#1 reading from stdin 675B done
+#1 DONE 0.1s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile:
+#2 transferring dockerfile: 3.46kB 0.0s done
+#2 DONE 0.6s
+
+#3 [internal] load metadata for docker.io/clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+#3 DONE 0.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context:
+#4 transferring context: 2B 0.0s done
+#4 DONE 0.0s
+
+#5 [1/2] FROM docker.io/clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+#5 resolve docker.io/clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6 0.0s done
+#5 DONE 0.0s
+
+#6 [2/2] RUN apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=1.70.0-r0'  && test "$(apk info -v 2>/dev/null | grep '^pcre2-[0-9]')" = 'pcre2-10.49-r0'  && test "$(apk info -v 2>/dev/null | grep '^zlib-[0-9]')" = 'zlib-1.3.2-r1'  && test "$(apk info -v 2>/dev/null | grep '^nghttp2-libs-[0-9]')" = 'nghttp2-libs-1.70.0-r0'  && rm -rf /var/log/apk.log /var/cache/apk/*
+#6 CACHED
+
+#7 exporting to image
+#7 exporting layers
+#7 exporting layers done
+#7 exporting manifest sha256:49ac7cc7be292f76059b652134a68973f35713fb1ecc001d8d3a5d16219b14a5 done
+#7 exporting config sha256:7c694c2d6a41a4596c0e6776fb468c936074369f77d55b060771e14a047f78f2 done
+#7 exporting attestation manifest sha256:2b33f4d09e0c23c53d226c164f08152d6b6143c28646760c58f3cbbc1043d469
+#7 exporting attestation manifest sha256:2b33f4d09e0c23c53d226c164f08152d6b6143c28646760c58f3cbbc1043d469 0.1s done
+#7 exporting manifest list sha256:5f19745525c20a16e00e18b5ee51f47fe6d272e7ae915c941a7fe5fd462307df
+#7 exporting manifest list sha256:5f19745525c20a16e00e18b5ee51f47fe6d272e7ae915c941a7fe5fd462307df 0.3s done
+#7 naming to docker.io/culvert/clamav:1.5.4-culvert.1
+#7 naming to docker.io/culvert/clamav:1.5.4-culvert.1 done
+#7 unpacking to docker.io/culvert/clamav:1.5.4-culvert.1 0.0s done
+#7 DONE 1.4s
+
+#8 resolving provenance for metadata file
+#8 DONE 0.0s
+ Image culvert/clamav:1.5.4-culvert.1 Built 
+ Network proj_default Creating 
+ Network proj_default Creating 
+ Network proj_default Created 
+ Network proj_default Created 
+ Container culvert-clamav Creating 
+ Container culvert-clamav Created 
+ Container culvert Creating 
+ Container culvert Created 
+ Container culvert-clamav Starting 
+ Container culvert-clamav Started 
+ Container culvert-clamav Waiting 
+ Container culvert-clamav Healthy 
+ Container culvert Starting 
+ Container culvert Started 

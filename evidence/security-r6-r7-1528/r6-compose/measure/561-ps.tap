@@ -1,0 +1,5 @@
+12:51:44.218 conn=24 open
+12:51:44.219 conn=24 c>d REQ HEAD /_ping
+12:51:44.221 conn=24 c>d REQ GET /v1.55/containers/json?filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.oneoff%3DFalse%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:44.224 conn=24 c>d closed after 487 bytes
+12:51:44.225 conn=24 d>c closed after 519 bytes

@@ -1,0 +1,2 @@
+      1 REQ GET /containers/json
+      1 REQ HEAD /_ping

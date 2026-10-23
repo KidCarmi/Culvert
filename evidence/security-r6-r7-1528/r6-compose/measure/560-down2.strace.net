@@ -1,0 +1,4 @@
+15953 bind(3, {sa_family=AF_UNIX, sun_path=@"docker_cli_4ddf4a49e306a7d2c50cd71768e80787"}, 46) = 0
+15953 listen(3, 4096)                   = 0
+15962 connect(5, {sa_family=AF_UNIX, sun_path=@"docker_cli_4ddf4a49e306a7d2c50cd71768e80787"}, 46) = 0
+15970 connect(8, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0

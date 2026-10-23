@@ -1,0 +1,25 @@
+12:51:08.616 conn=6 open
+12:51:08.617 conn=6 c>d REQ HEAD /_ping
+12:51:08.618 conn=6 c>d REQ HEAD /_ping
+12:51:08.622 conn=6 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:08.635 conn=6 c>d REQ GET /v1.55/networks?filters=%7B%22label%22%3A%7B%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:08.637 conn=6 c>d REQ GET /v1.55/volumes?filters=%7B%22label%22%3A%7B%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:08.640 conn=6 c>d REQ GET /v1.55/images/culvert/proxy:pinned/json?manifests=1
+12:51:08.667 conn=6 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:08.682 conn=6 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.oneoff%3DFalse%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:08.701 conn=6 c>d REQ POST /v1.55/containers/create?name=proj-cli-run-807e74d17240
+12:51:08.744 conn=6 c>d REQ GET /v1.55/containers/84b4e7123fab4fd5c6783ca46e5594a3718b841b96d0f5205c2b061d748bb8bd/json
+12:51:08.815 conn=6 c>d REQ GET /v1.55/containers/84b4e7123fab4fd5c6783ca46e5594a3718b841b96d0f5205c2b061d748bb8bd/json
+12:51:08.818 conn=7 open
+12:51:08.819 conn=7 c>d REQ POST /v1.55/containers/84b4e7123fab4fd5c6783ca46e5594a3718b841b96d0f5205c2b061d748bb8bd/attach?stderr=1&stdin=1&stdout=1&stream=1
+12:51:08.819 conn=7 c>d UPGRADE tcp
+12:51:08.819 conn=7 d>c UPGRADE tcp
+12:51:08.820 conn=6 c>d REQ POST /v1.55/containers/84b4e7123fab4fd5c6783ca46e5594a3718b841b96d0f5205c2b061d748bb8bd/wait?condition=removed
+12:51:08.822 conn=8 open
+12:51:08.824 conn=8 c>d REQ POST /v1.55/containers/84b4e7123fab4fd5c6783ca46e5594a3718b841b96d0f5205c2b061d748bb8bd/start
+12:51:09.078 conn=7 d>c closed after 117 bytes
+12:51:09.202 conn=7 c>d closed after 346 bytes
+12:51:09.231 conn=6 c>d closed after 5900 bytes
+12:51:09.231 conn=8 c>d closed after 249 bytes
+12:51:09.232 conn=6 d>c closed after 36368 bytes
+12:51:09.232 conn=8 d>c closed after 157 bytes

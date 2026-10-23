@@ -1,0 +1,14 @@
+15482 bind(3, {sa_family=AF_UNIX, sun_path=@"docker_cli_455bb4556baa26904fc7ad82290c2cb2"}, 46) = 0
+15482 listen(3, 4096)                   = 0
+15496 connect(5, {sa_family=AF_UNIX, sun_path=@"docker_cli_455bb4556baa26904fc7ad82290c2cb2"}, 46) = 0
+15504 connect(8, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15498 connect(9, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15522 connect(5, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15526 connect(8, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15526 connect(8, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15522 connect(9, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15521 connect(10, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15524 connect(11, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15522 connect(11, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15527 connect(11, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0
+15524 connect(13, {sa_family=AF_UNIX, sun_path="/tmp/b6x/p.sock"}, 18) = 0

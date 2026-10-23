@@ -1,0 +1,25 @@
+12:51:55.858 conn=27 open
+12:51:55.859 conn=27 c>d REQ HEAD /_ping
+12:51:55.861 conn=27 c>d REQ HEAD /_ping
+12:51:55.866 conn=27 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:55.879 conn=27 c>d REQ GET /v1.55/networks?filters=%7B%22label%22%3A%7B%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:55.881 conn=27 c>d REQ GET /v1.55/volumes?filters=%7B%22label%22%3A%7B%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:55.890 conn=27 c>d REQ GET /v1.55/images/culvert/proxy:pinned/json?manifests=1
+12:51:55.909 conn=27 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:55.921 conn=27 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.oneoff%3DFalse%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:55.933 conn=27 c>d REQ POST /v1.55/containers/create?name=proj-cli-run-db14f2ca14b2
+12:51:56.725 conn=27 c>d REQ GET /v1.55/containers/74d3a8bfabaee6b3590b93b50b4a05d46640b6b06d76fbe96574e68d7d6885e6/json
+12:51:56.788 conn=27 c>d REQ GET /v1.55/containers/74d3a8bfabaee6b3590b93b50b4a05d46640b6b06d76fbe96574e68d7d6885e6/json
+12:51:56.793 conn=28 open
+12:51:56.794 conn=28 c>d REQ POST /v1.55/containers/74d3a8bfabaee6b3590b93b50b4a05d46640b6b06d76fbe96574e68d7d6885e6/attach?stderr=1&stdin=1&stdout=1&stream=1
+12:51:56.794 conn=28 c>d UPGRADE tcp
+12:51:56.795 conn=28 d>c UPGRADE tcp
+12:51:56.796 conn=27 c>d REQ POST /v1.55/containers/74d3a8bfabaee6b3590b93b50b4a05d46640b6b06d76fbe96574e68d7d6885e6/wait?condition=removed
+12:51:56.798 conn=29 open
+12:51:56.799 conn=29 c>d REQ POST /v1.55/containers/74d3a8bfabaee6b3590b93b50b4a05d46640b6b06d76fbe96574e68d7d6885e6/start
+12:51:58.222 conn=28 d>c closed after 117 bytes
+12:51:59.185 conn=28 c>d closed after 346 bytes
+12:51:59.215 conn=27 c>d closed after 5900 bytes
+12:51:59.215 conn=29 c>d closed after 249 bytes
+12:51:59.215 conn=27 d>c closed after 36371 bytes
+12:51:59.215 conn=29 d>c closed after 157 bytes

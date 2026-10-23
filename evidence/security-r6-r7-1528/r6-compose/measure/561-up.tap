@@ -1,0 +1,30 @@
+12:51:45.550 conn=25 open
+12:51:45.552 conn=25 c>d REQ HEAD /_ping
+12:51:45.554 conn=25 c>d REQ HEAD /_ping
+12:51:45.556 conn=25 c>d REQ GET /v1.55/images/culvert/proxy:pinned/json?manifests=1
+12:51:45.556 conn=26 open
+12:51:45.557 conn=26 c>d REQ GET /v1.55/images/culvert/clamav:1.5.4-culvert.1/json?manifests=1
+12:51:45.580 conn=26 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:45.583 conn=26 c>d REQ GET /v1.55/networks?filters=%7B%22label%22%3A%7B%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:45.584 conn=26 c>d REQ GET /v1.55/volumes?filters=%7B%22label%22%3A%7B%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:45.586 conn=26 c>d REQ GET /v1.55/networks/proj_default
+12:51:45.589 conn=26 c>d REQ POST /v1.55/networks/create
+12:51:47.027 conn=26 c>d REQ POST /v1.55/containers/create?name=culvert
+12:51:47.546 conn=26 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.oneoff%3DFalse%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:47.561 conn=26 c>d REQ POST /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/start
+12:51:48.266 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:48.766 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:49.266 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:49.765 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:50.267 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:50.766 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:51.267 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:51.766 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:52.266 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:52.766 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:53.266 conn=26 c>d REQ GET /v1.55/containers/7764d2e058c2e8dd6aabb4a498b5e6a249854bec98a7e78b397e43640d5e2027/json
+12:51:53.269 conn=26 c>d REQ POST /v1.55/containers/ea56f166e4f5472837e2cc4e65409018abd6fdd48bfcfcddb841a5ea99161252/start
+12:51:54.490 conn=26 c>d closed after 12860 bytes
+12:51:54.490 conn=25 c>d closed after 488 bytes
+12:51:54.491 conn=26 d>c closed after 85121 bytes
+12:51:54.491 conn=25 d>c closed after 2118 bytes

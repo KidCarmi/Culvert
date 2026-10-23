@@ -1,0 +1,14 @@
+12:51:10.546 conn=9 open
+12:51:10.546 conn=9 c>d REQ HEAD /_ping
+12:51:10.549 conn=9 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.config-hash%22%3Atrue%2C%22com.docker.compose.oneoff%3DFalse%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:10.562 conn=9 c>d REQ POST /v1.55/containers/edc221c1a21c098f2420341ee6835f01a6d76ad841b40cd0bdc01f881fd14077/stop
+12:51:10.853 conn=9 c>d REQ DELETE /v1.55/containers/edc221c1a21c098f2420341ee6835f01a6d76ad841b40cd0bdc01f881fd14077?force=1
+12:51:10.868 conn=9 c>d REQ POST /v1.55/containers/9d8c3099e26c86211553d3fc5f7dd242135a3e8905639bf7b0a91005aebb08b1/stop
+12:51:11.026 conn=9 c>d REQ DELETE /v1.55/containers/9d8c3099e26c86211553d3fc5f7dd242135a3e8905639bf7b0a91005aebb08b1?force=1
+12:51:11.042 conn=9 c>d REQ GET /v1.55/containers/json?all=1&filters=%7B%22label%22%3A%7B%22com.docker.compose.hook%3Dpre_start%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:11.044 conn=9 c>d REQ GET /v1.55/networks?filters=%7B%22label%22%3A%7B%22com.docker.compose.project%3Dproj%22%3Atrue%2C%22com.docker.compose.relay-network%22%3Atrue%7D%7D
+12:51:11.045 conn=9 c>d REQ GET /v1.55/networks?filters=%7B%22label%22%3A%7B%22com.docker.compose.network%3Ddefault%22%3Atrue%2C%22com.docker.compose.project%3Dproj%22%3Atrue%7D%7D
+12:51:11.047 conn=9 c>d REQ GET /v1.55/networks/52e25c4785e9eec4b7563807ba638a8b951be596766b93c9971db431997c1724
+12:51:11.048 conn=9 c>d REQ DELETE /v1.55/networks/52e25c4785e9eec4b7563807ba638a8b951be596766b93c9971db431997c1724
+12:51:11.203 conn=9 c>d closed after 2777 bytes
+12:51:11.204 conn=9 d>c closed after 8749 bytes

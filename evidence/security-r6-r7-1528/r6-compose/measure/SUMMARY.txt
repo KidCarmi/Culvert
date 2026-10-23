@@ -1,0 +1,16 @@
+# generated 2026-10-23T12:50:58Z; dockerd 29.6.2; docker CLI 29.6.2
+== compose 560: 5.6.0 sha256 40343e21ca777173
+560 ps             rc=0   unix-connects:[      1 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+560 up             rc=0   unix-connects:[      2 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+560 cli-run        rc=0   unix-connects:[      3 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+560 down           rc=0   unix-connects:[      1 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+560 up-build       rc=0   unix-connects:[     11 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:5 h2-preface(c>d,d>c):2,2
+560 down2          rc=0   unix-connects:[      1 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+== compose 561: 5.6.1 sha256 47737f4236e6d3cc
+561 ps             rc=0   unix-connects:[      1 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+561 up             rc=0   unix-connects:[      2 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+561 cli-run        rc=0   unix-connects:[      3 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+561 down           rc=0   unix-connects:[      1 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+561 up-build       rc=0   unix-connects:[     11 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:5 h2-preface(c>d,d>c):2,2
+561 down2          rc=0   unix-connects:[      1 sun_path="/tmp/b6x/p.sock";] inet-connects:[] bind/listen:2 session/grpc-calls:0 h2-preface(c>d,d>c):0,0
+done

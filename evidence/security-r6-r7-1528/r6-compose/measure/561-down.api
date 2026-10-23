@@ -1,0 +1,7 @@
+      2 REQ DELETE /containers/<id>
+      1 REQ DELETE /networks/<x>
+      2 REQ GET /containers/json
+      2 REQ GET /networks
+      1 REQ GET /networks/<x>
+      1 REQ HEAD /_ping
+      2 REQ POST /containers/<id>/stop

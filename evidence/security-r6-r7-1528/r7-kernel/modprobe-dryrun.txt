@@ -1,0 +1,33 @@
+== modprobe -n -v rdma_rxe
+install /bin/false 
+insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/udp_tunnel.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/ip6_udp_tunnel.ko.zst 
+install /bin/false 
+insmod /lib/modules/7.0.0-38-generic/kernel/drivers/infiniband/sw/rxe/rdma_rxe.ko.zst 
+== modprobe -n -v rpcrdma
+insmod /lib/modules/7.0.0-38-generic/kernel/net/sunrpc/sunrpc.ko.zst 
+install /bin/false 
+install /bin/false 
+install /bin/false 
+install /bin/false 
+insmod /lib/modules/7.0.0-38-generic/kernel/net/sunrpc/xprtrdma/rpcrdma.ko.zst 
+== modprobe -n -v ksmbd
+insmod /lib/modules/7.0.0-38-generic/kernel/lib/crypto/libarc4.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/fs/nls/nls_ucs2_utils.ko.zst 
+install /bin/false 
+install /bin/false 
+install /bin/false 
+install /bin/false 
+install /bin/false 
+== modprobe -n -v nfsd
+insmod /lib/modules/7.0.0-38-generic/kernel/net/sunrpc/sunrpc.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/fs/nfs_common/grace.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/fs/lockd/lockd.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/fs/nfs_common/nfs_acl.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/net/sunrpc/auth_gss/auth_rpcgss.ko.zst 
+install /bin/false 
+== modprobe -n -v ceph
+insmod /lib/modules/7.0.0-38-generic/kernel/fs/netfs/netfs.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/crypto/krb5/krb5.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/net/ceph/libceph.ko.zst 
+insmod /lib/modules/7.0.0-38-generic/kernel/fs/ceph/ceph.ko.zst 

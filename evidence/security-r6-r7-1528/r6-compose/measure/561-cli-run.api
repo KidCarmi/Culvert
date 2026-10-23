@@ -1,0 +1,11 @@
+      2 REQ GET /containers/<id>/json
+      3 REQ GET /containers/json
+      1 REQ GET /images/<x>/proxy:pinned/json
+      1 REQ GET /networks
+      1 REQ GET /volumes
+      2 REQ HEAD /_ping
+      1 REQ POST /containers/<id>/attach
+      1 REQ POST /containers/<id>/start
+      1 REQ POST /containers/<id>/wait
+      1 REQ POST /containers/create
+      2 UPGRADE tcp
