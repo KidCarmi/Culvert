@@ -838,11 +838,19 @@ jobs:
           set -euo pipefail
           pull_retry() { for i in 1 2 3 4; do docker pull -q "$1" && return 0; sleep $((i*3)); done; return 1; }
           for img in registry:2 busybox:stable docker:29-dind@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1; do pull_retry "$img"; done
+      - name: "Local harness proofs (no lab): convergence verdict + custody/enforced steps/teardown"
+        # The pure decision logic the scenario below relies on, proven red/green
+        # first: a broken oracle or custody helper fails here, before ~an hour of lab.
+        run: |
+          set -euo pipefail
+          ./test/e2e/appliance/convergence-oracle_test.sh
+          ./test/e2e/appliance/recovery-custody_test.sh
       - name: "Interrupted-import recovery: SIGKILL mid-import, restart, prove quarantine+rebuild+re-converge"
         # exit 0 = the interrupted import was reproduced AND every recovery check
         # passed; exit 1 = a recovery/integrity check failed; exit 2 = inconclusive
-        # (the mid-import window was not observed — e.g. no feed egress). The
-        # window can be missed on a fast/slow host, so retry up to 3× on exit 2.
+        # (the mid-import window was not observed — e.g. no feed egress — or
+        # convergence exercised but not proven); exit 3 = the run passed but its
+        # bounded teardown failed. Retry up to 3× on exit 2 only.
         run: |
           set +e
           set -uo pipefail
@@ -857,7 +865,7 @@ jobs:
             echo "attempt $attempt: exit $rc"
             [ "$rc" = 2 ] || break
           done
-          sudo cp "$RUNNER_TEMP/killimport/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log} "$RUNNER_TEMP/killimport/" 2>/dev/null || true
+          sudo cp "$RUNNER_TEMP/killimport/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log,steps.log,cleanup.log} "$RUNNER_TEMP/killimport/" 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/killimport"
           exit "$rc"
       - name: Report
@@ -871,6 +879,9 @@ jobs:
             ${{ runner.temp }}/killimport/**/REPORT.md
             ${{ runner.temp }}/killimport/**/checks.jsonl
             ${{ runner.temp }}/killimport/**/diagnose.log
+            ${{ runner.temp }}/killimport/**/steps.log
+            ${{ runner.temp }}/killimport/**/cleanup.log
+            ${{ runner.temp }}/killimport/**/custody/**
           retention-days: 30
           if-no-files-found: warn
 
