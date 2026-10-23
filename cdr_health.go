@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Sluice/pkg/sluiceauth"
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
@@ -311,8 +312,20 @@ func runRenewFor(pc *cdrPooledClient, inst CDREnrolledInstance) {
 // (cert first, then key), so a crash mid-swap leaves either the old or
 // the new material intact — never a half-written file — and the staged
 // lineage entry lets reconcileCredentialLineage finish the swap.
+//
+// SEC-SECRETWRITE-1: the two staging files use fileutil.WriteFileExclusive,
+// NOT os.WriteFile. The ".tmp" names are a deliberate rendezvous —
+// finishStagedRenewal looks them up by exactly this path at the next boot —
+// so they cannot become random AtomicWrite temps; and a predictable path is
+// precisely where os.WriteFile is unsafe for a private key. It follows a
+// symlink planted at the path, and its perm argument applies only on
+// CREATION, so a 0666 file left at "<bundle>.key.tmp" would receive the
+// client private key and stay world-readable. WriteFileExclusive clears any
+// pre-existing entry and creates with O_EXCL at 0600, so the descriptor is
+// always a file this call made at this mode. It also fsyncs, which makes the
+// "never a half-written file" promise above true rather than likely.
 func installRenewedPEMs(inst CDREnrolledInstance, certPEM, keyPEM []byte) bool {
-	if werr := os.WriteFile(inst.ClientCertPath+".tmp", certPEM, 0o600); werr != nil {
+	if werr := fileutil.WriteFileExclusive(inst.ClientCertPath+".tmp", certPEM, 0o600); werr != nil {
 		logger.Printf("CDR: RenewCert %q: write cert tmp: %v", sanitizeLog(inst.Name), werr)
 		return false
 	}
@@ -324,7 +337,7 @@ func installRenewedPEMs(inst CDREnrolledInstance, certPEM, keyPEM []byte) bool {
 		logger.Printf("CDR: RenewCert %q: encrypt key: %v", sanitizeLog(inst.Name), kerr)
 		return false
 	}
-	if werr := os.WriteFile(inst.ClientKeyPath+".tmp", keyOut, 0o600); werr != nil {
+	if werr := fileutil.WriteFileExclusive(inst.ClientKeyPath+".tmp", keyOut, 0o600); werr != nil {
 		_ = os.Remove(inst.ClientCertPath + ".tmp")
 		logger.Printf("CDR: RenewCert %q: write key tmp: %v", sanitizeLog(inst.Name), werr)
 		return false

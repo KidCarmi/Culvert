@@ -2,7 +2,8 @@
 
 ## 0. Current status (authoritative)
 
-As of 2026-09-25, main `b59c054` (#1497: per-platform qualification pulls,
+As of 2026-09-25, main `fb0e92c` (#1498, the lane start order, §18.5.1)
+plus the second determinism slice (§19.1); before it, main `b59c054` (#1497: per-platform qualification pulls,
 §21.7.1; the first build-once release, `v1.0.244`, §21.7.2) plus the lane
 start-order change measured in §18.5.1; before it, main `0cf1245` (#1488,
 toolchain consistency, §20) plus build-once image promotion (§21); before it, main `6ec745d` (#1487); before that, main `75dbb8b` (#1486: targeted report dispatches skip the
@@ -35,7 +36,16 @@ Remaining backlog, in the order the measurements support (§18.5):
    trials. Start order adopted; the separate job rejected.
 2. **Determinism** — the longest job on both QA (≈860 s) and the Deep PR
    gate (median 897 s). First slice done: repeated OpenAPI fixture
-   preparation in the conformance tests (§19).
+   preparation in the conformance tests (§19). Second slice (§19.1): a
+   whole-package profile found the HA resume wait in `TestChaos55` was
+   234 s of the root double run's 936 s, almost all of it waiting; shortened
+   for the tests that only use the resume as setup, the root double run
+   falls from a median 910.9 s to 735.7 s locally. Post-merge CI
+   (§19.1.1, 2026-10-03): the determinism step on main QA fell from a
+   median 863 s (8 runs) to 705 s (4 runs). In PR Deep it landed below the
+   pre-change range in 14 of 15 completed attempts. This is a step-level
+   reduction only, not a gate-latency or runner-time claim. Next
+   candidate: the MCP event spool's per-spool PBKDF2 (≈221 s of CPU).
 3. **Root-state/package isolation** — packages whose tests share process or
    on-disk state cannot be split or reordered safely; this bounds items 1–2.
 4. **Repeated static-contract work** — many walls re-read and re-parse the
@@ -2873,6 +2883,306 @@ files on disk, so every new test file changes the MCP ledger's
 `SCANNED (N files)` claim. That is its design. This change moves it to
 2,605.
 
+### 19.1 Whole-package profile, and the HA resume wait (second determinism slice)
+
+§19 ended by asking for a profile of the whole root package before the
+next determinism slice. This is that profile, and the change it justified.
+
+**How it was measured.**
+- The configuration is the determinism job's own: no `-race`, no coverage,
+  `-count=2`, shuffled, `TEST_SEED=20260421`.
+- One prebuilt root test binary (Go 1.26.8, 4-core box) ran the complete
+  root package, with test binaries, profiles and logs outside the checkout.
+- Three sources were combined:
+  * the `test2json` timeline, per top-level test instance, with time shared
+    evenly when tests overlap so nothing is counted twice (no subtest times
+    are summed);
+  * a `-test.cpuprofile`;
+  * a sampler reading the process's CPU, child-process CPU, machine-wide CPU
+    and I/O every 0.25 s.
+- Wall time with little CPU behind it is waiting.
+
+**Baseline profile** (main `fb0e92c`, shuffle seed 1001): 936 s wall and
+516 s process CPU; the process was idle for 461 s of wall time.
+
+| Family (both repetitions) | Wall | CPU | What it is doing |
+|---|---|---|---|
+| `TestChaos55` (HA fencing-lease recovery, 20 tests) | **234 s** | 2.3 s | waiting: ~6 s per resume against a simulated-down etcd |
+| `TestChaos58` (LDAP stalls) | 26 s | 1.1 s | waiting on bounds the tests assert |
+| `TestChaos56` (shutdown bounds) | 25 s | 2.3 s | waiting on bounds the tests assert |
+| `TestLiveProd`, `TestHTTPSE2E`, `TestCoordinatorRehearsal`, … | 10–22 s each | ≈ wall | CPU-bound; see the PBKDF2 finding below |
+
+The CPU side, separately: **PBKDF2 is 291 s of the 508 s of CPU samples
+(57 %)**. 221 s of that is `spool.New` → `openCryptor` → `secret.Seal` →
+`ca.EncryptBundle`: the MCP event spool seals a fresh data key with
+600,000-iteration PBKDF2 every time a test builds one (`liveTestEvents`
+117 s, `buildMCPTelemetry` 88 s). bcrypt is another 51 s.
+
+**Why the HA wait, not PBKDF2.**
+- The HA wait is one mechanism, entirely setup, removable inside tests
+  without touching what they assert.
+- `acquireLeaseForResume` retries an unreachable backend every 2 s until
+  `haResumeUnreachableWait` (5 s) passes, so each resume blocks 6.0 s.
+  `TestChaos55_StopIsPromptDuringRecoveryBackoff` resumes 8 times per
+  repetition, 48.4 s each. Seven other tests resume once per repetition, and
+  none of them asserts anything about the resume's duration or attempt
+  count. That is ≈180 s of setup.
+- PBKDF2 cost is per spool. Removing it means sharing spools across tests
+  (loses isolation) or changing how production seals the key (a security
+  change). It is the next candidate, not this change.
+
+**Change.**
+- `HAState` gains two unexported per-instance fields,
+  `testResumeUnreachableWait` and `testResumeRetryBackoff`.
+  `acquireLeaseForResume` reads its budget through
+  `resumeUnreachableTiming()`, which returns the production constants when
+  they are zero. Nothing global changes, and production never sets them.
+- `shortResumeBudget(h)` sets 50 ms / 10 ms for the eight tests whose
+  subject comes after the resume hands off: the recovery loop, its metrics,
+  the fence decisions and `Stop`. Their resume takes the same path —
+  failed acquires, then the read-only leader role with recovery armed —
+  and stops retrying sooner.
+- The two tests that pin the budget itself keep the production values:
+  `ResumeAbsorbsAShortBackendOutage` (a 3 s outage must be absorbed) and
+  `ResumeDoesNotBlockBootOnALongOutage` (the resume must return within
+  budget + one retry + slack).
+- The ghost-lease tests use a different budget and are untouched.
+
+**Correctness.**
+- **The inventory is unchanged** except for the new wall: 6,544 → 6,545
+  tests (`-test.list`); every other name is identical.
+- **The new wall**, `TestChaos55_ResumeBudgetTestsKeepProductionTiming`:
+  * an `HAState` nobody shortened resumes with 5 s / 2 s;
+  * neither budget test references the override (AST walk);
+  * no non-test file assigns it.
+- **Mutations, each run against the affected tests:**
+
+| Mutation | Baseline | Candidate |
+|---|---|---|
+| Resume never arms recovery | 7 tests fail | the same 7 fail |
+| Resume gives up on the first transport error (the pre-CHAOS-55 shape) | — | `ResumeAbsorbsAShortBackendOutage` fails (production timing, so unchanged) |
+| Production code sets the override | — | the wall fails |
+| A budget test uses `shortResumeBudget` | — | the wall fails |
+| Recovery backoff ignores `Stop` | **not caught** | **not caught** |
+
+  The last row is pre-existing and identical on both sides: the first
+  recovery backoff is ≈1 s, inside `StopIsPrompt…`'s 2 s bound. It is
+  recorded here, not fixed in this change.
+- `go test -count=2 -shuffle=20260925 -timeout=20m ./...` with
+  `TEST_SEED=20260421` on the candidate: **passed**, all 110 packages, 780 s wall, the root package 775.2 s (alongside the other packages, as in CI).
+- golangci-lint (`--new-from-rev`) reports 0 issues.
+
+**Local result.** Unprofiled root double runs, run as interleaved pairs
+(base/cand, cand/base, base/cand), with the same prebuilt binaries, box and
+environment. Each pair shares a shuffle seed; `TEST_SEED` is 20260421 in
+every run and is not Go's shuffle seed. All 6 runs passed.
+
+| Pair (shuffle seed) | Baseline | Candidate | Δ |
+|---|---|---|---|
+| 1 (1101) | 917.4 s | 735.7 s | −181.7 s |
+| 2 (1202) | 903.2 s | 737.5 s | −165.7 s |
+| 3 (1303) | 910.9 s | 722.2 s | −188.7 s |
+| **Median** | **910.9 s** | **735.7 s** | **−175 s (−19 %)** |
+
+| Level | Baseline | Candidate |
+|---|---|---|
+| Family: `TestChaos55`, both repetitions (per run) | 233.3–233.9 s | 55.2–56.1 s |
+| Everything else in the root package (per run) | 669–684 s | 666–682 s |
+
+- **The saving is the family's saving.** The family falls by ≈178 s, the
+  rest of the package does not move, and the package falls by the same
+  amount.
+- The spread within each side is ≈15 s. The difference is ≈12 times
+  larger, so it is not runner noise. This is the attribution §19 could not
+  make for its own change.
+
+**CI result (PR #1501, head `eeeba4c`, one sample).**
+
+| Measure | This PR | Reference |
+|---|---|---|
+| Deep determinism job ([36163090082](https://github.com/KidCarmi/Culvert/actions/runs/36163090082)) | 734 s | median ≈880 s; 794–1,008 s over 10 identical-source dispatches (§18.5.1) |
+| Shuffled double-run step | 691 s | 752–965 s over the same 10 |
+| Root package inside it | 611.6 s | 750.2 s and 744.6 s (§19) |
+| Deep runner-seconds | 888 | 1,156–1,372 in the §18.5.1 trials |
+| Time until both PR gates finish | not comparable | see below |
+
+- **Gate completion time is not comparable on this sample.** Runners
+  queued jobs for up to 683 s (Fast) and 352 s (Deep) that day, against a
+  median job queue of 3 s in §18.5.1.
+- **Fast needed one re-run for an unrelated failure.** The first attempt
+  failed in root shard 0 on `TestChaos64_StaleServesDoNotStackRefreshes`:
+  the DNS-resolver test race recorded in §19, in a test this change does
+  not touch. The re-run of the failed jobs was green.
+- The shuffled step landed below the whole identical-source range,
+  consistent with the local −175 s. One sample still cannot establish a
+  gate speedup, so none is claimed. Natural runs after merge are the
+  evidence.
+
+**Rollback.** Revert this change. The production resume path is
+byte-for-byte the same when the override is unset, so nothing but test
+time moves.
+
+**Next candidate: the event-spool key derivation** (≈221 s of CPU, above).
+It needs a decision about spool isolation or production sealing, not a
+test-side edit.
+
+#### 19.1.1 Post-merge CI evidence (recorded 2026-10-03)
+
+The single-sample assessment above stands as written. This appends the
+natural runs it asked for. **What it shows is a shorter determinism test
+step** (`Determinism — shuffled double-run`), consistent with the local
+−175 s. It says nothing about time until a gate finishes, total CI time or
+runner minutes; none of those was measured here.
+
+**Sampling window and rules.**
+- #1501 merged as `81d60cd` at 2026-09-26T13:07:09Z, 25 s after #1508
+  (`103bf8b`). #1508 only adds a `-race` skip to one `internal/threatfeed`
+  gate; the determinism job runs without `-race`, so it does not change
+  what this step runs.
+- **The window ends at 2026-09-30T15:04Z**, the first CI run on a tree
+  carrying the package-isolation pilot (#1522). That change moves tests out
+  of the root package, so later runs measure a different suite.
+- **Main QA and PR Deep are separate cohorts and are never pooled.** Main
+  QA runs one commit per run on `main`; PR Deep runs PR merge refs whose
+  code differs from run to run.
+- **Every tested revision was checked, not inferred from its date.** Main
+  QA: the checked-out SHA from the job log, with `git merge-base
+  --is-ancestor 81d60cd <sha>`. PR Deep: the merge commit from the
+  checkout log (`HEAD is now at <merge> Merge <head> into <base>`); every
+  base is `f13479b` or `1f7f42c`, both descendants of `81d60cd`, and every
+  merge tree still contains #1501's `resumeUnreachableTiming()` and its nine
+  `shortResumeBudget(` lines (`git grep` on the merge commit). No
+  baseline SHA contains `81d60cd` or #1501's own commits.
+- **Excluded:** attempts whose test step was cancelled (prematurely
+  terminated, so not a full suite) and runs where the determinism job was
+  skipped. Each exclusion is listed below.
+- Durations are the step's own `started_at`/`completed_at`. "Root" is the
+  root package's time inside the step, from the `ok`/`FAIL` line.
+
+**Main QA cohort** (`qa-gate.yml`, `QA · Determinism (shuffle + count=2)`,
+all attempt 1, all `success`).
+
+| | Run | Event | Tested SHA | Step | Root |
+|---|---|---|---|---|---|
+| Baseline | [36201604938](https://github.com/KidCarmi/Culvert/actions/runs/36201604938) | push | `87d4378113c2c38eb046460fb59b4d7fe7a884eb` | 852 s | 798.6 s |
+| Baseline | [36205752601](https://github.com/KidCarmi/Culvert/actions/runs/36205752601) | push | `83328fdd7eef532024ece051e6a083e2a9bc4d33` | 722 s | 686.3 s |
+| Baseline | [36213377875](https://github.com/KidCarmi/Culvert/actions/runs/36213377875) | push | `75436973c6ad67ce97a0ec228f5bbfe481451b3b` | 873 s | 818.1 s |
+| Baseline | [36218056971](https://github.com/KidCarmi/Culvert/actions/runs/36218056971) | push | `c0c6ff713d9c887d94bf9b81dab89003e24e1b52` | 853 s | 800.2 s |
+| Baseline | [36220947387](https://github.com/KidCarmi/Culvert/actions/runs/36220947387) | push | `45eaf07c170f207a7ca6d2c289fb88b45c468f43` | 810 s | 768.4 s |
+| Baseline | [36224156514](https://github.com/KidCarmi/Culvert/actions/runs/36224156514) | push | `bcc0265a856c58f5a39c612c6b39e7c19a0dc330` | 886 s | 832.9 s |
+| Baseline | [36230412469](https://github.com/KidCarmi/Culvert/actions/runs/36230412469) | push | `4c71369fc3ebdb08c4da3c0c5e55ed2a336bd618` | 876 s | 821.1 s |
+| Baseline | [36241008216](https://github.com/KidCarmi/Culvert/actions/runs/36241008216) | push | `5deefff319f18ebd0c80594d49c3269ea9d35fca` | 873 s | 817.7 s |
+| Post-merge | [36244094875](https://github.com/KidCarmi/Culvert/actions/runs/36244094875) | push | `81d60cd418c4c178893c1295d6d8164a3649138c` | 692 s | 635.7 s |
+| Post-merge | [36252572406](https://github.com/KidCarmi/Culvert/actions/runs/36252572406) | push | `f13479b4cc73afd9f6a4834d7ea8b0bb92c42bce` | 703 s | 646.3 s |
+| Post-merge | [36274637440](https://github.com/KidCarmi/Culvert/actions/runs/36274637440) | push | `1f7f42c6937847c26f29387dcaae6685e356a9b0` | 707 s | 651.8 s |
+| Post-merge | [36301073995](https://github.com/KidCarmi/Culvert/actions/runs/36301073995) | schedule | `1f7f42c6937847c26f29387dcaae6685e356a9b0` | 713 s | 657.5 s |
+
+| Main QA | n | Step: range | Step: median | Root: median |
+|---|---|---|---|---|
+| Baseline (2026-09-25T23:35Z – 2026-09-26T12:23Z) | 8 | 722–886 s | 863 s | 809.0 s |
+| Post-merge (2026-09-26T13:08Z – 2026-09-27T06:58Z) | 4 | 692–713 s | 705 s | 649.1 s |
+
+- **The baseline is the eight main QA runs immediately before the merge
+  whose determinism step completed.** QA runs the concurrency group
+  cancelled are excluded: their step never started or was cut short, so
+  none is a full suite. The QA run on `103bf8b` (#1508, [36244072882](https://github.com/KidCarmi/Culvert/actions/runs/36244072882)) is
+  one of them.
+- **The four post-merge executions are all the main QA runs in the
+  window.** Three are pushes; the fourth is the weekly scheduled run on the
+  same commit as the third, kept and labelled rather than dropped.
+- **Every post-merge step is below every baseline step** (713 s against a
+  722 s minimum). The medians differ by 158 s (−18 %), the root package by
+  160 s: the same direction and size as the local −175 s.
+- **The closest pair is `5deefff` → `81d60cd`: 873 → 692 s (−181 s).** The
+  two trees differ only by #1508 and #1501.
+- Four post-merge runs is still a small sample. It is not combined with
+  the Deep cohort to make it larger.
+
+**PR Deep cohort** (`pr-deep-gate.yml`, `Deep · determinism (shuffle +
+count=2)`): every PR Deep run created in the window whose determinism step
+ran to completion. That is 15 attempts on 13 runs, on 13 different merge
+trees. Two runs were re-run, and both attempts of each are listed; an
+attempt is a full suite on the same tree.
+
+| Run (attempt) | PR head | Tested merge SHA | Conclusion | Step | Root |
+|---|---|---|---|---|---|
+| [36259310914 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36259310914/attempts/1) | `1601498` | `9694884b1657a6d86050ae38defa630d510d6f2e` | **failure** | 725 s | 665.6 s |
+| [36259310914 (2)](https://github.com/KidCarmi/Culvert/actions/runs/36259310914/attempts/2) | `1601498` | `9694884b1657a6d86050ae38defa630d510d6f2e` | success | 711 s | 666.8 s |
+| [36261390975 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36261390975) | `bbd9130` | `09232f560078b891055a499438b73eeee0e9f1c2` | success | 715 s | 658.3 s |
+| [36261680087 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36261680087) | `7887480` | `1948c52a44138aa8ebca2c09e68d29b2407f74be` | success | 611 s | 575.0 s |
+| [36264359560 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36264359560/attempts/1) | `349ecf6` | `6d359699423c7a9d669f397cae85cf1b11f8ad43` | **failure** | 646 s | 598.3 s |
+| [36264359560 (2)](https://github.com/KidCarmi/Culvert/actions/runs/36264359560/attempts/2) | `349ecf6` | `6d359699423c7a9d669f397cae85cf1b11f8ad43` | success | 735 s | 679.5 s |
+| [36265791392 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36265791392) | `6c9c3c2` | `6db549ed55f2a7b39699006cfa80e724babdde1d` | success | 701 s | 646.8 s |
+| [36266516994 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36266516994) | `49ed820` | `05cc8ae1b783dcc483a8fd3eef73c1c4eddfdc77` | success | 608 s | 569.1 s |
+| [36268232557 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36268232557) | `1f982e2` | `2a435e9c91e43a4a12fce19c3a36a41392390b1c` | success | 679 s | 636.2 s |
+| [36272455944 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36272455944) | `0ab2360` | `8a16604d56072c772f515e52a524cb75fb88c6ff` | success | 738 s | 680.9 s |
+| [36273104470 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36273104470) | `0758610` | `22fda1a4ca738da558db9605c186ed114f63c938` | **failure** | 721 s | 660.7 s |
+| [36273951828 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36273951828) | `7faae52` | `8e9144d2ea19e3e9cdeb697ccd88d2deae28e3b7` | success | 709 s | 653.3 s |
+| [36274191914 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36274191914) | `2f7bb2c` | `2ea6d2c0ac8536ad2baa2a8ca5d4eefca9ea5425` | success | 738 s | 682.4 s |
+| [36399192397 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36399192397) | `29f23ee` | `ec1a71f328592897e9d5ec49f1a5bb7540891d4e` | success | 927 s | 880.4 s |
+| [36399386334 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36399386334) | `19e1b57` | `7b16e69ee30e1c2809bd42e2c96ff1dcb1836742` | success | 746 s | 687.4 s |
+
+| PR Deep | n | Step: range | Step: median | Root: median |
+|---|---|---|---|---|
+| Post-merge, all completed attempts (2026-09-26T17:31Z – 2026-09-28T09:18Z) | 15 | 608–927 s | 715 s | 660.7 s |
+| Post-merge, successful attempts only | 12 | 608–927 s | 713 s | — |
+| Reference: 10 identical-source dispatches before the change (§18.5.1) | 10 | 752–965 s | — | — |
+
+- **14 of the 15 steps are below the reference minimum (752 s).** The
+  exception is the dependabot run [36399192397](https://github.com/KidCarmi/Culvert/actions/runs/36399192397) at 927 s,
+  inside the reference range; no cause has been identified.
+- **The failed attempts are kept in the timings because they ran the whole
+  suite**: the root package reported `FAIL` after 598–666 s, with the step
+  running to its normal end. Removing them moves the median by 2 s.
+- **Excluded as prematurely terminated:**
+  [36260903040](https://github.com/KidCarmi/Culvert/actions/runs/36260903040) (step cancelled after 484 s) and
+  [36268050473](https://github.com/KidCarmi/Culvert/actions/runs/36268050473) (cancelled after 177 s). Both were
+  superseded by a newer push to the same PR.
+- **Excluded as not run:** in-window Deep runs whose determinism job was
+  skipped by the change classifier ([36264610072](https://github.com/KidCarmi/Culvert/actions/runs/36264610072),
+  [36271635867](https://github.com/KidCarmi/Culvert/actions/runs/36271635867) and eleven dependabot runs created
+  2026-09-28T08:45–08:46Z).
+- **The cohort is not an identical-source comparison.** Each tree carries
+  a different PR, so this shows where the step now lands across ordinary
+  changes. It does not measure the change in isolation; the Main QA pair
+  and the local runs do that.
+
+**The failing attempts.**
+
+| Attempt | Failing test | What the log shows |
+|---|---|---|
+| [36259310914 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36259310914/attempts/1) | `TestBenchGate_IPFilterBulkLoadIsLinear` | ratio 9.90x against an 8.0x bound; attempt 2 on the same merge SHA passed |
+| [36264359560 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36264359560/attempts/1) | `TestBenchGate_RateLimitExemptBulkLoadIsLinear` | ratio 10.57x against an 8.0x bound; attempt 2 on the same merge SHA passed |
+| [36273104470 (1)](https://github.com/KidCarmi/Culvert/actions/runs/36273104470) | `TestTestFileReadsAreCWDIndependent` | the wall flagged `os.ReadDir(".")` in `session_logout_revocation_test.go`, a line that PR added (absent on `main`) |
+
+- **The two timing-gate failures:** no evidence currently links these
+  failures to #1501/#1508. That is not the same as showing they are
+  independent of it. They ran on branches other than #1501's and name tests
+  that neither change touches, but neither fact establishes independence:
+  a change that reorders or shortens the root package's work can still
+  move a same-run timing ratio.
+- **Their cause is undetermined.** The step logs and the uploaded
+  `deep-determinism-log` artifacts are non-verbose: they have no per-test
+  timeline and no goroutine state. Nothing in them identifies what inflated
+  the measured ratio.
+- **The third failure is attributed, with evidence.** The branch's next
+  push (`7faae52`) anchors that read to the package directory. Its run,
+  [36273951828](https://github.com/KidCarmi/Culvert/actions/runs/36273951828), passed.
+- **Tracking.** The two bulk-load gates have had stabilisation work since:
+  `dac3dde` ("stabilize relocated bulk-load timing samples", #1524) and
+  `6a83a2b` ("pair IP filter scaling gate samples under load", #1525).
+  `TestBenchGate_RateLimitExemptBulkLoadIsLinear` still failed after both,
+  in `internal/admission` ([36924714497](https://github.com/KidCarmi/Culvert/actions/runs/36924714497/attempts/1),
+  [37124197333](https://github.com/KidCarmi/Culvert/actions/runs/37124197333/attempts/1)).
+  **Tracked in #1539**, which lists every observed failure of that gate.
+  Reproduction and remediation belong there, outside this change.
+
+**What this does not establish.**
+- Time until a PR gate or the QA gate finishes, total CI time or runner
+  minutes. Those depend on queueing and on other jobs, and were not
+  measured.
+- Anything after 2026-09-30T15:04Z, where the root package changes shape.
+
 ## 20. Toolchain consistency: one pinned Go compiler
 
 **Before (main `6ec745d`).** Nothing tied the compiler that CI qualifies to
@@ -3308,3 +3618,13 @@ does not make a latency claim; §18's rule applies.
 * The runtime base (`alpine:3.24`) and the GeoIP download stay unpinned, so a
   rebuild is still not reproducible — which is exactly why the version binds a
   digest rather than a build.
+
+## Package-isolation follow-up (2026-09-30)
+
+The new [package-isolation program](PACKAGE-ISOLATION.md) revisits current root
+ownership with a fresh ADR-0037, beginning with the shutdown execution engine.
+The earlier extraction and runtime phases remain complete; this is not a restart.
+The pilot preserves phase/service ordering and the existing race, determinism,
+coverage and release gates. Its local-test benefit is measured separately from
+whole-gate/PR latency. The next focused PR owns distributed rate-limit state
+before moving that engine; see the ordered acceptance criteria in the new roadmap.

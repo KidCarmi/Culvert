@@ -183,6 +183,19 @@ Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
 
+Less common flags (the full list is `culvert -h`). Unless noted, a non-empty / non-zero / `true` flag value overrides the matching `config.yaml` value; an empty, zero or `false` flag falls through to the YAML value, so a flag cannot clear a setting the config file makes:
+
+| Flag | Purpose |
+|---|---|
+| `-ip-filter-mode allow\|block` | IP filter mode. Any other value aborts startup. YAML: `security.ip_filter_mode`. Filtering is off only when both are empty: `-ip-filter-mode=` does not disable a mode set in YAML; clear the YAML key instead. |
+| `-trust-forwarded-headers` | Trust `X-Forwarded-Host` and `X-Forwarded-Proto` only (OIDC redirect URL when `proxy.base_url` is unset, CP/DP bootstrap URLs). It does **not** trust `X-Forwarded-For`: client-IP resolution for admin allowlists, rate limits, lockout and audit uses `-trusted-proxy-cidrs` / `proxy.trusted_proxy_cidrs`. OR-ed with `proxy.trust_forwarded_headers` (either enables it). Unscoped (any direct peer) - read [OPERATIONS.md](docs/OPERATIONS.md) item 6 first. |
+| `-syslog-format rfc3164\|rfc5424` | Remote syslog message format (default `rfc3164`); used with `-syslog`. |
+| `-revocations-file`, `-fileprofiles-file`, `-cluster-db` | Persistence paths for session revocations, file-extension profiles and cluster state (e.g. `/data/revocations.json`). |
+| `-cat-sync-interval 24h` | Re-sync interval for the URL category community feed (with `-cat-feed-db`). |
+| `-scan-svc-listen :8484` | Run as the scan-microservice sidecar on this address (the client side is `-scan-svc-url`). `/scan` inspects bodies only with ClamAV (`-clamav-addr` / `security_scan.clamav_addr`) or loaded YARA rules (`-yara-rules-dir`) on the sidecar process itself; configured DPI patterns apply separately to text content types. `security_scan.enabled` or a threat-feed DB alone does not scan bodies (threat feeds check URLs and domains only): `/health` still reports ok and `/scan` answers clean for every body. |
+| `-list-backups -backup-dir /backup` | Print every regular file in `-backup-dir` (absolute path, default `/backup`) as a JSON array and exit. Entries are not filtered or validated as Culvert backups (directories and symlinks are skipped; `encrypted` is a magic-byte probe only), so keep the directory free of unrelated files. |
+| `-cdr-enabled`, `-cdr-endpoint`, `-cdr-certs-dir`, `-cdr-default-profile`, `-cdr-timeout-sec`, `-cdr-max-file-size-mb` | Sluice CDR client: enable, gRPC endpoint, bootstrap mTLS bundle directory (`ca.pem`, `client.pem`, `client.key`; read only while no instance is enrolled; UI enrollment writes `<data-dir>/integrations/sluice/<name>` instead), fallback profile (`default`), per-file deadline (>=30 s, default 35) and per-file size cap (default 50 MiB; larger files are not rejected: they skip sanitization and pass through unmodified, whatever the fail mode). `-cdr-enabled` can only turn CDR on; it cannot disable a config that enables it. |
+
 > In the shipped Docker image, persistence paths such as `/data/ca.bundle` and `/data/ui_users.json` are supplied by the compose command line, not by binary flag defaults.
 
 ### Environment variables
@@ -191,6 +204,7 @@ Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 |---|---|
 | `CULVERT_CA_PASSPHRASE` | CA private-key encryption passphrase (**required** for TLS inspection) |
 | `CULVERT_LOG_PASSPHRASE` | Encryption-at-rest passphrase for the persistent log store. Falls back to `CULVERT_CA_PASSPHRASE` if unset; empty (both unset) = encryption off. |
+| `CULVERT_SESSION_SECRET` | Hex-encoded session-cookie HMAC key (≥ 64 hex chars). Set the same value on every node behind a load balancer so sessions are valid cluster-wide; takes priority over `session_secret` in the config file. A random per-start key is used only when neither this nor a valid `session_secret` is set. An invalid value here aborts startup. |
 | `CULVERT_C2_ENFORCE` | Admin RBAC enforcement mode. Default `enforce` (fail-closed); set `false`/`0`/`no`/`off` for shadow (log-only). Read once at startup. |
 | `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch (default `ghcr.io/kidcarmi/culvert`; no tag/digest). |
 | `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint (default Unix socket `/run/culvert-maint/culvert-maint.sock`). |
@@ -242,7 +256,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 | **Certificate revocation** | OCSP checking (fail-closed when a published responder is unreachable), currently scoped to the upstream parent-proxy TLS handshake only - **not yet wired to SSL-inspected origin certificates**. CRL checking is **not yet implemented** - see [Limitations](#limitations--known-gaps) |
 | **Hop-by-hop stripping** | RFC 7230-compliant - parses the `Connection` header for dynamically listed hop-by-hop names |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, drops private `X-Real-IP`, always removes `X-User-Identity` before forwarding |
-| **Password complexity** | 8+ chars, mixed case, and a digit required |
+| **Password complexity** | 8 bytes minimum and 72 bytes maximum (bcrypt's hard limit; both bounds count UTF-8 bytes, not characters), with at least one uppercase letter, one lowercase letter and one digit (`validatePasswordComplexity`, `store.go`) |
 | **Admin RBAC (defense-in-depth)** | Metadata-driven enforcement layer *in addition to* per-handler `requireRole`; report-only audit-completeness and role-divergence detectors; read-only governance surface at `/api/governance/control-plane` |
 
 ### Post-Quantum key exchange
@@ -335,7 +349,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live under 68 top-level directories in `internal/` (some, like the MCP gateway, further decomposed into dozens of subpackages — 107 directories tree-wide contain non-test Go source). A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live under 70 top-level directories in `internal/` (`ls -d internal/*/ | wc -l`; some, like the MCP gateway, are further decomposed into dozens of subpackages — 109 directories under `internal/` in total contain non-test Go source). A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions are in [`docs/agent-context/conventions.md`](docs/agent-context/conventions.md), the `internal/` decomposition in [`roadmap/PACKAGE-ISOLATION.md`](roadmap/PACKAGE-ISOLATION.md), and the admin-API route-metadata contract in [`docs/agent-context/domains/admin-control-plane.md`](docs/agent-context/domains/admin-control-plane.md); [`AGENTS.md`](AGENTS.md) routes to the rest.
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 

@@ -1080,7 +1080,12 @@ culvert_upstream_direct_fallback_total %d
 	// visible across restarts even after the store self-healed.
 	cfdb := catFeedDBState()
 	cfdbAvailable, cfdbRecovered := 0, 0
-	if cfdb.Available {
+	// CHAOS-74: this gauge's contract is "open and SERVING LOOKUPS", and it was
+	// sourced purely from the boot record — so a store that lost its mapped
+	// tables at 03:00 kept reporting 1 while every lookup returned
+	// "uncategorised". A latched runtime degradation is reported as 0, which is
+	// what the HELP text already promised.
+	if cfdb.Available && !cfdb.RuntimeDegraded {
 		cfdbAvailable = 1
 	}
 	if cfdb.Recovered {
@@ -1097,10 +1102,20 @@ culvert_catfeeddb_recovered %d
 # HELP culvert_catfeeddb_quarantined_copies Quarantined (.corrupt.*) copies of the community category store still on the data volume
 # TYPE culvert_catfeeddb_quarantined_copies gauge
 culvert_catfeeddb_quarantined_copies %d
+
+# HELP culvert_catfeeddb_lookup_errors_total Community category lookups that failed with a store error instead of a clean miss since startup
+# TYPE culvert_catfeeddb_lookup_errors_total counter
+culvert_catfeeddb_lookup_errors_total %d
+
+# HELP culvert_catfeeddb_memory_faults_total Contained memory faults reading the community category store's mapped tables; non-zero means the data volume damaged the store while it was open and Layer-2 categorisation is off until this node restarts
+# TYPE culvert_catfeeddb_memory_faults_total counter
+culvert_catfeeddb_memory_faults_total %d
 `,
 		cfdbAvailable,
 		cfdbRecovered,
 		cfdb.ResidualCopies,
+		cfdb.RuntimeFaults,
+		cfdb.RuntimeMemoryFaults,
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is
@@ -1267,7 +1282,7 @@ culvert_socks5_bind_backoff_seconds %g
 	// stops a frozen broadcast from denying a client forever — but it is a
 	// degradation of the distributed limit and should be visible for as long as
 	// it lasts.
-	if crl := clusterRateLimitFreshness(); crl.Armed {
+	if crl := rl.ClusterFreshness(); crl.Armed {
 		stale := 0
 		if crl.Stale {
 			stale = 1
@@ -1363,6 +1378,9 @@ culvert_admin_ui_listen_backoff_seconds %g
 			au.Backoff.Seconds(),
 		)
 	}
+
+	// CHAOS-71: Control Plane gRPC listener health (cp_grpc_health.go).
+	writeCPGRPCMetrics(w)
 
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
@@ -1551,6 +1569,16 @@ culvert_storage_write_last_failure_age_seconds %d
 	// _unavailable is 1 while a backend is in its cooldown, and
 	// _gated_denials_total is the blast radius — requests denied without
 	// contacting the backend while it was gated.
+	//
+	// Terminology note: this is the SAME condition the "identity_backend_unreachable"
+	// alert (internal/alerts/store.go) and the "identity_backend" operator-contract
+	// row (diagnostics.go checkIdentityBackend) name. The metric prefix is still
+	// "auth_backend": dashboards and alert rules key off these exact series names,
+	// so it is not renamed in place. A rename is tracked as terminology finding
+	// T-61 and would need a dual-emission window, as the T-31 ClamAV rename did
+	// (culvert_clam_scan_errors_total, pinned by clamav_metrics_dualemit_test.go).
+	// Until then, read this comment as the cross-reference from the alert or the
+	// contract row to the PromQL series.
 	abSnap := authBackendHealthStatus()
 	abDegraded := 0
 	if abSnap.Degraded {

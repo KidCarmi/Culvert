@@ -64,6 +64,7 @@ function envelope(rules: unknown[], draft = false): Record<string, unknown> {
     version: 7,
     updatedAt: "2026-08-22T12:34:56Z",
     draft,
+    persisted: true,
   };
 }
 
@@ -82,12 +83,23 @@ describe("policy envelope decoder (§27)", () => {
     expect(snap.draft).toBe(true);
   });
 
+  it("decodes the persisted flag", () => {
+    const snap = decodePolicySnapshot({
+      ...envelope([accessRule]),
+      persisted: false,
+    });
+    expect(snap.persisted).toBe(false);
+  });
+
   it("fails closed on an invalid version", () => {
     expect(() =>
       decodePolicySnapshot({ ...envelope([accessRule]), version: "7" }),
     ).toThrow(DecodeError);
     expect(() =>
       decodePolicySnapshot(omit(envelope([accessRule]), "draft")),
+    ).toThrow(DecodeError);
+    expect(() =>
+      decodePolicySnapshot(omit(envelope([accessRule]), "persisted")),
     ).toThrow(DecodeError);
   });
 

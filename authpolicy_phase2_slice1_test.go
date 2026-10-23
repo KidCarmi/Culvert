@@ -215,6 +215,7 @@ func TestP2S1_Persistence_ImportReplaceAndMerge(t *testing.T) {
 }
 
 func TestP2S1_Persistence_RollbackAndClusterSnapshot(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	// Rollback (applyConfigBackup).
 	withFreshPolicyStore(t)
 	applyConfigBackup(&configBackup{Version: 1, PolicyRules: []PolicyRule{

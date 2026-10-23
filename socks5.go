@@ -461,14 +461,36 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
+	// ── Destination-host bound (CHAOS-69, fail-closed) ──────────────────────
+	// This path needs NO raw pre-cap: RFC 1928 §4 length-prefixes DOMAINNAME with
+	// ONE byte, so the protocol structurally caps the destination at 255 — already
+	// inside maxRawDestAuthorityBytes (1024), which is why a raw gate here would be
+	// permanently dead code. An earlier version of this change added one anyway and
+	// its test passed vacuously; see the note in proxy_host_bounds.go. The bound
+	// that IS reachable here is the CANONICAL one, applied just below once the host
+	// has been normalized — a 255-byte ASCII name measures 255 and is refused, while
+	// a 255-byte UTF-8 IDN normalizes to ~150 and is served.
 	// ── Host canonicalization gate (RISK-013, fail-closed) ──────────────────
 	// Mirror of the handleRequest gate: a destination that cannot be
 	// IDNA-normalized would reach the blocklist/plugin matchers un-normalized.
-	if _, ok := normalizeHostStrict(host); !ok {
+	normSOCKS5Host, ok := normalizeHostStrict(host)
+	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
 		recordRequest(clientIP, "SOCKS5", host, "INVALID_HOST", "idna", "", "", "")
 		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=idna}", clientIP, sanitizeLog(host))
+		return
+	}
+	// CHAOS-69 canonical tier: refuse a destination that cannot be a DNS name.
+	// Nothing is recorded with the destination in it — the counter and the
+	// rate-limited line carry the LENGTH, never the value.
+	if canonicalHostOversize(normSOCKS5Host) {
+		atomic.AddInt64(&statBlocked, 1) // same accounting as the INVALID_HOST twin above
+		// Charge BEFORE replying: the reply is what the client observes, so
+		// an accounting that lands after it races any reader (and a test)
+		// that acts on the refusal.
+		noteOversizeHostRejection("SOCKS5", clientIP, len(normSOCKS5Host), "canonical")
+		socks5Reply(conn, 0x02)
 		return
 	}
 

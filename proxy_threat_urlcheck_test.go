@@ -38,7 +38,14 @@ func withURLThreatFeed(t *testing.T, urls map[string]string) {
 	tf.SeedForTest(urls, nil)
 	globalThreatFeed = tf
 	globalSecScanner = newEnabledScanner(secscan.Deps{Feed: tf})
-	t.Cleanup(func() { globalSecScanner, globalThreatFeed = prevScanner, prevFeed })
+	// The plugin chain runs inside preDispatchBlocked ahead of the threat
+	// checks; isolate it so a middleware installed by another test cannot
+	// decide these verdicts.
+	prevPlugins := pluginReplace(nil)
+	t.Cleanup(func() {
+		globalSecScanner, globalThreatFeed = prevScanner, prevFeed
+		pluginReplace(prevPlugins)
+	})
 }
 
 func TestPreDispatch_URLThreatCheckBlocksThroughRequestPath(t *testing.T) {

@@ -93,7 +93,7 @@ jobs:
               # (ui_*.go: middleware/CSRF, C2 metadata enforcement, RBAC,
               # routes SSOT — CI review P1-1), and the self-update/backup/
               # restore + fail-closed GeoIP policy input.
-              auth*.go|ca.go|tls.go|session.go|ocsp.go|security*.go|scanner.go|\
+              auth*.go|ca.go|tls.go|session.go|ocsp.go|security*.go|admission.go|cluster_ratelimit*.go|scanner.go|\
               clam.go|yara_scan.go|fileblock.go|fileprofile.go|threatfeed.go|\
               lockout.go|totp.go|identity.go|enrollment.go|controlplane.go|\
               ui_*.go|update*.go|backup*.go|restore.go|geoip.go|events.go|\
@@ -322,6 +322,27 @@ jobs:
           go test -count=2 -shuffle=on -timeout=20m ./... 2>&1 | tee determinism.log \
             || { grep -m1 -- "-test.shuffle " determinism.log || true; \
                  echo "::error::determinism failure — reproduce with the printed -test.shuffle seed (log artifact: deep-determinism-log)"; exit 1; }
+
+      - name: Annotate determinism failures
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("determinism.log")
+          if path.exists():
+              lines = path.read_text(errors="replace").splitlines()
+              selected = set()
+              for i, line in enumerate(lines):
+                  if line.startswith("-test.shuffle ") or line.startswith("FAIL"):
+                      selected.add(i)
+                  if "--- FAIL:" in line or line.startswith("panic:"):
+                      selected.update(range(i, min(i + 8, len(lines))))
+              detail = "\n".join(lines[i] for i in sorted(selected))
+              if not detail:
+                  detail = "\n".join(lines[-40:])
+              detail = detail[:12000].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::error title=Determinism failure details::" + detail)
+          PY
 
       - name: Build determinism (release binaries are byte-reproducible)
         # The release builds' reproducibility underpins verifiable SLSA provenance

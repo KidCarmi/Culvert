@@ -59,6 +59,7 @@ beforeEach(() => {
             version: 3,
             updatedAt: "2026-08-22T12:00:00Z",
             draft: false,
+            persisted: true,
           };
       return Promise.resolve(
         new Response(JSON.stringify(body), {
