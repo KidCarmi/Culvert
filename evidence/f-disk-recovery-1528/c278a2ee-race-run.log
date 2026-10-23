@@ -1,0 +1,933 @@
+# F-DISK recovery Linux -race evidence — producer run (ASTRA 6321755217 item 1)
+started-utc: 2026-10-23T05:54:39Z
+source-sha: c278a2ee649bc9649f706461eb87c78dbf9080da
+branch: review/1528-fdisk-splash-fix (local feat worktree at the same commit)
+dirty-tree (git status --porcelain, empty = clean):
+<end dirty-tree>
+go-version: go version go1.26.9 linux/amd64
+kernel: Linux 6.18.44-fc-v153 x86_64 GNU/Linux
+goenv: GOOS=linux GOARCH=amd64 CGO_ENABLED=1 GOFLAGS=
+command: go test -race -count=2 -shuffle=on -v ./internal/feedsync/ ./internal/catdb/ ./internal/storeguard/
+=== raw output ===
+-test.shuffle 1792734880842985152
+=== RUN   TestHealth_OnAFreshSyncerIsZeroNotGarbage
+--- PASS: TestHealth_OnAFreshSyncerIsZeroNotGarbage (0.00s)
+=== RUN   TestClassifyTarEntry
+--- PASS: TestClassifyTarEntry (0.00s)
+=== RUN   TestDownloadAndParse_BadBody
+--- PASS: TestDownloadAndParse_BadBody (0.00s)
+=== RUN   TestFeedSyncer_Sync_Failure
+FeedSync: starting UT1 sync from http://127.0.0.1:37469
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:37469
+--- PASS: TestFeedSyncer_Sync_Failure (0.13s)
+=== RUN   TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f7a3b652286: runtime error: invalid memory address or nil pointer dereference"
+FeedSync: starting UT1 sync from http://127.0.0.1:33949
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:33949
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:33949
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:33949
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+--- PASS: TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing (0.81s)
+=== RUN   TestWriteBulkWatched_NormalWriteUnaffected
+--- PASS: TestWriteBulkWatched_NormalWriteUnaffected (0.45s)
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/no_probe
+FeedSync: starting UT1 sync from http://127.0.0.1:38289
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/ample
+FeedSync: starting UT1 sync from http://127.0.0.1:39417
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+--- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable (0.71s)
+    --- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/no_probe (0.52s)
+    --- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/ample (0.19s)
+=== RUN   TestParseTarball_Basic
+--- PASS: TestParseTarball_Basic (0.46s)
+=== RUN   TestFFeed1_RecordForAnotherFeedIsNotComplete
+FeedSync: starting UT1 sync from http://127.0.0.1:37333
+FeedSync: parsed 6 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 6 domains in 0s
+--- PASS: TestFFeed1_RecordForAnotherFeedIsNotComplete (0.08s)
+=== RUN   TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood
+FeedSync: starting UT1 sync from http://127.0.0.1:34401
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:36309
+FeedSync: write REFUSED (disk_space_unknown): free space on the store's filesystem could not be measured; the previous category data keeps serving
+--- PASS: TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood (0.15s)
+=== RUN   TestFFeed1_InterruptedImportIsCompletedAfterRestart
+FeedSync: starting UT1 sync from http://127.0.0.1:42659
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): process killed mid-import
+FeedSync: starting UT1 sync from http://127.0.0.1:42659
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 51 domains in 0s
+--- PASS: TestFFeed1_InterruptedImportIsCompletedAfterRestart (0.16s)
+=== RUN   TestFeedSyncer_Stats_Initial
+--- PASS: TestFeedSyncer_Stats_Initial (0.03s)
+=== RUN   TestNewFeedSyncer_Defaults
+--- PASS: TestNewFeedSyncer_Defaults (0.04s)
+=== RUN   TestDownloadAndParse_HTTPError
+--- PASS: TestDownloadAndParse_HTTPError (0.00s)
+=== RUN   TestFFeed1_FailedWriteDoesNotAdvanceSuccess
+FeedSync: starting UT1 sync from http://127.0.0.1:33963
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:33963
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): write failed
+--- PASS: TestFFeed1_FailedWriteDoesNotAdvanceSuccess (0.55s)
+=== RUN   TestSyncRound_QuiescesAfterAbandonedWrite
+FeedSync: starting UT1 sync from http://127.0.0.1:40415
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:40415
+FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)
+--- PASS: TestSyncRound_QuiescesAfterAbandonedWrite (0.17s)
+=== RUN   TestSync_RefusesTheWriteBelowTheFreeSpaceFloor
+FeedSync: starting UT1 sync from http://127.0.0.1:36855
+FeedSync: write REFUSED (disk_space): 64 MiB free, a 2-entry write needs about 512 MiB; no community category data is loaded yet (admin-managed categories only)
+--- PASS: TestSync_RefusesTheWriteBelowTheFreeSpaceFloor (0.09s)
+=== RUN   TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks
+--- PASS: TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks (0.04s)
+=== RUN   TestParseDomainFile_NoTrailingNewline
+--- PASS: TestParseDomainFile_NoTrailingNewline (0.00s)
+=== RUN   TestRetryBoundsAreSaneRelativeToTheInterval
+--- PASS: TestRetryBoundsAreSaneRelativeToTheInterval (0.00s)
+=== RUN   TestFeedSyncer_Sync_OK
+FeedSync: starting UT1 sync from http://127.0.0.1:44405
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+--- PASS: TestFeedSyncer_Sync_OK (0.06s)
+=== RUN   TestFeedSyncer_Start_CancelContext
+--- PASS: TestFeedSyncer_Start_CancelContext (0.05s)
+=== RUN   TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept
+FeedSync: starting UT1 sync from http://127.0.0.1:35895
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+--- PASS: TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept (0.06s)
+=== RUN   TestFFeed1_SpaceRefusalKeepsTheCertifiedImport
+FeedSync: starting UT1 sync from http://127.0.0.1:32819
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:32819
+FeedSync: write REFUSED (disk_space): 1 MiB free, a 11-entry write needs about 512 MiB; the previous category data keeps serving
+--- PASS: TestFFeed1_SpaceRefusalKeepsTheCertifiedImport (0.10s)
+=== RUN   TestLastFailureIsBounded
+FeedSync: starting UT1 sync from http://127.0.0.1:38533
+FeedSync: download/parse failed: HTTP 418 from http://127.0.0.1:38533
+--- PASS: TestLastFailureIsBounded (0.00s)
+=== RUN   TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus
+FeedSync: starting UT1 sync from http://127.0.0.1:36797
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 31 domains in 0s
+--- PASS: TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus (0.12s)
+=== RUN   TestWriteBulkWatched_ReturnedErrorPropagates
+--- PASS: TestWriteBulkWatched_ReturnedErrorPropagates (0.04s)
+=== RUN   TestSyncRound_FailureIsCountedAndClassified
+FeedSync: starting UT1 sync from http://127.0.0.1:33729
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:33729
+FeedSync: starting UT1 sync from http://127.0.0.1:33729
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:33729
+--- PASS: TestSyncRound_FailureIsCountedAndClassified (0.00s)
+=== RUN   TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker
+FeedSync: starting UT1 sync from http://127.0.0.1:40629
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:40629
+FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)
+--- PASS: TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker (0.09s)
+=== RUN   TestParseTarball_BadGzip
+--- PASS: TestParseTarball_BadGzip (0.00s)
+=== RUN   TestHeldWriter_RecoveryPersistsAcrossReopens
+FeedSync: starting UT1 sync from http://127.0.0.1:46409
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:46409
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 31 domains in 0s
+--- PASS: TestHeldWriter_RecoveryPersistsAcrossReopens (0.24s)
+=== RUN   TestNewFeedSyncer_CustomValues
+--- PASS: TestNewFeedSyncer_CustomValues (0.03s)
+=== RUN   TestParseTarball_SkipsNonFileEntries
+--- PASS: TestParseTarball_SkipsNonFileEntries (0.04s)
+=== RUN   TestParseDomainFile_CaseNormalization
+--- PASS: TestParseDomainFile_CaseNormalization (0.00s)
+=== RUN   TestSyncSpaceNeeded
+--- PASS: TestSyncSpaceNeeded (0.00s)
+=== RUN   TestParseDomainFile_CRLFLineEndings
+--- PASS: TestParseDomainFile_CRLFLineEndings (0.00s)
+=== RUN   TestSyncer_WaitJoinsTheLoop
+--- PASS: TestSyncer_WaitJoinsTheLoop (0.04s)
+=== RUN   TestWriteBulkWatched_StallSurfaced
+--- PASS: TestWriteBulkWatched_StallSurfaced (0.06s)
+=== RUN   TestParseDomainFile_Basic
+--- PASS: TestParseDomainFile_Basic (0.00s)
+=== RUN   TestScheduler_FailedRoundRetriesLongBeforeTheInterval
+--- PASS: TestScheduler_FailedRoundRetriesLongBeforeTheInterval (0.00s)
+=== RUN   TestDownloadAndParse_OK
+--- PASS: TestDownloadAndParse_OK (0.03s)
+=== RUN   TestSync_DeferredFirstSyncReportsNoCoverage
+FeedSync: starting UT1 sync from http://127.0.0.1:39399
+FeedSync: write REFUSED (disk_space_unknown): free space on the store's filesystem could not be measured; no community category data is loaded yet (admin-managed categories only)
+--- PASS: TestSync_DeferredFirstSyncReportsNoCoverage (0.06s)
+=== RUN   TestHealth_OnAFreshSyncerIsZeroNotGarbage
+--- PASS: TestHealth_OnAFreshSyncerIsZeroNotGarbage (0.00s)
+=== RUN   TestClassifyTarEntry
+--- PASS: TestClassifyTarEntry (0.00s)
+=== RUN   TestDownloadAndParse_BadBody
+--- PASS: TestDownloadAndParse_BadBody (0.00s)
+=== RUN   TestFeedSyncer_Sync_Failure
+FeedSync: starting UT1 sync from http://127.0.0.1:37829
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:37829
+--- PASS: TestFeedSyncer_Sync_Failure (0.03s)
+=== RUN   TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f7a3a775286: runtime error: invalid memory address or nil pointer dereference"
+FeedSync: starting UT1 sync from http://127.0.0.1:37009
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:37009
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:37009
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:37009
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+--- PASS: TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing (0.78s)
+=== RUN   TestWriteBulkWatched_NormalWriteUnaffected
+--- PASS: TestWriteBulkWatched_NormalWriteUnaffected (0.04s)
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/no_probe
+FeedSync: starting UT1 sync from http://127.0.0.1:45337
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+=== RUN   TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/ample
+FeedSync: starting UT1 sync from http://127.0.0.1:40633
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+--- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable (0.19s)
+    --- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/no_probe (0.12s)
+    --- PASS: TestSync_WritesWhenSpaceIsAmpleOrNotMeasurable/ample (0.07s)
+=== RUN   TestParseTarball_Basic
+--- PASS: TestParseTarball_Basic (0.16s)
+=== RUN   TestFFeed1_RecordForAnotherFeedIsNotComplete
+FeedSync: starting UT1 sync from http://127.0.0.1:40239
+FeedSync: parsed 6 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 6 domains in 0s
+--- PASS: TestFFeed1_RecordForAnotherFeedIsNotComplete (0.29s)
+=== RUN   TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood
+FeedSync: starting UT1 sync from http://127.0.0.1:40383
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:40727
+FeedSync: write REFUSED (disk_space_unknown): free space on the store's filesystem could not be measured; the previous category data keeps serving
+--- PASS: TestSync_FailedMeasurementDefersTheWriteAndKeepsLastKnownGood (0.39s)
+=== RUN   TestFFeed1_InterruptedImportIsCompletedAfterRestart
+FeedSync: starting UT1 sync from http://127.0.0.1:44349
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): process killed mid-import
+FeedSync: starting UT1 sync from http://127.0.0.1:44349
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 51 domains in 0s
+--- PASS: TestFFeed1_InterruptedImportIsCompletedAfterRestart (0.28s)
+=== RUN   TestFeedSyncer_Stats_Initial
+--- PASS: TestFeedSyncer_Stats_Initial (0.05s)
+=== RUN   TestNewFeedSyncer_Defaults
+--- PASS: TestNewFeedSyncer_Defaults (0.05s)
+=== RUN   TestDownloadAndParse_HTTPError
+--- PASS: TestDownloadAndParse_HTTPError (0.00s)
+=== RUN   TestFFeed1_FailedWriteDoesNotAdvanceSuccess
+FeedSync: starting UT1 sync from http://127.0.0.1:37405
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:37405
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): write failed
+--- PASS: TestFFeed1_FailedWriteDoesNotAdvanceSuccess (0.53s)
+=== RUN   TestSyncRound_QuiescesAfterAbandonedWrite
+FeedSync: starting UT1 sync from http://127.0.0.1:40941
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:40941
+FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)
+--- PASS: TestSyncRound_QuiescesAfterAbandonedWrite (0.19s)
+=== RUN   TestSync_RefusesTheWriteBelowTheFreeSpaceFloor
+FeedSync: starting UT1 sync from http://127.0.0.1:40907
+FeedSync: write REFUSED (disk_space): 64 MiB free, a 2-entry write needs about 512 MiB; no community category data is loaded yet (admin-managed categories only)
+--- PASS: TestSync_RefusesTheWriteBelowTheFreeSpaceFloor (0.15s)
+=== RUN   TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks
+--- PASS: TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks (0.07s)
+=== RUN   TestParseDomainFile_NoTrailingNewline
+--- PASS: TestParseDomainFile_NoTrailingNewline (0.00s)
+=== RUN   TestRetryBoundsAreSaneRelativeToTheInterval
+--- PASS: TestRetryBoundsAreSaneRelativeToTheInterval (0.00s)
+=== RUN   TestFeedSyncer_Sync_OK
+FeedSync: starting UT1 sync from http://127.0.0.1:37981
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+--- PASS: TestFeedSyncer_Sync_OK (0.19s)
+=== RUN   TestFeedSyncer_Start_CancelContext
+--- PASS: TestFeedSyncer_Start_CancelContext (0.06s)
+=== RUN   TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept
+FeedSync: starting UT1 sync from http://127.0.0.1:44361
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+--- PASS: TestFFeed1_LegacyStoreWithoutRecordIsSyncedAndKept (0.06s)
+=== RUN   TestFFeed1_SpaceRefusalKeepsTheCertifiedImport
+FeedSync: starting UT1 sync from http://127.0.0.1:38141
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:38141
+FeedSync: write REFUSED (disk_space): 1 MiB free, a 11-entry write needs about 512 MiB; the previous category data keeps serving
+--- PASS: TestFFeed1_SpaceRefusalKeepsTheCertifiedImport (0.28s)
+=== RUN   TestLastFailureIsBounded
+FeedSync: starting UT1 sync from http://127.0.0.1:43811
+FeedSync: download/parse failed: HTTP 418 from http://127.0.0.1:43811
+--- PASS: TestLastFailureIsBounded (0.00s)
+=== RUN   TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus
+FeedSync: starting UT1 sync from http://127.0.0.1:36341
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 31 domains in 0s
+--- PASS: TestFFeed1_CompletedSyncSurvivesRestartWithItsStatus (0.22s)
+=== RUN   TestWriteBulkWatched_ReturnedErrorPropagates
+--- PASS: TestWriteBulkWatched_ReturnedErrorPropagates (0.05s)
+=== RUN   TestSyncRound_FailureIsCountedAndClassified
+FeedSync: starting UT1 sync from http://127.0.0.1:43079
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:43079
+FeedSync: starting UT1 sync from http://127.0.0.1:43079
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:43079
+--- PASS: TestSyncRound_FailureIsCountedAndClassified (0.00s)
+=== RUN   TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker
+FeedSync: starting UT1 sync from http://127.0.0.1:38163
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:38163
+FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)
+--- PASS: TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker (0.08s)
+=== RUN   TestParseTarball_BadGzip
+--- PASS: TestParseTarball_BadGzip (0.00s)
+=== RUN   TestHeldWriter_RecoveryPersistsAcrossReopens
+FeedSync: starting UT1 sync from http://127.0.0.1:36207
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:36207
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 31 domains in 0s
+--- PASS: TestHeldWriter_RecoveryPersistsAcrossReopens (0.20s)
+=== RUN   TestNewFeedSyncer_CustomValues
+--- PASS: TestNewFeedSyncer_CustomValues (0.04s)
+=== RUN   TestParseTarball_SkipsNonFileEntries
+--- PASS: TestParseTarball_SkipsNonFileEntries (0.04s)
+=== RUN   TestParseDomainFile_CaseNormalization
+--- PASS: TestParseDomainFile_CaseNormalization (0.00s)
+=== RUN   TestSyncSpaceNeeded
+--- PASS: TestSyncSpaceNeeded (0.00s)
+=== RUN   TestParseDomainFile_CRLFLineEndings
+--- PASS: TestParseDomainFile_CRLFLineEndings (0.00s)
+=== RUN   TestSyncer_WaitJoinsTheLoop
+--- PASS: TestSyncer_WaitJoinsTheLoop (0.03s)
+=== RUN   TestWriteBulkWatched_StallSurfaced
+--- PASS: TestWriteBulkWatched_StallSurfaced (0.23s)
+=== RUN   TestParseDomainFile_Basic
+--- PASS: TestParseDomainFile_Basic (0.00s)
+=== RUN   TestScheduler_FailedRoundRetriesLongBeforeTheInterval
+--- PASS: TestScheduler_FailedRoundRetriesLongBeforeTheInterval (0.00s)
+=== RUN   TestDownloadAndParse_OK
+--- PASS: TestDownloadAndParse_OK (0.07s)
+=== RUN   TestSync_DeferredFirstSyncReportsNoCoverage
+FeedSync: starting UT1 sync from http://127.0.0.1:34665
+FeedSync: write REFUSED (disk_space_unknown): free space on the store's filesystem could not be measured; no community category data is loaded yet (admin-managed categories only)
+--- PASS: TestSync_DeferredFirstSyncReportsNoCoverage (0.05s)
+PASS
+ok  	github.com/KidCarmi/Culvert/internal/feedsync	10.710s
+-test.shuffle 1792734881197662007
+=== RUN   TestBulkWriteFault_LeavesAPartialStore
+--- PASS: TestBulkWriteFault_LeavesAPartialStore (0.15s)
+=== RUN   TestDanglingAliasTarget
+--- PASS: TestDanglingAliasTarget (0.00s)
+=== RUN   TestOpenResilient_QuarantineReleasesTheStoreLock
+--- PASS: TestOpenResilient_QuarantineReleasesTheStoreLock (0.07s)
+=== RUN   TestCompleteImport_ClearsIntent_NoFalseQuarantine
+--- PASS: TestCompleteImport_ClearsIntent_NoFalseQuarantine (0.75s)
+=== RUN   TestImportRecord_BeginImportWithdrawsTheRecord
+--- PASS: TestImportRecord_BeginImportWithdrawsTheRecord (0.12s)
+=== RUN   TestBadgerFork_LogArgumentsCannotForgeLines
+--- PASS: TestBadgerFork_LogArgumentsCannotForgeLines (0.00s)
+=== RUN   TestCommunityDB_Lookup_DomainWalking
+--- PASS: TestCommunityDB_Lookup_DomainWalking (0.04s)
+=== RUN   TestOpenResilient_FirstRunCreatesTheStore
+--- PASS: TestOpenResilient_FirstRunCreatesTheStore (0.03s)
+=== RUN   TestOpenResilient_QuarantinedCopiesAreBounded
+--- PASS: TestOpenResilient_QuarantinedCopiesAreBounded (0.48s)
+=== RUN   TestLookup_OrdinaryMissIsNotAFault
+--- PASS: TestLookup_OrdinaryMissIsNotAFault (0.62s)
+=== RUN   TestStats_FirstFaultLatchesTheStore
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386f1b7286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestStats_FirstFaultLatchesTheStore (0.53s)
+=== RUN   TestCommunityDB_BulkWrite_And_Lookup
+--- PASS: TestCommunityDB_BulkWrite_And_Lookup (0.04s)
+=== RUN   TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386f1a5286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen (0.69s)
+=== RUN   TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison
+--- PASS: TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison (0.06s)
+=== RUN   TestBeginImport_RefusesWhenIntentNotDurable
+--- PASS: TestBeginImport_RefusesWhenIntentNotDurable (0.03s)
+=== RUN   TestOpenResilient_HeldStoreLockRefusesACompetingOpen
+--- PASS: TestOpenResilient_HeldStoreLockRefusesACompetingOpen (0.06s)
+=== RUN   TestCommunityDB_Lookup_TrailingDot
+--- PASS: TestCommunityDB_Lookup_TrailingDot (0.03s)
+=== RUN   TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore
+--- PASS: TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore (0.07s)
+=== RUN   TestClassifyOpenError_NilIsUnknown
+--- PASS: TestClassifyOpenError_NilIsUnknown (0.00s)
+=== RUN   TestBeginImport_WritesDurableIntentBeforeData
+--- PASS: TestBeginImport_WritesDurableIntentBeforeData (0.04s)
+=== RUN   TestCommunityDB_EveryBadgerAccessIsGuarded
+--- PASS: TestCommunityDB_EveryBadgerAccessIsGuarded (0.01s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.03s)
+=== RUN   TestStoreFilesAreFullyAllocated
+--- PASS: TestStoreFilesAreFullyAllocated (0.03s)
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_truncated
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_emptied
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/table_missing
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/KEYREGISTRY_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/value-log_truncation_needed
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/block_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/dir_lock_held
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/path_is_a_file
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/read-only_volume
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/no_permission
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/volume_full
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/fd_exhaustion
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/failing_device
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/unrecognised
+--- PASS: TestClassifyOpenError_EmpiricalBadgerMessages (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_scrambled (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_truncated (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_emptied (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_checksum (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/table_missing (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/KEYREGISTRY_scrambled (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/value-log_truncation_needed (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/block_checksum (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/dir_lock_held (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/path_is_a_file (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/read-only_volume (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/no_permission (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/volume_full (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/fd_exhaustion (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/failing_device (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/unrecognised (0.00s)
+=== RUN   TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine
+--- PASS: TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine (0.00s)
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/retry
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/close-full
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/vlog-grow
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/sst-full
+--- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS (92.67s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/retry (31.12s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/close-full (26.43s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/vlog-grow (1.17s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/sst-full (33.95s)
+=== RUN   TestCommunityDB_Lookup_StopsAtTLD
+--- PASS: TestCommunityDB_Lookup_StopsAtTLD (0.04s)
+=== RUN   TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart
+--- PASS: TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart (0.11s)
+=== RUN   TestOpenResilient_NonRegularMarkerIsIgnored
+--- PASS: TestOpenResilient_NonRegularMarkerIsIgnored (0.08s)
+=== RUN   TestOpenResilient_LiveAttemptMarkerIsNotAbandoned
+--- PASS: TestOpenResilient_LiveAttemptMarkerIsNotAbandoned (0.00s)
+=== RUN   TestOpenResilient_MarkerIsASiblingNotAChild
+--- PASS: TestOpenResilient_MarkerIsASiblingNotAChild (0.00s)
+=== RUN   TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot
+--- PASS: TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot (0.07s)
+=== RUN   TestCommunityDB_BulkWrite_Empty
+--- PASS: TestCommunityDB_BulkWrite_Empty (0.03s)
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/mid-import
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/after-complete
+--- PASS: TestImportRecord_ConsistentAfterUncleanExit (0.16s)
+    --- PASS: TestImportRecord_ConsistentAfterUncleanExit/mid-import (0.07s)
+    --- PASS: TestImportRecord_ConsistentAfterUncleanExit/after-complete (0.09s)
+=== RUN   TestCommunityDB_DegradedStoreNeverReachesBadger
+--- PASS: TestCommunityDB_DegradedStoreNeverReachesBadger (0.00s)
+=== RUN   TestClassifyOpenError_EnvironmentalWinsOverCorruption
+--- PASS: TestClassifyOpenError_EnvironmentalWinsOverCorruption (0.00s)
+=== RUN   TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot
+--- PASS: TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot (1.14s)
+=== RUN   TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt
+--- PASS: TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt (0.00s)
+=== RUN   TestImportRecord_KeyIsUnreachableFromLookups
+--- PASS: TestImportRecord_KeyIsUnreachableFromLookups (0.05s)
+=== RUN   TestOpenResilient_ResidualQuarantinesAreReported
+--- PASS: TestOpenResilient_ResidualQuarantinesAreReported (0.10s)
+=== RUN   TestLookupFaults_DegradedImpliesACountedFault
+--- PASS: TestLookupFaults_DegradedImpliesACountedFault (0.05s)
+=== RUN   TestInterruptedImport_QuarantinesAndRebuildsInOneRestart
+--- PASS: TestInterruptedImport_QuarantinesAndRebuildsInOneRestart (0.24s)
+=== RUN   TestOpenResilient_CleanOpenLeavesNoTrace
+--- PASS: TestOpenResilient_CleanOpenLeavesNoTrace (0.15s)
+=== RUN   TestImportRecord_InvalidRecordsAreRejected
+--- PASS: TestImportRecord_InvalidRecordsAreRejected (0.04s)
+=== RUN   TestLookup_VolumeDamageAfterHealthyOpenIsContained
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386e9b9286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestLookup_VolumeDamageAfterHealthyOpenIsContained (0.51s)
+=== RUN   TestImportRecord_RoundTripSurvivesReopen
+--- PASS: TestImportRecord_RoundTripSurvivesReopen (0.08s)
+=== RUN   TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds
+--- PASS: TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds (0.07s)
+=== RUN   TestBadgerFork_MemtableIDOutOfRangeIsAnError
+--- PASS: TestBadgerFork_MemtableIDOutOfRangeIsAnError (0.00s)
+=== RUN   TestCommunityDB_Stats
+--- PASS: TestCommunityDB_Stats (0.04s)
+=== RUN   TestOpen_CreateAndClose
+--- PASS: TestOpen_CreateAndClose (0.03s)
+=== RUN   TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386e959286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget (0.56s)
+=== RUN   TestBadgerFork_TableFileIDIsUnsigned32
+--- PASS: TestBadgerFork_TableFileIDIsUnsigned32 (0.00s)
+=== RUN   TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot
+--- PASS: TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot (0.08s)
+=== RUN   TestCommunityDB_HasEntries
+--- PASS: TestCommunityDB_HasEntries (0.04s)
+=== RUN   TestImportRecord_FsyncOrderIsStructural
+--- PASS: TestImportRecord_FsyncOrderIsStructural (0.00s)
+=== RUN   TestBulkWriteFault_LeavesAPartialStore
+--- PASS: TestBulkWriteFault_LeavesAPartialStore (0.04s)
+=== RUN   TestDanglingAliasTarget
+--- PASS: TestDanglingAliasTarget (0.00s)
+=== RUN   TestOpenResilient_QuarantineReleasesTheStoreLock
+--- PASS: TestOpenResilient_QuarantineReleasesTheStoreLock (0.07s)
+=== RUN   TestCompleteImport_ClearsIntent_NoFalseQuarantine
+--- PASS: TestCompleteImport_ClearsIntent_NoFalseQuarantine (0.07s)
+=== RUN   TestImportRecord_BeginImportWithdrawsTheRecord
+--- PASS: TestImportRecord_BeginImportWithdrawsTheRecord (0.24s)
+=== RUN   TestBadgerFork_LogArgumentsCannotForgeLines
+--- PASS: TestBadgerFork_LogArgumentsCannotForgeLines (0.00s)
+=== RUN   TestCommunityDB_Lookup_DomainWalking
+--- PASS: TestCommunityDB_Lookup_DomainWalking (0.10s)
+=== RUN   TestOpenResilient_FirstRunCreatesTheStore
+--- PASS: TestOpenResilient_FirstRunCreatesTheStore (0.04s)
+=== RUN   TestOpenResilient_QuarantinedCopiesAreBounded
+--- PASS: TestOpenResilient_QuarantinedCopiesAreBounded (0.19s)
+=== RUN   TestLookup_OrdinaryMissIsNotAFault
+--- PASS: TestLookup_OrdinaryMissIsNotAFault (0.09s)
+=== RUN   TestStats_FirstFaultLatchesTheStore
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386e959286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestStats_FirstFaultLatchesTheStore (0.58s)
+=== RUN   TestCommunityDB_BulkWrite_And_Lookup
+--- PASS: TestCommunityDB_BulkWrite_And_Lookup (0.05s)
+=== RUN   TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386e959286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestOpenResilient_RuntimeFaultQuarantinesOnNextOpen (0.68s)
+=== RUN   TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison
+--- PASS: TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison (0.18s)
+=== RUN   TestBeginImport_RefusesWhenIntentNotDurable
+--- PASS: TestBeginImport_RefusesWhenIntentNotDurable (0.04s)
+=== RUN   TestOpenResilient_HeldStoreLockRefusesACompetingOpen
+--- PASS: TestOpenResilient_HeldStoreLockRefusesACompetingOpen (0.08s)
+=== RUN   TestCommunityDB_Lookup_TrailingDot
+--- PASS: TestCommunityDB_Lookup_TrailingDot (0.03s)
+=== RUN   TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore
+--- PASS: TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore (0.12s)
+=== RUN   TestClassifyOpenError_NilIsUnknown
+--- PASS: TestClassifyOpenError_NilIsUnknown (0.00s)
+=== RUN   TestBeginImport_WritesDurableIntentBeforeData
+--- PASS: TestBeginImport_WritesDurableIntentBeforeData (0.04s)
+=== RUN   TestCommunityDB_EveryBadgerAccessIsGuarded
+--- PASS: TestCommunityDB_EveryBadgerAccessIsGuarded (0.01s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.03s)
+=== RUN   TestStoreFilesAreFullyAllocated
+--- PASS: TestStoreFilesAreFullyAllocated (0.04s)
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_truncated
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_emptied
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/table_missing
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/KEYREGISTRY_scrambled
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/value-log_truncation_needed
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/block_checksum
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/dir_lock_held
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/path_is_a_file
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/read-only_volume
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/no_permission
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/volume_full
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/fd_exhaustion
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/failing_device
+=== RUN   TestClassifyOpenError_EmpiricalBadgerMessages/unrecognised
+--- PASS: TestClassifyOpenError_EmpiricalBadgerMessages (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_scrambled (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_truncated (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_emptied (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/MANIFEST_checksum (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/table_missing (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/KEYREGISTRY_scrambled (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/value-log_truncation_needed (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/block_checksum (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/dir_lock_held (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/path_is_a_file (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/read-only_volume (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/no_permission (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/volume_full (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/fd_exhaustion (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/failing_device (0.00s)
+    --- PASS: TestClassifyOpenError_EmpiricalBadgerMessages/unrecognised (0.00s)
+=== RUN   TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine
+--- PASS: TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine (0.00s)
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/retry
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/close-full
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/vlog-grow
+=== RUN   TestFullFilesystemWriteReturnsErrorNotSIGBUS/sst-full
+--- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS (78.69s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/retry (24.87s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/close-full (21.51s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/vlog-grow (1.19s)
+    --- PASS: TestFullFilesystemWriteReturnsErrorNotSIGBUS/sst-full (31.11s)
+=== RUN   TestCommunityDB_Lookup_StopsAtTLD
+--- PASS: TestCommunityDB_Lookup_StopsAtTLD (0.05s)
+=== RUN   TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart
+--- PASS: TestOpenResilient_FailedRebuildBehindAnAliasRecoversOnTheNextStart (0.13s)
+=== RUN   TestOpenResilient_NonRegularMarkerIsIgnored
+--- PASS: TestOpenResilient_NonRegularMarkerIsIgnored (0.07s)
+=== RUN   TestOpenResilient_LiveAttemptMarkerIsNotAbandoned
+--- PASS: TestOpenResilient_LiveAttemptMarkerIsNotAbandoned (0.00s)
+=== RUN   TestOpenResilient_MarkerIsASiblingNotAChild
+--- PASS: TestOpenResilient_MarkerIsASiblingNotAChild (0.00s)
+=== RUN   TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot
+--- PASS: TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot (0.07s)
+=== RUN   TestCommunityDB_BulkWrite_Empty
+--- PASS: TestCommunityDB_BulkWrite_Empty (0.03s)
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/mid-import
+=== RUN   TestImportRecord_ConsistentAfterUncleanExit/after-complete
+--- PASS: TestImportRecord_ConsistentAfterUncleanExit (0.13s)
+    --- PASS: TestImportRecord_ConsistentAfterUncleanExit/mid-import (0.07s)
+    --- PASS: TestImportRecord_ConsistentAfterUncleanExit/after-complete (0.06s)
+=== RUN   TestCommunityDB_DegradedStoreNeverReachesBadger
+--- PASS: TestCommunityDB_DegradedStoreNeverReachesBadger (0.00s)
+=== RUN   TestClassifyOpenError_EnvironmentalWinsOverCorruption
+--- PASS: TestClassifyOpenError_EnvironmentalWinsOverCorruption (0.00s)
+=== RUN   TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot
+--- PASS: TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot (1.16s)
+=== RUN   TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt
+--- PASS: TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt (0.00s)
+=== RUN   TestImportRecord_KeyIsUnreachableFromLookups
+--- PASS: TestImportRecord_KeyIsUnreachableFromLookups (0.04s)
+=== RUN   TestOpenResilient_ResidualQuarantinesAreReported
+--- PASS: TestOpenResilient_ResidualQuarantinesAreReported (0.12s)
+=== RUN   TestLookupFaults_DegradedImpliesACountedFault
+--- PASS: TestLookupFaults_DegradedImpliesACountedFault (0.06s)
+=== RUN   TestInterruptedImport_QuarantinesAndRebuildsInOneRestart
+--- PASS: TestInterruptedImport_QuarantinesAndRebuildsInOneRestart (0.14s)
+=== RUN   TestOpenResilient_CleanOpenLeavesNoTrace
+--- PASS: TestOpenResilient_CleanOpenLeavesNoTrace (0.07s)
+=== RUN   TestImportRecord_InvalidRecordsAreRejected
+--- PASS: TestImportRecord_InvalidRecordsAreRejected (0.04s)
+=== RUN   TestLookup_VolumeDamageAfterHealthyOpenIsContained
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386e7b9286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestLookup_VolumeDamageAfterHealthyOpenIsContained (0.53s)
+=== RUN   TestImportRecord_RoundTripSurvivesReopen
+--- PASS: TestImportRecord_RoundTripSurvivesReopen (0.07s)
+=== RUN   TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds
+--- PASS: TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds (0.07s)
+=== RUN   TestBadgerFork_MemtableIDOutOfRangeIsAnError
+--- PASS: TestBadgerFork_MemtableIDOutOfRangeIsAnError (0.00s)
+=== RUN   TestCommunityDB_Stats
+--- PASS: TestCommunityDB_Stats (0.03s)
+=== RUN   TestOpen_CreateAndClose
+--- PASS: TestOpen_CreateAndClose (0.03s)
+=== RUN   TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f386e759286: runtime error: invalid memory address or nil pointer dereference"
+--- PASS: TestOpenResilient_RuntimeFaultThroughASymlinkRecoversTheTarget (0.57s)
+=== RUN   TestBadgerFork_TableFileIDIsUnsigned32
+--- PASS: TestBadgerFork_TableFileIDIsUnsigned32 (0.00s)
+=== RUN   TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot
+--- PASS: TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot (0.37s)
+=== RUN   TestCommunityDB_HasEntries
+--- PASS: TestCommunityDB_HasEntries (0.04s)
+=== RUN   TestImportRecord_FsyncOrderIsStructural
+--- PASS: TestImportRecord_FsyncOrderIsStructural (0.00s)
+PASS
+ok  	github.com/KidCarmi/Culvert/internal/catdb	186.521s
+-test.shuffle 1792734881194951541
+=== RUN   TestParseMapsLine
+--- PASS: TestParseMapsLine (0.00s)
+=== RUN   TestAbandonedMarkers_LiveAttemptIsNotAbandoned
+--- PASS: TestAbandonedMarkers_LiveAttemptIsNotAbandoned (0.00s)
+=== RUN   TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason
+--- PASS: TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason (0.00s)
+=== RUN   TestClassifyOpenError_StructuralEnvironmentalFaults
+--- PASS: TestClassifyOpenError_StructuralEnvironmentalFaults (0.00s)
+=== RUN   TestOpen_ExemptedErrorIsNeverQuarantined
+--- PASS: TestOpen_ExemptedErrorIsNeverQuarantined (0.00s)
+=== RUN   TestOpen_DirectoryAtFaultMarkerPathIsIgnored
+--- PASS: TestOpen_DirectoryAtFaultMarkerPathIsIgnored (0.00s)
+=== RUN   TestContainFault_PassesErrorsAndSuccessThrough
+--- PASS: TestContainFault_PassesErrorsAndSuccessThrough (0.00s)
+=== RUN   TestOpen_InterruptedImportMarkerClearedWhenStoreGone
+--- PASS: TestOpen_InterruptedImportMarkerClearedWhenStoreGone (0.00s)
+=== RUN   TestOpen_AbandonedMarkerQuarantinesBeforeOpening
+--- PASS: TestOpen_AbandonedMarkerQuarantinesBeforeOpening (0.00s)
+=== RUN   TestBeginAttempt_MarkerIsASibling
+--- PASS: TestBeginAttempt_MarkerIsASibling (0.00s)
+=== RUN   TestContainFault_FaultOutsideTheStoreIsRePanicked
+--- PASS: TestContainFault_FaultOutsideTheStoreIsRePanicked (0.00s)
+=== RUN   TestOpen_RecordedFaultRespectsALiveLockHolder
+--- PASS: TestOpen_RecordedFaultRespectsALiveLockHolder (0.00s)
+=== RUN   TestContainFault_RestoresPanicOnFault
+--- PASS: TestContainFault_RestoresPanicOnFault (0.00s)
+=== RUN   TestOpen_HealthyStoreTouchesNothing
+--- PASS: TestOpen_HealthyStoreTouchesNothing (0.00s)
+=== RUN   TestAddrInStoreMapping_RequiresAPathBoundary
+--- PASS: TestAddrInStoreMapping_RequiresAPathBoundary (0.13s)
+=== RUN   TestQuarantinedCopies_IsChronological
+--- PASS: TestQuarantinedCopies_IsChronological (0.00s)
+=== RUN   TestContainFault_StoreReachedThroughASymlinkIsContained
+--- PASS: TestContainFault_StoreReachedThroughASymlinkIsContained (0.00s)
+=== RUN   TestQuarantineDir_PrunesToTheCap
+--- PASS: TestQuarantineDir_PrunesToTheCap (0.00s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.00s)
+=== RUN   TestClassifyOpenError_Table
+=== RUN   TestClassifyOpenError_Table/nil
+=== RUN   TestClassifyOpenError_Table/torn_manifest
+=== RUN   TestClassifyOpenError_Table/corrupt_manifest
+=== RUN   TestClassifyOpenError_Table/checksum
+=== RUN   TestClassifyOpenError_Table/missing_table
+=== RUN   TestClassifyOpenError_Table/keyregistry
+=== RUN   TestClassifyOpenError_Table/truncate
+=== RUN   TestClassifyOpenError_Table/invalid_magic
+=== RUN   TestClassifyOpenError_Table/live_owner
+=== RUN   TestClassifyOpenError_Table/not_a_dir
+=== RUN   TestClassifyOpenError_Table/permission
+=== RUN   TestClassifyOpenError_Table/read-only
+=== RUN   TestClassifyOpenError_Table/no_space
+=== RUN   TestClassifyOpenError_Table/emfile
+=== RUN   TestClassifyOpenError_Table/eio
+=== RUN   TestClassifyOpenError_Table/unrecognised
+--- PASS: TestClassifyOpenError_Table (0.00s)
+    --- PASS: TestClassifyOpenError_Table/nil (0.00s)
+    --- PASS: TestClassifyOpenError_Table/torn_manifest (0.00s)
+    --- PASS: TestClassifyOpenError_Table/corrupt_manifest (0.00s)
+    --- PASS: TestClassifyOpenError_Table/checksum (0.00s)
+    --- PASS: TestClassifyOpenError_Table/missing_table (0.00s)
+    --- PASS: TestClassifyOpenError_Table/keyregistry (0.00s)
+    --- PASS: TestClassifyOpenError_Table/truncate (0.00s)
+    --- PASS: TestClassifyOpenError_Table/invalid_magic (0.00s)
+    --- PASS: TestClassifyOpenError_Table/live_owner (0.00s)
+    --- PASS: TestClassifyOpenError_Table/not_a_dir (0.00s)
+    --- PASS: TestClassifyOpenError_Table/permission (0.00s)
+    --- PASS: TestClassifyOpenError_Table/read-only (0.00s)
+    --- PASS: TestClassifyOpenError_Table/no_space (0.00s)
+    --- PASS: TestClassifyOpenError_Table/emfile (0.00s)
+    --- PASS: TestClassifyOpenError_Table/eio (0.00s)
+    --- PASS: TestClassifyOpenError_Table/unrecognised (0.00s)
+=== RUN   TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery (0.00s)
+=== RUN   TestOpenAttempt_EndIsSafeOnAZeroValue
+--- PASS: TestOpenAttempt_EndIsSafeOnAZeroValue (0.00s)
+=== RUN   TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker
+--- PASS: TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker (0.00s)
+=== RUN   TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery (0.00s)
+=== RUN   TestOpen_ReplacementFailureIsReportedNotRetried
+--- PASS: TestOpen_ReplacementFailureIsReportedNotRetried (0.00s)
+=== RUN   TestOpen_RecordedFaultQuarantinesBeforeOpening
+--- PASS: TestOpen_RecordedFaultQuarantinesBeforeOpening (0.00s)
+=== RUN   TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery
+--- PASS: TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery (0.00s)
+=== RUN   TestOpen_InterruptedImportQuarantinesAndRebuilds
+--- PASS: TestOpen_InterruptedImportQuarantinesAndRebuilds (0.00s)
+=== RUN   TestContainFault_UnreadableMapsRePanics
+--- PASS: TestContainFault_UnreadableMapsRePanics (0.00s)
+=== RUN   TestRecordFault_DirectorySyncFailureIsReported
+--- PASS: TestRecordFault_DirectorySyncFailureIsReported (0.00s)
+=== RUN   TestContainFault_InStoreAddressFromInjectedMapsIsContained
+--- PASS: TestContainFault_InStoreAddressFromInjectedMapsIsContained (0.00s)
+=== RUN   TestEmptyPathIsInert
+--- PASS: TestEmptyPathIsInert (0.00s)
+=== RUN   TestOpen_EnvironmentalFaultNeverQuarantines
+--- PASS: TestOpen_EnvironmentalFaultNeverQuarantines (0.00s)
+=== RUN   TestContainFault_MemoryFaultBecomesError
+    faultguard_test.go:65: contained: storeguard: memory fault reading the store's mapped file at 0x7f07982d2000: runtime error: invalid memory address or nil pointer dereference
+--- PASS: TestContainFault_MemoryFaultBecomesError (0.00s)
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist[1]
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist?
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist*
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist\x
+--- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath (0.01s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist[1] (0.00s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist? (0.00s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist* (0.00s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist\x (0.00s)
+=== RUN   TestContainFault_NilDerefIsNotAStoreFault
+    faultguard_test.go:89: re-panicked as expected: runtime error: invalid memory address or nil pointer dereference
+--- PASS: TestContainFault_NilDerefIsNotAStoreFault (0.00s)
+=== RUN   TestMarkImportPending_IsASibling
+--- PASS: TestMarkImportPending_IsASibling (0.00s)
+=== RUN   TestPolicy_OnlySubtracts
+--- PASS: TestPolicy_OnlySubtracts (0.00s)
+=== RUN   TestOpen_NoImportMarkerNeverQuarantines
+--- PASS: TestOpen_NoImportMarkerNeverQuarantines (0.00s)
+=== RUN   TestOpen_InterruptedImportIsLeastSevere
+--- PASS: TestOpen_InterruptedImportIsLeastSevere (0.00s)
+=== RUN   TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce
+--- PASS: TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce (0.00s)
+=== RUN   TestOpen_RecordedFaultForAMissingStoreIsCleared
+--- PASS: TestOpen_RecordedFaultForAMissingStoreIsCleared (0.00s)
+=== RUN   TestClassifyOpenError_EnvironmentalOutranksEverything
+--- PASS: TestClassifyOpenError_EnvironmentalOutranksEverything (0.00s)
+=== RUN   TestDiscovery_DoesNotClaimANeighboursMarker
+--- PASS: TestDiscovery_DoesNotClaimANeighboursMarker (0.00s)
+=== RUN   TestOpen_UnknownErrorDegrades
+--- PASS: TestOpen_UnknownErrorDegrades (0.00s)
+=== RUN   TestParseMapsLine
+--- PASS: TestParseMapsLine (0.00s)
+=== RUN   TestAbandonedMarkers_LiveAttemptIsNotAbandoned
+--- PASS: TestAbandonedMarkers_LiveAttemptIsNotAbandoned (0.00s)
+=== RUN   TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason
+--- PASS: TestApplyQuarantine_MissingDirectoryIsSkippedWithAReason (0.00s)
+=== RUN   TestClassifyOpenError_StructuralEnvironmentalFaults
+--- PASS: TestClassifyOpenError_StructuralEnvironmentalFaults (0.00s)
+=== RUN   TestOpen_ExemptedErrorIsNeverQuarantined
+--- PASS: TestOpen_ExemptedErrorIsNeverQuarantined (0.00s)
+=== RUN   TestOpen_DirectoryAtFaultMarkerPathIsIgnored
+--- PASS: TestOpen_DirectoryAtFaultMarkerPathIsIgnored (0.00s)
+=== RUN   TestContainFault_PassesErrorsAndSuccessThrough
+--- PASS: TestContainFault_PassesErrorsAndSuccessThrough (0.00s)
+=== RUN   TestOpen_InterruptedImportMarkerClearedWhenStoreGone
+--- PASS: TestOpen_InterruptedImportMarkerClearedWhenStoreGone (0.00s)
+=== RUN   TestOpen_AbandonedMarkerQuarantinesBeforeOpening
+--- PASS: TestOpen_AbandonedMarkerQuarantinesBeforeOpening (0.00s)
+=== RUN   TestBeginAttempt_MarkerIsASibling
+--- PASS: TestBeginAttempt_MarkerIsASibling (0.00s)
+=== RUN   TestContainFault_FaultOutsideTheStoreIsRePanicked
+--- PASS: TestContainFault_FaultOutsideTheStoreIsRePanicked (0.00s)
+=== RUN   TestOpen_RecordedFaultRespectsALiveLockHolder
+--- PASS: TestOpen_RecordedFaultRespectsALiveLockHolder (0.00s)
+=== RUN   TestContainFault_RestoresPanicOnFault
+--- PASS: TestContainFault_RestoresPanicOnFault (0.00s)
+=== RUN   TestOpen_HealthyStoreTouchesNothing
+--- PASS: TestOpen_HealthyStoreTouchesNothing (0.00s)
+=== RUN   TestAddrInStoreMapping_RequiresAPathBoundary
+--- PASS: TestAddrInStoreMapping_RequiresAPathBoundary (0.00s)
+=== RUN   TestQuarantinedCopies_IsChronological
+--- PASS: TestQuarantinedCopies_IsChronological (0.00s)
+=== RUN   TestContainFault_StoreReachedThroughASymlinkIsContained
+--- PASS: TestContainFault_StoreReachedThroughASymlinkIsContained (0.00s)
+=== RUN   TestQuarantineDir_PrunesToTheCap
+--- PASS: TestQuarantineDir_PrunesToTheCap (0.00s)
+=== RUN   TestQuarantineDir_RefusesWithoutAHeldLock
+--- PASS: TestQuarantineDir_RefusesWithoutAHeldLock (0.00s)
+=== RUN   TestClassifyOpenError_Table
+=== RUN   TestClassifyOpenError_Table/nil
+=== RUN   TestClassifyOpenError_Table/torn_manifest
+=== RUN   TestClassifyOpenError_Table/corrupt_manifest
+=== RUN   TestClassifyOpenError_Table/checksum
+=== RUN   TestClassifyOpenError_Table/missing_table
+=== RUN   TestClassifyOpenError_Table/keyregistry
+=== RUN   TestClassifyOpenError_Table/truncate
+=== RUN   TestClassifyOpenError_Table/invalid_magic
+=== RUN   TestClassifyOpenError_Table/live_owner
+=== RUN   TestClassifyOpenError_Table/not_a_dir
+=== RUN   TestClassifyOpenError_Table/permission
+=== RUN   TestClassifyOpenError_Table/read-only
+=== RUN   TestClassifyOpenError_Table/no_space
+=== RUN   TestClassifyOpenError_Table/emfile
+=== RUN   TestClassifyOpenError_Table/eio
+=== RUN   TestClassifyOpenError_Table/unrecognised
+--- PASS: TestClassifyOpenError_Table (0.00s)
+    --- PASS: TestClassifyOpenError_Table/nil (0.00s)
+    --- PASS: TestClassifyOpenError_Table/torn_manifest (0.00s)
+    --- PASS: TestClassifyOpenError_Table/corrupt_manifest (0.00s)
+    --- PASS: TestClassifyOpenError_Table/checksum (0.00s)
+    --- PASS: TestClassifyOpenError_Table/missing_table (0.00s)
+    --- PASS: TestClassifyOpenError_Table/keyregistry (0.00s)
+    --- PASS: TestClassifyOpenError_Table/truncate (0.00s)
+    --- PASS: TestClassifyOpenError_Table/invalid_magic (0.00s)
+    --- PASS: TestClassifyOpenError_Table/live_owner (0.00s)
+    --- PASS: TestClassifyOpenError_Table/not_a_dir (0.00s)
+    --- PASS: TestClassifyOpenError_Table/permission (0.00s)
+    --- PASS: TestClassifyOpenError_Table/read-only (0.00s)
+    --- PASS: TestClassifyOpenError_Table/no_space (0.00s)
+    --- PASS: TestClassifyOpenError_Table/emfile (0.00s)
+    --- PASS: TestClassifyOpenError_Table/eio (0.00s)
+    --- PASS: TestClassifyOpenError_Table/unrecognised (0.00s)
+=== RUN   TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerForAMissingStoreThatCannotBeClearedStopsRecovery (0.00s)
+=== RUN   TestOpenAttempt_EndIsSafeOnAZeroValue
+--- PASS: TestOpenAttempt_EndIsSafeOnAZeroValue (0.00s)
+=== RUN   TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker
+--- PASS: TestDiscovery_TempMarkerIsNotSeenAsAFinalMarker (0.00s)
+=== RUN   TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery
+--- PASS: TestOpen_FaultMarkerThatCannotBeClearedStopsRecovery (0.01s)
+=== RUN   TestOpen_ReplacementFailureIsReportedNotRetried
+--- PASS: TestOpen_ReplacementFailureIsReportedNotRetried (0.00s)
+=== RUN   TestOpen_RecordedFaultQuarantinesBeforeOpening
+--- PASS: TestOpen_RecordedFaultQuarantinesBeforeOpening (0.00s)
+=== RUN   TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery
+--- PASS: TestOpen_FaultMarkerClearThatCannotBeSyncedStopsRecovery (0.00s)
+=== RUN   TestOpen_InterruptedImportQuarantinesAndRebuilds
+--- PASS: TestOpen_InterruptedImportQuarantinesAndRebuilds (0.00s)
+=== RUN   TestContainFault_UnreadableMapsRePanics
+--- PASS: TestContainFault_UnreadableMapsRePanics (0.00s)
+=== RUN   TestRecordFault_DirectorySyncFailureIsReported
+--- PASS: TestRecordFault_DirectorySyncFailureIsReported (0.00s)
+=== RUN   TestContainFault_InStoreAddressFromInjectedMapsIsContained
+--- PASS: TestContainFault_InStoreAddressFromInjectedMapsIsContained (0.00s)
+=== RUN   TestEmptyPathIsInert
+--- PASS: TestEmptyPathIsInert (0.00s)
+=== RUN   TestOpen_EnvironmentalFaultNeverQuarantines
+--- PASS: TestOpen_EnvironmentalFaultNeverQuarantines (0.00s)
+=== RUN   TestContainFault_MemoryFaultBecomesError
+    faultguard_test.go:65: contained: storeguard: memory fault reading the store's mapped file at 0x7f07982d2000: runtime error: invalid memory address or nil pointer dereference
+--- PASS: TestContainFault_MemoryFaultBecomesError (0.00s)
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist[1]
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist?
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist*
+=== RUN   TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist\x
+--- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath (0.01s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist[1] (0.00s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist? (0.00s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist* (0.00s)
+    --- PASS: TestDiscovery_IsNotFooledByGlobMetacharactersInThePath/hist\x (0.00s)
+=== RUN   TestContainFault_NilDerefIsNotAStoreFault
+    faultguard_test.go:89: re-panicked as expected: runtime error: invalid memory address or nil pointer dereference
+--- PASS: TestContainFault_NilDerefIsNotAStoreFault (0.00s)
+=== RUN   TestMarkImportPending_IsASibling
+--- PASS: TestMarkImportPending_IsASibling (0.00s)
+=== RUN   TestPolicy_OnlySubtracts
+--- PASS: TestPolicy_OnlySubtracts (0.00s)
+=== RUN   TestOpen_NoImportMarkerNeverQuarantines
+--- PASS: TestOpen_NoImportMarkerNeverQuarantines (0.00s)
+=== RUN   TestOpen_InterruptedImportIsLeastSevere
+--- PASS: TestOpen_InterruptedImportIsLeastSevere (0.01s)
+=== RUN   TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce
+--- PASS: TestOpen_CorruptionQuarantinesAndRetriesExactlyOnce (0.00s)
+=== RUN   TestOpen_RecordedFaultForAMissingStoreIsCleared
+--- PASS: TestOpen_RecordedFaultForAMissingStoreIsCleared (0.00s)
+=== RUN   TestClassifyOpenError_EnvironmentalOutranksEverything
+--- PASS: TestClassifyOpenError_EnvironmentalOutranksEverything (0.00s)
+=== RUN   TestDiscovery_DoesNotClaimANeighboursMarker
+--- PASS: TestDiscovery_DoesNotClaimANeighboursMarker (0.00s)
+=== RUN   TestOpen_UnknownErrorDegrades
+--- PASS: TestOpen_UnknownErrorDegrades (0.00s)
+PASS
+ok  	github.com/KidCarmi/Culvert/internal/storeguard	1.323s
+=== end raw output ===
+exit-status: 0
+finished-utc: 2026-10-23T05:57:47Z

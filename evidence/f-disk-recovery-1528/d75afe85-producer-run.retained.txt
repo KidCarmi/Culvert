@@ -1,0 +1,12 @@
+# F-DISK recovery Linux -race evidence (ASTRA correction 6304005247 handoff)
+generated-at: 2026-10-20T23:26:13Z
+source-sha: d75afe85 (review/1528-fdisk-splash-fix tip) — the run's working tree carried heldwriter_recovery_test.go staged; it was committed as d75afe85 immediately after, byte-identical. Checkout d75afe85 to reproduce.
+go-version: go version go1.26.9 linux/amd64
+uname: Linux 6.18.44-fc-v139 x86_64 GNU/Linux
+goenv: GOOS=linux GOARCH=amd64 CGO_ENABLED=1
+command: go test -race -count=2 -shuffle=on ./internal/feedsync/ ./internal/catdb/ ./internal/storeguard/
+=== output ===
+ok  	github.com/KidCarmi/Culvert/internal/feedsync	13.483s
+ok  	github.com/KidCarmi/Culvert/internal/catdb	223.543s
+ok  	github.com/KidCarmi/Culvert/internal/storeguard	1.524s
+exit=0
