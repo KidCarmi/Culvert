@@ -10910,3 +10910,27 @@ forbids.
   session.** This is the honest trade and the reason it is counted and
   surfaced: refusing to admit is better than evicting a local entry, and a
   silent drop would be worse than either.
+
+### 46.9 Reconciled with SEC-REVEXP-1 when main was brought in
+
+SEC-REVEXP-1 merged to main while this sweep was open and made
+`revocationExpired` (Decode's acceptance test, transposed) the one answer to
+"has this revocation's lifetime ended?". This sweep had added three decision
+points of its own, each written against the older predicate, which disagrees
+with Decode for the whole wall-clock second numbered `s.Exp`:
+
+* `RevokeVerified` refused a logout in that second as `expired`, while Decode
+  still accepted the cookie, so the logged-out session authenticated until the
+  second ended;
+* `sweepLocked`, now the only eviction step in front of the gossip export and
+  the revocations file, dropped token and user entries in that second, which
+  reintroduced SEC-REVEXP-1 through the shared sweep (main's own
+  `TestRevocationExpiry_ExportDropsOnlyWhatDecodeRejects` fails against it);
+* the provenance-trusted reload refused a verified entry in that second.
+
+All three now use the oracle. Gates in
+`internal/session/revocation_bounds_expiry_test.go`, each verified failing
+with the older predicate restored at its site. Main's
+`TestRevocationExpiry_MalformedPeerExpiries` pinned a far-future peer expiry
+as admitted and named this sweep as the place it would change; it now asserts
+the `far_future` refusal, and that an in-lifetime peer expiry is still admitted.

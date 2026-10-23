@@ -229,7 +229,11 @@ func (r *RevocationList) RevokeVerified(cookieValue string) (changed bool, reaso
 	}
 
 	exp := time.Unix(s.Exp, 0)
-	if !time.Now().Before(exp) {
+	// SEC-REVEXP-1: the same oracle Decode's acceptance test is transposed
+	// into. A cookie in the final second of its life is still honoured by
+	// Decode, so refusing to revoke it as "expired" would leave a logged-out
+	// session authenticating until that second ends.
+	if revocationExpired(time.Now(), exp) {
 		// Already dead by its own terms; Decode rejects it on expiry alone.
 		noteRefusal(RevokeExpired)
 		return false, RevokeExpired
@@ -260,16 +264,23 @@ func (r *RevocationList) sweepIfDueLocked(now time.Time) {
 }
 
 // sweepLocked drops every entry whose own expiry has passed. Caller holds r.mu.
+//
+// SEC-REVEXP-1: the eviction test is revocationExpired, Decode's acceptance
+// test transposed, so the sweep can never drop an entry while a cookie it
+// revokes would still be honoured. ExportRevocations and exportPersisted
+// reach the gossip wire and the on-disk file only through this sweep, so a
+// second, inline eviction rule there would be a second dialect for one
+// question.
 func (r *RevocationList) sweepLocked(now time.Time) {
 	r.sinceSweep = 0
 	for tok, exp := range r.tokens {
-		if now.After(exp) {
+		if revocationExpired(now, exp) {
 			delete(r.tokens, tok)
 			delete(r.verified, tok)
 		}
 	}
 	for user, exp := range r.users {
-		if now.After(exp) {
+		if revocationExpired(now, exp) {
 			delete(r.users, user)
 		}
 	}
@@ -285,7 +296,7 @@ func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time) 
 		return false
 	}
 	exp := time.Unix(e.Expiry, 0)
-	if !now.Before(exp) {
+	if revocationExpired(now, exp) { // SEC-REVEXP-1: the one expiry oracle
 		return false // already expired; not a refusal worth counting
 	}
 	// No genuine session outlives MaxSessionLifetime, so an untrusted expiry
