@@ -380,6 +380,137 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the MCP acceptance PKI check). The `go.mod` toolchain line and both
   Docker builder images move together; the `go` language minimum is
   unchanged.
+- An inspected (TLS-decrypted) tunnel enforced policy on the CONNECT authority
+  but forwarded each inner request's own `Host` / `:authority` upstream verbatim,
+  and nothing compared the two (SEC-TUNHOST-1). A CONNECT is authorized **once**:
+  `handleTunnelInspect` derives `hostOnly` from the CONNECT line and everything
+  downstream is decided against it — `policyStore.Evaluate` ran on it, the
+  decryption profile resolved on it, the upstream TLS `ServerName` is it, and
+  every log row, scan verdict and CDR decision the tunnel produces is attributed
+  to it, because `runInspectExchange` threads `ex.host` and never `ex.req.Host`.
+
+  The decrypted stream, however, carries its own destination on every request.
+  `rq.Write` writes `req.Host` on the H1 leg and `upstreamCC.RoundTrip` sends it
+  as `:authority` on the H2 leg, so a client could open a tunnel to a destination
+  policy allowed and then ask that connection for a different one:
+
+      CONNECT allowed.example.com:443   → evaluated, allowed, MITM established
+        GET / Host: blocked.example.com → forwarded verbatim
+
+  The upstream connection is pinned to the CONNECT target's address, so this is
+  not SSRF — but any shared front end (a CDN, a cloud load balancer, any
+  multi-tenant vhost) routes by `Host`/`:authority`, so the response is the one
+  the **client** named, not the one policy allowed. Policy is consulted once, on
+  a host the client then declines to use, and the request log records the
+  authorized host for a retrieval of the unauthorized one, so the bypass is also
+  invisible to the operator reviewing traffic afterwards. Scan and CDR verdicts
+  are mis-keyed the same way. The H2 path's own comment had recorded the gap as a
+  pending refinement ("strict `:authority` pinning / 421 handling").
+
+  The inner host is now pinned to the CONNECT authority in `runInspectExchange`,
+  ahead of the round trip and of the header scrub — so an unauthorized
+  destination is never fetched, and the refusal does not depend on anything the
+  scrub rewrites. Both sides are reduced identically (port and IPv6 brackets
+  stripped, then IDNA-canonicalized), so the spellings the matchers already fold
+  to one destination still pass: case, a trailing dot, an explicit port, and a
+  U-label against the A-label the CONNECT carried. The pin anchors on the CONNECT
+  authority rather than the client's SNI deliberately: a client controls both its
+  SNI and its `Host`, so it can make them agree with each other and still name a
+  destination policy never saw — only the authorizing value is a safe anchor.
+  Fail-closed: a host that cannot be canonicalized on either side is refused
+  rather than compared loosely. Refusing cannot break a conforming client, since
+  the forged leaf carries a single SAN (`DNSNames` is exactly `[]string{host}`),
+  so HTTP/2 connection reuse for a second origin (RFC 9113 §9.1.1) is never
+  certificate-authorized; the client may open a tunnel for the host it actually
+  wants, which then receives its own policy decision. One gate serves both
+  protocols because `runInspectExchange` is the shared enforcement seam
+  (invariant C5).
+
+  **Scope, stated rather than implied:** the pin does not fire when the CONNECT
+  authority is an IP literal. A client that resolved the name itself legitimately
+  CONNECTs to an address and names the origin in SNI and `Host` (`curl
+  --resolve`, any client with its own resolver, and the shape this repository's
+  own inspect harness models by passing `target` and `serverName` separately to
+  `connectAndTLS`), so there is no name to compare and refusing would break
+  supported traffic. A deployment whose rules authorize by IP or CIDR therefore
+  still gets no name-level enforcement on the inner request, exactly as before.
+  Closing that means *evaluating* policy on the inner host rather than comparing
+  it — re-running the rulebase, the decryption profile and the attribution per
+  inner request — which is a policy-engine change, not a gate, and is the
+  recorded follow-up. This change closes the case that is both exploitable today
+  and decidable at this seam: a tunnel authorized for a **name**, reused for a
+  different name.
+
+  **Correction round — an absent inner authority is not harmless (Codex P1, PR
+  #1632).** The first revision treated an empty inner host as pinned, reasoning
+  that it names no competing destination and that an origin requiring a `Host`
+  would reject it anyway. The second half was the real error: it assumed the
+  ORIGIN's behaviour instead of enforcing here, which is the same fail-open
+  asymmetry this gate exists to remove. Measured against the tree rather than
+  argued — `runH1InspectLoop` reads inner requests with `http.ReadRequest`, NOT
+  through an `http.Server`, so the server's "missing required Host header" 400
+  never runs; `ReadRequest` accepts `"GET / HTTP/1.1\r\n\r\n"` and yields
+  `req.Host == ""`, and `Request.Write` then serializes a literal `Host: ` and
+  returns no error. A shared front end with a default or fallback virtual host
+  (an nginx `server_name _`, a CDN catch-all) answers such a request from that
+  vhost — a destination policy never evaluated, with the scan verdicts and the
+  log row still attributed to the CONNECT host. Empty inner hosts are now
+  refused, ahead of the IP-literal scope skip, because the default-vhost concern
+  does not depend on the tunnel target being a name. Substituting the authorized
+  authority was considered and rejected: it would have the gateway synthesize a
+  `Host` the client never sent. `TestInnerHostPin_EmptyInnerHostIsRefused` gates
+  it and states the mechanism rather than trusting the claim — it proves against
+  the real stdlib that the request is both accepted by the reader this path uses
+  and serialized with an empty `Host`, then asserts the refusal, so the branch
+  cannot be reverted by repeating the original reasoning.
+
+  **Correction round 2 — the comparison must not repair what the wire keeps
+  (Codex P1, PR #1632).** Square brackets are legal only around an IP literal,
+  but `hostutil.StripHostPort` ends in `strings.Trim(host, "[]")` — correct for
+  its own callers, which must accept the de-bracketed IPv6 shapes that reach
+  scan/bypass lookups — so it turned `Host: [allowed.example.com]` into the bare
+  authorized name. Measured, not argued: `http.ReadRequest` accepts that header
+  and keeps the brackets in `req.Host`, and `Request.Write` forwards those bytes
+  **verbatim**. So the pin saw a match for the authorized host and forwarded a
+  bracketed authority no vhost is configured for, letting a shared front end
+  answer from its default vhost — this gate's own bypass, reached *through* the
+  comparison rather than around it. The inner authority's bracket syntax is now
+  validated before anything is stripped: brackets must enclose a value that
+  parses as an IP, and a stray, unmatched or nested bracket is refused. The
+  check sits in this gate, not in `StripHostPort`, because that helper is a
+  shared seam the threat feed, DPI scanner, scan-exclusion matcher, autoexclude
+  cache and traffic redactor all read through. Only the inner side is checked:
+  `handleTunnelInspect` derives `hostOnly` through `net.SplitHostPort`, so a
+  bracketed CONNECT authority is already de-bracketed consistently for policy,
+  the dial and the upstream `ServerName`.
+
+  The sibling spellings were measured too, and are deliberately still accepted
+  because they are not this defect: a U-label is sent as the A-label by
+  `Request.Write` (`bücher.example.com` goes out as `xn--bcher-kva.example.com`),
+  so its forwarded bytes already match what was authorized; the `Host` field is
+  case-insensitive; and a trailing root dot is a valid authority for the same DNS
+  name. `TestInnerHostPin_BracketedDNSAuthorityIsRefused` gates the refusal and
+  pins the U-label control beside it, both asserted against the real stdlib
+  before the predicate is consulted, since the defect is exactly that the
+  comparison and the wire disagreed.
+
+  New counter `culvert_proxy_inner_host_mismatch_blocked_total` (always emitted,
+  so a flat zero means "no client has done this", never "the gate is off") and an
+  `INNER_HOST_MISMATCH` log line naming **both** hosts, since either alone says
+  nothing; both are client-influenced and go through `sanitizeLog` + `%q`
+  (CWE-117). Gates: the defect gate asserts the upstream was never *contacted*,
+  not merely that the exchange was blocked — a refusal taken after the round trip
+  would still have fetched the unauthorized resource — and was verified failing
+  against the verbatim pre-fix body. Controls pin that the authorized
+  destination still flows, that the client-resolved-address shape still flows on
+  both IPv4 and IPv6, that a self-consistent SNI/`Host` pair naming an
+  unauthorized destination is still refused (this fails CI if the pin is ever
+  "simplified" to compare against the SNI), and that `MatchFQDNNorm`'s
+  subdomain-inclusive semantics — correct for a policy rule, wrong here — are not
+  reused for the comparison. Plus the boundary table (case, trailing dot,
+  U-label/A-label, ports, IPv6 brackets, empty hosts, unnormalizable input), the
+  403 wire bytes on each protocol responder, and 400 concurrent refusals under
+  `-race`.
 
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
