@@ -1466,9 +1466,12 @@ is_fresh_deployment() {
 secret_already_set() {
   local var="$1" envfile="$2"
   [[ -n "${!var:-}" ]] && return 0
-  # Strip CR first: a CRLF-edited .env's empty "VAR=\r" must not count as set
-  # (env_put normalizes CRLF on write; the reader has to agree).
-  [[ -f "$envfile" ]] && tr -d '\r' < "$envfile" 2>/dev/null | grep -Eq "^${var}=.+"
+  # The first value char must not be CR: a CRLF-edited .env's empty "VAR=\r"
+  # must not count as set (env_put normalizes CRLF on write; the reader has to
+  # agree). No pipeline: under pipefail an early-exiting grep -q would SIGPIPE
+  # the upstream command and turn a match into a failure.
+  local cr=$'\r'
+  [[ -f "$envfile" ]] && grep -Eq "^${var}=[^${cr}]" "$envfile" 2>/dev/null
 }
 
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
