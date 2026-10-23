@@ -1,27 +1,28 @@
 package feedsync
 
 // heldwriter_recovery_test.go — Linux source-level evidence for the held-writer
-// abandon path (ASTRA 2026-10-20 held-writer review, correction 6304005247:
-// "Linux source-level held-writer/late-return/... marker tests ... can be
-// prepared and evidenced against exact review-branch source in an isolated
-// Linux test environment"). These run HERE, on Linux, against the review-branch
-// source — they are NOT the replacement-OVA / ESXi gates (physical ENOSPC,
-// mmap/SIGBUS, real power loss and a booted recovery remain a later candidate
-// step). They need BeginImport's POSIX directory fsync, so they skip off Linux
-// exactly like TestSyncRound_QuiescesAfterAbandonedWrite.
+// abandon path (ASTRA held-writer review; correction 6304005247; d75afe85 audit
+// 6304420199). These run on Linux against review-branch source. They are NOT
+// the replacement-OVA / ESXi gates: physical ENOSPC, mmap/SIGBUS, real power
+// loss, a service-manager restart and a booted recovery remain later candidate
+// steps. They need BeginImport's POSIX directory fsync, so they skip off Linux.
 //
-// What they add beyond TestSyncRound_QuiescesAfterAbandonedWrite (which proves
-// no SECOND BulkWrite starts): they RELEASE the abandoned writer, let its late
-// write COMPLETE, and prove the late completion is harmless — the store is never
-// certified and the import-pending marker is never cleared, so the next boot
-// quarantines and discards the abandoned data. This is the "late-return",
-// "no early marker clear" and "post-restart integrity" evidence ASTRA named,
-// settled node-locally where cancellation is impossible (badger WriteBatch.Flush
-// takes no context — the latched-fault/controlled-restart path is the substitute).
+// Beside TestSyncRound_QuiescesAfterAbandonedWrite (no SECOND BulkWrite starts),
+// these RELEASE the abandoned writer and JOIN its actual BulkWrite return (the
+// writeReturnedForTest seam — quiescence is never inferred from visible keys),
+// then assert, AFTER that join:
+//   - the late completion did not certify the store and did not clear the
+//     import-pending marker;
+//   - the next open quarantines it as an interrupted import; a SECOND clean
+//     open neither re-quarantines nor changes the retained-copy inventory;
+//   - a fresh import then certifies, and a further clean open keeps the
+//     certified data with no new quarantine.
 
 import (
 	"os"
 	"runtime"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,33 +30,41 @@ import (
 	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
-// stallParkedWrite installs a fault that parks the FIRST BulkWrite on release
-// (so the write neither returns nor degrades the store — the pure stall path),
-// runs one syncRound that must abandon it, and returns the release func and the
-// store dir with the writer still in flight.
-func stallParkedWrite(t *testing.T) (s *Syncer, db *catdb.CommunityDB, dir string, release func(), domains []string) {
+func skipOffLinux(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("BeginImport needs POSIX directory fsync; Linux source-level test skipped on %s", runtime.GOOS)
+	}
+}
+
+// abandonParkedWrite opens a store, parks its first BulkWrite, runs one
+// syncRound that must abandon it (pure stall path: the store is not degraded),
+// and returns with the writer still parked. The DB Close is registered before
+// the parked-writer helper, so teardown is release -> join -> close.
+func abandonParkedWrite(t *testing.T) (s *Syncer, db *catdb.CommunityDB, closeDB func() error, dir, url string, p *parkedWriter, domains []string) {
 	t.Helper()
 	withWatchdogTimings(t, time.Second, 20*time.Millisecond) // stall fires fast; no degrade poll
-	url, dl, _ := controlledFeed(t, 30)
+	url, domains, _ = controlledFeed(t, 30)
 	dir = t.TempDir()
 	db = openStore(t, dir)
-	rel := make(chan struct{})
-	var once bool
-	db.SetBulkWriteFaultForTest(func(n int) error {
-		if n == 1 && !once { // park the writer mid-write, exactly once
-			once = true
-			<-rel
-		}
-		return nil
-	})
+	var once sync.Once
+	var closeErr error
+	closeDB = func() error { once.Do(func() { closeErr = db.Close() }); return closeErr }
+	t.Cleanup(func() { _ = closeDB() }) // idempotent; runs AFTER the writer teardown
+	p = newParkedWriter(t)              // registered after Close => its teardown runs first
+	db.SetBulkWriteFaultForTest(p.hook(nil))
 	s = New(db, url, 24*time.Hour)
+	p.attach(s)
 	if s.syncRound() {
 		t.Fatal("a stalled import must not count as a sync")
 	}
 	if !s.writeAbandoned.Load() {
 		t.Fatal("a stalled BulkWrite must latch writeAbandoned")
 	}
-	return s, db, dir, func() { close(rel) }, dl
+	if !p.started.Load() {
+		t.Fatal("the BulkWrite never reached the parked write")
+	}
+	return s, db, closeDB, dir, url, p, domains
 }
 
 func markerPresent(t *testing.T, dir string) bool {
@@ -67,98 +76,143 @@ func markerPresent(t *testing.T, dir string) bool {
 	return err == nil
 }
 
-// TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker proves the abandoned
-// writer's LATE completion cannot certify the store: syncRound abandoned before
-// CompleteImport, so when the parked write finally flushes its (stale) data the
-// store stays uncertified and the import-pending marker stays set — the next
-// boot will quarantine it. This is the overwrite hazard's real closure: the Old
-// writer may still land, but it can never land over a CERTIFIED store, because
-// quiescence guaranteed no writer certified one.
+// TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker: the abandoned writer's
+// late return — joined at the actual BulkWrite boundary — cannot certify the
+// store or clear the marker, because syncRound abandoned before CompleteImport
+// and quiescence admits no other writer.
 func TestHeldWriter_LateReturnDoesNotCertifyAndKeepsMarker(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skipf("BeginImport needs POSIX directory fsync; Linux source-level test skipped on %s", runtime.GOOS)
-	}
-	s, db, dir, release, domains := stallParkedWrite(t)
+	skipOffLinux(t)
+	s, db, _, dir, _, p, domains := abandonParkedWrite(t)
 
-	// Before the late return: uncertified, marker present (no early clear).
 	if s.ImportComplete() {
 		t.Fatal("an abandoned import must not be certified")
 	}
 	if !markerPresent(t, dir) {
-		t.Fatal("the import-pending marker must still be present after an abandoned write (no early clear)")
+		t.Fatal("the import-pending marker must be present after an abandoned write (no early clear)")
 	}
 
-	// Release the parked writer and let its late write COMPLETE (all domains land).
-	release()
-	deadline := time.Now().Add(10 * time.Second)
-	for present(db, domains) < len(domains) {
-		if time.Now().After(deadline) {
-			t.Fatalf("the released writer never completed its late flush: %d/%d present", present(db, domains), len(domains))
-		}
-		time.Sleep(5 * time.Millisecond)
+	p.release()
+	if err := p.join(); err != nil { // the ACTUAL BulkWrite return, and its result
+		t.Fatalf("the released writer returned an error: %v", err)
 	}
 
-	// After the late return: STILL uncertified, marker STILL present. The late
-	// Old flush changed the data but could not certify it or clear the marker.
+	// Every assertion below is made AFTER the writer is known to have returned.
+	if got := present(db, domains); got != len(domains) {
+		t.Fatalf("the late write returned nil but only %d/%d keys are visible", got, len(domains))
+	}
 	if s.ImportComplete() {
 		t.Fatal("the late writer's completion must NOT certify the store (no CompleteImport ran)")
 	}
 	if _, err := db.ImportRecord(); err == nil {
-		t.Fatal("a certification record must not exist after an abandoned+late-returned write")
+		t.Fatal("no certification record may exist after an abandoned, late-returned write")
 	}
 	if !markerPresent(t, dir) {
-		t.Fatal("the import-pending marker must survive the late write (no early clear) so the next boot quarantines")
+		t.Fatal("the import-pending marker must survive the late write so the next boot quarantines")
+	}
+	// No further round may run: quiescence holds after the late return too.
+	if s.syncRound() {
+		t.Fatal("a round after an abandoned write must stay quiesced, even once the writer returned")
+	}
+	if s.ImportComplete() || !markerPresent(t, dir) {
+		t.Fatal("a quiesced round must not certify or clear the marker")
 	}
 }
 
-// TestHeldWriter_InterruptedImportQuarantinesOnReopen proves the recovery the
-// marker is for: after the abandoned write (uncertified + marker present), the
-// NEXT open via OpenResilient quarantines the store as an interrupted import and
-// opens a fresh one, discarding the abandoned writer's data. This SIMULATES the
-// next-boot recovery at the unit level; the actual OVA boot + full re-convergence
-// remains the ESXi replacement gate.
-func TestHeldWriter_InterruptedImportQuarantinesOnReopen(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skipf("BeginImport needs POSIX directory fsync; Linux source-level test skipped on %s", runtime.GOOS)
-	}
-	_, db, dir, release, domains := stallParkedWrite(t)
+// TestHeldWriter_RecoveryPersistsAcrossReopens: after the abandoned write the
+// next open quarantines; a second clean open does not re-quarantine and leaves
+// the retained-copy inventory unchanged; a fresh import then certifies; and a
+// further clean open keeps the certified data without a new quarantine. This is
+// a unit-level simulation of successive boots, not a booted appliance.
+func TestHeldWriter_RecoveryPersistsAcrossReopens(t *testing.T) {
+	skipOffLinux(t)
+	_, _, closeDB, dir, url, p, domains := abandonParkedWrite(t)
 
-	// Let the late write complete so nothing is in flight when we close — then
-	// close WITHOUT certifying (exactly the state a crash/kill would leave).
-	release()
-	deadline := time.Now().Add(10 * time.Second)
-	for present(db, domains) < len(domains) {
-		if time.Now().After(deadline) {
-			t.Fatalf("the released writer never completed: %d/%d present", present(db, domains), len(domains))
-		}
-		time.Sleep(5 * time.Millisecond)
+	p.release()
+	if err := p.join(); err != nil {
+		t.Fatalf("the released writer returned an error: %v", err)
 	}
-	if err := db.Close(); err != nil {
+	// Close WITHOUT certifying (the state a kill would leave), after the join.
+	if err := closeDB(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	// The next boot: OpenResilient sees the uncleared marker and quarantines.
-	next, rec, err := catdb.OpenResilient(dir)
+	// Open #1 — recovery: interrupted-import quarantine, empty replacement.
+	o1, rec, err := catdb.OpenResilient(dir)
 	if err != nil {
-		t.Fatalf("OpenResilient after an abandoned import: %v", err)
+		t.Fatalf("open #1: %v", err)
 	}
-	defer next.Close()
 	if rec.Trigger != catdb.TriggerInterruptedImport || !rec.Quarantined || rec.QuarantinePath == "" {
-		t.Fatalf("an abandoned import must quarantine on reopen as an interrupted import: trigger=%v quarantined=%v path=%q",
+		t.Fatalf("open #1 must quarantine as an interrupted import: trigger=%v quarantined=%v path=%q",
 			rec.Trigger, rec.Quarantined, rec.QuarantinePath)
 	}
 	if _, err := os.Stat(rec.QuarantinePath); err != nil {
-		t.Fatalf("the quarantined copy must exist (moved aside, not deleted): %v", err)
+		t.Fatalf("the quarantined copy must be retained (moved aside, not deleted): %v", err)
 	}
-	if got := catdb.QuarantinedCopies(dir); len(got) != 1 {
-		t.Fatalf("want exactly one quarantined copy, got %v", got)
+	inventory := catdb.QuarantinedCopies(dir)
+	if len(inventory) != 1 || inventory[0] != rec.QuarantinePath {
+		t.Fatalf("retained inventory after open #1 = %v, want [%s]", inventory, rec.QuarantinePath)
 	}
-	// The rebuilt store is fresh (the abandoned data is discarded) and the marker
-	// is gone (recovery cleared it), so a later boot does not re-quarantine.
-	if present(next, domains) != 0 {
-		t.Fatalf("the rebuilt store must be empty, not the abandoned writer's data: %d present", present(next, domains))
+	if got := present(o1, domains); got != 0 {
+		t.Fatalf("the replacement store must be empty, not the abandoned writer's data: %d present", got)
 	}
 	if markerPresent(t, dir) {
-		t.Fatal("recovery must clear the import-pending marker so the next boot does not re-quarantine")
+		t.Fatal("recovery must clear the import-pending marker")
+	}
+	if err := o1.Close(); err != nil {
+		t.Fatalf("close after open #1: %v", err)
+	}
+
+	// Open #2 — a clean reopen is EXERCISED, not inferred: no new quarantine,
+	// unchanged retained-copy inventory.
+	o2, rec, err := catdb.OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("open #2: %v", err)
+	}
+	if rec.Trigger != catdb.TriggerNone || rec.Quarantined {
+		t.Fatalf("open #2 must be clean: trigger=%v quarantined=%v", rec.Trigger, rec.Quarantined)
+	}
+	if got := catdb.QuarantinedCopies(dir); !slices.Equal(got, inventory) {
+		t.Fatalf("retained inventory changed on a clean reopen: %v -> %v", inventory, got)
+	}
+
+	// Fresh import on the recovered store: it must complete and certify. Lift
+	// the 20 ms stall deadline used to provoke the abandon so a healthy import
+	// under -race is not misreported as a stall.
+	bulkWriteStallTimeout = 30 * time.Second
+	fresh := New(o2, url, 24*time.Hour)
+	if !fresh.syncRound() {
+		t.Fatal("a fresh import on the recovered store must succeed")
+	}
+	if !fresh.ImportComplete() {
+		t.Fatal("the fresh import must certify the store")
+	}
+	if got := present(o2, domains); got != len(domains) {
+		t.Fatalf("the fresh import must land the whole feed: %d/%d", got, len(domains))
+	}
+	if markerPresent(t, dir) {
+		t.Fatal("a certified import must clear the import-pending marker")
+	}
+	if err := o2.Close(); err != nil {
+		t.Fatalf("close after the fresh import: %v", err)
+	}
+
+	// Open #3 — clean reopen after certification: data and record kept, no
+	// quarantine, inventory still unchanged.
+	o3, rec, err := catdb.OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("open #3: %v", err)
+	}
+	defer o3.Close()
+	if rec.Trigger != catdb.TriggerNone || rec.Quarantined {
+		t.Fatalf("open #3 must be clean: trigger=%v quarantined=%v", rec.Trigger, rec.Quarantined)
+	}
+	if _, err := o3.ImportRecord(); err != nil {
+		t.Fatalf("the certification record must survive a clean reopen: %v", err)
+	}
+	if got := present(o3, domains); got != len(domains) {
+		t.Fatalf("the certified data must survive a clean reopen: %d/%d", got, len(domains))
+	}
+	if got := catdb.QuarantinedCopies(dir); !slices.Equal(got, inventory) {
+		t.Fatalf("retained inventory changed after certification + reopen: %v -> %v", inventory, got)
 	}
 }

@@ -182,6 +182,15 @@ type Syncer struct {
 	// intra-process; a restart is the recovery, and the durable marker carries
 	// the interrupted-import state across it.
 	writeAbandoned atomic.Bool
+
+	// writeReturnedForTest, when non-nil, receives the result of the BulkWrite
+	// goroutine at the moment it ACTUALLY returns — including a write the
+	// watchdog already abandoned. It lets a test JOIN on the real writer-return
+	// boundary rather than infer quiescence from visible keys (ASTRA held-writer
+	// audit). Test-only; nil in production. Set once before the first sync, so
+	// the set happens-before the goroutine spawn; the channel must be buffered so
+	// the goroutine never blocks after it has delivered to `done`.
+	writeReturnedForTest chan error
 }
 
 // Bounded reason classes for a failed round. The verbose cause goes to the log.
@@ -570,7 +579,17 @@ func (fs *Syncer) storeDegraded() bool {
 // this returns.
 func (fs *Syncer) writeBulkWatched(entries map[string]string) (bulkWriteOutcome, error) {
 	done := make(chan error, 1)
-	go func() { done <- fs.db.BulkWrite(entries) }()
+	go func() {
+		err := fs.db.BulkWrite(entries)
+		done <- err
+		// Signal the ACTUAL writer-return boundary for a test that joins on it
+		// (nil in production). This runs even when the watchdog already abandoned
+		// the write, so a test can prove the abandoned goroutine returned rather
+		// than infer it from visible keys.
+		if fs.writeReturnedForTest != nil {
+			fs.writeReturnedForTest <- err
+		}
+	}()
 
 	poll := time.NewTicker(bulkWriteDegradedPoll)
 	defer poll.Stop()

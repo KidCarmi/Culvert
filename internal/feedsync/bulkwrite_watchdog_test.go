@@ -41,17 +41,13 @@ func openWatchdogStore(t *testing.T) *catdb.CommunityDB {
 // degraded, and the watchdog reports the failure WITHOUT the write returning.
 func TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks(t *testing.T) {
 	withWatchdogTimings(t, time.Millisecond, 10*time.Second) // poll fast, stall far away
-	db := openWatchdogStore(t)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) }) // let the abandoned BulkWrite goroutine exit
-	db.SetBulkWriteFaultForTest(func(n int) error {
-		if n == 1 {
-			db.ForceDegradedForTest() // a contained mmap fault would latch this
-			<-release                 // ...while the outer BulkWrite never returns
-		}
-		return nil
-	})
+	db := openWatchdogStore(t)                               // registers Close first => it runs after the writer teardown
+	p := newParkedWriter(t)
+	// A contained mmap fault would latch degraded while the outer BulkWrite
+	// never returns: latch it, then park.
+	db.SetBulkWriteFaultForTest(p.hook(db.ForceDegradedForTest))
 	fs := New(db, "http://unused", time.Hour)
+	p.attach(fs)
 
 	done := make(chan bulkWriteOutcome, 1)
 	go func() {
@@ -73,15 +69,10 @@ func TestWriteBulkWatched_DegradedMidWriteSurfacedWhileBulkWriteBlocks(t *testin
 func TestWriteBulkWatched_StallSurfaced(t *testing.T) {
 	withWatchdogTimings(t, time.Second, 20*time.Millisecond) // stall fires first
 	db := openWatchdogStore(t)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	db.SetBulkWriteFaultForTest(func(n int) error {
-		if n == 1 {
-			<-release // block without degrading
-		}
-		return nil
-	})
+	p := newParkedWriter(t)
+	db.SetBulkWriteFaultForTest(p.hook(nil)) // park without degrading
 	fs := New(db, "http://unused", time.Hour)
+	p.attach(fs)
 
 	done := make(chan bulkWriteOutcome, 1)
 	go func() {
@@ -157,17 +148,14 @@ func TestSyncRound_QuiescesAfterAbandonedWrite(t *testing.T) {
 	db := openStore(t, t.TempDir())
 	t.Cleanup(func() { _ = db.Close() })
 
+	// Teardown: release -> join the actual writer return -> Close (LIFO).
+	p := newParkedWriter(t)
+	// Count EVERY writer that reaches its first entry (a defective retry would
+	// be a second one); only the first is parked.
 	var faultCalls atomic.Int64
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) }) // let the abandoned writer exit at test end
-	db.SetBulkWriteFaultForTest(func(n int) error {
-		if n == 1 {
-			faultCalls.Add(1)
-			<-release // block the first write => the write stalls, never returns
-		}
-		return nil
-	})
+	db.SetBulkWriteFaultForTest(p.hook(func() { faultCalls.Add(1) }))
 	s := New(db, url, 24*time.Hour)
+	p.attach(s)
 
 	// Round 1: the write stalls; writeBulkWatched abandons it and latches.
 	if s.syncRound() {
