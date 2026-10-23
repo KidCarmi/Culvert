@@ -29,3 +29,24 @@ race runtime's default 1 s exit sleep (`atexit_sleep_ms`); the store close was
 22–26 ms, and 61 ms SIGTERM→exit was measured without `-race`. Source-level
 Linux evidence only. Not covered: service-manager stop, physical ENOSPC, a
 booted appliance.
+
+## cfae7d67: ASTRA 6359611097 #5/#6 source fixes, with a self-generated receipt
+
+`cfae7d67-race-run.log` was written by the run itself and not edited afterwards.
+It records the full head SHA, the tree id, `git status --porcelain` before and
+after (both empty), go version, uname, goenv, both exact commands, the
+`-test.shuffle` seeds and each command's exit status (0 and 0).
+
+## Lab run 39916602574 (ba1eda2a harness, superseded by 7854ed76)
+
+`lab-run-39916602574-midimport-kill-evidence.zip` is the run's artifact as
+downloaded (GitHub digest
+sha256:20a38ece3d03129a29576f162600c1b09a17e2f466cab0d1ac1471e323d96e55). The
+harness it ran had the P1 defects ASTRA found in 6359611097, so the run is
+**non-qualifying** and is retained as a record only. It finished on its own
+before the owner-requested cancel reached it (the cancel returned 409). Recorded
+outcome: 25 PASS / 2 FAIL. Convergence was proven: sync complete, 2,601,320
+domains. Both failures were the guessed adult-domain probe, and the lab
+mirror's feed carries no adult list. The large quarantine files were deleted
+under the pre-fix hash-only custody. Only their manifest, inventory and files
+under 1 MiB were retained, and that is not complete custody.
