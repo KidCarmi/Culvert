@@ -374,6 +374,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
+  not distrust compromised intermediate certificates. Culvert reaches it
+  through certificate verification (`x509.Certificate.Verify`, for example
+  the MCP acceptance PKI check). The `go.mod` toolchain line and both
+  Docker builder images move together; the `go` language minimum is
+  unchanged.
 - An inspected (TLS-decrypted) tunnel enforced policy on the CONNECT authority
   but forwarded each inner request's own `Host` / `:authority` upstream verbatim,
   and nothing compared the two (SEC-TUNHOST-1). A CONNECT is authorized **once**:
