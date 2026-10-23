@@ -511,6 +511,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   U-label/A-label, ports, IPv6 brackets, empty hosts, unnormalizable input), the
   403 wire bytes on each protocol responder, and 400 concurrent refusals under
   `-race`.
+- An admin session was any session the cookie was *named* after
+  (SEC-UISESS-1). `ps_session` (the proxy end-user cookie,
+  `setSessionCookie`) and `ps_ui_session` (the admin operator cookie,
+  `setUISessionCookie`) are signed with the same HMAC key and carry the same
+  `Session` payload, with no audience or purpose field between them — so the
+  cookie name was the only separation, and the caller picks the name.
+
+  Both fields that could have refused the replay declined instead.
+  `sessionRoleOrReject("")` resolves to `RoleAdmin`, deliberately, for
+  pre-RBAC sessions minted before the role field existed — and a proxy
+  session never sets `Role`, so every `ps_session` carried exactly the empty
+  string that branch promotes. The roster-existence backstop that would have
+  caught the unknown subject was gated on `sess.Provider == "local"`, and a
+  proxy IdP session carries the IdP profile id, so the check was skipped
+  rather than failed.
+
+  The result was reproduced end to end by minting through the real proxy
+  issuer and re-presenting the cookie value under the admin cookie name:
+  HTTP 200 with injected role `admin`. An ordinary proxy end user who
+  completed a normal captive-portal OIDC/SAML login with their own corporate
+  credentials — no forgery, no XSS, no MITM, no knowledge of the signing key
+  — was a control-plane admin, above every handler `requireRole` gate and
+  every C2 metadata role. The CP distributes one signing key to every DP, so
+  the token was admin on every node in the cluster. This contradicted
+  `docs/enterprise/IDENTITY-AND-ACCESS-DEPLOYMENT.md`, which states that
+  external IdPs authenticate proxy end users and "never issue an admin
+  session" (GAP-IAM-02).
+
+  The fix is the narrowest one available. `setUISessionCookie` is the only
+  minter of `ps_ui_session` and has always stamped `Provider "local"`, so
+  that value becomes the named constant `uiSessionProvider` — read by the
+  issuer and by `uiAuthMiddleware`, deliberately one constant so the two
+  cannot drift open — and a UI session naming any other provider is refused.
+  The roster check loses its provider guard, which is not a widening: it
+  already applied to every local session, and a non-local one is now refused
+  by the clause before it. Together they leave the empty-role compatibility
+  branch reachable only for a local session whose user is still on the
+  roster, which is the pre-RBAC single-admin deployment it was written for.
+  Nothing on the wire or on disk changes — admin cookies already carry
+  `Provider "local"` — so no operator session is invalidated. An explicit
+  `aud` claim would be the deeper fix and is recorded for follow-up; it would
+  refuse every cookie currently in flight.
+
+  Gates: a defect gate that mints through the production proxy issuer and
+  asserts 401, a class gate over foreign providers crossed with every role
+  value (including an explicitly elevated one, which a restored proxy-side
+  roster could carry), and three controls — the pre-RBAC empty-role local
+  session still resolves to admin, enrolled local roles pass through at their
+  exact role, and a local session for a deleted user is still refused, so the
+  fix did not trade one bypass for another.
 
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
@@ -1397,6 +1447,73 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- Two security-regression gates added for the memoized IDNA slow path
+  (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
+  and each verified failing in both against the specific defect it claims to
+  catch. No runtime behaviour changes; ported from the closed PR #1617.
+
+  `NormalizeHostStrict` is the fail-closed dispatch gate: `ok=false` means the
+  request is REFUSED, so a host that cannot be canonicalized never reaches FQDN,
+  blocklist or category matching un-normalized (RISK-013). The memo's slots are
+  shared by design — each tier is direct-mapped and a colliding host overwrites
+  the entry that was there — so the crossing that matters is a REJECTED host
+  meeting a resident ACCEPTED entry, which the existing collision test cannot
+  observe because it alternates two accepted hosts.
+  `TestIDNMemo_RejectionIsNeverUpgradedToAcceptance` pins that crossing in
+  both directions in the main tier, and in the long tier (which never retains a
+  rejection) on every round. Against a memo whose hit skips the full-key
+  re-verification, `xn--0.example.com` is answered as another host's A-label
+  with `ok=true` — a client-chosen unnormalizable authority admitted and
+  evaluated as a different destination than the one it names.
+
+  `TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer` pins that the stored key is
+  a CLONE of the caller's string. The key arrives as a substring of whatever
+  buffer the caller holds — on the request path, net/http's header buffer — so
+  an entry that kept it would pin that whole backing array per slot while every
+  byte-counting test still reported a short key. The gate drops every
+  reference it holds to a 16 MiB buffer the probe host was sliced out of and
+  asks the collector what is still reachable: a few hundred bytes when the key
+  is cloned, ~16.8 MB against the un-cloned shape, for a 25-byte main-tier key
+  and a 505-byte long-tier key alike. The review is
+  `docs/engineering/security-reviews/2026-10-13-idna-memo-and-host-bounds-window.md`;
+  its single-tier "un-memoized band is deliberate" finding is superseded by the
+  long tier and its gate for that gap is intentionally not ported.
+### Performance
+
+- Category-group membership is now resolved by index instead of by walking
+  every group. `categoryGroupMatchesHostScratch` runs once per category-group
+  access rule per proxied request and prefers the rule's
+  `DestCategoryGroupID` — the authoritative, rename-safe link the admin API
+  stamps on every rule saved against an existing group — but
+  `MatchesCategoryByID` resolved that id by ranging the whole group map
+  comparing IDs, with the store's read lock held across the walk, because the
+  map is keyed by *name*. So the path production takes was O(number of groups)
+  while the denormalized-name fallback it supersedes was already an O(1)
+  probe, and the store is capped at 1000 groups.
+
+  Measured on a 4-core Xeon @2.10 GHz (medians of n=3, both arms in one
+  session), one resolve: **117.6 → 89.5 ns at 4 groups, 349.3 → 82.2 at 64,
+  1317 → 89.0 at 256, 5298 → 86.6 at 1000** — linear at ~5 ns/group before,
+  flat after. End to end through the policy scan with 20 category-group rules
+  and a categorized destination: **121 µs → 2.25 µs per request** at the
+  1000-group cap (53.8×). An *uncategorized* destination — clean traffic to a
+  host no tier classifies, and the common case — now short-circuits the whole
+  per-rule probe at the call site, because neither branch can match an empty
+  category: **125 µs → 395 ns** (317×). Verdicts are unchanged; the index is
+  derived state rebuilt wholesale at the one content-mutation chokepoint, and
+  a stale index degrades to "not resolved" rather than to a wrong group.
+
+  Also fixes a **data race** on the same path, reported by the race detector:
+  `MatchesCategory` resolved through `GetByName`, which releases the lock
+  before returning the live group, and then read that group's category set
+  with no lock held — while `Update`, `UpdateByID`, `Load`, `ReplaceAll` and
+  the rollback path all *reassign* that field under the write lock. Reachable
+  as proxy traffic evaluating an un-migrated category-group rule concurrent
+  with an admin edit of that group. The probe now happens inside the single
+  read-lock critical section, which also removes the old shape's second lock
+  round trip. Only deployments using category groups in policy rules are
+  affected; no configuration, API or metric surface changes.
+
 ### Changed
 
 - A panic in either of the release-dispatch plane's detached worker goroutines
@@ -1516,6 +1633,80 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The per-IP connection limiter now does its whole job in ONE critical section
+  per call, and stores the counter by value. `Acquire` + a deferred `Release`
+  run on every proxied request (`handleRequest`, `socks5.go`), not once per TCP
+  connection. Sharding the limiter reduced contention between distinct clients
+  and left the per-request lock COUNT at three, because `Release` took the shard
+  lock twice: once to look the counter up and again to delete the entry after an
+  unlocked decrement returned zero. On a keep-alive connection with no second
+  request in flight — the ordinary shape — the count returns to zero on every
+  request, so every request paid an 8-byte allocation, a map insert, a map
+  delete, three lock acquisitions and two atomic read-modify-writes.
+
+  The profile named it. On the distinct-IP parallel benchmark at GOMAXPROCS=1,
+  mutex `Lock`+`Unlock` was 34% of all samples and `mapdelete_faststr` 28%, with
+  `Release` at 62% of cumulative time against `Acquire`'s 34% — the cheaper half
+  of the pair costing nearly twice as much, structurally. In the single-NAT-
+  egress case at four cores, mutex machinery was 64% of all samples, with
+  `procyieldAsm` and `futex` showing real parking. That case is an ordinary
+  enterprise deployment and the package header had recorded it, together with
+  the three lock acquisitions, as deliberately unfixed.
+
+  Storing the count as `map[string]int64` and collapsing both halves removes the
+  allocation, the pointer chase, the GC write barriers, the per-counter atomics,
+  one of `Release`'s two lock acquisitions, and `Acquire`'s increment-then-undo
+  dance on the reject path (it simply never commits the count — the same net
+  accounting with no window to guard). Measured with the pre-change shape frozen
+  in-tree as the `_Legacy` benchmark arms so both are timed in one run (4-core
+  Xeon @2.10GHz, Go 1.26.8, medians of n=6, ns/op per `Acquire`+`Release` pair):
+  single NAT egress **103.2 → 66.3 (−35.8%)** at one core and **267.6 → 199.6
+  (−25.4%)** at four; distinct IPs **105.7 → 70.0 (−33.8%)** and **108.3 → 85.6
+  (−21.0%)**; entry churn **99.8 → 67.4 (−32.5%)** and **105.9 → 68.0
+  (−35.8%)**; the reject path **62.6 → 29.6 (−52.7%)** and **245.1 → 101.3
+  (−58.7%)** — with **1 → 0 allocs/op** on the shapes that create an entry per
+  operation (distinct IPs and entry churn at both core counts, single NAT
+  egress at one core). The reject and retained-entry arms, and single NAT
+  egress at four cores, already report **0 allocs/op in both forms**: the entry
+  exists before the timed operation, so neither form allocates a counter for
+  it. End to end,
+  `BenchmarkPerfQual_ProxyHTTPForward` goes 177 → 176 allocs/op and `connlimit`
+  leaves the `alloc_objects` profile entirely.
+
+  One of the ten measured shapes regressed and is recorded rather than rounded
+  away: the retained-entry case (an IP with a second request already in flight,
+  so the count never returns to zero) is 58.3 → 60.7 ns at one core, **+4.2%**
+  with overlapping distributions at n=15, and parity at four cores — there the
+  old form did a lookup plus an atomic add through the pointer already in hand,
+  where this one does a lookup plus a `mapassign` in each half. It is bought
+  with the two shapes that dominate a real gateway: entry churn, and the reject
+  path an attacker drives, where a flood used to cost the limiter more per
+  refusal than per admission.
+
+  It is also a **fail-open fix**. `Release`'s second pass re-checked the
+  counter's *value* without re-checking its *identity*, while `Acquire`'s reject
+  path carried exactly that guard (`cur == ctr`) — the pattern was known and
+  applied in one of the two places that needed it. Release A reads the counter,
+  unlocks, decrements 1 → 0 and is descheduled; B acquires and releases,
+  deleting the entry; C then misses, allocates a fresh counter and takes it to 1
+  (a live, admitted connection); A re-locks, loads its stale pointer, sees 0,
+  and deletes C's entry. C's accounting is destroyed and the IP goes on to hold
+  `limit+1` concurrent connections — past a configured per-IP cap, the same
+  direction as the #503 bug the unconditional-accounting contract exists to
+  close (measured: 3 admitted against a cap of 2). Reproduced deterministically
+  by `TestRelease_LegacyTwoPhaseLosesALiveSlot`, which owns a verbatim legacy
+  copy with one injected pause point rather than racing for the interleaving.
+  Every behavioural test in the package keeps passing against the two-phase
+  shape, so the regression instruments are deliberately structural: an AST wall
+  requiring exactly one `sh.mu.Lock()` and zero per-counter atomics in each half
+  (with a not-vacuous control that rejects a verbatim pre-fix copy), and a
+  `testing.AllocsPerRun` gate across the churning, steady-state and reject
+  postures — the churn posture is load-bearing, since a gate measuring only the
+  retained entry reads zero against the defect too. Both were verified failing
+  against the reverted implementation. The admit/reject boundary, the
+  unconditional-accounting contract and the delete-when-last behaviour are
+  unchanged.
+
 - The request log's JSONL persistence gate no longer takes a process-wide
   mutex on every logged request. `reqlog.Add` runs once per logged request on
   the proxy request goroutine, and the `enqueue` it calls opened with an
@@ -1574,23 +1765,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from recomputing. The existing `FuzzNormalizeHostStrict` differential against
   the pre-optimization reference ran 598k executions with no divergence.
 
-  The key is a client-chosen authority, so the table is direct-mapped with 1024
-  fixed slots and a per-process random slot seed, and no entry retains a string
-  longer than the 253-byte DNS name maximum. That last bound is load-bearing
-  rather than decorative: `handleRequest`'s raw pre-cap admits a 1 KiB
-  authority and the 253-byte canonical refusal runs *after* `canonicalDestHost`
-  has normalized it, while the zero-option `idna.ToASCII` profile enforces no
-  length limit of its own, so an oversize A-label host would otherwise be
-  retained whole (~2.1 MB across a full table). Refusing to memoize one costs
-  nothing — no DNS server can resolve a longer name, and both dispatch gates
-  refuse it immediately, so it never reaches the fan-out the memo exists to
-  collapse. The table therefore cannot grow — 104 KB retained after 65 536
-  distinct IDN hosts, against a 554 KB absolute ceiling —
-  a collision costs a recomputation rather than a wrong answer, because every
-  hit re-verifies the full key, and an adversary who could force collisions
-  would obtain today's behaviour. Ordinary ASCII traffic is untouched: it
-  returns from the fast path above the memo and never reads or writes the
-  table, pinned by `TestIDNMemo_FastPathNeverTouchesMemo`.
+  The key is a client-chosen authority, so the table is direct-mapped with
+  fixed slots and a per-process random slot seed, and no entry retains a
+  canonical value longer than the 253-byte DNS name maximum. That value bound
+  is load-bearing rather than decorative: `handleRequest`'s raw pre-cap admits
+  a 1 KiB authority and the 253-byte canonical refusal runs *after*
+  `canonicalDestHost` has normalized it, while the zero-option `idna.ToASCII`
+  profile enforces no length limit of its own, so an oversize A-label host
+  would otherwise be retained whole (~2.1 MB across a full table). The table
+  therefore cannot grow — 103 KiB retained after 65 536 distinct IDN hosts,
+  against a 720 KiB absolute ceiling across both tiers — a collision costs a
+  recomputation rather than a wrong answer, because every hit re-verifies the
+  full key, and an adversary who could force collisions would obtain the
+  pre-memo behaviour. Ordinary ASCII traffic is untouched: it returns from the
+  fast path above the memo and never reads or writes the table, pinned by
+  `TestIDNMemo_FastPathNeverTouchesMemo`.
+
+  **Retention is bounded on two tiers, because one bound could not do both
+  jobs.** The first version measured the 253-byte bound on the KEY as the
+  client spelled it, on the stated reasoning that refusing such a host "costs
+  nothing" because "no DNS server can resolve a longer name, and both dispatch
+  gates refuse it immediately". Both halves were wrong, and the mistake was
+  reading a bound on the raw spelling as a bound on the name. IDNA *shrinks* a
+  U-label authority: `proxy_host_bounds.go`'s own derivation records the worst
+  legitimate case as **883 raw bytes collapsing to a 251-byte A-label**, which
+  is precisely why the raw pre-cap is 1 KiB and not 253. So a host whose raw
+  spelling exceeded the bound could canonicalize comfortably inside the DNS
+  limit, with every label inside the 63-byte A-label limit too — a resolvable,
+  ordinary internationalized destination — and **both dispatch gates accepted
+  it**. It was not refused; it walked the full ~10x fan-out with nothing
+  memoized, which is the asymmetry the memo exists to close. Measured per
+  normalization of one such accepted destination (eight U-labels of 20 CJK code
+  points, 499 raw bytes against 227 canonical): `idna.ToASCII` **5.32 µs and 18
+  allocations**, i.e. ~53 µs and 180 allocations per request across the
+  fan-out, against **71 ns and 0 allocations** for a memo hit. Such a key is
+  now retained in a separately bounded long tier — 128 slots, keys to 1024
+  bytes, values still to 253 — which adds ~165 KiB to the ceiling and leaves
+  the main tier's capacity untouched. The key bound is the request path's raw
+  pre-cap itself, not the 883-byte empirical maximum, so "every authority a
+  dispatch gate admits is memoizable" holds by construction rather than by a
+  measurement; the root gate asserts that relation between the two constants,
+  so raising the raw pre-cap fails there instead of re-opening the asymmetry
+  for the newly admitted band.
+  Per-request fan-out for that destination, both measured through the full
+  `NormalizeHostStrict` body: **~85–94 µs and 200 allocations before, ~27–29 µs
+  and 0 allocations after**. Verdicts are unchanged in both tiers — a host past *both*
+  key bounds is still normalized, just not retained.
+
+  Gates, both verified failing against the pre-fix bound:
+  `TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained` (proves the probe host
+  is DNS-valid and that both gate predicates admit it *before* asserting it is
+  retained, so the test cannot pass by accident) and the root
+  `TestHostutilLongRawULabelReachesTheMemo`, which calls the real
+  `rawAuthorityOversize` / `canonicalHostOversize` so the two bounds cannot
+  drift apart again. Plus `TestIDNMemo_LongTierHitIsAllocationFree`,
+  `TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained` (outer boundary,
+  including one byte over), `TestIDNMemo_LongTierBoundedFootprint` and
+  `TestIDNMemo_LongTierConcurrentStress`;
+  `TestIDNMemo_StoredEntriesRespectTheBound` now asserts the invariant over
+  every live entry in both tiers against that tier's key bound.
+
+  **What this does not fix, stated plainly.** `strings.ToLower` runs
+  `strings.Map(unicode.ToLower, …)` for a non-ASCII input — a per-rune table
+  walk over the whole authority — and it sits in `NormalizeHostStrict` *ahead*
+  of both the fast path and the memo, so no tier can collapse it. At **2.84 µs
+  per call** it is ~28 µs per request across the fan-out, against ~50 ns for an
+  ASCII destination, and the client selects it with ~500 header bytes. That
+  residual asymmetry is left open deliberately: narrowing or hoisting the
+  lowering pass changes what canonicalization does to non-ASCII input, which is
+  the IDN-homograph contract `NormalizeHost` exists to enforce (RISK-013), and
+  that belongs to the differential fuzz harness and review rather than to a
+  performance patch.
 
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
