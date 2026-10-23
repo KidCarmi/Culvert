@@ -22,9 +22,26 @@ COVERAGE_OUT="${1:?usage: coverage-floor.sh <coverage.out>}"
 GLOBAL_FLOOR=55
 
 # file → floor%. Every file listed is security-sensitive.
+#
+# A row must name the file that holds the DECISION, not the file that used to.
+# security.go is now five one-line wrappers: the SSRF guard moved to
+# internal/ssrf and host normalisation to internal/hostutil (ADR-0002/0003),
+# and the admission engine to internal/admission (ADR-0039). Its row still
+# pins that those wrappers stay exercised — it reads 100% over five trivial
+# functions — but the guards it was written to protect are the internal/ rows.
+# A floor that does not follow its code keeps passing while the thing it was
+# written for goes untested, which is the quiet way a regression gate dies.
+#
+# NOTE: the reader loop below is a bare `while read -r file floor`, so this
+# table takes NO inline comments — a "# ..." line is parsed as a row. Keep
+# commentary up here, above FLOORS.
 FLOORS="
 totp.go                85
 security.go            70
+internal/ssrf/ssrf.go  85
+internal/hostutil/hostutil.go 80
+internal/admission/engine.go 70
+internal/admission/freshness.go 70
 session.go             75
 lockout.go             80
 policy.go              60
