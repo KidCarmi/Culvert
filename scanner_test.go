@@ -296,7 +296,7 @@ func TestMatchDPIRegexWithTimeout_TimeoutReturnsTrue(t *testing.T) {
 	// because the abandoned match goroutine runs to completion after return. The branch itself is pinned deterministically by
 	// internal/scanner TestRunWithTimeout; this keeps the end-to-end fail-closed
 	// contract of the root alias.
-	re := regexp.MustCompile(`^(a+)+$`)
+	re := regexp.MustCompile(`^(a|aa)+$`)
 	data := append(bytes.Repeat([]byte("a"), 512<<10), '!')
 	if !matchDPIRegexWithTimeout(re, data, time.Nanosecond) {
 		t.Error("timeout should return true (fail-closed)")
