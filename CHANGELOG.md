@@ -1336,6 +1336,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   path's bracket encloses the inner one, the marker is a depth counter rather
   than a flag: with a flag the inner `end` would clear a marker the outer region
   still needs.
+- Two defects in the fixes above, both found reviewing them. **The owed
+  revocation persist was gated on the control plane:** the retry sat after the
+  `SyncRevocations` RPC, so while the CP was unreachable every round returned
+  early and the owed local write was never re-attempted — defeating the fix
+  under exactly the condition that makes the fail-open dangerous. It is now
+  discharged on every round exit and on the loop's shutdown branch. **And the
+  interrupted-apply marker's consume raced a second applier:** the depth counter
+  is process-global while an HA standby sync applies bundles through the same
+  `applyConfigSnapshot`, and a node can run both roles, so an unsynchronized
+  consume could swallow a concurrent apply's in-flight increment and drive the
+  counter negative — after which the next pre-mutation panic falsely reported a
+  configuration-content rejection, permanently. The consume now takes the apply
+  gate, so it only ever observes balanced bracket states.
 - A Data Plane boot **silently discarded the bandwidth/QoS and node-group
   slices** of its last-known-good config snapshot and still recorded a complete,
   version-advancing apply (CHAOS-80). `initCluster` replays that snapshot

@@ -94,8 +94,9 @@ startup-**order** fact:
 | `main.go:228` | `initCluster(s)` | → `startDataPlane` → `applyDPLastGoodConfigSnapshot()` replays the last-known-good snapshot **synchronously** |
 | `main.go:255` | `initPersistentAdminState(s)` | → constructs `globalNodeGroups` and `globalBandwidth` |
 
-So on **every** DP boot the replay reaches the apply with both stores still
-`nil`, drops both slices, and the surrounding apply then persists last-good,
+So on a DP boot the replay reaches the apply with both stores still `nil` and
+drops **each slice the replayed snapshot carries** (a slice the snapshot omits
+is the presence contract and is not a drop), and the surrounding apply then persists last-good,
 advances `lastVersion` and marks the apply OK. The version ratchet
 (`snap.Version <= c.lastVersion.Load()`) suppresses the next poll, so nothing
 re-applies them until the CP increments the config version. The ordering
@@ -143,7 +144,7 @@ limiting on cancellation *after* contained panics.
 | CHAOS-79 | Five DP↔CP sync workers run unguarded rounds; a panic in any kills the gateway | **High** | Yes — any node run with `-dp-addr` / an enrollment config | **Fixed** here |
 | CHAOS-79a | Contained audit round would destroy a drained batch per interval | **High** (data integrity) | Yes, once containment exists | **Fixed** in the same commit |
 | CHAOS-79b | Contained config round would report a half-applied snapshot as healthy | **Medium** | Yes, once containment exists | **Fixed** in the same commit |
-| CHAOS-80 | DP boot drops CP-authoritative bandwidth + node-group slices and records a complete apply | **Low** | Yes, every DP boot; impact masked by node-local persistence | **Reported**, not repaired — see §7 |
+| CHAOS-80 | DP boot drops CP-authoritative bandwidth + node-group slices and records a complete apply | **Low** | Yes, on any boot whose replayed snapshot carries either slice; impact masked by node-local persistence | **Reported**, not repaired — see §7 |
 
 Severity for CHAOS-79 is availability-led: a single auxiliary worker could take
 the whole in-line gateway down, which is the blast-radius property the CHAOS-24
@@ -317,6 +318,44 @@ moved. The mutating steps are plain functions with no injection seam, and adding
 a production hook purely so a test could observe them would be a worse trade
 than the honest gap. The balance gates do catch a missing `end`; they do not
 catch a bracket that starts too late.
+
+### Two more, from CodeRabbit's review of the fixes themselves
+
+Both are mine, both were in the shipped fix, and both are the same shape as
+everything else here: a correction that was right about the mechanism and wrong
+about its scope.
+
+**The owed revocation persist was gated on the CP.** The P1 retry was placed
+after the `SyncRevocations` RPC, so while the CP was unreachable every round
+returned early at the RPC or the parse and the owed write was never
+re-attempted — defeating the fix under **exactly** the condition that makes the
+underlying fail-open dangerous, which my own comment had already named
+("indefinitely while the CP is unreachable"). The save is purely local and never
+needed the CP to succeed. It is now `defer c.persistOwedRevocations()` at round
+entry, so every exit path discharges it, plus a guarded discharge on the loop's
+shutdown branch — the one exit with no next round to retry on.
+
+**The mutation marker's consume raced a second applier.** The depth counter is
+process-global, and this node's config round is not the only applier: an HA
+standby sync applies a bundle through the same `applyConfigSnapshot` (`ha.go`),
+and `startDataPlane` is wired *independently* of the CP/HA branch
+(`cluster_startup.go`), so one node can run both. An unsynchronized consume
+could `Swap(0)` away a concurrent apply's in-flight increment; that apply's own
+`end` then drove the counter **negative**, and the next PRE-mutation panic read
+non-zero and falsely marked a configuration-content rejection — the P2 defect
+reintroduced through cross-path interference, and permanent again because no
+unchanged response clears it. Reproduced before fixing: the gate prints
+`mutation depth = -1 after a concurrent apply completed`. The consume now takes
+`refScanDeleteLock`, the gate every snapshot apply already holds across its
+mutating region, so it can only observe balanced bracket states.
+
+**The pattern worth naming, because it has now repeated four times.** Each fix
+in this change was correct about the mechanism and too narrow about where the
+mechanism applies: guard the rounds (but two needed fail-closed treatment);
+mark the apply (but only post-mutation); bracket the mutation (but only one of
+three paths); retry the owed write (but only when the CP answers). **A fix
+aimed at a mechanism should be checked against every path that reaches it,
+which is a different question from whether the fix is right.**
 
 ---
 

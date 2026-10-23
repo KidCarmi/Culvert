@@ -696,3 +696,138 @@ func TestChaos79_EachMutatingPathLeavesTheMarkerBalanced(t *testing.T) {
 		}
 	})
 }
+
+// ── 9. CodeRabbit review of the CHAOS-79 fix ────────────────────────────────
+
+// TestChaos79_OwedRevocationPersistSurvivesACPOutage is the gate for the hole
+// in the first P1 fix: the owed-save retry sat AFTER the RPC, so while the CP
+// was unreachable every round returned early and the write was never
+// re-attempted — defeating the fix under precisely the condition that makes the
+// underlying fail-open dangerous. The save is purely local and must not be
+// gated on the CP.
+func TestChaos79_OwedRevocationPersistSurvivesACPOutage(t *testing.T) {
+	t.Cleanup(sessionRevoked.SwapForTest())
+	dir := t.TempDir()
+	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
+
+	entry := RevocationEntry{Token: "chaos79-outage", Expiry: time.Now().Add(time.Hour).Unix()}
+	if added := sessionRevoked.MergeRevocations([]RevocationEntry{entry}); added != 1 {
+		t.Fatalf("priming merge added %d, want 1", added)
+	}
+
+	// The node owes a write, and the CP is down for every subsequent round.
+	c := &DataPlaneClient{nodeID: "chaos79", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return nil, errors.New("controlled CP outage")
+	}}
+	c.revocationsUnsaved.Store(true)
+
+	c.revocationSyncRound(context.Background())
+
+	if c.revocationsUnsaved.Load() {
+		t.Error("the owed persist is still marked owed after a round that could reach the local disk")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "revocations.json"))
+	if err != nil {
+		t.Fatalf("an owed revocation persist was stranded by a CP outage: %v", err)
+	}
+	if !strings.Contains(string(data), "chaos79-outage") {
+		t.Errorf("persisted revocations = %s, want the merged token", data)
+	}
+}
+
+// And a shutdown is the one exit with no next round to retry on, so the loop
+// must discharge an owed write on its way out.
+func TestChaos79_OwedRevocationPersistIsDischargedOnShutdown(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	t.Cleanup(sessionRevoked.SwapForTest())
+	dir := t.TempDir()
+	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
+
+	entry := RevocationEntry{Token: "chaos79-shutdown", Expiry: time.Now().Add(time.Hour).Unix()}
+	if added := sessionRevoked.MergeRevocations([]RevocationEntry{entry}); added != 1 {
+		t.Fatalf("priming merge added %d, want 1", added)
+	}
+
+	c := &DataPlaneClient{nodeID: "chaos79", callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return nil, errors.New("CP unreachable for the whole stint")
+	}}
+	c.revocationsUnsaved.Store(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	// A long interval so the loop never ticks: the only path to disk is the
+	// shutdown branch.
+	go func() { defer close(done); c.revocationSyncLoop(ctx, time.Hour) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revocationSyncLoop did not exit on cancellation")
+	}
+
+	if _, err := os.ReadFile(filepath.Join(dir, "revocations.json")); err != nil {
+		t.Fatalf("shutdown stranded an owed revocation persist: %v", err)
+	}
+	if c.revocationsUnsaved.Load() {
+		t.Error("the owed persist is still marked owed after shutdown discharged it")
+	}
+}
+
+// TestChaos79_MarkerConsumeIsSerializedAgainstAConcurrentApply is the gate for
+// the cross-path interference: the depth counter is process-global and this
+// node's config round is not the only applier (an HA standby sync applies a
+// bundle through the same applyConfigSnapshot, and startDataPlane is wired
+// independently of the CP/HA branch, so one node can run both). An
+// unsynchronized consume could Swap(0) away a concurrent apply's in-flight
+// increment; that apply's own end would then drive the counter NEGATIVE, and
+// the next PRE-mutation panic would read non-zero and falsely mark a
+// configuration-content rejection — permanently, since no unchanged response
+// clears it.
+func TestChaos79_MarkerConsumeIsSerializedAgainstAConcurrentApply(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	resetConfigSnapshotApplyHealth(t)
+
+	// Stand in for the other applier: it holds the apply gate across its
+	// bracket, exactly as applyConfigSnapshot does.
+	otherApplyDone := make(chan struct{})
+	otherApplyEntered := make(chan struct{})
+	go func() {
+		defer close(otherApplyDone)
+		refScanDeleteLock()
+		beginConfigSnapshotApplyMutation()
+		close(otherApplyEntered)
+		time.Sleep(50 * time.Millisecond) // hold the in-flight bracket open
+		endConfigSnapshotApplyMutation()
+		refScanDeleteUnlock()
+	}()
+	<-otherApplyEntered
+
+	// This round is clean: no panic, nothing of its own to report.
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(0)
+	c.callForTest = func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"config_unchanged":true}`), nil
+	}
+	c.guardedConfigRound(context.Background())
+	<-otherApplyDone
+
+	// The other applier's bracket must have balanced itself, leaving nothing
+	// negative behind for a later round to misread.
+	if got := configSnapshotApplyDepth.Load(); got != 0 {
+		t.Fatalf("mutation depth = %d after a concurrent apply completed, want 0 — "+
+			"a stolen increment leaves it negative and the next pre-mutation panic reads non-zero", got)
+	}
+
+	// Prove the consequence directly: a pre-mutation panic now must NOT claim a
+	// content rejection.
+	var rounds atomic.Int64
+	c2 := &DataPlaneClient{callForTest: panickingCall(&rounds)}
+	c2.lastVersion.Store(0)
+	c2.guardedConfigRound(context.Background())
+	if !lastConfigSnapshotApplyOK() {
+		t.Error("a pre-mutation panic claimed a content rejection after a concurrent apply — " +
+			"the consume was not serialized with the other applier's bracket")
+	}
+}

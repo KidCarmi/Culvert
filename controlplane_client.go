@@ -312,9 +312,29 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 // only for the apply.
 func (c *DataPlaneClient) guardedConfigRound(ctx context.Context) {
 	panicked := runGuarded(dpComponentConfigPoll, func() { c.fetchAndApply(ctx) })
+	// Consume under the apply gate, because this node's config round is not the
+	// only applier (CodeRabbit review of the CHAOS-79 fix). An HA standby sync
+	// applies a bundle through the same applyConfigSnapshot (ha.go), and
+	// startDataPlane is wired INDEPENDENTLY of the CP/HA branch
+	// (cluster_startup.go), so one node can run both. The depth counter is
+	// process-global, so an unsynchronized consume could Swap(0) away a
+	// concurrent HA apply's in-flight increment; that apply's own end would
+	// then drive the counter NEGATIVE, and the next pre-mutation panic would
+	// read non-zero and falsely mark a configuration-content rejection — the
+	// P2 defect reintroduced through cross-path interference, and permanent
+	// again because no unchanged response clears it.
+	//
+	// refScanDeleteLock is the gate every snapshot apply already holds across
+	// its mutating region, so taking it here means the consume can only ever
+	// observe BALANCED bracket states. Nothing is held under it but one atomic
+	// swap, and this round's own apply has long returned, so there is no
+	// nesting and no self-deadlock.
+	//
 	// Consume unconditionally: a round that completed normally must not leave a
 	// marker behind for the next one to read.
+	refScanDeleteLock()
 	interrupted := consumeConfigSnapshotApplyInterrupted()
+	refScanDeleteUnlock()
 	if panicked && interrupted {
 		markConfigSnapshotApplyRejected()
 	}
@@ -776,6 +796,10 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 	for {
 		select {
 		case <-ctx.Done():
+			// Shutdown is the one exit with no next round to retry an owed
+			// write, so discharge it here. Guarded: this runs on the shutdown
+			// path, where a panic must not escape.
+			runGuarded(dpComponentRevocation, c.persistOwedRevocations)
 			return
 		case <-ticker.C:
 			runGuarded(dpComponentRevocation, func() { c.revocationSyncRound(ctx) })
@@ -793,6 +817,10 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 // does, and the next tick re-sends the full local set (ExportRevocations is a
 // full export, not a delta), so nothing is lost by the skip.
 func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
+	// Discharge an owed persist on EVERY exit path, including the RPC and parse
+	// errors below — see persistOwedRevocations.
+	defer c.persistOwedRevocations()
+
 	local := sessionRevoked.ExportRevocations()
 	req := struct {
 		NodeID  string            `json:"node_id"`
@@ -820,26 +848,36 @@ func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
 		// SaveRevocations must leave the node knowing the write is still owed.
 		c.revocationsUnsaved.Store(true)
 	}
-	// Retry the persist whenever it is still owed, independently of `added`
-	// (Codex P1). Tying the save to `added > 0` was safe only while a failed
-	// round killed the process: MergeRevocations counts only tokens that were
-	// NOT already present, so once a merge has landed in memory every later
-	// full-set response returns added == 0. A round contained between the merge
-	// and a completed save would therefore hold the revocations in RAM with the
-	// save never re-attempted — and on the next restart the node would load a
-	// file that never received them and ACCEPT those revoked cookies until
-	// gossip happened to re-deliver them, or indefinitely while the CP is
-	// unreachable. That is a fail-open the crash did not have (process death
-	// lost the in-memory merge too, so the next successful round saw added > 0
-	// and saved), so containment is what introduces it and the dirty flag is
-	// what removes it.
-	if c.revocationsUnsaved.Load() {
-		if err := sessionRevoked.SaveRevocations(); err != nil {
-			logger.Printf("DataPlane: failed to persist revocations: %v", err)
-			return // still owed; the next round retries
-		}
-		c.revocationsUnsaved.Store(false)
+}
+
+// persistOwedRevocations writes the revocation set whenever a merge has landed
+// in memory but its persist has not completed.
+//
+// It is called through `defer` from revocationSyncRound, and that is the whole
+// point (CodeRabbit review of the CHAOS-79 fix). Retrying the save only after a
+// successful RPC — where this logic first sat — defeated the fix under exactly
+// the condition that makes the underlying fail-open dangerous: while the CP is
+// unreachable, every round returns early at the RPC or the parse, so the owed
+// write was never re-attempted, and a restart then loaded a file that never
+// received those revocations and ACCEPTED the revoked cookies. The save is
+// purely local; it never needed the CP to succeed, so it must not be gated on
+// one.
+//
+// Deferred rather than called at entry so a merge landing in THIS round is
+// included, and so a contained panic still discharges the write on the way out
+// (the round runs under runGuarded, so a fault in here is contained too).
+// MergeRevocations counts only tokens that were NOT already present, so the
+// owed flag — not `added` — is the only thing that can drive the retry: once a
+// merge has landed, every later full-set response reports added == 0.
+func (c *DataPlaneClient) persistOwedRevocations() {
+	if !c.revocationsUnsaved.Load() {
+		return
 	}
+	if err := sessionRevoked.SaveRevocations(); err != nil {
+		logger.Printf("DataPlane: failed to persist revocations: %v", err)
+		return // still owed; the next round (or loop exit) retries
+	}
+	c.revocationsUnsaved.Store(false)
 }
 
 // auditPushLoop forwards local audit events to the CP for centralized logging.
