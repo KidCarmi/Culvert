@@ -179,12 +179,11 @@ var (
 // the drops are not counted twice.
 func auditClusterPushDropsTotal() int64 {
 	total := auditPendingDrops()
-	// clusterRole is documented (above, this file) as read only under
-	// clusterRoleMu — every other reader in the tree follows it, and this
-	// accessor runs on the admin-dashboard request path, not at startup.
-	clusterRoleMu.RLock()
-	self := clusterRole.nodeID
-	clusterRoleMu.RUnlock()
+	// clusterRole is read-only outside the cluster-role arbiter
+	// (cluster_role_arbiter.go) — every other reader goes through
+	// clusterRoleSnapshot(), since a direct RLock can observe a mixed tuple
+	// while the CP claim is asynchronous.
+	self := clusterRoleSnapshot().nodeID
 	nodeMetricsMu.RLock()
 	for id := range nodeMetrics {
 		if self != "" && id == self {
