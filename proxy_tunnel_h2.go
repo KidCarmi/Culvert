@@ -10,13 +10,13 @@ package main
 // (CVE-2023-44487) and the HTTP/2 CONTINUATION flood (CVE-2023-45288 — the Go /
 // x-net identifier; not the Apache-httpd CVE-2024-27316) are mitigated by default
 // in the vendored x/net v0.57.0 (the effective Rapid-Reset cap equals
-// MaxConcurrentStreams). Still deferred (marked inline):
-//   - :authority pinning / 421: NOT a security hole — upstreamCC is pinned to the
-//     CONNECT target so a client :authority cannot redirect the request off that
-//     connection (no SSRF). It is defense-in-depth against cross-origin coalescing
-//     confusion; deferred because a naive 421 risks breaking legitimate edge cases
-//     (IP-target CONNECT, single-SAN forged leaves already prevent coalescing) and
-//     warrants its own careful pass.
+// MaxConcurrentStreams). :authority pinning is enforced in the shared
+// runInspectExchange seam (SEC-TUNHOST-1, inspect_host_pin.go): upstreamCC is
+// pinned to the CONNECT target's address, so a client :authority cannot redirect
+// the request off that connection (no SSRF), but a shared front end routes by
+// :authority, so an unpinned stream reached a vhost policy never evaluated. A
+// mismatch is refused with the frozen pre-commit 403, not a 421; an IP-literal
+// CONNECT target is out of the pin's scope. Notes:
 //   - upstream (origin-initiated) GOAWAY → per-stream failure mapping is already
 //     handled: an origin GOAWAY errors the in-flight upstreamCC.RoundTrip, mapped to
 //     exRoundTripError/exDeliverError by handleH2StreamOutcome. No extra work.
@@ -434,8 +434,9 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 	// Reshape the h2 server request for an h2 client RoundTrip: RoundTrip requires
 	// an absolute URL (scheme+host) and an empty RequestURI. The request travels
 	// over upstreamCC, which is pinned to the CONNECT target, so the :authority
-	// cannot redirect it off that connection (no SSRF). Strict :authority pinning
-	// / 421 handling is a security-PR refinement.
+	// cannot redirect it off that connection (no SSRF). runInspectExchange pins
+	// req.Host (:authority) to the authorized CONNECT host before this request
+	// is forwarded (SEC-TUNHOST-1).
 	reqPath := req.URL.Path
 
 	// Per-stream inactivity watchdog: cancel this stream's context if no body byte
