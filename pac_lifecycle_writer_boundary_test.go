@@ -68,6 +68,7 @@ func TestPACBoundary_W1_WriterOutsideTheBoundaryIsDetectedAtCommitAndRefused(t *
 }
 
 func TestPACBoundary_W2_SnapshotApplyAcrossAParkedPublishKeepsBothChanges(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	pacBoundaryEnv(t)
 	pacBoundarySeedOther(t, "Other")
 	pacContinuitySaveDraft(t, pacIntentDraft("v2", false))

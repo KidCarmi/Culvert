@@ -128,6 +128,7 @@ func TestConfigSnapshot_CAFingerprint(t *testing.T) {
 // ── DP CA Rotation Detection ─────────────────────────────────────────────────
 
 func TestApplyConfigSnapshot_CARotationDetection(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	// Save and restore package globals that applyConfigSnapshot mutates so
 	// this test does NOT leak into sibling tests (qa-determinism catches the
 	// cascade: AddManual on the half-initialised Blocklist left behind here

@@ -199,6 +199,13 @@ type DispatchOptions struct {
 	PassphraseRef  string // REQUIRED by the agent iff pre_backup ends up true
 	NoRollback     bool   // opt out of rollback_on_failure (default: rollback ON)
 	IdempotencyKey string // op identity from higher orchestration; passed through verbatim (may be empty)
+
+	// OnIdempotencyKey is an OBSERVER, not an operator choice: when set,
+	// DispatchService.Dispatch calls it once with the op's idempotency key
+	// (supplied or service-minted) after planning and BEFORE any apply is
+	// attempted. The planner ignores it. It lets a caller whose worker may die
+	// mid-dispatch still hand back the key that makes a retry safe.
+	OnIdempotencyKey func(key string)
 }
 
 // DefaultDispatchOptions returns the standard options: pre_backup desired,

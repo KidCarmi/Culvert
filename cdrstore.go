@@ -485,9 +485,10 @@ func setCDREnabledRuntime(on bool) error {
 // cdrActiveClient returns any live CDR client from the pool, or nil when
 // CDR is disabled / no instance is available.
 //
-// Backwards-compat: callers that just want "is CDR live?" treat nil as
-// "no" and keep working.  The proxy hot path should call cdrPickPooled()
-// instead to pick a healthy instance with circuit-breaker awareness.
+// It NEVER reserves a half-open probe (cdrClientPool.Pick is non-consuming):
+// its callers are status, UI and admin-diagnostic paths that do not record a
+// sanitize outcome, so a reservation taken here would strand the probe the
+// next real document needs.  The proxy hot path uses cdrPickPooledReserved.
 func cdrActiveClient() *CDRClient {
 	if pc := cdrPool.Pick(); pc != nil {
 		return pc.Client

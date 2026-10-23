@@ -1111,6 +1111,26 @@ type inspectExchange struct {
 // enforcement, SSRF-guarded upstream access, scanning, and CDR are identical to
 // the H1 path because this is the exact code the H1 loop used to run inline.
 func runInspectExchange(ex *inspectExchange) exchangeOutcome {
+	// Pin the inner request to the destination this tunnel was AUTHORIZED for
+	// before anything is forwarded. The CONNECT authority is what policy
+	// evaluated and what every row below records; the decrypted request carries
+	// its own Host/:authority and was forwarded verbatim, so a client could
+	// reuse an allowed tunnel to reach a different vhost on the same front end
+	// while the log named the allowed one. See inspect_host_pin.go for why the
+	// anchor is that authority rather than the client's SNI, and why refusing
+	// cannot break a conforming client.
+	//
+	// It runs FIRST, ahead of the round trip and of the header scrub: a request
+	// for an unauthorized destination must not reach the upstream at all, and a
+	// refusal must not depend on anything the scrub rewrites.
+	if !innerHostPinnedToTunnel(ex.req.Host, ex.host) {
+		if ex.req.Body != nil {
+			ex.req.Body.Close() //nolint:errcheck // best-effort; nothing was forwarded
+		}
+		blockInnerHostMismatch(ex.responder, ex.clientIP, ex.host, ex.req.Host)
+		return exchangeOutcome{kind: exBlocked}
+	}
+
 	// Scrub client-spoofable forwarded/identity headers on the DECRYPTED inner
 	// request (prevents X-User-Identity spoofing / private XFF leakage), then
 	// strip hop-by-hop headers before forwarding upstream.
