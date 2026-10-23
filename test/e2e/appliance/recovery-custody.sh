@@ -100,6 +100,23 @@ arm_evidence(){ evidence_state "unpreserved:$1"; }
 custody_fail(){ evidence_state "unpreserved:custody-$2 failed: $3"
   check "$1" "custody-$2" fail "$3 — nothing was deleted; the loop image holding it is RETAINED"; write_report_and_exit; }
 
+# verify_archive <custody-dir> <manifest> — the RECOVERABLE-BYTES check (ASTRA
+# 6361214485): the archive file exists, its bytes match its recorded digest, and
+# it extracts to exactly the files in <manifest> with exactly those hashes.
+# Metadata alone (a digest sidecar, a preserved-by pointer, matching names) is
+# never accepted as preservation. Prints the reason on failure.
+verify_archive(){ local ad="$1" man="$2" v n
+  [[ -f "$ad/quarantine.tar.gz" ]] || { echo "archive missing at ${ad##*/}/quarantine.tar.gz"; return 1; }
+  [[ -s "$ad/quarantine.tar.gz.sha256" ]] || { echo "no recorded digest for ${ad##*/}/quarantine.tar.gz"; return 1; }
+  ( cd "$ad" && sha256sum -c --quiet quarantine.tar.gz.sha256 ) >/dev/null 2>&1 \
+    || { echo "${ad##*/}/quarantine.tar.gz does not match its recorded digest (missing, truncated or altered)"; return 1; }
+  v="$(mktemp -d "$ad/.verify.XXXXXX")" || { echo "cannot create a verification directory"; return 1; }
+  if ! tar -xzf "$ad/quarantine.tar.gz" -C "$v" 2>/dev/null; then rm -rf "$v"; echo "${ad##*/}/quarantine.tar.gz does not extract"; return 1; fi
+  n="$(find "$v" -type f | wc -l | tr -d ' ')"
+  if [[ "$n" != "$(sed '/^$/d' "$man" | wc -l | tr -d ' ')" ]]; then rm -rf "$v"; echo "${ad##*/}/quarantine.tar.gz holds $n files, the manifest $(wc -l < "$man" | tr -d ' ')"; return 1; fi
+  if ! ( cd "$v" && sha256sum -c --quiet "$man" ) >/dev/null 2>&1; then rm -rf "$v"; echo "${ad##*/}/quarantine.tar.gz does not match the manifest"; return 1; fi
+  rm -rf "$v"; }
+
 # quarantine_custody <sc> <tag> — chain of custody for every quarantined copy
 # (catfeeddb.corrupt.*) and import scratch dir (catfeeddb.importingtmp.*), taken
 # BEFORE anything deletes them. Under $EVID/custody/<tag>/:
@@ -134,13 +151,17 @@ quarantine_custody(){ local sc="$1" tag="$2" d="$EVID/custody/$2" n files=0 byte
   CUSTODY_TREE="$(sha256sum "$d/manifest.sha256" | cut -d' ' -f1)"
   # Same generation already preserved? (identical names AND identical content
   # hashes in an earlier verified custody) — reuse it rather than copy again.
-  local o
+  local o why
   for o in "$EVID"/custody/*/; do o="${o%/}"
     [[ "$o" == "$d" || ! -s "$o/quarantine.tar.gz.sha256" ]] && continue
     if cmp -s "$o/names.txt" "$d/names.txt" && cmp -s "$o/manifest.sha256" "$d/manifest.sha256"; then
-      basename "$o" > "$d/preserved-by"; evidence_state "preserved:$tag"
-      check "$sc" "custody-$tag" pass "this exact set [$CUSTODY_NAMES] (manifest $CUSTODY_TREE) is already preserved and verified in custody/$(basename "$o")/ — no second copy"
-      return 0
+      # Reuse only RECOVERABLE bytes: the archive itself is re-verified now.
+      if why="$(verify_archive "$o" "$d/manifest.sha256")"; then
+        basename "$o" > "$d/preserved-by"; evidence_state "preserved:$tag"
+        check "$sc" "custody-$tag" pass "this exact set [$CUSTODY_NAMES] (manifest $CUSTODY_TREE) is already preserved in custody/$(basename "$o")/, and that archive was re-verified now (digest + extract + every file hash) — no second copy"
+        return 0
+      fi
+      echo "reuse of custody/$(basename "$o") rejected: $why — making a fresh copy" >> "$d/verify.log"
     fi
   done
   # Rule 3: the complete bytes, off the pressure volume, BEFORE any deletion.
@@ -151,14 +172,8 @@ quarantine_custody(){ local sc="$1" tag="$2" d="$EVID/custody/$2" n files=0 byte
     || custody_fail "$sc" "$tag" "not enough room off the volume to preserve ${bytes} bytes (need ${need} KiB, have ${avail:-?} KiB at $d)"
   ( set -o pipefail; rx 1800 "tar -cf - $CUSTODY_NAMES" | gzip -1 > "$d/quarantine.tar.gz" ) \
     || custody_fail "$sc" "$tag" "copying the complete quarantined bytes off the volume failed (rc=$?)"
-  rm -rf "$d/verify"; mkdir -p "$d/verify"
-  tar -xzf "$d/quarantine.tar.gz" -C "$d/verify" || custody_fail "$sc" "$tag" "the preserved archive does not extract"
-  [[ "$(find "$d/verify" -type f | wc -l | tr -d ' ')" == "$files" ]] \
-    || custody_fail "$sc" "$tag" "the preserved archive holds $(find "$d/verify" -type f | wc -l | tr -d ' ') files, the inventory $files"
-  ( cd "$d/verify" && sha256sum -c --quiet "$d/manifest.sha256" ) >> "$d/verify.log" 2>&1 \
-    || custody_fail "$sc" "$tag" "the preserved archive does not match the manifest (see custody/$tag/verify.log)"
-  rm -rf "$d/verify"
   sha256sum "$d/quarantine.tar.gz" | sed "s|$d/||" > "$d/quarantine.tar.gz.sha256"
+  why="$(verify_archive "$d" "$d/manifest.sha256")" || custody_fail "$sc" "$tag" "the preserved archive failed verification: $why"
   evidence_state "preserved:$tag"
   check "$sc" "custody-$tag" pass "BEFORE deletion: $(wc -l < "$d/inventory.txt" | tr -d ' ') entr(y/ies) [$CUSTODY_NAMES], $files files, $bytes bytes; manifest sha256 $CUSTODY_TREE; complete bytes preserved off-volume as quarantine.tar.gz (sha256 $(cut -d' ' -f1 < "$d/quarantine.tar.gz.sha256")) and re-verified file-by-file against the manifest"; }
 
@@ -172,7 +187,7 @@ quarantine_custody(){ local sc="$1" tag="$2" d="$EVID/custody/$2" n files=0 byte
 # exactly custody/<tag>/names.txt, and the bytes on the volume are RE-HASHED and
 # must still equal custody/<tag>/manifest.sha256 immediately before deletion.
 # Any new entry, or any listing that fails, re-arms the protection (unpreserved).
-delete_custodied(){ local sc="$1" tag="$2" args="" n left after d="$EVID/custody/$2" now
+delete_custodied(){ local sc="$1" tag="$2" args="" n left after d="$EVID/custody/$2" now ad why
   [[ -z "$CUSTODY_NAMES" ]] && return 0
   { [[ -s "$d/quarantine.tar.gz.sha256" || -s "$d/preserved-by" ]] && [[ "$(evidence_state_get)" == "preserved:$tag" ]]; } \
     || { check "$sc" "delete-$tag" fail "refusing to delete: no verified off-volume copy authorizes custody '$tag' (state '$(evidence_state_get)')"; write_report_and_exit; }
@@ -182,6 +197,12 @@ delete_custodied(){ local sc="$1" tag="$2" args="" n left after d="$EVID/custody
     || { arm_evidence "pre-delete re-hash failed"; check "$sc" "delete-$tag" fail "refusing to delete: could not re-hash the set before deletion (rc=$?)"; write_report_and_exit; }
   printf '%s\n' "$now" | sed '/^$/d' | LC_ALL=C sort -k2 | cmp -s - "$d/manifest.sha256" \
     || { arm_evidence "the set changed since it was preserved"; check "$sc" "delete-$tag" fail "refusing to delete: the bytes on the volume no longer match the preserved manifest $CUSTODY_TREE"; write_report_and_exit; }
+  # The archive that authorizes this deletion — this custody's own, or the one it
+  # reused — must still be RECOVERABLE right now (ASTRA 6361214485): a sidecar
+  # or a preserved-by pointer alone never authorizes destroying the source.
+  ad="$d"; if [[ -s "$d/preserved-by" ]]; then ad="$EVID/custody/$(basename "$(cat "$d/preserved-by")")"; fi
+  why="$(verify_archive "$ad" "$d/manifest.sha256")" \
+    || { arm_evidence "deletion refused: the authorizing archive is not recoverable ($why)"; check "$sc" "delete-$tag" fail "refusing to delete: $why"; write_report_and_exit; }
   for n in $CUSTODY_NAMES; do args+=" '$n'"; done
   dstep "$sc" "delete-$tag" 300 "cd '$MP' || exit 3; rm -rf --$args"
   left="$(rx 60 "for e in $args; do if [ -e \"\$e\" ]; then echo \"\$e\"; fi; done")" \

@@ -219,7 +219,7 @@ rc="$(exit_case ex-copy "$UNP; quarantine_custody K t; delete_custodied K t" STU
 expect "EXIT path: a failed copy exits 1 and the image holding the evidence is RETAINED" '[[ $rc == 1 && -e "$T/ex-copy/img" ]] && grep -q "RETAINED .*custody-t failed" "$T/ex-copy/evid/cleanup.log" && grep -q "loop image RETAINED" "$T/ex-copy/evid/REPORT.md"'
 mkdir -p "$T/ex-extract/vol"; xq ex-extract catfeeddb.corrupt.52
 rc="$(exit_case ex-extract "$UNP; quarantine_custody K t; delete_custodied K t" STUB_TAR_GARBAGE=1)"
-expect "EXIT path: a non-archive stream fails verification (extract or file count), exits 1, image RETAINED, nothing deleted" '[[ $rc == 1 && -e "$T/ex-extract/img" && -d "$T/ex-extract/vol/catfeeddb.corrupt.52" ]] && grep -Eq "custody-t fail the preserved archive (does not extract|holds 0 files)" "$T/ex-extract/evid/checks.txt"'
+expect "EXIT path: a non-archive stream fails verification (extract or file count), exits 1, image RETAINED, nothing deleted" '[[ $rc == 1 && -e "$T/ex-extract/img" && -d "$T/ex-extract/vol/catfeeddb.corrupt.52" ]] && grep -Eq "custody-t fail the preserved archive failed verification: .*(does not extract|holds 0 files)" "$T/ex-extract/evid/checks.txt"'
 mkdir -p "$T/ex-tamper/vol"; xq ex-tamper catfeeddb.corrupt.53
 rc="$(exit_case ex-tamper "$UNP; quarantine_custody K t; delete_custodied K t" STUB_TAR_TAMPER="$T/ex-tamper/vol")"
 expect "EXIT path: bytes that changed after hashing fail verification, image RETAINED" '[[ $rc == 1 && -e "$T/ex-tamper/img" ]] && grep -q "does not match the manifest" "$T/ex-tamper/evid/checks.txt"'
@@ -258,6 +258,29 @@ expect "lifecycle: re-custody of the SAME generation reuses the verified archive
 mkdir -p "$T/lc-rearm/vol"; xq lc-rearm catfeeddb.corrupt.68
 rc="$(exit_case lc-rearm "$UNP; quarantine_custody K t; delete_custodied K t; arm_evidence \"a restart may quarantine again\"; mkdir \"\$MP/catfeeddb.corrupt.69\"; printf z > \"\$MP/catfeeddb.corrupt.69/MANIFEST\"; dstep K restart 2 false")"
 expect "lifecycle: a restart re-armed after deletion that then fails RETAINS the image holding its fresh quarantine" '[[ $rc == 1 && -e "$T/lc-rearm/img" ]] && grep -q "RETAINED .*a restart may quarantine again" "$T/lc-rearm/evid/cleanup.log"'
+
+echo "== archive reuse/deletion requires RECOVERABLE bytes, never metadata (ASTRA 6361214485) =="
+mkdir -p "$T/ar-ok/vol"; xq ar-ok catfeeddb.corrupt.71
+rc="$(exit_case ar-ok "$UNP; quarantine_custody K a; arm_evidence restart; quarantine_custody K b; delete_custodied K b")"
+expect "reuse CONTROL: an intact archive is re-verified and reused; delete -> exit 0, image removed, archive kept" '[[ $rc == 0 && ! -e "$T/ar-ok/img" && -s "$T/ar-ok/evid/custody/a/quarantine.tar.gz" && ! -e "$T/ar-ok/vol/catfeeddb.corrupt.71" ]] && grep -q "re-verified now" "$T/ar-ok/evid/checks.txt"'
+mkdir -p "$T/ar-trunc/vol"; xq ar-trunc catfeeddb.corrupt.72
+rc="$(exit_case ar-trunc "$UNP; quarantine_custody K a; : > \"\$EVID/custody/a/quarantine.tar.gz\"; arm_evidence restart; quarantine_custody K b; delete_custodied K b")"
+expect "reuse: a TRUNCATED earlier archive is rejected and a FRESH verified copy is made before deletion" '[[ $rc == 0 && ! -e "$T/ar-trunc/evid/custody/b/preserved-by" ]] && (cd "$T/ar-trunc/evid/custody/b" && sha256sum -c --quiet quarantine.tar.gz.sha256) && grep -q "rejected: .*does not match its recorded digest" "$T/ar-trunc/evid/custody/b/verify.log"'
+mkdir -p "$T/ar-missing/vol"; xq ar-missing catfeeddb.corrupt.73
+rc="$(exit_case ar-missing "$UNP; quarantine_custody K a; mv \"\$EVID/custody/a/quarantine.tar.gz\" \"\$EVID/moved.tgz\"; arm_evidence restart; quarantine_custody K b; delete_custodied K b")"
+expect "reuse: a MISSING earlier archive is rejected and a FRESH verified copy is made before deletion" '[[ $rc == 0 && ! -e "$T/ar-missing/evid/custody/b/preserved-by" ]] && (cd "$T/ar-missing/evid/custody/b" && sha256sum -c --quiet quarantine.tar.gz.sha256) && grep -q "rejected: archive missing" "$T/ar-missing/evid/custody/b/verify.log"'
+mkdir -p "$T/ar-postreuse/vol"; xq ar-postreuse catfeeddb.corrupt.74
+rc="$(exit_case ar-postreuse "$UNP; quarantine_custody K a; arm_evidence restart; quarantine_custody K b; : > \"\$EVID/custody/a/quarantine.tar.gz\"; delete_custodied K b")"
+expect "delete: archive corrupted AFTER reuse, BEFORE delete -> REFUSED, exit 1, image RETAINED, source kept" '[[ $rc == 1 && -e "$T/ar-postreuse/img" && -d "$T/ar-postreuse/vol/catfeeddb.corrupt.74" ]] && grep -q "RETAINED .*authorizing archive is not recoverable" "$T/ar-postreuse/evid/cleanup.log"'
+mkdir -p "$T/ar-postreuse-mv/vol"; xq ar-postreuse-mv catfeeddb.corrupt.75
+rc="$(exit_case ar-postreuse-mv "$UNP; quarantine_custody K a; arm_evidence restart; quarantine_custody K b; mv \"\$EVID/custody/a/quarantine.tar.gz\" \"\$EVID/moved.tgz\"; delete_custodied K b")"
+expect "delete: archive MISSING after reuse, before delete -> REFUSED, image RETAINED, source kept" '[[ $rc == 1 && -e "$T/ar-postreuse-mv/img" && -d "$T/ar-postreuse-mv/vol/catfeeddb.corrupt.75" ]] && grep -q "refusing to delete: archive missing" "$T/ar-postreuse-mv/evid/checks.txt"'
+mkdir -p "$T/ar-own/vol"; xq ar-own catfeeddb.corrupt.76
+rc="$(exit_case ar-own "$UNP; quarantine_custody K t; printf junk >> \"\$EVID/custody/t/quarantine.tar.gz\"; delete_custodied K t")"
+expect "delete: its OWN archive altered between custody and delete -> REFUSED, image RETAINED" '[[ $rc == 1 && -e "$T/ar-own/img" && -d "$T/ar-own/vol/catfeeddb.corrupt.76" ]]'
+mkdir -p "$T/ar-sidecar/vol"; xq ar-sidecar catfeeddb.corrupt.77
+rc="$(exit_case ar-sidecar "$UNP; quarantine_custody K t; ( cd \"\$EVID/custody/t\" && sha256sum quarantine.tar.gz >/dev/null && : > quarantine.tar.gz && sha256sum quarantine.tar.gz > quarantine.tar.gz.sha256 ); delete_custodied K t")"
+expect "delete: an empty archive whose digest was RE-RECORDED still fails the manifest check -> REFUSED" '[[ $rc == 1 && -e "$T/ar-sidecar/img" && -d "$T/ar-sidecar/vol/catfeeddb.corrupt.77" ]]'
 
 echo "== structural: the REAL scenario arms protection before every risky step (ASTRA 6360721903) =="
 # In the K scenario, from the import onward, the nearest evidence-state change
