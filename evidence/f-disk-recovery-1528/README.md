@@ -50,3 +50,16 @@ domains. Both failures were the guessed adult-domain probe, and the lab
 mirror's feed carries no adult list. The large quarantine files were deleted
 under the pre-fix hash-only custody. Only their manifest, inventory and files
 under 1 MiB were retained, and that is not complete custody.
+
+## 90c5fc65: harness fixes for ASTRA 6360307931, with a self-generated local-proof receipt
+
+`90c5fc65-harness-proof.log` was written by the run itself on Linux. It records
+head, tree, clean porcelain before and after, the exact commands and their exit
+statuses. It covers convergence-oracle_test.sh (23 assertions),
+recovery-custody_test.sh run with REQUIRE_PROCESS_PROOF=1 (64 assertions, 0
+unsupported) and shellcheck. It is source-level local proof; it is not a lab
+run.
+
+Correction to the earlier summary of lab run 39916602574: its checks.jsonl
+totals **39 PASS / 2 FAIL** (12 E0 + 27 K PASS, 2 K FAIL), not 25 / 2. The
+earlier figure counted only the K rows visible in the report tail.
