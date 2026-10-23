@@ -75,3 +75,19 @@ source-level local proof, not a lab run.
 ## 67694982: archive reuse/deletion requires recoverable bytes (ASTRA 6361214485)
 
 `67694982-harness-proof.log` was self-generated on Linux: head, tree, clean porcelain before and after, exact commands and their exits. It covers convergence-oracle 23/23, recovery-custody 81/81 with REQUIRE_PROCESS_PROOF=1, and shellcheck. Source-level local proof, not a lab run.
+
+## Lab run 39943952965 (67694982 harness, `[midimport-kill]`): 44 PASS / 0 FAIL
+
+- **Artifact.** `lab-run-39943952965-midimport-kill-evidence.zip` is the evidence artifact as downloaded (id 12498020087, GitHub digest sha256:155dbc23500ba6fcfca187c4e51951250edb064a8b32b13443e07012f2b9151b; recomputed digest identical).
+- **Totals.** Its checks.jsonl totals 12 E0, 31 K and 1 mandatory convergence verdict, all PASS. There was one attempt, and only this job ran; the OVA build was skipped.
+- **Quarantine archive.** The archive is the separate artifact 12496688726 (sha256:63f17a9fb632ee12b1f8f4c27798d6e9412b702bf9d0b4f8d98d3461ce759c82). It is retained by GitHub until 2026-11-22 and is not committed here because of its size; its digests are recorded instead.
+- **Independent verification.** `lab-run-39943952965-verify.log` records it:
+  - `quarantine.tar.gz` sha256 1d6740c8…cb8ee4 matches its sidecar;
+  - the archive extracts to exactly 6 files and 403,701,806 bytes;
+  - `sha256sum -c` against `manifest.sha256` (sha256 3e23a814…b33d0) passes for all 6;
+  - the final evidence state is `clear:post-restart`.
+- **Scope.**
+  - This proves the harness, at 67694982, running against the frozen application image from 4524311b. It does not validate the later recovery source fixes, which are absent from the frozen 4524311b/27006cf4.
+  - Convergence follows the harness's verified preservation and deletion of the quarantined partial, then freeing space and a restart. It is not automatic pressure pruning.
+  - It does not prove stalled-Flush completion, power loss, systemd/whole-appliance cancellation, general ENOSPC, or ESXi reproduction.
+  - Run 39916602574 remains non-qualifying.

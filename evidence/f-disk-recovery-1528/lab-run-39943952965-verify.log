@@ -1,0 +1,25 @@
+# Independent verification of lab run 39943952965 artifacts (harness 67694982)
+# generated 2026-10-23T11:23:37Z on Linux x86_64
+## artifact zip digests (GitHub-recorded vs recomputed)
+evidence   12498020087 github=155dbc23500ba6fcfca187c4e51951250edb064a8b32b13443e07012f2b9151b
+           recomputed=155dbc23500ba6fcfca187c4e51951250edb064a8b32b13443e07012f2b9151b
+quarantine 12496688726 github=63f17a9fb632ee12b1f8f4c27798d6e9412b702bf9d0b4f8d98d3461ce759c82
+           recomputed=63f17a9fb632ee12b1f8f4c27798d6e9412b702bf9d0b4f8d98d3461ce759c82
+## checks.jsonl tally
+E0:pass=12 K:pass=31 midimport-kill:pass=1 | total 44
+## quarantine.tar.gz
+sidecar:    1d6740c849a48a02bb9472440883abce435d2d137b40e3da96faa9a47dcb8ee4  quarantine.tar.gz
+recomputed: 1d6740c849a48a02bb9472440883abce435d2d137b40e3da96faa9a47dcb8ee4
+manifest.sha256 digest: 3e23a814300b8c67375d235dfb83c3a4901de203e33229812ee79e2a4feb33d0
+inventory: catfeeddb.corrupt.1792753821739087458 files=6 bytes=403701806
+extracted files: 6, bytes: 403701806
+## sha256sum -c manifest.sha256 against extracted archive
+catfeeddb.corrupt.1792753821739087458/000001.vlog: OK
+catfeeddb.corrupt.1792753821739087458/00001.mem: OK
+catfeeddb.corrupt.1792753821739087458/DISCARD: OK
+catfeeddb.corrupt.1792753821739087458/KEYREGISTRY: OK
+catfeeddb.corrupt.1792753821739087458/LOCK: OK
+catfeeddb.corrupt.1792753821739087458/MANIFEST: OK
+rc=0
+## final evidence state
+clear:post-restart
