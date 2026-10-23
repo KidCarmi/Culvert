@@ -285,11 +285,20 @@ func TestMatchDPIRegexWithTimeout_Normal(t *testing.T) {
 }
 
 func TestMatchDPIRegexWithTimeout_TimeoutReturnsTrue(t *testing.T) {
-	// Use a pattern that's fast to compile but we force a tiny timeout.
+	// Go's regexp is RE2 (linear, no backtracking), so a short input finishes in
+	// well under a microsecond and could beat even a 1ns timer: under -race both
+	// select cases became ready together and Go picked one at random (the flake
+	// internal/scanner's runWithTimeout comment records). The match must instead
+	// be unable to finish first: a 512 KiB non-matching input keeps re.Match busy
+	// for tens of milliseconds (hundreds under -race), longer than both the
+	// microseconds the timer needs and Go's 10ms preemption slice on a single
+	// CPU, so only the timeout case is ready. It is kept no larger than that
+	// because the abandoned match goroutine runs to completion after return. The branch itself is pinned deterministically by
+	// internal/scanner TestRunWithTimeout; this keeps the end-to-end fail-closed
+	// contract of the root alias.
 	re := regexp.MustCompile(`^(a+)+$`)
-	// With a near-zero timeout, the match should time out and return true (fail-closed).
-	result := matchDPIRegexWithTimeout(re, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"), time.Nanosecond)
-	if !result {
+	data := append(bytes.Repeat([]byte("a"), 512<<10), '!')
+	if !matchDPIRegexWithTimeout(re, data, time.Nanosecond) {
 		t.Error("timeout should return true (fail-closed)")
 	}
 }
