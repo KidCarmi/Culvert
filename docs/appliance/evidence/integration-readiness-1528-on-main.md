@@ -1,6 +1,6 @@
 # Integration Readiness: #1528 appliance line on latest main (Workstream A)
 
-Prepared by OPUS on 2026-10-23 under owner directive 6369573402. Everything here is **local** and nothing is pushed:
+Prepared by OPUS on 2026-10-23 under owner directive 6369573402. The tree is pushed only to `review/1528-integ-on-main`, which triggers no workflow:
 - no PR exists, so no Fast, Deep, QA or Security CI has run on this tree;
 - main is not fast-forwarded;
 - the frozen #1528 head `4524311b` is untouched;
@@ -17,7 +17,9 @@ Status: MERGE / PILOT / RELEASE remain **NO-GO**.
 | Merge commit | `369c069d` | `712718519c7142f41a0c0630d4c178d1c66f2d07` |
 | + session-admission fix | `e5dc751f92646d8dbe7e1ba0cfc670ccca15bea5` | `93af1bf6e3fd55aed5d70c508e3f526c646e7df0` |
 | + R1 test lint | `bf79ed0cce2c010debbf0045c9f2c4a88a6e3329` | `24c18d6e5b351b4596fc1e80036adab8b576db33` |
-| **Tip: `integ/1528-on-main` (local)** | **`ce78db1b80a116cf9a204f94034977de4515436c`** | **`485c940a13ade7302c4c184c13edeafde3097117`** |
+| + gitleaks fingerprint pin | `ce78db1b80a116cf9a204f94034977de4515436c` | `485c940a13ade7302c4c184c13edeafde3097117` |
+| + merge of latest `main` `3c4bf491` (three Dependabot bumps) | **`78f0b6796bf14c73f1579eddaf30ecdbdf50323d`** | **`7cc07e983dc321e6a1f7587d554b2ec1bfa852ea`** |
+| Pushed as `review/1528-integ-on-main` (runs no workflow) | this record's commit, documentation only, atop `78f0b679` | |
 
 Ancestry is verified: `4524311b ⊂ cfae7d67 ⊂ 95e68e65 ⊂ tip`, and `e380b901 ⊂ tip`. Toolchain is go1.26.10 (main's pin).
 
@@ -53,6 +55,21 @@ Ancestry is verified: `4524311b ⊂ cfae7d67 ⊂ 95e68e65 ⊂ tip`, and `e380b90
 4. **R1 tests had never been linted.** They lived only on review branches, which run no workflow. golangci-lint v2.5.0 found `tooManyResultsChecker`, `G204` and `noctx`. Fixed in `bf79ed0c` with no assertion change.
 
 5. **gitleaks: a full-range scan found a #1528 fixture** (`recovery_secrets_test.go` at `42ba4f38`, a synthetic setup token). #1528's PR scans never reached it, because each PR run covers only that push's range. It is pinned as one exact fingerprint, with provenance, in `ce78db1b`.
+
+### Sync to latest main
+
+During verification, main advanced from `e380b901` to `3c4bf491`: brotli 1.2.6, etcd/server 3.7.2 and klauspost/compress 1.20.3.
+- The only conflict was adjacent `require` lines in `go.mod`. Main's versions are taken, and the appliance line's `xml-roundtrip-validator` require is kept.
+- `go mod tidy` reproduces main's `go.sum` delta exactly.
+- Re-run on `78f0b679`, all PASS:
+  - full `go test ./...` (119 ok);
+  - `-race -count=2 -shuffle=on` over feedsync, catdb, storeguard, logstore and shutdown;
+  - govulncheck;
+  - gosec;
+  - golangci-lint `--new-from-rev origin/main` (0 issues);
+  - fork integrity;
+  - `go mod verify`.
+- Determinism was run on `ce78db1b`; the sync since then is dependency-only.
 
 ## Changed-file inventory
 
