@@ -9161,6 +9161,10 @@ values, and they are CLK-1, CLK-2 and CLK-3.
 
 ### BKP-1 — an encrypted-backup passphrase is never *required*
 
+**CLOSED** (CHAOS-82; §45): a plaintext blob is refused when a passphrase is
+configured. Gate: `TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet`, with
+two negative controls.
+
 `loadAndMaybeDecrypt` (`restore.go:305-311`) chooses the envelope by magic-byte
 sniff and consults the passphrase **only** in the encrypted branch, so a
 plaintext archive is accepted with the passphrase never examined, and
@@ -9176,6 +9180,9 @@ level. No test covers passphrase-set-plus-plaintext-archive.
 
 ### BKP-2 — the unencrypted backup archive is written world-readable
 
+**CLOSED** (CHAOS-82; §45): the writer chmods the descriptor to 0600. Measured
+at 0644 pre-fix. Gate: `TestChaos82_PublishedArchiveIsOwnerOnly`.
+
 `backup.go:425` uses `os.Create` (0666 before umask, so typically 0644) with no
 `Chmod` anywhere in the file, while the encrypted writer goes through
 `atomicWriteFile(..., 0o600)` whose `Chmod` makes the mode umask-independent.
@@ -9189,6 +9196,8 @@ path.
 
 ### BKP-3 — archive memory is not actually bounded
 
+**OPEN** (reasoning recorded in §45.5; risk row R22).
+
 The decompression-bomb guard checks declared entry sizes
 (`restore.go:365-371`) but `restore.go:306` slurps the whole archive with an
 unbounded `os.ReadFile` (≈3× file size peak for the encrypted envelope), and
@@ -9201,6 +9210,12 @@ one-shot at `:198`, so that path has no `GOMEMLIMIT` backstop. Availability only
 
 ### BKP-4 — the unencrypted writer still uses a fixed `<out>.tmp`
 
+**CLOSED** (CHAOS-82; §45): publication moved to `os.CreateTemp`. Measured
+worse than described here — a planted symlink received the whole archive and
+the CLI reported success. Gates:
+`TestChaos82_PlantedSymlinkAtFixedTmpIsNotFollowed`,
+`TestChaos82_StaleTmpAtFixedPathIsUntouched`.
+
 `backup.go:424-425` uses `outPath + ".tmp"` with `os.Create` — no `O_EXCL`, and
 it follows symlinks. The encrypted path deliberately abandoned this pattern and
 pins the abandonment with two tests (`TestBackupEncrypt_NoFixedTmpFile`,
@@ -9211,6 +9226,9 @@ interleave, after which the CLI prints success over a corrupt archive. Two-line
 switch to `atomicWriteFile`.
 
 ### BKP-5 — `modeFull` silently deletes live artifacts absent from the archive
+
+**OPEN** — the sharpest remaining row in this domain; it needs an
+operator-contract decision, recorded in §45.5 (risk row R21).
 
 `stageArtifacts` pass 2 skips every path for which `mode.fromTarball` is true,
 and for `modeFull` that is unconditional (`restore.go:170-172`), so any live
@@ -9226,6 +9244,11 @@ should enumerate what a commit will delete, in the shape
 `--accept-dp-reenrollment` already establishes.
 
 ### BKP-6 / BKP-7 — recorded, lower severity
+
+**BKP-6 half CLOSED** (CHAOS-82; §45): the PBKDF2 iteration ceiling shipped as
+`encMaxIters`; measured >280 s of burn pre-fix. The `enqueueRetry` fsync half
+(below) and BKP-7 remain open. Gate:
+`TestChaos82_ItersAboveCeilingRejectedNonOpaque`.
 
 No ceiling on the archive-declared PBKDF2 iteration count (`backupcrypt.go:197`
 enforces only a floor, so a declared `0xFFFFFFFF` is ~40 minutes of
@@ -10795,3 +10818,231 @@ required before merge; each is now in the tree.
 Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
 listener is dark is still allowed (break-glass by design); it will withhold and
 fence again until the listener serves.
+
+---
+
+## 45. CHAOS-82 — The backup plane: who may read the archive, and what the restore will accept
+
+**Id claim.** `CHAOS-82` was claimed in a committed placeholder row as commit
+one (see the dated row in the header), before any code. `CHAOS-75` was the
+highest MERGED id; 76–81 were claimed by sweeps still open when this one
+started (76 = PR #1633, 77 = #1669, 78 = #1675, 79/80 = #1626, 81 = #1494).
+
+**Origin.** Rows **BKP-1**, **BKP-2**, **BKP-4** and **BKP-6** of §42 — the
+backup findings the CHAOS-74 sweep measured, recorded, and deliberately did not
+fix. Nothing in this sweep is a new discovery of a failure *mode*; what is new
+is that each row now has a fix and a gate that fails without it. The §42 text
+was accurate in every particular, which is worth saying plainly: the value here
+was in the recording, not the re-finding.
+
+---
+
+### 45.1 Executive summary
+
+**The backup plane protected the archive's contents and then published it
+world-readable, and the restore protected the archive's integrity and then
+accepted one that was never encrypted.**
+
+Four defects, all on the two paths that matter — who can read a backup, and
+what a restore will install. Three are security defects and one is a cheap
+availability defect. None needed a new failure mode to be invented; all four
+were sitting in §42 with file and line.
+
+**BKP-2 — the archive was published 0644.** `writeBackupTarball` used
+`os.Create` (0666 before umask) with no `Chmod` anywhere in the file, while the
+encrypted writer went through `atomicWriteFile(..., 0o600)`. Measured by
+restoring the pre-fix writer under this sweep's own gate: **mode 0644**. The
+archive aggregates files that are individually 0600 and contains
+`cluster-ca.key` — the fleet's MITM-capable CA key — plus `ui_users.json`
+(password hashes, TOTP secrets) and `idp_profiles.json` (OIDC client secrets,
+LDAP bind credentials). Any local account or co-mounted container with read
+access to `/backup` obtained all of it. The whole fix is one `Chmod`.
+
+**BKP-4 — and it published through a predictable, symlink-following path.**
+The same writer used a fixed `outPath + ".tmp"` with `os.Create`: no `O_EXCL`,
+and it follows symlinks. This is the finding that measured worse than its §42
+description. With the pre-fix writer restored, a symlink planted at
+`<out>.tmp` ahead of the run **received the entire archive** — 687 bytes
+landing on a canary file outside the output directory — and `runBackup`
+returned success. That is not a corruption risk, it is an exfiltration
+primitive for the cluster CA key, available to anyone who can create one
+directory entry in `/backup`. `os.Create` also truncates, so a stale file at
+that path was silently destroyed, and two concurrent backups to one `outPath`
+opened the same inode and interleaved, after which the CLI printed success over
+a corrupt archive. The encrypted writer had already abandoned this pattern and
+pinned the abandonment with two tests; this path kept it.
+
+**BKP-1 — a plaintext archive was accepted although a passphrase was set.**
+`loadAndMaybeDecrypt` chose the envelope by magic-byte sniff and consulted the
+passphrase **only** in the encrypted branch, so a plaintext blob returned
+before the passphrase was ever examined. The substitution is the whole attack:
+anyone who can write into `/backup` replaces the archive with a hand-built
+unencrypted tarball carrying their own `ui_users.json`, and no other guard
+fires — the manifest is self-referential, so every content check still passes.
+The restore installs an attacker-authored admin roster. The format carries no
+other provenance binding, so refusing the downgrade is the only available
+control, and it is symmetric with the KDF-iteration downgrade `backupcrypt`
+already refuses at the header level.
+
+**BKP-6a — the archive declared how much CPU the restore would spend.**
+`parseEncHeader` enforced an iteration *floor* and no ceiling, and `DecryptBlob`
+fed the header's count straight to `pbkdf2.Key`. §42 estimated ~40 minutes for
+a declared `0xFFFFFFFF`. Measured here by removing the new ceiling: the open
+**did not complete in 280 seconds** and the test harness killed it, against an
+instant refusal with the ceiling in place. Four attacker-controlled header
+bytes, and the blob could never have authenticated anyway.
+
+---
+
+### 45.2 A result worth separating from the fixes: one of the gates was vacuous
+
+The first version of the BKP-4 gate asserted that no `<out>.tmp` is left in the
+output directory after a successful backup — mirroring
+`TestBackupEncrypt_NoFixedTmpFile`, which pins exactly that for the writer that
+had already been fixed. Mutation-tested against the restored `os.Create`
+version, **it passed**. It had to: the pre-fix writer *renamed* its fixed temp
+file onto `outPath`, so a successful run left no litter either. The assertion
+was true before and after the fix and discriminated nothing.
+
+This is recorded rather than quietly corrected because the mirrored test is a
+trap: copying a gate from a sibling writer carries over its *shape* without its
+*discriminating power*, and the sibling's version is not vacuous only because
+`atomicWriteFile` never had a fixed name to leave behind. Two gates that do
+discriminate were added — a planted symlink must not be followed (the security
+property, and the one that exposed the exfiltration measurement above) and a
+stale file at the fixed path must survive untouched (`os.Create` truncates it).
+The litter assertion was kept, with its own limitation written into the test, as
+a guard against a writer that abandons temp files.
+
+Every other gate in this sweep was mutation-tested the same way, and each fails
+with its fix reverted. That is the only evidence that distinguishes a gate from
+a comment.
+
+---
+
+### 45.3 What shipped
+
+* **`backup.go`** — `writeBackupTarball` publishes through `os.CreateTemp` (a
+  random name under `O_EXCL`, so a planted symlink is never opened and two
+  concurrent backups cannot share an inode) and chmods the descriptor to
+  `0o600` before writing. Streaming is preserved: the encrypted writer builds
+  the whole archive in a `bytes.Buffer` because it must seal it, and there was
+  no reason to adopt that memory profile on the path that does not. The
+  existing fsync → rename → parent-dir-fsync publication is unchanged.
+* **`restore.go`** — `loadAndMaybeDecrypt` refuses a plaintext blob when a
+  passphrase is configured, naming the archive, the condition and the remedy.
+  It does **not** fire on the legitimate plaintext restore, which supplies no
+  passphrase — which is already what the maintenance agent does
+  (`ComposeRestoreDryRun` resolves an empty passphrase for an unencrypted
+  archive, and the unencrypted backup/list templates suppress the variable with
+  an explicit unset), so the shipped restore flow is unaffected.
+* **`internal/backupcrypt`** — `encMaxIters = 10_000_000` beside the existing
+  floor, checked in `parseEncHeader` before any key derivation. ~16× the 600k
+  this version writes, so a future deliberate increase still opens. The
+  rejection is non-opaque like the floor: it cannot leak passphrase
+  information, and an operator needs to know what was wrong.
+
+**A secondary effect, deliberately kept.** The BKP-1 refusal also changes the
+tampered-magic path: an encrypted archive whose magic has been broken now fails
+with an explicit downgrade refusal instead of falling through to an opaque
+`gunzip: invalid header`. Same fail-closed outcome, a message that names the
+actual condition. `TestBackupEncrypt_TamperedMagic` asserted the old message and
+was updated to accept either, with the reasoning in the test. The gunzip path is
+still what a tampered blob reaches when no passphrase is supplied; that case is
+unchanged.
+
+---
+
+### 45.4 Gates
+
+In `backup_chaos82_test.go` (root) and
+`internal/backupcrypt/iterceiling_chaos82_test.go`:
+
+| Gate | Pins | Fails without the fix as |
+|---|---|---|
+| `TestChaos82_PublishedArchiveIsOwnerOnly` | both writers publish 0600 | `mode = 0644` |
+| `TestChaos82_PlantedSymlinkAtFixedTmpIsNotFollowed` | the archive is not written through a planted link | canary overwritten with 687 archive bytes |
+| `TestChaos82_StaleTmpAtFixedPathIsUntouched` | `os.Create`'s truncation of the fixed path | stale file consumed |
+| `TestChaos82_UnencryptedWriterLeavesNoFixedTmp` | no temp litter | *(vacuous — see §45.2)* |
+| `TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet` | the BKP-1 downgrade | plaintext archive accepted |
+| `TestChaos82_PlaintextArchiveStillAcceptedWithoutPassphrase` | negative control: the legitimate plaintext restore | — |
+| `TestChaos82_EncryptedArchiveStillRestores` | negative control: encrypted restore unaffected | — |
+| `TestChaos82_ItersAboveCeilingRejectedNonOpaque` | the BKP-6a ceiling, non-opaque | open does not finish in 280 s |
+| `TestChaos82_ShippedItersStillOpen` | the ceiling cannot be set below the shipped `KDFIters` | — |
+
+The two negative controls are load-bearing, not decoration: the BKP-1 refusal
+is only correct if it fires on the downgrade and nowhere else, and a refusal
+that also caught the no-passphrase restore would break the maintenance agent's
+restore flow in a way no gate on the positive case would notice.
+
+---
+
+### 45.5 Deliberately left, recorded rather than silently skipped
+
+* **BKP-3 (unbounded archive memory).** `restore.go` slurps the whole archive
+  with an unbounded `os.ReadFile` and caps no entry *count*, and
+  `initMemoryBackstop()` runs after the restore one-shot so that path has no
+  `GOMEMLIMIT` backstop. Availability only, pre-mutation, and the remedy is the
+  repository's own `io.LimitReader`-plus-explicit-refusal pattern. Left out to
+  keep this PR to the archive-publication and accept-decision boundary; it
+  wants the entry-count cap and the backstop ordering decided together.
+* **BKP-5 (`modeFull` silently deletes live artifacts absent from the
+  archive).** The sharpest remaining row in the domain: `policy.json` and
+  `admin_settings.json` are Tier-2 *optional*, so an archive from a fresh
+  install legitimately contains neither, and restoring it onto a configured
+  appliance drops both — and `admin_settings.json` is where `default_action`
+  persists, whose empty-plus-zero-rules combination resolves to passthrough.
+  The gateway goes from enforcing to fully permissive, silently. Not fixed here
+  because the fix is a *plan* change — enumerating what a commit will delete,
+  in the shape `--accept-dp-reenrollment` already establishes — which is an
+  operator-contract and CLI-surface decision, not a thing to invent inside a
+  sweep. This is the CHAOS-75/WK-22 precedent: record the reasoning, leave the
+  owner decision.
+* **A umask-independence gate for BKP-2.** The `Chmod` is precisely what makes
+  the 0600 independent of the process umask, and the natural gate flips
+  `syscall.Umask` the way `internal/fileutil`'s
+  `TestWriteFileExclusive_ModeIsIndependentOfUmask` does. It was written, and
+  then removed: it would have been the **first** `syscall.Umask` test in the
+  root package, whose ~982 test files share process-global state and run
+  shuffled, repeated and parallel, and whose suite contains other file-mode
+  assertions. Trading a real intermittent failure across the largest package in
+  the repository for a property the default-umask gate already discriminates
+  (0644 vs 0600) is a bad trade. Recorded so the absence is a decision rather
+  than an oversight. Note for a future sweep: `fileutil`'s own umask gate
+  covers `WriteFileExclusive`, **not** `AtomicWrite`, whose 0600 is asserted
+  only at the default umask — so the encrypted path's umask-independence is
+  likewise ungated today, and a subprocess-isolated gate in `fileutil` would
+  cover both writers at once without touching root's process state.
+
+---
+
+### 45.6 Residual risk
+
+| # | Risk | Likelihood | Impact | Status |
+|---|---|---|---|---|
+| R17 | BKP-2 an archive carrying `cluster-ca.key`, password hashes and IdP secrets is readable by any local account with `/backup` read access | High (default umask; measured 0644) | High (fleet MITM capability) | **CLOSED** (CHAOS-82) |
+| R18 | BKP-4 a symlink planted at the predictable temp path redirects the whole archive, and the CLI reports success | Low-Medium (needs one directory entry in `/backup` ahead of the run) | High (exfiltration of the CA key; measured end-to-end) | **CLOSED** (CHAOS-82) |
+| R19 | BKP-1 a substituted plaintext archive installs an attacker-authored admin roster on restore | Low-Medium (needs write access to `/backup`) | Critical (admin takeover of the appliance) | **CLOSED** (CHAOS-82) |
+| R20 | BKP-6a an archive-declared iteration count spends unbounded restore CPU before failing authentication | Low (restore CLI only, one-shot) | Low-Medium (measured >280 s; DoS on the recovery path) | **CLOSED** (CHAOS-82) |
+| R21 | BKP-5 `modeFull` silently drops `admin_settings.json`, taking the gateway from enforcing to passthrough | Medium (a fresh-install archive restored onto a configured node) | High (silent total policy bypass) | **OPEN** — owner decision, §45.5 |
+| R22 | BKP-3 restore memory is unbounded in archive size and entry count, with no `GOMEMLIMIT` backstop on that path | Low-Medium | Low (availability only, pre-mutation) | **OPEN** — §45.5 |
+
+The pre-existing finding that dominates this domain's DR picture is unchanged
+and not re-litigated: the restore commit cannot succeed in the shipped
+docker-compose topology because step 6 renames `/data`, a mount point (`EBUSY`),
+which `restore_mountpoint_test.go` already characterises. The failure is clean.
+
+**Already resilient in this domain, and the code that provides it** —
+re-confirmed at this revision rather than restated from §42: restore validates
+fully in memory before the first byte is written (`runRestoreCommit`), stages
+into a fresh exclusive directory and publishes by rename, so a mid-restore
+ENOSPC leaves `/data` untouched; `fileutil.AtomicWrite` is temp → chmod → fsync
+→ rename → parent fsync with cleanup on every branch, and distinguishes a
+post-rename fsync failure so it cannot be mistaken for "nothing was written";
+`checkInterruptedRestore` refuses to boot into an empty `/data` when a `.bak`
+sibling proves a killed commit, and prints both recovery commands; `backupcrypt`
+binds its header as AAD so an iteration downgrade cannot authenticate, and
+collapses wrong-passphrase and tamper into one opaque error with no oracle; the
+no-overwrite contract at the top of `runBackupWith` is preserved by both writers;
+and node-local key material is excluded on the pack side *and* refused on the
+restore side.

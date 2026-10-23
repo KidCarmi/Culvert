@@ -415,17 +415,49 @@ func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestF
 	return nil
 }
 
+// createArchiveTemp creates the temp file writeBackupTarball streams the
+// archive into, owner-only and at a name an attacker cannot predict
+// (CHAOS-82 / BKP-2 + BKP-4).
+//
+// Both properties replace an `os.Create(outPath + ".tmp")` that had neither.
+// The fixed name was a symlink target that could be planted ahead of the run —
+// os.Create follows links, so the archive, which carries cluster-ca.key, landed
+// wherever the link pointed and the CLI still reported success — and it was a
+// shared inode for two concurrent backups to one outPath, which interleaved
+// into a corrupt archive. os.CreateTemp is O_EXCL on a random name, so neither
+// is reachable, and it truncates nothing that was already there.
+//
+// The explicit Chmod is what makes 0600 independent of the process umask:
+// os.CreateTemp's own 0600 is still filtered through it. Without it the archive
+// published 0666-before-umask (typically 0644) while aggregating files that are
+// individually 0600 — cluster-ca.key (fleet MITM capability), ui_users.json
+// (password hashes, TOTP secrets) and idp_profiles.json (OIDC client secrets,
+// LDAP bind credentials). fileutil.AtomicWrite chmods for the same reason,
+// which is how the encrypted writer already got both properties.
+func createArchiveTemp(outPath string) (*os.File, error) {
+	f, err := os.CreateTemp(filepath.Dir(outPath), filepath.Base(outPath)+".tmp.*")
+	if err != nil {
+		return nil, fmt.Errorf("backup: create output: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name()) // #nosec G104 -- best-effort cleanup
+		return nil, fmt.Errorf("backup: chmod output: %w", err)
+	}
+	return f, nil
+}
+
 // design — defer-stacks would re-order Close calls and obscure the failure
 // path. Splitting into smaller helpers would push the gz/tw/out lifetimes
 // across function boundaries, complicating reasoning about partial state.
 //
 //nolint:funlen // Cleanup-on-error is repeated per close site (tw, gz, out) by
 func writeBackupTarball(outPath string, manifestBytes []byte, packed []packedFile) error {
-	tmpPath := outPath + ".tmp"
-	out, err := os.Create(tmpPath) // #nosec G304 -- operator-controlled path
+	out, err := createArchiveTemp(outPath)
 	if err != nil {
-		return fmt.Errorf("backup: create output: %w", err)
+		return err
 	}
+	tmpPath := out.Name()
 	cleanup := func() { _ = os.Remove(tmpPath) }
 
 	gz := gzip.NewWriter(out)

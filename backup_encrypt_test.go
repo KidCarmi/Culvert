@@ -212,11 +212,18 @@ func TestBackupEncrypt_TamperedMagic(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on tampered magic")
 	}
-	// First-bytes path: with magic broken, the file looks like neither
-	// gzip nor encrypted — gzip reader fails. The exact message comes
-	// from the gunzip path.
-	if !strings.Contains(err.Error(), "gunzip") && !strings.Contains(err.Error(), "tarball") {
-		t.Fatalf("expected gunzip/tarball error after magic break, got: %v", err)
+	// The tamper is refused, and since CHAOS-82 (BKP-1) it is refused EARLIER
+	// and more precisely than it used to be. With the magic broken the blob
+	// looks like neither gzip nor encrypted, so this restore — which supplies
+	// a passphrase — is now rejected as an encryption downgrade before any
+	// gunzip is attempted, instead of falling through to an opaque
+	// "gunzip: invalid header". Same fail-closed outcome, a message that names
+	// the actual condition. The gunzip path is still the one a tampered blob
+	// reaches when NO passphrase is supplied; that case is unchanged.
+	if !strings.Contains(err.Error(), "NOT encrypted") &&
+		!strings.Contains(err.Error(), "gunzip") &&
+		!strings.Contains(err.Error(), "tarball") {
+		t.Fatalf("expected a downgrade refusal or gunzip/tarball error after magic break, got: %v", err)
 	}
 }
 
