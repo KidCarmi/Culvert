@@ -9,6 +9,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **go-ldap v3.4.15 would have reclassified malformed-packet faults as "the directory answered".** v3.4.15 adds `ErrorMalformedPacket` (207) for decode
+  faults that v3.4.14 returned as plain errors, which `ldapUserBindIsUnreachable`
+  treats as unreachable. With the client-error ceiling still at 206, those faults
+  would have fallen outside the range: they would no longer arm the CHAOS-47
+  cooldown and would count as reachability evidence that clears it. The ceiling
+  now tracks `ErrorMalformedPacket`, so classification is unchanged across the
+  bump; `TestLDAPClientErrorCeil_TracksLibrary` caught the drift.
+
 - **A Control Plane gRPC listener fault terminated the whole appliance, and a
   listener that died after binding was silent and terminal (CHAOS-71).** The CP
   boot path had exactly one error branch — `logFatalf("ControlPlane gRPC: %v",
