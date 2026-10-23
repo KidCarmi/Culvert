@@ -19,6 +19,12 @@ cat > "$T/bin/docker" <<'STUB'
 case "$1" in
   exec) shift 2
     if [ -n "${STUB_FAIL_MATCH:-}" ] && [[ "$*" == *"$STUB_FAIL_MATCH"* ]]; then echo "stub: forced failure" >&2; exit 1; fi
+    if [[ "$*" == *"tar -cf"* ]]; then
+      # The archive stream arrives, but is not a tar: extraction must fail.
+      if [ -n "${STUB_TAR_GARBAGE:-}" ]; then echo "not a tar stream"; exit 0; fi
+      # The bytes change between hashing and archiving: verification must fail.
+      if [ -n "${STUB_TAR_TAMPER:-}" ]; then find "$STUB_TAR_TAMPER" -name MANIFEST -exec sh -c 'printf x >> "$1"' _ {} \; ; fi
+    fi
     exec "$@" ;;
   inspect)
     if [ -n "${STUB_DAEMON_DOWN:-}" ]; then echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" >&2; exit 1; fi
@@ -30,7 +36,17 @@ esac
 STUB
 chmod +x "$T/bin/docker"; export PATH="$T/bin:$PATH"
 
-fails=0; n=0
+fails=0; n=0; unsupported=0
+# proc_state <exact-args>: present | absent | unsupported. Absence counts ONLY
+# when the process table was actually enumerated (ASTRA 6360307931): a ps that
+# fails or prints nothing is "unsupported", never "absent".
+proc_state(){ local out
+  if ! out="$(ps -eo args= 2>/dev/null)" || [[ -z "$out" ]]; then echo unsupported; return 0; fi
+  if grep -qxF "$1" <<<"$out"; then echo present; else echo absent; fi; }
+# unsupported_or_fail <what>: report an unproven assertion explicitly. With
+# REQUIRE_PROCESS_PROOF=1 (the Linux lab job) it is a FAILURE.
+unsupported_or_fail(){ if [[ -n "${REQUIRE_PROCESS_PROOF:-}" ]]; then bad "$1 — process enumeration unsupported here, and proof is required"
+  else unsupported=$((unsupported+1)); printf 'UNSUPPORTED %s — process enumeration unavailable; NOT proven on this platform\n' "$1"; fi; }
 ok(){ n=$((n+1)); printf 'ok   %s\n' "$1"; }
 bad(){ n=$((n+1)); printf 'FAIL %s\n' "$1"; fails=$((fails+1)); }
 expect(){ if eval "$2"; then ok "$1"; else bad "$1 (assertion: $2)"; fi; }
@@ -64,7 +80,13 @@ expect "step: a hang is cut at the bound and FAILS" '[[ $rc == 99 ]] && checks s
 expect "step: a timed-out step records remote-process evidence" 'grep -q "processes in the bounded host after" "$T/step-hang/evid/steps.log"'
 t0=$SECONDS; rc="$(run_case dstep-remote 'dstep K r 1 "sleep 29.517"')"; took=$((SECONDS - t0))
 expect "dstep: the REMOTE command is KILLed at its own 1 s deadline (outer 16 s bound not reached; took ${took}s)" '[[ $rc == 99 && $took -lt 10 ]] && checks dstep-remote | grep -q "step-r fail required harness step .r. was KILLed at its deadline"'
-expect "dstep: no remote process outlives the KILL" '! ps -eo args= | grep -qx "sleep 29.517"'
+ps_after="$(proc_state "sleep 29.517")"
+case "$ps_after" in
+  absent) ok "dstep: no remote process outlives the KILL (process table enumerated)" ;;
+  present) bad "dstep: the remote process OUTLIVED the KILL" ;;
+  *) unsupported_or_fail "dstep: no remote process outlives the KILL" ;;
+esac
+expect "proc_state: a process that IS running is reported present (the check can see processes)" '( sleep 30.731 & p=$!; sleep 0.2; r="$(proc_state "sleep 30.731")"; kill "$p"; [[ $r == present || $r == unsupported ]] )'
 
 t0=$SECONDS; rc="$(STUB_SLEEP=60 run_case diag-stall 'step K s 1 docker exec x true')"; took=$((SECONDS - t0))
 expect "step: with the diagnostic transport STALLED too, the FAIL still reaches the report, bounded (took ${took}s)" '[[ $rc == 99 && $took -lt 60 ]] && checks diag-stall | grep -q "step-s fail" && checks diag-stall | grep -q REPORT-REACHED'
@@ -161,6 +183,61 @@ expect "teardown: a failed run keeps exit 1 (teardown cannot mask it)"       '[[
 expect "teardown: an inconclusive run keeps exit 2"                          '[[ $(teardown_case td-f2 2 STUB_DAEMON_DOWN=1) == 2 ]]'
 expect "teardown: a hung daemon probe is cut at its bound and counted"       '[[ $(teardown_case td-hang 0 STUB_PRESENT=1 STUB_SLEEP=200 TEARDOWN_PROBE_SECS=1) == 3 ]] && grep -q "UNKNOWN (rc=124" "$T/td-hang/evid/cleanup.log"'
 
+echo "== clean_restart_verdict: an unreadable log never reads as quiet (ASTRA 6360307931 #2) =="
+quiet="$T/quiet.log"; printf 'POLICY_ALLOW ...\n' > "$quiet"; resync="$T/resync.log"; printf 'FeedSync: starting UT1 sync from x\n' > "$resync"
+( fails=0; . "$HERE/recovery-custody.sh"; cr(){ clean_restart_verdict "$@" >/dev/null 2>&1; }
+  expect "clean restart: read log, nothing changed -> pass"              'cr 0 "$quiet" 0 1 1 absent'
+  expect "clean restart: log read FAILED (rc 1) -> fail, not quiet"      '! cr 1 "$quiet" 0 1 1 absent'
+  expect "clean restart: log read TIMED OUT (rc 124) -> fail"            '! cr 124 "$quiet" 0 1 1 absent'
+  expect "clean restart: marker check ERROR -> fail"                     '! cr 0 "$quiet" 0 1 1 error'
+  expect "clean restart: re-quarantined (recovered=1) -> fail"           '! cr 0 "$quiet" 1 1 1 absent'
+  expect "clean restart: quarantined copies unreadable -> fail"          '! cr 0 "$quiet" 0 1 "" absent'
+  expect "clean restart: quarantined copies changed -> fail"             '! cr 0 "$quiet" 0 1 2 absent'
+  expect "clean restart: a feed sync started -> fail"                    '! cr 0 "$resync" 0 1 1 absent'
+  exit "$fails" ) || fails=$((fails + $?))
+n=$((n + 8))
+
+echo "== evidence custody through the ACTUAL report + EXIT path (ASTRA 6360307931 #1) =="
+# exit_case <name> <body> [env…]: a real script with `trap harness_teardown EXIT`
+# whose write_report_and_exit exits 1 on any FAIL — the production shape.
+# Prints the process exit code.
+exit_case(){ local name="$1" body="$2"; shift 2; local D="$T/$name"; mkdir -p "$D/evid" "$D/vol" "$D/sock"; head -c 4096 /dev/zero > "$D/img"
+  env "$@" bash -c '
+    set -euo pipefail
+    EVID="$1"; MD="$EVID/REPORT.md"; : > "$MD"; STEPLOG="$EVID/steps.log"; MP="$2"; MNT="$EVID/not-mounted"
+    DIND=d; REG=r; IMG="$3"; SOCKDIR="$4"; CERTSD=""; CUSTODY_NAMES=""; CUSTODY_TREE=none; FAILS=0
+    export DIAG_BOUND=1 DIAG_SLACK=1
+    check(){ printf "%s %s %s %s\n" "$1" "$2" "$3" "$4" >> "$EVID/checks.txt"; if [[ "$3" == fail ]]; then FAILS=$((FAILS+1)); fi; }
+    write_report_and_exit(){ echo REPORT-WRITTEN >> "$EVID/checks.txt"; (( FAILS > 0 )) && exit 1; exit 0; }
+    . "$5"; trap harness_teardown EXIT
+    eval "$6"
+    write_report_and_exit' _ "$D/evid" "$D/vol" "$D/img" "$D/sock" "$HERE/recovery-custody.sh" "$body" >/dev/null 2>&1 && echo 0 || echo $?; }
+xq(){ local d="$T/$1/vol/$2"; mkdir -p "$d"; printf 'manifest' > "$d/MANIFEST"; head -c 2097152 /dev/urandom > "$d/000001.vlog"; }
+UNP='evidence_state "unpreserved:interrupted import on the volume"'
+mkdir -p "$T/ex-copy/vol"; xq ex-copy catfeeddb.corrupt.51
+rc="$(exit_case ex-copy "$UNP; quarantine_custody K t; delete_custodied K t" STUB_FAIL_MATCH='tar -cf')"
+expect "EXIT path: a failed copy exits 1 and the image holding the evidence is RETAINED" '[[ $rc == 1 && -e "$T/ex-copy/img" ]] && grep -q "RETAINED .*custody-t failed" "$T/ex-copy/evid/cleanup.log" && grep -q "loop image RETAINED" "$T/ex-copy/evid/REPORT.md"'
+mkdir -p "$T/ex-extract/vol"; xq ex-extract catfeeddb.corrupt.52
+rc="$(exit_case ex-extract "$UNP; quarantine_custody K t; delete_custodied K t" STUB_TAR_GARBAGE=1)"
+expect "EXIT path: a non-archive stream fails verification (extract or file count), exits 1, image RETAINED, nothing deleted" '[[ $rc == 1 && -e "$T/ex-extract/img" && -d "$T/ex-extract/vol/catfeeddb.corrupt.52" ]] && grep -Eq "custody-t fail the preserved archive (does not extract|holds 0 files)" "$T/ex-extract/evid/checks.txt"'
+mkdir -p "$T/ex-tamper/vol"; xq ex-tamper catfeeddb.corrupt.53
+rc="$(exit_case ex-tamper "$UNP; quarantine_custody K t; delete_custodied K t" STUB_TAR_TAMPER="$T/ex-tamper/vol")"
+expect "EXIT path: bytes that changed after hashing fail verification, image RETAINED" '[[ $rc == 1 && -e "$T/ex-tamper/img" ]] && grep -q "does not match the manifest" "$T/ex-tamper/evid/checks.txt"'
+rc="$(exit_case ex-early "$UNP; dstep K compose-up 2 false")"
+expect "EXIT path: an early abort (a failed step before custody) RETAINS the image" '[[ $rc == 1 && -e "$T/ex-early/img" ]] && grep -q "RETAINED .*interrupted import on the volume" "$T/ex-early/evid/cleanup.log"'
+mkdir -p "$T/ex-ok/vol"; xq ex-ok catfeeddb.corrupt.54
+rc="$(exit_case ex-ok "$UNP; quarantine_custody K t; delete_custodied K t")"
+expect "EXIT path CONTROL: preserved + verified + deleted -> exit 0 and the image is removed" '[[ $rc == 0 && ! -e "$T/ex-ok/img" ]] && [[ "$(cat "$T/ex-ok/evid/.evidence-state")" == preserved:t ]]'
+rc="$(exit_case ex-unpres-pass "$UNP")"
+expect "EXIT path: a run that 'passes' with evidence still unpreserved exits 3, image RETAINED" '[[ $rc == 3 && -e "$T/ex-unpres-pass/img" ]]'
+
+echo "== structural: no unbounded docker exec in the harness (ASTRA 6360307931 #3) =="
+unb="$(grep -nE 'docker exec' "$HERE/upgrade-enospc-qualify.sh" "$HERE/recovery-custody.sh" \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -v 'timeout' | grep -vE '(^|[^A-Za-z_])INB? ' || true)"
+expect "structural: every docker exec is bounded (timeout, IN or INB) — offenders: ${unb:-none}" '[[ -z "$unb" ]]'
+expect "structural: IN itself is bounded on both ends" 'grep -qE "^IN\(\)\{ .*timeout --kill-after=.*docker exec \"\\\$DIND\" timeout -s KILL" "$HERE/upgrade-enospc-qualify.sh"'
+
 echo
-if (( fails == 0 )); then echo "PASS: recovery custody + enforced steps + verdicts + teardown — $n assertions"; exit 0
+if (( unsupported > 0 )); then echo "NOTE: $unsupported assertion(s) UNSUPPORTED on this platform (not counted as proven)"; fi
+if (( fails == 0 )); then echo "PASS: recovery custody + enforced steps + verdicts + teardown — $n assertions, $unsupported unsupported"; exit 0
 else echo "FAILED: $fails/$n assertions"; exit 1; fi

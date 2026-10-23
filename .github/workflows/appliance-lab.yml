@@ -844,7 +844,8 @@ jobs:
         run: |
           set -euo pipefail
           ./test/e2e/appliance/convergence-oracle_test.sh
-          ./test/e2e/appliance/recovery-custody_test.sh
+          # Linux runner: process-absence proof is REQUIRED, never "unsupported".
+          REQUIRE_PROCESS_PROOF=1 ./test/e2e/appliance/recovery-custody_test.sh
       - name: "Interrupted-import recovery: SIGKILL mid-import, restart, prove quarantine+rebuild+re-converge"
         # exit 0 = the interrupted import was reproduced AND every recovery check
         # passed; exit 1 = a recovery/integrity check failed; exit 2 = inconclusive
@@ -865,7 +866,7 @@ jobs:
             echo "attempt $attempt: exit $rc"
             [ "$rc" = 2 ] || break
           done
-          sudo cp "$RUNNER_TEMP/killimport/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log,steps.log,cleanup.log,probes.txt} "$RUNNER_TEMP/killimport/" 2>/dev/null || true
+          sudo cp "$RUNNER_TEMP/killimport/attempt-$attempt/"{REPORT.md,checks.jsonl,diagnose.log,steps.log,cleanup.log,probes.txt,clean-restart.log} "$RUNNER_TEMP/killimport/" 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/killimport"
           exit "$rc"
       - name: Report
@@ -882,8 +883,12 @@ jobs:
             ${{ runner.temp }}/killimport/**/steps.log
             ${{ runner.temp }}/killimport/**/cleanup.log
             ${{ runner.temp }}/killimport/**/probes.txt
+            ${{ runner.temp }}/killimport/**/clean-restart.log
+            ${{ runner.temp }}/killimport/**/k-*.log
+            ${{ runner.temp }}/killimport/**/.evidence-state
             ${{ runner.temp }}/killimport/**/custody/**
             !${{ runner.temp }}/killimport/**/custody/**/quarantine.tar.gz
+          include-hidden-files: true
           retention-days: 30
           if-no-files-found: warn
       # The COMPLETE quarantined bytes the harness preserved and re-verified
@@ -896,6 +901,16 @@ jobs:
           name: appliance-lab-fdisk-midimport-kill-quarantine
           path: ${{ runner.temp }}/killimport/**/custody/**/quarantine.tar.gz
           compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
+      # When custody did NOT complete (ASTRA 6360307931 #1), teardown RETAINS the
+      # loop image that holds the unpreserved quarantine; upload it so the
+      # evidence leaves the runner. Absent on a run whose custody completed.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-fdisk-midimport-kill-retained-image
+          path: ${{ runner.temp }}/killimport/**/appliance-root.img
           retention-days: 30
           if-no-files-found: ignore
 

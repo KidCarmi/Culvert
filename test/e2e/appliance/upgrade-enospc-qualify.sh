@@ -143,7 +143,9 @@ docker run -d --privileged --name "$DIND" -e DOCKER_TLS_CERTDIR= \
   -v "$SOCKDIR:/run/culvert-maint" --mount "type=bind,src=$CERTSD,dst=/etc/docker/certs.d/$REGHOST,readonly" \
   -p 127.0.0.1:18080:8080 -p 127.0.0.1:19090:9090 \
   "$DIND_IMAGE" --bip 10.213.0.1/24 --default-address-pool base=10.214.0.0/16,size=24 >/dev/null
-IN(){ docker exec "$DIND" "$@"; }
+# IN: every command inside the bounded host is BOUNDED (ASTRA 6360307931 #3) —
+# KILLed there at IN_BOUND, and locally 15 s later. No read can hang the run.
+IN(){ local b="${IN_BOUND:-600}"; timeout --kill-after=5 "$((b + 15))" docker exec "$DIND" timeout -s KILL "$b" "$@"; }
 for _ in $(seq 1 60); do IN docker info >/dev/null 2>&1 && break; sleep 1; done
 info="$(IN docker info --format 'server={{.ServerVersion}} driver={{.Driver}} root={{.DockerRootDir}} containerd-store={{.DriverStatus}}')"
 # Where the image CONTENT really lands: find the containerd content store and
@@ -157,7 +159,7 @@ else
 fi
 check E0 dind-image pass "$DIND_IMAGE = $(docker image inspect -f '{{index .RepoDigests 0}}' "$DIND_IMAGE" 2>/dev/null || echo unknown)"
 
-docker save busybox:stable | docker exec -i "$DIND" docker load -q >/dev/null
+timeout --kill-after=10 600 docker save busybox:stable | timeout --kill-after=10 600 docker exec -i "$DIND" timeout -s KILL 590 docker load -q >/dev/null
 IN docker pull -q "$PRED_REF" >/dev/null; IN docker tag "$PRED_REF" "$PINNED"
 PRED_ID="$(IN docker image inspect -f '{{.Id}}' "$PINNED")"
 [[ "$PRED_ID" == "${PRED_REF##*@}" ]] && check E0 image-pulled pass "nested daemon runs $PRED_ID = the pushed manifest digest" \
@@ -192,7 +194,11 @@ assert_enforcement(){ local a b v f="$EVID/deny-body.$$.html"
 ca_fp(){ api GET /api/ca-cert | sed '$d' | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2; }
 health_version(){ curl -fsS -m 5 http://127.0.0.1:18080/health | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])'; }
 PRED_VER="$(health_version)"
-state_sum(){ IN docker exec culvert sh -c 'cd /data && sha256sum ui_users.json ca.bundle 2>/dev/null' | sha256sum | cut -c1-16; }
+# state_sum: a failed read is "error(rc)", never a digest of nothing.
+state_sum(){ local o rc=0
+  o="$(IN_BOUND=30 IN docker exec culvert sh -c 'cd /data && sha256sum ui_users.json ca.bundle')" || rc=$?
+  if (( rc != 0 )) || [[ -z "$o" ]]; then echo "error(rc=$rc)"; return 1; fi
+  printf '%s\n' "$o" | sha256sum | cut -c1-16; }
 STATE0="$(state_sum)"
 check E0 seeded-predecessor pass "running $PRED_VER image=$PRED_ID state=$STATE0"
 RUN_IMG="$(IN docker inspect -f '{{.Image}}' culvert 2>/dev/null || true)"
@@ -317,7 +323,8 @@ if [[ "$SCENARIO" == midwrite ]]; then
   # policy are untouched (state-intact compares them after recovery).
   IN sh -c 'cd /srv/culvert && docker compose stop proxy' >/dev/null 2>&1
   IN docker run --rm -v culvert_proxy-data:/data busybox:stable rm -rf /data/catfeeddb
-  LOGS_SINCE="$(IN date -u +%Y-%m-%dT%H:%M:%SZ)"
+  LOGS_SINCE="$(IN_BOUND=15 IN date -u +%Y-%m-%dT%H:%M:%SZ)" && [[ -n "$LOGS_SINCE" ]] \
+    || { check "$SCENARIO" clock-read fail "could not read the bounded host's clock"; write_report_and_exit; }
   IN sh -c 'cd /srv/culvert && docker compose start proxy' >/dev/null 2>&1
   # Same container: read only what it logged since this start.
   wlogs() { IN docker logs --since "$LOGS_SINCE" culvert 2>&1; }
@@ -335,7 +342,7 @@ if [[ "$SCENARIO" == midwrite ]]; then
   if wlogs | grep -qE "$wdone"; then
     check W write-in-flight inconclusive "the write finished before the fill could land; nothing was tested"
     INCONCLUSIVE=1; write_report_and_exit; fi
-  r0="$(IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null || echo 0)"
+  r0="$(IN_BOUND=15 IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null)" || r0="unknown(read failed)"
   why="$(fill_bounded)" || { check W filled-during-write fail "$why"; write_report_and_exit; }
   if wlogs | grep -qE "$wdone"; then
     check W write-in-flight inconclusive "the write finished while the fill was being placed; nothing was tested"
@@ -503,7 +510,12 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # failed" line before killing, even though the marker PERSISTS after a failed
   # import — no CompleteImport runs — so the interrupted state was there to catch;
   # run 39391241768 was inconclusive 3× for exactly that reason).
-  MP="$(IN docker volume inspect culvert_proxy-data -f '{{.Mountpoint}}' 2>/dev/null)"; [ -n "$MP" ] || MP=/var/lib/docker/volumes/culvert_proxy-data/_data
+  # The volume path is OBSERVED, never assumed: a failed inspection ends the run.
+  MP="$(IN_BOUND=30 IN docker volume inspect culvert_proxy-data -f '{{.Mountpoint}}')" && [[ "$MP" == /* ]] \
+    || { check K volume-inspect fail "could not inspect the data volume (got '${MP:-}')"; write_report_and_exit; }
+  # klog <since> <file>: the proxy log since <since>, read BOUNDED into <file>;
+  # returns the read's status so a transport failure is never "no lines".
+  klog(){ IN_BOUND=30 IN docker logs --since "$1" culvert > "$2" 2>&1; }
   # ASTRA 6359611097 #2: the marker is TRI-STATE. present/absent come only from a
   # check that itself ran; a failed transport, a missing volume or a timeout is
   # "error", which FAILS the run instead of reading as "absent".
@@ -582,12 +594,13 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   dstep K reset-cache 300 "cd '$MP' || exit 3; rm -rf -- catfeeddb catfeeddb.importing"
   rs="$(rx 20 'if [ -e catfeeddb ] || [ -e catfeeddb.importing ]; then echo present; else echo absent; fi' 2>/dev/null || echo error)"
   [[ "$rs" == absent ]] || { check K reset-cache fail "after the reset the derived cache/marker are '$rs' (want absent from a successful check)"; write_report_and_exit; }
-  LOGS_SINCE="$(IN date -u +%Y-%m-%dT%H:%M:%SZ)"
+  LOGS_SINCE="$(IN_BOUND=15 IN date -u +%Y-%m-%dT%H:%M:%SZ)" && [[ -n "$LOGS_SINCE" ]] \
+    || { check "$SCENARIO" clock-read fail "could not read the bounded host's clock"; write_report_and_exit; }
   dstep K compose-start 180 'cd /srv/culvert && docker compose start proxy'
   wlogs(){ INB 30 docker logs --since "$LOGS_SINCE" culvert 2>&1; }
   done_re='FeedSync: sync complete'                               # the ONLY line that clears the marker
   beginfail='FeedSync: could not begin the import'                # BeginImport itself failed: no marker, nothing to interrupt
-  r0="$(IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null || echo 0)"
+  r0="$(IN_BOUND=15 IN docker inspect -f '{{.RestartCount}}' culvert 2>/dev/null)" || r0="unknown(read failed)"
   # Kill the instant the durable marker is present and the import has NOT certified
   # complete — the deterministic interrupted-import state. The marker persists
   # through a FAILED BulkWrite too (no CompleteImport), so this catches both a slow
@@ -604,11 +617,14 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     sleep 0.25
   done
   if [[ -z "$killed" ]]; then
-    feedtail="$(wlogs | grep -oE 'FeedSync: [^"]{0,120}' | tail -4 | tr '\n' '|' || true)"
+    if wl="$(wlogs)"; then feedtail="$(grep -oE 'FeedSync: [^"]{0,120}' <<<"$wl" | tail -4 | tr '\n' '|' || true)"; else feedtail="(log read failed)"; fi
     check K import-pending-marker inconclusive "no interrupted-import window observed (marker never present before the import resolved); feed log: ${feedtail:-none}; this host completed or could-not-begin the import too fast/entirely to interrupt"
     INCONCLUSIVE=1; write_report_and_exit; fi
   # The kill leaves the interrupted end-state: marker present, no completion — the
   # same durable state the stalled landing produces, reached deterministically.
+  # From here the volume holds an interrupted import the product will quarantine:
+  # evidence that must be preserved before anything may delete it or its image.
+  evidence_state "unpreserved:interrupted import on the data volume (killed mid-write) — not yet preserved off the volume"
   if marker_present; then check K interrupted-state pass "proxy SIGKILLed mid-import; $MARKER still present and the import never certified — the stall's durable end-state, reached deterministically"
   else check K interrupted-state fail "marker gone after the kill — the import may have completed; nothing was interrupted"; INCONCLUSIVE=1; write_report_and_exit; fi
   # Recovery is a plain restart (no disk is full here). The next boot MUST
@@ -620,7 +636,8 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   v="$(health_version 2>/dev/null || echo unreachable)"
   [[ "$v" == "$PRED_VER" ]] && check K recovered-serving pass "/health 200 version=$v after one restart (compose up -d)" || check K recovered-serving fail "version=$v after restart (want $PRED_VER)"
   # C2: the interrupted import is quarantined and the store rebuilt + serving.
-  metrics="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null || true)"
+  metrics="$(curl -fsS -m 5 http://127.0.0.1:18080/metrics 2>/dev/null)" \
+    || { check K metrics-read fail "could not read /metrics after recovery"; write_report_and_exit; }
   qc="$(printf '%s\n' "$metrics" | awk '/^culvert_catfeeddb_quarantined_copies /{print $2}')"
   qt="$(printf '%s\n' "$metrics" | awk '/^culvert_catfeeddb_quarantines_total /{print $2}')"
   av="$(printf '%s\n' "$metrics" | awk '/^culvert_catfeeddb_available /{print $2}')"
@@ -647,11 +664,14 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # accepted here.) Phase B below proves the "free-space recovery" case.
   conv="${QUAL_FEED_CONVERGE_SECS:-1800}"; t0=$SECONDS; res=""
   while (( SECONDS - t0 < conv )); do
-    res="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: (sync complete[^"]*|write REFUSED \(disk_space\)[^"]*|bulk write failed|could not begin the import|import written but could not be certified|download/parse failed)' | tail -1 || true)"
+    if klog "$REC_AT" "$EVID/k-recovery.log"; then
+      res="$(grep -oE 'FeedSync: (sync complete[^"]*|write REFUSED \(disk_space\)[^"]*|bulk write failed|could not begin the import|import written but could not be certified|download/parse failed)' "$EVID/k-recovery.log" | tail -1 || true)"
+    else res=""; KLOG_ERRORS=$(( ${KLOG_ERRORS:-0} + 1 )); fi
     [[ -n "$res" ]] && break; sleep 15
   done
   waited=$((SECONDS - t0))
-  feedlog="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,140}' | tail -6 | tr '\n' '|' || true)"
+  if klog "$REC_AT" "$EVID/k-recovery.log"; then feedlog="$(grep -oE 'FeedSync: [^"]{0,140}' "$EVID/k-recovery.log" | tail -6 | tr '\n' '|' || true)"
+  else feedlog="(log read failed; ${KLOG_ERRORS:-0} failed reads during the wait)"; fi
   degraded_on_space=0
   # ASTRA §2: the convergence path is now EXERCISED. Whatever terminal outcome
   # this decision reaches (converge outright, degrade-then-recover below, a
@@ -673,7 +693,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
           check K restart-disk-full-degrades fail "disk-space refusal did not stay graceful: /health=$hv catfeeddb_available=$av2; feed: ${feedlog:-none}"
         fi;;
     *"download/parse failed"*) check K restart-disk-full-degrades info "retry after ${waited}s hit a download failure (network, not disk); feed: ${feedlog:-none}";;
-    "") allfeed="$(IN docker logs culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,140}' | tail -8 | tr '\n' '|' || true)"
+    "") if klog 1970-01-01T00:00:00Z "$EVID/k-all.log"; then allfeed="$(grep -oE 'FeedSync: [^"]{0,140}' "$EVID/k-all.log" | tail -8 | tr '\n' '|' || true)"; else allfeed="(log read failed)"; fi
         check K restart-disk-full-degrades fail "no FeedSync outcome within ${conv}s of recovery; since-recovery feed: ${feedlog:-NONE}; all-boots feed: ${allfeed:-NONE (FeedSync never logged — boot sync did not run on the rebuilt store)}"; diagnose K-no-converge;;
     *) check K restart-disk-full-degrades fail "unexpected re-sync outcome: $res (${waited}s); feed: ${feedlog:-none}";;
   esac
@@ -689,7 +709,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # interrupted import) — restart, and prove the re-sync then CONVERGES.
   # Deterministic: the harness controls the disk, no external variable.
   if [[ "${degraded_on_space:-0}" == 1 ]]; then
-    freeB4="$(IN df -k "$MP" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
+    freeB4="$(IN_BOUND=15 IN df -k "$MP" | awk 'NR==2{print $4}')" && [[ "$freeB4" =~ ^[0-9]+$ ]] || freeB4="error"
     # Custody BEFORE deletion: inventory + hash + retain metadata of exactly
     # what the product quarantined, cross-checked against the product's own
     # count, then delete exactly that set by name (bounded, enforced).
@@ -698,17 +718,20 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     if [[ "$nq" == "$qcm" && "$nq" -ge 1 ]]; then check K custody-matches-product pass "inventory holds $nq quarantined cop(y/ies) = culvert_catfeeddb_quarantined_copies $qcm"
     else check K custody-matches-product fail "inventory holds $nq quarantined cop(y/ies), product reports $qcm"; write_report_and_exit; fi
     delete_custodied K pre-free
-    freeAf="$(IN df -k "$MP" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
+    freeAf="$(IN_BOUND=15 IN df -k "$MP" | awk 'NR==2{print $4}')" && [[ "$freeAf" =~ ^[0-9]+$ ]] || freeAf="error"
     REC_AT="$(date -u +%FT%TZ)"
     dstep K restart-after-free 180 'cd /srv/culvert && docker compose restart proxy'
     wait_serving K restart-after-free 120
     t0=$SECONDS; res2=""
     while (( SECONDS - t0 < conv )); do
-      res2="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: (sync complete[^"]*|write REFUSED \(disk_space\)[^"]*|bulk write failed|download/parse failed)' | tail -1 || true)"
+      if klog "$REC_AT" "$EVID/k-free.log"; then
+        res2="$(grep -oE 'FeedSync: (sync complete[^"]*|write REFUSED \(disk_space\)[^"]*|bulk write failed|download/parse failed)' "$EVID/k-free.log" | tail -1 || true)"
+      else res2=""; KLOG_ERRORS=$(( ${KLOG_ERRORS:-0} + 1 )); fi
       [[ -n "$res2" ]] && break; sleep 15
     done
     waited2=$((SECONDS - t0))
-    feedlog2="$(IN docker logs --since "$REC_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,140}' | tail -6 | tr '\n' '|' || true)"
+    if klog "$REC_AT" "$EVID/k-free.log"; then feedlog2="$(grep -oE 'FeedSync: [^"]{0,140}' "$EVID/k-free.log" | tail -6 | tr '\n' '|' || true)"
+    else feedlog2="(log read failed; ${KLOG_ERRORS:-0} failed reads)"; fi
     conv_check K free-space-recovery-converges "$res2" "$waited2" "after freeing the quarantined partial, avail ${freeB4}->${freeAf} KiB; feed: ${feedlog2:-none}"
     [[ -z "$res2" ]] && diagnose K-free-space || true
   else
@@ -734,12 +757,15 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     # start a feed sync immediately (RunNow); a certified store waits a full
     # interval, so no "FeedSync: starting" may appear here.
     sleep "${QUAL_CLEAN_RESTART_SETTLE_SECS:-60}"
-    rlog="$(INB 30 docker logs --since "$RS_AT" culvert 2>&1 | grep -oE 'FeedSync: [^"]{0,120}|community category store [^"]{0,100}' | tr '\n' '|' || true)"
+    # The raw log is captured WITH its read status before any filtering (ASTRA
+    # 6360307931 #2): an unreadable log FAILS, it never reads as "quiet".
+    lrc=0; klog "$RS_AT" "$EVID/clean-restart.log" || lrc=$?
+    rlog="$(grep -oE 'FeedSync: [^"]{0,120}|community category store [^"]{0,100}' "$EVID/clean-restart.log" 2>/dev/null | tr '\n' '|' || true)"
     rec="$(metric culvert_catfeeddb_recovered)"; qcR="$(metric culvert_catfeeddb_quarantined_copies)"
-    if [[ "$rec" == 0 && -n "$qcR" && "$qcR" == "$qcF" ]] && ! marker_present && ! grep -q 'FeedSync: starting' <<<"$rlog"; then
-      check K clean-restart-after-convergence pass "restart from the converged state: no quarantine (recovered=$rec, quarantined_copies $qcF->$qcR), no marker, no re-sync in ${QUAL_CLEAN_RESTART_SETTLE_SECS:-60}s; log: ${rlog:-quiet}"
+    if v="$(clean_restart_verdict "$lrc" "$EVID/clean-restart.log" "$rec" "$qcF" "$qcR" "$(marker_state)")"; then
+      check K clean-restart-after-convergence pass "${v#pass } (settle ${QUAL_CLEAN_RESTART_SETTLE_SECS:-60}s; raw log clean-restart.log); log: ${rlog:-quiet}"
     else
-      check K clean-restart-after-convergence fail "recovered='$rec' quarantined_copies $qcF->'$qcR' marker=$(marker_state); log: ${rlog:-none}"
+      check K clean-restart-after-convergence fail "${v#fail } (raw log clean-restart.log); log: ${rlog:-none}"
     fi
     # Fresh session after the restart, so a lookup failure can only mean the store.
     api POST /api/auth/login '{"user":"enospcadmin","pass":"Enospc-Qual-2026!x"}' >/dev/null || true

@@ -72,8 +72,23 @@ diagnose(){ local tag="$1" B="${DIAG_BOUND:-20}" S="${DIAG_SLACK:-10}" o
     echo "-- bounded dockerd log"; bx docker logs --tail 40 "$DIND" | cut -c1-300
   } >> "$EVID/diagnose.log" 2>&1 || true; }
 
-# custody_fail <sc> <tag> <msg> — FAIL and end the run; nothing is deleted.
-custody_fail(){ check "$1" "custody-$2" fail "$3 — nothing was deleted"; write_report_and_exit; }
+# Evidence state (ASTRA 6360307931 #1). $EVID/.evidence-state records whether
+# the data volume — inside the loop image — may hold quarantine evidence that has
+# NOT been preserved off it:
+#   absent / none            nothing to protect
+#   unpreserved:<reason>     the image holds evidence not yet preserved
+#   preserved:<tag>          the complete bytes were preserved and verified
+# Every exit path goes through harness_teardown, which RETAINS the image while
+# the state is unpreserved — a clean container teardown never erases evidence
+# that was never copied out. It is a file, not a variable, so subshells and the
+# EXIT trap all see the same state.
+evidence_state(){ printf '%s\n' "$1" > "$EVID/.evidence-state"; }
+evidence_state_get(){ if [[ -f "$EVID/.evidence-state" ]]; then cat "$EVID/.evidence-state"; else echo none; fi; }
+
+# custody_fail <sc> <tag> <msg> — FAIL and end the run; nothing is deleted, and
+# the evidence is marked unpreserved so teardown retains the image holding it.
+custody_fail(){ evidence_state "unpreserved:custody-$2 failed: $3"
+  check "$1" "custody-$2" fail "$3 — nothing was deleted; the loop image holding it is RETAINED"; write_report_and_exit; }
 
 # quarantine_custody <sc> <tag> — chain of custody for every quarantined copy
 # (catfeeddb.corrupt.*) and import scratch dir (catfeeddb.importingtmp.*), taken
@@ -122,6 +137,7 @@ quarantine_custody(){ local sc="$1" tag="$2" d="$EVID/custody/$2" n files=0 byte
     || custody_fail "$sc" "$tag" "the preserved archive does not match the manifest (see custody/$tag/verify.log)"
   rm -rf "$d/verify"
   sha256sum "$d/quarantine.tar.gz" | sed "s|$d/||" > "$d/quarantine.tar.gz.sha256"
+  evidence_state "preserved:$tag"
   check "$sc" "custody-$tag" pass "BEFORE deletion: $(wc -l < "$d/inventory.txt" | tr -d ' ') entr(y/ies) [$CUSTODY_NAMES], $files files, $bytes bytes; manifest sha256 $CUSTODY_TREE; complete bytes preserved off-volume as quarantine.tar.gz (sha256 $(cut -d' ' -f1 < "$d/quarantine.tar.gz.sha256")) and re-verified file-by-file against the manifest"; }
 
 # delete_custodied <sc> <tag> — delete EXACTLY what quarantine_custody recorded
@@ -157,6 +173,19 @@ enforcement_verdict(){ local a="$1" b="$2" body="$3"
     echo "fail blocked origin answered 403 without Culvert's default-deny block page"; return 1; fi
   echo "pass allowed=200 blocked=403 with the default-deny block page"; }
 
+# clean_restart_verdict <log-rc> <log-file> <recovered> <qc-before> <qc-after> <marker-state>
+# — the clean-restart-after-convergence decision as a pure function (ASTRA
+# 6360307931 #2). The restart log must have been READ (rc 0) for "no re-sync"
+# to mean anything: an unreadable log is an error, never "quiet". Prints
+# "pass <why>" or "fail <why>"; returns 0 only on pass.
+clean_restart_verdict(){ local lrc="$1" lf="$2" rec="$3" qb="$4" qa="$5" mk="$6"
+  if [[ "$lrc" != 0 ]]; then echo "fail the restart log could not be read (rc=$lrc) — absence of a re-sync is unproven"; return 1; fi
+  if [[ "$mk" != absent ]]; then echo "fail import-pending marker is '$mk' (want absent)"; return 1; fi
+  if [[ "$rec" != 0 ]]; then echo "fail culvert_catfeeddb_recovered='$rec' (want 0: the restart re-quarantined)"; return 1; fi
+  if [[ -z "$qa" || "$qa" != "$qb" ]]; then echo "fail quarantined_copies '$qb' -> '$qa' (want unchanged)"; return 1; fi
+  if grep -q 'FeedSync: starting' "$lf"; then echo "fail a feed sync started after the restart (the store was not recognised as certified)"; return 1; fi
+  echo "pass no quarantine (recovered=0, quarantined_copies $qb->$qa), no marker, no re-sync in a log that was read"; }
+
 # Teardown is bounded (each step under a deadline) and its failures are
 # ENFORCED: every step's outcome is recorded in cleanup.log, and a run that
 # otherwise passed exits 3 if teardown failed. A run that already failed or was
@@ -185,7 +214,13 @@ harness_teardown(){ local st=$? cf=0 rc out uncertain=0
     timeout 60 umount "$MNT" >> "$EVID/cleanup.log" 2>&1 || timeout 60 umount -l "$MNT" >> "$EVID/cleanup.log" 2>&1 || true
     if mountpoint -q "$MNT" 2>/dev/null; then echo "cleanup: $MNT still mounted" >> "$EVID/cleanup.log"; cf=$((cf+1)); uncertain=1; fi
   fi
-  if (( uncertain )); then
+  local es; es="$(evidence_state_get)"
+  if [[ "$es" == unpreserved:* ]]; then
+    printf 'cleanup: RETAINED %s — it holds evidence that was NOT preserved off the volume (%s)\n' "$IMG" "${es#unpreserved:}" >> "$EVID/cleanup.log"
+    if [[ -f "$MD" ]]; then printf '\nEvidence: **loop image RETAINED** at `%s` — %s\n' "$IMG" "${es#unpreserved:}" >> "$MD"; fi
+    # A run that otherwise passed must never leave evidence unpreserved.
+    (( st == 0 )) && cf=$((cf+1))
+  elif (( uncertain )); then
     echo "cleanup: RETAINED $IMG — container/mount state not verified released" >> "$EVID/cleanup.log"
   else ct 30 rm -f "${IMG:?}" || true; fi
   ct 30 rm -f "${SOCKDIR:?}/agent.sock" || true; if [[ -d "$SOCKDIR" ]]; then ct 30 rmdir "${SOCKDIR:?}" || true; fi
