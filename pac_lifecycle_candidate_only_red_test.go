@@ -258,6 +258,7 @@ func TestPACBoundary_V2b_CandidateOnlyRollbackDefersWhileSettlementCannotPersist
 }
 
 func TestPACBoundary_V2c_CandidateOnlySnapshotDefersWhileSettlementCannotPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	opX := pacCandidateOnlyPendingIntent(t)
 	pacSettleArmLifecycleFault(t)
 	cur := pacProfiles.Get()
