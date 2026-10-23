@@ -12,10 +12,22 @@ substitute another file):
 
 | | |
 |---|---|
-| OVA | `culvert-appliance-dev-candidate.4c4b7728c0e6-ubuntu-24.04.ova` |
-| OVA SHA-256 | `e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4` |
-| Application image | `sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04` (Deep PR Gate artifact `deep-gate-image`, run `37124197333`) |
-| Source commit (image AND provisioning, no drift) | `4c4b7728c0e6a1746e968d935b635fc652647e6f` |
+| OVA | `culvert-appliance-1.0.269-candidate.g4524311ba974-ubuntu-24.04.ova` (2,131,865,600 bytes; retained lab artifact `12228273676`) |
+| OVA SHA-256 | `27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd` |
+| Application image | OCI manifest `sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a`, config `sha256:fc622ce09678a0c4df5291b8642262e09aca6faa8b4c5ae3d6e1db6ea2ecebd8` |
+| Agent / console binaries (SHA-256) | `b35b38e8b82989328117138365310d195c10eff112f3714a5585b4a6068f825a` / `5b65efabfc2c5c158f80ad799510a9725e7b319cbd518dabf3edc4b0e71fa969` |
+| Source commit (image AND provisioning) | `4524311ba9743abcf9df05e9955e2842eb48168c` (PR #1528 frozen head) |
+
+This is the canonical candidate as of 2026-10-23. ASTRA has already run its
+own exact-byte ESXi qualification of this OVA (ESXi 8.0.1, PR #1528 review
+5592731454, "E1"). Lifecycle, enforcement, three timed reboots, backup,
+same-appliance and source-absent restore, and encrypted-history recovery PASS
+on these bytes. The live failed-unit startup display FAILS, and the
+category-store writer-ownership defect is present in them. The current gate
+decision is in `readiness-report.md` §0. Earlier candidate identities that
+appeared in this table (for example `4c4b7728…` / `e24eb542…`) are historical
+and must not be substituted. A replacement OVA gets its own table, filled from
+its own build record.
 
 This is a **candidate** build: unsigned CI image, never for customers. First
 boot logs `CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1` on the console for that
@@ -24,7 +36,7 @@ reason; a release OVA never does.
 ## 0. Variables (edit once)
 
 ```bash
-export OVA=./culvert-appliance-dev-candidate.4c4b7728c0e6-ubuntu-24.04.ova
+export OVA=./culvert-appliance-1.0.269-candidate.g4524311ba974-ubuntu-24.04.ova
 export VI='vi://administrator@vsphere.local@vcenter.example/DC/host/Cluster'   # target
 export NET='VM Network'           # port group carrying management + proxy traffic
 export VMNAME=culvert-qual-01
@@ -38,7 +50,7 @@ export EV=./culvert-qual-evidence; mkdir -p "$EV"
 ## 1. Verify the artefact
 
 ```bash
-echo "e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4  $OVA" | sha256sum -c - | tee "$EV/01-ova-sha256.txt"
+echo "27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd  $OVA" | sha256sum -c - | tee "$EV/01-ova-sha256.txt"
 tar -xOf "$OVA" "$(tar -tf "$OVA" | grep '\.ovf$')" | grep -E 'CANDIDATE|Version|ovf:capacity' | tee "$EV/01-ovf-head.txt"
 ```
 
@@ -81,7 +93,9 @@ export TOKEN="$($SSH 'sudo culvert-status' | awk -F': *' '/Setup token:/{print $
 
 Pass: `State: services running — setup pending`; `state/` lists
 `ovf console images install agent complete` `.done` files; the `culvert` container
-runs `sha256:384f4c4b1bad91be93dc8b78adb974b6c57dd9b4c8f534bfdbafc2c1e4f1ab04`; the token is 32 characters.
+runs the application image whose OCI manifest is
+`sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a` (the containerd image store reports the manifest
+digest); the token is 32 characters.
 
 ## 4. Enrol the first administrator (setup token is required)
 

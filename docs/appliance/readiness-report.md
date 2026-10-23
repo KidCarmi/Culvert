@@ -1,8 +1,90 @@
 # On-prem appliance readiness report (Tambour pilot evaluation)
 
+> **§0 is the current status.** Everything after it is the historical record of earlier rounds.
+
 **Branch:** `feat/onprem-appliance-readiness` · **Baseline:** `3fcc07e7ab5d4d19e6cadc8bb63b682f3af` (origin/main, the SHA the prior review examined) · **Final SHA:** see the PR head (the evidence tables below name the exact commit each artifact was built from).
 
 This report separates **implemented**, **tested** (and how: unit gates, executed Docker qualification against real images, CI), **blocked** (exact prerequisite), and **unsupported** (deliberately out of the pilot). Nothing here claims production readiness; the product document deadline is not a deployment date.
+
+## 0. Canonical status (2026-10-23) — read this first
+
+**Decision: MERGE / LIMITED PILOT / PRODUCTION RELEASE are NO-GO.** The rows
+below are ASTRA's recommended exit criteria (PR #1528 comment 6364575740).
+They are not waivers, and only the owner approves any GO. §1–§3k below are
+the **historical** record of earlier rounds and earlier candidate identities
+(`6b26b34`, `4c4b772`, `72c827b7`, `bad788e5`, `6248daf7`, …). None of them
+is the current candidate, and none of their PASS rows carries over to
+different bytes.
+
+**Canonical candidate (frozen):** PR head `4524311ba9743abcf9df05e9955e2842eb48168c`;
+OVA `culvert-appliance-1.0.269-candidate.g4524311ba974-ubuntu-24.04.ova`, SHA-256
+`27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd`. Its
+identities are in `vsphere-qualification.md`.
+
+- It is an **unsigned candidate**: internal evaluation only, never for
+  customers.
+- Fixes prepared after it (review branches `review/1528-fdisk-splash-fix` @
+  `cfae7d67`, and the lab harness) are **not in this OVA**.
+- Shipping them needs a new candidate identity and an owner-approved
+  replacement decision (R4).
+
+**Declared pilot scope (E6, `requirements-matrix.md`):**
+- single node, local admin only, destination-policy proxy;
+- no identity provider, no HA, no air-gapped operation, no registry mirror;
+- capacity not benchmarked (the questionnaire's 250 users / 500 req/s is an
+  assumption, not a measurement).
+
+**Executed on the exact candidate, ESXi 8.0.1 (E1, ASTRA review 5592731454) — PASS:**
+- OVA import, first boot and provisioning; setup token (unauthenticated setup 403);
+- operator and access boundaries; actual allow 200 / deny 403 and category blocking;
+- three timed recovery reboots (78.969 / 67.844 / 71.328 s, all < 120 s) and post-recovery backup;
+- ClamAV content enforcement and outage posture (200/403 → 403/403 → 200/403);
+- backup and same-appliance restore; source-absent restore; encrypted-history recovery;
+- seven P1 lifecycle regressions.
+
+**On the same bytes — FAIL:**
+- the live failed-unit startup display (R5);
+- category-store writer ownership (R1).
+
+| ID | Requirement | Status | Blocks | Closure (owner) |
+|---|---|---|---|---|
+| R1 | One writer owns a category import until it completes; no overlapping retry, no early certification | **FAIL** in frozen bytes; source fix + Linux regressions PASS on `cfae7d67` (also on its merge with current main, go1.26.10) | M, L, P (P1) | Integrate `cfae7d67` (OPUS map: evidence branch `r1-r5-integration-map.md`); ASTRA verifies; ship via R4 |
+| R2 | Bounded failure/restart semantics; no unsupported cancellation or power-loss claim | PASS for scoped source subprocess tests; NOT RUN for in-engine uninterruptible Flush and whole-appliance fault shutdown; RESIDUAL for physical power loss | M for the claim only; L conditional; P for advertised guarantees | Document the supervisor stop/escalate/restart boundary and the durable uncertified-state contract (OPUS); owner may accept the physical-I/O residual for a bounded pilot |
+| R3 | Preserve evidence before recovery deletion; truthful space refusal; final integrity; clean restart | PASS scoped (lab run 39943952965: 44/0, full quarantine custody). Convergence followed explicit preservation, deletion, freeing space and a restart; it is not automatic | none for the proven scenario | Pilot traffic needs the E7 guest/datastore alarm delivery and an operator recovery owner |
+| R4 | Deliver exactly the corrected candidate and qualify its changed paths on ESXi | BLOCKED — no replacement built or authorized | L, P | OPUS: frozen bill of materials + change-to-test map; owner: one replacement build + one-VM sequencing; ASTRA: impacted ESXi qualification |
+| R5 | A failed unit is named, within 80 columns, on the live startup console | **FAIL** live (frozen console `5b65efab…`); `14e714c6` + `89e8fbd4` PASS in source (mocked + 9 width cases) | M (integrate), L conditional, P | Live healthy + failure VGA capture on the R4 replacement |
+| R6 | Compose CVEs: fixed bytes or bounded exposure | RESIDUAL; pilot acceptance BLOCKED on current evidence (compose `40343e21…`: 4 HIGH rows / 3 CVEs) | L, P | OPUS: fixed Compose with provenance, or a runtime exposure dossier; owner: named, dated pilot-only residual if accepted (`docker-cve-upgrade-proposal.md`) |
+| R7 | Sidecar and OS/kernel/Engine dispositions bind the shipped bytes | BLOCKED — sidecar image id `ea362f9b…` is not bound to an archive or scan; four packages changed under OS maintenance | M (truthful dispositions), L/P (reachable severe risk) | OPUS: archive → image → scan binding + exact applicability table; ASTRA verifies |
+| R8 | Authentication only for enabled or promised integrations | Pilot declares **no IdP**; live LDAP/AD/OIDC/SAML NOT RUN | no generic L block for the E6 scope; M/P conditional | Any provider added to scope needs its own allowed/denied/disabled/outage/session-separation proof |
+| R9 | Trusted artifact provenance; candid documentation | Customer/production distribution BLOCKED (unsigned candidate). Docs corrected here | M (docs), L (customer), P | Trust plan below; owner decides distribution policy |
+| R10 | Acceptance evidence is complete; errors cannot become PASS | PASS for offline integrity negatives and observed captures | the specific claim only | Apply the fatal-record rules to the R1/R4/R5 evidence |
+
+**R9: release trust and provenance plan (proposal; the owner decides).** What
+is trusted today:
+- the application image is signed keyless by `ci.yml` (pinned identity:
+  `release_identity.env`);
+- the release catalog is signed, and the maintenance agent verifies digests;
+- a **release-mode** `build-ova.sh` cosign-verifies the application image at
+  build time and checks the Ubuntu base image's SHA256 and GPG signature.
+
+What does not exist yet:
+1. A workflow that builds a release OVA from a signed tag. Every OVA so far
+   came from the appliance lab, built from CI candidate images.
+2. A signature or attestation on the OVA file itself. A customer can only
+   check a SHA-256 delivered out of band.
+3. Attested `build-info.json`/SBOM provenance.
+
+Minimum to close for a customer pilot:
+- build the OVA from the tagged, signed images;
+- `cosign sign-blob` the OVA and attach the bundle, the signed SHA256SUMS,
+  `build-info.json` and the SBOM as release assets;
+- document verification in `hypervisor-install.md`.
+
+**Constraint:** keyless identities are per workflow file + ref. Signing the
+OVA in a new workflow means a new pinned identity; it must never widen
+`release_identity.env`.
+
+Candidate OVAs stay labelled CANDIDATE and unpublished.
 
 ## 1. Material concerns — classification
 

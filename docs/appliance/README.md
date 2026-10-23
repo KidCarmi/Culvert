@@ -1,7 +1,10 @@
 # Culvert on-prem appliance — pilot readiness package
 
-Start with **`readiness-report.md`** (what is implemented, executed,
-blocked, unsupported — with SHAs and digests). Then:
+Start with **`readiness-report.md` §0**. It holds the current gate decision
+(MERGE / LIMITED PILOT / PRODUCTION RELEASE: **NO-GO**), the canonical
+candidate (`4524311b` / OVA `27006cf4…`, an unsigned candidate that is never
+for customers), and the exit criteria R1–R10. The rest of that report is the
+historical record of earlier rounds. Then:
 
 | Document | Purpose |
 |---|---|
