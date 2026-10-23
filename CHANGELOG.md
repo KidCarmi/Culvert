@@ -7,6 +7,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **Two merge-gate workflows reached their actions through MUTABLE tags, and a
+  repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
+  (designed to be a REQUIRED branch-protection check) and
+  `.github/workflows/api-contract.yml` referenced `actions/checkout@v7.0.1`,
+  `actions/setup-go@v7.0.0` and `actions/cache@v6` by tag while every one of the
+  hundred-plus other `uses:` refs under `.github/` is pinned to a 40-character
+  commit SHA with a `# vX.Y.Z` comment. A tag is a pointer its owner can move, so
+  the commit that actually ran inside those jobs was not the commit anyone
+  reviewed — and because those jobs *are* the gate, a moved tag could make a
+  blocking check report green without having gated anything. That is the same
+  failure shape `codeql_action_pin_test.go` exists for, where a mis-pinned SAST
+  action produced a job that looked like it ran and executed zero queries.
+
+  The convention was enforced per file, so these two drifted and kept drifting:
+  the dependency sweep that rewrote `actions/setup-go@v7` to `@v7.0.0` touched
+  those exact lines and left them mutable, because nothing failed. All six refs
+  are now SHA-pinned to the revisions already in use elsewhere in the tree, and
+  `workflow_action_pin_test.go` enforces the rule across every workflow and
+  composite action under `.github/` — so a new file, or a bump that rewrites a
+  ref, cannot reintroduce a mutable one silently.
+
+  `slsa-framework/slsa-github-generator` is a recorded exception with its reason:
+  the generator verifies its own provenance against the invoking tag and refuses
+  to run from a SHA, so pinning it would disable release provenance rather than
+  harden it. The exception is still constrained to an exact
+  `vMAJOR.MINOR.PATCH` release, never a moving major alias, and the test fails if
+  an exception stops being used — the allowlist is exact, not a dumping ground.
+  No runtime, policy or proxy behaviour changes; this is CI trust only.
+
 ### Fixed
 
 - **go-ldap v3.4.15 would have reclassified malformed-packet faults as "the directory answered".** v3.4.15 adds `ErrorMalformedPacket` (207) for decode
