@@ -34,7 +34,7 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null .
 TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=20m ./...
 ```
 
-The shuffled double run is the existing Deep determinism command. Capture the printed shuffle seed on failure. Formatting and lint settings come from CI and [`.golangci.yml`](../../../.golangci.yml); Fast's root lint is diff-scoped with `--new-from-rev`, not a demand to fix unrelated legacy findings. Its currently pinned golangci-lint version is v2.5.0. Use the actual review base for that comparison.
+The shuffled double run is the existing Deep determinism command. Capture the printed shuffle seed on failure. Formatting and lint settings come from CI and [`.golangci.yml`](../../../.golangci.yml); Fast's root lint is diff-scoped with `--new-from-rev`, not a demand to fix unrelated legacy findings. Its currently pinned golangci-lint version is v2.15.0. Use the actual review base for that comparison.
 
 For a local full-root race/coverage diagnostic, Fast's unsharded reference uses:
 
