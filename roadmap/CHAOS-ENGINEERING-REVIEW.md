@@ -95,6 +95,23 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-23 — `CHAOS-82` sweep (the backup plane: archive publication mode and
+the restore-side encryption trust boundary). Id claimed in this placeholder row
+as commit one**, before any code, per the convention above. `CHAOS-75` is the
+highest MERGED id; 76–81 are claimed by sweeps still open when this one started
+(76 = PR #1633, 77 = #1669, 78 = #1675, 79/80 = #1626, 81 = #1494), so this
+sweep took 82 and will not move.
+
+Scope is the §42 backup rows recorded and not fixed by the CHAOS-74 sweep:
+**BKP-1** (a plaintext archive is accepted although a passphrase is configured,
+so anyone who can write into `/backup` installs an attacker-authored admin
+roster), **BKP-2** (the unencrypted archive is published world-readable although
+it aggregates `cluster-ca.key`, `ui_users.json` and `idp_profiles.json`),
+**BKP-4** (that same writer publishes through a fixed, symlink-following
+`<out>.tmp` the encrypted writer deliberately abandoned) and **BKP-6a** (the
+archive-declared PBKDF2 iteration count is floor-checked but has no ceiling).
+**BKP-3** and **BKP-5** are deliberately left; see §45 for the reasoning.
+
 **2026-10-11 — `CHAOS-75` sweep (the release-dispatch plane's detached executor
 goroutines). Id claimed in a committed placeholder row as commit one**, per the
 convention the header above reaches twice independently after ten collisions;
