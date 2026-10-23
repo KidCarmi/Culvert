@@ -14,14 +14,10 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// h2cLoopback wires an http2.Server (serving `handler` on a LOCAL h2InspectShared)
-// to an http2.ClientConn over a TCP loopback socket, cleartext h2 (h2c). TCP (not
+// h2TCPPair returns a connected client/server TCP loopback pair. TCP (not
 // net.Pipe) avoids the synchronous-pipe deadlock h2's concurrent preface/SETTINGS
-// exchange can hit. Returns the client conn and the server-side net.Conn. Everything
-// is torn down via t.Cleanup.
-//
-//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
-func h2cLoopback(t *testing.T, sh *h2InspectShared, handler http.Handler) (*http2.ClientConn, net.Conn) {
+// exchange can hit. Both ends are closed via t.Cleanup.
+func h2TCPPair(t *testing.T) (cliConn, srvConn net.Conn) {
 	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
@@ -37,18 +33,28 @@ func h2cLoopback(t *testing.T, sh *h2InspectShared, handler http.Handler) (*http
 		}
 		srvCh <- c
 	}()
-	cliConn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", ln.Addr().String())
+	cliConn, err = (&net.Dialer{}).DialContext(context.Background(), "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = cliConn.Close() })
-	srvConn := <-srvCh
+	srvConn = <-srvCh
 	if srvConn == nil {
 		t.Fatalf("accept failed")
 	}
 	t.Cleanup(func() { _ = srvConn.Close() })
-	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
-	go sh.srv.ServeConn(srvConn, &http2.ServeConnOpts{Handler: handler, BaseConfig: sh.base})
+	return cliConn, srvConn
+}
+
+// h2cLoopback serves `handler` on a LOCAL h2InspectShared through the production
+// serveConn wiring (same ServeConnOpts as handleInspectH2, ctx as the per-tunnel
+// context) and connects an http2.ClientConn to it over cleartext h2 (h2c) on a TCP
+// loopback pair. Returns that single client conn (as a RoundTripper: every request
+// goes over the one served conn) and the server-side net.Conn.
+func h2cLoopback(t *testing.T, ctx context.Context, sh *h2InspectShared, handler http.Handler) (http.RoundTripper, net.Conn) {
+	t.Helper()
+	cliConn, srvConn := h2TCPPair(t)
+	go sh.serveConn(ctx, srvConn, handler)
 	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	cc, err := (&http2.Transport{}).NewClientConn(cliConn)
 	if err != nil {
@@ -77,7 +83,7 @@ func TestH2InspectDrain_GracefulGoawayCompletesInflightAndRefusesNew(t *testing.
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "done")
 	})
-	cc, _ := h2cLoopback(t, sh, handler)
+	cc, _ := h2cLoopback(t, context.Background(), sh, handler)
 
 	// Start an in-flight request and wait until the handler is running.
 	type rtResult struct {
@@ -118,14 +124,21 @@ func TestH2InspectDrain_GracefulGoawayCompletesInflightAndRefusesNew(t *testing.
 		t.Fatal("in-flight stream did not complete within 10s after GOAWAY")
 	}
 
-	// A NEW stream on the same conn must be refused (GOAWAY stops new streams). Poll
-	// briefly: the client marks the conn un-usable once it processes the GOAWAY.
+	// A NEW stream on the same conn must be refused (GOAWAY stops new streams).
+	assertH2NewStreamsRefused(t, cc)
+}
+
+// assertH2NewStreamsRefused polls until a NEW stream on cc (one h2 client conn) is
+// refused. Poll briefly: the client marks the conn un-usable once it processes the
+// GOAWAY.
+func assertH2NewStreamsRefused(t *testing.T, cc http.RoundTripper) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://origin.test/new", http.NoBody)
 		resp, err := cc.RoundTrip(req)
 		if err != nil {
-			break // refused, as required
+			return // refused, as required
 		}
 		_ = resp.Body.Close()
 		if time.Now().After(deadline) {
@@ -133,6 +146,32 @@ func TestH2InspectDrain_GracefulGoawayCompletesInflightAndRefusesNew(t *testing.
 		}
 		time.Sleep(20 * time.Millisecond) //nolint:forbidigo // bounded poll for GOAWAY processing, not a sequencing sleep
 	}
+}
+
+// TestH2InspectDrain_RefireReachesLateConn pins the per-tick re-fire contract
+// (refireH2InspectGoaway): a tunnel that starts serving AFTER the first GOAWAY wave
+// — a CONNECT that raced the admission fence — must still be GOAWAY'd by the next
+// gracefulShutdownH2InspectShared call on the same shared server.
+func TestH2InspectDrain_RefireReachesLateConn(t *testing.T) {
+	sh := newH2InspectServer()
+	if err := gracefulShutdownH2InspectShared(sh, context.Background()); err != nil {
+		t.Fatalf("first wave: %v", err)
+	}
+	cc, _ := h2cLoopback(t, context.Background(), sh, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	// Confirm the late conn is actually serving before the re-fire.
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://origin.test/late", http.NoBody)
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("late conn did not serve a stream before the re-fire: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if err := gracefulShutdownH2InspectShared(sh, context.Background()); err != nil {
+		t.Fatalf("re-fire: %v", err)
+	}
+	assertH2NewStreamsRefused(t, cc)
 }
 
 // TestH2InspectDrain_NilServerNoop pins that the inner helper is a fast no-op on a
