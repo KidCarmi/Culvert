@@ -50,3 +50,5 @@ d5ff77257f2324f567e48893a0d52656bed3de02:fe6a2c_red_test.go:generic-api-key:56
 d89b6b057d63bfc7545a0c22e9d986361b1744a3:kek_test.go:private-key:32
 # Documentation references to synthetic test identity.
 a6bde4eab76312a41570242f5aedebe1ddbccfa1:roadmap/RUNTIME-OWNERSHIP.md:generic-api-key:193
+# Synthetic setup-token fixture for the console recovery-secrets redaction test.
+42ba4f38ff5061f08041c4a40311192b5aae2c0d:internal/applianceconsole/recovery_secrets_test.go:generic-api-key:11

@@ -60,7 +60,14 @@ Each of these findings was inspected in its exact historical commit:
 - Twelve matches are synthetic authentication/redaction values in retired
   regression tests; one is a test identity reference in ownership documentation.
 
-`.gitleaksignore` records only these 24 complete
+A later full-range scan, while integrating the appliance line with `main`,
+reported one more: the `CULVERT_SETUP_TOKEN` value in the console
+recovery-secrets redaction test (`internal/applianceconsole/recovery_secrets_test.go`,
+commit `42ba4f38`). It is a synthetic fixture beside sibling values such as
+`OTHER_SECRET=must-never-appear`, used to prove the reveal path redacts it. A PR
+scan never reached it because each PR run covers only that push's commit range.
+
+`.gitleaksignore` records only these 25 complete
 `commit:path:rule:line` fingerprints. It suppresses neither whole historical
 commits nor future findings in those files. The policy regression rejects
 non-fingerprint entries. Additional historical findings remain subject to review;
