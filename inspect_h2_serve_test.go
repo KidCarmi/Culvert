@@ -177,14 +177,14 @@ func TestH2InspectServe_PerConnContext(t *testing.T) {
 	sh := newH2InspectServer()
 	gotVal := make(chan any, 1)
 	canceled := make(chan struct{})
-	cc, _ := h2cLoopback(t, ctx, sh, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cc := h2cLoopback(t, ctx, sh, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotVal <- r.Context().Value(ctxKey{})
 		<-r.Context().Done()
 		close(canceled)
 	}))
 	go func() {
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://origin.test/ctx", http.NoBody)
-		if resp, err := cc.RoundTrip(req); err == nil {
+		if resp, err := cc.rt.RoundTrip(req); err == nil {
 			_ = resp.Body.Close()
 		}
 	}()
