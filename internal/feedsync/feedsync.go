@@ -302,6 +302,18 @@ func (fs *Syncer) syncRound() bool {
 	start := time.Now()
 	fs.lastAttempt.Store(start)
 
+	// CHAOS-74: a store that latched degraded after a contained memory fault
+	// refuses every write until restart (catdb.ErrDegraded). Downloading and
+	// parsing a 50+ MB tarball only to have BulkWrite refuse it would be waste on
+	// every round, so the round fails here, charged as a write failure (the
+	// bounded reason set is unchanged), and the scheduler backs off as for any
+	// failed round.
+	if fs.storeDegraded() {
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts")
+		return false
+	}
+
 	entries, err := downloadAndParse(fs.feedURL)
 	if err != nil {
 		fs.noteFailure(failDownload)
@@ -322,6 +334,16 @@ func (fs *Syncer) syncRound() bool {
 	fs.lastFailure.Store("")
 	obs.Printf("FeedSync: sync complete: %d domains in %s", len(entries), time.Since(start).Round(time.Second))
 	return true
+}
+
+// storeDegraded reports whether the target store has latched degraded. A nil
+// store (the download-only test harness) is not degraded.
+func (fs *Syncer) storeDegraded() bool {
+	if fs.db == nil {
+		return false
+	}
+	_, _, degraded := fs.db.LookupFaults()
+	return degraded
 }
 
 // noteFailure records one failed round: the cumulative counter the metrics

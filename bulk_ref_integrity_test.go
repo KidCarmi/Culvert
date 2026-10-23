@@ -132,6 +132,7 @@ func TestBulkRef_RollbackRefusesDanglingGroupRef(t *testing.T) {
 // reference is rejected as a WHOLE snapshot — validateConfigSnapshot errors
 // and applyConfigSnapshot mutates nothing.
 func TestBulkRef_SnapshotRejectsDanglingGroupRef(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	refGateSetup(t)
 	prev := saasEffectiveView.Swap(nil)
 	t.Cleanup(func() { saasEffectiveView.Swap(prev) })
@@ -182,6 +183,7 @@ func TestBulkRef_SnapshotBothSidesRequired(t *testing.T) {
 // candidate only the URL-category slice was rejected (ReplaceAllChecked) and
 // the rest applied, leaving the new policy enforced against the old taxonomy.
 func TestBulkRef_SnapshotOverCapCategoryRejectsWholeSnapshot(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	refGateSetup(t)
 	snapshotBlocklistGlobals(t)
 	prevAction := defaultPolicyAction()
