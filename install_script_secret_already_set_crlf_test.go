@@ -88,3 +88,25 @@ func seedCRLFEnv(t *testing.T, dir, content string) {
 		t.Fatal(err)
 	}
 }
+
+// The installer runs under `set -euo pipefail`. persist_host_env_session_secret
+// probes .env with a bare grep and reads $? on the next line, so a "no entry"
+// answer (grep exit 1) aborted the whole install before the host secret could be
+// persisted. The other host-env tests run without errexit and could not see it.
+func TestPersistHostEnvSessionSecret_NoEntryDoesNotAbortUnderErrexit(t *testing.T) {
+	secret := strings.Repeat("ab", 32)
+	for name, seed := range map[string]string{
+		"crlf empty placeholder": "CULVERT_SESSION_SECRET=\r\n",
+		"unrelated entry only":   "CULVERT_OTHER=1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			seedCRLFEnv(t, dir, seed)
+			out, code, env := runPersistHostEnvSessionSecret(t, dir,
+				"set -e\nexport CULVERT_SESSION_SECRET=\""+secret+"\"")
+			if code != 0 || !strings.Contains(env, "CULVERT_SESSION_SECRET="+secret) {
+				t.Fatalf("install aborted or secret not persisted under errexit (exit %d)\n%s\n.env: %q", code, out, env)
+			}
+		})
+	}
+}

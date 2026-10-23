@@ -1630,8 +1630,10 @@ persist_host_env_session_secret() {
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -f "$envfile" ]]; then
-    grep -Eq '^CULVERT_SESSION_SECRET=.*[^[:space:]]' "$envfile" 2>/dev/null
-    local rc=$?
+    # `|| rc=$?`: the installer runs under `set -e`, and grep exit 1 ("no entry")
+    # is an expected answer here, not a failure to abort on.
+    local rc=0
+    grep -Eq '^CULVERT_SESSION_SECRET=.*[^[:space:]]' "$envfile" 2>/dev/null || rc=$?
     if [[ $rc -eq 0 ]]; then
       return 0 # already configured — never overwrite
     elif [[ $rc -ne 1 ]]; then
