@@ -578,7 +578,7 @@ jobs:
         run: $(go env GOPATH)/bin/golangci-lint run --timeout=5m ./...
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
 
       - name: gosec (agent module)
         # G703 excluded for parity with security-release-gate.yml (taint-mode
@@ -591,7 +591,7 @@ jobs:
             ./...
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 
       - name: staticcheck (agent module)
         working-directory: cmd/culvert-maint
