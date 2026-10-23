@@ -2358,13 +2358,15 @@ func TestChaos81_ConfigMetadataIsReadOnlyThroughItsAccessors(t *testing.T) {
 	owners := map[string]bool{"syslog.go": true, "ui_config.go": true}
 	names := []string{"syslogConfigured", "syslogConfiguredAddr"}
 
-	files, err := filepath.Glob("*.go")
+	// Anchored to the package source dir, not the CWD — see syslogFuncDecl.
+	files, err := filepath.Glob(filepath.Join(pkgSourceDir(), "*.go"))
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
 	checked := 0
 	for _, f := range files {
-		if owners[f] || strings.HasSuffix(f, "_test.go") {
+		base := filepath.Base(f)
+		if owners[base] || strings.HasSuffix(base, "_test.go") {
 			continue
 		}
 		src, err := os.ReadFile(f)
@@ -2940,11 +2942,20 @@ var syslogWriterOnlyReader = struct{ fn, file string }{"persistLogEntry", "store
 // a few instructions wide and cannot be scheduled through the public entry
 // points; the round-9 wall on syslogFeedState exists for the same reason and
 // for the same defect one reader earlier.
-// syslogFuncDecl parses file and returns the named top-level function.
+// syslogFuncDecl parses one of this package's own source files, named
+// relative to the package, and returns the named top-level function.
+//
+// The parse is anchored to pkgSourceDir(), never to the process working
+// directory. A bare parser.ParseFile(fset, "syslog_health.go", ...) races any
+// concurrent os.Chdir in the test binary — the flake class
+// TestTestFileReadsAreCWDIndependent (static_read_wall_test.go) exists to
+// forbid. That wall matches LITERAL os.ReadFile("x.go") patterns, so a
+// variable-derived read like this one slips past it; the anchoring here is
+// what actually keeps these walls deterministic (CodeRabbit, PR #1494).
 func syslogFuncDecl(t *testing.T, file, fn string) (*token.FileSet, *ast.FuncDecl) {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+	f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), file), nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
 	}
@@ -3572,7 +3583,8 @@ func TestChaos81_DialGraceIsDerivedFromTheEngineBudget(t *testing.T) {
 // forgets to dial, so the pairing is pinned structurally: every production
 // file that records an intent must also be the one that dials.
 func TestChaos81_EveryIntentRecordedIsFollowedByItsDial(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	// Anchored to the package source dir, not the CWD — see syslogFuncDecl.
+	files, err := filepath.Glob(filepath.Join(pkgSourceDir(), "*.go"))
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
@@ -3994,7 +4006,8 @@ func TestChaos81_RecoveryDoesNotSuppressASubsequentOutage(t *testing.T) {
 // are pinned in internal/syslog/syslog_stats_test.go.
 func TestChaos81_FoldingReadsOneCumulativeValue(t *testing.T) {
 	const healthFile = "syslog_health.go"
-	src, err := os.ReadFile(healthFile)
+	// Anchored, not CWD-relative — see syslogFuncDecl.
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), healthFile))
 	if err != nil {
 		t.Fatalf("reading the health plane: %v", err)
 	}

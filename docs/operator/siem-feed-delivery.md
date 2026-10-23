@@ -66,7 +66,7 @@ events that never reached any SIEM, and resetting them would break `rate()`).
 
 | Series | Meaning |
 | --- | --- |
-| `culvert_syslog_up` | `1` while the feed is delivering; `0` once it is degraded |
+| `culvert_syslog_up` | `1` while the configured collector is healthy; `0` once the feed is degraded — by unresolved loss (the rule below) **or** by an unmet configured target, which needs no loss at all |
 | `culvert_syslog_degraded` | the inverse, for rules that prefer to alert on `== 1` |
 | `culvert_syslog_delivered_total` | events written to the collector socket |
 | `culvert_syslog_drops_total` | **events lost and never replayed** |
@@ -104,7 +104,8 @@ the load balancer would convert a compliance gap into a traffic outage.
 | --- | --- |
 | `ok` | not configured, or delivering cleanly |
 | `warn` | delivering, but events have been dropped since startup |
-| `fail` | **degraded**: events are being lost and nothing has been delivered for 5 minutes |
+| `fail` | **degraded** by unresolved loss: events are being lost and nothing has been delivered for 5 minutes |
+| `fail` | **degraded** by an unmet configured target: no writer for the collector you configured, or a re-point whose dial failed while the previous collector keeps delivering. No loss is required and the 5-minute window does not apply |
 | `fail` | configured but never connected (the pre-existing boot-time branch, unchanged) |
 
 ### Alert

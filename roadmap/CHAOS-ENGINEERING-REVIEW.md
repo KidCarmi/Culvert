@@ -12875,6 +12875,17 @@ single follow-up commit rather than cancelling the in-flight gate run (round
   to wait out, so both the CHANGELOG entry and the runbook section titled "How
   degradation is decided" gave one of two conditions as *the* definition. Both
   now name the loss-based rule as the loss-based rule.
+
+  **My first pass fixed the wrong place.** The finding anchors on the runbook's
+  **metrics and diagnostics tables** — `culvert_syslog_up` ("`0` once it is
+  degraded") and the `fail` row ("events are being lost and nothing has been
+  delivered for 5 minutes") — and says so explicitly; I read it as being about
+  the prose section and corrected that instead. A reader who takes the row
+  literally writes an alert rule for a condition that is one of two. Both rows
+  now name both conditions, and the `fail` status has the second as its own
+  line. Recorded because the error is instructive: the prose was *also* wrong,
+  so the first fix looked like it had addressed the finding, and nothing would
+  have caught that it had not.
 - **`delivered` on TCP is a successful local write.** Stronger than the finding
   put it: `Write` returning without error means the bytes reached the LOCAL
   socket buffer, so a connection breaking before it drains loses a line already
@@ -12886,6 +12897,31 @@ single follow-up commit rather than cancelling the in-flight gate run (round
   look for `outcome: "delivered"`. UDP is the default when the address omits a
   scheme and can only ever answer `sent`, so the step directed the majority of
   deployments to wait for an outcome their transport cannot produce.
+
+- **Package-source scans must be anchored** (🔵 Trivial, and the one that
+  mattered to CI). The round-18 wall read `os.ReadFile("syslog_health.go")`,
+  and `syslogFuncDecl` passed a bare relative name to `parser.ParseFile`. A
+  CWD-relative read in the test binary races any concurrent `os.Chdir` — a
+  flake class this repository has already paid for, which is why
+  `pkgSourceDir()` exists and why
+  `TestTestFileReadsAreCWDIndependent` forbids it. That wall matches the
+  LITERAL pattern `os.ReadFile("x.go")`, so a variable-derived read and a
+  `filepath.Glob("*.go")` both slip past it: **the wall guards the spelling,
+  not the property.** Four sites anchored (the new wall, `syslogFuncDecl`, and
+  two earlier globs of mine).
+
+  Proven rather than reasoned: built with `go test -c` and run from an empty
+  directory, the anchored walls all pass; with the anchors reverted the same
+  binary reports `open syslog_health.go: no such file or directory` and
+  `parse admin_settings.go: ... no such file or directory`. So the flake was
+  reachable, and the anchor is what removes it.
+
+  > **A wall that matches a spelling catches the shape it was written against.
+  > `os.ReadFile("x.go")` and `os.ReadFile(f)` have the same defect and only
+  > one of them is forbidden.** Recorded as a limitation of
+  > `TestTestFileReadsAreCWDIndependent` rather than fixed here: widening it to
+  > variable-derived reads touches every source-scanning wall in the package and
+  > is not this PR's to do.
 
 **Residual, recorded not fixed:** the probe's own response `message` for
 `delivered` is the string *"the collector accepted the test event"*
