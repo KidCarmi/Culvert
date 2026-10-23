@@ -63,3 +63,11 @@ run.
 Correction to the earlier summary of lab run 39916602574: its checks.jsonl
 totals **39 PASS / 2 FAIL** (12 E0 + 27 K PASS, 2 K FAIL), not 25 / 2. The
 earlier figure counted only the K rows visible in the report tail.
+
+## 880ae60b: evidence-protection lifecycle (ASTRA 6360721903), with a self-generated receipt
+
+`880ae60b-harness-proof.log` was written by the run itself on Linux. It
+records head, tree, clean porcelain before and after, the exact commands and
+exit 0 for each: convergence-oracle 23/23, recovery-custody 74/74 with
+REQUIRE_PROCESS_PROOF=1 (0 unsupported), and shellcheck clean. It is
+source-level local proof, not a lab run.
