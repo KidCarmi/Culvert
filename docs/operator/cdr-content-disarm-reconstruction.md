@@ -252,7 +252,8 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    **non-blocking** (lazy connect) — a client is added to the pool whether or
    not Sluice is actually reachable, and the post-init `warmupCDRClient` probe
    only logs on failure, it never removes the client. So an unreachable
-   Sluice at boot does **not** leave `cdrActiveClient()` nil: the first
+   Sluice at boot does **not** leave the pool empty
+   (`cdrAnyInstanceAvailable()` still reports an instance): the first
    eligible requests DO reach a live RPC attempt (gate 2 below, which honors
    `fail_mode`) and fail there, and only after enough consecutive failures
    open that instance's breaker does this gate start applying. This gate is
@@ -320,8 +321,8 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    **The fail-closed panic guarantee is scoped to `safeCDRSanitize` only,
    not to "the CDR call path" as a whole.** `safeCDRSanitize` is the one
    function wrapped by the deferred `recover()` that produces `cdrBlock`.
-   Its caller, `runCDRStage`, calls `cdrActiveClient()` *before* entering
-   that wrapper, and after it returns still runs terminal metrics
+   Its caller, `runCDRStage`, calls `cdrAnyInstanceAvailable()` *before*
+   entering that wrapper, and after it returns still runs terminal metrics
    (`recordCDRTerminal`, `recordThreatDetections`), request logging
    (`recordRequest`, the `CDR_BLOCKED`/`CDR_SANITIZED`/`CDR_ERROR` log
    lines), and response handling (`scanBlockConn` on the block branch). A
@@ -401,60 +402,36 @@ open, the pool has no client to pick and the request passes through
 **unconditionally** — see the "no client to call" gate under **Failure
 behavior** above; this is *not* governed by `fail_mode`.
 
-> **Single-instance half-open recovery is currently broken.** The default
-> half-open probe budget is 1 (`HalfOpenProbes`), and `runCDRStage` spends it
-> before a real probe ever happens: it first calls `cdrActiveClient()` just
-> to check whether *any* client exists, and that call alone invokes
-> `Pool.Pick()` → `Breaker.Allow()`, consuming the sole half-open
-> reservation. `safeCDRSanitize`'s own `cdrPickPooled()` call — the one that
-> would actually run a probe RPC and call `OnSuccess`/`OnFailure` — then
-> finds the budget already exhausted and gets `nil` back, so CDR silently
-> skips (fail-open) instead of probing. With only one instance in the pool
-> there is no other candidate for `Pick()` to fall through to, so the
-> breaker never sees a real probe and **stays half-open indefinitely** —
-> not the elapsed-time-plus-one-success path described above. Recovery
-> needs the pool to be rebuilt with **no prior breaker to carry forward**:
-> a process restart does this (the pool starts empty), and so does a full
-> runtime **disable-then-enable** via `PUT /api/cdr/config`
-> (`{"enabled":false}` calls `shutdownCDRClient()`, which empties the pool
-> entirely; the following `{"enabled":true}` rebuilds from the registry
-> with nothing in `oldPool` for `dialEnrolledInstance` to match by name, so
-> it mints a fresh breaker). Editing or re-saving the SAME instance's
-> registry entry WITHOUT a full disable/enable cycle does **not** recover
-> it — that path only ever calls `initCDRClient`, which reads the CURRENT
-> (still half-open) pool as `oldPool` and carries the breaker forward by
-> name.
->
-> **A pool with two or more *closed* instances is NOT unaffected — the
-> stuck instance still never recovers, it just stops mattering for most
-> requests.** `Pool.Pick()` uses ONE shared round-robin cursor that
-> advances on every call, including both separate `Pick()` calls one
-> request makes (`cdrActiveClient()`'s nil-check, then
-> `safeCDRSanitize`'s `cdrPickPooled()`). On a request where the cursor
-> happens to land on the half-open member for the FIRST call, that call
-> alone consumes its sole half-open reservation via `Breaker.Allow()`; the
-> cursor has advanced by the SECOND call, so the actual RPC lands on a
-> different, closed member instead — the half-open member gets no real
-> probe AND no `OnSuccess`/`OnFailure`, so it never closes. The pool keeps
-> serving requests through its closed members (CDR isn't bypassed), but
-> the half-open member stays permanently capacity-degraded — one
-> pool-configured instance silently never rejoins rotation until a
-> process restart or a full disable/enable cycle.
->
-> **The runtime disable-then-enable recovery ALSO silently resets
-> `fail_mode`, the default profile/mode, the timeout, and the size/chunk
-> limits — not just the breaker.** `shutdownCDRClient()` replaces
-> `cdrActiveCfg` with a fully zeroed `CDRConfig{}`; the toggle's enable
-> path only ever flips `cdrActiveCfg.Enabled` back to `true` on that same
-> (now-zeroed) struct before calling `initCDRClient`, and `PUT
-> /api/cdr/config` accepts no field but `enabled` — there is no runtime way
-> to restore the other values. So if you're running `cdr.fail_mode:
-> closed` (or a non-default profile/timeout/size cap), the disable-then-
-> enable recovery above will leave CDR running **fail-open** with default
+Only the sanitize RPC path takes a half-open probe. `runCDRStage`'s
+"is any instance usable?" gate (`cdrAnyInstanceAvailable`) and every
+status, UI and diagnostic caller (`cdrActiveClient()`, `Pool.Pick()`) ask
+the breaker `Available()`, which never consumes the probe budget;
+`safeCDRSanitize` alone reserves through `cdrPickPooledReserved()` and must
+record a success, a failure or a release for that reservation. So an
+instance whose breaker has reached half-open gets its probe from the next
+real document, closes on success and reopens (with a fresh 30s timer) on
+failure, whether it is the only pool member or one of several. As a
+backstop, a reserved probe that never reports an outcome is abandoned after
+`HalfOpenProbeTimeout` — the larger of twice the reset timeout and the
+per-file deadline (`cdr.timeout_sec`) plus 30s, never below 90s — and the
+budget re-arms for one new probe. Any non-zero `staleProbes` in an
+instance's breaker stats (`GET /api/cdr/instances`) means that backstop
+fired, which is a bug signal rather than normal operation.
+
+> **A runtime disable-then-enable silently resets `fail_mode`, the default
+> profile/mode, the timeout, and the size/chunk limits.** `PUT
+> /api/cdr/config` with `{"enabled":false}` calls `shutdownCDRClient()`,
+> which replaces `cdrActiveCfg` with a fully zeroed `CDRConfig{}`; the
+> toggle's enable path only ever flips `cdrActiveCfg.Enabled` back to
+> `true` on that same (now-zeroed) struct before calling `initCDRClient`,
+> and `PUT /api/cdr/config` accepts no field but `enabled` — there is no
+> runtime way to restore the other values. So if you're running
+> `cdr.fail_mode: closed` (or a non-default profile/timeout/size cap), a
+> disable-then-enable leaves CDR running **fail-open** with default
 > settings until the next restart, with nothing in the API response
 > calling that out. **If your deployment has fail_mode set to `closed` or
 > any non-default CDR setting, restart the process instead of using the
-> runtime toggle to recover a stuck half-open breaker** — a restart
+> runtime toggle** whenever you need to rebuild the pool — a restart
 > re-resolves the full static config from disk and reapplies it correctly.
 
 Two observability tiers exist. `culvert_cdr_instance_healthy` and
@@ -631,9 +608,23 @@ request falls through to `cdr.default_profile` / `cdr.default_mode`. Use
 ## Testing a file
 
 **CDR → (test upload)** / `POST /api/cdr/test` (admin-only) submits a file to
-the active Sluice instance in `REPORT_ONLY` mode without touching live
-traffic — use it to confirm connectivity and see what a given file would
+a pool member in `REPORT_ONLY` mode without delivering anything to a
+client — use it to confirm connectivity and see what a given file would
 trigger before writing a policy rule around it.
+
+**A test upload is a real Sanitize RPC and goes through the instance's
+circuit breaker exactly like proxied traffic.** It reserves through
+`cdrPickPooledReserved()` and records its outcome: a transport error
+(other than Sluice's file-too-large rejection), an
+engine `ERROR` or an unknown status counts as a failure toward the
+5-consecutive-failure trip, and a success closes a half-open breaker. So
+repeated failing test uploads against a degraded Sluice can open that
+instance's breaker for live traffic too, and a test upload can itself be
+the half-open recovery probe. When the pool has members but none can take a
+request right now (every breaker open, or the half-open probe already in
+flight) the endpoint answers `503 CDR is recovering; retry shortly` rather
+than bypassing the breaker; an empty pool answers `503 no active CDR
+client`.
 
 **The effective upload limit here is 1 MiB, not `cdr.max_file_size_mb`.**
 `securityMiddleware` (`ui_middleware.go`) wraps the body of every mutating
@@ -689,7 +680,8 @@ streamed back from Sluice on *every* call (including `CLEAN`/`UNSUPPORTED`/
 `BLOCKED` outcomes) are tracked by the separate, unexported
 `statCDRBytesReceived` (incremented per chunk in the shared receive loop
 in `cdr.go`), which has no Prometheus exposure either. `POST /api/cdr/test`
-calls `client.Sanitize` directly and never goes through `runCDRStage`, so
+calls the pooled client's `Sanitize` directly and never goes through
+`runCDRStage`, so
 an admin test run can receive an entire sanitized/original response
 without moving `bytes_out_total` at all. Treat `bytes_out_total` as "bytes
 delivered to a client via a request-path sanitization swap," not as total
