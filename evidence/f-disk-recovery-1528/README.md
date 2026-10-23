@@ -91,3 +91,9 @@ source-level local proof, not a lab run.
   - Convergence follows the harness's verified preservation and deletion of the quarantined partial, then freeing space and a restart. It is not automatic pressure pruning.
   - It does not prove stalled-Flush completion, power loss, systemd/whole-appliance cancellation, general ENOSPC, or ESXi reproduction.
   - Run 39916602574 remains non-qualifying.
+
+## R1/R5 integration tree and test map (ASTRA 6364575740, OPUS item a)
+
+`r1-r5-integration-map.md` proposes `cfae7d67` as the integration tree: a linear descendant of frozen `4524311b` that carries the reviewed R1 ownership and R5 console fixes. It maps changed and unchanged bytes to tests.
+
+`integ-receipt-cfae7d67+main.log` is self-generated. It is a merge of current main `2892dbf6` with `--no-commit`. It asserts that the tested closure is byte-identical to merge-tree `1b44dd34`, and that none of the 5 pre-existing conflicts are inside that closure. On go1.26.10, feedsync/catdb/storeguard `-race -count=2 -shuffle=on` gave 290 PASS / 0 FAIL / 2 helper SKIP, and boot-splash_test.sh passed. This is source-level producer execution, not a lab run.
