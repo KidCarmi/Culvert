@@ -34,6 +34,18 @@ func auditEvent(r *http.Request, action, object, detail string) {
 // a bare IP in the audit trail next to a username in config history. The Basic
 // username is only ever present after cfg.VerifyUIUser succeeded
 // (uiAuthMiddleware), so it is authenticated, never request-asserted.
+//
+// The result is a PRINCIPAL and is deliberately NOT length-bounded. Non-audit
+// callers compare it for identity — the MCP publication and approval handlers
+// cast it to approval.PrincipalID, so four-eyes (approver == requester) is an
+// equality test on it — and persist it in records written before this
+// distinction existed. A lossy bound here made two distinct configured admins
+// whose names share the bounded prefix and length compare equal, refusing the
+// second one's legitimate approval as self-approval (Codex review, PR #1532).
+// The CHAOS-63 bound applies to the RENDERED audit entry only, and it is
+// applied in exactly one place: addAuditEntry (store.go), behind auditAdd,
+// which every AuditEntry producer reaches. Hand auditActor's full value to the
+// audit sink; never pre-bound it.
 func auditActor(r *http.Request) string {
 	// RISK-019: attribute to the real client behind a configured trusted proxy
 	// so audit lines don't all name the reverse proxy (falls back to the peer).
@@ -78,7 +90,7 @@ func auditEventDiffID(r *http.Request, action, object, objectID, detail string, 
 	entry := AuditEntry{
 		TS:       time.Now().UnixMilli(),
 		Time:     time.Now().Format("2006-01-02 15:04:05"),
-		Actor:    auditActor(r),
+		Actor:    auditActor(r), // bounded for rendering inside auditAdd (addAuditEntry)
 		Action:   action,
 		Object:   object,
 		ObjectID: objectID,

@@ -2969,6 +2969,10 @@ Firefox (all platforms):
             <strong>operator</strong> - manage policy/blocklist/filters &nbsp;·&nbsp;
             <strong>viewer</strong> - read-only
           </p>
+          <p class="hint" id="roster-persist-hint" style="display:none;color:var(--warn,#b8860b)">
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <span id="roster-persist-text"></span>
+          </p>
           <table>
             <thead><tr>
               <th>Username</th>
@@ -6621,7 +6625,34 @@ async function fetchUsers() {
   try {
     const d = await api('/api/auth/users');
     renderUsersTable(d.users || []);
+    renderRosterPersistHint(d);
   } catch (_) {}
+}
+
+// Admin-roster write failures (CHAOS-70), fed from the admin-only users
+// payload — never from the viewer-readable /api/stats. A refused change did
+// NOT take effect; a degraded login-path write means a single-use credential
+// or TOTP replay counter may not survive a restart.
+function renderRosterPersistHint(d) {
+  const hint = document.getElementById('roster-persist-hint');
+  if (!hint) return;
+  const failed = (d && d.adminRosterPersistFailures) || 0;
+  const degraded = (d && d.adminRosterPersistDegraded) || 0;
+  const parts = [];
+  if (failed > 0) {
+    parts.push(fmt(failed) + ' account change' + (failed === 1 ? ' was' : 's were') +
+      ' NOT applied because the roster could not be written to disk — verify the change took effect and retry once the data volume is writable.');
+  }
+  if (degraded > 0) {
+    parts.push(fmt(degraded) + ' login-time write' + (degraded === 1 ? '' : 's') +
+      ' (TOTP replay counter / backup-code use) failed to persist — a used code may be accepted again after a restart.');
+  }
+  if (parts.length) {
+    document.getElementById('roster-persist-text').textContent = parts.join(' ') + ' (counts since last restart)';
+    hint.style.display = '';
+  } else {
+    hint.style.display = 'none';
+  }
 }
 
 function renderUsersTable(users) {
@@ -19724,6 +19755,11 @@ function resetBlockPage() {
              on its own) or has stopped entirely (the listening socket is gone —
              restart required). Fires once per episode, never per retry. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="socks5_listener_down"> SOCKS5 listener not accepting connections</label>
+        <!-- CHAOS-71: this node is configured as a Control Plane but its gRPC listener
+             has been unable to bind or serve for over 30 s (or its supervisor stopped).
+             Config distribution, node enrollment and certificate renewal are unavailable
+             fleet-wide; this node's own proxy keeps serving. Fires once per episode. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cp_grpc_listener_down"> Control Plane gRPC listener down (fleet config distribution unavailable)</label>
         <!-- CHAOS-57: threat intelligence has not synced successfully for over 2x the
              sync interval, or has never synced on this node. Last-known-good entries
              keep being enforced throughout — this is degraded freshness, not a dark
