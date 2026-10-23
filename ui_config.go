@@ -1821,7 +1821,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		// CHAOS-72: drops alone is cumulative and unreadable — it cannot
+		// CHAOS-81: drops alone is cumulative and unreadable — it cannot
 		// distinguish a feed that is dark now from one that healed last week.
 		// The delivery snapshot carries the time axis the counter lacks.
 		//
@@ -1911,7 +1911,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Addr == "" {
 			// Disable syslog.
-			// CHAOS-72: clear the writer AND tell the plane the feature is gone
+			// CHAOS-81: clear the writer AND tell the plane the feature is gone
 			// as one serialized transition, or a switched-off feed keeps
 			// exporting culvert_syslog_up 1 (and a concurrent re-point could
 			// interleave with the two halves).

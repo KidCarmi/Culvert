@@ -1,6 +1,6 @@
 package main
 
-// syslog_health_chaos_test.go — CHAOS-72 gates for the SIEM forwarding plane.
+// syslog_health_chaos_test.go — CHAOS-81 gates for the SIEM forwarding plane.
 //
 // Every DEFECT gate here was verified failing against the pre-fix tree before
 // the fix was written; the two headline ones were reproduced against the real
@@ -224,7 +224,7 @@ func waitForDrops(t *testing.T, n uint64) {
 // collector that had been swallowing every audit event for as long as the
 // process had been up. Measured against the pre-fix tree: 49 of 49 audit lines
 // dropped, row still ok.
-func TestChaos72_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
+func TestChaos81_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -247,7 +247,7 @@ func TestChaos72_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 
 	row := checkSyslogFeed()
 	if row.Status != diagFail {
-		t.Fatalf("syslog_feed = %v (%q) with a dead collector and %d drops; want fail — the pre-CHAOS-72 row reported \"forwarding is active\" here",
+		t.Fatalf("syslog_feed = %v (%q) with a dead collector and %d drops; want fail — the pre-CHAOS-81 row reported \"forwarding is active\" here",
 			row.Status, row.Message, activeSyslog().Stats().Drops)
 	}
 	if strings.Contains(row.Message, "is active") {
@@ -261,7 +261,7 @@ func TestChaos72_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 // Pre-fix the ONLY consumer of Drops() in the whole tree was an admin-only JSON
 // blob: no Prometheus series existed, so no alerting rule could exist, and the
 // compliance feed could be dark indefinitely with every scrape green.
-func TestChaos72_DropsReachMetricsAndHealthz(t *testing.T) {
+func TestChaos81_DropsReachMetricsAndHealthz(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -293,7 +293,7 @@ func TestChaos72_DropsReachMetricsAndHealthz(t *testing.T) {
 // The emission rule every gauge in this tree follows: a `culvert_syslog_up 0`
 // on a node that forwards nowhere is indistinguishable from a dark feed, and
 // the documented paging rule is `== 0`.
-func TestChaos72_NoSeriesWhenNoCollectorConfigured(t *testing.T) {
+func TestChaos81_NoSeriesWhenNoCollectorConfigured(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -317,7 +317,7 @@ func TestChaos72_NoSeriesWhenNoCollectorConfigured(t *testing.T) {
 // the abandoned collector (a read on the far end timed out instead of seeing
 // EOF). Reached on EVERY boot of an appliance that has both a YAML target and a
 // persisted admin target, not only on an admin re-point.
-func TestChaos72_InitSyslogClosesTheWriterItReplaces(t *testing.T) {
+func TestChaos81_InitSyslogClosesTheWriterItReplaces(t *testing.T) {
 	first := startSyslogCollector(t)
 	second := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
@@ -359,7 +359,7 @@ func TestChaos72_InitSyslogClosesTheWriterItReplaces(t *testing.T) {
 // because nothing is being logged looks identical to a feed that started
 // delivering again — the discipline ca_health.go and storage_health.go both
 // record by name.
-func TestChaos72_RecoveryRequiresADeliveredEvent(t *testing.T) {
+func TestChaos81_RecoveryRequiresADeliveredEvent(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -427,7 +427,7 @@ func startSyslogCollectorOn(t *testing.T, addr string) *syslogTestCollector {
 // the ephemeral local port — a per-failure-unique Detail defeats the dedup
 // window by construction and evicts real threat alerts from the bounded retry
 // queue (WK-12/RS-5, recorded twice already in this tree).
-func TestChaos72_AlertDetailCarriesOnlyABoundedReason(t *testing.T) {
+func TestChaos81_AlertDetailCarriesOnlyABoundedReason(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	host, port, _ := net.SplitHostPort(col.addr)
@@ -467,7 +467,7 @@ func TestChaos72_AlertDetailCarriesOnlyABoundedReason(t *testing.T) {
 // became asynchronous — it confirmed only that a channel send succeeded, and
 // checkSyslogFeed's own OperatorAction pointed operators at it to "confirm
 // connectivity". A probe that cannot fail is worse than no probe.
-func TestChaos72_ProbeReportsTheRealOutcome(t *testing.T) {
+func TestChaos81_ProbeReportsTheRealOutcome(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -479,7 +479,7 @@ func TestChaos72_ProbeReportsTheRealOutcome(t *testing.T) {
 	waitForDrops(t, 1)
 	outcome, detail := syslogDeliveryProbe(activeSyslog())
 	if outcome == "delivered" || outcome == "sent" {
-		t.Errorf("probe reported %q against a dead collector (%s) — the pre-CHAOS-72 endpoint answered ok:true here", outcome, detail)
+		t.Errorf("probe reported %q against a dead collector (%s) — the pre-CHAOS-81 endpoint answered ok:true here", outcome, detail)
 	}
 }
 
@@ -489,7 +489,7 @@ func TestChaos72_ProbeReportsTheRealOutcome(t *testing.T) {
 // subsystem writers, so this pins the WIRING structurally (source scan, the
 // convention the C1 route-parity tests use) rather than by standing up a
 // scrape. Deterministic on any hardware, under -race, at any load.
-func TestChaos72_MetricsExpositionCallsTheSyslogWriter(t *testing.T) {
+func TestChaos81_MetricsExpositionCallsTheSyslogWriter(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "metrics.go"))
 	if err != nil {
 		t.Fatalf("read metrics.go: %v", err)
@@ -505,13 +505,13 @@ func TestChaos72_MetricsExpositionCallsTheSyslogWriter(t *testing.T) {
 
 // Walling the PROBE FUNCTION is not walling the PATH. The gate above exercises
 // syslogDeliveryProbe directly, so it passes unchanged against a handler that
-// never calls it — verified: reverting apiSyslogTest to its pre-CHAOS-72 body
+// never calls it — verified: reverting apiSyslogTest to its pre-CHAOS-81 body
 // left that gate green. This one drives the real handler an operator reaches,
 // which is the only thing that proves the endpoint stopped lying. Same lesson
 // the SOCKS5 log-injection note records one subsystem over: sanitising one
 // argument does not sanitise the call, and walling one call shape does not wall
 // the path.
-func TestChaos72_TestEndpointReportsFailureAgainstADeadCollector(t *testing.T) {
+func TestChaos81_TestEndpointReportsFailureAgainstADeadCollector(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -535,13 +535,13 @@ func TestChaos72_TestEndpointReportsFailureAgainstADeadCollector(t *testing.T) {
 }
 
 // The writer handle is MUTATED AT RUNTIME by the admin plane while the request
-// path reads it, and before CHAOS-72 it was a bare package-level pointer with
+// path reads it, and before CHAOS-81 it was a bare package-level pointer with
 // no synchronisation at all. Confirmed under -race against the real
 // apiSyslogConfig and recordRequest shapes: nothing in the suite happened to
 // exercise both at once, which is the only reason it had never been reported.
 // This gate is that exercise, and it is the reason the handle is now an
 // atomic.Pointer.
-func TestChaos72_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T) {
+func TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -608,7 +608,7 @@ func TestChaos72_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T
 
 // A plane that reported every feed as degraded would satisfy every defect gate
 // above while being far worse than the defect.
-func TestChaos72_HealthyFeedStillReportsActive(t *testing.T) {
+func TestChaos81_HealthyFeedStillReportsActive(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -645,7 +645,7 @@ func TestChaos72_HealthyFeedStillReportsActive(t *testing.T) {
 // The predicate must require BOTH halves. An idle gateway forwards nothing, so
 // its last-success timestamp ages without limit — inventing a fault from
 // silence is how a health plane loses its audience.
-func TestChaos72_IdleNodeIsNeverDegraded(t *testing.T) {
+func TestChaos81_IdleNodeIsNeverDegraded(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -654,7 +654,7 @@ func TestChaos72_IdleNodeIsNeverDegraded(t *testing.T) {
 
 	snap := syslogFeedState()
 	// WriterDrops, not the process-lifetime total — see the note in
-	// TestChaos72_HealthyFeedStillReportsActive.
+	// TestChaos81_HealthyFeedStillReportsActive.
 	if snap.WriterDrops != 0 {
 		t.Fatalf("precondition: idle feed recorded %d drops", snap.WriterDrops)
 	}
@@ -668,7 +668,7 @@ func TestChaos72_IdleNodeIsNeverDegraded(t *testing.T) {
 
 // A UDP feed cannot prove delivery; every surface that reports one as healthy
 // must say so, or a green gauge is read as proof the SIEM has the events.
-func TestChaos72_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
+func TestChaos81_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
 	var lc net.ListenConfig
 	pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
 	if err != nil {
@@ -695,7 +695,7 @@ func TestChaos72_UDPFeedCarriesTheUnprovableDeliveryCaveat(t *testing.T) {
 // writer doing pointless work through a stale callback) and this test does not
 // prove it; what it does pin is the property an operator depends on, which is
 // that re-pointing a collector does not make the new target look broken.
-func TestChaos72_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
+func TestChaos81_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 	first := startSyslogCollector(t)
 	second := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
@@ -709,7 +709,7 @@ func TestChaos72_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 	// Captured BEFORE the re-point. How many of those 50 lines have already
 	// been charged as drops depends on when the queue fills, so the assertion
 	// below is monotonicity, not a count — the deterministic preservation gate
-	// is TestChaos72_RePointDoesNotResetTheLossHistory, which waits for drops
+	// is TestChaos81_RePointDoesNotResetTheLossHistory, which waits for drops
 	// first.
 	beforeDrops := syslogFeedState().Drops
 	syslogConfiguredAddr = "tcp://" + second.addr
@@ -759,7 +759,7 @@ func TestChaos72_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 // switched-off feed that keeps exporting culvert_syslog_up 1 and a clean row is
 // the same class of false statement this plane exists to remove, pointing the
 // other way.
-func TestChaos72_DisablingForwardingRemovesEverySurface(t *testing.T) {
+func TestChaos81_DisablingForwardingRemovesEverySurface(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -801,7 +801,7 @@ func TestChaos72_DisablingForwardingRemovesEverySurface(t *testing.T) {
 // The original IdleNodeIsNeverDegraded control did not catch this because it
 // used a feed with ZERO drops — the control was too weak, which is exactly what
 // the reviewer pointed out.
-func TestChaos72_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
+func TestChaos81_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -865,7 +865,7 @@ func TestChaos72_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
 // quiet period crosses the threshold with nothing left to fire the alert: the
 // metrics and the row compute the truth on READ, but the paging surfaces never
 // fired. The watchdog is the independent driver.
-func TestChaos72_WatchdogFiresTheAlertWhenTrafficHasStopped(t *testing.T) {
+func TestChaos81_WatchdogFiresTheAlertWhenTrafficHasStopped(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -910,7 +910,7 @@ func TestChaos72_WatchdogFiresTheAlertWhenTrafficHasStopped(t *testing.T) {
 // own not-vacuous control — the same treatment the metrics-exposition wiring
 // gets, and for the same reason: a watchdog nobody starts satisfies a test that
 // calls its body directly.
-func TestChaos72_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
+func TestChaos81_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "background_services_startup.go"))
 	if err != nil {
 		t.Fatalf("read background_services_startup.go: %v", err)
@@ -928,7 +928,7 @@ func TestChaos72_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
 // concurrent line's delivery could be reported as the probe's own success while
 // the probe's message was still queued behind a collector about to drop it.
 // WriteProbe reports the outcome of THAT message, from the drain goroutine.
-func TestChaos72_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
+func TestChaos81_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	sw := activeSyslog()
@@ -1008,7 +1008,7 @@ func waitDelivered(t *testing.T, sw *syslogWriter, base uint64, within time.Dura
 // was healthy but idle for longer than the window used to page on its very
 // next transient drop — the episode was seconds old, Age was already past the
 // threshold, and the fire-once alert went out for a blip.
-func TestChaos72_IdleFeedDoesNotPageOnItsFirstFreshDrop(t *testing.T) {
+func TestChaos81_IdleFeedDoesNotPageOnItsFirstFreshDrop(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	sw := activeSyslog()
@@ -1047,7 +1047,7 @@ func TestChaos72_IdleFeedDoesNotPageOnItsFirstFreshDrop(t *testing.T) {
 // event used to be dropped against the displaced writer — whose observer is
 // detached and whose counters no surface reads — so it was lost AND invisible.
 // It must instead reach the writer that replaced it.
-func TestChaos72_LateWriteOnADisplacedWriterReachesItsSuccessor(t *testing.T) {
+func TestChaos81_LateWriteOnADisplacedWriterReachesItsSuccessor(t *testing.T) {
 	first := startSyslogCollector(t)
 	second := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
@@ -1077,7 +1077,7 @@ func TestChaos72_LateWriteOnADisplacedWriterReachesItsSuccessor(t *testing.T) {
 	}
 }
 
-// TestChaos72_RowNeverClaimsDeliveryItCannotShow pins the contract row's
+// TestChaos81_RowNeverClaimsDeliveryItCannotShow pins the contract row's
 // message against the two states it used to describe with the same sentence it
 // uses for a healthy feed.
 //
@@ -1092,7 +1092,7 @@ func TestChaos72_LateWriteOnADisplacedWriterReachesItsSuccessor(t *testing.T) {
 // time-since-delivery to the failure episode: before that they were already
 // FAIL. Moving a boundary in one place changes what every branch downstream of
 // it has to say.
-func TestChaos72_RowNeverClaimsDeliveryItCannotShow(t *testing.T) {
+func TestChaos81_RowNeverClaimsDeliveryItCannotShow(t *testing.T) {
 	// The state under test is "drops recorded, nothing ever delivered, episode
 	// still young". Reaching it needs care: InitSyslog refuses a target it
 	// cannot dial, and the FIRST write to a TCP socket whose peer has gone
@@ -1145,13 +1145,13 @@ func TestChaos72_RowNeverClaimsDeliveryItCannotShow(t *testing.T) {
 	}
 }
 
-// TestChaos72_OverlappingRePointsLeaveRecordDescribingTheActiveWriter pins
+// TestChaos81_OverlappingRePointsLeaveRecordDescribingTheActiveWriter pins
 // that publishing the active writer and installing the health record that
 // describes it are ONE transition. As two steps, overlapping admin re-points
 // could end with the active writer C while target/installedAt/the alert latch
 // described B (Codex review, PR #1494). The interleaving is a race, so this is
 // a correctness gate for the serialized shape, not a deterministic defect gate.
-func TestChaos72_OverlappingRePointsLeaveRecordDescribingTheActiveWriter(t *testing.T) {
+func TestChaos81_OverlappingRePointsLeaveRecordDescribingTheActiveWriter(t *testing.T) {
 	first := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
 	const n = 8
@@ -1190,7 +1190,7 @@ func TestChaos72_OverlappingRePointsLeaveRecordDescribingTheActiveWriter(t *test
 }
 
 // A collector an operator configured but that could NOT be connected exports
-// every series, reporting the feed down (CHAOS-72 P1-F).
+// every series, reporting the feed down (CHAOS-81 P1-F).
 //
 // Pre-fix, every surface in the plane gated on `configured`, which is set only
 // once a Writer is installed — so the boot path's own tolerated failure
@@ -1205,7 +1205,7 @@ func TestChaos72_OverlappingRePointsLeaveRecordDescribingTheActiveWriter(t *test
 // The condition is reported down IMMEDIATELY rather than after the degradation
 // window, matching what the row has always done: nothing retries a failed
 // InitSyslog, so there is no transient to wait out.
-func TestChaos72_ConfiguredButNeverConnectedIsExportedAsDown(t *testing.T) {
+func TestChaos81_ConfiguredButNeverConnectedIsExportedAsDown(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -1269,7 +1269,7 @@ func TestChaos72_ConfiguredButNeverConnectedIsExportedAsDown(t *testing.T) {
 // and pages all of them. The rule is "was this feature ASKED for", so intent
 // must be the only thing that opens the gate, and disabling forwarding must
 // close it again.
-func TestChaos72_UnmetIntentDoesNotWidenTheEmissionRule(t *testing.T) {
+func TestChaos81_UnmetIntentDoesNotWidenTheEmissionRule(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -1297,7 +1297,7 @@ func TestChaos72_UnmetIntentDoesNotWidenTheEmissionRule(t *testing.T) {
 }
 
 // A degradation decision snapshotted against one Writer must not be committed
-// into the record of another (CHAOS-72 P1-G).
+// into the record of another (CHAOS-81 P1-G).
 //
 // evaluateSyslogDegradation reads the snapshot and then takes the lock to fire.
 // An admin re-point landing between the two installs a fresh record, and the
@@ -1307,7 +1307,7 @@ func TestChaos72_UnmetIntentDoesNotWidenTheEmissionRule(t *testing.T) {
 // silent. The window is microseconds wide and cannot be scheduled through the
 // public entry point, so the commit half is its own function and is driven
 // directly.
-func TestChaos72_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
+func TestChaos81_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -1361,7 +1361,7 @@ func TestChaos72_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
 }
 
 // A runtime re-point must not make the exported counters go BACKWARDS
-// (CHAOS-72, Codex P2).
+// (CHAOS-81, Codex P2).
 //
 // InitSyslog installs a brand-new Writer whose counters start at zero. The
 // plane read them straight off that Writer, so `culvert_syslog_drops_total`
@@ -1371,7 +1371,7 @@ func TestChaos72_StaleDegradationSnapshotNeitherPagesNorLatches(t *testing.T) {
 // `syslog_feed` row's "N dropped since startup" back to clean, erasing the
 // loss history at exactly the moment an operator re-points the collector to
 // remediate the outage that produced it.
-func TestChaos72_RePointDoesNotResetTheLossHistory(t *testing.T) {
+func TestChaos81_RePointDoesNotResetTheLossHistory(t *testing.T) {
 	dead := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+dead.addr)
 	dead.waitForConnection(t)
@@ -1428,7 +1428,7 @@ func TestChaos72_RePointDoesNotResetTheLossHistory(t *testing.T) {
 }
 
 // GET /api/syslog answers from the delivery snapshot, never from the live
-// Writer (CHAOS-72, Codex P2 ×2 on `ecfb906`).
+// Writer (CHAOS-81, Codex P2 ×2 on `ecfb906`).
 //
 // Two defects, one cause — the handler had its own idea of where the numbers
 // come from:
@@ -1443,7 +1443,7 @@ func TestChaos72_RePointDoesNotResetTheLossHistory(t *testing.T) {
 //     which is set only once a Writer exists — so a target whose boot dial
 //     failed was reported `degraded:true, neverDelivered:false`, denying the
 //     one fact that verdict rests on.
-func TestChaos72_AdminAPIAnswersFromTheDeliverySnapshot(t *testing.T) {
+func TestChaos81_AdminAPIAnswersFromTheDeliverySnapshot(t *testing.T) {
 	t.Run("a re-point does not reset the counters", func(t *testing.T) {
 		dead := startSyslogCollector(t)
 		armSyslogFeed(t, "tcp://"+dead.addr)
@@ -1533,7 +1533,7 @@ func readSyslogAdminAPI(t *testing.T) map[string]any {
 	return body
 }
 
-// TestChaos72_EventsLostToAnUnmetIntentAreCounted closes the last hole in the
+// TestChaos81_EventsLostToAnUnmetIntentAreCounted closes the last hole in the
 // compliance-loss series this sweep exists to publish.
 //
 // P1-F made a configured-but-never-connected collector VISIBLE
@@ -1548,7 +1548,7 @@ func readSyslogAdminAPI(t *testing.T) map[string]any {
 // A Writer's counters structurally cannot hold this loss: it happens because
 // there is no Writer. It belongs to the process-lifetime total, which is the
 // one series meaning "events that did not reach the SIEM".
-func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
+func TestChaos81_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -1595,11 +1595,11 @@ func TestChaos72_EventsLostToAnUnmetIntentAreCounted(t *testing.T) {
 	}
 }
 
-// TestChaos72_InstallingAWriterStopsCountingSkips is the other half of the
+// TestChaos81_InstallingAWriterStopsCountingSkips is the other half of the
 // arming rule: once a Writer exists the events go THROUGH it and are counted
 // (or not) by its own machinery. Continuing to charge skips here would
 // double-count every loss.
-func TestChaos72_InstallingAWriterStopsCountingSkips(t *testing.T) {
+func TestChaos81_InstallingAWriterStopsCountingSkips(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr) // installs a Writer (and resets the plane)
 
@@ -1614,7 +1614,7 @@ func TestChaos72_InstallingAWriterStopsCountingSkips(t *testing.T) {
 	}
 }
 
-// TestChaos72_DisablingAnUnmetFeedStopsCountingSkips covers the transition the
+// TestChaos81_DisablingAnUnmetFeedStopsCountingSkips covers the transition the
 // gate above CANNOT reach, and the reason it could not is the point.
 //
 // That gate disables forwarding too, but it installs a Writer first — which
@@ -1630,7 +1630,7 @@ func TestChaos72_InstallingAWriterStopsCountingSkips(t *testing.T) {
 // disable's own audit entry, would otherwise be charged as a SIEM loss for the
 // life of the process, and those bogus drops surface the moment forwarding is
 // enabled again.
-func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
+func TestChaos81_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -1652,7 +1652,7 @@ func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
 	}
 }
 
-// TestChaos72_HealthzReportsTheLossMetricsReports pins that the two surfaces
+// TestChaos81_HealthzReportsTheLossMetricsReports pins that the two surfaces
 // answer the same question with the same predicate.
 //
 // /metrics exports the skipped-event total for a configured collector that
@@ -1661,7 +1661,7 @@ func TestChaos72_DisablingAnUnmetFeedStopsCountingSkips(t *testing.T) {
 // for exactly the outage where every event is being lost (Codex P2, PR #1494).
 // Third instance in this sweep of establishing a rule and not enumerating the
 // other readers of the same fact.
-func TestChaos72_HealthzReportsTheLossMetricsReports(t *testing.T) {
+func TestChaos81_HealthzReportsTheLossMetricsReports(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -1691,7 +1691,7 @@ func TestChaos72_HealthzReportsTheLossMetricsReports(t *testing.T) {
 	}
 }
 
-// TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent drives the REAL
+// TestChaos81_TheRealFanOutChargesEventsLostToAnUnmetIntent drives the REAL
 // audit and request-log paths, not the counter behind them.
 //
 // This section has had to record "walling the function is not walling the
@@ -1700,7 +1700,7 @@ func TestChaos72_HealthzReportsTheLossMetricsReports(t *testing.T) {
 // gate that calls noteSyslogEventSkipped directly proves the counter works
 // and says nothing about whether either fan-out reaches it — which is exactly
 // where the defect lived.
-func TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
+func TestChaos81_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -1718,7 +1718,7 @@ func TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
 	// The audit fan-out (audit.SetSIEM, wired in store.go's init).
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/policy", http.NoBody)
 	req.RemoteAddr = "198.51.100.77:5555"
-	auditEvent(req, "policy.update", "rule-1", "chaos72 unmet-intent path gate")
+	auditEvent(req, "policy.update", "rule-1", "chaos81 unmet-intent path gate")
 
 	// The request-log fan-out.
 	recordRequest("198.51.100.77", http.MethodGet, "example.com", "200", "", "allow", "", "")
@@ -1735,7 +1735,7 @@ func TestChaos72_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
 // just the state. "Events are not reaching the collector" is the diagnosis;
 // "how much have I lost?" is the next question, and the answer was
 // structurally zero until the loss was counted.
-func TestChaos72_FailedToConnectRowNamesTheLoss(t *testing.T) {
+func TestChaos81_FailedToConnectRowNamesTheLoss(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -1763,7 +1763,7 @@ func TestChaos72_FailedToConnectRowNamesTheLoss(t *testing.T) {
 	}
 }
 
-// TestChaos72_SnapshotReadsTheWriterItCaptured pins that syslogFeedState reads
+// TestChaos81_SnapshotReadsTheWriterItCaptured pins that syslogFeedState reads
 // its Writer stats from the generation it captured under the lock, never from
 // a fresh activeSyslog() load.
 //
@@ -1780,7 +1780,7 @@ func TestChaos72_FailedToConnectRowNamesTheLoss(t *testing.T) {
 // the public entry point, so the MECHANISM is pinned by source scan — the
 // convention this file already uses for wiring — rather than by a race gate
 // that would pass against the defect most of the time.
-func TestChaos72_SnapshotReadsTheWriterItCaptured(t *testing.T) {
+func TestChaos81_SnapshotReadsTheWriterItCaptured(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "syslog_health.go"))
 	if err != nil {
 		t.Fatalf("read syslog_health.go: %v", err)
@@ -1835,7 +1835,7 @@ func syslogFuncBody(t *testing.T, src, decl string) string {
 	return code.String()
 }
 
-// TestChaos72_SupersededTargetIsNotReportedAsNeverConnected pins that the
+// TestChaos81_SupersededTargetIsNotReportedAsNeverConnected pins that the
 // unmet-intent alert tells the truth in BOTH shapes it can reach.
 //
 // A boot that connects target A and then fails to connect the persisted
@@ -1850,7 +1850,7 @@ func syslogFuncBody(t *testing.T, src, decl string) string {
 // The two shapes are distinguished by `Configured`, which is true only once a
 // Writer is installed. Neither sentence names a target: Detail is the alert
 // dedup key and an operator-supplied address there is WK-12/RS-5.
-func TestChaos72_SupersededTargetIsNotReportedAsNeverConnected(t *testing.T) {
+func TestChaos81_SupersededTargetIsNotReportedAsNeverConnected(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr) // target A connects
 
@@ -1919,7 +1919,7 @@ func captureSyslogAlertDetail(t *testing.T, snap syslogFeedSnapshot) string {
 	return got[len(got)-1]
 }
 
-// TestChaos72_RecordWriterPairingIsAnInvariant pins that the health record's
+// TestChaos81_RecordWriterPairingIsAnInvariant pins that the health record's
 // `configured` flag and its `writer` pointer are set and cleared TOGETHER.
 //
 // Three consumers read `Configured` as "a writer exists": the metrics plane's
@@ -1934,7 +1934,7 @@ func captureSyslogAlertDetail(t *testing.T, snap syslogFeedSnapshot) string {
 // meaning. It is BEHAVIOURAL over every transition that touches either field,
 // because a source scan would pass against an install path that set them in
 // two separate critical sections — which is the shape that actually breaks it.
-func TestChaos72_RecordWriterPairingIsAnInvariant(t *testing.T) {
+func TestChaos81_RecordWriterPairingIsAnInvariant(t *testing.T) {
 	check := func(stage string) {
 		t.Helper()
 		syslogHealth.mu.Lock()
@@ -1983,7 +1983,7 @@ func TestChaos72_RecordWriterPairingIsAnInvariant(t *testing.T) {
 
 // A degradation snapshotted against a configured-but-unreachable feed must not
 // be committed into the record of a feed the operator has since DISABLED
-// (CHAOS-72, Codex P2 round 10).
+// (CHAOS-81, Codex P2 round 10).
 //
 // Round 9 closed the stale-commit window with a pointer comparison against the
 // snapshot's Writer. That answered the question everywhere except the one case
@@ -1999,7 +1999,7 @@ func TestChaos72_RecordWriterPairingIsAnInvariant(t *testing.T) {
 // The window is microseconds wide and cannot be scheduled through the public
 // entry point, so the commit half is driven directly — the same reason the
 // round-9 gate above does.
-func TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
+func TestChaos81_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -2053,7 +2053,7 @@ func TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
 }
 
 // The probe must classify its transport from the WRITER that served the line,
-// never from an address string read separately (CHAOS-72, Codex P2 round 10).
+// never from an address string read separately (CHAOS-81, Codex P2 round 10).
 //
 // syslogDeliveryProbe took the Writer as a parameter and then read
 // `syslogHealth.target` in its own critical section afterwards. Those are two
@@ -2063,7 +2063,7 @@ func TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
 // UDP's inability to prove delivery is register row SL-1 and is stated on
 // every other surface in this plane; the one endpoint an operator is told to
 // use to CONFIRM connectivity was the one that could contradict it.
-func TestChaos72_ProbeClassifiesTransportFromTheWriterThatServedIt(t *testing.T) {
+func TestChaos81_ProbeClassifiesTransportFromTheWriterThatServedIt(t *testing.T) {
 	armSyslogFeed(t, "udp://127.0.0.1:65533")
 	sw := activeSyslog()
 	if sw == nil {
@@ -2103,7 +2103,7 @@ func TestChaos72_ProbeClassifiesTransportFromTheWriterThatServedIt(t *testing.T)
 }
 
 // Every transition that CHANGES what the health record describes must advance
-// its generation (CHAOS-72, Codex P2 round 10).
+// its generation (CHAOS-81, Codex P2 round 10).
 //
 // The stale-commit guard is now `syslogHealth.gen != snap.gen`, so a future
 // transition that swaps `writer` without bumping `gen` silently reopens the
@@ -2116,7 +2116,7 @@ func TestChaos72_ProbeClassifiesTransportFromTheWriterThatServedIt(t *testing.T)
 // Stated as "writer changed ⇒ gen advanced", not as an exact bump count: the
 // point is that the identity cannot be reused, and extra bumps are harmless
 // (they only ever refuse a stale commit that would have been refused anyway).
-func TestChaos72_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
+func TestChaos81_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
 	read := func() (*syslogWriter, uint64) {
 		syslogHealth.mu.Lock()
 		defer syslogHealth.mu.Unlock()
@@ -2196,7 +2196,7 @@ func TestChaos72_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
 	syslogHealth.mu.Unlock()
 }
 
-// The transport claim must have ONE source (CHAOS-72, round 10 self-review).
+// The transport claim must have ONE source (CHAOS-81, round 10 self-review).
 //
 // Round 10's P2-14 was the probe deriving "can this transport prove delivery"
 // from the health record's target string while the Writer that served the line
@@ -2212,7 +2212,7 @@ func TestChaos72_EveryRecordTransitionAdvancesTheGeneration(t *testing.T) {
 // The fallback is deliberately kept and is not a second answer: a feed with no
 // Writer has no transport to ask, and the operator's intended address is the
 // only thing that can describe what they asked for.
-func TestChaos72_TransportClaimHasOneSource(t *testing.T) {
+func TestChaos81_TransportClaimHasOneSource(t *testing.T) {
 	for _, tc := range []struct {
 		addr    string
 		wantUDP bool
@@ -2270,7 +2270,7 @@ func TestChaos72_TransportClaimHasOneSource(t *testing.T) {
 }
 
 // Enabling and disabling the SIEM feed must publish the writer and the config
-// metadata as ONE transition (CHAOS-72, Codex P2 round 11).
+// metadata as ONE transition (CHAOS-81, Codex P2 round 11).
 //
 // `syslogConfigured` / `syslogConfiguredAddr` decide what `GET /api/syslog`
 // reports, what `checkSyslogFeed` compares, and what `admin_settings.json`
@@ -2283,7 +2283,7 @@ func TestChaos72_TransportClaimHasOneSource(t *testing.T) {
 // The window is a few instructions wide and cannot be scheduled through the
 // HTTP handler, so the invariant is pinned on the transitions themselves:
 // after either one, the writer and the metadata must agree.
-func TestChaos72_ConfigMetadataIsPublishedWithTheWriter(t *testing.T) {
+func TestChaos81_ConfigMetadataIsPublishedWithTheWriter(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -2339,7 +2339,7 @@ func TestChaos72_ConfigMetadataIsPublishedWithTheWriter(t *testing.T) {
 }
 
 // The config-metadata variables must be reached only through their guarded
-// accessors (CHAOS-72, Codex P2 round 11).
+// accessors (CHAOS-81, Codex P2 round 11).
 //
 // `syslogConfigured` / `syslogConfiguredAddr` are published under
 // `syslogPublishMu` with the writer. They are read by the diagnostics row, the
@@ -2354,7 +2354,7 @@ func TestChaos72_ConfigMetadataIsPublishedWithTheWriter(t *testing.T) {
 // concurrent re-point, which is exactly the case no ordinary test drives. So
 // the access is pinned structurally — the declarations and the accessors live
 // in syslog.go/ui_config.go, and nothing else may name them outside a comment.
-func TestChaos72_ConfigMetadataIsReadOnlyThroughItsAccessors(t *testing.T) {
+func TestChaos81_ConfigMetadataIsReadOnlyThroughItsAccessors(t *testing.T) {
 	owners := map[string]bool{"syslog.go": true, "ui_config.go": true}
 	names := []string{"syslogConfigured", "syslogConfiguredAddr"}
 
@@ -2428,7 +2428,7 @@ func findIdent(code, name string) []int {
 }
 
 // A loss that no live Writer can hold must reach the EXPORTED total, not just
-// the engine's counter (CHAOS-72, Codex P2 round 11).
+// the engine's counter (CHAOS-81, Codex P2 round 11).
 //
 // Round 11 added `lateDrops` in internal/syslog for losses charged to a
 // Writer whose finals had already been folded. The engine gate asserts that
@@ -2439,7 +2439,7 @@ func findIdent(code, name string) []int {
 // close, committed inside its own fix.
 //
 // So this gate reads the operator-facing surfaces.
-func TestChaos72_LateDropsReachTheExportedTotal(t *testing.T) {
+func TestChaos81_LateDropsReachTheExportedTotal(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -2534,7 +2534,7 @@ func promSeriesValue(t *testing.T, body, name string) float64 {
 func floodUntilDropping(t *testing.T, sw *syslogWriter, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		sw.WriteAudit("chaos72 flood")
+		sw.WriteAudit("chaos81 flood")
 	}
 }
 
@@ -2592,7 +2592,7 @@ func waitExportedAccountsFor(t *testing.T, want uint64, within time.Duration) ui
 	}
 }
 
-// TestChaos72_DisablingAFeedExportsEveryLossItRecorded is the DEFECT gate for
+// TestChaos81_DisablingAFeedExportsEveryLossItRecorded is the DEFECT gate for
 // the fold-ordering loss.
 //
 // noteSyslogForwardingDisabled folded the Writer's totals BEFORE
@@ -2606,7 +2606,7 @@ func waitExportedAccountsFor(t *testing.T, want uint64, within time.Duration) ui
 // the Writer did", not a fixed number: what makes the defect a defect is the
 // DISAGREEMENT between the two, and the split between drops and deliveries is
 // timing-dependent.
-func TestChaos72_DisablingAFeedExportsEveryLossItRecorded(t *testing.T) {
+func TestChaos81_DisablingAFeedExportsEveryLossItRecorded(t *testing.T) {
 	t.Cleanup(resetSyslogHealthForTest)
 	const events = 2000
 	for trial := 0; trial < 3; trial++ {
@@ -2642,7 +2642,7 @@ func TestChaos72_DisablingAFeedExportsEveryLossItRecorded(t *testing.T) {
 	}
 }
 
-// TestChaos72_ARetiredWritersLaterLossesStillReachTheTotal pins the settle
+// TestChaos81_ARetiredWritersLaterLossesStillReachTheTotal pins the settle
 // itself, deterministically.
 //
 // The end-to-end disable gate above exercises the same mechanism but its
@@ -2652,7 +2652,7 @@ func TestChaos72_DisablingAFeedExportsEveryLossItRecorded(t *testing.T) {
 // enough that a broken settle still passes. This drives the real recorders
 // and then moves a retired-but-unsealed Writer's counters by hand, so the
 // delta the settle has to carry is exact and cannot shrink to nothing.
-func TestChaos72_ARetiredWritersLaterLossesStillReachTheTotal(t *testing.T) {
+func TestChaos81_ARetiredWritersLaterLossesStillReachTheTotal(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 	c := startSyslogCollector(t)
@@ -2693,7 +2693,7 @@ func TestChaos72_ARetiredWritersLaterLossesStillReachTheTotal(t *testing.T) {
 	}
 }
 
-// TestChaos72_ALossAtTheSealBoundaryIsCountedExactlyOnce is the CONTROL for
+// TestChaos81_ALossAtTheSealBoundaryIsCountedExactlyOnce is the CONTROL for
 // the settle, in the direction the settle can get wrong.
 //
 // The settle folds a tracked Writer's delta on every read, and lateDrops
@@ -2703,7 +2703,7 @@ func TestChaos72_ARetiredWritersLaterLossesStillReachTheTotal(t *testing.T) {
 // sealed Writer's counters alone. This drives the real send path against a
 // Writer that is retired, still tracked, and sealed, and requires the
 // exported total to move by exactly one.
-func TestChaos72_ALossAtTheSealBoundaryIsCountedExactlyOnce(t *testing.T) {
+func TestChaos81_ALossAtTheSealBoundaryIsCountedExactlyOnce(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 	c := startSyslogCollector(t)
@@ -2750,7 +2750,7 @@ func TestChaos72_ALossAtTheSealBoundaryIsCountedExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestChaos72_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent is the
+// TestChaos81_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent is the
 // DEFECT gate for Codex P2-16.
 //
 // A boot that connects target A and then fails to connect the persisted
@@ -2760,7 +2760,7 @@ func TestChaos72_ALossAtTheSealBoundaryIsCountedExactlyOnce(t *testing.T) {
 // delivering again". Both statements are false for B, and because the
 // watchdog re-evaluates every 30s the page then fired again, and again, for
 // as long as the mixed state lasted.
-func TestChaos72_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent(t *testing.T) {
+func TestChaos81_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -2812,12 +2812,12 @@ func TestChaos72_ASupersededWritersDeliveryDoesNotClearAnUnmetIntent(t *testing.
 	}
 }
 
-// TestChaos72_AMetIntentStillRecovers is the CONTROL for the gate above.
+// TestChaos81_AMetIntentStillRecovers is the CONTROL for the gate above.
 //
 // The cheapest way to stop a superseded delivery clearing the latch is to
 // stop clearing it at all, which would leave every real recovery latched and
 // silence the feed's next genuine outage for the life of the process.
-func TestChaos72_AMetIntentStillRecovers(t *testing.T) {
+func TestChaos81_AMetIntentStillRecovers(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -2852,7 +2852,7 @@ func TestChaos72_AMetIntentStillRecovers(t *testing.T) {
 	}
 }
 
-// TestChaos72_ALossOnAnInstalledWriterIsNeverCountedAsLate is the mirror
+// TestChaos81_ALossOnAnInstalledWriterIsNeverCountedAsLate is the mirror
 // CONTROL: it pins the OTHER half of the late-drop predicate.
 //
 // A loss is late only when the owner has RETIRED the Writer as well as the
@@ -2860,7 +2860,7 @@ func TestChaos72_AMetIntentStillRecovers(t *testing.T) {
 // recorded against a Writer that is still installed — its cumulative
 // counters are read live and are folded nowhere else — and moves it into the
 // "lost to an earlier target" bucket while it is still the current one.
-func TestChaos72_ALossOnAnInstalledWriterIsNeverCountedAsLate(t *testing.T) {
+func TestChaos81_ALossOnAnInstalledWriterIsNeverCountedAsLate(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 	c := startSyslogCollector(t)
@@ -2925,7 +2925,7 @@ var configMetadataReaders = map[string]string{
 // the previous control sample evaporated.
 var syslogWriterOnlyReader = struct{ fn, file string }{"persistLogEntry", "store.go"}
 
-// TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot is the
+// TestChaos81_ConfigMetadataReadersTakeTheWriterFromTheSnapshot is the
 // STRUCTURAL wall for Codex P2-17.
 //
 // syslogConfiguredTargets() released syslogPublishMu before the caller loaded
@@ -2973,7 +2973,7 @@ func activeSyslogCallSites(fset *token.FileSet, fd *ast.FuncDecl) []string {
 	return at
 }
 
-func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T) {
+func TestChaos81_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T) {
 	checked := 0
 	for fn, file := range configMetadataReaders {
 		fset, fd := syslogFuncDecl(t, file, fn)
@@ -3004,7 +3004,7 @@ func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 	}
 }
 
-// TestChaos72_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved is the
+// TestChaos81_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved is the
 // DEFECT gate for Codex P2-19.
 //
 // noteSyslogEventSkipped re-read the arming flag at charge time, so a fan-out
@@ -3016,7 +3016,7 @@ func TestChaos72_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 // The interleaving is a few instructions wide and cannot be scheduled through
 // the fan-outs, so the gate drives the boundary the fix introduced — the
 // charge takes the arming state its CALLER observed, not the current one.
-func TestChaos72_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved(t *testing.T) {
+func TestChaos81_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -3052,12 +3052,12 @@ func TestChaos72_AnInstallDoesNotEraseALossTheFanOutAlreadyObserved(t *testing.T
 	}
 }
 
-// TestChaos72_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped is the
+// TestChaos81_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped is the
 // CONTROL. The cheapest way to pass the gate above is to charge every event
 // unconditionally, which would accrue a permanent meaningless loss on every
 // appliance that forwards nowhere — the emission rule this plane already
 // applies everywhere else.
-func TestChaos72_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped(t *testing.T) {
+func TestChaos81_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -3079,7 +3079,7 @@ func TestChaos72_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped(t *testin
 	}
 }
 
-// TestChaos72_TheDropRowIsNeverRenderedFromASaveResponse is the UI CONTRACT
+// TestChaos81_TheDropRowIsNeverRenderedFromASaveResponse is the UI CONTRACT
 // gate for Codex P2-18.
 //
 // The drop counters are process-lifetime: they carry every collector this
@@ -3091,7 +3091,7 @@ func TestChaos72_AnEventForwardedThroughAWriterIsNeverChargedAsSkipped(t *testin
 //
 // Walled structurally because the defect is in a browser handler: no Go test
 // can drive it, and the failure is silent (a wrong number, not an error).
-func TestChaos72_TheDropRowIsNeverRenderedFromASaveResponse(t *testing.T) {
+func TestChaos81_TheDropRowIsNeverRenderedFromASaveResponse(t *testing.T) {
 	// Anchored to the package source dir, never CWD-relative: a concurrent
 	// os.Chdir in another test makes a relative read pick up the wrong file,
 	// which the determinism and -race gates surface as a flake.
@@ -3147,7 +3147,7 @@ func jsFunctionBody(t *testing.T, src, decl string) string {
 	return ""
 }
 
-// TestChaos72_ADropEvaluatesOnlyWhenNoEvaluationIsInFlight is the DEFECT gate
+// TestChaos81_ADropEvaluatesOnlyWhenNoEvaluationIsInFlight is the DEFECT gate
 // for Codex round 14: a queue-full drop is charged on the CALLER's goroutine —
 // a proxy request goroutine — so during a sustained SIEM outage the delivery
 // observer is reached at the full request rate. Unguarded, each of those calls
@@ -3171,7 +3171,7 @@ func jsFunctionBody(t *testing.T, src, decl string) string {
 // The injected clock is the instrument because syslogFeedState reads it
 // exactly once per evaluation on a feed that is not degraded, so the call
 // count IS the evaluation count.
-func TestChaos72_ADropEvaluatesOnlyWhenNoEvaluationIsInFlight(t *testing.T) {
+func TestChaos81_ADropEvaluatesOnlyWhenNoEvaluationIsInFlight(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -3209,14 +3209,14 @@ func TestChaos72_ADropEvaluatesOnlyWhenNoEvaluationIsInFlight(t *testing.T) {
 	}
 }
 
-// TestChaos72_ConcurrentDropsAreRaceFree exercises the real shape — many
+// TestChaos81_ConcurrentDropsAreRaceFree exercises the real shape — many
 // goroutines charging losses at once, as a SIEM outage does — under the race
 // detector. It deliberately asserts NO count: which goroutine wins the claim
 // is a scheduling outcome, so a count assertion here would be exactly the
 // flaky gate the unit above replaces. What it proves is that the claim, its
 // deferred release and the health plane are safe under real concurrency, and
 // that the claim is left FREE afterwards.
-func TestChaos72_ConcurrentDropsAreRaceFree(t *testing.T) {
+func TestChaos81_ConcurrentDropsAreRaceFree(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -3246,13 +3246,13 @@ func TestChaos72_ConcurrentDropsAreRaceFree(t *testing.T) {
 	}
 }
 
-// TestChaos72_ASequentialDropStillEvaluates is the CONTROL. The cheapest way
+// TestChaos81_ASequentialDropStillEvaluates is the CONTROL. The cheapest way
 // to pass the gate above is to stop evaluating on a drop at all — which would
 // delete the "immediate on a busy node" half of the degradation plane and
 // leave the 30s watchdog as the only driver. A claim that is never released
 // (a trailing Store instead of a deferred one, which a panicking observer
 // would skip) fails here too, on the second drop.
-func TestChaos72_ASequentialDropStillEvaluates(t *testing.T) {
+func TestChaos81_ASequentialDropStillEvaluates(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
@@ -3280,10 +3280,10 @@ func TestChaos72_ASequentialDropStillEvaluates(t *testing.T) {
 	}
 }
 
-// TestChaos72_ADegradedFeedStillPagesFromADropUnderConcurrency is the second
+// TestChaos81_ADegradedFeedStillPagesFromADropUnderConcurrency is the second
 // CONTROL: coalescing must not swallow the page itself. A feed already past
 // the window is driven by concurrent drops, and the alert must still fire.
-func TestChaos72_ADegradedFeedStillPagesFromADropUnderConcurrency(t *testing.T) {
+func TestChaos81_ADegradedFeedStillPagesFromADropUnderConcurrency(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
@@ -3316,7 +3316,7 @@ func TestChaos72_ADegradedFeedStillPagesFromADropUnderConcurrency(t *testing.T) 
 	}
 }
 
-// TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters is the PATH half
+// TestChaos81_TheProbeReportsTheSendersReasonNotItsOwnWriters is the PATH half
 // of Codex round 15's second finding. The engine gate
 // (internal/syslog.TestAckCarriesTheSendersFailureReason) proves the
 // acknowledgement carries the reason of the Writer that actually refused the
@@ -3332,7 +3332,7 @@ func TestChaos72_ADegradedFeedStillPagesFromADropUnderConcurrency(t *testing.T) 
 // successor, and dropped there — an interleaving driven at the engine level by
 // the gate above. What this asserts is the one thing that can regress by
 // habit: that the ack branch stops asking the writer it was handed.
-func TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters(t *testing.T) {
+func TestChaos81_TheProbeReportsTheSendersReasonNotItsOwnWriters(t *testing.T) {
 	fset, fd := syslogFuncDecl(t, "syslog_health.go", "syslogDeliveryProbe")
 	if fd == nil {
 		t.Fatal("syslogDeliveryProbe not found in syslog_health.go")
@@ -3404,7 +3404,7 @@ func TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters(t *testing.T) {
 // a health surface asserting a false statement. Nothing had failed yet.
 
 // The watchdog tick that used to page must not, while the dial is in flight.
-func TestChaos72_PendingDialIsNeitherDegradedNorPaged(t *testing.T) {
+func TestChaos81_PendingDialIsNeitherDegradedNorPaged(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -3436,7 +3436,7 @@ func TestChaos72_PendingDialIsNeitherDegradedNorPaged(t *testing.T) {
 // latch that makes the feed permanently unpageable — the fail-OPEN failure
 // this plane keeps recording — so the window is a DEADLINE that expires on its
 // own. Correctness must not depend on anyone reporting back.
-func TestChaos72_PendingDialGraceExpiresWithoutBeingCleared(t *testing.T) {
+func TestChaos81_PendingDialGraceExpiresWithoutBeingCleared(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -3462,7 +3462,7 @@ func TestChaos72_PendingDialGraceExpiresWithoutBeingCleared(t *testing.T) {
 // A dial that has RETURNED without a writer is unmet NOW. Waiting the grace
 // out would leave the read surfaces reporting a not-yet-degraded feed for the
 // rest of it — which is exactly when an operator looks at a boot that failed.
-func TestChaos72_ResolvedFailedDialIsReportedWithoutWaitingTheGraceOut(t *testing.T) {
+func TestChaos81_ResolvedFailedDialIsReportedWithoutWaitingTheGraceOut(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -3485,7 +3485,7 @@ func TestChaos72_ResolvedFailedDialIsReportedWithoutWaitingTheGraceOut(t *testin
 // The superseded-target shape has the same window: a boot that connected A and
 // then records intent B spends up to a dial reporting the feed DOWN although
 // nothing has failed and A is still delivering.
-func TestChaos72_PendingDialForASecondTargetDoesNotPageTheServingOne(t *testing.T) {
+func TestChaos81_PendingDialForASecondTargetDoesNotPageTheServingOne(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
@@ -3521,7 +3521,7 @@ func TestChaos72_PendingDialForASecondTargetDoesNotPageTheServingOne(t *testing.
 // posture is walled by twelve existing gates (verified by mutation), and the
 // bounded-suppression half by the expiry gate above; this one guards the
 // ORDER.
-func TestChaos72_SuccessfulDialResolvesThePendingIntent(t *testing.T) {
+func TestChaos81_SuccessfulDialResolvesThePendingIntent(t *testing.T) {
 	col := startSyslogCollector(t)
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
@@ -3556,7 +3556,7 @@ func TestChaos72_SuccessfulDialResolvesThePendingIntent(t *testing.T) {
 // fact, one source: an engine that raises its dial timeout would otherwise
 // silently reopen the window this round closed, and a grace at or above the
 // watchdog's tick would postpone a real page by a whole tick.
-func TestChaos72_DialGraceIsDerivedFromTheEngineBudget(t *testing.T) {
+func TestChaos81_DialGraceIsDerivedFromTheEngineBudget(t *testing.T) {
 	if syslogDialVerdictGrace <= syslog.DialTimeout {
 		t.Errorf("dial grace %s does not cover the engine's dial budget %s — a dial can outlast its own grace and be paged mid-flight",
 			syslogDialVerdictGrace, syslog.DialTimeout)
@@ -3571,7 +3571,7 @@ func TestChaos72_DialGraceIsDerivedFromTheEngineBudget(t *testing.T) {
 // and report nothing. Behavioural coverage cannot reach a future caller that
 // forgets to dial, so the pairing is pinned structurally: every production
 // file that records an intent must also be the one that dials.
-func TestChaos72_EveryIntentRecordedIsFollowedByItsDial(t *testing.T) {
+func TestChaos81_EveryIntentRecordedIsFollowedByItsDial(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
@@ -3621,7 +3621,7 @@ func TestChaos72_EveryIntentRecordedIsFollowedByItsDial(t *testing.T) {
 // The configured collector must survive its own dial failing. This is the
 // half with a visible product consequence: the loss row is hidden by an empty
 // address, on the worst outage this plane can report.
-func TestChaos72_FailedDialStillNamesTheConfiguredCollector(t *testing.T) {
+func TestChaos81_FailedDialStillNamesTheConfiguredCollector(t *testing.T) {
 	ensureObservabilityStartupTestLogger(t)
 	snapshotObservabilityGlobals(t)
 	resetSyslogHealthForTest()
@@ -3648,7 +3648,7 @@ func TestChaos72_FailedDialStillNamesTheConfiguredCollector(t *testing.T) {
 
 // The superseded shape: the two targets are named separately, and the verdict
 // is never attached to the one it is not about.
-func TestChaos72_SupersededTargetIsNamedBesideTheServingOne(t *testing.T) {
+func TestChaos81_SupersededTargetIsNamedBesideTheServingOne(t *testing.T) {
 	col := startSyslogCollector(t)
 	serving := "tcp://" + col.addr
 	armSyslogFeed(t, serving)
@@ -3676,7 +3676,7 @@ func TestChaos72_SupersededTargetIsNamedBesideTheServingOne(t *testing.T) {
 // reports the target met. The cheapest way to pass the two gates above is to
 // report `targetMet:false` always, or to stop reporting a serving address at
 // all — either of which makes the panel permanently warn on a working feed.
-func TestChaos72_HealthyFeedReportsItsTargetAsMet(t *testing.T) {
+func TestChaos81_HealthyFeedReportsItsTargetAsMet(t *testing.T) {
 	col := startSyslogCollector(t)
 	addr := "tcp://" + col.addr
 	armSyslogFeed(t, addr)
@@ -3698,7 +3698,7 @@ func TestChaos72_HealthyFeedReportsItsTargetAsMet(t *testing.T) {
 // window between two reads is a few instructions wide and cannot be scheduled
 // through the handler, which is the same reason round 9's wall on
 // syslogFeedState and the config-metadata wall above are structural.
-func TestChaos72_TheSyslogAPIReadsOneGeneration(t *testing.T) {
+func TestChaos81_TheSyslogAPIReadsOneGeneration(t *testing.T) {
 	fset, fd := syslogFuncDecl(t, "ui_config.go", "apiSyslogConfig")
 	if fd == nil {
 		t.Fatal("apiSyslogConfig is gone; this wall names a function that no longer exists")
@@ -3735,7 +3735,7 @@ func TestChaos72_TheSyslogAPIReadsOneGeneration(t *testing.T) {
 	}
 }
 
-// TestChaos72_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed is the UI
+// TestChaos81_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed is the UI
 // CONTRACT half of the finding above.
 //
 // The panel keys its whole syslog section off `addr`, and `addr` used to be
@@ -3749,7 +3749,7 @@ func TestChaos72_TheSyslogAPIReadsOneGeneration(t *testing.T) {
 // Walled structurally for the same reason as the gate above: the defect is in
 // a browser handler, no Go test can drive it, and the failure is silence
 // rather than an error.
-func TestChaos72_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed(t *testing.T) {
+func TestChaos81_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed(t *testing.T) {
 	src, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("reading the admin UI: %v", err)
@@ -3771,7 +3771,7 @@ func TestChaos72_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed(t *testing.T)
 	}
 }
 
-// TestChaos72_ProbeRefusesToTestACollectorThatWasReplaced closes the
+// TestChaos81_ProbeRefusesToTestACollectorThatWasReplaced closes the
 // superseded-target finding at its THIRD surface.
 //
 // The alert wording got it in round 9b and the recovery clear in round 12b.
@@ -3783,7 +3783,7 @@ func TestChaos72_TheSyslogPanelDoesNotHideALossRowOnAnUnservedFeed(t *testing.T)
 // correctly refuses to clear that episode for a superseded writer's delivery,
 // so the alert stayed up while the test said it had worked: two contradictory
 // statements on one operator surface (CodeRabbit, PR #1494).
-func TestChaos72_ProbeRefusesToTestACollectorThatWasReplaced(t *testing.T) {
+func TestChaos81_ProbeRefusesToTestACollectorThatWasReplaced(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.waitForConnection(t)
@@ -3820,7 +3820,7 @@ func TestChaos72_ProbeRefusesToTestACollectorThatWasReplaced(t *testing.T) {
 // cheapest way to pass the gate above is to refuse every probe, which deletes
 // the one tool an operator has for producing the delivery evidence recovery
 // requires.
-func TestChaos72_ProbeStillTestsACollectorThatIsBeingServed(t *testing.T) {
+func TestChaos81_ProbeStillTestsACollectorThatIsBeingServed(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.waitForConnection(t)
@@ -3843,7 +3843,7 @@ func TestChaos72_ProbeStillTestsACollectorThatIsBeingServed(t *testing.T) {
 	}
 }
 
-// TestChaos72_ObservabilitySnapshotRestoresTheHealthPlane walls the fixture
+// TestChaos81_ObservabilitySnapshotRestoresTheHealthPlane walls the fixture
 // leak behind the gate above.
 //
 // snapshotObservabilityGlobals restores the writer POINTER and the config
@@ -3854,7 +3854,7 @@ func TestChaos72_ProbeStillTestsACollectorThatIsBeingServed(t *testing.T) {
 // were charged to culvert_syslog_drops_total as SIEM losses (CodeRabbit,
 // PR #1494). That is the swapAutoExclude fence-pollution rule: a global a test
 // installs is a global the test must take back, not merely stop pointing at.
-func TestChaos72_ObservabilitySnapshotRestoresTheHealthPlane(t *testing.T) {
+func TestChaos81_ObservabilitySnapshotRestoresTheHealthPlane(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 

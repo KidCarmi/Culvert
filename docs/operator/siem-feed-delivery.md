@@ -1,4 +1,4 @@
-# SIEM / syslog feed delivery health (CHAOS-72)
+# SIEM / syslog feed delivery health (CHAOS-81)
 
 Culvert forwards two streams to a remote syslog collector when one is
 configured: every **audit event** (who changed what on the admin plane) and
@@ -12,7 +12,7 @@ it says the feed is down.
 
 ---
 
-## What changed in CHAOS-72
+## What changed in CHAOS-81
 
 Before this sweep the node could tell you only whether it had **connected once,
 at startup**. The `syslog_feed` operator-contract row was a function of two
@@ -31,7 +31,7 @@ is dark right now from one that healed last week. There was no Prometheus
 series (so no alerting rule could exist), no `/healthz` field, no alert, and no
 log line.
 
-CHAOS-72 adds the delivery axis and wires it to every surface. It changes
+CHAOS-81 adds the delivery axis and wires it to every surface. It changes
 nothing about what is sent or how.
 
 ---
@@ -52,7 +52,7 @@ retries a failed connect, so this state is terminal until you re-save the
 target (`POST /api/syslog`) or restart; it is reported down immediately rather
 than after the five-minute degradation window, because there is no transient
 to wait out. The `syslog_feed` contract row has always reported this case as
-`fail` ("configured but failed to connect"); until CHAOS-72's P1-F round the
+`fail` ("configured but failed to connect"); until CHAOS-81's P1-F round the
 metrics plane did not, so the documented `culvert_syslog_up == 0` rule could
 not fire for precisely the feed that never came up.
 
@@ -268,7 +268,7 @@ this very endpoint to confirm the fix. Two contradictory statements on one
 operator surface is the defect this plane exists to remove, so the endpoint
 answers `superseded` instead and sends nothing.
 
-> Before CHAOS-72 this endpoint answered `{"ok": true, "message": "test message
+> Before CHAOS-81 this endpoint answered `{"ok": true, "message": "test message
 > sent"}` unconditionally. Once delivery became asynchronous that confirmed
 > only that a channel send had succeeded: it returned `ok` for a collector that
 > had been dead for a week, while the diagnostics row pointed operators here to
@@ -317,7 +317,7 @@ protocol, not a limitation of the node.
    that the network path (firewall, route, NAT) is intact from this node.
 2. **For `tcp://`, check the collector's connection limit.** Some SIEMs cap
    concurrent sources; a node that re-pointed repeatedly on older builds could
-   leave phantom `ESTABLISHED` sessions behind (fixed in CHAOS-72 — see below),
+   leave phantom `ESTABLISHED` sessions behind (fixed in CHAOS-81 — see below),
    and those count against the cap.
 3. **Re-save the target** (`POST /api/syslog`) or restart the proxy if the
    address itself is wrong. Re-saving reconnects immediately and resets the
@@ -337,7 +337,7 @@ event produced since boot has been lost**, and the row names the count
 (`N event(s) lost so far`) — as does `culvert_syslog_drops_total` and
 `syslogDrops` on `/healthz`.
 
-Until CHAOS-72 round 7 that loss was counted nowhere: the fan-outs skip when
+Until CHAOS-81 round 7 that loss was counted nowhere: the fan-outs skip when
 no writer exists, so a Writer's counters could not hold a loss caused by there
 being no Writer, and the compliance-loss series read `0` throughout the outage.
 If you are reading a series from an older build, treat `0` here as *unknown*,
@@ -357,7 +357,7 @@ on the `syslog_feed` row are **process-lifetime** totals: they carry every
 collector this process has served, so re-pointing or disabling a collector
 never resets them, and they never decrease.
 
-Reading them on a build before CHAOS-72 round 12 needs a caveat. A displaced
+Reading them on a build before CHAOS-81 round 12 needs a caveat. A displaced
 collector's totals were folded into the exported counters at the moment it was
 displaced, while its queue was still draining, so losses recorded during that
 final flush were held by nothing. Measured on the disable path against a dead
@@ -389,7 +389,7 @@ Deliveries to that previous collector do **not** clear the state. They are
 evidence that the old target is reachable and say nothing about the one you
 configured, so the alert stays latched and the row stays degraded until a
 writer is installed for the intended target or forwarding is switched off.
-Before CHAOS-72 round 12 such a delivery cleared the latch and logged "SIEM
+Before CHAOS-81 round 12 such a delivery cleared the latch and logged "SIEM
 feed delivering again", after which the 30-second watchdog re-fired the DOWN
 alert — so on an older build this state can produce a page every half minute.
 
@@ -466,4 +466,4 @@ simply safe now where before it was undefined.
 - `roadmap/CHAOS-ENGINEERING-REVIEW.md` §13 (ST-8, local audit write loss) and
   §30 (CHAOS-61, DP→CP audit push drops) — the other two members of this
   compliance-record family
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §42 — the CHAOS-72 write-up
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §45 — the CHAOS-81 write-up

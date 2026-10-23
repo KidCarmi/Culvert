@@ -170,7 +170,7 @@ func TestHandOffQueued_ExhaustedHopBoundDropsRatherThanFallingBack(t *testing.T)
 }
 
 // A probe's acknowledgement must carry the transport of the writer that
-// ACTUALLY SENT the line (CHAOS-72, Codex P2 round 11).
+// ACTUALLY SENT the line (CHAOS-81, Codex P2 round 11).
 //
 // handOffQueued moves a queued line — its ack channel included — to a
 // successor, which may speak a different transport. The probe endpoint binds
@@ -227,7 +227,7 @@ func TestProbeAckCarriesTheSendingTransport(t *testing.T) {
 }
 
 // A loss at the end of a bounded successor walk must be countable, and the
-// walk must not charge a writer it never tried (CHAOS-72, Codex P2 round 11).
+// walk must not charge a writer it never tried (CHAOS-81, Codex P2 round 11).
 //
 // The exported drop total is each displaced writer's finals (folded when it is
 // displaced) plus the LIVE writer's own counters. A drop recorded against an

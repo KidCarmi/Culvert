@@ -494,7 +494,7 @@ func applyAdminServices(s *AdminSettings) {
 		noteSyslogConfiguredIntent(s.SyslogAddr)
 		// See loadObservability: the health plane needs the intent under its
 		// own mutex so a persisted target that will not connect is still
-		// exported as down (CHAOS-72 P1-F).
+		// exported as down (CHAOS-81 P1-F).
 		noteSyslogIntent(s.SyslogAddr)
 		// syslogConfigured is published by InitSyslog with the writer itself
 		// (one critical section); the intent above survives a failed dial.

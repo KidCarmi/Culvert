@@ -38,7 +38,7 @@ func loadObservability(cfg observabilityStartupConfig) {
 		// configured feed that silently failed to connect at startup.
 		noteSyslogConfiguredIntent(cfg.SyslogAddr)
 		// Same intent, recorded where the health plane can read it under a
-		// mutex (CHAOS-72 P1-F): without it a failed dial exports no
+		// mutex (CHAOS-81 P1-F): without it a failed dial exports no
 		// culvert_syslog_* series at all, so the documented
 		// `culvert_syslog_up == 0` paging rule cannot fire for a feed that
 		// never came up.

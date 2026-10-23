@@ -10907,7 +10907,7 @@ async function loadSettings() {
     // failed; `servingAddr` is what is actually being served. Keying this
     // section off a serving address meant a failed boot dial answered addr:""
     // with degraded:true, so the form lost the operator's own address and
-    // hideSyslogDrops() ran on the one feed losing every event (CHAOS-72,
+    // hideSyslogDrops() ran on the one feed losing every event (CHAOS-81,
     // Codex P2, PR #1494).
     document.getElementById('s-syslog-addr').value = sl.addr || '';
     document.getElementById('s-syslog-format').value = sl.format || 'rfc3164';
@@ -11078,7 +11078,7 @@ async function saveUIAllowIPs() {
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────
 // renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
-// forwarding state. The counters are PROCESS-lifetime (CHAOS-72 P2-4): they
+// forwarding state. The counters are PROCESS-lifetime (CHAOS-81 P2-4): they
 // carry every collector this process has retired, so a re-point does NOT
 // start them back at zero and they must never be inferred from a mutation
 // response - only GET /api/syslog answers them. Disabling still hides the row

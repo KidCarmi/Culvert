@@ -1,7 +1,7 @@
 package main
 
 // syslog_health.go — the SIEM/syslog forwarding feed's delivery plane
-// (CHAOS-72).
+// (CHAOS-81).
 //
 // # Why this file exists
 //
@@ -160,7 +160,7 @@ type syslogHealthRecord struct {
 	target string
 
 	// intendedTarget is the collector the operator has ASKED for, recorded
-	// whether or not a Writer could be installed for it (CHAOS-72 P1-F).
+	// whether or not a Writer could be installed for it (CHAOS-81 P1-F).
 	//
 	// Every surface in this file used to gate on `configured`, which is set
 	// only once a Writer exists — so a node whose collector was unreachable at
@@ -532,7 +532,7 @@ func noteSyslogEventSkipped(armed bool) {
 }
 
 // noteSyslogIntent records that an operator has asked for a collector, BEFORE
-// the dial that may or may not produce a Writer for it (CHAOS-72 P1-F).
+// the dial that may or may not produce a Writer for it (CHAOS-81 P1-F).
 //
 // Called from the two startup paths that tolerate a failed connect — the
 // YAML/flag slice and the persisted-admin-settings apply. The live admin
@@ -809,7 +809,7 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 // Derived from the engine's own dial budget rather than chosen: syslog.NewWriter
 // blocks on exactly one thing, the connect, and syslog.DialTimeout bounds it.
 // The extra second covers the hostname lookup and scheduling around it. One
-// fact, one source — TestChaos72_DialGraceIsDerivedFromTheEngineBudget pins
+// fact, one source — TestChaos81_DialGraceIsDerivedFromTheEngineBudget pins
 // the derivation so an engine change cannot silently leave a window open.
 //
 // It is deliberately far BELOW the watchdog's 30s tick, so suppressing a
@@ -1025,7 +1025,7 @@ type syslogFeedSnapshot struct {
 // question that already has one, and round 10's P2-14 is what happens when the
 // two drift (the probe derived the same fact from the record's target and so
 // could contradict every other surface). Two answers to one question is the
-// defect; `TestChaos72_TransportClaimHasOneSource` walls the agreement, so a
+// defect; `TestChaos81_TransportClaimHasOneSource` walls the agreement, so a
 // future installer that normalises or rewrites the address cannot silently
 // make the contract row's UDP caveat wrong.
 //
@@ -1095,7 +1095,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	// sum would otherwise reach. Adding the engine-side counter without
 	// folding it here would count the loss into a void — which is the very
 	// defect the counter exists to close, committed inside its own fix, and
-	// is why TestChaos72_LateDropsReachTheExportedTotal drives /metrics and
+	// is why TestChaos81_LateDropsReachTheExportedTotal drives /metrics and
 	// /healthz rather than the counter (Codex P2, PR #1494).
 	snap.Drops = retiredDrops + syslogSkippedNoWriter.Load() + syslogLateDrops()
 	snap.Panics = retiredPanics
@@ -1363,7 +1363,7 @@ func syslogWritePrometheus(w *strings.Builder) {
 	// EITHER half admits the series. Configured alone was the gate, and it is
 	// set only once a Writer exists — so the node whose collector was
 	// unreachable at boot exported nothing, and `culvert_syslog_up == 0` could
-	// not fire for precisely the feed that never came up (CHAOS-72 P1-F). The
+	// not fire for precisely the feed that never came up (CHAOS-81 P1-F). The
 	// emission rule is about whether the feature was ASKED for; an operator
 	// who configured a collector has asked, and gets a truthful 0.
 	if !snap.Configured && !snap.Intended {

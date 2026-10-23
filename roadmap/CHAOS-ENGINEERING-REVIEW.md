@@ -175,7 +175,7 @@ below** — written as §41 and renumbered in merge order when main was brought
 in again, because `CHAOS-74` had merged as §41/§42 and the open `CHAOS-75`
 sweep (#1605) holds §43.
 
-**2026-09-24 — CHAOS-72 sweep (the SIEM/syslog forwarding path under a
+**2026-09-24 — CHAOS-81 sweep (the SIEM/syslog forwarding path under a
 collector outage). ID CLAIMED IN THIS PLACEHOLDER ROW AS COMMIT ONE, BEFORE ANY
 CODE WAS WRITTEN — AND IT STILL MOVED.** It was claimed as `CHAOS-66`, which was
 free in the merged tree that morning; the SOCKS5-bind sweep (the row below)
@@ -183,7 +183,11 @@ claimed the same id from the same tree on the same day and merged first, so per
 the rule this header already states — *an id is rewritable for free right up
 until its first merge, so the sweep that is still an open PR renumbers ITSELF* —
 this one moved to `CHAOS-72` / §42 (the coordinator's allocation; §37–§41 are reserved for other open sweeps) while still unmerged, and a third open sweep
-was concurrently titled `chaos-66` as well.
+was concurrently titled `chaos-66` as well. **It moved a second time, to `CHAOS-81` / §45, when main was brought in
+on 2026-10-23:** #1611 (the CDR breaker) had merged holding `CHAOS-72`, §41–§44
+had merged (`CHAOS-74`, its adjacent-domain sweep, `CHAOS-75`, `CHAOS-71`), and
+open sweeps held `CHAOS-73` and `CHAOS-76`–`80`, so it took the next id above
+every visible claim, the rule this row states below.
 
 **That is the sharpest evidence yet about what the placeholder row does and does
 not buy, and it refines the remedy rather than refuting it.** A committed
@@ -226,7 +230,7 @@ The seventh was found while wiring the plane and is a plain concurrency defect:
 read on the REQUEST PATH (`recordRequest`'s `WriteRequest`, the audit fan-out's
 `WriteAudit`), confirmed under `-race` — nothing in the suite exercised both at
 once, and this sweep would have added two more readers to it. Written up in
-§42.
+§45.
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -10689,7 +10693,11 @@ Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
 listener is dark is still allowed (break-glass by design); it will withhold and
 fence again until the listener serves.
 
-## 42. CHAOS-72 — The SIEM forwarding path under a collector outage
+## 45. CHAOS-81 — The SIEM forwarding path under a collector outage
+
+**Id note.** Written as `CHAOS-72` / §42 and renumbered to `CHAOS-81` / §45 in
+merge order when main was brought in (see this sweep's revision-log row).
+Gates and source comments carry the new id.
 
 **Sweep date:** 2026-09-24. **Scope:** `internal/syslog`, `syslog.go`,
 `checkSyslogFeed` (diagnostics.go), the `/api/syslog` + `/api/syslog/test`
@@ -10919,16 +10927,16 @@ held its collector connection `ESTABLISHED`; and `POST /api/syslog/test`
 answered `ok: true` against a dead collector.
 
 Two gates exist because of a lesson this document already records one subsystem
-over. `TestChaos72_ProbeReportsTheRealOutcome` exercises `syslogDeliveryProbe`
+over. `TestChaos81_ProbeReportsTheRealOutcome` exercises `syslogDeliveryProbe`
 directly and **passed unchanged against the reverted handler** — walling the
 function is not walling the path, exactly as the SOCKS5 log-injection note
-found for `pluginDecision`. `TestChaos72_TestEndpointReportsFailureAgainstADeadCollector`
+found for `pluginDecision`. `TestChaos81_TestEndpointReportsFailureAgainstADeadCollector`
 drives the real handler, and
-`TestChaos72_MetricsExpositionCallsTheSyslogWriter` pins the exposition wiring
+`TestChaos81_MetricsExpositionCallsTheSyslogWriter` pins the exposition wiring
 structurally (a source scan, with its own not-vacuous control) because a metrics
 writer nobody calls satisfies a test that calls it directly.
 
-`TestChaos72_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` is the D6 gate
+`TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` is the D6 gate
 and carries no assertion beyond "the race detector saw nothing" — a torn handle
 is the defect, and `-race` is the only instrument that observes it. Verified
 failing against the reintroduced bare-pointer shape. It is also the gate that
@@ -11019,7 +11027,7 @@ race.** Recorded rather than dressed up as a verified-failing gate.
 
 ### A note on how the recovery gate was nearly wrong
 
-`TestChaos72_RecoveryRequiresADeliveredEvent` first waited for `Delivered > 0`
+`TestChaos81_RecoveryRequiresADeliveredEvent` first waited for `Delivered > 0`
 and failed. The cause is worth recording: **the first TCP write after the peer
 closes still succeeds** — the RST arrives later — so a collector that had
 already gone away left `Delivered` at 1, and the gate would have observed that
@@ -11475,7 +11483,7 @@ feed with no writer at all:
 
 So the branch now reads `snap.writer`, the field this function already trusts
 for its P1-G staleness check, and the pairing is a stated rule rather than an
-unstated assumption: `TestChaos72_RecordWriterPairingIsAnInvariant` walks every
+unstated assumption: `TestChaos81_RecordWriterPairingIsAnInvariant` walks every
 transition that touches either field and fails against the CHAOS-66 shape. The
 wall is behavioural, not a source scan, because the shape that actually breaks
 the invariant is an install path that sets the two fields in two separate
@@ -11578,10 +11586,10 @@ by construction rather than by timing. The snapshot's own UDP caveat needed no
 change — round 9 already made `target` and `described` a single locked read,
 which is why the same defect did not reach the contract row.
 
-**Gates.** `TestChaos72_DisabledFeedDoesNotInheritAnInFlightDegradation` and
-`TestChaos72_ProbeClassifiesTransportFromTheWriterThatServedIt`, each with its
+**Gates.** `TestChaos81_DisabledFeedDoesNotInheritAnInFlightDegradation` and
+`TestChaos81_ProbeClassifiesTransportFromTheWriterThatServedIt`, each with its
 own control, the round-9 P1-G gate updated to carry generations, and
-`TestChaos72_EveryRecordTransitionAdvancesTheGeneration` as a structural wall.
+`TestChaos81_EveryRecordTransitionAdvancesTheGeneration` as a structural wall.
 
 Mutations, each verified failing the gate that targets it: the reverted pointer
 comparison (both halves — it pages AND latches), the reverted target-string
@@ -11628,7 +11636,7 @@ The string survives only as the fallback for a feed that has none, which is not
 a second answer: there is no transport to ask, and the operator's intended
 address is the only thing that can describe what they asked for.
 
-`TestChaos72_TransportClaimHasOneSource` walls the agreement — for an installed
+`TestChaos81_TransportClaimHasOneSource` walls the agreement — for an installed
 writer the snapshot's claim must equal the writer's, and a `tcp://` string
 written onto the record must not override a UDP writer. Verified failing
 against the reverted string-only derivation. Its control runs both ways, because
@@ -11725,8 +11733,8 @@ and racy only under a re-point, which is the case no ordinary test drives.
 
 **Gates.** `TestProbeAckCarriesTheSendingTransport` and
 `TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` in the engine;
-`TestChaos72_ConfigMetadataIsPublishedWithTheWriter` and
-`TestChaos72_ConfigMetadataIsReadOnlyThroughItsAccessors` in the root. Each has
+`TestChaos81_ConfigMetadataIsPublishedWithTheWriter` and
+`TestChaos81_ConfigMetadataIsReadOnlyThroughItsAccessors` in the root. Each has
 its own control. Four mutations verified failing the gate that targets them:
 an ack that ignores its sender, the late-drop charge removed, the bound
 restored to the top of the loop, and the metadata assignment moved back
@@ -11750,7 +11758,7 @@ The engine gate could not see it, and that is the whole lesson rather than an
 excuse: it asserts the COUNTER moves, and the counter did. Measured, not
 recalled — with the fold removed,
 `TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` stays GREEN while
-`TestChaos72_LateDropsReachTheExportedTotal` fails on all three surfaces it
+`TestChaos81_LateDropsReachTheExportedTotal` fails on all three surfaces it
 reads (`syslogFeedState`, `/healthz`'s `syslogDropCount`, and the real
 `culvert_syslog_drops_total` exposition body).
 
@@ -11764,7 +11772,7 @@ process-lifetime by design — its whole purpose is to outlive the Writer the
 loss was charged against — which makes it exactly the kind of global a test
 must RESTORE rather than merely stop looking at. The new gate produces one
 late drop, which shifted the exported drop total for every gate that ran
-after it; seven unrelated CHAOS-72 gates turned red, all asserting exact
+after it; seven unrelated CHAOS-81 gates turned red, all asserting exact
 counts. `ResetLateDropsForTest` joins `resetSyslogHealthForTest`, beside the
 `syslogSkippedNoWriter` reset that is there for the same reason.
 
@@ -11774,7 +11782,7 @@ first). *A global a test installs — or increments — is a global the test mus
 take back.*
 
 **And a shuffled run over a `-run` filter is NOT the determinism gate.** The
-local `-count=2 -shuffle=on -run 'TestChaos72_'` run passed, and the change
+local `-count=2 -shuffle=on -run 'TestChaos81_'` run passed, and the change
 was pushed on the strength of it. CI's `Deep · determinism (shuffle, count=2)`
 and `Race · root shard 1` both failed, because they shuffle the WHOLE package:
 the gates that assert absolute drop counts and the gate that produces one only
@@ -12210,7 +12218,7 @@ fails only on `sw` itself, so `sw` *is* the writer that charged it.
   all. Without that precondition the gate could not distinguish the two writers.
 - `TestAckReasonIsEmptyOnDelivery` — CONTROL against stamping a class
   unconditionally, which would report a failure reason alongside a success.
-- `TestChaos72_TheProbeReportsTheSendersReasonNotItsOwnWriters` — the PATH half:
+- `TestChaos81_TheProbeReportsTheSendersReasonNotItsOwnWriters` — the PATH half:
   an AST wall on the handler's ack branch, because *walling the function is not
   walling the path*, and `ProbeReportsTheRealOutcome` passed unchanged against a
   reverted handler once already in this sweep.

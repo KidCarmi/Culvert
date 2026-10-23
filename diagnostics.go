@@ -1787,7 +1787,7 @@ func checkSyslogFeed() OperatorContractCheck {
 	if serving == nil || connectedTarget != intendedTarget {
 		// Name the MAGNITUDE, not just the state. "Events are not reaching
 		// the collector" is the diagnosis; "how much have I lost?" is the
-		// question an operator asks next, and until CHAOS-72's round 7 the
+		// question an operator asks next, and until CHAOS-81's round 7 the
 		// answer was structurally zero on every surface — the loss happens
 		// because there is no Writer, so no Writer's counters could hold it.
 		lost := ""
@@ -1801,7 +1801,7 @@ func checkSyslogFeed() OperatorContractCheck {
 			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity. Events lost while the collector was unreachable are not replayed.",
 		}
 	}
-	// CHAOS-72: everything above decides on state fixed at INIT time, and was
+	// CHAOS-81: everything above decides on state fixed at INIT time, and was
 	// the whole row. It answers "did we connect once?" and then reports
 	// "forwarding is active" for the rest of the process lifetime — including
 	// for a collector that died an hour later and has been swallowing every

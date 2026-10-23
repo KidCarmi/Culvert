@@ -2,7 +2,7 @@ package syslog
 
 import "time"
 
-// testhooks.go — test seams for the delivery-freshness plane (CHAOS-72).
+// testhooks.go — test seams for the delivery-freshness plane (CHAOS-81).
 //
 // The engine stamps its own timestamps (noteDelivered / noteDrop) while the
 // plane in package main measures age against its own clock seam. A test that
@@ -35,6 +35,6 @@ func SetNowForTest(fn func() time.Time) (restore func()) {
 // at. A gate that produces one late drop otherwise shifts the exported drop
 // total for every gate that runs after it, and those assert exact counts.
 // Observed, not hypothetical: adding the late-drop gate turned seven
-// unrelated CHAOS-72 gates red. Same rule as swapAutoExclude and
+// unrelated CHAOS-81 gates red. Same rule as swapAutoExclude and
 // armSyslogFeed closing the writer it installs.
 func ResetLateDropsForTest() { lateDrops.Store(0) }

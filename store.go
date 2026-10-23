@@ -423,7 +423,7 @@ func init() {
 		}
 		// No Writer: an operator-configured collector that never came up
 		// loses every event here, and a Writer's counters cannot record a
-		// loss that happened because there is no Writer (CHAOS-72, Codex P2).
+		// loss that happened because there is no Writer (CHAOS-81, Codex P2).
 		noteSyslogEventSkipped(armed)
 	})
 }
@@ -2595,7 +2595,7 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 		return
 	}
 	// See the audit fan-out above: a configured collector with no Writer is
-	// losing every one of these, and it must be counted (CHAOS-72, Codex P2).
+	// losing every one of these, and it must be counted (CHAOS-81, Codex P2).
 	noteSyslogEventSkipped(armed)
 }
 
