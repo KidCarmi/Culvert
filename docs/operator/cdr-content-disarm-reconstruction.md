@@ -414,9 +414,14 @@ failure, whether it is the only pool member or one of several. As a
 backstop, a reserved probe that never reports an outcome is abandoned after
 `HalfOpenProbeTimeout` — the larger of twice the reset timeout and the
 per-file deadline (`cdr.timeout_sec`) plus 30s, never below 90s — and the
-budget re-arms for one new probe. Any non-zero `staleProbes` in an
-instance's breaker stats (`GET /api/cdr/instances`) means that backstop
-fired, which is a bug signal rather than normal operation.
+budget re-arms for one new probe. The breaker tracks this as a `staleProbes`
+counter (`cdrCircuitBreaker.Stats()`), but **`GET /api/cdr/instances` does
+not expose it** — `apiCDRInstances` (`cdr_ui.go`) copies only `cbState`,
+`cbConsecFails`, `cbTotalOpens`, `cbTotalTrips`, and `poolHealthy` from the
+breaker stats into the response. There is currently no way to read
+`staleProbes` from outside the process; a non-zero value would be a bug
+signal (the backstop fired), but today you cannot see it without attaching
+a debugger or adding your own instrumentation.
 
 > **A runtime disable-then-enable silently resets `fail_mode`, the default
 > profile/mode, the timeout, and the size/chunk limits.** `PUT
