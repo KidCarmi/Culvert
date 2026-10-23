@@ -434,8 +434,21 @@ func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestF
 // (password hashes, TOTP secrets) and idp_profiles.json (OIDC client secrets,
 // LDAP bind credentials). fileutil.AtomicWrite chmods for the same reason,
 // which is how the encrypted writer already got both properties.
+//
+// The temp PATTERN is a short fixed prefix and is deliberately NOT derived from
+// outPath, which is what the first version of this fix did (copying
+// fileutil.AtomicWrite's `filepath.Base(path)+".tmp.*"`). Deriving it couples
+// the temp name's length to the destination's: CreateTemp replaces `*` with
+// ~10 random digits, so a basename in roughly the 241–251 byte range produced a
+// name past NAME_MAX and the backup failed ENAMETOOLONG where the old fixed
+// ".tmp" suffix had fit. That range is reachable through the product's own
+// supported path — the maintenance agent's validateBackupFilename admits
+// `[a-zA-Z0-9._-]{1,255}`. Nothing looks this file up by name (it is renamed or
+// removed on every branch), so the association bought nothing. The leading dot
+// additionally cannot collide with a validated backup name, since that
+// validator rejects a leading dot.
 func createArchiveTemp(outPath string) (*os.File, error) {
-	f, err := os.CreateTemp(filepath.Dir(outPath), filepath.Base(outPath)+".tmp.*")
+	f, err := os.CreateTemp(filepath.Dir(outPath), ".culvert-backup-*")
 	if err != nil {
 		return nil, fmt.Errorf("backup: create output: %w", err)
 	}

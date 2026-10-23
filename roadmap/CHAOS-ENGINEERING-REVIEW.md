@@ -9161,9 +9161,12 @@ values, and they are CLK-1, CLK-2 and CLK-3.
 
 ### BKP-1 — an encrypted-backup passphrase is never *required*
 
-**CLOSED** (CHAOS-82; §45): a plaintext blob is refused when a passphrase is
-configured. Gate: `TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet`, with
-two negative controls.
+**CLOSED** (CHAOS-82; §45). The row below records what the CHAOS-74 sweep
+observed and is kept as written, per this file's convention of preserving a
+finding's own words beside its closure marker (cf. WK-20/WK-21). **was:** a
+plaintext blob returned before the passphrase was examined; **now:** it is
+refused when a passphrase is configured. Gate:
+`TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet`, with two negative controls.
 
 `loadAndMaybeDecrypt` (`restore.go:305-311`) chooses the envelope by magic-byte
 sniff and consults the passphrase **only** in the encrypted branch, so a
@@ -9180,8 +9183,9 @@ level. No test covers passphrase-set-plus-plaintext-archive.
 
 ### BKP-2 — the unencrypted backup archive is written world-readable
 
-**CLOSED** (CHAOS-82; §45): the writer chmods the descriptor to 0600. Measured
-at 0644 pre-fix. Gate: `TestChaos82_PublishedArchiveIsOwnerOnly`.
+**CLOSED** (CHAOS-82; §45); row kept as written. **was:** `os.Create`, measured
+0644 under the ordinary 022 umask; **now:** the descriptor is chmodded to 0600.
+Gate: `TestChaos82_PublishedArchiveIsOwnerOnly`.
 
 `backup.go:425` uses `os.Create` (0666 before umask, so typically 0644) with no
 `Chmod` anywhere in the file, while the encrypted writer goes through
@@ -9210,11 +9214,13 @@ one-shot at `:198`, so that path has no `GOMEMLIMIT` backstop. Availability only
 
 ### BKP-4 — the unencrypted writer still uses a fixed `<out>.tmp`
 
-**CLOSED** (CHAOS-82; §45): publication moved to `os.CreateTemp`. Measured
-worse than described here — a planted symlink received the whole archive and
-the CLI reported success. Gates:
+**CLOSED** (CHAOS-82; §45); row kept as written, and it UNDERSTATED the
+exposure — a planted symlink received the whole archive and the CLI reported
+success. **was:** a fixed, symlink-following `<out>.tmp`; **now:**
+`os.CreateTemp` on a short fixed prefix. Gates:
 `TestChaos82_PlantedSymlinkAtFixedTmpIsNotFollowed`,
-`TestChaos82_StaleTmpAtFixedPathIsUntouched`.
+`TestChaos82_StaleTmpAtFixedPathIsUntouched`,
+`TestChaos82_TempNameDoesNotInheritBasenameLength`.
 
 `backup.go:424-425` uses `outPath + ".tmp"` with `os.Create` — no `O_EXCL`, and
 it follows symlinks. The encrypted path deliberately abandoned this pattern and
@@ -9245,10 +9251,12 @@ should enumerate what a commit will delete, in the shape
 
 ### BKP-6 / BKP-7 — recorded, lower severity
 
-**BKP-6 half CLOSED** (CHAOS-82; §45): the PBKDF2 iteration ceiling shipped as
-`encMaxIters`; measured >280 s of burn pre-fix. The `enqueueRetry` fsync half
-(below) and BKP-7 remain open. Gate:
-`TestChaos82_ItersAboveCeilingRejectedNonOpaque`.
+**BKP-6a CLOSED, BKP-6b and BKP-7 OPEN** (CHAOS-82; §45); row kept as written.
+Only the iteration-ceiling half shipped. **was:** a floor with no ceiling,
+measured >280 s of PBKDF2 burn on a declared `0xFFFFFFFF`; **now:**
+`encMaxIters`, checked before key derivation. Gate:
+`TestChaos82_ItersAboveCeilingRejectedNonOpaque`. The `enqueueRetry` producer-side
+fsync (described below) and BKP-7 are NOT addressed by this sweep.
 
 No ceiling on the archive-declared PBKDF2 iteration count (`backupcrypt.go:197`
 enforces only a floor, so a declared `0xFFFFFFFF` is ~40 minutes of
@@ -10977,6 +10985,52 @@ restore flow in a way no gate on the positive case would notice.
 
 ---
 
+### 45.4b The fix's own regression, and the pattern it was copied from
+
+The first version of the BKP-4 fix derived the temp-file pattern from the
+destination, `os.CreateTemp(dir, filepath.Base(outPath)+".tmp.*")` — copied
+verbatim from `fileutil.AtomicWrite`'s `writeSyncedTemp`, on the reasoning that
+matching the chokepoint was the conservative choice. It was not. `CreateTemp`
+replaces `*` with ~10 random digits, so a derived pattern couples the temp
+name's length to the destination's, and **measured: a 247-byte basename failed
+`ENAMETOOLONG` under the derived pattern and succeeded under the old fixed
+`.tmp` suffix** (both fail past ~251; both succeed at 207). The fix therefore
+broke a case the defect it replaced had handled.
+
+That range is reachable through the product's own supported path, not only a
+hand-run CLI: the maintenance agent's `validateBackupFilename` admits
+`[a-zA-Z0-9._-]{1,255}`, so the agent accepts a backup filename this writer then
+could not publish. The failure is clean — nothing is written and the CLI reports
+the error — which is why it rates Minor rather than higher, but it is a
+regression this sweep introduced and not a style point.
+
+The pattern is now a short fixed prefix, `.culvert-backup-*`. Nothing looks the
+temp file up by name (it is renamed or removed on every branch), so deriving it
+bought nothing; and because `validateBackupFilename` rejects a leading dot, the
+prefix additionally cannot collide with a validated backup name. Gate:
+`TestChaos82_TempNameDoesNotInheritBasenameLength`, mutation-tested against the
+derived pattern.
+
+**Found by CodeRabbit on PR #1690, labelled Minor.** Recorded at length because
+the label understated it and the provenance is the lesson: the bug arrived *by
+copying the hardened chokepoint*, which is normally the right instinct here and
+is exactly why it passed self-review. §45.2 is the same shape one level up — a
+gate copied from a sibling writer that carried the shape without the substance.
+Two of this sweep's own defects came from imitating neighbouring code rather
+than from writing something new.
+
+**`fileutil.AtomicWrite` has the same coupling, and it is NOT fixed here.**
+`writeSyncedTemp` still derives its pattern from the destination basename, so
+every durable write in the product — roughly fifty call sites, including the
+ENCRYPTED backup path via `atomicWriteFile` — carries this bound today. It is
+pre-existing rather than introduced by this sweep, and the encrypted archive has
+therefore always failed for a long-basename destination. Left for its own
+change: it is the shared chokepoint, the blast radius is every persisted store,
+and widening this PR to touch it is precisely what the verification rules warn
+against. Recorded as risk row R23.
+
+---
+
 ### 45.5 Deliberately left, recorded rather than silently skipped
 
 * **BKP-3 (unbounded archive memory).** `restore.go` slurps the whole archive
@@ -11026,6 +11080,7 @@ restore flow in a way no gate on the positive case would notice.
 | R20 | BKP-6a an archive-declared iteration count spends unbounded restore CPU before failing authentication | Low (restore CLI only, one-shot) | Low-Medium (measured >280 s; DoS on the recovery path) | **CLOSED** (CHAOS-82) |
 | R21 | BKP-5 `modeFull` silently drops `admin_settings.json`, taking the gateway from enforcing to passthrough | Medium (a fresh-install archive restored onto a configured node) | High (silent total policy bypass) | **OPEN** — owner decision, §45.5 |
 | R22 | BKP-3 restore memory is unbounded in archive size and entry count, with no `GOMEMLIMIT` backstop on that path | Low-Medium | Low (availability only, pre-mutation) | **OPEN** — §45.5 |
+| R23 | `fileutil.AtomicWrite` derives its temp name from the destination basename, so a long-but-legal name fails every durable write — the encrypted backup path included | Low (needs a ~241–251 byte basename) | Low-Medium (clean failure, but it is the chokepoint for ~50 stores) | **OPEN** — pre-existing, §45.4b |
 
 The pre-existing finding that dominates this domain's DR picture is unchanged
 and not re-litigated: the restore commit cannot succeed in the shipped

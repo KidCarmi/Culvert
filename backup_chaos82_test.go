@@ -220,6 +220,46 @@ func TestChaos82_PlantedSymlinkAtFixedTmpIsNotFollowed(t *testing.T) {
 	}
 }
 
+// The temp name must not inherit the destination basename's length. The first
+// version of the BKP-4 fix derived the pattern from outPath, copying
+// fileutil.AtomicWrite's `filepath.Base(path)+".tmp.*"`; CreateTemp then
+// appends ~10 random digits, so a long-but-legal destination basename produced
+// a name past NAME_MAX and the backup failed ENAMETOOLONG where the old fixed
+// ".tmp" suffix had fit. Measured at the time: a 247-byte basename failed under
+// the derived pattern and succeeded under the old one.
+//
+// 247 is not a hypothetical: the maintenance agent's own validateBackupFilename
+// admits `[a-zA-Z0-9._-]{1,255}`, so the product's supported path accepts a name
+// this writer then could not publish. Caught by CodeRabbit on PR #1690.
+//
+// The ceiling here is NAME_MAX (255 on ext4/tmpfs), so the destination basename
+// is kept well inside it while being long enough to have broken the derived
+// pattern.
+func TestChaos82_TempNameDoesNotInheritBasenameLength(t *testing.T) {
+	dataDir := seedBackupDataDir(t)
+	outDir := t.TempDir()
+
+	// 247 bytes total, the measured failing case, and legal per the agent's
+	// validator.
+	base := strings.Repeat("b", 247-len(".tar.gz")) + ".tar.gz"
+	if len(base) != 247 {
+		t.Fatalf("test setup: basename is %d bytes, want 247", len(base))
+	}
+	out := filepath.Join(outDir, base)
+
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("backup with a %d-byte basename must publish, got: %v", len(base), err)
+	}
+
+	fi, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("stat published archive: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("published archive mode = %04o, want 0600", got)
+	}
+}
+
 // BKP-1: a plaintext archive must be REFUSED when a passphrase is configured.
 // loadAndMaybeDecrypt chose the envelope by magic-byte sniff and consulted the
 // passphrase only in the encrypted branch, so the downgrade was accepted with
