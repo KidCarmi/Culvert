@@ -211,6 +211,14 @@ func TestCrashFlood_Throttled(t *testing.T) {
 
 func TestCrashCounter_OverflowBucket(t *testing.T) {
 	resetCrashGuardStateForTest()
+	// Restore on the way OUT too, not just on the way in. This test deliberately
+	// saturates a process-global label map and used to leave it that way, so
+	// every later test in the binary that recorded a NEW component silently got
+	// it folded into "other" — its own label never appeared on
+	// culvert_crash_records_total. Found by CHAOS-75's gates, whose
+	// per-component counter assertion failed only under -shuffle, i.e. only when
+	// this test happened to run first.
+	t.Cleanup(resetCrashGuardStateForTest)
 	for i := 0; i < maxCrashLabels+10; i++ {
 		crashByComponent.record(fmt.Sprintf("dyn-%d", i)) // must not nil-deref
 	}
