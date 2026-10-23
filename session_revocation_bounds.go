@@ -173,7 +173,12 @@ func persistRevocations() {
 	defer persistMu.Unlock()
 	if err := sessionRevoked.SaveRevocations(); err != nil {
 		sessionRevocationsDirty.Store(true)
-		logger.Printf("Session: failed to persist revocations: %v", err)
+		// sanitizeLog + %q, not a bare %v: this error is object-derived and
+		// carries untrusted content. SaveRevocations marshals the entries,
+		// whose tokens come from cluster gossip and the on-disk file, so a
+		// marshal failure can fold a peer-supplied token into the message and
+		// forge log lines (CWE-117, CodeQL alert 418 on PR #1591).
+		logger.Printf("Session: failed to persist revocations: %q", sanitizeLog(err.Error()))
 		return
 	}
 	sessionRevocationsDirty.Store(false)

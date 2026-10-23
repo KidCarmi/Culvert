@@ -1326,3 +1326,69 @@ func TestChaos73_ControlConcurrentPersistsLeaveTheFileAndFlagAgreeing(t *testing
 			"endless retry of a write that already landed")
 	}
 }
+
+// TestChaos73_WallPersistFailureLogIsSanitized pins that the persist-failure
+// log passes its error through sanitizeLog rather than logging it bare.
+//
+// The error is object-derived and carries untrusted content: SaveRevocations
+// marshals the revocation entries, whose tokens arrive over cluster gossip
+// and from the on-disk file, so a marshal failure can fold a peer-supplied
+// token into the message. Logged raw, that token can carry newlines and
+// forge whole log lines (CWE-117). CodeQL traced three such flows to this one
+// statement and posted alert 418 on PR #1591.
+//
+// sanitizeLog leads with strings.ReplaceAll, which is the barrier CodeQL
+// recognises; %q keeps the value visibly one field. CodeQL itself only
+// comments on NEW code, so without this gate a later edit back to a bare %v
+// would land silently.
+func TestChaos73_WallPersistFailureLogIsSanitized(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "session_revocation_bounds.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse session_revocation_bounds.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "persistRevocations" {
+			fn = d
+		}
+	}
+	if fn == nil {
+		t.Fatal("persistRevocations not found; this wall proves nothing")
+	}
+
+	logs, sanitized := 0, 0
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Printf" {
+			return true
+		}
+		logs++
+		for _, arg := range call.Args {
+			inner, ok := arg.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if id, ok := inner.Fun.(*ast.Ident); ok && id.Name == "sanitizeLog" {
+				sanitized++
+			}
+		}
+		return true
+	})
+
+	// Not vacuous: the coordinator must still log on the failure arm.
+	if logs != 1 {
+		t.Fatalf("found %d Printf calls in persistRevocations, want 1; this wall is "+
+			"no longer watching the statement CodeQL flagged", logs)
+	}
+	if sanitized == 0 {
+		t.Error("persistRevocations logs its error without sanitizeLog: a revocation " +
+			"token supplied over gossip can reach the log through the marshal error " +
+			"and forge log lines (CWE-117)")
+	}
+}
