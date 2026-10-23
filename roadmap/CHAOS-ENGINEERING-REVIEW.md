@@ -11023,9 +11023,12 @@ than from writing something new.
 **`fileutil.AtomicWrite` has the same coupling, and it is NOT fixed here.**
 `writeSyncedTemp` still derives its pattern from the destination basename, so
 every durable write in the product — roughly fifty call sites, including the
-ENCRYPTED backup path via `atomicWriteFile` — carries this bound today. It is
-pre-existing rather than introduced by this sweep, and the encrypted archive has
-therefore always failed for a long-basename destination. Left for its own
+ENCRYPTED backup path via `atomicWriteFile` — carries the same coupling today,
+pre-existing rather than introduced by this sweep. Scope note, so the row is not
+read as more than it is: the coupling is established by reading
+`writeSyncedTemp`, while the 241–251 byte window was measured against THIS
+writer only. The encrypted path's own threshold was not measured end-to-end
+through `atomicWriteFile`, and no number is claimed for it. Left for its own
 change: it is the shared chokepoint, the blast radius is every persisted store,
 and widening this PR to touch it is precisely what the verification rules warn
 against. Recorded as risk row R23.
@@ -11081,7 +11084,7 @@ against. Recorded as risk row R23.
 | R20 | BKP-6a an archive-declared iteration count spends unbounded restore CPU before failing authentication | Low (restore CLI only, one-shot) | Low-Medium (measured >280 s; DoS on the recovery path) | **CLOSED** (CHAOS-82) |
 | R21 | BKP-5 `modeFull` silently drops `admin_settings.json`, taking the gateway from enforcing to passthrough | Medium (a fresh-install archive restored onto a configured node) | High (silent total policy bypass) | **OPEN** — owner decision, §45.5 |
 | R22 | BKP-3 restore memory is unbounded in archive size and entry count, with no `GOMEMLIMIT` backstop on that path | Low-Medium | Low (availability only, pre-mutation) | **OPEN** — §45.5 |
-| R23 | `fileutil.AtomicWrite` derives its temp name from the destination basename, so a long-but-legal name fails every durable write — the encrypted backup path included | Low (needs a ~241–251 byte basename) | Low-Medium (clean failure, but it is the chokepoint for ~50 stores) | **OPEN** — pre-existing, §45.4b |
+| R23 | `fileutil.AtomicWrite` derives its temp name from the destination basename, so a long-but-legal name couples every durable write to that length — the encrypted backup path included | Low (needs a long basename; the ~241–251 byte window is measured for the backup writer, not for `AtomicWrite` itself) | Low-Medium (clean failure, but it is the chokepoint for ~50 stores) | **OPEN** — pre-existing, §45.4b |
 
 The pre-existing finding that dominates this domain's DR picture is unchanged
 and not re-litigated: the restore commit cannot succeed in the shipped
