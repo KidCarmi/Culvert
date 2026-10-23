@@ -8,6 +8,7 @@ historical record of earlier rounds. Then:
 
 | Document | Purpose |
 |---|---|
+| `r6-r7-security-dispositions.md` | Exact-byte R6 (Compose) and R7 (ClamAV sidecar binding, OS/kernel applicability) dispositions for the frozen candidate, with measured runtime behaviour |
 | `requirements-matrix.md` | The ONE declared pilot configuration: confirmed facts, provisional assumptions, customer questions, blockers |
 | `customer-questionnaire.md` | Questions for the customer (each maps to a matrix row) |
 | `hypervisor-install.md` | OVA import on the supported hypervisor, sizing, networking |
