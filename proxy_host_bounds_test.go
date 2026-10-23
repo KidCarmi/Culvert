@@ -237,7 +237,7 @@ func TestChaos69_DefectIPBlockedPathDoesNotRetainTheAuthority(t *testing.T) {
 	// present.
 	origIPF := ipf
 	t.Cleanup(func() { ipf = origIPF })
-	ipf = &IPFilter{single: map[string]bool{}}
+	ipf = newIPFilter()
 	ipf.SetMode("allow") // allowlist mode with an empty list denies everything
 	host := chaos66Host(64 * 1024)
 	w := httptest.NewRecorder()
