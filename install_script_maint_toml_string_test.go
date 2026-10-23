@@ -106,3 +106,34 @@ func TestInstallScript_MaintTomlString_NoComment(t *testing.T) {
 		t.Fatalf("maint_toml_string(compose_project_dir) = %q, want %q", got, want)
 	}
 }
+
+// TestInstallScript_MaintTomlString_SingleQuotedLiteral proves that a TOML
+// literal string ('...'), which is spec-legal and which the sibling
+// extract_toml_string in packaging/culvert-maint/install.sh accepts, is read
+// back without its surrounding single quotes. Otherwise the extracted
+// compose_project_dir/socket_path/proxy_repo never equals the expected value
+// and wire_release_agent_for_compose silently skips Release Management
+// auto-wiring.
+func TestInstallScript_MaintTomlString_SingleQuotedLiteral(t *testing.T) {
+	toml := "compose_project_dir = '/srv/culvert'  # literal string\n" +
+		"proxy_repo = 'ghcr.io/kidcarmi/culvert'\n"
+
+	for key, want := range map[string]string{
+		"compose_project_dir": "/srv/culvert",
+		"proxy_repo":          "ghcr.io/kidcarmi/culvert",
+	} {
+		if got := runMaintTomlString(t, toml, key); got != want {
+			t.Fatalf("maint_toml_string(%s) = %q, want %q — single-quoted TOML literal strings must be unquoted", key, got, want)
+		}
+	}
+}
+
+// TestInstallScript_MaintTomlString_TripleSingleQuoted guards against the
+// single-quote branch mistaking a triple-single-quoted literal for an empty
+// string, which the caller would silently replace with the default repository.
+func TestInstallScript_MaintTomlString_TripleSingleQuoted(t *testing.T) {
+	toml := "proxy_repo = '''ghcr.io/example/custom'''\n"
+	if got, want := runMaintTomlString(t, toml, "proxy_repo"), "ghcr.io/example/custom"; got != want {
+		t.Fatalf("maint_toml_string(proxy_repo) = %q, want %q", got, want)
+	}
+}

@@ -255,6 +255,7 @@ func TestDC_RollbackPreservesRewriteStableIDs(t *testing.T) {
 // TestDC_SnapshotPreservesRewriteStableIDs (§39): the DP apply preserves CP
 // identities verbatim; duplicate identities reject the entire snapshot.
 func TestDC_SnapshotPreservesRewriteStableIDs(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	dcRewriteSetup(t)
 	cpRule := dcRewriteRule("cp.example", "X-CP", "1")
 	cpRule.StableID = "5c9e1a00-0000-4000-8000-0000000000c1"
