@@ -89,6 +89,37 @@ func processKEKSource() (source string, envUsable bool) {
 // CULVERT_KEK → fail (key unlock/migration would fail closed); the same
 // misconfiguration with everything disabled → warn (it will break on enable).
 func checkKeyAtRest() OperatorContractCheck {
+	c := checkKeyAtRestPosture()
+	bad := unrecognizedKeyAtRestEnv()
+	if len(bad) == 0 || c.Status == diagFail {
+		return c
+	}
+	// The toggles treat any value outside the recognised set as "off", so a
+	// typo (for example "enabled") silently leaves private keys as plaintext
+	// while the operator believes encryption is on. Names only — never values.
+	return OperatorContractCheck{
+		Code:           c.Code,
+		Status:         diagWarn,
+		Message:        fmt.Sprintf("%s — ignored: %s has an unrecognised value and is treated as disabled", c.Message, strings.Join(bad, ", ")),
+		OperatorAction: "Set each listed variable to one of 1/true/yes/on (enable) or 0/false/no/off (disable) and restart; any other value is treated as disabled.",
+	}
+}
+
+// unrecognizedKeyAtRestEnv lists the key-at-rest toggle variables that are set
+// to a value the toggles do not recognise. It reports variable names only.
+func unrecognizedKeyAtRestEnv() []string {
+	var bad []string
+	for _, name := range []string{clusterCAEncryptEnvVar, dpNodeKeyEncryptEnvVar, cdrClientKeyEncryptEnvVar} {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+		case "", "1", "true", "yes", "on", "0", "false", "no", "off":
+		default:
+			bad = append(bad, name)
+		}
+	}
+	return bad
+}
+
+func checkKeyAtRestPosture() OperatorContractCheck {
 	enabled := make([]string, 0, 3)
 	if clusterCAKeyEncryptionEnabled() {
 		enabled = append(enabled, keyAtRestObjClusterCA)
