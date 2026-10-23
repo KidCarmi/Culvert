@@ -206,6 +206,7 @@ func TestF3a2_ValidateSnapshot_RejectsInvalid(t *testing.T) {
 // applyConfigSnapshot must reject a snapshot with one invalid feed field WITHOUT
 // applying any of its (otherwise valid) fields — no partial application.
 func TestF3a2_ApplyConfigSnapshot_AtomicRejection(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	f3a2ResetFeedDurable(t)
 	s := f3a2SwapOverrides(t)
 	_ = s.ReplaceAll(CategoryOverrides{Tombstones: []string{"keep.example.com"}})
@@ -230,6 +231,7 @@ func TestF3a2_ApplyConfigSnapshot_AtomicRejection(t *testing.T) {
 // ─── 6. stale epoch rejection ────────────────────────────────────────────────────
 
 func TestF3a2_StaleEpochRejection(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	f3a2ResetFeedDurable(t)
 	f3a2SwapOverrides(t)
 	// Ratchet the DP's last-seen epoch high, then push a stale-epoch snapshot.

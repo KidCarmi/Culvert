@@ -25,7 +25,7 @@
 # default, stated here so it cannot be lost) forbids the go command from
 # downloading or switching to another toolchain, and the RUN below refuses to
 # build with any compiler other than the one go.mod names.
-FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS builder
 ENV GOTOOLCHAIN=local
 
 WORKDIR /app
@@ -90,7 +90,7 @@ RUN want="$(sed -n 's/^toolchain //p' go.mod)" && go version culvert && \
 # no `toolchain` line on purpose (the installer's offline build fallback must
 # not be sent to download one), so the assertion reads the ROOT go.mod, copied
 # here under a separate name.
-FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS maintbuilder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS maintbuilder
 ENV GOTOOLCHAIN=local
 
 WORKDIR /src
