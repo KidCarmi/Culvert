@@ -46,11 +46,24 @@ Two findings are remotely exploitable by an unauthenticated or ordinary client
 compromise (SEC-HATOKEN-1); one is triggered by routine operator clicks and
 silently disables a configured admission control (SEC-SECPARTIAL-1).
 
+**A seventh finding is this change's own.** Fixing SEC-POLICYACTION-1 — making
+`PolicyStore.Load` refuse a rule whose action this build cannot dispatch — turned
+out to compose badly with the startup default-action heuristic, which reads the
+*installed* rule count: a policy file refused in full installs nothing, reads as
+"no policy configured", and selects the passthrough `allow` default. For that one
+configuration the fail-closed fix would have admitted strictly more traffic than
+the defect it closed. [SEC-POLICYDROP-1](#sec-policydrop-1) records it. It was
+found by Codex review on PR #1651, not by this run — the run's own blind spot was
+composition: each fix was verified against the contract it changed, and this one
+was unsound only in combination with a contract it did not touch.
+
 **Verdict: no security regression in the reviewed delta. Six pre-existing
 fail-open defects, all closed fail-closed in this change, each with a defect
-gate verified failing against the verbatim pre-fix body (§6).** A further seven
-findings are recorded in §3 rather than fixed, because each needs an owner
-decision or a migration larger than this change should carry.
+gate verified failing against the verbatim pre-fix body (§6) — plus
+SEC-POLICYDROP-1, introduced by one of those fixes and closed here under the
+same standard.** A further eight findings are recorded in §3 rather than fixed,
+because each needs an owner decision or a migration larger than this change
+should carry.
 
 | ID | Severity | What fails open |
 |---|---|---|
@@ -58,6 +71,7 @@ decision or a migration larger than this change should carry.
 | [SEC-HATOKEN-1](#sec-hatoken-1) | **High** | A viewer reads the HA join token → cluster CA private key |
 | [SEC-GEOHOST-1](#sec-geohost-1) | **High** | Host-header case variation evades every `destCountry` deny rule |
 | [SEC-POLICYACTION-1](#sec-policyaction-1) | **High** | An unrecognised rule action allows, and shadows every deny rule under it |
+| [SEC-POLICYDROP-1](#sec-policydrop-1) | **High** | A policy file refused in full reads as "no policy configured" → passthrough default |
 | [SEC-REVOKE-1](#sec-revoke-1) | **High** | Unauthenticated logout writes attacker-chosen entries into the revocation list |
 | [SEC-SECPARTIAL-1](#sec-secpartial-1) | **Medium** | A partial `/api/security` update disables the per-IP rate limiter, durably |
 
@@ -519,6 +533,134 @@ suite does not execute, so CI caught it rather than the pre-push checks.
 
 ---
 
+### SEC-POLICYDROP-1 — A policy file the load gate refuses in full flips the startup default action to passthrough {#sec-policydrop-1}
+
+| | |
+|---|---|
+| **Severity** | **High** (High impact × Low likelihood) |
+| **CWE** | CWE-636 Not Failing Securely ("Failing Open"); CWE-1188 Insecure Default Initialization of Resource |
+| **OWASP** | A01:2021 Broken Access Control; A05:2021 Security Misconfiguration |
+| **Regression risk** | **Reachability introduced by SEC-POLICYACTION-1 in this change**; the mechanism predates it |
+| **Status** | Fixed in this change. Found by Codex review on PR #1651, confirmed against the startup ordering before any code was touched |
+
+#### Mechanism
+
+The startup default-action derivation is a heuristic over the rule *count*
+(`loadRewriteAndDefaultAction`, `rewrite_default_action_startup.go`): with
+`proxy.default_action` unset it selects `"allow"` (passthrough) when the
+rulebase is empty and `"deny"` (zero-trust) when it is not. That is the
+documented [errata](../../agent-context/errata.md) contract, and it is sound —
+*provided the count it is given means what it says*.
+
+The shim fed it `len(policyStore.List())`: the count of rules **installed**.
+But `PolicyStore.Load` runs a fail-closed gate (`policyRulePersistable`) that
+**drops** rules it must not install, and `initPolicy` runs earlier in the init
+block than `initRewriteAndDefaultAction` (`main.go`), so the drops are already
+final when the derivation reads the count. A policy file whose rules are *all*
+refused therefore installs nothing, reports zero, and is read as "the operator
+configured no policy at all" → `allow`.
+
+The composition is the defect: a gate that refuses one fail-open *rule* hands
+the derivation a fail-open *default*. SEC-POLICYACTION-1 made this reachable,
+because it added by far the most plausible way for a whole file to be refused —
+a hand-written or downgraded-binary policy carrying one consistently wrong
+action spelling. The hazard itself is older: the `SubjectMatch` and invalid-auth
+refusals already on `main` could empty a rulebase the same way.
+
+#### Attack scenario
+
+| | |
+|---|---|
+| **Preconditions** | `proxy.policy_file` configured; `proxy.default_action` unset; every rule in the file refused by the load gate. No attacker action at all — the operator supplies the condition |
+| **Trigger** | A restart |
+| **Exploitability** | Trivial once the condition exists, and invisible: the proxy starts, serves traffic, and logs a per-rule warning among the startup noise |
+| **Likelihood** | Low, and strictly lower than SEC-POLICYACTION-1's — it needs the *whole* file refused, not one rule — but a small hand-written policy with one wrong action throughout is exactly that shape |
+
+A small `policy.json` written by hand with `"action": "Deny"` throughout (the
+real constants are `Drop` and `Block_Page`), no `default_action` in the config
+file:
+
+- **Before this change:** the rules installed. Each matched its own
+  `destFQDN` and fell out of the dispatch switch — allowing that one
+  destination, the SEC-POLICYACTION-1 defect — while **every other**
+  destination was denied by the non-empty-rulebase `deny` default.
+- **With SEC-POLICYACTION-1 fixed but this one open:** all rules are refused,
+  the store is empty, the derivation selects `allow`, and the gateway becomes
+  an open forward proxy. The scoped destination is still allowed *and* every
+  previously denied destination now is too.
+
+So the fail-closed fix, alone, would have been a **net regression** for this
+configuration: strictly more traffic admitted than before. That is why it is
+recorded here as a finding of this change rather than a pre-existing one.
+
+#### Impact
+
+Full loss of egress policy on restart for an affected deployment: every
+category, country, FQDN and file-type decision the rulebase expressed stops
+being applied, and the gateway forwards everything. Affected assets: the egress
+policy decision for all proxied traffic; the zero-trust default posture.
+
+#### Fix
+
+Give the derivation the **configured** rulebase size rather than the installed
+one, so a refusal cannot read as an absence:
+
+- `PolicyStore.droppedOnLoad` (`policy.go`) banks the refusal count of the most
+  recent successful `Load`, stored unconditionally so a clean reload clears a
+  previous file's count. A `Load` that fails before reading or parsing leaves it
+  — and the rules — untouched.
+- `PolicyStore.ConfiguredRuleCount()` returns installed + refused. Its doc
+  states why `len(List())` is the wrong input for "has a policy been configured
+  at all?", because that is the exact mistake to prevent recurring.
+- `initRewriteAndDefaultAction` (`main.go`) passes it; the loader's parameter is
+  renamed `rulesConfigured` to match.
+- `Load` additionally emits one aggregate warning when it refused anything,
+  naming how many of how many were refused and stating that the startup default
+  still treats the policy as configured. The per-rule warnings said what was
+  dropped but not what it meant for the posture.
+
+The loader's own logic is untouched: it was always correct for the question it
+was asked. Only the question changed. `default_action` stated explicitly still
+wins in both directions — the errata contract is unchanged.
+
+Rejecting the load outright (the review's other suggestion) was considered and
+not taken: `initPolicy` escalates a `Load` error to `logFatalf`, so a single
+unrecognised action in an operator's file would become a boot failure. That is a
+defensible posture but it is an availability decision for the product owner, not
+a regression fix — and it is strictly less safe to ship blind, because the
+failure mode of getting it wrong is a gateway that will not start.
+
+#### Required tests — `policy_load_filtered_default_action_test.go`
+
+The positive case (a fully refused file still derives `deny`), and
+`PreFixCountWouldHaveSelectedAllow` as the differential oracle: the same store,
+the two candidate inputs, opposite outcomes — if it ever reports the same action
+for both, the fix has stopped doing anything and every other assertion would
+pass vacuously. `EveryRefusalReasonKeepsTheDenyDefault` covers all three refusal
+reasons (unknown action, `SubjectMatch` on an access rule, invalid auth rule),
+since the mechanism was never specific to the new gate.
+
+Two negative controls carry the weight, because the obvious over-correction here
+is "deny everywhere": `GenuinelyEmptyPolicyStillAllows` and
+`MissingPolicyFileStillAllows` pin that a deployment which configured no rules
+keeps its documented passthrough default. Boundaries:
+`PartiallyRefusedFileIsUnchanged` (one survivor already said `deny` pre-fix, so
+the outcome must be identical both ways), `ExplicitDefaultActionStillWins` in
+both directions, and `CleanReloadClearsTheRefusalCount` — otherwise one bad file
+would pin the store at "configured" forever. Malformed input:
+`MalformedFileLeavesTheCountUntouched`, since reporting refusals from a load
+that never happened is the same confusion mirrored. Concurrency:
+`ConfiguredRuleCountIsRaceFree` exercises 64 goroutines mixing
+`ConfiguredRuleCount`, `List` and `Load` under `-race`.
+
+Finally `ShimPassesTheConfiguredCount`, a structural wall over `main.go`'s AST.
+The defect was a single wrong **argument** at one call site, which no
+behavioural test of the loader can see — the loader is correct either way, it
+just answers the question it was asked. The wall asserts the question, and was
+verified failing against the pre-fix argument.
+
+---
+
 ### SEC-REVOKE-1 — An unauthenticated logout writes attacker-chosen entries into the persisted, cluster-gossiped revocation list {#sec-revoke-1}
 
 | | |
@@ -850,6 +992,25 @@ traced to its origin:
 - SEC-HATOKEN-1, SEC-GEOHOST-1, SEC-POLICYACTION-1, SEC-REVOKE-1 — all older
   than the window; untouched by it.
 
+**One regression was introduced by this change, and it was not caught by this
+run.** SEC-POLICYDROP-1: the SEC-POLICYACTION-1 install gate composes with the
+startup default-action heuristic, which keys off the *installed* rule count, so
+a policy file refused in full selects the passthrough default. Codex review on
+PR #1651 found it; it is fixed here under the same standard as the rest, with a
+differential oracle and a structural wall verified failing against the pre-fix
+argument.
+
+It is worth naming the blind spot rather than just the bug. Every fix in this
+change was verified against the contract it modified, and this one was correct
+there — `policyRulePersistable` does exactly what it should. The unsoundness
+lived in a contract the change never touched: the rule *count* as a proxy for
+"is a policy configured?". A fail-closed gate that removes items can always
+flip a downstream emptiness test, so the question to carry forward is not only
+"does this check fail closed?" but **"what else reads the shape this check
+changes?"** The two other refusal reasons in the same gate (`SubjectMatch`,
+invalid auth) had the same latent exposure on `main` and are covered by the same
+fix and tests.
+
 The window's substantive changes were each checked against their own contract
 and found sound:
 
@@ -981,6 +1142,7 @@ Checked at this revision, with the evidence that holds them:
 | `go test ./...` — every `internal/...` package | pass (85 packages) |
 | `go test .` — root package | 9 failures, **all pre-existing**: the `IdP`/`SAML`/`OIDC` family, which fails identically on a pristine `origin/main` worktree in this sandbox because the fixtures' issuer host resolves to a private address and the URL validator refuses it (`idp oidc issuer: URL must be https:// and must not point to a private address`). **Zero new failures.** |
 | `go test -race -count=1 ./internal/hostutil` | pass |
+| `go test -race .` — `TestSECPOLICYDROP1\|TestLoadRewriteAndDefaultAction\|TestPolicyStore\|TestSECPOLICYACTION` | pass, race-clean (includes the 64-goroutine `ConfiguredRuleCount`/`List`/`Load` storm) |
 | `go test ./internal/{admission,hostutil,fileutil,alerts,upstream,lockout,logstore,shutdown,blocklistfeed}` | pass |
 | `python3 docs/agent-context/check.py` | pass (108 blocks, 450 links, 117 route edges) |
 
@@ -994,6 +1156,7 @@ finding's suite:
 | SEC-HATOKEN-1 | `NonAdminRolesNeverSeeTheJoinToken` and `UnenrolledRoleSeesNoToken` both FAIL |
 | SEC-GEOHOST-1 | all four canonicalisation/cache suites FAIL |
 | SEC-POLICYACTION-1 | `UnknownActionBlocksAndIsTerminal` and `ResolvedActionsDispatchToTheirBranch` FAIL with `proxy.go` taken from `origin/main`; `PersistableRefusesUnknownAction` and `ReplaceAllDropsUnknownActionKeepsValid` FAIL with the install check disabled |
+| SEC-POLICYDROP-1 | `ShimPassesTheConfiguredCount` FAILS on both assertions with `main.go`'s pre-fix argument restored; `PreFixCountWouldHaveSelectedAllow` shows the pre-fix input deriving `allow` where the configured count derives `deny`, on the same store |
 | SEC-REVOKE-1 | `UnsignedCookieIsNotRevoked`, `ForgedPayloadNeverBecomesRevoked` and `PortalTokenDoesNotRevokeAcrossAudiences` all FAIL |
 | SEC-SECPARTIAL-1 | `PartialUpdateLeavesTheRateLimiterAlone`, `NegativeLimitIsRefusedAndChangesNothing` and `ExplicitNullIsTreatedAsAbsent` all FAIL |
 
@@ -1018,6 +1181,10 @@ the roster-endpoint gate ran against a pre-fix tree its successful delete left
 `"bob"` user-revoked and a later positive control failed for the wrong reason.
 The audience suite now swaps the revocation list per test
 (`conventions.md`, global-test cleanup).
+
+**What PR review caught that the local run did not**, recorded for the same
+reason: SEC-POLICYDROP-1, above. The fix for it is a second round on this
+change, verified the same way, and the lesson is in §4 rather than here.
 
 **What CI caught that the local run did not**, recorded because it marks the
 limit of the pre-push checks: the `golangci-lint` gate (three findings in the
@@ -1072,3 +1239,13 @@ local check is not a passing merge gate.
 - **R2 means ten support-bundle routes run on a single RBAC layer.** Their
   handler checks are present and correct, so this is a defence-in-depth loss,
   but the C2 counters cannot see it.
+- **The startup default action is still a heuristic over a count.**
+  SEC-POLICYDROP-1 makes that count mean "configured" rather than "installed",
+  which is the honest input, but the posture of a deployment that leaves
+  `default_action` unset still depends on a derived value rather than a stated
+  one. Any future code that removes rules between load and that derivation
+  re-opens the same class, and the wall test only guards the one call site. The
+  durable form is R8 — require an explicit action on load — plus requiring an
+  explicit `default_action` for any deployment that has a policy file at all.
+  Both are migrations with availability consequences and belong to the product
+  owner, not to a regression fix.

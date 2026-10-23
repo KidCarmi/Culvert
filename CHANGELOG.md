@@ -113,6 +113,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   data already on disk. The sibling gate in the same engine already behaves this
   way: `IPFilter.Allowed` denies all traffic on an unrecognized mode.
 
+- A policy file the load gate refused **in full** read downstream as "no policy
+  configured" and flipped the startup default action to passthrough
+  (SEC-POLICYDROP-1). With `proxy.default_action` unset, the derivation in
+  `loadRewriteAndDefaultAction` selects `allow` for an empty rulebase and `deny`
+  for a non-empty one — and the shim fed it `len(policyStore.List())`, the
+  **installed** count. Because `PolicyStore.Load` drops the rules its
+  fail-closed gate refuses, and `initPolicy` runs before
+  `initRewriteAndDefaultAction`, a file whose every rule was refused installed
+  nothing, counted zero, and turned the gateway into an open forward proxy on
+  restart. The composition is the defect: a gate refusing one fail-open *rule*
+  produced a fail-open *default*. Fixing SEC-POLICYACTION-1 made it reachable
+  from the most plausible shape of all — a hand-written or downgraded-binary
+  policy with one consistently wrong action spelling — so for that
+  configuration the fail-closed fix alone would have admitted strictly more
+  traffic than the defect it closed. The older `SubjectMatch` and invalid-auth
+  refusals could empty a rulebase the same way.
+
+  `PolicyStore.ConfiguredRuleCount()` now reports installed **plus** refused
+  (banked per load by `droppedOnLoad`, cleared by a clean reload, untouched by a
+  load that failed to read or parse), and the shim passes it. `Load` also emits
+  one aggregate warning when it refused anything, since the per-rule warnings
+  said what was dropped but not what it meant for the posture. The loader's own
+  logic is unchanged — it was always correct for the question it was asked, and
+  only the question changed — and an explicit `default_action` still wins in
+  both directions. Rejecting the load outright was considered and not taken:
+  `initPolicy` escalates a `Load` error to `logFatalf`, so one unrecognized
+  action in an operator's file would become a boot failure, which is an
+  availability decision for the product owner rather than a regression fix.
+
 - An **unauthenticated** `POST /api/auth/logout` wrote attacker-chosen,
   **unsigned** entries into the persisted and cluster-gossiped revocation list
   (SEC-REVOKE-1). `apiAuthLogout` discarded `decodeSession`'s error

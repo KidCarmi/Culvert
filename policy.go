@@ -275,6 +275,44 @@ type PolicyStore struct {
 	// false (the GUI warning stays up) until a later write succeeds. Only a
 	// successful SaveErr, or a later Load, clears it.
 	adoptUnsaved atomic.Bool
+	// droppedOnLoad counts the rules the most recent SUCCESSFUL Load refused
+	// via the fail-closed gate (policyRulePersistable). It exists so a caller
+	// can tell a policy file that filtered down to nothing from a genuinely
+	// empty one; see ConfiguredRuleCount and SEC-POLICYDROP-1.
+	droppedOnLoad atomic.Int64
+}
+
+// DroppedOnLoad reports how many rules the most recent successful Load refused
+// via the fail-closed persistability gate. A Load that failed before reading or
+// parsing the file leaves the previous value (and the previous rules) in place.
+// Runtime mutations do not change it: it describes the file as last loaded.
+func (ps *PolicyStore) DroppedOnLoad() int {
+	return int(ps.droppedOnLoad.Load())
+}
+
+// ConfiguredRuleCount reports the size of the rulebase the operator CONFIGURED
+// as of the last load: the rules that are installed plus the rules the load
+// gate refused. It is the fail-closed input for any decision that keys off
+// "has a policy been configured at all?" — above all the startup default-action
+// derivation in loadRewriteAndDefaultAction, which selects passthrough Allow
+// for a zero count and zero-trust Deny otherwise.
+//
+// SEC-POLICYDROP-1: len(List()) is the WRONG input for that question. A policy
+// file whose every rule the gate refuses (a hand-edited or downgraded-binary
+// file carrying an action this build cannot dispatch, an invalid auth rule, or
+// a SubjectMatch-bearing access rule) installs nothing, so len(List()) == 0
+// would report "no policy configured" and newly ADMIT the unmatched traffic the
+// nonempty-rule Deny default had been refusing — the refusal of a fail-open
+// rule turning into a fail-open default. Counting the refused rules keeps the
+// operator's intent ("I configured a policy") visible to that derivation.
+//
+// Because it describes the last load, a caller that needs the live installed
+// count must use List(); this is deliberately not a live view.
+func (ps *PolicyStore) ConfiguredRuleCount() int {
+	ps.mu.RLock()
+	installed := len(ps.rules)
+	ps.mu.RUnlock()
+	return installed + ps.DroppedOnLoad()
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -402,6 +440,7 @@ func (ps *PolicyStore) Load(path string) error {
 	// only; the file is not rewritten here, so an offending line is inert and
 	// re-warned each load until removed.
 	kept := rules[:0]
+	dropped := 0
 	for _, r := range rules {
 		if ok, reason := policyRulePersistable(r); !ok {
 			name := ""
@@ -409,11 +448,21 @@ func (ps *PolicyStore) Load(path string) error {
 				name = r.Name
 			}
 			logWarnf("Policy: dropping rule %q on load — %s", sanitizeLog(name), sanitizeLog(reason))
+			dropped++
 			continue
 		}
 		kept = append(kept, r)
 	}
 	rules = kept
+	// SEC-POLICYDROP-1: remember the refusals. Dropping a rule must never read
+	// downstream as "the operator configured no policy" — see
+	// ConfiguredRuleCount, which the startup default-action derivation consumes.
+	// Stored unconditionally so a clean reload clears a previous file's count.
+	ps.droppedOnLoad.Store(int64(dropped))
+	if dropped > 0 {
+		logWarnf("Policy: %d of %d rule(s) in %s were refused by the load gate; the remaining %d are installed and the startup default action still treats this as a CONFIGURED policy (deny) rather than an empty one",
+			dropped, dropped+len(rules), sanitizeLog(path), len(rules))
+	}
 	ps.mu.Lock()
 	ps.path = path
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
