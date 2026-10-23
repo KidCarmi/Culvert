@@ -259,6 +259,16 @@ components:
         users:
           type: array
           items: { $ref: '#/components/schemas/User' }
+        adminRosterPersistFailures:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Admin-roster changes refused and rolled back since process start because the roster file could not be written (CHAOS-70). Admin-only; not exposed on /api/stats.
+        adminRosterPersistDegraded:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Login-path roster writes (TOTP replay counter, backup-code consumption) that failed since process start while the login proceeded (CHAOS-70). Admin-only.
     CreateUserRequest:
       type: object
       required: [username, password, role]

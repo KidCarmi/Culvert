@@ -43,6 +43,11 @@ package alerts
 //   "socks5_listener_down"  — the SOCKS5 accept loop has been unable to accept connections for a
 //                             sustained period, or has stopped entirely: SOCKS5 clients cannot
 //                             connect (CHAOS-54). Fired once per episode, never per retry.
+//   "cp_grpc_listener_down" — this node was asked to be a Control Plane but its gRPC listener has been
+//                             unable to bind/serve for a sustained period (30 s), or its supervisor has
+//                             stopped: config distribution, enrollment and certificate renewal are
+//                             unavailable fleet-wide (CHAOS-71). This node's own proxy keeps serving.
+//                             Fired once per episode, never per retry.
 //   "threat_feed_stale"     — threat intelligence has not synced successfully for over 2x the sync
 //                             interval, or has NEVER synced on this node (CHAOS-59). The gateway
 //                             keeps enforcing last-known-good entries — nothing is wiped — so this
