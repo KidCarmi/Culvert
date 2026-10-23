@@ -12603,3 +12603,261 @@ QA Gate and Security Release Gate. Module-wide `-count=2 -shuffle=on` (seed
 `validateExternalURL` failing closed because `example.com` does not resolve in
 that sandbox, each appearing exactly twice — deterministic environment, not
 ordering. Nothing this round touched failed.
+
+### Round 18 — a verdict that outlived its episode, and two answers to "how much did this writer lose"
+
+Two P2s, and they are the same mistake at two different altitudes: **a value
+read as though there were only one of it.** One is a staleness generation keyed
+on the wrong event; the other is a cumulative counter read as a pair.
+
+#### (a) A recovery that invalidates nothing
+
+`syslogHealthRecord.gen` is the staleness identity the watchdog's
+snapshot/commit split relies on: the snapshot half captures `gen`, the commit
+half refuses to act if it has moved. It was documented, and implemented, as
+*"the identity of the RECORD"* — bumped by an install, a disable and the test
+reset, the three transitions that replace what the record describes.
+
+`noteSyslogDeliveryRecovered` replaces nothing. It clears `alerted`, `logAt`
+and `suppressed` and leaves the writer, the target and the intent exactly as
+they were. So a snapshot taken while the feed was down, committing a moment
+after the recovery, passed the staleness check and **paged a feed that was
+already delivering again** — and, because the commit half sets `alerted`, it
+also re-latched it.
+
+That re-latch is the serious half, and its failure mode is **silence**. The
+delivery observer is edge-triggered: `noteSyslogDeliveryRecovered` runs on the
+transition out of an episode, never on an ordinary success. With the episode
+already over, nothing will clear `alerted` again. The next genuine outage
+reaches `alertNow = !alerted` as false and **pages nobody**. Reproduced in all
+three steps against the pre-fix tree; the third printed
+
+```
+DEFECT(3): a genuine outage after the stale commit fired 0 alerts, want 1 — the latch suppressed the page
+```
+
+The fix is one line — `syslogHealth.gen++` on the clearing path — but the
+line is not the deliverable. The **definition** is:
+
+> **Define a staleness generation by what it PROTECTS, not by what changed. The
+> only consumer of `gen` is the check that asks "is this degraded verdict still
+> true?", so every transition that can falsify a degraded verdict has to move
+> it — including one that replaces nothing at all.**
+
+Under the old rule, three of the four bumps were correct by coincidence: an
+install, a disable and a reset all happen to falsify a degraded verdict *and*
+replace the record. Recovery is the case where the two rules disagree, and the
+old rule gave the wrong answer. The doc comment now states the rule, names
+recovery as the case that distinguishes them, and — the other direction of the
+same test — explains why `noteSyslogIntent` still does **not** bump: recording
+a new intent leaves a pending unmet-degraded verdict TRUE, so there is nothing
+to invalidate.
+
+The bump sits after the early return, not before it. `noteSyslogDeliveryRecovered`
+returns early when the intent is unmet, because a delivery by the writer being
+*served* is not evidence about the collector the operator *asked* for — round
+12(b). Bumping on that path would clear a verdict that is still true, and
+round 12(b)'s own note already says what keeps the latch from being stranded:
+every transition that RESOLVES the intent clears it.
+
+Two gates. The defect gate drives a degraded snapshot of the CURRENT
+generation across a recovery and asserts three things, not one: no page fires,
+the record is **not left latched**, and — the half that matters — a genuine
+outage after it still pages. A gate asserting only "the commit is refused"
+would have passed a fix that silenced the alert path altogether, and would have
+said nothing about the stranded latch, which is the part an operator actually
+pays for. The control comes at it from the other side: a snapshot taken AFTER a
+recovery, describing a fresh outage, must still page — because the cheapest way
+to pass the defect gate is to stop committing degraded snapshots at all.
+
+#### (b) Two cumulative values, read as a pair
+
+A retired `Writer` has **two** cumulative totals, on purpose: the live counters
+and the sealed `finalStats` the drain publishes on its way out. The live ones
+deliberately keep moving after the seal — `chargeTerminalDrop` keeps counting,
+and reports that the loss belongs to the process-lifetime `lateDrops` counter
+instead of to the writer's fold.
+
+Both folding call sites read them as a pair:
+
+```go
+st, sealed := old.FinalStats()
+if !sealed {
+    st = old.Stats()
+}
+```
+
+Two unsynchronised loads, and the Writer can seal between them. The fallback
+then folds a live value that already includes a post-seal loss — **already
+charged to `lateDrops`**, so it is counted twice — and the next
+`settleRetiredSyslogWritersLocked` reads the *sealed* snapshot, which is
+**smaller** than what was folded. The delta goes negative and
+`culvert_syslog_drops_total` **decreases**: the one thing a Prometheus counter
+may not do, and precisely the contract the sealing boundary was introduced to
+keep.
+
+`settleRetiredSyslogWritersLocked`'s own doc comment asserted the opposite —
+*"a settle can never make `culvert_syslog_drops_total` decrease"* — and
+attributed it to a Writer's counters being monotonic. They are monotonic. That
+was never the reason: with two cumulative values per Writer, monotonicity of
+each says nothing about a fold that reads one and a settle that reads the
+other. The comment is corrected rather than deleted, because the claim it makes
+is the contract — it just has to rest on the right thing.
+
+`CumulativeStats()` answers with one of the two, so a folded value is never
+succeeded by a smaller one. What makes the pair safe is the **order**: the live
+counters are read **first**, and only then is the seal loaded. If the seal is
+present the finals are the answer exactly; if it is absent, the Writer had not
+sealed at the *later* of the two reads and therefore not at the earlier one
+either, so the live value predates the seal and cannot exceed the finals that
+follow. The original code had exactly these two reads in the opposite order,
+which is the whole defect.
+
+**The first shape of that fix deadlocked the appliance.** It is worth recording
+in full, because the fix was wrong in a way the finding was not.
+
+The first `CumulativeStats` read the seal flag and the counters under one
+acquisition of `sendMu` — exact, obviously correct in isolation, and a
+**three-way deadlock**:
+
+- Both folding consumers run with `syslogHealth.mu` **held** (their names say
+  so: `…Locked`).
+- A line this Writer refuses charges its drop from `tryEnqueue`, which holds
+  `sendMu.RLock`, and `noteDrop` notifies the delivery observer from inside
+  that — and the observer takes `syslogHealth.mu`.
+
+So the two lock orders are opposite. Two read locks coexist, which is why this
+looks survivable — until a `Close()` is parked on `sendMu.Lock()`. Go's
+`RWMutex` then stops new readers from barging ahead of the waiting writer, and
+the cycle closes. Not a window; a cycle.
+
+`TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` — an existing
+gate from an earlier round, written for a different defect — **hung to the test
+timeout**, and `SIGQUIT` named all three edges on one Writer (`0x…b1a140`):
+
+```
+goroutine 61  tryEnqueue (holds sendMu.R) → noteDrop → notifyDelivery
+              → noteSyslogDelivery → syslog_health.go:1080  [waiting: syslogHealth.mu]
+goroutine 65  syslogFeedState (holds syslogHealth.mu) → settleRetiredSyslogWritersLocked
+              → CumulativeStats → syslog.go:253            [waiting: sendMu.R]
+goroutine 12  releaseReplacedSyslogWriter → Writer.Close → syslog.go:1362
+                                                            [waiting: sendMu.W]
+```
+
+Three things about this are worth keeping:
+
+- **It is CA-17 again** (§17.2, CHAOS-50): a lock held across a call that
+  re-enters the same domain through a callback. That one was a self-deadlock
+  under `ca.mu`; this one is an inversion between two domains' mutexes. The
+  repository had already paid for this failure class once, which is an argument
+  for the wall below rather than for a comment.
+- **The ordering argument makes the lock unnecessary**, so the fix is not a
+  lock reordering or a copy under a third mutex — it is deleting the lock and
+  proving the pair safe without it. A fix that needs *less* synchronisation
+  than the defect is usually the right one.
+- **The gate that caught it was a hang**, which is the most expensive failure
+  shape a suite has: it burns the whole package timeout and names no test
+  without a stack dump. So the property is pinned **structurally** instead —
+  `CumulativeStats` may take no lock, however briefly, and must read the live
+  counters before the seal. Both halves are mutation-verified, and the wall has
+  a positive control (`tryEnqueue`, whose job *is* to hold `sendMu`) so a
+  broken AST walk cannot pass silently.
+
+> **A function called with a foreign mutex held may take no lock of its own —
+> including a read lock, including briefly. If the domain it reaches into can
+> call back into yours, the two read locks are not harmless; they are one
+> parked writer away from a cycle.**
+
+> **A folding consumer must read ONE cumulative value, and the ORDER of the two
+> reads is the proof. A check-then-read pair is not a snapshot of either value;
+> reversing it makes it one.**
+
+Five engine gates pin it: that the sealed and live values do diverge at all
+(the negative control — without divergence the whole defect is unreachable and
+every gate below is vacuous), that `CumulativeStats` prefers the finals once
+sealed, that it reports the live counters before sealing, the no-lock /
+live-read-first wall above, and that wall's own positive control.
+The consumer side is walled **structurally** — the window is a few instructions
+wide and cannot be scheduled through either caller, the same reason round 9's
+snapshot wall and round 17's config-metadata wall are structural. The wall
+requires each folding function to call `CumulativeStats` and forbids
+`FinalStats`/`Stats` inside it, with a control asserting the plane still calls
+`.Stats()` somewhere, so a broken AST walk cannot pass silently.
+
+#### Round 18 — the rest of the lock graph, swept and clean
+
+Finding a lock-order inversion in my own fix is a reason to ask whether the
+plane has others, so the whole graph was walked rather than just the edge that
+hung. Three locks are involved: `syslogHealth.mu`, `syslogPublishMu` and each
+Writer's `sendMu`.
+
+- **Health plane → Writer.** Every call the health plane makes to a Writer
+  while holding `syslogHealth.mu` is lock-free: `Stats()` and `FinalStats()`
+  are pure atomic loads, `MarkRetired()` is an atomic store, and
+  `CumulativeStats()` is now lock-free by construction and walled. `Close()`,
+  the one Writer method that takes `sendMu` exclusively, is never called from
+  under `syslogHealth.mu` — `releaseReplacedSyslogWriter` spawns it
+  (`go old.Close()`) and `disableActiveSyslog` calls it with
+  `syslogPublishMu` already released.
+- **Publish → health.** `syslogPublishMu` is always taken *outside*
+  `syslogHealth.mu` (`InitSyslog` → `noteSyslogWriterInstalled`,
+  `disableActiveSyslog` → `noteSyslogForwardingDisabled`), and nothing takes it
+  while holding `syslogHealth.mu`. `syslogFeedState` deliberately reads the
+  published pair through a reader that does not participate in it (round 17).
+  One direction only, so no cycle.
+- **Writer → health.** This is the callback edge, `notifyDelivery` →
+  `noteSyslogDelivery`, and it runs with `sendMu.RLock` held by `tryEnqueue` or
+  `chargeTerminalDrop`. It is the edge that makes the first rule above a
+  requirement rather than a preference.
+
+Nothing else to fix. Recorded because "I checked the rest of the graph" is the
+part of a deadlock fix that usually goes unwritten, and because the *shape* of
+the rule — an observer callback that re-enters the caller's domain — is
+reusable: this is the second time it has cost this repository a hang (CA-17,
+§17.2).
+
+#### Round 18 — a gate that mirrors the caller, not the API
+
+The first engine gate asserted `LateDrops() == 1` after calling
+`chargeTerminalDrop` directly, and it was wrong: `chargeTerminalDrop` only
+*reports* that the loss belongs to the late counter — the production caller is
+the one that acts on it (`if late := ...; late { noteLateDrop() }`). Asserting
+on the counter while skipping the half of the contract the caller owns tests a
+sequence nothing executes.
+
+> **When a function returns a verdict for its caller to act on, a gate that
+> asserts the effect must perform the caller's half too — or it is asserting
+> against a code path that does not exist.**
+
+#### Round 18 — verification
+
+Mutation-verified, each fix by a distinct gate subset:
+
+| Mutation | Caught by |
+| --- | --- |
+| remove `syslogHealth.gen++` from `noteSyslogDeliveryRecovered` | `TestChaos81_RecoveredEpisodeRejectsItsPreRecoverySnapshot`, on all three assertions; the control stays green |
+| `CumulativeStats` takes `sendMu.RLock` again | `TestCumulativeStatsTakesNoLockAndReadsLiveFirst` |
+| `CumulativeStats` loads the seal before the live read | `TestCumulativeStatsTakesNoLockAndReadsLiveFirst` |
+| `CumulativeStats` returns live counters even when sealed | `TestCumulativeStatsPrefersTheSealedFinals` |
+| `CumulativeStats` drops the live fallback | `TestCumulativeStatsReportsLiveCountersBeforeSealing` |
+| either folding consumer reverts to `FinalStats`-then-`Stats` | `TestChaos81_FoldingReadsOneCumulativeValue` |
+
+Checks run on the final tree, `go1.26.10` per `go.mod`'s `toolchain`:
+
+- `go vet ./...` — clean.
+- `go test -race -count=2 -shuffle=on ./internal/syslog/` — pass.
+- `go test -race -run 'TestChaos81_|TestSyslog|TestCumulative' .` — 78 gates
+  pass in 16.8s, 77 of them `TestChaos81_` (74 carried forward, 3 new). The one
+  that hung to the test timeout against the first fix,
+  `TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic`, completes in
+  0.33s.
+- `go test .` (the whole root package, 416.8s) — exactly nine failures, all
+  `validateExternalURL` failing closed because `example.com` does not resolve
+  in this sandbox (`URL must be https:// and must not point to a private
+  address`, from the IdP persistence and admin-IdP tests). The same nine as
+  round 17; nothing this round touched failed.
+- `python3 docs/agent-context/check.py` — pass (no guidance path changed; run
+  because the round edits instruction-adjacent prose).
+
+Not run locally: `golangci-lint`, which cannot execute against this repository
+here, and the hosted gates. A passing local check is not a passing merge gate.

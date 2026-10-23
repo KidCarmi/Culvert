@@ -3876,3 +3876,164 @@ func TestChaos81_ObservabilitySnapshotRestoresTheHealthPlane(t *testing.T) {
 		t.Errorf("the health record still names %q after the snapshot cleanup; later gates read a feed nobody configured", snap.IntendedTarget)
 	}
 }
+
+// ── A recovered episode invalidates a degraded snapshot ─────────────────────
+//
+// noteSyslogDeliveryRecovered clears `alerted` without replacing anything the
+// record describes, so a generation keyed on "the record was replaced"
+// accepted a snapshot taken moments before it. The stale commit then paged a
+// feed that had just recovered AND re-set the latch — and because the delivery
+// observer is edge-triggered (a drop, or the recovery edge, never an ordinary
+// success), with the episode already over nothing clears that latch again, so
+// the NEXT genuine outage reaches `alertNow = !alerted` as false and pages
+// nobody (Codex P2, PR #1494).
+//
+// The silence is the serious half. A spurious page is noise; a stranded latch
+// is the fail-open failure this whole plane exists to remove.
+func TestChaos81_RecoveredEpisodeRejectsItsPreRecoverySnapshot(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
+
+	syslogHealth.mu.Lock()
+	liveGen := syslogHealth.gen
+	syslogHealth.mu.Unlock()
+
+	// The watchdog's snapshot: degraded, and from the CURRENT generation — this
+	// is NOT the re-point/disable case the generation already rejected.
+	snap := syslogFeedSnapshot{Configured: true, Degraded: true, writer: sw, gen: liveGen, Age: 10 * time.Minute}
+
+	// A delivery lands before the commit runs. The episode is over.
+	noteSyslogDeliveryRecovered()
+
+	commitSyslogDegradation(snap)
+	if len(fired) != 0 {
+		t.Errorf("paged %d time(s) for an episode that had already recovered: %q", len(fired), fired)
+	}
+	syslogHealth.mu.Lock()
+	latched := syslogHealth.alerted
+	syslogHealth.mu.Unlock()
+	if latched {
+		t.Error("the stale commit left the record LATCHED; nothing clears it again, so the next real outage would be silent")
+	}
+
+	// The half that matters: a genuine outage after it must still page.
+	fired = nil
+	syslogHealth.mu.Lock()
+	gen2 := syslogHealth.gen
+	syslogHealth.mu.Unlock()
+	commitSyslogDegradation(syslogFeedSnapshot{Configured: true, Degraded: true, writer: sw, gen: gen2, Age: 10 * time.Minute})
+	if len(fired) != 1 {
+		t.Errorf("a genuine outage after the stale commit fired %d alert(s), want 1", len(fired))
+	}
+}
+
+// CONTROL: a recovery must not become a blanket excuse to drop verdicts. A
+// snapshot taken AFTER the recovery, describing a fresh outage, still pages —
+// the cheapest way to pass the gate above is to stop committing degraded
+// snapshots at all, which deletes the alert.
+func TestChaos81_RecoveryDoesNotSuppressASubsequentOutage(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+
+	var fired []string
+	prev := fireSyslogFeedDownAlert
+	fireSyslogFeedDownAlert = func(d string) { fired = append(fired, d) }
+	t.Cleanup(func() { fireSyslogFeedDownAlert = prev })
+
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	t.Cleanup(func() { _ = sw.Close() })
+	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
+
+	noteSyslogDeliveryRecovered()
+	// Snapshot taken after the recovery: its generation is current.
+	snap := syslogFeedState()
+	snap.Configured, snap.Degraded, snap.Age = true, true, 10*time.Minute
+
+	commitSyslogDegradation(snap)
+	if len(fired) != 1 {
+		t.Fatalf("a fresh outage after a recovery fired %d alert(s), want 1", len(fired))
+	}
+}
+
+// TestChaos81_FoldingReadsOneCumulativeValue is the STRUCTURAL wall for the
+// sealing read.
+//
+// A Writer carries two cumulative values — the live counters and the sealed
+// finals — and the live ones deliberately keep moving after the seal. Reading
+// them as FinalStats-then-Stats has the two loads in the WRONG ORDER, and the
+// Writer can seal in between: the live value then already holds a loss charged
+// to lateDrops (double count), and the next settle reverses it with the
+// smaller sealed snapshot, making culvert_syslog_drops_total DECREASE (Codex
+// P2, PR #1494).
+//
+// Walled structurally because the interleaving is a few instructions wide and
+// cannot be scheduled through either caller — the same reason round 9's
+// snapshot wall and the config-metadata wall are structural. The engine-side
+// ordering contract, the divergence the defect rests on, and the rule that
+// CumulativeStats may take NO lock (it is called from under the mutex that the
+// engine's own observer callback needs — the first shape locked and deadlocked)
+// are pinned in internal/syslog/syslog_stats_test.go.
+func TestChaos81_FoldingReadsOneCumulativeValue(t *testing.T) {
+	const healthFile = "syslog_health.go"
+	src, err := os.ReadFile(healthFile)
+	if err != nil {
+		t.Fatalf("reading the health plane: %v", err)
+	}
+	for _, fn := range []string{"retireSyslogWriterLocked", "settleRetiredSyslogWritersLocked"} {
+		fset, fd := syslogFuncDecl(t, healthFile, fn)
+		if fd == nil {
+			t.Fatalf("%s is gone; this wall names a function that no longer exists", fn)
+		}
+		uses := 0
+		ast.Inspect(fd, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "CumulativeStats":
+				uses++
+			case "FinalStats", "Stats":
+				t.Errorf("%s calls %s() at %s\n\t"+
+					"a folding consumer must take the cumulative pair from CumulativeStats(), which reads the "+
+					"counters before the seal and so is safe without a lock; FinalStats-then-Stats can seal in "+
+					"between and makes the exported drop total decrease (Codex P2, PR #1494)",
+					fn, sel.Sel.Name, fset.Position(call.Pos()).String())
+			}
+			return true
+		})
+		if uses == 0 {
+			t.Errorf("%s folds a retired writer's totals without calling CumulativeStats(); the wall would then pass however it read them", fn)
+		}
+	}
+	// CONTROL: the matcher must be able to SEE what it forbids, or a broken
+	// AST walk passes forever. The file reads live Stats() elsewhere on
+	// purpose — the INSTALLED writer's counters are read live, because
+	// nothing else folds them.
+	if !strings.Contains(string(src), ".Stats()") {
+		t.Fatal("control: the health plane no longer calls Stats() anywhere, so the walk above proves nothing")
+	}
+}

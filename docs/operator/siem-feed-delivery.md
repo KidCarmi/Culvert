@@ -231,6 +231,20 @@ The honest cost of that rule: **a node whose collector you fixed while the node
 was quiet stays reported as down until it delivers one event.** Use the probe
 below to produce that evidence on demand.
 
+**A recovery retracts verdicts sampled before it.** The 30-second watchdog
+samples the feed and then commits the verdict, and the commit refuses to act if
+the record moved in between — an install, a disable, and now a delivery that
+ends the outage. The last of those was missing, and it mattered more than a
+spurious page: the stale commit also re-armed the fire-once latch, and because
+that latch is cleared only on the transition *out* of an outage — which had
+already happened — nothing cleared it again. On a build before CHAOS-81 round
+18, a collector that recovered within one watchdog tick of the sample could
+therefore leave the node permanently unable to page: the next genuine outage
+fired no `syslog_feed_down` at all. If you are running such a build and have
+seen a `syslog_feed_down` arrive for a feed that was already delivering again,
+treat later silence from that node as unproven rather than healthy, and read
+`degraded` on `GET /api/syslog` directly.
+
 ---
 
 ## Confirming a collector by hand
@@ -370,6 +384,19 @@ On current builds the two accountings are exhaustive and disjoint: a
 collector's losses are carried by that collector until its queue has drained
 and its final totals are published, and anything recorded after that point is
 counted for the process instead. Each loss appears exactly once.
+
+Builds before CHAOS-81 round 18 need one more caveat, in the other direction. A
+retiring collector carries *two* totals — its live counters, which keep moving
+after its drain has finished, and the final snapshot that drain publishes — and
+the fold read them as two separate loads. A collector that published its
+snapshot between those two loads had a post-seal loss folded in twice, and the
+following settle reversed the difference against the smaller snapshot, so
+`culvert_syslog_drops_total` could **briefly rise and then fall** across a
+re-point. A scrape pair straddling that moment yields a negative rate. Both
+totals are now read in the one order that makes the pair safe — the live
+counters first, so a snapshot that is still absent proves the value predates it
+— which is what the never-decreases guarantee above actually rests on, not, as
+the code once claimed, each counter being monotonic on its own.
 
 ### If the feed is degraded but the drop count is not rising
 

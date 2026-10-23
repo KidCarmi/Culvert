@@ -2,6 +2,9 @@ package syslog
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"sync"
@@ -676,5 +679,221 @@ func TestNoteDelivered_CannotUnderflowTheFailureCount(t *testing.T) {
 	w.noteDelivered(50, now().UnixNano())
 	if got := w.Stats().ConsecutiveFailures; got != 0 {
 		t.Fatalf("ConsecutiveFailures = %d, want 0: the resolve must clamp, never wrap", got)
+	}
+}
+
+// ── A folding consumer reads one cumulative value, not two ───────────────────
+//
+// A Writer carries TWO cumulative values: the live counters and the sealed
+// finals. The live ones deliberately keep moving after the seal, and every
+// post-seal loss is ALSO charged to lateDrops. So the two diverge by exactly
+// the losses lateDrops already holds, and a consumer that folds the live value
+// after the seal counts them twice — then has the next fold reversed by the
+// smaller sealed snapshot, making an exported counter DECREASE (Codex P2,
+// PR #1494).
+
+// The divergence itself, which is what makes a two-read consumer unsafe.
+func TestSealedAndLiveCumulativeValuesDiverge(t *testing.T) {
+	ResetLateDropsForTest()
+	t.Cleanup(ResetLateDropsForTest)
+
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	w.MarkRetired()
+	w.noteDrop(&reasonQueueFull) // before the seal
+
+	// Seal exactly as the drain does: finals published under sendMu.
+	w.sendMu.Lock()
+	final := w.Stats()
+	w.finalStats.Store(&final)
+	w.sendMu.Unlock()
+
+	// A stale handle charges a loss after the seal. The engine routes it to
+	// lateDrops, and the Writer's own counters move too.
+	// Exactly as send/handOffQueued do it: chargeTerminalDrop REPORTS that the
+	// loss belongs to the process-lifetime counter, and the caller charges it.
+	if late := w.chargeTerminalDrop(&reasonClosed); late {
+		noteLateDrop()
+	} else {
+		t.Fatal("precondition: a post-seal loss on a retired writer must be routed to lateDrops")
+	}
+
+	sealed, ok := w.FinalStats()
+	if !ok {
+		t.Fatal("precondition: the writer must report sealed")
+	}
+	live := w.Stats()
+	if live.Drops <= sealed.Drops {
+		t.Fatalf("precondition: the live counters must exceed the sealed finals after a post-seal loss (live=%d sealed=%d)", live.Drops, sealed.Drops)
+	}
+	if got := LateDrops(); got != 1 {
+		t.Fatalf("lateDrops = %d, want 1 — the post-seal loss is already held there, so folding the live value counts it twice", got)
+	}
+}
+
+// CumulativeStats answers with ONE of the two, so a folded value is never
+// succeeded by a smaller one.
+func TestCumulativeStatsPrefersTheSealedFinals(t *testing.T) {
+	ResetLateDropsForTest()
+	t.Cleanup(ResetLateDropsForTest)
+
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	w.MarkRetired()
+	w.noteDrop(&reasonQueueFull)
+	w.sendMu.Lock()
+	final := w.Stats()
+	w.finalStats.Store(&final)
+	w.sendMu.Unlock()
+	if late := w.chargeTerminalDrop(&reasonClosed); late {
+		noteLateDrop()
+	}
+
+	cur, sealed := w.CumulativeStats()
+	if !sealed {
+		t.Fatal("CumulativeStats did not report a sealed writer as sealed")
+	}
+	if cur.Drops != final.Drops {
+		t.Fatalf("CumulativeStats returned Drops=%d for a sealed writer, want the finals' %d — folding the live value double-counts the loss lateDrops already holds",
+			cur.Drops, final.Drops)
+	}
+}
+
+// CONTROL: before the seal it must report the LIVE counters, or a displaced
+// writer's losses stop being folded at all while its drain is still flushing —
+// which is the loss-history erasure the sealing boundary exists to prevent.
+func TestCumulativeStatsReportsLiveCountersBeforeSealing(t *testing.T) {
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	w.noteDrop(&reasonQueueFull)
+	w.noteDrop(&reasonQueueFull)
+
+	cur, sealed := w.CumulativeStats()
+	if sealed {
+		t.Fatal("reported an unsealed writer as sealed")
+	}
+	if cur.Drops != 2 {
+		t.Fatalf("CumulativeStats returned Drops=%d before sealing, want the live 2", cur.Drops)
+	}
+}
+
+// ── CumulativeStats takes no lock, and reads the live value FIRST ────────────
+//
+// The first shape of CumulativeStats read the seal flag and the counters under
+// sendMu.RLock. That is exact, and it DEADLOCKS. Both folding consumers
+// (retireSyslogWriterLocked, settleRetiredSyslogWritersLocked) run with the
+// health plane's mutex held, while a line this Writer refuses charges its drop
+// from tryEnqueue — holding sendMu.RLock — and notifies the delivery observer
+// from there, which takes that same health mutex. Two read locks coexist, so
+// the inversion looks harmless until a Close() is waiting on sendMu.Lock: Go's
+// RWMutex then stops new readers barging in, and the three edges close a
+// cycle. Measured, not reasoned: the concurrent re-point gate hung to the test
+// timeout, and the dump named all three edges on one Writer.
+//
+// Walled structurally because the alternative gate is a hang — the most
+// expensive failure a suite can have (it costs the whole package's timeout and
+// reports no test name without reading a stack dump), and the cycle needs a
+// Close() parked between a reader and the fold to appear at all. The property
+// is also exactly a source property: this function may take no lock, however
+// briefly, because it is called from under the very mutex this Writer's
+// delivery observer goes on to take.
+//
+// The ordering half is pinned here too, and it is the reason the lock is not
+// needed: reading the live counters BEFORE loading the seal means an absent
+// seal proves the Writer had not sealed at the earlier read either, so the
+// live value predates the finals and can never exceed them. The reverse order
+// is the original defect (Codex P2, PR #1494).
+func TestCumulativeStatsTakesNoLockAndReadsLiveFirst(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "syslog.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse syslog.go: %v", err)
+	}
+	var fd *ast.FuncDecl
+	for _, d := range f.Decls {
+		if d, ok := d.(*ast.FuncDecl); ok && d.Name.Name == "CumulativeStats" {
+			fd = d
+			break
+		}
+	}
+	if fd == nil {
+		t.Fatal("CumulativeStats is gone; this wall names a function that no longer exists")
+	}
+
+	liveAt, sealAt := -1, -1
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Lock", "RLock", "TryLock", "TryRLock":
+			t.Errorf("CumulativeStats calls %s() at %s\n\t"+
+				"it runs with syslogHealth.mu held, and this package's own drop path takes that mutex "+
+				"while holding sendMu — any lock here closes a three-way cycle with a parked Close() "+
+				"(Codex P2, PR #1494)",
+				sel.Sel.Name, fset.Position(call.Pos()).String())
+		case "Stats":
+			if liveAt < 0 {
+				liveAt = int(call.Pos())
+			}
+		case "Load":
+			// s.finalStats.Load(); any other Load in here would be a new
+			// field this wall has not been taught about, and ordering it
+			// against the live read is the conservative answer anyway.
+			if sealAt < 0 {
+				sealAt = int(call.Pos())
+			}
+		}
+		return true
+	})
+	if liveAt < 0 {
+		t.Fatal("CumulativeStats no longer reads the live counters; the unsealed answer cannot be correct")
+	}
+	if sealAt < 0 {
+		t.Fatal("CumulativeStats no longer loads the seal; it cannot report whether the writer sealed")
+	}
+	if liveAt > sealAt {
+		t.Errorf("CumulativeStats loads the seal (%s) BEFORE reading the live counters (%s)\n\t"+
+			"that is the original defect: a seal landing between the two makes the fallback return a "+
+			"post-seal live value, already counted in lateDrops and larger than the finals the next "+
+			"settle reads — so culvert_syslog_drops_total decreases",
+			fset.Position(token.Pos(sealAt)).String(), fset.Position(token.Pos(liveAt)).String())
+	}
+}
+
+// CONTROL: the matcher must be able to SEE the locks it forbids, or a broken
+// AST walk passes forever. tryEnqueue takes sendMu.RLock on purpose — that is
+// what makes "check closed, then enqueue" atomic against Close.
+func TestLockMatcherSeesTheLocksItForbids(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "syslog.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse syslog.go: %v", err)
+	}
+	var fd *ast.FuncDecl
+	for _, d := range f.Decls {
+		if d, ok := d.(*ast.FuncDecl); ok && d.Name.Name == "tryEnqueue" {
+			fd = d
+			break
+		}
+	}
+	if fd == nil {
+		t.Fatal("tryEnqueue is gone; pick another positive sample whose job IS to hold sendMu")
+	}
+	found := false
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "RLock" {
+			found = true
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("control: the walk cannot find RLock in tryEnqueue, so the wall above proves nothing")
 	}
 }

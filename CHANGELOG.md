@@ -9,6 +9,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- The SIEM outage alert could go permanently silent after a recovery. The
+  health watchdog samples the feed and then commits the verdict, refusing to
+  act if the record changed in between — but a *recovery* changes nothing the
+  record describes, so a sample taken during an outage that committed just
+  after the feed came back was still accepted. It paged a collector that was
+  already delivering again and re-armed the fire-once latch; since the latch is
+  cleared only on the transition out of an outage, and that transition had
+  already happened, nothing cleared it again and the **next** genuine outage
+  fired no alert at all. A delivery that ends an outage now invalidates every
+  verdict sampled before it.
+
+- `culvert_syslog_drops_total` could decrease while a replaced collector was
+  being retired. A retired writer carries two totals — its live counters, which
+  keep moving, and the final snapshot its drain publishes on the way out — and
+  the fold read them as two separate loads. A writer that published its
+  snapshot between the two loads had a post-seal loss folded in twice (it is
+  already counted in the process-lifetime late-drop total), and the next settle
+  reversed the difference with the smaller final snapshot, so the exported drop
+  counter went down. The two are now read in the one order that makes the pair
+  safe — the live counters first, so an absent snapshot proves the value
+  predates it — which is what the no-decrease guarantee actually rests on.
+
 - A SIEM event is no longer destroyed on the collector a re-point just replaced.
   The replacement is named before the displaced writer is closed, and that close
   is asynchronous, so a request goroutine holding the old handle could find a

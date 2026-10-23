@@ -255,10 +255,26 @@ type syslogHealthRecord struct {
 	// mid-update.
 	writer *syslogWriter
 
-	// gen is a monotonic identity for the RECORD, bumped by every transition
-	// that replaces what the record describes: an install, a disable, a test
-	// reset. A snapshot captures it and the commit half compares it, which is
-	// the direct statement of "this record is still the one I described".
+	// gen is a monotonic identity for the DEGRADED VERDICT this record can
+	// carry, bumped by every transition that INVALIDATES such a verdict: an
+	// install, a disable, a test reset — and a delivery that ENDS the episode.
+	// A snapshot captures it and the commit half compares it, which is the
+	// direct statement of "the thing I described is still true to describe".
+	//
+	// The recovery case was missing and it was the worst of the four, because
+	// its failure is SILENCE rather than noise. noteSyslogDeliveryRecovered
+	// clears `alerted` without replacing anything the record describes, so a
+	// generation keyed on "the record was replaced" accepted a snapshot taken
+	// moments before it: the commit paged a feed that had just recovered AND
+	// re-set the latch. The delivery observer is edge-triggered — it fires on
+	// a drop and once on the recovery edge, never on an ordinary success — so
+	// with the episode already over nothing clears that latch again, and the
+	// NEXT genuine outage reaches `alertNow = !alerted` as false and pages
+	// nobody (Codex P2, PR #1494; reproduced in all three steps).
+	//
+	// So the generation is defined by what it PROTECTS, not by what changed:
+	// the staleness check is its only consumer, and every transition that can
+	// falsify a degraded snapshot has to move it.
 	//
 	// It replaces a pointer comparison against `writer`, which answered the
 	// same question everywhere EXCEPT the one case that matters most: a boot
@@ -277,9 +293,11 @@ type syslogHealthRecord struct {
 	// sitting beside it, so there is no second predicate to drift.
 	//
 	// noteSyslogIntent deliberately does NOT bump it: recording an intent
-	// changes what the operator ASKED for, not what the record DESCRIBES, and
-	// a pending unmet-degraded verdict stays true across it. Suppressing there
-	// would only delay a legitimate page to the next 30 s watchdog tick.
+	// changes what the operator ASKED for, and a pending unmet-degraded
+	// verdict stays TRUE across it — which is the test, now that the rule is
+	// "does this falsify a degraded snapshot" rather than "did the record
+	// change". Suppressing there would only delay a legitimate page to the
+	// next 30 s watchdog tick.
 	gen uint64
 
 	alerted    bool
@@ -421,10 +439,15 @@ func retireSyslogWriterLocked(old *syslogWriter) {
 	// Mark BEFORE anything closes it: a loss landing after the seal but
 	// before the mark is in neither the fold nor the late counter.
 	old.MarkRetired()
-	st, sealed := old.FinalStats()
-	if !sealed {
-		st = old.Stats()
-	}
+	// ONE read, in the order that makes the pair safe without a lock. The
+	// FinalStats-then-Stats pair this replaces could seal in between, folding
+	// a live value that already included a loss charged to lateDrops and that
+	// the next settle's smaller sealed snapshot would then reverse.
+	//
+	// It must stay lock-free: we hold syslogHealth.mu here, and the engine's
+	// own drop path takes that mutex from under sendMu.RLock, so a lock in
+	// CumulativeStats closes a three-way cycle. See CumulativeStats.
+	st, sealed := old.CumulativeStats()
 	syslogHealth.retiredDelivered += st.Delivered
 	syslogHealth.retiredDrops += st.Drops
 	syslogHealth.retiredPanics += st.Panics
@@ -442,10 +465,18 @@ func retireSyslogWriterLocked(old *syslogWriter) {
 // Caller holds syslogHealth.mu.
 //
 // It must run before any read of the retired totals, which is why there is
-// exactly one such read (syslogFeedState) and it calls this first. The deltas
-// are non-negative because a Writer's counters are monotonic, so this can only
-// ever move the exported totals UP — a settle can never make
-// `culvert_syslog_drops_total` decrease.
+// exactly one such read (syslogFeedState) and it calls this first.
+//
+// The deltas are non-negative, and that rests on CumulativeStats rather than
+// on a Writer's counters being monotonic. They are monotonic, but there are
+// TWO cumulative values per Writer — the live counters and the sealed finals —
+// and the live ones keep moving after the seal. Reading the pair with
+// FinalStats-then-Stats could therefore fold a post-seal live value and have
+// the next settle reverse it with the smaller sealed snapshot, making
+// `culvert_syslog_drops_total` DECREASE. CumulativeStats reads the live value
+// BEFORE the seal, which is what makes an unsealed answer provably no larger
+// than the finals that follow, so a folded value is never succeeded by a
+// smaller one (Codex P2, PR #1494).
 func settleRetiredSyslogWritersLocked() {
 	if len(syslogHealth.retiring) == 0 {
 		return
@@ -461,10 +492,7 @@ func settleRetiredSyslogWritersLocked() {
 		// take them a second time and make the compliance-loss series
 		// OVERSTATE, which is a false alarm on the one number an operator
 		// pages from.
-		cur, sealed := r.w.FinalStats()
-		if !sealed {
-			cur = r.w.Stats()
-		}
+		cur, sealed := r.w.CumulativeStats()
 		syslogHealth.retiredDelivered += cur.Delivered - r.folded.Delivered
 		syslogHealth.retiredDrops += cur.Drops - r.folded.Drops
 		syslogHealth.retiredPanics += cur.Panics - r.folded.Panics
@@ -876,6 +904,13 @@ func noteSyslogDeliveryRecovered() {
 	syslogHealth.alerted = false
 	syslogHealth.logAt = time.Time{}
 	syslogHealth.suppressed = 0
+	// The episode is over, so every degraded snapshot taken before this
+	// instant is now false. Advancing the generation is what makes the commit
+	// half reject them; without it a watchdog snapshot caught moments ago
+	// pages a recovered feed and re-latches it, and because this observer is
+	// edge-triggered nothing clears that latch again — the next real outage
+	// is silent (Codex P2, PR #1494). See syslogHealthRecord.gen.
+	syslogHealth.gen++
 	syslogHealth.mu.Unlock()
 
 	if wasAlerted && logger != nil {

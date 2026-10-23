@@ -229,6 +229,50 @@ func (s *Writer) FinalStats() (Stats, bool) {
 	return Stats{}, false
 }
 
+// CumulativeStats returns the snapshot a FOLDING consumer must use — the
+// sealed finals once this Writer has sealed, the live counters until then —
+// together with whether it has sealed.
+//
+// A consumer that instead calls FinalStats() and then falls back to Stats()
+// has the two reads in the WRONG ORDER, and the Writer can seal between them.
+// Its live counters keep moving after the seal (deliberately — see
+// chargeTerminalDrop), and every post-seal loss is ALREADY charged to
+// lateDrops, so folding that live value counts the same loss twice. Worse, the
+// next settle reads the sealed snapshot, which is SMALLER than the live value
+// already folded, so the delta goes negative and the exported
+// culvert_syslog_drops_total DECREASES — the one thing a Prometheus counter
+// may not do, and precisely the contract the sealing boundary exists to keep
+// (Codex P2, PR #1494).
+//
+// The order below is what makes the pair safe, and it needs no lock:
+//
+//   - If the seal is present, the finals ARE the answer, exactly.
+//   - If it is absent, the Writer had not sealed at the LATER of the two
+//     reads, so it had not sealed at the earlier one either. The live value
+//     therefore predates the seal and cannot exceed the finals that follow —
+//     so a folded value is never succeeded by a smaller one, which is the
+//     whole guarantee.
+//
+// Reading both under sendMu would also be exact, and it was the first shape.
+// It deadlocks, and the ordering argument is what replaces it. Both folding
+// consumers run with syslogHealth.mu held, while a line refused by tryEnqueue
+// charges its drop holding sendMu.RLock and notifies the delivery observer
+// from there — which takes syslogHealth.mu. That is a lock-order inversion,
+// and with a Close() blocked on sendMu.Lock in between (which stops any new
+// reader barging in) it is a three-way cycle, not a window: measured, with
+// TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic hanging to
+// the test timeout and the dump naming all three edges.
+//
+// So no lock may be taken here at all, however briefly: this is called from
+// under the very mutex that this Writer's delivery observer goes on to take.
+func (s *Writer) CumulativeStats() (Stats, bool) {
+	live := s.Stats()
+	if p := s.finalStats.Load(); p != nil {
+		return *p, true
+	}
+	return live, false
+}
+
 // chargeTerminalDrop records a loss against a Writer that refused a line and
 // could not hand it on, and reports whether that loss must ALSO be charged to
 // the process-lifetime late-drop counter.
