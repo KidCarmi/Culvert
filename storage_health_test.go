@@ -14,9 +14,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -458,27 +461,158 @@ func TestStorageWriteAlert_RetryQueueDoesNotConsumeAlertGate(t *testing.T) {
 // configured, which is the default posture and the state of every test binary.
 // It showed up as a spurious failure in an unrelated guardrail that samples
 // runtime.NumGoroutine() over a 50ms window.
+//
+// The test used to sample that same process-global counter itself, so any
+// goroutine an earlier test left behind that started inside its 50ms window
+// was blamed on this write, and the Deep determinism gate failed on unrelated
+// PRs with "spawned 1 goroutine(s)" (#1437 seed 1790363966990362284, #1529
+// seed 1792140730415552198). It now asserts in two layers, neither of which
+// another test's goroutines can reach:
+//
+//  1. The gate itself, in-process and exact: the real fireStorageWriteAlert
+//     runs, and its launcher seam counts deliveries. No subscriber means zero
+//     launches; a subscriber means a launch naming this write (the control
+//     that proves the seam is on the delivery path).
+//  2. The whole failed-write path with the REAL launcher, measured with the
+//     original goroutine-count guard in a re-executed copy of this binary that
+//     runs nothing else. The count sees every goroutine still running,
+//     including one whose spawner already exited (Codex review on #1634),
+//     which a parent-attribution snapshot cannot.
 func TestStorageWriteAlert_NoGoroutineWithoutSubscriber(t *testing.T) {
 	withCleanStorageWriteHealth(t)
 
-	// The PRODUCTION seam, deliberately not swapped: this test is about what
-	// the real one does.
+	// The PRODUCTION gate, deliberately not swapped: this test is about what
+	// the real one does. Only the launcher under it is recorded.
 	prevStore := globalAlertStore
 	globalAlertStore = &AlertStore{}
 	t.Cleanup(func() { globalAlertStore = prevStore })
-
-	before := runtime.NumGoroutine()
-	failingWrite(t, "policy.json")
-	time.Sleep(50 * time.Millisecond) // let anything spawned get scheduled
-	if after := runtime.NumGoroutine(); after > before {
-		t.Errorf("a failed durable write spawned %d goroutine(s) with no webhook subscribed", after-before)
+	var mu sync.Mutex
+	var launched []string
+	prevGo := goStorageWriteAlert
+	goStorageWriteAlert = func(detail string, _ func()) {
+		mu.Lock()
+		launched = append(launched, detail)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { goStorageWriteAlert = prevGo })
+	launches := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), launched...)
 	}
 
-	// With a subscriber, delivery is attempted (the goroutine is legitimate).
+	const target = "nogoroutine-probe.json"
+	failingWrite(t, target)
+	if got := launches(); len(got) != 0 {
+		t.Errorf("a failed durable write launched %d alert deliveries with no webhook subscribed: %q", len(got), got)
+	}
+
+	// CONTROL: with a subscriber the same failure launches a delivery. The rate
+	// gate is reopened first so the second failure is alertable.
 	globalAlertStore.Add(AlertWebhook{
 		URL: "https://alerts.invalid/hook", Enabled: true, Events: []string{"storage_write_failed"},
 	})
 	if !globalAlertStore.HasSubscriber("storage_write_failed") {
 		t.Fatal("setup: webhook not registered as a subscriber")
 	}
+	resetStorageWriteHealthForTest()
+	already := len(launches())
+	failingWrite(t, target)
+	ours := 0
+	for _, d := range launches()[already:] {
+		if strings.Contains(d, target) {
+			ours++
+		}
+	}
+	if ours != 1 {
+		t.Errorf("a subscribed failure launched %d deliveries naming %s, want 1: the launcher seam is not on the "+
+			"delivery path, so the zero above proves nothing", ours, target)
+	}
+
+	if n, out := goroutinesLeftByFailedWriteIsolated(t, storageProbeProduction); n > 0 {
+		t.Errorf("a failed durable write left %d goroutine(s) running with no webhook subscribed "+
+			"(isolated process):\n%s", n, out)
+	}
+}
+
+// TestStorageWriteAlert_IsolatedGuardCatchesNestedSpawn is the control for
+// layer 2: a write path that spawns a goroutine which spawns the long-lived
+// one and exits before the sample (the Codex shape) must still be counted.
+func TestStorageWriteAlert_IsolatedGuardCatchesNestedSpawn(t *testing.T) {
+	if n, out := goroutinesLeftByFailedWriteIsolated(t, storageProbeNestedSpawn); n < 1 {
+		t.Fatalf("the isolated guard counted %d goroutines for a nested spawn whose spawner exited; want 1:\n%s", n, out)
+	}
+}
+
+const (
+	storageProbeEnv         = "CULVERT_STORAGE_GOROUTINE_PROBE"
+	storageProbeProduction  = "production"
+	storageProbeNestedSpawn = "nested-spawn-control"
+	storageProbeResultMark  = "storage-goroutine-probe spawned="
+)
+
+// goroutinesLeftByFailedWriteIsolated re-executes this test binary to run
+// ONLY TestStorageWriteAlertGoroutineProbe in the given mode, so no other
+// test's goroutines share the process, and returns the goroutine-count delta
+// the probe measured across one failed durable write.
+func goroutinesLeftByFailedWriteIsolated(t *testing.T, mode string) (left int, out string) {
+	t.Helper()
+	// #nosec G204,G702 -- re-exec of THIS test binary (os.Args[0]) with a fixed,
+	// literal test selector and a fixed mode; no external input.
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestStorageWriteAlertGoroutineProbe$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), storageProbeEnv+"="+mode)
+	raw, err := cmd.CombinedOutput()
+	out = string(raw)
+	if err != nil {
+		t.Fatalf("isolated goroutine probe (%s) failed: %v\n%s", mode, err, out)
+	}
+	i := strings.LastIndex(out, storageProbeResultMark)
+	if i < 0 {
+		t.Fatalf("isolated goroutine probe (%s) reported no result:\n%s", mode, out)
+	}
+	field, _, _ := strings.Cut(out[i+len(storageProbeResultMark):], "\n")
+	n, err := strconv.Atoi(strings.TrimSpace(field))
+	if err != nil {
+		t.Fatalf("isolated goroutine probe (%s) result %q: %v", mode, field, err)
+	}
+	return n, out
+}
+
+// TestStorageWriteAlertGoroutineProbe is the child half of
+// goroutinesLeftByFailedWriteIsolated; it does nothing in a normal run. It
+// applies the original guard (goroutine count before and after a failed write
+// plus a 50ms settle), which is sound in a process that runs nothing else.
+func TestStorageWriteAlertGoroutineProbe(t *testing.T) {
+	mode := os.Getenv(storageProbeEnv)
+	if mode == "" {
+		t.Skip("child process for TestStorageWriteAlert_NoGoroutineWithoutSubscriber")
+	}
+	withCleanStorageWriteHealth(t)
+	prevStore := globalAlertStore
+	globalAlertStore = &AlertStore{}
+	t.Cleanup(func() { globalAlertStore = prevStore })
+	switch mode {
+	case storageProbeProduction:
+		// The real gate and the real launcher.
+	case storageProbeNestedSpawn:
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop) })
+		prev := fireStorageWriteAlert
+		fireStorageWriteAlert = func(string) {
+			done := make(chan struct{})
+			go func() {
+				go func() { <-stop }()
+				close(done)
+			}()
+			<-done
+		}
+		t.Cleanup(func() { fireStorageWriteAlert = prev })
+	default:
+		t.Fatalf("unknown probe mode %q", mode)
+	}
+
+	before := runtime.NumGoroutine()
+	failingWrite(t, "policy.json")
+	time.Sleep(50 * time.Millisecond) // let anything spawned get scheduled
+	fmt.Printf("%s%d\n", storageProbeResultMark, runtime.NumGoroutine()-before)
 }

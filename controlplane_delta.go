@@ -21,10 +21,17 @@ package main
 //     giant delta is never cheaper than a full snapshot, so this loses nothing.
 //
 // The ring stores a CONTIGUOUS chain of per-version deltas (base = target-1). A
-// non-contiguous publish (concurrent reorder, HA-promotion version jump) CLEARS
-// the ring — the chain is no longer valid, so every DP older than the newest
-// entry correctly gets a resync until the chain rebuilds. Correctness over
-// bytes: a spurious resync only costs one full pull.
+// non-contiguous publish (an HA-promotion version jump) CLEARS the ring — the
+// chain is no longer valid, so every DP older than the newest entry correctly
+// gets a resync until the chain rebuilds. Correctness over bytes: a spurious
+// resync only costs one full pull.
+//
+// Deltas are APPLIED IN COMMIT ORDER even though they are computed outside the
+// store lock (Codex review of #1556): each commit reserves its slot under the
+// store lock (reserve), and a computed delta waits in that slot until every
+// earlier commit's delta has landed (complete). Without it a slow full publish
+// (vN, O(N) diff) finishing after a fast address-only publish (vN+1) looked
+// non-contiguous, cleared vN+1, and left the ring behind the store version.
 
 import (
 	"context"
@@ -79,6 +86,18 @@ type blocklistDeltaRing struct {
 	mu         sync.Mutex
 	entries    []blocklistDelta // ascending Version, contiguous (entries[i+1].Version == entries[i].Version+1)
 	totalBytes int
+	// pending is the commit-ordered hand-off: one slot per reserved commit
+	// whose delta has not been applied yet. Only the leading run of completed
+	// slots is applied, so entries always grow in commit order. Bounded by the
+	// number of in-flight publishes.
+	pending []pendingDelta
+}
+
+// pendingDelta is one reserved commit's slot in the hand-off.
+type pendingDelta struct {
+	target int64
+	done   bool
+	d      blocklistDelta
 }
 
 // hostSliceBytes approximates the retained size of a host slice.
@@ -90,12 +109,44 @@ func hostSliceBytes(hosts []string) int {
 	return n
 }
 
-// record appends the delta for a newly published version. oldHosts/newHosts are
-// the previous and new blocklists; base/target are their versions; fp is the
-// synced fingerprint of newHosts (advertised as the target a DP must reach);
-// epoch is the issuing CP's fencing epoch. A non-contiguous target clears the
-// ring first (the existing chain is no longer valid).
-func (r *blocklistDeltaRing) record(base, target int64, oldHosts, newHosts []string, fp string, epoch int64) {
+// reserve claims target's slot in the commit-ordered hand-off. The store calls
+// it under its commit lock (commitLocked), so slots are in commit order. O(1):
+// it never computes anything.
+func (r *blocklistDeltaRing) reserve(target int64) {
+	r.mu.Lock()
+	r.pending = append(r.pending, pendingDelta{target: target})
+	r.mu.Unlock()
+}
+
+// complete fills d.Version's reserved slot and applies every leading
+// completed slot in commit order. A delta whose earlier commits are still
+// computing waits in its slot; the last of them to finish applies it. A delta
+// with no reserved slot is applied directly.
+func (r *blocklistDeltaRing) complete(d blocklistDelta) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	slot := -1
+	for i := range r.pending {
+		if r.pending[i].target == d.Version && !r.pending[i].done {
+			slot = i
+			break
+		}
+	}
+	if slot < 0 {
+		r.appendLocked(d)
+		return
+	}
+	r.pending[slot].d, r.pending[slot].done = d, true
+	for len(r.pending) > 0 && r.pending[0].done {
+		r.appendLocked(r.pending[0].d)
+		r.pending[0] = pendingDelta{} // drop the host-slice references
+		r.pending = r.pending[1:]
+	}
+}
+
+// buildBlocklistDelta computes one version's delta: the O(N) diff that runs
+// OUTSIDE every lock.
+func buildBlocklistDelta(base, target int64, oldHosts, newHosts []string, fp string, epoch int64) blocklistDelta {
 	d := blocklistDelta{Version: target, Base: base, FP: fp, Epoch: epoch}
 	// A nil oldHosts means there was NO prior published snapshot to diff against
 	// (fresh CP start, or an HA-promoted standby whose ConfigStore.snap was never
@@ -107,23 +158,25 @@ func (r *blocklistDeltaRing) record(base, target int64, oldHosts, newHosts []str
 	// any real publish, so a genuinely-empty published blocklist still deltas.)
 	if oldHosts == nil {
 		d.Resync = true
-	} else {
-		added, removed := diffHosts(oldHosts, newHosts)
-		d.bytes = hostSliceBytes(added) + hostSliceBytes(removed)
-		if d.bytes > maxSingleDeltaBytes {
-			// Too large to retain; a DP traversing this version resyncs.
-			d.Resync = true
-			d.bytes = 0
-		} else {
-			d.Added, d.Removed = added, removed
-		}
+		return d
 	}
+	added, removed := diffHosts(oldHosts, newHosts)
+	d.bytes = hostSliceBytes(added) + hostSliceBytes(removed)
+	if d.bytes > maxSingleDeltaBytes {
+		// Too large to retain; a DP traversing this version resyncs.
+		d.Resync = true
+		d.bytes = 0
+	} else {
+		d.Added, d.Removed = added, removed
+	}
+	return d
+}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	// Contiguity: the chain must be gap-free. A non-contiguous target (base does
-	// not match the newest retained version) invalidates the existing chain.
-	if len(r.entries) > 0 && base != r.entries[len(r.entries)-1].Version {
+// appendLocked appends d to the chain. A non-contiguous d (base does not match
+// the newest retained version) invalidates the existing chain first. Called
+// with r.mu held, in commit order.
+func (r *blocklistDeltaRing) appendLocked(d blocklistDelta) {
+	if len(r.entries) > 0 && d.Base != r.entries[len(r.entries)-1].Version {
 		r.entries = nil
 		r.totalBytes = 0
 	}
@@ -382,8 +435,13 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 		}
 	}
 
-	epoch := globalHA.CurrentEpoch()
-	cur := globalConfigStore.Version()
+	// The reply's epoch labels the COMMITTED data it describes — the target
+	// version's snapshot stamp, read with that version under one lock — never
+	// live HA state (Codex P1 4302926140 on #1645). A live read could label a
+	// version committed with a new grant's epoch with the old one before the
+	// new one is exposed, and a Data Plane would apply it without ratcheting.
+	// The stamp already carries the role-less floor (configEpochLocked).
+	cur, epoch := globalConfigStore.committedVersionEpoch()
 	if dreq.KnownVersion == cur {
 		// Idle-drift detection: if the DP reports a fingerprint for the current
 		// version that disagrees with ours, it has drifted (e.g. a half-applied

@@ -6533,6 +6533,18 @@
       "UserList": {
         "additionalProperties": false,
         "properties": {
+          "adminRosterPersistDegraded": {
+            "description": "Login-path roster writes (TOTP replay counter, backup-code consumption) that failed since process start while the login proceeded (CHAOS-70). Admin-only.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "adminRosterPersistFailures": {
+            "description": "Admin-roster changes refused and rolled back since process start because the roster file could not be written (CHAOS-70). Admin-only; not exposed on /api/stats.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "users": {
             "items": {
               "$ref": "#/components/schemas/User"

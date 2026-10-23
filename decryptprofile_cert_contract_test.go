@@ -77,6 +77,7 @@ func TestConfigImport_MigratesPermissive(t *testing.T) {
 // TestSnapshotApply_MigratesPermissive — the CP→DP snapshot-apply path cannot
 // install permissive; it fail-closed-migrates to strict.
 func TestSnapshotApply_MigratesPermissive(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	swapDecProfileStore(t)
 	applyConfigSnapshot(ConfigSnapshot{
 		Version: 1,
@@ -99,6 +100,7 @@ func TestSnapshotApply_MigratesPermissive(t *testing.T) {
 // pattern (unique discriminator) rather than a len() delta, which saturates
 // under the determinism gate.
 func TestSnapshotApply_PermissiveMigrationIsAuditVisible(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	swapDecProfileStore(t)
 	const uniq = "audit-probe-perm-716"
 	applyConfigSnapshot(ConfigSnapshot{
