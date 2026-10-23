@@ -12,7 +12,10 @@
 
 ## 1. Executive summary
 
-**The reviewed window itself is clean. Every finding below is pre-existing.**
+**The reviewed window itself is clean. Every finding below is pre-existing —
+except SEC-POLICYDROP-1, which this change's own SEC-POLICYACTION-1 fix
+introduced and which is recorded here with the rest rather than quietly
+absorbed.**
 The window's substantive changes — the `internal/admission` extraction
 (#1522–#1525), the memoized IDNA slow path in `internal/hostutil` (#1598), the
 SEC-SECRETWRITE-1 secret-write hardening, CHAOS-70 roster durability, the

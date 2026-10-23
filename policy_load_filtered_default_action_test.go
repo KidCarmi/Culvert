@@ -258,6 +258,28 @@ func TestSECPOLICYDROP1_CleanReloadClearsTheRefusalCount(t *testing.T) {
 	}
 }
 
+// Adopting a path with no file yet is a SUCCESSFUL load, so the refusal count
+// must describe it rather than the file loaded before it. The error direction is
+// fail-closed (a stale count derives deny, not allow), but a count that
+// describes a file the store no longer points at is not a count anyone can
+// reason about. (CodeRabbit, PR #1651.)
+func TestSECPOLICYDROP1_AdoptingAMissingFileClearsTheRefusalCount(t *testing.T) {
+	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
+	if got := ps.DroppedOnLoad(); got != 2 {
+		t.Fatalf("precondition: DroppedOnLoad got %d, want 2", got)
+	}
+
+	if err := ps.Load(filepath.Join(t.TempDir(), "absent.json")); err != nil {
+		t.Fatalf("Load of a missing file should adopt the path: %v", err)
+	}
+	if got := ps.DroppedOnLoad(); got != 0 {
+		t.Fatalf("adopting a fresh path must clear the count: DroppedOnLoad got %d, want 0", got)
+	}
+	if got := ps.ConfiguredRuleCount(); got != 0 {
+		t.Fatalf("ConfiguredRuleCount: got %d, want 0", got)
+	}
+}
+
 // ── Malformed input ───────────────────────────────────────────────────────────
 
 // A file Load never managed to parse must leave BOTH the rules and the refusal
@@ -339,22 +361,57 @@ func TestSECPOLICYDROP1_ShimPassesTheConfiguredCount(t *testing.T) {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 
-	var body string
+	// The ARGUMENT is the assertion, not a substring of the body. A body that
+	// merely mentions ConfiguredRuleCount() while passing 0 to the loader would
+	// satisfy a `strings.Contains` check and reintroduce the whole defect, and
+	// no behavioural test of the loader can see it — the behavioural tests call
+	// loadRewriteAndDefaultAction directly. (CodeRabbit, PR #1651: correct, and
+	// on a gate whose only job is precision.)
+	var (
+		body  string
+		found bool
+		arg   string
+	)
 	ast.Inspect(file, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
 		if !ok || fn.Name == nil || fn.Name.Name != "initRewriteAndDefaultAction" || fn.Body == nil {
 			return true
 		}
 		body = string(src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
+		ast.Inspect(fn.Body, func(inner ast.Node) bool {
+			call, isCall := inner.(*ast.CallExpr)
+			if !isCall {
+				return true
+			}
+			name, isIdent := call.Fun.(*ast.Ident)
+			if !isIdent || name.Name != "loadRewriteAndDefaultAction" {
+				return true
+			}
+			found = true
+			if len(call.Args) != 2 {
+				t.Errorf("loadRewriteAndDefaultAction called with %d argument(s), want 2 — move this wall with the signature", len(call.Args))
+				return false
+			}
+			start := fset.Position(call.Args[1].Pos()).Offset
+			end := fset.Position(call.Args[1].End()).Offset
+			arg = string(src[start:end])
+			return false
+		})
 		return false
 	})
 
 	if body == "" {
 		t.Fatalf("initRewriteAndDefaultAction not found in main.go — if it was renamed or moved, move this wall with it")
 	}
-	if !strings.Contains(body, "policyStore.ConfiguredRuleCount()") {
-		t.Errorf("initRewriteAndDefaultAction must pass policyStore.ConfiguredRuleCount() so refused rules still count as a configured policy (SEC-POLICYDROP-1); body:\n%s", body)
+	if !found {
+		t.Fatalf("initRewriteAndDefaultAction no longer calls loadRewriteAndDefaultAction directly; this wall can no longer see the argument it exists to check:\n%s", body)
 	}
+	if arg != "policyStore.ConfiguredRuleCount()" {
+		t.Errorf("the rule count passed to loadRewriteAndDefaultAction is %q, want %q — refused rules must still count as a configured policy, or a fully refused policy file selects the passthrough Allow default (SEC-POLICYDROP-1)",
+			arg, "policyStore.ConfiguredRuleCount()")
+	}
+	// Kept alongside the argument check: it names the specific wrong answer, so
+	// a regression reports the defect rather than just a mismatch.
 	if strings.Contains(body, "len(policyStore.List())") {
 		t.Errorf("initRewriteAndDefaultAction must NOT derive the default action from the INSTALLED rule count: a fully refused policy file would select passthrough Allow (SEC-POLICYDROP-1); body:\n%s", body)
 	}
