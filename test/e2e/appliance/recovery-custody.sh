@@ -75,15 +75,25 @@ diagnose(){ local tag="$1" B="${DIAG_BOUND:-20}" S="${DIAG_SLACK:-10}" o
 # Evidence state (ASTRA 6360307931 #1). $EVID/.evidence-state records whether
 # the data volume — inside the loop image — may hold quarantine evidence that has
 # NOT been preserved off it:
-#   absent / none            nothing to protect
-#   unpreserved:<reason>     the image holds evidence not yet preserved
-#   preserved:<tag>          the complete bytes were preserved and verified
+#   absent / none            nothing to protect yet
+#   unpreserved:<reason>     the image holds (or may hold) evidence not yet
+#                            preserved — set BEFORE any operation that can create
+#                            it (arm_evidence), and on any custody failure, new
+#                            un-inventoried entry or failed observation
+#   preserved:<tag>          the complete bytes of the CURRENT set were preserved
+#                            and verified (custody/<tag>)
+#   clear:<tag>              a SUCCESSFUL listing found nothing to preserve
 # Every exit path goes through harness_teardown, which RETAINS the image while
 # the state is unpreserved — a clean container teardown never erases evidence
 # that was never copied out. It is a file, not a variable, so subshells and the
 # EXIT trap all see the same state.
 evidence_state(){ printf '%s\n' "$1" > "$EVID/.evidence-state"; }
 evidence_state_get(){ if [[ -f "$EVID/.evidence-state" ]]; then cat "$EVID/.evidence-state"; else echo none; fi; }
+# arm_evidence <reason> — call BEFORE an operation that may create quarantine
+# evidence or leave partial data (an import starting, a kill, a restart). A
+# failure or timeout of that operation then exits with the image retained,
+# because the protection was already in place (ASTRA 6360721903 #1).
+arm_evidence(){ evidence_state "unpreserved:$1"; }
 
 # custody_fail <sc> <tag> <msg> — FAIL and end the run; nothing is deleted, and
 # the evidence is marked unpreserved so teardown retains the image holding it.
@@ -106,7 +116,8 @@ quarantine_custody(){ local sc="$1" tag="$2" d="$EVID/custody/$2" n files=0 byte
   out="$(rx 60 'for e in catfeeddb.corrupt.* catfeeddb.importingtmp.*; do if [ -e "$e" ]; then echo "$e"; fi; done')" \
     || custody_fail "$sc" "$tag" "could not observe the data volume ($MP): the listing failed (rc=$?), which is not the same as nothing there"
   CUSTODY_NAMES="$(printf '%s\n' "$out" | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' ')"; CUSTODY_NAMES="${CUSTODY_NAMES% }"
-  if [[ -z "$CUSTODY_NAMES" ]]; then CUSTODY_TREE=none
+  printf '%s\n' "$CUSTODY_NAMES" > "$d/names.txt"
+  if [[ -z "$CUSTODY_NAMES" ]]; then CUSTODY_TREE=none; evidence_state "clear:$tag"
     check "$sc" "custody-$tag" pass "inventory (listing succeeded): nothing quarantined on the volume — nothing to preserve or delete"; return 0; fi
   for n in $CUSTODY_NAMES; do
     [[ "$n" =~ ^catfeeddb\.(corrupt|importingtmp)\.[A-Za-z0-9._-]+$ ]] \
@@ -121,6 +132,17 @@ quarantine_custody(){ local sc="$1" tag="$2" d="$EVID/custody/$2" n files=0 byte
   lines="$(wc -l < "$d/manifest.sha256" | tr -d ' ')"
   (( lines == files )) || custody_fail "$sc" "$tag" "manifest has $lines hashes for $files files — the inventory is incomplete"
   CUSTODY_TREE="$(sha256sum "$d/manifest.sha256" | cut -d' ' -f1)"
+  # Same generation already preserved? (identical names AND identical content
+  # hashes in an earlier verified custody) — reuse it rather than copy again.
+  local o
+  for o in "$EVID"/custody/*/; do o="${o%/}"
+    [[ "$o" == "$d" || ! -s "$o/quarantine.tar.gz.sha256" ]] && continue
+    if cmp -s "$o/names.txt" "$d/names.txt" && cmp -s "$o/manifest.sha256" "$d/manifest.sha256"; then
+      basename "$o" > "$d/preserved-by"; evidence_state "preserved:$tag"
+      check "$sc" "custody-$tag" pass "this exact set [$CUSTODY_NAMES] (manifest $CUSTODY_TREE) is already preserved and verified in custody/$(basename "$o")/ — no second copy"
+      return 0
+    fi
+  done
   # Rule 3: the complete bytes, off the pressure volume, BEFORE any deletion.
   # Room for the archive plus the verification extract (worst case: no
   # compression) and 64 MiB headroom; refusing is better than a partial copy.
@@ -145,20 +167,35 @@ quarantine_custody(){ local sc="$1" tag="$2" d="$EVID/custody/$2" n files=0 byte
 # is never destroyed unrecorded), bounded and enforced; then prove, with
 # listings that themselves succeeded, that every inventoried name is gone and
 # report anything that appeared during the custody window.
-delete_custodied(){ local sc="$1" tag="$2" args="" n left after
+# A preserved archive authorizes deletion ONLY of the generation it preserves
+# (ASTRA 6360721903 #2): the state must be preserved:<tag>, the names must be
+# exactly custody/<tag>/names.txt, and the bytes on the volume are RE-HASHED and
+# must still equal custody/<tag>/manifest.sha256 immediately before deletion.
+# Any new entry, or any listing that fails, re-arms the protection (unpreserved).
+delete_custodied(){ local sc="$1" tag="$2" args="" n left after d="$EVID/custody/$2" now
   [[ -z "$CUSTODY_NAMES" ]] && return 0
-  [[ -s "$EVID/custody/$tag/quarantine.tar.gz.sha256" ]] \
-    || { check "$sc" "delete-$tag" fail "refusing to delete: no verified off-volume copy for custody '$tag'"; write_report_and_exit; }
+  { [[ -s "$d/quarantine.tar.gz.sha256" || -s "$d/preserved-by" ]] && [[ "$(evidence_state_get)" == "preserved:$tag" ]]; } \
+    || { check "$sc" "delete-$tag" fail "refusing to delete: no verified off-volume copy authorizes custody '$tag' (state '$(evidence_state_get)')"; write_report_and_exit; }
+  [[ "$(cat "$d/names.txt" 2>/dev/null)" == "$CUSTODY_NAMES" ]] \
+    || { arm_evidence "deletion refused: the set to delete [$CUSTODY_NAMES] is not the preserved set"; check "$sc" "delete-$tag" fail "refusing to delete: [$CUSTODY_NAMES] is not the set preserved in custody/$tag"; write_report_and_exit; }
+  now="$(rx 900 "find $CUSTODY_NAMES -type f -exec sha256sum {} +")" \
+    || { arm_evidence "pre-delete re-hash failed"; check "$sc" "delete-$tag" fail "refusing to delete: could not re-hash the set before deletion (rc=$?)"; write_report_and_exit; }
+  printf '%s\n' "$now" | sed '/^$/d' | LC_ALL=C sort -k2 | cmp -s - "$d/manifest.sha256" \
+    || { arm_evidence "the set changed since it was preserved"; check "$sc" "delete-$tag" fail "refusing to delete: the bytes on the volume no longer match the preserved manifest $CUSTODY_TREE"; write_report_and_exit; }
   for n in $CUSTODY_NAMES; do args+=" '$n'"; done
   dstep "$sc" "delete-$tag" 300 "cd '$MP' || exit 3; rm -rf --$args"
   left="$(rx 60 "for e in $args; do if [ -e \"\$e\" ]; then echo \"\$e\"; fi; done")" \
-    || { check "$sc" "delete-$tag" fail "could not verify the deletion: the post-delete listing failed (rc=$?)"; write_report_and_exit; }
+    || { arm_evidence "post-delete listing failed; the volume's content is unknown"; check "$sc" "delete-$tag" fail "could not verify the deletion: the post-delete listing failed (rc=$?)"; write_report_and_exit; }
   after="$(rx 60 'for e in catfeeddb.corrupt.* catfeeddb.importingtmp.*; do if [ -e "$e" ]; then echo "$e"; fi; done')" \
-    || { check "$sc" "delete-$tag" fail "could not verify the volume after deletion: listing failed (rc=$?)"; write_report_and_exit; }
+    || { arm_evidence "post-delete volume listing failed; the volume's content is unknown"; check "$sc" "delete-$tag" fail "could not verify the volume after deletion: listing failed (rc=$?)"; write_report_and_exit; }
   after="$(printf '%s' "$after" | tr '\n' ' ')"
   if [[ -n "$left" ]]; then check "$sc" "delete-$tag" fail "inventoried entries still present after deletion: $left"; write_report_and_exit
-  elif [[ -n "${after// /}" ]]; then check "$sc" "delete-$tag" fail "deleted exactly the inventoried set (manifest $CUSTODY_TREE), but un-inventoried entries appeared meanwhile: $after"
-  else check "$sc" "delete-$tag" pass "deleted exactly the inventoried, preserved set [$CUSTODY_NAMES] (manifest $CUSTODY_TREE); verified gone by a successful listing; nothing else appeared"; fi; }
+  elif [[ -n "${after// /}" ]]; then
+    # New, un-inventoried entries: the old archive does not cover them.
+    arm_evidence "un-inventoried entries appeared during custody '$tag': $after"
+    check "$sc" "delete-$tag" fail "deleted exactly the inventoried set (manifest $CUSTODY_TREE), but un-inventoried entries appeared meanwhile: $after — protection re-armed; the image is retained unless they are preserved"
+  else evidence_state "clear:$tag"
+    check "$sc" "delete-$tag" pass "deleted exactly the inventoried, preserved set [$CUSTODY_NAMES] (manifest $CUSTODY_TREE, re-hashed unchanged before deletion); verified gone by a successful listing; nothing else appeared"; fi; }
 
 # enforcement_verdict <allowed-code> <blocked-code> <blocked-body-file> — the
 # default-deny contract, as a pure decision: the allowed origin answers 200 AND

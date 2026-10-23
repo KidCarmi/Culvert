@@ -596,6 +596,10 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   [[ "$rs" == absent ]] || { check K reset-cache fail "after the reset the derived cache/marker are '$rs' (want absent from a successful check)"; write_report_and_exit; }
   LOGS_SINCE="$(IN_BOUND=15 IN date -u +%Y-%m-%dT%H:%M:%SZ)" && [[ -n "$LOGS_SINCE" ]] \
     || { check "$SCENARIO" clock-read fail "could not read the bounded host's clock"; write_report_and_exit; }
+  # ARM protection BEFORE the import starts writing (ASTRA 6360721903 #1): a
+  # kill, compose or observation failure from here on exits with the image —
+  # which holds whatever the import wrote — retained.
+  arm_evidence "an import is writing to the data volume; any partial or quarantined data on it is not yet preserved"
   dstep K compose-start 180 'cd /srv/culvert && docker compose start proxy'
   wlogs(){ INB 30 docker logs --since "$LOGS_SINCE" culvert 2>&1; }
   done_re='FeedSync: sync complete'                               # the ONLY line that clears the marker
@@ -624,7 +628,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
   # same durable state the stalled landing produces, reached deterministically.
   # From here the volume holds an interrupted import the product will quarantine:
   # evidence that must be preserved before anything may delete it or its image.
-  evidence_state "unpreserved:interrupted import on the data volume (killed mid-write) — not yet preserved off the volume"
+  arm_evidence "interrupted import on the data volume (killed mid-write) — not yet preserved off the volume"
   if marker_present; then check K interrupted-state pass "proxy SIGKILLed mid-import; $MARKER still present and the import never certified — the stall's durable end-state, reached deterministically"
   else check K interrupted-state fail "marker gone after the kill — the import may have completed; nothing was interrupted"; INCONCLUSIVE=1; write_report_and_exit; fi
   # Recovery is a plain restart (no disk is full here). The next boot MUST
@@ -720,6 +724,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     delete_custodied K pre-free
     freeAf="$(IN_BOUND=15 IN df -k "$MP" | awk 'NR==2{print $4}')" && [[ "$freeAf" =~ ^[0-9]+$ ]] || freeAf="error"
     REC_AT="$(date -u +%FT%TZ)"
+    arm_evidence "a restart after freeing space may quarantine again"
     dstep K restart-after-free 180 'cd /srv/culvert && docker compose restart proxy'
     wait_serving K restart-after-free 120
     t0=$SECONDS; res2=""
@@ -734,6 +739,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     else feedlog2="(log read failed; ${KLOG_ERRORS:-0} failed reads)"; fi
     conv_check K free-space-recovery-converges "$res2" "$waited2" "after freeing the quarantined partial, avail ${freeB4}->${freeAf} KiB; feed: ${feedlog2:-none}"
     [[ -z "$res2" ]] && diagnose K-free-space || true
+    quarantine_custody K post-free   # preserve anything the restart created; else verified clear
   else
     # Converged (or not) without a free-space step: the quarantined copy stays on
     # the volume. Record its custody anyway, so the evidence names what remains.
@@ -751,6 +757,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     if [[ -n "$probe" ]]; then check K converged-store-serves pass "/api/urlcat/lookup resolves ${probe%% *} (taken from the downloaded feed) -> tier=community category='${probe#* }' — the converged import is what serves; raw responses in probes.txt"
     else check K converged-store-serves fail "a sync completed, but no feed-derived candidate [${PROBE_CANDIDATES:-none derived}] resolves to the community tier (raw responses in probes.txt)"; fi
     qcF="$(metric culvert_catfeeddb_quarantined_copies)"; RS_AT="$(date -u +%FT%TZ)"
+    arm_evidence "a clean restart may quarantine again"
     dstep K clean-restart 180 'cd /srv/culvert && docker compose restart proxy'
     wait_serving K clean-restart 120
     # Settle window: a boot that did NOT recognise the store as certified would
@@ -773,6 +780,7 @@ if [[ "$SCENARIO" == midimport-kill ]]; then
     if [[ -n "$probe" && "$probe2" == "$probe" ]]; then check K converged-store-persists pass "after the clean restart ${probe%% *} still resolves tier=community '${probe#* }' — the certified store survived the restart"
     else check K converged-store-persists fail "after the clean restart '${probe%% *}' resolves '${probe2:-not community}' (before: '${probe:-none}')"; fi
     final_integrity K post-restart
+    quarantine_custody K post-restart   # re-verify the volume after the last restart
   else
     check K clean-restart-after-convergence info "not run: convergence was not PROVEN (verdict=$CONV_VERDICT), so there is no converged state to restart from — the run stays INCONCLUSIVE for convergence (exit 2)"
   fi

@@ -227,9 +227,50 @@ rc="$(exit_case ex-early "$UNP; dstep K compose-up 2 false")"
 expect "EXIT path: an early abort (a failed step before custody) RETAINS the image" '[[ $rc == 1 && -e "$T/ex-early/img" ]] && grep -q "RETAINED .*interrupted import on the volume" "$T/ex-early/evid/cleanup.log"'
 mkdir -p "$T/ex-ok/vol"; xq ex-ok catfeeddb.corrupt.54
 rc="$(exit_case ex-ok "$UNP; quarantine_custody K t; delete_custodied K t")"
-expect "EXIT path CONTROL: preserved + verified + deleted -> exit 0 and the image is removed" '[[ $rc == 0 && ! -e "$T/ex-ok/img" ]] && [[ "$(cat "$T/ex-ok/evid/.evidence-state")" == preserved:t ]]'
+expect "EXIT path CONTROL: preserved + verified + deleted -> exit 0, state clear, the image is removed" '[[ $rc == 0 && ! -e "$T/ex-ok/img" ]] && [[ "$(cat "$T/ex-ok/evid/.evidence-state")" == clear:t ]]'
 rc="$(exit_case ex-unpres-pass "$UNP")"
 expect "EXIT path: a run that 'passes' with evidence still unpreserved exits 3, image RETAINED" '[[ $rc == 3 && -e "$T/ex-unpres-pass/img" ]]'
+
+echo "== evidence lifecycle: arm BEFORE the risky step, invalidate on new entries (ASTRA 6360721903) =="
+# The REAL caller ordering: pre-run custody leaves the state clear/preserved,
+# then the import window is armed BEFORE the kill. A kill that fails must keep
+# the image (it holds the partial import).
+rc="$(exit_case lc-killfail 'quarantine_custody K pre-run; delete_custodied K pre-run; arm_evidence "an import is writing"; dstep K sigkill 2 false')"
+expect "lifecycle: a FAILED kill after arming exits 1 and RETAINS the image" '[[ $rc == 1 && -e "$T/lc-killfail/img" ]] && grep -q "RETAINED .*an import is writing" "$T/lc-killfail/evid/cleanup.log"'
+rc="$(exit_case lc-killhang 'quarantine_custody K pre-run; arm_evidence "an import is writing"; dstep K sigkill 1 "sleep 30"')"
+expect "lifecycle: a kill that TIMES OUT after arming RETAINS the image" '[[ $rc == 1 && -e "$T/lc-killhang/img" ]]'
+mkdir -p "$T/lc-newentry/vol"; xq lc-newentry catfeeddb.corrupt.61
+rc="$(exit_case lc-newentry "$UNP; quarantine_custody K t; mkdir \"\$MP/catfeeddb.corrupt.62\"; printf x > \"\$MP/catfeeddb.corrupt.62/MANIFEST\"; delete_custodied K t")"
+expect "lifecycle: a NEW entry after the inventory invalidates 'preserved' — exit 1, image RETAINED" '[[ $rc == 1 && -e "$T/lc-newentry/img" ]] && grep -q "RETAINED .*un-inventoried entries appeared" "$T/lc-newentry/evid/cleanup.log"'
+expect "lifecycle: and the new entry itself is never deleted" '[[ -d "$T/lc-newentry/vol/catfeeddb.corrupt.62" && ! -e "$T/lc-newentry/vol/catfeeddb.corrupt.61" ]]'
+mkdir -p "$T/lc-obserr/vol"; xq lc-obserr catfeeddb.corrupt.63
+rc="$(exit_case lc-obserr "$UNP; quarantine_custody K t; delete_custodied K t" STUB_FAIL_MATCH="for e in  '")"
+expect "lifecycle: an uncertain post-delete listing re-arms protection — exit 1, image RETAINED" '[[ $rc == 1 && -e "$T/lc-obserr/img" ]] && grep -q "RETAINED .*post-delete listing failed" "$T/lc-obserr/evid/cleanup.log"'
+mkdir -p "$T/lc-changed/vol"; xq lc-changed catfeeddb.corrupt.64
+rc="$(exit_case lc-changed "$UNP; quarantine_custody K t; printf y >> \"\$MP/catfeeddb.corrupt.64/MANIFEST\"; delete_custodied K t")"
+expect "lifecycle: bytes changed after preservation — deletion REFUSED, image RETAINED, nothing deleted" '[[ $rc == 1 && -e "$T/lc-changed/img" && -d "$T/lc-changed/vol/catfeeddb.corrupt.64" ]] && grep -q "no longer match the preserved manifest" "$T/lc-changed/evid/checks.txt"'
+mkdir -p "$T/lc-otherset/vol"; xq lc-otherset catfeeddb.corrupt.65; xq lc-otherset catfeeddb.corrupt.66
+rc="$(exit_case lc-otherset "$UNP; quarantine_custody K t; CUSTODY_NAMES=catfeeddb.corrupt.65; delete_custodied K t")"
+expect "lifecycle: an archive authorizes only the set it preserved — a different set is REFUSED" '[[ $rc == 1 && -e "$T/lc-otherset/img" && -d "$T/lc-otherset/vol/catfeeddb.corrupt.65" ]] && grep -q "is not the set preserved" "$T/lc-otherset/evid/checks.txt"'
+mkdir -p "$T/lc-reuse/vol"; xq lc-reuse catfeeddb.corrupt.67
+rc="$(exit_case lc-reuse "$UNP; quarantine_custody K a; arm_evidence restart; quarantine_custody K b")"
+expect "lifecycle: re-custody of the SAME generation reuses the verified archive (no second copy) and clears the arm" '[[ $rc == 0 && ! -e "$T/lc-reuse/evid/custody/b/quarantine.tar.gz" && "$(cat "$T/lc-reuse/evid/custody/b/preserved-by")" == a ]] && grep -q "already preserved" "$T/lc-reuse/evid/checks.txt"'
+mkdir -p "$T/lc-rearm/vol"; xq lc-rearm catfeeddb.corrupt.68
+rc="$(exit_case lc-rearm "$UNP; quarantine_custody K t; delete_custodied K t; arm_evidence \"a restart may quarantine again\"; mkdir \"\$MP/catfeeddb.corrupt.69\"; printf z > \"\$MP/catfeeddb.corrupt.69/MANIFEST\"; dstep K restart 2 false")"
+expect "lifecycle: a restart re-armed after deletion that then fails RETAINS the image holding its fresh quarantine" '[[ $rc == 1 && -e "$T/lc-rearm/img" ]] && grep -q "RETAINED .*a restart may quarantine again" "$T/lc-rearm/evid/cleanup.log"'
+
+echo "== structural: the REAL scenario arms protection before every risky step (ASTRA 6360721903) =="
+# In the K scenario, from the import onward, the nearest evidence-state change
+# before every dstep must be arm_evidence (never a stale preserved/clear state).
+order="$(awk '
+  /^if \[\[ "\$SCENARIO" == midimport-kill \]\]; then/ {k=1}
+  k && /^fi$/ {k=0}
+  !k {next}
+  /arm_evidence /                  {last="arm"; armed=1; next}
+  /quarantine_custody K|delete_custodied K/ {last="custody"; next}
+  armed && /dstep K / { match($0, /dstep K [a-z-]+/); s=substr($0, RSTART+8, RLENGTH-8); print s "=" last }
+' "$HERE/upgrade-enospc-qualify.sh" | tr '\n' ' ')"
+expect "structural: every risky K step after the import starts is preceded by arm_evidence [$order]" '[[ -n "$order" && "$order" != *"=custody"* ]] && [[ "$order" == *"compose-start=arm"* && "$order" == *"sigkill=arm"* && "$order" == *"restart-after-free=arm"* && "$order" == *"clean-restart=arm"* ]]'
 
 echo "== structural: no unbounded docker exec in the harness (ASTRA 6360307931 #3) =="
 unb="$(grep -nE 'docker exec' "$HERE/upgrade-enospc-qualify.sh" "$HERE/recovery-custody.sh" \
