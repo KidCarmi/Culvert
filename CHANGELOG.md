@@ -30,6 +30,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   composite action under `.github/` — so a new file, or a bump that rewrites a
   ref, cannot reintroduce a mutable one silently.
 
+  The gate enumerates refs by **parsing the YAML**, not by scanning for
+  `^uses:`, because the line-based first revision had a hole of exactly the kind
+  it exists to catch: YAML also accepts `uses : x@v7`, `"uses": x@v7`,
+  `'uses': x@v7` and the flow mapping `- {uses: x@v7}`, all four of which
+  GitHub Actions honours and none of which that regex matched — while the
+  hundred-odd refs it did match kept its "scanned nothing" guard satisfied. A
+  mutable tag in any of those spellings would have run with the gate green.
+  `TestWorkflowActionRefEnumerationSeesEveryUsesKey` pins all four plus the
+  job-level reusable-workflow form, so a future simplification back to a regex
+  fails instead of silently un-seeing refs. A SHA pin's comment must also now
+  *name* the revision (`# v1.2.3`, or `# branch @ YYYY-MM-DD` as `ci.yml` pins
+  an action with no releases); the first revision accepted any `#`, so `# TODO`
+  passed a check whose own message promised it named a release.
+
   `slsa-framework/slsa-github-generator` is a recorded exception with its reason:
   the generator verifies its own provenance against the invoking tag and refuses
   to run from a SHA, so pinning it would disable release provenance rather than
