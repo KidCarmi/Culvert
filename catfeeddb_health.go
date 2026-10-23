@@ -181,6 +181,12 @@ func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 	// the free-space floor (or that free space could not be measured). Reported
 	// after the runtime-fault rows above (an active memory/IO fault is the more
 	// urgent root cause) and before the recovery/healthy rows below.
+	// An abandoned import (F-DISK-RECOVERY-1) is a LATCH, not a transient
+	// failure: every later import is refused until restart. It outranks the
+	// deferral row (a deferral retries on its own; this never does).
+	if c, ok := checkCategoryFeedWriteAbandoned(); ok {
+		return c
+	}
 	if c, ok := checkCategoryFeedDeferral(); ok {
 		return c
 	}
@@ -207,6 +213,37 @@ func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 		Status:  diagOK,
 		Message: "community category store loaded",
 	}
+}
+
+// checkCategoryFeedWriteAbandoned reports a community import the watchdog
+// abandoned mid-write (internal/feedsync). The abandoned writer may still hold
+// the store, so no further import runs in this process; the durable
+// import-pending marker makes the next start quarantine the half-written store
+// and re-sync. Without this row the only signal was a generic "write" failure
+// that reads as retryable — it is not.
+func checkCategoryFeedWriteAbandoned() (OperatorContractCheck, bool) {
+	sy := globalUT1FeedSyncer
+	if sy == nil {
+		return OperatorContractCheck{}, false
+	}
+	h := sy.Health()
+	if !h.WriteAbandoned {
+		return OperatorContractCheck{}, false
+	}
+	cause := "the write did not complete within its deadline (typically a full or unresponsive data volume)"
+	if h.WriteAbandonedCause == feedsync.AbandonDegraded {
+		cause = "the store hit a contained memory fault while the write was in progress"
+	}
+	coverage := "the previously synced community categories keep serving"
+	if sy.StoreEmpty() {
+		coverage = "no community category data is loaded yet — category matching uses the admin-managed list only"
+	}
+	return OperatorContractCheck{
+		Code:           "category_feed_db",
+		Status:         diagWarn,
+		Message:        "community category import abandoned mid-write: " + cause + "; further imports are refused until this node restarts; " + coverage,
+		OperatorAction: "Check the data volume (free space, I/O errors, mount), then restart this node: the interrupted import is quarantined at the next start and the feed re-syncs automatically.",
+	}, true
 }
 
 // checkCategoryFeedDeferral reports a category sync the free-space guard

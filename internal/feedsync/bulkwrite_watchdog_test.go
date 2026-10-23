@@ -172,6 +172,11 @@ func TestSyncRound_QuiescesAfterAbandonedWrite(t *testing.T) {
 	if !s.writeAbandoned.Load() {
 		t.Fatal("a stalled BulkWrite must latch writeAbandoned (quiescence)")
 	}
+	// The latch is reported as "restart required", with its cause, not only as
+	// the generic "write" failure (item 4: latched-fault reporting).
+	if h := s.Health(); !h.WriteAbandoned || h.WriteAbandonedCause != AbandonStalled || h.WriteAbandonedAt.IsZero() {
+		t.Fatalf("Health must report the stalled abandon: %+v", h)
+	}
 
 	// Round 2 (the scheduler's retry): MUST be quiesced — no second BulkWrite,
 	// no download, no BeginImport — so the held writer stays the sole writer.

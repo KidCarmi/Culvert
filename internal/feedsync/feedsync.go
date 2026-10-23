@@ -182,6 +182,11 @@ type Syncer struct {
 	// intra-process; a restart is the recovery, and the durable marker carries
 	// the interrupted-import state across it.
 	writeAbandoned atomic.Bool
+	// writeAbandonedCause / writeAbandonedAt describe the latch for operators
+	// (Health). Stored BEFORE writeAbandoned is set, so a reader that sees the
+	// latch also sees its cause. Only the sequential sync round writes them.
+	writeAbandonedCause atomic.Value // string: AbandonStalled | AbandonDegraded
+	writeAbandonedAt    atomic.Value // time.Time
 
 	// writeReturnedForTest, when non-nil, receives the result of the BulkWrite
 	// goroutine at the moment it ACTUALLY returns — including a write the
@@ -261,6 +266,18 @@ const (
 	bulkWriteStalled                                  // neither returned nor degraded within the deadline
 )
 
+// Causes reported in Health.WriteAbandonedCause when the watchdog abandoned a
+// BulkWrite (F-DISK-RECOVERY-1). They are a bounded set: the operator surfaces
+// branch on them.
+const (
+	// AbandonStalled: the write neither returned nor degraded the store within
+	// the stall deadline (typically a full or unresponsive data volume).
+	AbandonStalled = "stalled"
+	// AbandonDegraded: the store latched a contained memory fault while the
+	// write was blocked.
+	AbandonDegraded = "degraded_mid_write"
+)
+
 // Health is a consistent snapshot of the UT1 syncer's state for the metrics
 // and diagnostics surfaces.
 type Health struct {
@@ -271,6 +288,13 @@ type Health struct {
 	LastFailure         string
 	SyncInterval        time.Duration
 	Domains             int64
+	// WriteAbandoned is true once a BulkWrite was abandoned mid-write. It is a
+	// LATCH for the life of the process: every later import is refused, so the
+	// state is "restart required", not a transient failure — which is why it is
+	// reported separately from LastFailure (which only says "write").
+	WriteAbandoned      bool
+	WriteAbandonedCause string    // AbandonStalled | AbandonDegraded
+	WriteAbandonedAt    time.Time // when the watchdog gave up on the write
 }
 
 // Health returns the current snapshot.
@@ -288,8 +312,30 @@ func (fs *Syncer) Health() Health {
 	if v, ok := fs.lastFailure.Load().(string); ok {
 		h.LastFailure = v
 	}
+	if fs.writeAbandoned.Load() {
+		h.WriteAbandoned = true
+		h.WriteAbandonedCause, _ = fs.writeAbandonedCause.Load().(string)
+		h.WriteAbandonedAt, _ = fs.writeAbandonedAt.Load().(time.Time)
+	}
 	return h
 }
+
+// latchWriteAbandoned records that a BulkWrite was abandoned, with its cause.
+// The first cause wins (the latch is never cleared in-process). Only the
+// sequential sync round calls it.
+func (fs *Syncer) latchWriteAbandoned(cause string) {
+	if fs.writeAbandoned.Load() {
+		return
+	}
+	fs.writeAbandonedCause.Store(cause)
+	fs.writeAbandonedAt.Store(time.Now())
+	fs.writeAbandoned.Store(true)
+}
+
+// MarkWriteAbandonedForTest drives the latch without a real stalled write, so a
+// caller outside the package (the operator surfaces in package main) can test
+// its rendering. Test support only, like SeedStats.
+func (fs *Syncer) MarkWriteAbandonedForTest(cause string) { fs.latchWriteAbandoned(cause) }
 
 // New creates a Syncer for the given DB.
 // feedURL defaults to defaultUT1FeedURL when empty.
@@ -516,7 +562,7 @@ func (fs *Syncer) syncRound() bool {
 		// boot; this round is surfaced truthfully now. Latch writeAbandoned so no
 		// new import races the still-in-flight writer (defense-in-depth beside the
 		// storeDegraded latch, which already quiesces this path).
-		fs.writeAbandoned.Store(true)
+		fs.latchWriteAbandoned(AbandonDegraded)
 		fs.noteFailure(failWrite)
 		obs.Printf("FeedSync: bulk write did not complete — the community category store latched degraded after a contained memory fault mid-write (import NOT complete; the store is rebuilt on the next start)")
 		return false
@@ -525,7 +571,7 @@ func (fs *Syncer) syncRound() bool {
 		// full disk), so storeDegraded stays false. Latch writeAbandoned so the
 		// scheduler's next round does NOT start a second BulkWrite that races the
 		// stalled, still-in-flight writer (ASTRA: the held-writer overwrite).
-		fs.writeAbandoned.Store(true)
+		fs.latchWriteAbandoned(AbandonStalled)
 		fs.noteFailure(failWrite)
 		obs.Printf("FeedSync: bulk write stalled past %s without returning (import NOT complete; the store is rebuilt on the next start)", bulkWriteStallTimeout)
 		return false

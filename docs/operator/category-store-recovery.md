@@ -73,6 +73,7 @@ the path and cause.
 | store re-created this boot | `warn` |
 | quarantined copies still on the volume | `warn` |
 | store unavailable, running Layer-1 only | `warn` |
+| an import was abandoned mid-write — restart required | `warn` |
 
 The row never reports `fail`: a node on Layer-1-only categorisation is fully
 able to serve traffic — it is the same posture as a node started without
@@ -90,6 +91,35 @@ culvert_catfeeddb_quarantined_copies   N     # .corrupt.* directories still on t
 
 A useful alert is `culvert_catfeeddb_quarantined_copies > 0` **for more than a
 day** — that is disk nobody has reclaimed and an incident nobody has looked at.
+
+```
+culvert_category_feed_write_abandoned  0|1   # 1 = an import was abandoned mid-write; restart required
+```
+
+`culvert_category_feed_write_abandoned` is emitted only when the community
+feed is configured. Page on `== 1`: unlike every other feed failure it does
+**not** clear by itself (see below).
+
+### An import abandoned mid-write (restart required)
+
+If a feed import's bulk write stops making progress — it does not return within
+its deadline (90 s), typically because the data volume is full or unresponsive,
+or the store latches a contained memory fault while the write is blocked — the
+syncer stops waiting for it and reports the import as failed. The write itself
+**cannot be cancelled** (the storage engine's write takes no deadline), so it
+may still be holding the store. To stop it racing a second import, the syncer
+then refuses **every** further import until the node restarts. The `/api/diagnostics`
+row says so (`community category import abandoned mid-write … further imports
+are refused until this node restarts`) together with whether earlier data is
+still serving, and the gauge above reads `1`.
+
+What you should do: check the data volume (free space, I/O errors, mount), fix
+it, then **restart the node**. Shutdown does not wait for the stuck write — it
+closes the store and exits normally. At the next start the half-written store
+is detected (a durable import-pending marker survives the stop, including a
+kill), quarantined as `catfeeddb.corrupt.*`, re-created empty, and re-synced.
+Until you restart, community categories stay as they were before the failed
+import (or absent, if there were none yet); Layer 1 is unaffected.
 
 ## What you should do
 
