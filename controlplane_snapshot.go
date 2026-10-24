@@ -1561,7 +1561,15 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 		cur := pacStore.Get()
 		cur.Exclusions = snap.PACExclusions
 		if err := pacStore.Set(cur); err != nil {
-			logger.Printf("DataPlane: PAC exclusions NOT applied this sync (deferred, previous list still live): %v", err)
+			// sanitizeLog + %q per the CWE-117 rule in conventions.md: CodeQL
+			// traces a user-provided value into this sink (alert 420). The
+			// error carries the store path, and Store.Set now reaches its
+			// durable write through the storeAtomicWrite seam, so CodeQL can
+			// no longer prove the returned error is independent of the
+			// snapshot-derived config it was handed. Sanitising at the sink
+			// is correct either way and is the barrier CodeQL recognises.
+			logger.Printf("DataPlane: PAC exclusions NOT applied this sync (deferred, previous list still live): %q",
+				sanitizeLog(err.Error()))
 		}
 	}
 	// PAC profiles/pools (PAC initiative PR 2): nil-skip (old CP), non-nil
