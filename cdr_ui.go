@@ -1149,7 +1149,7 @@ func cdrPickOtherClient(exclude string) *CDRClient {
 		if pc.Name == exclude {
 			continue
 		}
-		if pc.Breaker.Allow() {
+		if pc.Breaker.Available() { // non-consuming: no sanitize outcome is recorded here
 			return pc.Client
 		}
 	}
@@ -1256,8 +1256,7 @@ func apiCDRTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	client := cdrActiveClient()
-	if client == nil {
+	if cdrPool.Len() == 0 {
 		http.Error(w, "no active CDR client", http.StatusServiceUnavailable)
 		return
 	}
@@ -1284,13 +1283,33 @@ func apiCDRTest(w http.ResponseWriter, r *http.Request) {
 		PolicyVersion: cdrPolicyVersionString(),
 	}
 
+	// This is a REAL Sanitize RPC, so it goes through the breaker exactly like
+	// the proxy path: it reserves (in half-open, one slot of the probe budget),
+	// and it records the outcome or hands the slot back. Selecting through the
+	// non-consuming picker instead let concurrent admin tests run alongside the
+	// recovery probe without being counted or reported, defeating the half-open
+	// concurrency limit against a recovering Sluice. When no slot is free the
+	// admin gets a clear 503 rather than a bypass.
+	pooled, resv := cdrPickPooledReserved()
+	if pooled == nil {
+		http.Error(w, "CDR is recovering; retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	defer pooled.Breaker.Release(resv) // no-op once an outcome is recorded
+
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	res, err := client.Sanitize(ctx, header, bytes.NewReader(body))
+	res, err := pooled.Client.Sanitize(ctx, header, bytes.NewReader(body))
 	if err != nil {
+		if !IsFileTooLarge(err) {
+			cdrMarkOutcome(pooled.Name, resv, true)
+		}
 		http.Error(w, fmt.Sprintf("Sanitize failed: %v", err), http.StatusBadGateway)
 		return
 	}
+	// The same classification the proxy path applies (cdrClassifyResult): an
+	// engine ERROR or an unknown status is an instance failure.
+	cdrMarkOutcome(pooled.Name, resv, cdrStatusIsInstanceFailure(res.Status))
 
 	auditEventDiff(r, "cdr.test", filename,
 		fmt.Sprintf("size=%d status=%s threats=%d duration_ms=%d",

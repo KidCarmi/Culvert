@@ -79,7 +79,7 @@ type DataPlaneClient struct {
 	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 	// jitter decorrelates this node's retry delays from the rest of the fleet
-	// (CHAOS-71). Assigned once by NewDataPlaneClient and never mutated, so the
+	// (CHAOS-89). Assigned once by NewDataPlaneClient and never mutated, so the
 	// loop goroutines that read it need no synchronisation. A nil value — every
 	// struct-literal client in the tests — means "no jitter", which is exactly
 	// what a cadence assertion wants: see jitterDelay.
@@ -106,7 +106,7 @@ const dpFailoverAfterFailures = 3
 // backoff sleeps for an exponentially increasing, jittered duration after
 // consecutive Control Plane failures: 2s, 4s, 8s, … capped at dpBackoffCeiling.
 //
-// CHAOS-71 — two corrections to the original implementation, both of which the
+// CHAOS-89 — two corrections to the original implementation, both of which the
 // empirical ladder disproved rather than inspection:
 //
 //  1. It no longer increments failCount. It used to, on top of the increment
@@ -287,7 +287,7 @@ func (c *DataPlaneClient) reconnectActive() error {
 // failover tries the next CP address in the list. Returns true if a new
 // connection was established, false if all addresses have been tried.
 //
-// CHAOS-71: a successful redial deliberately does NOT clear failCount. It used
+// CHAOS-89: a successful redial deliberately does NOT clear failCount. It used
 // to, and that single assignment defeated the entire backoff ladder on every
 // HA deployment: a reachable-but-not-serving CP pair (overloaded, fenced out,
 // or timing out an oversized snapshot) answers the TCP/TLS dial while failing
@@ -318,7 +318,7 @@ func (c *DataPlaneClient) failover() bool {
 }
 
 // dpStartupStaggerMax caps the one-time phase offset applied before each
-// CP-facing ticker starts (CHAOS-71).
+// CP-facing ticker starts (CHAOS-89).
 //
 // Five seconds is chosen against the ONE deadline a stagger can actually
 // endanger: heartbeatTimeout (enrollment.go) marks a node disconnected after
@@ -613,8 +613,9 @@ func (c *DataPlaneClient) tryDeltaSync(ctx context.Context) bool {
 func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// ADR-0005 S3: fence before ANY mutation. A fenced-out zombie CP's delta is
 	// rejected; skip the cycle rather than fall through to a full pull that would
-	// re-fence identically.
-	if !dpObserveEpoch("config delta", reply.Epoch) {
+	// re-fence identically. The fence reads every epoch the reply carries, not
+	// only its own label (deltaReplyEpochs).
+	if !dpObserveEpoch("config delta", deltaReplyEpochs(reply, 0).highest) {
 		return true
 	}
 	// Base must match ours (strict sequential), and the target must move strictly
@@ -630,6 +631,9 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 		logger.Printf("DataPlane: parse delta remainder v%d: %v — full resync", reply.TargetVersion, err)
 		markConfigSnapshotApplyRejected()
 		return false
+	}
+	if !fenceDeltaTarget(deltaReplyEpochs(reply, remainder.Epoch)) {
+		return true // still before any mutation
 	}
 	if err := validateConfigSnapshot(remainder); err != nil {
 		logger.Printf("DataPlane: rejecting delta remainder v%d: %v", reply.TargetVersion, err)
@@ -666,6 +670,42 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	c.lastPolicyVersion.Store(remainder.PolicyVersion)
 	logger.Printf("DataPlane: applied config delta → v%d (%d step(s))", reply.TargetVersion, len(reply.Deltas))
 	return true
+}
+
+// deltaEpochs is what a delta reply says about fencing epochs: the highest it
+// carries anywhere (its own label, every delta entry's, the remainder's) and
+// the lowest stamp on its TARGET data (the remainder's — the target
+// snapshot's stamp — and the last delta's, which produced the target). The
+// reply's own label is not target data: a stale label on data committed under
+// a higher epoch is ratcheted past, not trusted.
+type deltaEpochs struct{ highest, target int64 }
+
+// deltaReplyEpochs reads every epoch a delta reply carries (Codex P1
+// 4302926140 on #1645). A CP that labelled the reply from live HA state could
+// send version N+1, committed with a new grant's epoch E2, labelled with the
+// old E1; checking the label alone, the Data Plane applied N+1 without
+// ratcheting to E2 and could later accept a higher-version E1 snapshot from a
+// fenced Control Plane. remainderEpoch: 0 until the remainder is parsed.
+func deltaReplyEpochs(reply getConfigDeltaReply, remainderEpoch int64) deltaEpochs {
+	e := deltaEpochs{highest: max(reply.Epoch, remainderEpoch), target: remainderEpoch}
+	for i := range reply.Deltas {
+		e.highest = max(e.highest, reply.Deltas[i].Epoch)
+	}
+	if n := len(reply.Deltas); n > 0 {
+		e.target = min(e.target, reply.Deltas[n-1].Epoch)
+	}
+	return e
+}
+
+// fenceDeltaTarget is the delta fence once the remainder is parsed: ratchet to
+// the highest epoch the reply carries, then require its target to stand at
+// that ratchet. Older chain entries may carry older epochs (a chain can span a
+// failover), but a target labelled below an epoch the same reply carries is a
+// fenced Control Plane's write after a higher-epoch commit (S3's zombie
+// shape): rejected. Two ordinary dpObserveEpoch calls, so its ratchet contract
+// (CAS forward, persisted, 0 accepted only while unseeded) is unchanged.
+func fenceDeltaTarget(e deltaEpochs) bool {
+	return dpObserveEpoch("config delta", e.highest) && dpObserveEpoch("config delta target", e.target)
 }
 
 // buildMetricsReport assembles the DP→CP heartbeat report. The version facts
@@ -962,7 +1002,7 @@ func updateDPAddresses(addrs []string) {
 		return
 	}
 	old := c.addrs
-	// CHAOS-72c (found while fixing CHAOS-72b): activeIdx is an index INTO
+	// CHAOS-91 (found while fixing CHAOS-71 address-republish rider): activeIdx is an index INTO
 	// c.addrs naming the address c.conn is connected to, so replacing the slice
 	// without re-resolving it leaves a stale index. A shrinking list then makes
 	// reconnectActive's `c.addrs[c.activeIdx]` panic — its len==0 guard does not
@@ -972,7 +1012,7 @@ func updateDPAddresses(addrs []string) {
 	//
 	// Reachable before this fix and newly easy to reach: a DP configured with
 	// two CP addresses sits at activeIdx=1 after one failover, and an HA
-	// promotion published a ONE-element list (CHAOS-72b), which is exactly the
+	// promotion published a ONE-element list (CHAOS-71 address-republish rider), which is exactly the
 	// shrink that panics.
 	//
 	// Re-resolve by ADDRESS, not by clamping the index: clamping would silently

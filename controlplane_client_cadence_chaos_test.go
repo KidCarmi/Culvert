@@ -1,6 +1,6 @@
 package main
 
-// controlplane_client_cadence_chaos_test.go — CHAOS-71: the DP→CP retry cadence
+// controlplane_client_cadence_chaos_test.go — CHAOS-89: the DP→CP retry cadence
 // under a Control Plane outage.
 //
 // The Control Plane is the one dependency every data plane shares, so its
@@ -39,11 +39,11 @@ func cpDownClient(t *testing.T, addrs ...string) (*DataPlaneClient, *atomic.Int3
 	t.Helper()
 	var calls atomic.Int32
 	return &DataPlaneClient{
-		nodeID: "dp-chaos71",
+		nodeID: "dp-chaos89",
 		addrs:  addrs,
 		callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 			calls.Add(1)
-			return nil, errors.New("chaos71: control plane unreachable")
+			return nil, errors.New("chaos89: control plane unreachable")
 		},
 	}, &calls
 }
@@ -57,12 +57,12 @@ func cancelledCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// TestChaos71_BackoffLadderIsTheDocumentedOne pins the ladder that the doubled
+// TestChaos89_BackoffLadderIsTheDocumentedOne pins the ladder that the doubled
 // increment silently replaced. Before the fix the observed delays for the first
 // three failed polls were 4s, 16s and 60s: the ceiling on the THIRD poll
 // instead of the sixth, costing a data plane up to a minute of config
 // convergence after a blip barely long enough to notice.
-func TestChaos71_BackoffLadderIsTheDocumentedOne(t *testing.T) {
+func TestChaos89_BackoffLadderIsTheDocumentedOne(t *testing.T) {
 	want := []time.Duration{
 		2 * time.Second,
 		4 * time.Second,
@@ -87,10 +87,10 @@ func TestChaos71_BackoffLadderIsTheDocumentedOne(t *testing.T) {
 	}
 }
 
-// TestChaos71_StreakAdvancesOncePerFailedPoll is the direct regression test for
+// TestChaos89_StreakAdvancesOncePerFailedPoll is the direct regression test for
 // the double increment: the streak is the input to BOTH the ladder and the
 // failover gate, so an extra increment per poll corrupted both at once.
-func TestChaos71_StreakAdvancesOncePerFailedPoll(t *testing.T) {
+func TestChaos89_StreakAdvancesOncePerFailedPoll(t *testing.T) {
 	ctx := cancelledCtx(t)
 	c, calls := cpDownClient(t, "cp1:50051") // single CP: failover is impossible
 
@@ -107,12 +107,12 @@ func TestChaos71_StreakAdvancesOncePerFailedPoll(t *testing.T) {
 	}
 }
 
-// TestChaos71_FailoverTripsOnTheThirdFailureNotTheSecond pins the gate that the
+// TestChaos89_FailoverTripsOnTheThirdFailureNotTheSecond pins the gate that the
 // doubled increment moved. Redialling a peer one failure early is not a safe
 // direction to err in: it is extra connection churn aimed at a CP that may be
 // merely blipping, which is exactly what the snapshot-scaled call deadline
 // (dpConfigMaxDeadline) was introduced to avoid causing.
-func TestChaos71_FailoverTripsOnTheThirdFailureNotTheSecond(t *testing.T) {
+func TestChaos89_FailoverTripsOnTheThirdFailureNotTheSecond(t *testing.T) {
 	ctx := cancelledCtx(t)
 	c, _ := cpDownClient(t, "cp1:50051", "cp2:50051")
 	startIdx := c.activeIdx
@@ -133,13 +133,13 @@ func TestChaos71_FailoverTripsOnTheThirdFailureNotTheSecond(t *testing.T) {
 	}
 }
 
-// TestChaos71_SustainedOutageConvergesOnTheCeiling is the regression test for
+// TestChaos89_SustainedOutageConvergesOnTheCeiling is the regression test for
 // the failover streak reset, and the most consequential of the three: because
 // failover() cleared failCount on a successful DIAL, an HA pair that answered
 // TCP while failing GetConfig held every data plane on the low rungs of the
 // ladder indefinitely. The streak must grow monotonically across failovers so
 // the ladder actually reaches its ceiling.
-func TestChaos71_SustainedOutageConvergesOnTheCeiling(t *testing.T) {
+func TestChaos89_SustainedOutageConvergesOnTheCeiling(t *testing.T) {
 	ctx := cancelledCtx(t)
 	c, _ := cpDownClient(t, "cp1:50051", "cp2:50051")
 
@@ -168,22 +168,22 @@ func TestChaos71_SustainedOutageConvergesOnTheCeiling(t *testing.T) {
 	}
 }
 
-// TestChaos71_SuccessfulPollClearsTheStreak is the negative control for the two
+// TestChaos89_SuccessfulPollClearsTheStreak is the negative control for the two
 // tests above: the fix removes the reset from the redial path, so the only
 // remaining reset — an actually successful poll — must still work. Without this
 // a "fix" that never cleared the streak would pin every other assertion here
 // while leaving a recovered CP permanently on the 60s ceiling.
-func TestChaos71_SuccessfulPollClearsTheStreak(t *testing.T) {
+func TestChaos89_SuccessfulPollClearsTheStreak(t *testing.T) {
 	ctx := cancelledCtx(t)
 	var healthy atomic.Bool
 	c := &DataPlaneClient{
-		nodeID: "dp-chaos71",
+		nodeID: "dp-chaos89",
 		addrs:  []string{"cp1:50051", "cp2:50051"},
 		callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 			if healthy.Load() {
 				return json.RawMessage(`{}`), nil
 			}
-			return nil, errors.New("chaos71: control plane unreachable")
+			return nil, errors.New("chaos89: control plane unreachable")
 		},
 	}
 	for poll := 1; poll <= 4; poll++ {
@@ -203,12 +203,12 @@ func TestChaos71_SuccessfulPollClearsTheStreak(t *testing.T) {
 	}
 }
 
-// TestChaos71_JitterDecorrelatesTheRetryInstant asserts the property that makes
+// TestChaos89_JitterDecorrelatesTheRetryInstant asserts the property that makes
 // a fleet's recovery survivable: two nodes handed the same ladder rung must not
 // retry at the same instant. The CP outage that starts every node's streak is a
 // single shared event, so without this the ladder is a schedule the whole fleet
 // agrees on.
-func TestChaos71_JitterDecorrelatesTheRetryInstant(t *testing.T) {
+func TestChaos89_JitterDecorrelatesTheRetryInstant(t *testing.T) {
 	const (
 		fleet = 200
 		base  = 30 * time.Second
@@ -252,12 +252,12 @@ func mostCommonCount(m map[time.Duration]int) int {
 	return worst
 }
 
-// TestChaos71_StartupStaggerIsBoundedAndSpread pins the phase offset that keeps
+// TestChaos89_StartupStaggerIsBoundedAndSpread pins the phase offset that keeps
 // a fleet's tickers out of lockstep: bounded above by dpStartupStaggerMax so it
 // can never approach the 90s heartbeat timeout, bounded by the loop's own
 // interval so a sub-second loop is not delayed past its first tick, and
 // actually spread rather than constant.
-func TestChaos71_StartupStaggerIsBoundedAndSpread(t *testing.T) {
+func TestChaos89_StartupStaggerIsBoundedAndSpread(t *testing.T) {
 	for _, interval := range []time.Duration{
 		500 * time.Millisecond, 3 * time.Second, 10 * time.Second, 30 * time.Second, time.Hour,
 	} {
@@ -282,10 +282,10 @@ func TestChaos71_StartupStaggerIsBoundedAndSpread(t *testing.T) {
 	}
 }
 
-// TestChaos71_StaggerYieldsToShutdown asserts the stagger is a cancellation
+// TestChaos89_StaggerYieldsToShutdown asserts the stagger is a cancellation
 // point, not a sleep: a SIGTERM arriving in the offset window must not be held
 // for it, and the caller must learn that so it can run its own teardown.
-func TestChaos71_StaggerYieldsToShutdown(t *testing.T) {
+func TestChaos89_StaggerYieldsToShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
@@ -300,13 +300,13 @@ func TestChaos71_StaggerYieldsToShutdown(t *testing.T) {
 	}
 }
 
-// TestChaos71_GossipLoopDisarmsWhenCancelledDuringTheStagger covers the one
+// TestChaos89_GossipLoopDisarmsWhenCancelledDuringTheStagger covers the one
 // teardown the stagger could have swallowed: rateLimitGossipLoop arms
 // cluster-aware rate limiting BEFORE waiting out its offset, so a cancellation
 // inside that window must disarm it exactly as the loop's own ctx.Done() branch
 // does. Leaving it armed would hold the limiter in cluster mode with no gossip
 // ever arriving behind it.
-func TestChaos71_GossipLoopDisarmsWhenCancelledDuringTheStagger(t *testing.T) {
+func TestChaos89_GossipLoopDisarmsWhenCancelledDuringTheStagger(t *testing.T) {
 	limiter := newRateLimiter()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -327,22 +327,22 @@ func TestChaos71_GossipLoopDisarmsWhenCancelledDuringTheStagger(t *testing.T) {
 	}
 }
 
-// TestChaos71_ColdStartPollIsNeverStaggered is the guard on the one ordering
+// TestChaos89_ColdStartPollIsNeverStaggered is the guard on the one ordering
 // the stagger must not change. A node with no last-known-good snapshot
 // enforces nothing until its first poll lands, so delaying that poll to smooth
 // a boot burst would trade a security property for load. Every SUBSEQUENT poll
 // is staggered; the first must not be.
-func TestChaos71_ColdStartPollIsNeverStaggered(t *testing.T) {
+func TestChaos89_ColdStartPollIsNeverStaggered(t *testing.T) {
 	polled := make(chan struct{}, 1)
 	c := &DataPlaneClient{
-		nodeID: "dp-chaos71",
+		nodeID: "dp-chaos89",
 		addrs:  []string{"cp1:50051"},
 		callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 			select {
 			case polled <- struct{}{}:
 			default:
 			}
-			return nil, errors.New("chaos71: control plane unreachable")
+			return nil, errors.New("chaos89: control plane unreachable")
 		},
 	}
 	// Install a KNOWN, long phase offset. Waiting out the real offset would not
@@ -376,10 +376,10 @@ func TestChaos71_ColdStartPollIsNeverStaggered(t *testing.T) {
 	}
 }
 
-// TestChaos71_BackoffDoesNotOutliveShutdown pins the backoff as a cancellation
+// TestChaos89_BackoffDoesNotOutliveShutdown pins the backoff as a cancellation
 // point. The ceiling is a minute; a drain that waited one out would blow any
 // shutdown budget in the process.
-func TestChaos71_BackoffDoesNotOutliveShutdown(t *testing.T) {
+func TestChaos89_BackoffDoesNotOutliveShutdown(t *testing.T) {
 	c, _ := cpDownClient(t, "cp1:50051")
 	c.failCount = 6 // the ceiling rung
 	ctx, cancel := context.WithCancel(context.Background())
@@ -402,11 +402,11 @@ func TestChaos71_BackoffDoesNotOutliveShutdown(t *testing.T) {
 	}
 }
 
-// TestChaos71_BackoffLogLineReportsTheRealDelay keeps the operator-facing
+// TestChaos89_BackoffLogLineReportsTheRealDelay keeps the operator-facing
 // evidence honest. The doubled increment also made the log line itself
 // misleading ("backing off 4s (failure #2)" on the FIRST failed poll), so an
 // operator reading it could not have reconstructed the real cadence.
-func TestChaos71_BackoffLogLineReportsTheRealDelay(t *testing.T) {
+func TestChaos89_BackoffLogLineReportsTheRealDelay(t *testing.T) {
 	ctx := cancelledCtx(t)
 	c, _ := cpDownClient(t, "cp1:50051")
 
@@ -421,13 +421,13 @@ func TestChaos71_BackoffLogLineReportsTheRealDelay(t *testing.T) {
 	}
 }
 
-// TestChaos71_ProductionClientHasJitterInstalled is the wiring guard. Every
+// TestChaos89_ProductionClientHasJitterInstalled is the wiring guard. Every
 // assertion above about jitter is about the FUNCTION; this one is about the
 // constructor, because the whole fleet-decorrelation property is one struct
 // field away from being silently absent in production while every other test
 // in this file still passes.
-func TestChaos71_ProductionClientHasJitterInstalled(t *testing.T) {
-	c, err := NewDataPlaneClient("dp-chaos71", "127.0.0.1:1", "", "", "")
+func TestChaos89_ProductionClientHasJitterInstalled(t *testing.T) {
+	c, err := NewDataPlaneClient("dp-chaos89", "127.0.0.1:1", "", "", "")
 	if err != nil {
 		t.Fatalf("NewDataPlaneClient: %v", err)
 	}

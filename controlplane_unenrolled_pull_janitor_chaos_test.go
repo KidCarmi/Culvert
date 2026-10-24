@@ -1,6 +1,6 @@
 package main
 
-// controlplane_unenrolled_pull_janitor_chaos_test.go — CHAOS-73: the unenrolled
+// controlplane_unenrolled_pull_janitor_chaos_test.go — CHAOS-90: the unenrolled
 // config-pull throttle must not grow without bound.
 //
 // unenrolledConfigPullAllow prunes a per-IP timestamp slice only on that same
@@ -39,10 +39,10 @@ func unenrolledPullEntries() int {
 	return len(unenrolledConfigPull.attempts)
 }
 
-// TestChaos73_JanitorReclaimsOneShotPeerEntries is the regression test: a sweep
+// TestChaos90_JanitorReclaimsOneShotPeerEntries is the regression test: a sweep
 // of peers that pulled once, long enough ago to have aged out, must leave the
 // map empty rather than holding one entry per address forever.
-func TestChaos73_JanitorReclaimsOneShotPeerEntries(t *testing.T) {
+func TestChaos90_JanitorReclaimsOneShotPeerEntries(t *testing.T) {
 	resetUnenrolledPullForTest(t)
 
 	// A source sweep: many distinct addresses, one pull each, all stale. The
@@ -65,11 +65,11 @@ func TestChaos73_JanitorReclaimsOneShotPeerEntries(t *testing.T) {
 	}
 }
 
-// TestChaos73_JanitorKeepsLiveWindows is the negative control. A sweep that
+// TestChaos90_JanitorKeepsLiveWindows is the negative control. A sweep that
 // reclaimed in-window state would silently reset the throttle, turning a
 // memory fix into an exfiltration-rate regression — the throttle exists to
 // make bulk pulls slow.
-func TestChaos73_JanitorKeepsLiveWindows(t *testing.T) {
+func TestChaos90_JanitorKeepsLiveWindows(t *testing.T) {
 	resetUnenrolledPullForTest(t)
 
 	const ip = "203.0.113.77"
@@ -98,11 +98,11 @@ func TestChaos73_JanitorKeepsLiveWindows(t *testing.T) {
 	}
 }
 
-// TestChaos73_JanitorDoesNotChangeTheThrottleDecision pins the property that
+// TestChaos90_JanitorDoesNotChangeTheThrottleDecision pins the property that
 // makes this fix safe to ship: sweeping is about reclaiming memory, not about
 // relaxing the limit. A peer that has exhausted its window must still be
 // refused immediately after a sweep.
-func TestChaos73_JanitorDoesNotChangeTheThrottleDecision(t *testing.T) {
+func TestChaos90_JanitorDoesNotChangeTheThrottleDecision(t *testing.T) {
 	resetUnenrolledPullForTest(t)
 
 	const ip = "203.0.113.90"

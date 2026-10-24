@@ -1465,111 +1465,112 @@ func initClusterCA(clusterDBPath string) {
 	}
 }
 
-// enableControlPlane activates Control Plane mode: starts the gRPC server,
+// enableControlPlane activates Control Plane mode: starts the gRPC listener,
 // initialises the cluster CA, and starts the heartbeat monitor.
-// Safe to call at runtime from the admin API (idempotent — returns error if already CP).
+//
+// This is the SYNCHRONOUS entry point, used by the live admin API
+// (`apiClusterMode`) and by the HA promote callback. A listener that cannot
+// come up is reported as an error — which is what it always did here, and the
+// asymmetry CHAOS-71 found was that the BOOT path took the same error and
+// called `logFatalf` on it. The boot path is now
+// `enableControlPlaneResilient`; see cp_grpc_bind.go for the finding.
+//
+// Idempotent: returns an error if already CP.
 func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
+	return activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath, false, nil)
+}
+
+// enableControlPlaneResilient is the BOOT path's entry point: identical to
+// enableControlPlane except that a first-attempt listener failure is TOLERATED
+// — the supervisor keeps retrying at a bounded rate and this node serves
+// traffic meanwhile — instead of terminating the process.
+//
+// onActivated runs ONCE, after the CP role is claimed on an observed bind. It
+// carries the work that must not happen until the listener is real; on the boot
+// path that is the HA leadership resume.
+func enableControlPlaneResilient(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, onActivated func()) error {
+	return activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath, true, onActivated)
+}
+
+// activateControlPlane is the shared body: one-time preparation, then the
+// listener, then the role.
+//
+// cpActivationMu is the OUTER lock and is taken for the whole operation —
+// preparation, bind and role claim are four individually-atomic steps that are
+// jointly not, so un-serialised two concurrent activations could each bind and
+// the later role claim could point at a socket the other one is serving (the
+// `caMutationMu` pattern, §18). clusterRoleMu is taken INSIDE it, briefly, by
+// the readers and by commitActivation (claimRole) — never held across the
+// bind, which is what lets the supervisor goroutine claim the role on a later
+// successful attempt without deadlocking against a starter waiting on it.
+func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, tolerateFirstFailure bool, onActivated func()) error {
+	// An undo still draining (deactivateControlPlane) holds the role it is
+	// about to restore: wait it out, OUTSIDE the lock its release takes, so a
+	// promote retry gets "deactivating, retry" rather than "already running"
+	// (Codex P1 4303232156 on #1645).
+	if err := awaitCPDeactivation(cpListenerStopWait()); err != nil {
+		return err
+	}
+	cpActivationMu.Lock()
+	defer cpActivationMu.Unlock()
+	if cpDeactivation != nil {
+		return fmt.Errorf("%w — retry once it completes", errCPDeactivating)
+	}
+
+	alreadyCP := isControlPlaneRole()
+	if alreadyCP {
+		return fmt.Errorf("already running as control-plane")
+	}
 	if grpcAddr == "" {
 		return fmt.Errorf("gRPC listen address is required")
 	}
-
-	// CHAOS-72: build the initial snapshot BEFORE taking clusterRoleMu.
-	//
-	// CurrentConfigSnapshot reads clusterRoleMu itself — via buildCPAddressList,
-	// which needs clusterRole.grpcAddr for the DP failover address list — and
-	// sync.RWMutex is not reentrant, so an RLock from inside the write-locked
-	// section blocks on this same goroutine and never wakes. That turned every
-	// HA standby→leader promotion into a permanent hang: buildCPAddressList
-	// returns early only when HA is DISABLED, and a standby's role makes
-	// Status().Enabled true for its whole stint, so the guard was open on
-	// exactly the path that uses it. Worse than a failed promotion, the hung
-	// goroutine keeps holding the clusterRoleMu WRITE lock, so every reader —
-	// diagnostics, /healthz, the PAC mutation gate, the support bundle — wedges
-	// behind it, and the node that was supposed to become the control plane
-	// becomes neither a control plane nor a diagnosable one.
-	//
-	// Hoisting is behaviour-preserving as well as sufficient: the snapshot is
-	// pure reads, and clusterRole.grpcAddr is assigned only AFTER the publish
-	// below, so this snapshot never observed the new address under the old
-	// ordering either. The arm-before-publish requirement of CHAOS-01 is
-	// unaffected — building a snapshot is not publishing it.
-	snap := CurrentConfigSnapshot()
-
-	if err := commitControlPlaneRole(snap, grpcAddr, certFile, keyFile, caFile, clusterDBPath); err != nil {
-		return err
-	}
-
-	// CHAOS-72b (Codex review of PR #1618): republish now that the role fields
-	// are committed, because the snapshot published above cannot name this node.
-	//
-	// buildCPAddressList composes the DP failover list from the HA peer address
-	// and clusterRole.grpcAddr, and grpcAddr is deliberately assigned only
-	// AFTER the listener is up ("only set role after gRPC is successfully
-	// started"). On an HA promotion that leaves the first snapshot naming the
-	// peer — which, for a promoting standby, is the leader that just DIED — and
-	// not the node that is taking over. updateDPAddresses REPLACES a DP's list
-	// rather than merging into it, so a data plane that had just found the new
-	// leader would overwrite its working address with the dead one and have
-	// nothing live left to redial.
-	//
-	// Republishing is preferred over building the first list from the
-	// prospective address: it keeps "the published list describes committed
-	// state" true by construction, rather than making one caller predict state
-	// it has not reached yet, and it cannot publish an address that then fails
-	// to bind. It must happen OUT of the write lock — CurrentConfigSnapshot
-	// reads clusterRoleMu, which is the whole of CHAOS-72 above.
-	//
-	// Only published when the list actually changed, so the ordinary non-HA
-	// startup (where buildCPAddressList returns nil both times) does not spend
-	// a config version on a no-op.
-	if republished := CurrentConfigSnapshot(); !slicesEqual(snap.CPAddresses, republished.CPAddresses) {
-		// CPAddresses is operator- and peer-supplied (the HA peer address and
-		// this node's configured listen address), so it is an untrusted log
-		// value under the CWE-117 rule in docs/agent-context/conventions.md:
-		// format then sanitize with the barrier CodeQL recognises, and print
-		// with %q. The line below does the same thing for grpcAddr inline.
-		logger.Printf("ControlPlane: republishing config with the committed CP address list %q (was %q)",
-			sanitizeLog(fmt.Sprint(republished.CPAddresses)), sanitizeLog(fmt.Sprint(snap.CPAddresses)))
-		_ = globalConfigStore.Update(republished)
-	}
-
-	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
-	return nil
-}
-
-// commitControlPlaneRole is enableControlPlane's write-locked section: the
-// idempotency guard, the initial publish, the CA, the listener, and the role
-// fields the guard protects, which must all be atomic against a concurrent
-// enable. Split out so the lock is RELEASED before the caller rebuilds a
-// snapshot — see CHAOS-72 and CHAOS-72b above.
-func commitControlPlaneRole(snap ConfigSnapshot, grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
-	clusterRoleMu.Lock()
-	defer clusterRoleMu.Unlock()
-
-	if clusterRole.role == "control-plane" {
-		return fmt.Errorf("already running as control-plane")
+	if cpSupervisor != nil {
+		return fmt.Errorf("a control-plane listener is already starting")
 	}
 
 	// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
 	// publish so a restarted (or HA-promoted) CP never re-issues version
 	// numbers at or below what running DPs have already seen.
+	//
+	// CHAOS-71: this preparation runs ONCE, outside the retry loop, and that
+	// placement is deliberate. Folding it into the retried unit would
+	// re-publish a config version and rewrite the durable floor file on EVERY
+	// rebind attempt — a write every 30 s for the length of an outage, to
+	// re-derive state that has not changed.
 	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
+	// CHAOS-71: from here on the CP address list is owned by its source, so a
+	// full publish captured before a delayed bind can never overwrite the list
+	// the activation publishes (ConfigStore.Update).
+	globalConfigStore.setCPAddressSource(buildCPAddressList)
 	// Initial publish. A commit-time rejection (startup config already over a
 	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
 	// the CP still serves locally, so boot continues.
-	_ = globalConfigStore.Update(snap)
+	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
-	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
+
+	cfg := cpListenerConfig{addr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile}
+	sup, err := startControlPlaneListener(cfg, tolerateFirstFailure, onActivated)
+	if err != nil {
+		// Refused: no supervisor, no role — so no address-list owner either
+		// (Codex review of #1556). The resilient boot path does not return
+		// here on a bind failure; it keeps the ownership its retries need.
+		globalConfigStore.releaseCPAddressSource()
 		return err
 	}
+	cpSupervisor = sup
 
-	// Only set role after gRPC is successfully started.
-	clusterRole.role = "control-plane"
-	clusterRole.grpcAddr = grpcAddr
-	clusterRole.certFile = certFile
-	clusterRole.keyFile = keyFile
-	clusterRole.caFile = caFile
+	// The role is claimed by the supervisor on an OBSERVED bind — never here.
+	// A first-attempt failure therefore leaves the node `standalone` and the
+	// supervisor claims the role itself when a later attempt succeeds, so
+	// there is exactly ONE writer of that transition
+	// (commitActivation). All this does is say which happened.
+	if sup.currentServer() == nil {
+		logger.Printf("ControlPlane: gRPC listener on %s is not up yet — this node stays standalone and keeps "+
+			"serving proxy traffic while the listener retries in the background",
+			strings.ReplaceAll(grpcAddr, "\n", ""))
+		return nil
+	}
+	logger.Printf("ControlPlane: enabled (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
 }
 

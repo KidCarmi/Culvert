@@ -10,6 +10,17 @@ This round is recorded separately from
 three defects and opens a prioritized backlog; the risk-matrix rows it touches
 are named inline so the main review stays the index.
 
+> **Ids renumbered 2026-10-24, when main was brought in.** This round first
+> claimed `CHAOS-71`/`72`/`73`. On main, `CHAOS-71` is the Control Plane gRPC
+> listener sweep (§44), `CHAOS-72` is #1611's CDR breaker finding, and
+> `CHAOS-73` is held by the open #1591, so the findings still unique to this
+> round take the next ids no open sweep holds: the backoff ladder (was 71,
+> sub-items 71a–c) is **CHAOS-89** (89a–c), the unenrolled-pull janitor (was 73)
+> is **CHAOS-90**, and the DP's stale active index (was 72c) is **CHAOS-91**.
+> The promotion self-deadlock (was 72) and the address republish (was 72b) were
+> ported to main as CHAOS-71 riders (§44.8 of the main review) and are named
+> that way below; their code and gates live on main.
+
 ---
 
 ## 1. Executive summary
@@ -27,7 +38,7 @@ The three defects fixed in this round are therefore not gaps in coverage. They
 are **inversions**: in each case a mechanism that exists specifically to make a
 failure survivable made it worse.
 
-1. **CHAOS-72 (CRITICAL) — HA standby→leader promotion self-deadlocks.**
+1. **CHAOS-71 promote-deadlock rider (CRITICAL) — HA standby→leader promotion self-deadlocks.**
    `enableControlPlane` held the `clusterRoleMu` *write* lock while building the
    initial config snapshot, and that snapshot reads the same (non-reentrant)
    `RWMutex` through `buildCPAddressList`. The guard that was meant to make this
@@ -41,7 +52,7 @@ failure survivable made it worse.
    is left with no control plane *and* no way to diagnose why. **Verified
    empirically** (a probe under the write lock blocked indefinitely; see §2.1).
 
-2. **CHAOS-71 (HIGH) — the data plane's backoff against its control plane was
+2. **CHAOS-89 (HIGH) — the data plane's backoff against its control plane was
    defeated three ways at once.** The consecutive-failure streak was
    incremented twice per failed poll (once by `pollConfig`, once by `backoff`),
    so the documented `2s, 4s, 8s, …, 60s` ladder was really **`4s, 16s, 60s`** —
@@ -58,7 +69,7 @@ failure survivable made it worse.
    and reconnected in one instant. **Verified empirically** (observed ladder and
    failover point; see §2.2).
 
-3. **CHAOS-73 (MEDIUM) — an unbounded per-peer-IP map on the control plane.**
+3. **CHAOS-90 (MEDIUM) — an unbounded per-peer-IP map on the control plane.**
    `unenrolledConfigPull.attempts` grows one permanent entry per distinct source
    address that ever attempts a pre-enrollment config pull, with no TTL, no cap
    and no sweep. Its structurally identical sibling `enrollRateLimit` *has* a
@@ -84,7 +95,7 @@ the PR's SHA is claimed — see §9.
 
 ## 2. Failure scenarios (the three closed this round)
 
-### 2.1 CHAOS-72 — promotion self-deadlock
+### 2.1 CHAOS-71 promote-deadlock rider — promotion self-deadlock
 
 | | |
 |---|---|
@@ -102,7 +113,7 @@ the PR's SHA is claimed — see §9.
 | **Why it escaped testing** | The only existing test that calls `enableControlPlane` (`cluster_audit_test.go`) runs with HA **disabled**, so `buildCPAddressList` takes its `nil` early return and the reentrancy never fires. The guard being conditional on HA is precisely what made the test vacuous. |
 | **Residual risk after fix** | The invariant "nothing may build a config snapshot while holding `clusterRoleMu`" is now enforced by a test on the lock itself, not only on this caller. A *new* caller could still reintroduce it; see §10. |
 
-### 2.2 CHAOS-71 — DP→CP retry cadence
+### 2.2 CHAOS-89 — DP→CP retry cadence
 
 | | |
 |---|---|
@@ -119,7 +130,7 @@ the PR's SHA is claimed — see §9.
 | **Severity tempering (verified)** | The P0-3 `KnownVersion` sentinel means an *unchanged* config poll returns a small "unchanged" reply rather than the full (up to ~60 MiB) snapshot, so the recovery herd is only expensive when config actually changed. gRPC's own transport backoff keeps the *dial* from hot-looping. Both materially reduce the blast radius, and neither addresses the ladder or the jitter. |
 | **Residual risk after fix** | The cold-start poll is deliberately **not** staggered (see §10); the four telemetry loops still have no backoff at all (§4.2, not fixed here). |
 
-### 2.3 CHAOS-73 — unbounded per-peer-IP throttle map
+### 2.3 CHAOS-90 — unbounded per-peer-IP throttle map
 
 | | |
 |---|---|
@@ -140,13 +151,13 @@ Severity is impact × reachability on a **supported default deployment**.
 
 | ID | Finding | Severity | Status | Evidence |
 |----|---------|----------|--------|----------|
-| CHAOS-72 | HA promotion self-deadlocks on `clusterRoleMu`; wedged writer blocks health/diagnostics/PAC/support | **CRITICAL** | **FIXED** | `main.go` `enableControlPlane`, `controlplane_snapshot.go` `buildCPAddressList`; empirical |
-| CHAOS-71a | Failure streak double-incremented → wrong ladder (`4s/16s/60s`) and failover on the 2nd failure | **HIGH** | **FIXED** | `controlplane_client.go` `backoff`/`pollConfig`; empirical |
-| CHAOS-71b | Redial cleared the streak → HA deployments never back off; permanent CP flapping | **HIGH** | **FIXED** | `controlplane_client.go` `failover`; empirical |
-| CHAOS-71c | No jitter on the ladder, no phase offset on five CP-facing tickers → fleet lockstep + mass reconnect (instantiates registered **WK-13 / HA-11**, P2) | **MEDIUM** | **FIXED** | `controlplane_client.go`; empirical |
-| CHAOS-72b | The snapshot a promoted leader publishes names the **dead** peer and not itself, and `updateDPAddresses` REPLACES a DP's failover list rather than merging — so a DP that had just found the new leader overwrote its working address with the dead one | **HIGH** | **FIXED** | `main.go` `enableControlPlane`; raised by Codex review of PR #1618, mechanics source-verified |
-| CHAOS-72c | `updateDPAddresses` replaced `c.addrs` without re-resolving `activeIdx`, which indexes it; a shrinking list left the index past the end and `reconnectActive` — the **certificate-renewal redial** — panicked on it | **HIGH** | **FIXED** | `controlplane_client.go`; empirical (`index out of range [1] with length 1`) |
-| CHAOS-73 | `unenrolledConfigPull.attempts` unbounded per peer IP; sibling has a janitor | **MEDIUM** | **FIXED** | `controlplane_server.go`; source-verified |
+| CHAOS-71 promote-deadlock rider | HA promotion self-deadlocks on `clusterRoleMu`; wedged writer blocks health/diagnostics/PAC/support | **CRITICAL** | **FIXED** | `main.go` `enableControlPlane`, `controlplane_snapshot.go` `buildCPAddressList`; empirical |
+| CHAOS-89a | Failure streak double-incremented → wrong ladder (`4s/16s/60s`) and failover on the 2nd failure | **HIGH** | **FIXED** | `controlplane_client.go` `backoff`/`pollConfig`; empirical |
+| CHAOS-89b | Redial cleared the streak → HA deployments never back off; permanent CP flapping | **HIGH** | **FIXED** | `controlplane_client.go` `failover`; empirical |
+| CHAOS-89c | No jitter on the ladder, no phase offset on five CP-facing tickers → fleet lockstep + mass reconnect (instantiates registered **WK-13 / HA-11**, P2) | **MEDIUM** | **FIXED** | `controlplane_client.go`; empirical |
+| CHAOS-71 address-republish rider | The snapshot a promoted leader publishes names the **dead** peer and not itself, and `updateDPAddresses` REPLACES a DP's failover list rather than merging — so a DP that had just found the new leader overwrote its working address with the dead one | **HIGH** | **FIXED** | `main.go` `enableControlPlane`; raised by Codex review of PR #1618, mechanics source-verified |
+| CHAOS-91 | `updateDPAddresses` replaced `c.addrs` without re-resolving `activeIdx`, which indexes it; a shrinking list left the index past the end and `reconnectActive` — the **certificate-renewal redial** — panicked on it | **HIGH** | **FIXED** | `controlplane_client.go`; empirical (`index out of range [1] with length 1`) |
+| CHAOS-90 | `unenrolledConfigPull.attempts` unbounded per peer IP; sibling has a janitor | **MEDIUM** | **FIXED** | `controlplane_server.go`; source-verified |
 
 Registered rows this round touches: **WK-13** (jitter on every feed/poll ticker)
 and **HA-11** are now closed *for the cluster control/data plane*. They remain
@@ -154,15 +165,15 @@ open for `internal/blocklistfeed` and `internal/otlp` — see §4.2.
 
 ---
 
-### 3.1 Two defects the CHAOS-72 fix uncovered
+### 3.1 Two defects the CHAOS-71 promote-deadlock rider fix uncovered
 
-Worth recording as a method note, not just as rows. CHAOS-72 was a deadlock, and
+Worth recording as a method note, not just as rows. CHAOS-71 promote-deadlock rider was a deadlock, and
 a deadlock is a *perfect* mask: the promotion path never reached its own publish,
 so two further defects downstream of that publish had never executed on this
 path. Fixing the hang made both live at once, and the Codex review of the PR
 caught the first within minutes of it becoming reachable.
 
-- **CHAOS-72b** — `buildCPAddressList` composes the DP failover list from the HA
+- **CHAOS-71 address-republish rider** — `buildCPAddressList` composes the DP failover list from the HA
   peer address and `clusterRole.grpcAddr`, and `grpcAddr` is deliberately
   assigned only *after* the listener binds ("only set role after gRPC is
   successfully started"). For a promoting standby the peer is **the leader that
@@ -171,17 +182,17 @@ caught the first within minutes of it becoming reachable.
   into it, so a data plane that had just reached the new leader would overwrite
   its working address with the dead one and have nothing live left to redial.
   Fixed by republishing once the role fields are committed, outside the write
-  lock (inside it would be CHAOS-72 again), and only when the list actually
+  lock (inside it would be CHAOS-71 promote-deadlock rider again), and only when the list actually
   changed so ordinary non-HA startup does not spend a config version on a no-op.
 
-- **CHAOS-72c** — found while fixing 72b, and worse. `activeIdx` is an index
+- **CHAOS-91** — found while fixing 72b, and worse. `activeIdx` is an index
   *into* `c.addrs` naming the address the live connection holds, and
   `updateDPAddresses` replaced the slice without re-resolving it.
   `reconnectActive` indexes it directly, and its `len == 0` guard does not cover
   an index past a *non-empty* slice — so a shrinking list panicked with
   `index out of range [1] with length 1`. `reconnectActive` is the
   certificate-renewal redial, which runs unattended on a healthy node, and the
-  one-element list CHAOS-72b published is exactly the shrink that triggers it.
+  one-element list CHAOS-71 address-republish rider published is exactly the shrink that triggers it.
   Fixed by re-resolving by **address** rather than clamping the index: clamping
   also stops the panic but silently re-points the client at a different control
   plane than the one its connection actually holds.
@@ -218,7 +229,7 @@ change wider than a chaos round should make unreviewed.
 
 | ID | Finding | Sev | Status |
 |----|---------|-----|--------|
-| R-1 | **Four of the five DP→CP loops have no backoff at all** — metrics, rate-limit gossip (5s), revocation sync (3s) and audit push (10s) each `continue` on error and retry at full rate for the whole outage (~0.6 RPC/s/node) plus a log line per failure. Deliberately **not** bundled into CHAOS-71: the gossip loop's freshness evaluation is coupled to its tick by CHAOS-61, and revocation/audit delay has security and compliance meaning, so changing their cadence needs a posture decision rather than a mechanical fix. | **MED** | delegated (loops' structure source-verified while fixing CHAOS-71) |
+| R-1 | **Four of the five DP→CP loops have no backoff at all** — metrics, rate-limit gossip (5s), revocation sync (3s) and audit push (10s) each `continue` on error and retry at full rate for the whole outage (~0.6 RPC/s/node) plus a log line per failure. Deliberately **not** bundled into CHAOS-89: the gossip loop's freshness evaluation is coupled to its tick by CHAOS-61, and revocation/audit delay has security and compliance meaning, so changing their cadence needs a posture decision rather than a mechanical fix. | **MED** | delegated (loops' structure source-verified while fixing CHAOS-89) |
 | R-2 | **Hidden retry — effective MCP upstream timeout is 3× the configured one.** The request deadline is created *inside* the per-attempt round trip under a retry loop with no delay between attempts, so a stalled upstream occupies ~90s against a configured 30s budget and sends 3 POSTs where 1 was budgeted. | **MED** | delegated |
 | R-3 | `internal/blocklistfeed` is the one feed never migrated to `internal/feedsched`: `lastAttempt` is stamped on the error path too, so a failed sync is not retried for a full interval (default 24h), with no jitter against a third-party origin, and its fetch uses `context.Background()` so it is not cancellable at shutdown. **This is the live remainder of registered WK-13.** | **MED** | delegated |
 | R-4 | The alert webhook retry pass is not interruptible (no ctx check inside the per-item loop) and each delivery is parented to `context.Background()`, so a blackholed webhook with a full 500-item queue can keep delivering and writing the retry queue to disk long after lifecycle cancellation. | **MED** | delegated |
@@ -262,7 +273,7 @@ renumbered into sequence.
 |----|---------|-----|--------|
 | X-8 | **`TestBenchGate_IPFilterBulkLoadIsLinear` is a marginal timing gate.** Observed at **8.65x against an 8.0x bound** on two heads of PR #1618, in a package that PR does not touch. The test's own comment records CI previously seeing **8.28x** on the same shuffled determinism run, which is why it already carries `runtime.GC()` settling and best-of-nine sampling. A ratio of two sub-millisecond samples on a shared runner is the underlying fragility; the bound is not the finding, the measurement's variance is. | **LOW** (CI reliability, not product) | **source-verified** (the prior overshoot is recorded in the test) |
 | X-9 | **`ConfigStore.Update` has no expected-version update, so two concurrent publishers can lose each other's content.** Every publisher in the tree is an unsynchronized build-then-update — `publishCurrentConfigSnapshot` is literally `globalConfigStore.Update(CurrentConfigSnapshot())`, and `configversion.go:385` and `enrollment.go:1256` do the same — so a publish landing between another's snapshot build and its `Update` is overwritten until something republishes. Repo-wide, not specific to any one caller. A real fix is a CAS or publish lock on `Update` plus converting every publisher; narrowing one call site in isolation would make that site look safe while the others carry the property. Raised by CodeRabbit against this round's republish; declined there as pre-existing and out of scope. | **LOW–MED** (needs an owner decision) | **source-verified** |
-| X-10 | **`updateDPAddresses` replaces the active connection with an unverified one.** `connect` uses lazy `grpc.NewClient`, so a redial to a de-listed address's replacement returns no error even when the replacement is unreachable. Self-healing (failed polls advance the streak until `failover()` tries the next listed address), and the alternative is better than the status quo either way: the old address has been *de-listed by the authority*, so keeping it is the defect CHAOS-72c fixes. The reviewer's suggested remedy — `grpc.DialContext` + `WithBlock` — is **not** available: both are deprecated in the pinned grpc v1.83.2 (`WithBlock`'s own comment links grpc's anti-patterns guide), and it would place a 5s blocking dial under `c.mu`, which `call`'s comment forbids ("would serialize all DP loops and block any failover"). A non-deprecated verification (health probe outside the mutex, or deferring the swap until the first successful poll) would be a genuine improvement. | **LOW** (needs an owner decision) | **source-verified** |
+| X-10 | **`updateDPAddresses` replaces the active connection with an unverified one.** `connect` uses lazy `grpc.NewClient`, so a redial to a de-listed address's replacement returns no error even when the replacement is unreachable. Self-healing (failed polls advance the streak until `failover()` tries the next listed address), and the alternative is better than the status quo either way: the old address has been *de-listed by the authority*, so keeping it is the defect CHAOS-91 fixes. The reviewer's suggested remedy — `grpc.DialContext` + `WithBlock` — is **not** available: both are deprecated in the pinned grpc v1.83.2 (`WithBlock`'s own comment links grpc's anti-patterns guide), and it would place a 5s blocking dial under `c.mu`, which `call`'s comment forbids ("would serialize all DP loops and block any failover"). A non-deprecated verification (health probe outside the mutex, or deferring the swap until the first successful poll) would be a genuine improvement. | **LOW** (needs an owner decision) | **source-verified** |
 
 ---
 
@@ -311,16 +322,16 @@ is not re-reported as missing):
 
 The recurring operational theme of this round is **signal inversion**: three of
 the four most serious items are failures whose own monitoring is what breaks.
-CHAOS-72 wedges the health, diagnostics and support-bundle surfaces an operator
+CHAOS-71 promote-deadlock rider wedges the health, diagnostics and support-bundle surfaces an operator
 would use to diagnose it. L-5's dead CP serve loop leaves every surface
-reporting a healthy control plane. CHAOS-71's backoff log line reported a rung
+reporting a healthy control plane. CHAOS-89's backoff log line reported a rung
 the code was not using.
 
-For the three fixes: CHAOS-72 turns a hung promotion into a completed one, so
-the existing HA surfaces report truthfully again. CHAOS-71 makes the backoff log
+For the three fixes: CHAOS-71 promote-deadlock rider turns a hung promotion into a completed one, so
+the existing HA surfaces report truthfully again. CHAOS-89 makes the backoff log
 line match reality and makes a control-plane restart in a large fleet settle
 smoothly instead of as a synchronized burst — the recovery is quieter, and the
-log flood during an outage decays. CHAOS-73 removes an unbounded growth source
+log flood during an outage decays. CHAOS-90 removes an unbounded growth source
 on the node whose loss is a management outage.
 
 No new operator-facing configuration is introduced, so there is no GUI/API
@@ -333,14 +344,14 @@ parity obligation for this change.
 None of the three fixes changes a security posture, a default, or a policy
 decision; all three restore intended behavior.
 
-- **CHAOS-72** is the most security-relevant: during the deadlock, policy,
+- **CHAOS-71 promote-deadlock rider** is the most security-relevant: during the deadlock, policy,
   blocklist and session-revocation changes stop propagating fleet-wide while
   every node continues to serve traffic and report healthy. That is posture
   drift with no visible enforcement gap. The fix closes it.
-- **CHAOS-71** shortens the window in which a fleet enforces stale policy after
+- **CHAOS-89** shortens the window in which a fleet enforces stale policy after
   a control-plane blip, and stops a data plane from hammering a struggling
   control plane — which is the resource a fleet's security posture depends on.
-- **CHAOS-73** removes a remotely-driven unbounded allocation on the control
+- **CHAOS-90** removes a remotely-driven unbounded allocation on the control
   plane. It does not change the throttle's *decision*, only the sweeping of
   aged-out state, so the exfiltration throttle the map exists for is unchanged.
 
@@ -388,7 +399,7 @@ Ordered by expected harm reduced per unit of review risk.
    configured budget is the whole-request budget.
 
 A standing recommendation: **add a lock-ordering check for `clusterRoleMu`.**
-CHAOS-72 was a non-reentrancy bug hidden behind a conditional guard, which is
+CHAOS-71 promote-deadlock rider was a non-reentrancy bug hidden behind a conditional guard, which is
 the shape static review misses and a test only catches if it sets up the
 condition. The test added here pins the premise as well as the behavior, but a
 broader "no snapshot build under `clusterRoleMu`" assertion would generalize.
@@ -397,7 +408,7 @@ broader "no snapshot build under `clusterRoleMu`" assertion would generalize.
 
 ## 9. Suggested PR — what this round actually changes
 
-**Title:** `fix(cluster): HA promotion deadlock, DP→CP backoff ladder, unbounded peer map (CHAOS-71/72/73)`
+**Title:** `fix(cluster): HA promotion deadlock, DP→CP backoff ladder, unbounded peer map (CHAOS-89/72/73)`
 
 **Changed scope** (3 source files, 3 new test files; no behavior outside the
 cluster control/data plane):
@@ -431,7 +442,7 @@ row for why.
 All three fixes have regression tests that **fail on the pre-fix revision**,
 which was verified by re-introducing each defect individually.
 
-**CHAOS-71** (`controlplane_client_cadence_chaos_test.go`, 13 tests):
+**CHAOS-89** (`controlplane_client_cadence_chaos_test.go`, 13 tests):
 the documented ladder as a pure function including its clamps; one streak
 increment per failed poll; failover on the 3rd consecutive failure, not the 2nd;
 a sustained outage converging on the ceiling with failover at the gate's cadence
@@ -446,7 +457,7 @@ stagger and backoff both yielding to cancellation; the gossip loop disarming
 when cancelled *during* the stagger; the cold-start poll never being staggered;
 and the backoff log line reporting the real rung.
 
-**CHAOS-72** (`cluster_promote_deadlock_chaos_test.go`, 3 tests): that
+**CHAOS-71 promote-deadlock rider** (`cluster_promote_deadlock_chaos_test.go`, 3 tests): that
 `buildCPAddressList` really does take `clusterRoleMu` — pinning the *premise*,
 so a refactor cannot make the guards vacuous the way the original guard was;
 that `enableControlPlane` reaches a decision rather than hanging while HA
@@ -466,7 +477,7 @@ Two test-design notes worth carrying forward:
   have returned from the argument check before reaching the snapshot — it would
   have passed pre-fix and guarded nothing.
 
-**CHAOS-73** (`controlplane_unenrolled_pull_janitor_chaos_test.go`): aged-out
+**CHAOS-90** (`controlplane_unenrolled_pull_janitor_chaos_test.go`): aged-out
 entries swept, live entries retained, and the throttle's decision unchanged
 across a sweep.
 
@@ -476,12 +487,12 @@ across a sweep.
 |---|---|
 | `go build ./...` | pass |
 | `go vet .` | pass (clean) |
-| `go test -run 'TestChaos71\|TestChaos72\|TestChaos73' .` | pass, 19 tests |
+| `go test -run 'TestChaos89\|TestChaos71_PromoteDeadlock\|TestChaos90' .` | pass, 19 tests |
 | `go test -run 'TestCluster\|TestControlPlane\|TestDataPlane\|TestDP\|TestHA\|TestChaos0\|TestChaos5\|TestChaos6\|TestChaos7' .` | pass, 105s |
 | `python3 docs/agent-context/check.py` | pass (static integrity) |
-| Pre-fix regression check | each defect re-introduced individually; the matching tests fail, and the CHAOS-72 case wedges the test binary until its own timeout panic — the deadlock end to end |
+| Pre-fix regression check | each defect re-introduced individually; the matching tests fail, and the CHAOS-71 promote-deadlock rider case wedges the test binary until its own timeout panic — the deadlock end to end |
 | `golangci-lint run` | **superseded — this conclusion was wrong.** Recorded as it was first reported, because the PR description carried it; the row below and the note after the table give the real cause and the passing result. |
-| `go test -race -run 'TestChaos71\|TestChaos72\|TestChaos73' .` | pass, clean under `-race` |
+| `go test -race -run 'TestChaos89\|TestChaos71_PromoteDeadlock\|TestChaos90' .` | pass, clean under `-race` |
 | `go test .` (serial, whole root package, 468s) | 10 failures, **all pre-existing and environmental** — see below |
 | `go test -race .` (whole root package, 2307s) | **0 data races, 0 panics, 0 CHAOS-7x failures.** The only failures are the same 9 environmental IdP tests described below. |
 | `golangci-lint run --timeout=10m --new-from-rev origin/main` | **0 issues** — see the note below on why this became runnable |
@@ -560,9 +571,9 @@ commit-between-renames injection) and would be worth building out per item.
   60s retry over 12s: a large improvement over exactly-simultaneous, but for a
   very large fleet a wider or full-jitter scheme would spread better. Widening
   it is a tuning decision with convergence-latency consequences on the 2s rung.
-- **CHAOS-73 inherits its sibling's 5-minute sweep against a 1-minute window**,
+- **CHAOS-90 inherits its sibling's 5-minute sweep against a 1-minute window**,
   so bounded accumulation between sweeps remains. Pre-existing and reviewed.
-- **CHAOS-72's invariant can be reintroduced** by any new caller that builds a
+- **CHAOS-71 promote-deadlock rider's invariant can be reintroduced** by any new caller that builds a
   config snapshot under `clusterRoleMu`. The test pins the premise, which makes
   the failure loud, but does not prevent a new caller.
 

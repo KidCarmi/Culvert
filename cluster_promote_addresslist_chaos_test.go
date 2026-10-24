@@ -1,20 +1,20 @@
 package main
 
-// cluster_promote_addresslist_chaos_test.go — CHAOS-72b/72c: the CP address
+// cluster_promote_addresslist_chaos_test.go — CHAOS-91 (found beside the CHAOS-71 address-republish rider): the CP address
 // list a promoted leader publishes, and what a data plane does with a shrinking
 // one.
 //
 // Both came out of the Codex review of PR #1618, and both are consequences of
-// CHAOS-72 having made HA promotion complete at all: the ordering below was
+// CHAOS-71 promote-deadlock rider having made HA promotion complete at all: the ordering below was
 // always wrong, but before the deadlock was fixed the promotion path never
 // reached the publish.
 //
-//   72b — buildCPAddressList composes the list from the HA peer address and
+//   rider    — buildCPAddressList composes the list from the HA peer address and
 //         clusterRole.grpcAddr, and grpcAddr is assigned only AFTER the
 //         listener is up. The first snapshot therefore names the PEER — for a
 //         promoting standby, the leader that just died — and not the node
 //         taking over.
-//   72c — updateDPAddresses REPLACED c.addrs without re-resolving activeIdx,
+//   CHAOS-91 — updateDPAddresses REPLACED c.addrs without re-resolving activeIdx,
 //         which indexes it. A shrinking list left the index past the end, and
 //         reconnectActive (the certificate-renewal redial) indexes it directly.
 
@@ -35,14 +35,14 @@ func dpAddrState(c *DataPlaneClient) (addrs []string, activeIdx int) {
 	return append([]string(nil), c.addrs...), c.activeIdx
 }
 
-// TestChaos72c_ShrinkingAddressListDoesNotStrandTheIndex is the regression test
+// TestChaos91_ShrinkingAddressListDoesNotStrandTheIndex is the regression test
 // for the panic. The pre-fix sequence — two configured CPs, one failover, then a
 // one-element list from a promoting leader — left activeIdx=1 against a
 // one-element slice, and the next redial died with "index out of range [1] with
 // length 1" on an unattended cert-renewal path.
-func TestChaos72c_ShrinkingAddressListDoesNotStrandTheIndex(t *testing.T) {
+func TestChaos91_ShrinkingAddressListDoesNotStrandTheIndex(t *testing.T) {
 	c := &DataPlaneClient{
-		nodeID:    "dp-chaos72c",
+		nodeID:    "dp-chaos91",
 		addrs:     []string{"cp1:50051", "cp2:50051"},
 		activeIdx: 1, // where one failover leaves it
 	}
@@ -71,14 +71,14 @@ func TestChaos72c_ShrinkingAddressListDoesNotStrandTheIndex(t *testing.T) {
 	}
 }
 
-// TestChaos72c_ActiveAddressIsTrackedByValueNotIndex pins the stronger property
+// TestChaos91_ActiveAddressIsTrackedByValueNotIndex pins the stronger property
 // the fix provides. Clamping the index into range would also stop the panic,
 // but it would silently re-point activeIdx at a DIFFERENT control plane than
 // the one c.conn actually holds — so the invariant "activeIdx names the address
 // this client is connected to" has to survive a reorder, not just a shrink.
-func TestChaos72c_ActiveAddressIsTrackedByValueNotIndex(t *testing.T) {
+func TestChaos91_ActiveAddressIsTrackedByValueNotIndex(t *testing.T) {
 	c := &DataPlaneClient{
-		nodeID:    "dp-chaos72c",
+		nodeID:    "dp-chaos91",
 		addrs:     []string{"cp1:50051", "cp2:50051"},
 		activeIdx: 1, // connected to cp2
 	}
@@ -96,12 +96,12 @@ func TestChaos72c_ActiveAddressIsTrackedByValueNotIndex(t *testing.T) {
 	}
 }
 
-// TestChaos72c_DroppedActiveAddressFallsBackToAListedOne covers the honest case:
+// TestChaos91_DroppedActiveAddressFallsBackToAListedOne covers the honest case:
 // when the CP says the address in use is no longer a member, the client must
 // land on a listed address rather than keep an index it cannot justify.
-func TestChaos72c_DroppedActiveAddressFallsBackToAListedOne(t *testing.T) {
+func TestChaos91_DroppedActiveAddressFallsBackToAListedOne(t *testing.T) {
 	c := &DataPlaneClient{
-		nodeID:    "dp-chaos72c",
+		nodeID:    "dp-chaos91",
 		addrs:     []string{"cp1:50051", "cp2:50051"},
 		activeIdx: 1,
 	}
@@ -120,7 +120,7 @@ func TestChaos72c_DroppedActiveAddressFallsBackToAListedOne(t *testing.T) {
 	}
 }
 
-// TestChaos72c_DroppedActiveAddressRedialsRatherThanOnlyReindexing is the
+// TestChaos91_DroppedActiveAddressRedialsRatherThanOnlyReindexing is the
 // CodeRabbit finding from the review of PR #1618, and it is the part that
 // actually matters. Re-pointing activeIdx is cosmetic on its own: `call`
 // invokes over c.conn, not over c.addrs[c.activeIdx], and nothing else redials
@@ -134,9 +134,9 @@ func TestChaos72c_DroppedActiveAddressFallsBackToAListedOne(t *testing.T) {
 // plane would apply a demoted CP's configuration indefinitely. With the fencing
 // lease unset the snapshot carries epoch 0, so the DP-side ratchet does not
 // reject it either.
-func TestChaos72c_DroppedActiveAddressRedialsRatherThanOnlyReindexing(t *testing.T) {
+func TestChaos91_DroppedActiveAddressRedialsRatherThanOnlyReindexing(t *testing.T) {
 	c := &DataPlaneClient{
-		nodeID:    "dp-chaos72c",
+		nodeID:    "dp-chaos91",
 		addrs:     []string{"cp1:50051", "cp2:50051"},
 		activeIdx: 1, // connected to cp2
 	}
@@ -170,13 +170,13 @@ func TestChaos72c_DroppedActiveAddressRedialsRatherThanOnlyReindexing(t *testing
 	}
 }
 
-// TestChaos72c_RetainedActiveAddressKeepsItsConnection is the negative control
+// TestChaos91_RetainedActiveAddressKeepsItsConnection is the negative control
 // for the redial: when the active address is STILL a member, the connection must
 // be left alone. Redialling unconditionally would throw away a working link on
 // every unrelated list change — a reorder, or a peer being added.
-func TestChaos72c_RetainedActiveAddressKeepsItsConnection(t *testing.T) {
+func TestChaos91_RetainedActiveAddressKeepsItsConnection(t *testing.T) {
 	c := &DataPlaneClient{
-		nodeID:    "dp-chaos72c",
+		nodeID:    "dp-chaos91",
 		addrs:     []string{"cp1:50051", "cp2:50051"},
 		activeIdx: 1,
 	}
@@ -208,12 +208,12 @@ func TestChaos72c_RetainedActiveAddressKeepsItsConnection(t *testing.T) {
 	}
 }
 
-// TestChaos72c_EmptyListIsIgnored pins the existing guard that an empty
+// TestChaos91_EmptyListIsIgnored pins the existing guard that an empty
 // CPAddresses (every non-HA snapshot carries one) must not wipe a DP's
 // configured addresses.
-func TestChaos72c_EmptyListIsIgnored(t *testing.T) {
+func TestChaos91_EmptyListIsIgnored(t *testing.T) {
 	c := &DataPlaneClient{
-		nodeID:    "dp-chaos72c",
+		nodeID:    "dp-chaos91",
 		addrs:     []string{"cp1:50051", "cp2:50051"},
 		activeIdx: 1,
 	}
@@ -229,64 +229,11 @@ func TestChaos72c_EmptyListIsIgnored(t *testing.T) {
 	}
 }
 
-// TestChaos72b_PromotingLeaderPublishesAListNamingItself is the 72b regression
-// test, asserted at the level the defect lives: the list that
-// buildCPAddressList produces BEFORE clusterRole.grpcAddr is committed names
-// only the peer, and the list it produces AFTER names this node too. The fix in
-// enableControlPlane is to publish the second one; this test is what makes that
-// difference visible and keeps it from silently regressing.
-func TestChaos72b_PromotingLeaderPublishesAListNamingItself(t *testing.T) {
-	const (
-		deadLeader = "10.0.0.1:50051"
-		promoted   = "10.0.0.2:50051"
-	)
-	withHARoleForTest(t, "standby")
-	globalHA.mu.Lock()
-	prevPeer := globalHA.peerAddr
-	globalHA.peerAddr = deadLeader
-	globalHA.mu.Unlock()
-	t.Cleanup(func() {
-		globalHA.mu.Lock()
-		globalHA.peerAddr = prevPeer
-		globalHA.mu.Unlock()
-	})
+// The 72b regression (the promoting leader's republished list names itself)
+// is pinned on main by TestChaos71_CPAddrRepublish_PromotingLeaderPublishesAListNamingItself
+// in cluster_promote_deadlock_chaos_test.go, ported from this PR.
 
-	clusterRoleMu.Lock()
-	prevRole := clusterRole
-	clusterRole.grpcAddr = "" // a standby has not published a CP address
-	clusterRoleMu.Unlock()
-	t.Cleanup(func() {
-		clusterRoleMu.Lock()
-		clusterRole = prevRole
-		clusterRoleMu.Unlock()
-	})
-
-	before := buildCPAddressList()
-	if len(before) != 1 || before[0] != deadLeader {
-		t.Fatalf("pre-commit list = %v, want just the peer %q — this test's premise about the ordering is stale", before, deadLeader)
-	}
-
-	// Commit the role fields, as enableControlPlane does once the listener is up.
-	clusterRoleMu.Lock()
-	clusterRole.grpcAddr = promoted
-	clusterRoleMu.Unlock()
-
-	after := buildCPAddressList()
-	if slicesEqual(before, after) {
-		t.Fatal("committing the role did not change the address list, so there would be nothing to republish")
-	}
-	var names bool
-	for _, a := range after {
-		if a == promoted {
-			names = true
-		}
-	}
-	if !names {
-		t.Errorf("post-commit list = %v, which does not name the promoted node %q — a DP applying it would be left with only the dead leader", after, promoted)
-	}
-}
-
-// TestChaos72c_AddressListLogIsInjectionSafe is the CWE-117 gate on the line
+// TestChaos91_AddressListLogIsInjectionSafe is the CWE-117 gate on the line
 // updateDPAddresses writes. The address list arrives verbatim in the Control
 // Plane's config snapshot, so it is peer-supplied: a newline in an address
 // would otherwise forge whole log lines in the process log an operator reads
@@ -294,11 +241,11 @@ func TestChaos72b_PromotingLeaderPublishesAListNamingItself(t *testing.T) {
 //
 // CodeQL flagged the sibling line in enableControlPlane for exactly this during
 // review of PR #1618, which is what prompted auditing this one.
-func TestChaos72c_AddressListLogIsInjectionSafe(t *testing.T) {
+func TestChaos91_AddressListLogIsInjectionSafe(t *testing.T) {
 	const forged = "10.0.0.9:50051\nFORGED ControlPlane: enabled via GUI (gRPC evil:1)"
 
 	c := &DataPlaneClient{
-		nodeID:    "dp-chaos72c",
+		nodeID:    "dp-chaos91",
 		addrs:     []string{"cp1:50051"},
 		activeIdx: 0,
 	}

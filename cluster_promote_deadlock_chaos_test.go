@@ -1,65 +1,106 @@
 package main
 
-// cluster_promote_deadlock_chaos_test.go — CHAOS-72: HA standby→leader
-// promotion must not deadlock on clusterRoleMu.
+// cluster_promote_deadlock_chaos_test.go — CHAOS-71 riders ported from open PR
+// #1618 onto the CHAOS-71 listener supervisor (#1556): the PROMOTE-DEADLOCK
+// rider and the CP ADDRESS-REPUBLISH rider. They are filed under this PR's own
+// id (CHAOS-72 belongs to a different finding, #1611); when #1618 is reworked
+// onto this branch it drops its own copies of these gates.
 //
-// enableControlPlane held the clusterRoleMu WRITE lock across
+// Promote deadlock — HA standby→leader promotion must not deadlock on clusterRoleMu.
+// main's enableControlPlane held the clusterRoleMu WRITE lock across
 // CurrentConfigSnapshot, and that snapshot reads the same mutex through
-// buildCPAddressList (it needs clusterRole.grpcAddr for the DP failover address
-// list). sync.RWMutex is not reentrant, so the RLock blocked on the goroutine
-// already holding the write lock and never woke.
+// buildCPAddressList. sync.RWMutex is not reentrant, so the RLock blocked on
+// the goroutine already holding the write lock and never woke. The guard that
+// was supposed to make it unreachable (`if !haStatus.Enabled { return nil }`)
+// is open on precisely the promotion path: HAStatus.Enabled is `role != ""`, so
+// a standby reports Enabled for its whole stint. CHAOS-71's activateControlPlane
+// never holds clusterRoleMu across the snapshot (cpActivationMu is the outer
+// lock and clusterRoleMu is taken only briefly), so these gates pin that it
+// stays that way through the real promotion entry point.
 //
-// The guard that was supposed to make this unreachable is buildCPAddressList's
-// `if !haStatus.Enabled { return nil }`, and it is open on precisely the path
-// that matters: HAStatus.Enabled is `role != ""`, so a standby node reports
-// Enabled for its entire stint, and every promotion path (manual, legacy
-// auto-failover, planned handoff, lease-arbitrated) reaches enableControlPlane
-// through HAState.promote's onPromote closure.
+// Address republish — once the role is committed (commitActivation) the
+// CP address list must be REPUBLISHED, outside the role lock, because the
+// pre-bind snapshot names only the HA peer — for a promoting standby, the
+// leader that just died — and updateDPAddresses REPLACES a DP's list.
 //
-// The blast radius is why these are errors rather than skips: the hung
-// goroutine keeps the WRITE lock, so every clusterRoleMu reader — diagnostics,
-// the health surfaces, the PAC mutation gate, the support bundle — blocks
-// behind it too. The node becomes neither a control plane nor diagnosable.
-//
-// Both tests run the suspect call on their own goroutine and FAIL on a timeout
-// rather than hanging the package: a regression here must be reported, not
-// inflicted on every other test in the binary.
+// Every suspect call runs on its own goroutine and FAILS on a timeout rather
+// than hanging the package: a regression must be reported, not inflicted on
+// every later test in the binary.
 
 import (
+	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-// withHARoleForTest gives the HA state a role, which is what makes
-// Status().Enabled true, and restores it afterwards.
-func withHARoleForTest(t *testing.T, role string) {
+// cpWithGlobalHARole gives globalHA a role (which is what makes
+// Status().Enabled true and sends buildCPAddressList down its locking branch)
+// and a peer address, restoring both afterwards.
+func cpWithGlobalHARole(t *testing.T, role, peer string) {
 	t.Helper()
 	globalHA.mu.Lock()
-	prev := globalHA.role
-	globalHA.role = role
+	prevRole, prevPeer := globalHA.role, globalHA.peerAddr
+	globalHA.role, globalHA.peerAddr = role, peer
 	globalHA.mu.Unlock()
 	t.Cleanup(func() {
 		globalHA.mu.Lock()
-		globalHA.role = prev
+		globalHA.role, globalHA.peerAddr = prevRole, prevPeer
 		globalHA.mu.Unlock()
 	})
 }
 
-// TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock pins the PREMISE the
-// regression guards below rest on: with HA enabled, buildCPAddressList really
-// does acquire clusterRoleMu, so calling it under the write lock really would
-// be reentrant. If a refactor removes that acquisition this test fails loudly,
-// telling the next reader that CHAOS-72's guards have stopped guarding
-// anything, instead of letting them pass vacuously forever.
+// cpIsolateActivation gives activateControlPlane a private world and gives it
+// back afterwards, returning the cluster-DB path to pass in.
 //
-// It proves the acquisition from ANOTHER goroutine and then releases the lock.
-// Reproducing the deadlock itself — taking the write lock and calling
-// buildCPAddressList on one goroutine — is deliberately NOT done here: that
-// goroutine can never be recovered, so it would hold a process-global lock for
-// the rest of the test binary and wedge every later test that reads it. (The
-// first draft of this file did exactly that and poisoned the two tests below.)
-func TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
-	withHARoleForTest(t, "standby")
+// Every global the activation touches is SWAPPED, not merely redirected — the
+// lesson #1618's first draft learned: redirecting dataDir but leaving
+// initClusterCA to mint into a t.TempDir() that is then deleted leaves every
+// later test in the binary holding a global cluster CA pointing at a directory
+// that no longer exists. Same for globalConfigStore, which
+// armVersionPersistence arms at a temp path and Update then bumps.
+//
+// Call it BEFORE cpChaosSetup: t.Cleanup is LIFO, so the supervisor that
+// cpChaosSetup stops is gone before these globals are restored under it.
+func cpIsolateActivation(t *testing.T) string {
+	t.Helper()
+	prevDir := dataDir
+	dataDir = t.TempDir()
+	// Join a CA auto-rotation loop an earlier test may have left finishing its
+	// immediate first round (loadRootCA with t.Context(), cancelled but not
+	// joined): that round reads globalClusterCA, which is swapped just below.
+	// The done channel's close orders its reads before this write (-race).
+	if done := caRotationLoopDone; done != nil {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a CA auto-rotation loop left running by an earlier test did not exit")
+		}
+	}
+	prevCA := globalClusterCA
+	globalClusterCA = &clusterCA{}
+	prevStore := globalConfigStore
+	globalConfigStore = &ConfigStore{}
+	t.Cleanup(func() {
+		globalConfigStore = prevStore
+		globalClusterCA = prevCA
+		dataDir = prevDir
+	})
+	return filepath.Join(t.TempDir(), "cluster.json")
+}
+
+// TestChaos71_PromoteDeadlock_BuildCPAddressListNeedsTheClusterRoleLock pins the PREMISE the
+// gates below rest on: with HA enabled, buildCPAddressList really does acquire
+// clusterRoleMu. If a refactor removes that acquisition this fails loudly
+// instead of letting the deadlock gates pass vacuously forever.
+//
+// The acquisition is proven from ANOTHER goroutine and the lock is then
+// released. Reproducing the deadlock itself on one goroutine is deliberately
+// not done: that goroutine could never be recovered and would wedge every later
+// test that reads the lock.
+func TestChaos71_PromoteDeadlock_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
+	cpWithGlobalHARole(t, "standby", "10.0.0.1:50051")
 	if !globalHA.Status().Enabled {
 		t.Fatal("precondition: a node with an HA role must report Enabled, or this test proves nothing")
 	}
@@ -82,10 +123,10 @@ func TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
 	select {
 	case <-blocked:
 		close(release)
-		t.Fatal("buildCPAddressList returned while clusterRoleMu was write-held — it no longer reads that lock, so the reentrancy CHAOS-72 fixed can no longer occur and the guards below are vacuous; re-derive them before trusting this file")
+		t.Fatal("buildCPAddressList returned while clusterRoleMu was write-held — it no longer reads that lock, " +
+			"so the promote-deadlock reentrancy can no longer occur and the gates below are vacuous; re-derive them")
 	case <-time.After(500 * time.Millisecond):
-		// Expected: it is waiting on the lock. Release and let it finish, so
-		// nothing is left wedged.
+		// Expected: it is waiting on the lock.
 	}
 	close(release)
 	select {
@@ -95,102 +136,58 @@ func TestChaos72_BuildCPAddressListNeedsTheClusterRoleLock(t *testing.T) {
 	}
 }
 
-// chaos72PromotionAddr is a gRPC listen address that is non-empty and
-// well-formed — so enableControlPlane's argument check passes and it proceeds
-// into the locked section where the deadlock lived — but that can never bind,
-// because `.invalid` is reserved by RFC 2606 and never resolves.
-//
-// That combination is what makes these tests both honest and cheap. The hang
-// was at the config-snapshot publish, which happens BEFORE the listen, so the
-// call must get far enough to fail at the listen; and because it fails there,
-// the test never binds a port and never sets clusterRole.role (which is only
-// assigned after a SUCCESSFUL listen). An empty address would not do: it
-// returns from the argument check before reaching the snapshot, so it would
-// have passed pre-fix too and guarded nothing.
-const chaos72PromotionAddr = "culvert-chaos72.invalid:50051"
+// TestChaos71_PromoteDeadlock_EnableControlPlaneDoesNotDeadlockOnPromotion is the regression
+// gate: with HA reporting Enabled — the standby condition every promotion path
+// runs under — enableControlPlane (the HA onPromote callback) must reach a
+// DECISION rather than hang. Driven against an occupied port so the call gets
+// all the way through the pre-bind snapshot publish (where the deadlock lived)
+// to a refused bind, binding nothing.
+func TestChaos71_PromoteDeadlock_EnableControlPlaneDoesNotDeadlockOnPromotion(t *testing.T) {
+	clusterDB := cpIsolateActivation(t)
+	cpChaosSetup(t)
+	cpInsecure(t)
+	cpWithGlobalHARole(t, "standby", "10.0.0.1:50051")
 
-// chaos72Isolate gives enableControlPlane a private world and gives it back
-// afterwards. It returns the cluster-DB path to pass in.
-//
-// Every global the call touches is swapped, not just redirected. Getting this
-// wrong is how a test poisons the ones that run after it, and the first version
-// of this helper did exactly that: it redirected dataDir and restored
-// clusterRole, but left initClusterCA's `globalClusterCA.InitOrLoad` to mint a
-// CA into a t.TempDir() that is then deleted — so every later test in the same
-// binary inherited a global cluster CA pointing at a directory that no longer
-// exists. Roughly ten test files read globalClusterCA, and which of them follow
-// this one depends on the shard partition and on -test.shuffle, which is exactly
-// the shape that shows up as an unreproducible CI failure rather than a local
-// one. Same reasoning for globalConfigStore, which armVersionPersistence arms at
-// a temp path and Update then bumps.
-//
-// The swap-and-restore pattern follows the repository's existing precedent
-// (bootstrap_host_injection_test.go for the CA, controlplane_idp_sync_test.go
-// for the config store); conventions.md states the rule it implements — a test
-// that changes shared global state must register its restoration, because the
-// shared setup helpers reset state at test START and do not undo what a test
-// does afterwards.
-func chaos72Isolate(t *testing.T) string {
-	t.Helper()
-
-	prevDir := dataDir
-	dataDir = t.TempDir()
-
-	clusterRoleMu.Lock()
-	prevRole := clusterRole
-	clusterRoleMu.Unlock()
-
-	prevCA := globalClusterCA
-	globalClusterCA = &clusterCA{}
-
-	prevStore := globalConfigStore
-	globalConfigStore = &ConfigStore{}
-
-	t.Cleanup(func() {
-		StopControlPlaneGRPC()
-		clusterRoleMu.Lock()
-		clusterRole = prevRole
-		clusterRoleMu.Unlock()
-		globalConfigStore = prevStore
-		globalClusterCA = prevCA
-		dataDir = prevDir
-	})
-	return t.TempDir()
-}
-
-// TestChaos72_EnableControlPlaneDoesNotDeadlockOnPromotion is the regression
-// guard: with HA reporting Enabled — the standby condition every promotion path
-// runs under — enableControlPlane must reach a DECISION rather than hang.
-func TestChaos72_EnableControlPlaneDoesNotDeadlockOnPromotion(t *testing.T) {
-	withHARoleForTest(t, "standby")
-	clusterDB := chaos72Isolate(t)
+	port, release := occupyPort(t)
+	defer release()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	got := make(chan error, 1)
-	go func() { got <- enableControlPlane(chaos72PromotionAddr, "", "", "", clusterDB) }()
+	go func() { got <- enableControlPlane(addr, "", "", "", clusterDB) }()
 
 	select {
 	case err := <-got:
 		if err == nil {
-			t.Fatalf("enableControlPlane bound %q — the address was supposed to be unresolvable, so this test is no longer side-effect free", chaos72PromotionAddr)
+			t.Fatalf("enableControlPlane bound %q although the port is held — this gate is no longer side-effect free", addr)
 		}
-		t.Logf("returned a decision rather than hanging: %v", err)
+		// Not vacuous: the refusal must be the BIND, i.e. the call really did
+		// pass the snapshot publish that used to deadlock.
+		if !strings.Contains(err.Error(), "port_in_use") {
+			t.Fatalf("the promotion did not reach the bind: want a port_in_use refusal, got %v", err)
+		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("enableControlPlane did not return within 30s while HA reported Enabled — the promotion path is deadlocked on clusterRoleMu again, and the wedged goroutine holds the WRITE lock, so diagnostics, health, the PAC mutation gate and the support bundle are all blocked behind it")
+		t.Fatal("enableControlPlane did not return within 30s while HA reported Enabled — the promotion path is " +
+			"deadlocked on clusterRoleMu again, and every cluster-role reader is blocked behind it")
 	}
 }
 
-// TestChaos72_ClusterRoleReadersStayLiveAfterPromotion is the blast-radius
-// assertion. A failed promotion is bad; a promotion that also takes every
-// health and diagnostic surface with it is why this is critical. After the
-// attempt, clusterRoleMu must still be acquirable by readers.
-func TestChaos72_ClusterRoleReadersStayLiveAfterPromotion(t *testing.T) {
-	withHARoleForTest(t, "standby")
-	clusterDB := chaos72Isolate(t)
+// TestChaos71_PromoteDeadlock_ClusterRoleReadersStayLiveAfterPromotion is the blast-radius
+// assertion: after a promotion attempt, clusterRoleMu must still be acquirable
+// by its readers (diagnostics, /healthz, the PAC mutation gate, the support
+// bundle all read it).
+func TestChaos71_PromoteDeadlock_ClusterRoleReadersStayLiveAfterPromotion(t *testing.T) {
+	clusterDB := cpIsolateActivation(t)
+	cpChaosSetup(t)
+	cpInsecure(t)
+	cpWithGlobalHARole(t, "standby", "10.0.0.1:50051")
+
+	port, release := occupyPort(t)
+	defer release()
 
 	attempted := make(chan struct{})
 	go func() {
 		defer close(attempted)
-		_ = enableControlPlane(chaos72PromotionAddr, "", "", "", clusterDB)
+		_ = enableControlPlane(fmt.Sprintf("127.0.0.1:%d", port), "", "", "", clusterDB)
 	}()
 	select {
 	case <-attempted:
@@ -198,7 +195,6 @@ func TestChaos72_ClusterRoleReadersStayLiveAfterPromotion(t *testing.T) {
 		t.Fatal("the promotion attempt never returned; clusterRoleMu is held by a wedged goroutine")
 	}
 
-	// buildCPAddressList is the real reader whose blocking was the symptom.
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -207,6 +203,90 @@ func TestChaos72_ClusterRoleReadersStayLiveAfterPromotion(t *testing.T) {
 	select {
 	case <-readDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("clusterRoleMu is still held after the promotion attempt returned — every reader (diagnostics, /healthz, the PAC mutation gate, the support bundle) is wedged")
+		t.Fatal("clusterRoleMu is still held after the promotion attempt returned — every reader is wedged")
 	}
+}
+
+// TestChaos71_CPAddrRepublish_PromotingLeaderPublishesAListNamingItself pins the address-republish rider at the level
+// the defect lives: the list buildCPAddressList produces BEFORE
+// clusterRole.grpcAddr is committed names only the peer, and the list AFTER
+// names this node too — so there is something the republish must publish.
+func TestChaos71_CPAddrRepublish_PromotingLeaderPublishesAListNamingItself(t *testing.T) {
+	const (
+		deadLeader = "10.0.0.1:50051"
+		promoted   = "10.0.0.2:50051"
+	)
+	cpWithGlobalHARole(t, "standby", deadLeader)
+
+	clusterRoleMu.Lock()
+	prevRole := clusterRole
+	clusterRole.grpcAddr = "" // a standby has not published a CP address
+	clusterRoleMu.Unlock()
+	t.Cleanup(func() {
+		clusterRoleMu.Lock()
+		clusterRole = prevRole
+		clusterRoleMu.Unlock()
+	})
+
+	before := buildCPAddressList()
+	if len(before) != 1 || before[0] != deadLeader {
+		t.Fatalf("pre-commit list = %v, want just the peer %q — this gate's premise about the ordering is stale", before, deadLeader)
+	}
+
+	clusterRoleMu.Lock()
+	clusterRole.grpcAddr = promoted
+	clusterRoleMu.Unlock()
+
+	after := buildCPAddressList()
+	if slicesEqual(before, after) {
+		t.Fatal("committing the role did not change the address list, so there would be nothing to republish")
+	}
+	if !cpListNames(after, promoted) {
+		t.Errorf("post-commit list = %v, which does not name the promoted node %q — a DP applying it would be "+
+			"left with only the dead leader", after, promoted)
+	}
+}
+
+// TestChaos71_CPAddrRepublish_PromotionRepublishesTheCommittedAddressList is the WIRING gate
+// for the address-republish rider on the CHAOS-71 supervisor: a real promotion through enableControlPlane
+// must leave the PUBLISHED snapshot naming this node, which only the post-commit
+// republish in the supervisor's activation flow can produce (the pre-bind
+// publish cannot know grpcAddr). Verified failing with the address publish
+// removed from commitActivation.
+func TestChaos71_CPAddrRepublish_PromotionRepublishesTheCommittedAddressList(t *testing.T) {
+	const deadLeader = "10.0.0.1:50051"
+	clusterDB := cpIsolateActivation(t)
+	cpChaosSetup(t)
+	cpInsecure(t)
+	cpWithGlobalHARole(t, "standby", deadLeader)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", cpFreePort(t))
+	done := make(chan error, 1)
+	go func() { done <- enableControlPlane(addr, "", "", "", clusterDB) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("promotion-path enableControlPlane: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("promotion-path enableControlPlane did not return — deadlock on clusterRoleMu")
+	}
+
+	pub := globalConfigStore.Get().CPAddresses
+	if !cpListNames(pub, addr) {
+		t.Errorf("published CP address list = %v does not name the promoted node %q — DPs would replace their "+
+			"list with one naming only the dead leader", pub, addr)
+	}
+	if !cpListNames(pub, deadLeader) {
+		t.Errorf("published CP address list = %v dropped the peer %q", pub, deadLeader)
+	}
+}
+
+func cpListNames(list []string, want string) bool {
+	for _, a := range list {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
