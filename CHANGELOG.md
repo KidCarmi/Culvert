@@ -24,6 +24,74 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The syslog/SIEM writer handle was published without synchronization, so a
+  "disable forwarding" click could abort an in-flight proxy request, and every
+  runtime retarget leaked a delivery goroutine and its collector socket
+  (CHAOS-78).** `globalSyslog` was a plain `*syslogWriter`: written at runtime
+  from the admin handler goroutine (`InitSyslog` via `POST /api/syslog`; the
+  disable branch stored `nil`) and read unsynchronized on the proxy request
+  path at `persistLogEntry` — the chokepoint every request-log record flows
+  through — and on the audit SIEM hook.
+
+  The nil check and the dereference were two separate unsynchronized loads, so
+  a request goroutine could pass the check and then dereference the `nil` the
+  disable branch had just stored. Measured: 14 reported data races under
+  `-race` between `persistLogEntry` and `InitSyslog`. The proxy crash guard
+  contains the panic per request, so the cost is a dead request or tunnel and a
+  crash record, not a dead appliance.
+
+  The subtler half is the one a nil guard would **not** have fixed. The engine
+  sets its queue in `startAsync` *after* the struct literal and treats a zero
+  queue as "deliver synchronously" — a path that holds the writer mutex across
+  three serialized network ops, which the engine's own comment puts at ~15 s
+  worst case (`writeTimeout` + dial + `writeTimeout`). A plain pointer write
+  carries no
+  release edge, so on a weakly ordered target (the appliance ships
+  `linux/arm64`) a request goroutine could observe a non-nil writer whose queue
+  was still zero, take that path, and pay ~15 s on the data path with every
+  other logging caller queued behind it — exactly the proxy-wide stall the
+  async design exists to prevent, reached through the pointer rather than the
+  engine.
+
+  The handle is now an `atomic.Pointer[syslogWriter]` read once into a local at
+  every site, which supplies both the single load and the release edge. This is
+  the pattern the codebase already uses for every other hot-path-read,
+  runtime-reconfigured global (`globalLogStore`, `logSink`, `obs.sink`, and the
+  syslog engine's own `panicObserver`); the pointer holding the engine was the
+  one left plain.
+
+  Separately, `InitSyslog` published over the previous writer without closing
+  it, and the engine's `drainLoop` exits **only** via `Close` — so each runtime
+  SIEM retarget stranded one delivery goroutine and one collector socket for
+  the life of the process (measured: 8 retargets, 8 leaked, 7 still live after
+  a disable). `InitSyslog` now closes the writer it displaces. The enable
+  branch also dereferenced the global twice more with no nil guard at all, so a
+  second admin's concurrent disable nil-panicked the admin handler; the format
+  now resolves from one load.
+
+  Closing that leak opened a narrower hole, which review caught: `send` read
+  `closed` and only *then* enqueued, while `Close` closed `stop` and let
+  `drainLoop` exit — so a sender preempted between its check and its enqueue
+  could put a line on a queue whose drain goroutine had already returned.
+  `Close` never closes the channel, so the send succeeds and the line is
+  **neither delivered nor counted in `Drops`** — silent loss, in audit records.
+  The leak had been masking it: a leaked `drainLoop` keeps running, so that same
+  line was delivered. `Close` now stores `closed`, waits for in-flight senders,
+  and only then closes `stop`, so every line is either delivered or counted
+  provided the sender clears within the bound; the wait is bounded so it can
+  never hang shutdown, and that bound is the one path that can still lose a
+  line. Measured: against the pre-fix ordering the conservation test fails 6
+  runs in 10, typically losing exactly one line (`delivered 2091 + dropped 5273
+  = 7364; want exactly 7365 sent`), and the `Close`-waits-for-a-sender ordering
+  is ~108 µs pre-fix against a required 150 ms.
+
+  Closes `OBS-1` of the chaos register's §42, which nominated it as the
+  recommended first follow-up. Gated by a `-race` reconfigure-versus-request
+  test, a goroutine-leak test counting delivery goroutines by stack, an AST
+  wall (the handle stays an `atomic.Pointer`, only `syslog.go` names it, and
+  no caller may write `syslogHandle().Method()`), and a compile-time type
+  assertion. Full write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §45.
+
 - **Built with Go 1.27, the shutdown drain sent no GOAWAY to inspected HTTP/2
   tunnels.** Under `go1.27 && !http2legacy`, x/net v0.61 compiles a different
   `http2.Server` (`server_wrap.go`) that wraps net/http's HTTP/2 server. That
@@ -417,6 +485,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The IDNA memo's value bound (`len(norm) > maxMemoHostLen`, 253 bytes) had no
+  gate on its main-tier axis: an in-limit host that **expands** past the bound
+  through punycode encoding. The long tier's oversize cases exercise the same
+  branch, but nothing pinned that a host arriving inside the limit cannot be
+  retained once encoded, so a tier-specific rewrite of the check could drop it
+  silently; measured with the main-tier check removed, the table retains
+  **969 KB against its 554 KB ceiling**, holding a 668-byte canonical form in a
+  slot. The guard itself is present and correct, so no release was affected and
+  no behavior changes here. The ACE overhead (`xn--`, the delimiter, the
+  encoded deltas) is paid per **label**, so while a dense script compresses — a
+  252-byte CJK host measures 98 bytes as an A-label — one non-ASCII rune in
+  each of many short labels expands instead: `é.é.é…` at 251 bytes normalizes
+  to 671 and `aé.aé.aé…` at 251 bytes to 629, up to ~2.7x the bound, from
+  ordinary authorities well inside the 1 KiB HTTP raw pre-cap.
+  `TestIDNMemo_PunycodeExpansionIsNotRetained` (per-shape retention, with both
+  preconditions asserted so a future `x/net` encoding change fails loudly
+  rather than passing vacuously) and `TestIDNMemo_ExpansionCannotBreachTheCeiling`
+  (the bound under a stream of nothing but expanding hosts) now gate it, and
+  `TestIDNMemo_StoredEntriesRespectTheBound`'s corpus carries the expanding
+  shapes, which it previously reached for only through CJK. Verdicts were
+  never at issue — an expanding host is still normalized, just not retained.
+- `fileutil.AtomicWrite`'s new post-rename `fstat` duplicate was created
+  without `syscall.ForkLock`, so the descriptor was briefly inheritable
+  (CWE-403). `holdInode` ran `syscall.Dup` and then `syscall.CloseOnExec` as
+  two separate calls; `dup(2)` cannot set `FD_CLOEXEC` itself, so between them
+  the duplicate was an ordinary inheritable descriptor. A `fork`+`exec` started
+  in that window by any goroutine would hand the child a **read** descriptor of
+  the file the write is landing — and `AtomicWrite` is the single chokepoint for
+  every durable write in the appliance, the admin roster, data-plane and cluster
+  CA key-at-rest material and enrollment receipts among them.
+
+  No shipped `culvert` binary execs a subprocess, so this was latent rather
+  than reachable; the duplicate is new on every durable write regardless, and
+  the exposure would turn on whenever a future caller does exec. The dup and
+  the flag now run inside `syscall.ForkLock.RLock`, the pattern the `syscall`
+  package documents for descriptor-creating code: `forkExec` takes that lock
+  for writing, so no exec can begin in the window. The failure path releases
+  the lock (holding it would wedge every later exec in the process).
+  Pinned by `TestHoldInode_DuplicateIsCloseOnExec` and
+  `TestHoldInode_ReleasesForkLockWhenTheDupFails`.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
