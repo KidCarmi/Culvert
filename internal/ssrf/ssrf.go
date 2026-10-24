@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -105,8 +106,20 @@ func (g guardTable) forAddr(addr netip.Addr) []netip.Prefix {
 }
 
 // privatePrefixes is the live guard table. It is replaced wholesale (never
-// mutated in place) so a reader always sees a consistent pair of buckets.
-var privatePrefixes = compileGuardTable(privateRanges)
+// mutated in place) so a reader always sees a consistent pair of buckets. The
+// atomic pointer makes that snapshot swap race-free: the only writer is the
+// AllowLoopbackForTest seam, and a dial goroutine that outlives its test (Go
+// 1.27's net/http can finish a dial after the request returns) may still be
+// reading the table when the seam's restore runs.
+var privatePrefixes atomic.Pointer[guardTable]
+
+func init() {
+	g := compileGuardTable(privateRanges)
+	privatePrefixes.Store(&g)
+}
+
+// liveGuardTable returns the current guard table snapshot.
+func liveGuardTable() guardTable { return *privatePrefixes.Load() }
 
 func compileGuardTable(ranges []string) guardTable {
 	var g guardTable
@@ -146,7 +159,7 @@ func PrivateAddr(addr netip.Addr) bool {
 		return false // parity with Contains(nil): an invalid address matches nothing
 	}
 	a := addr.Unmap().WithZone("")
-	table := privatePrefixes
+	table := liveGuardTable()
 	for _, p := range table.forAddr(a) {
 		if p.Contains(a) {
 			return true
@@ -344,7 +357,7 @@ func CacheReset() {
 // CONNECT/dial to 127.0.0.1 through the real proxy path — never call from
 // production code. The DNS verdict cache is reset on both swap and restore.
 func AllowLoopbackForTest() (restore func()) {
-	orig := privatePrefixes
+	orig := liveGuardTable()
 	lo4 := netip.MustParseAddr("127.0.0.1")
 	lo6 := netip.MustParseAddr("::1")
 	drop := func(in []netip.Prefix) []netip.Prefix {
@@ -357,10 +370,10 @@ func AllowLoopbackForTest() (restore func()) {
 		}
 		return out
 	}
-	privatePrefixes = guardTable{v4: drop(orig.v4), v6: drop(orig.v6)}
+	privatePrefixes.Store(&guardTable{v4: drop(orig.v4), v6: drop(orig.v6)})
 	CacheReset()
 	return func() {
-		privatePrefixes = orig
+		privatePrefixes.Store(&orig)
 		CacheReset()
 	}
 }
