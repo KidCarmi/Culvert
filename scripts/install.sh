@@ -1639,7 +1639,10 @@ persist_host_env_session_secret() {
     # `|| rc=$?` keeps grep's "not found" exit 1 from tripping `set -e`
     # (this script runs under `set -euo pipefail`) before rc is inspected.
     local rc=0
-    grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null || rc=$?
+    # Same "non-empty as docker compose resolves it" pattern as
+    # secret_already_set(): CR-only, an empty quote pair, or a blank followed
+    # by an inline comment is EMPTY there and must not block persisting.
+    grep -Eq '^CULVERT_SESSION_SECRET=([^[:space:]"'"'"']|[[:space:]]+([^[:space:]"'"'"'#]|"([^"]|$)|'"'"'([^'"'"']|$))|"([^"]|$)|'"'"'([^'"'"']|$))' "$envfile" 2>/dev/null || rc=$?
     if [[ $rc -eq 0 ]]; then
       return 0 # already configured — never overwrite
     elif [[ $rc -ne 1 ]]; then

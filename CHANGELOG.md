@@ -7,6 +7,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`install.sh` skipped persisting a host-env `CULVERT_SESSION_SECRET` when `.env`
+  already held an empty-valued line.** `persist_host_env_session_secret` treated
+  `CULVERT_SESSION_SECRET=""`, `=''`, a CRLF-only value or `= # comment` as
+  already configured, although docker compose resolves all of them to empty, so
+  every node fell back to its own random signing key. It now uses the same
+  non-empty test as `secret_already_set`.
+
 ### Security
 
 - **Two merge-gate workflows reached their actions through MUTABLE tags, and a
