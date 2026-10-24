@@ -201,6 +201,9 @@ func buildOperatorContract() OperatorContract {
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
 	checks = append(checks, checkClusterCA()...)
+	// Log disk guard: emergency minimal logging or pressure-forced early deletion.
+	// Contributes nothing until the guard has intervened.
+	checks = append(checks, checkLogDiskProtection()...)
 	// Break-glass release-catalog signature mode (permissive/disabled).
 	// Contributes nothing in enforce mode or when release management is not
 	// composed on this node.
@@ -556,12 +559,12 @@ func checkSessionSecret() OperatorContractCheck {
 // GET /api/diagnose call and in the Diagnostics panel, for the life of the
 // process rather than scrolling out of a log file. Usernames themselves are
 // not included in the message (matching the boot-time warning's own
-// discipline of reporting only the length) — Admin Users already lists the
+// discipline of reporting only the length) — Administrators already lists the
 // full roster for the operator to identify which account to rename.
 //
 // The threshold is the 64-byte ACCOUNT limit, not the login endpoint's
 // 256-byte bound: every admin-facing sign-in form (static/index.html
-// li-user, maxlength=64) and the setup / Admin Users creation paths cap at 64, so a
+// li-user, maxlength=64) and the setup / Administrators creation paths cap at 64, so a
 // 65–256-byte name created via -user / --reset-password passes the API
 // bound yet cannot be typed into the dashboard login field. Reporting ok for
 // it would falsely confirm an account the operator cannot sign in with.
@@ -613,7 +616,7 @@ func checkOversizeConfiguredUsernames() OperatorContractCheck {
 		Code:   adminUsernameLengthCode,
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d admin account%s have a username above the %d-byte account limit (longest: %d bytes) — "+
-			"the dashboard sign-in form accepts at most %d characters and setup and Admin Users cap new names there "+
+			"the dashboard sign-in form accepts at most %d characters and setup and the Administrators panel cap new names there "+
 			"(the -user / auth.user startup credentials and --reset-password do not, which is how such a name is created), "+
 			"so the account may be unusable from the admin UI (configured names are exempt from the login API's length bound, "+
 			"so the account can still authenticate through the API)",
@@ -751,8 +754,8 @@ func collectAdminUsernames() adminUsernameInventory {
 		names[legacy] = struct{}{}
 		inv.legacyOversize = len(legacy) > adminUsernameAccountLimit
 	}
-	// rosterOversize counts oversize Admin Users rows OTHER than the legacy
-	// login: those are the only accounts the Admin Users create/delete
+	// rosterOversize counts oversize Administrators rows OTHER than the legacy
+	// login: those are the only accounts the Administrators create/delete
 	// workflow applies to (a mirrored legacy name is retired via Settings).
 	for name := range names {
 		if name != legacy && len(name) > adminUsernameAccountLimit {
@@ -771,12 +774,12 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 	// account's role (an oversize operator/viewer must not become an admin).
 	action := ""
 	if inv.rosterOversize {
-		action = "Usernames cannot be renamed in place: from Admin Users, create a replacement account with the same role " +
+		action = "Usernames cannot be renamed in place: from the Administrators panel, create a replacement account with the same role " +
 			"and a name of at most 64 bytes, confirm it can sign in, then delete the old account. "
 	}
 	if inv.legacyOversize {
-		// The legacy single-user login (cfg.user) is not an Admin Users row
-		// and deleting its roster entry leaves it in place, so Admin Users
+		// The legacy single-user login (cfg.user) is not an Administrators row
+		// and deleting its roster entry leaves it in place, so Administrators
 		// cannot clear it. It is replaced by Settings (POST /api/settings,
 		// cfg.SetAuth) — and -user / auth.user re-apply it on every boot, so
 		// the startup source must change too.
@@ -788,8 +791,8 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		// SetAuth also OVERWRITES any existing roster entry of the chosen
 		// name (new hash, RoleAdmin), so the name must be unused — reusing
 		// one would reset that account's password and could elevate it.
-		action += "The oversize name includes the legacy single-user login, which Admin Users alone cannot change: " +
-			"set a login of at most 64 bytes that no existing Admin Users account already uses " +
+		action += "The oversize name includes the legacy single-user login, which the Administrators panel alone cannot change: " +
+			"set a login of at most 64 bytes that no existing administrator account already uses " +
 			"(Settings overwrites an existing account of that name, resetting its password and making it an admin) " +
 			"under Settings (POST /api/settings) together with a new strong password in the same save " +
 			"(Settings sets the password it is given — never leave the password blank), "
@@ -800,7 +803,7 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 			// restored BEFORE the first sign-in: a role change does not
 			// revoke sessions and the session cookie carries the role it was
 			// issued with, so signing in first leaves an admin session alive.
-			action += fmt.Sprintf("then, before anyone signs in with the new login, set its role back to %s in Admin Users "+
+			action += fmt.Sprintf("then, before anyone signs in with the new login, set its role back to %s in the Administrators panel "+
 				"(Settings always creates it as admin, but the old login's effective role is %s, and a role change does not "+
 				"revoke a session already issued), ", inv.legacyRole, inv.legacyRole)
 		}
@@ -808,7 +811,7 @@ func oversizeUsernameAction(inv adminUsernameInventory, totpOversize bool) strin
 		if inv.legacyMirrored {
 			// Only a mirrored legacy name has a roster entry to remove; a
 			// legacy-only name is retired by overwriting cfg.user alone.
-			action += "then delete the old name's remaining Admin Users entry (Settings adds the new name but does not remove the old one), "
+			action += "then delete the old name's remaining entry in the Administrators panel (Settings adds the new name but does not remove the old one), "
 		} else {
 			// POST /api/settings never writes ui_users.json, and with no
 			// mirrored row there is no roster delete to persist it either;
@@ -1334,51 +1337,51 @@ func targetProblemAdminRow(problem string) OperatorContractCheck {
 	switch problem {
 	case rosterTargetFirstWritePending:
 		row.OperatorAction = "The first admin account change that is saved proves the file and clears this " +
-			"warning. If that change is refused, fix the admin users file (-ui-users-file) path or its permissions " +
+			"warning. If that change is refused, fix the admin roster file (-ui-users-file) path or its permissions " +
 			"so it names a writable regular file on a persistent volume, restart, and re-apply the change."
 	case rosterTargetNotYetVerified:
 		row.OperatorAction = "No action is needed now: the next admin account change that is saved verifies " +
-			"persistence and clears this. If that change is refused, fix the admin users file (-ui-users-file) " +
+			"persistence and clears this. If that change is refused, fix the admin roster file (-ui-users-file) " +
 			"path or its permissions so it names a writable regular file on a persistent volume, and restart."
 	case rosterTargetReplaced:
-		row.OperatorAction = "Reconcile first: compare the admin users file (-ui-users-file) on disk with " +
+		row.OperatorAction = "Reconcile first: compare the admin roster file (-ui-users-file) on disk with " +
 			"Administrators and find what changed it. Then either save an admin account change, which writes the " +
 			"roster in use back over the file, or restart to adopt the file as it is now. Until then, a restart " +
 			"silently switches to the file's accounts and credentials."
 	case rosterTargetDirNotSynced:
 		row.OperatorAction = "Give the account Culvert runs as read permission on the directory holding the admin " +
-			"users file (-ui-users-file) so it can be synced, or check the volume. The next admin account change " +
+			"roster file (-ui-users-file) so it can be synced, or check the volume. The next admin account change " +
 			"that is saved and synced clears this; no restart is needed."
 	case rosterTargetImmutable:
-		row.OperatorAction = "Clear the flag on the admin users file (-ui-users-file) or its directory (chattr -i, " +
+		row.OperatorAction = "Clear the flag on the admin roster file (-ui-users-file) or its directory (chattr -i, " +
 			"chattr -a; lsattr shows it), or point -ui-users-file at a file that is not a bind mount. The row " +
 			"re-checks live, so no restart is needed; re-apply any admin change refused meanwhile."
 	case rosterTargetNotResponding:
-		row.OperatorAction = "Check the volume holding the admin users file (-ui-users-file): a stalled NFS or FUSE " +
+		row.OperatorAction = "Check the volume holding the admin roster file (-ui-users-file): a stalled NFS or FUSE " +
 			"mount, or a hung storage backend. Admin account changes and TOTP logins may hang or fail until it " +
 			"responds; the row re-checks on its own once it does, with no restart needed."
 	case rosterParentNotWritable:
 		row.OperatorAction = "Restore write and search permission (mode bits and ACL) on the directory holding the " +
-			"admin users file (-ui-users-file) for the account Culvert runs as, or remount the volume read-write. " +
+			"admin roster file (-ui-users-file) for the account Culvert runs as, or remount the volume read-write. " +
 			"The row re-checks live, so no restart is needed; re-apply any admin change refused meanwhile."
 	case rosterTargetChangedExternally:
-		row.OperatorAction = "None needed if the change to the admin users file (-ui-users-file) was intentional: " +
+		row.OperatorAction = "None needed if the change to the admin roster file (-ui-users-file) was intentional: " +
 			"the next admin account change that is saved re-verifies persistence and clears this, with no restart. " +
 			"If it was not, find what touched the file, and check its permissions, ACL and labels still let Culvert " +
 			"replace it."
 	case rosterTargetOwnerChanged:
-		row.OperatorAction = "Give the admin users file (-ui-users-file) back to the account Culvert runs as " +
+		row.OperatorAction = "Give the admin roster file (-ui-users-file) back to the account Culvert runs as " +
 			"(chown), or run Culvert as the file's owner and restart. Until then an admin account change may be " +
 			"refused, and nothing it would have changed is saved."
 	case rosterTargetDisappeared:
 		row.OperatorAction = "Before the next restart, either save an admin account change (any change from " +
-			"Administrators writes the roster in use back and recreates the file) or restore the admin users file " +
+			"Administrators writes the roster in use back and recreates the file) or restore the admin roster file " +
 			"(-ui-users-file) from backup and restart to load it. Find out what removed it: a configuration " +
 			"manager or cleanup job that deletes it will do so again."
 	default:
 		row.Message = problem + " — admin account deletes, role changes and password rotations " +
 			"may not be saved and can be LOST on restart"
-		row.OperatorAction = "Fix the admin users file (-ui-users-file) path or its permissions so it names a " +
+		row.OperatorAction = "Fix the admin roster file (-ui-users-file) path or its permissions so it names a " +
 			"writable regular file on a persistent volume, then restart and re-apply any account changes made since boot."
 	}
 	return row
@@ -1399,12 +1402,12 @@ func (f rosterDurabilityFacts) notDurableAdminRow() OperatorContractCheck {
 		row.Message = "no admin roster file is configured — admin account deletes, role changes and password " +
 			"rotations apply in memory only and are LOST on restart (a rotated password reverts to the " +
 			"-user/auth.user credential)"
-		row.OperatorAction = "Set the admin users file (-ui-users-file) to a path on a persistent volume and restart, " +
+		row.OperatorAction = "Set the admin roster file (-ui-users-file) to a path on a persistent volume and restart, " +
 			"then re-apply any account changes made since the last restart."
 	} else {
 		row.Message = "No local administrator account: if the identity provider is unavailable, nobody can sign in. " +
 			"No admin roster file is configured either, so any account created now is LOST on restart"
-		row.OperatorAction = "Create a local break-glass administrator in Administrators. First set the admin users file " +
+		row.OperatorAction = "Create a local break-glass administrator in Administrators. First set the admin roster file " +
 			"(-ui-users-file) to a path on a persistent volume and restart, so the account survives a restart."
 	}
 	if f.notDurable > 0 {

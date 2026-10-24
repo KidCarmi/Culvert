@@ -572,7 +572,7 @@ export function AccessRulesPage(): JSX.Element {
         <div className={styles.calloutSpace}>
           <Callout variant="critical" title="Not persisted" role="alert">
             Access rules are stored in memory only and will be{" "}
-            <strong>lost on restart or update</strong>. Start Culvert with{" "}
+            <strong>lost on restart or upgrade</strong>. Start Culvert with{" "}
             <code>-policy /data/policy.json</code> (or set{" "}
             <code>proxy.policy_file</code> in config.yaml) to persist them.
           </Callout>
