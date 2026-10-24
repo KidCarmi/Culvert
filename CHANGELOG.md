@@ -63,6 +63,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `vMAJOR.MINOR.PATCH` release, never a moving major alias, and the test fails if
   an exception stops being used — the allowlist is exact, not a dumping ground.
   No runtime, policy or proxy behaviour changes; this is CI trust only.
+
+  The three `actions/checkout` steps in those two workflows also set
+  `persist-credentials: false` (CWE-522, CodeRabbit on this PR): each job runs
+  PR-authored code, which could otherwise read the run's `GITHUB_TOKEN` from
+  `.git/config`. Nothing in them needs the credential — the base-ref
+  `git fetch` reads a public repository.
+
 ### Changed
 
 - **The pinned Go toolchain moves from go1.26.10 to go1.27.3.** The `go.mod`

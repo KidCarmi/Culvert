@@ -44,6 +44,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # This job runs PR-authored scripts; do not leave GITHUB_TOKEN in
+          # .git/config for them (CWE-522). The base-ref fetch below needs no
+          # credential: the repository is public.
+          persist-credentials: false
       - name: Detect contract changes
         id: changed
         env:
@@ -118,6 +122,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # This job runs PR-authored scripts; do not leave GITHUB_TOKEN in
+          # .git/config for them (CWE-522). The base-ref fetch below needs no
+          # credential: the repository is public.
+          persist-credentials: false
       - name: Detect contract changes
         id: changed
         env:
