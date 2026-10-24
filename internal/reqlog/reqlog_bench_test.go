@@ -62,12 +62,22 @@ func BenchmarkAdd(b *testing.B) {
 // This benchmark is still ~FLAT in core count after that gate was removed
 // (49.0 / 96.1 / 157.4 ns at GOMAXPROCS 1/2/4 on the Xeon the gate comment
 // records). The remaining ceiling is ringMu itself: every logged request
-// copies a 328-byte Entry under one process-wide exclusive lock. That is NOT
+// copies a 352-byte Entry under one process-wide exclusive lock. That is NOT
 // the same kind of finding as the gate was — the lock guards real shared
 // state, not a nil check — and removing it means changing what Get()
-// guarantees about ordering (a lock-free shared ring would race the reader;
-// sharding it would reorder entries inside a millisecond, which is all the
-// resolution Entry.TS has). Measure before building either.
+// guarantees about ordering.
+//
+// That has now been MEASURED, and the answer is to keep the lock. Three
+// ordered alternatives were built and benchmarked in
+// ring_order_bench_test.go: a lock-free-per-slot ticket ring (1.1-3.0x
+// WORSE), and core-local sharding with a global sequence stamp, which ties
+// this arm at four cores only when given a stickiness the request path cannot
+// supply and is a tie-or-regression with the realistic per-entry shard key.
+// The reason is in that file: a total order costs one shared read-modify-write
+// per entry whoever pays it, and at four cores that single atomic add already
+// costs a quarter of this whole arm. Read ring_order_bench_test.go's header
+// before re-deriving any of it — including the ~9M entries/s ceiling this
+// leaves and the headroom it carries.
 func BenchmarkAddParallel(b *testing.B) {
 	restore := SwapRingForTest()
 	defer restore()
