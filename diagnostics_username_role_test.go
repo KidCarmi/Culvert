@@ -80,7 +80,7 @@ var rosterDisclosureTokens = []string{
 	"back to operator",           // the legacy login's effective role, interpolated verbatim
 	"longest:",                   // the longest configured username's byte length
 	"legacy single-user login",   // existence/topology of the legacy single-user login
-	"Admin Users",                // the roster remediation workflow
+	"Administrators panel",       // the roster remediation workflow
 }
 
 // usernameRowDetail is everything the row itself discloses.
