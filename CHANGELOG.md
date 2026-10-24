@@ -2020,6 +2020,89 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   round trip. Only deployments using category groups in policy rules are
   affected; no configuration, API or metric surface changes.
 
+### Fixed
+
+- Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the
+  repository's durable-write chokepoint (CHAOS-85) — the same chokepoint the
+  SEC-SECRETWRITE-1 entry above adopted for key material. They hand-rolled
+  `os.WriteFile(tmp)` + `os.Rename`, which is atomic for a *reader* (no torn
+  file is ever visible) but is **not fsynced**, and — the serious half — is
+  invisible to the storage-health plane. `storageDegraded()`, the rate-limited
+  `storage_write_failed` alert, the degraded operator-contract row and the
+  Prometheus series are all driven by the observers `storage_health.go`
+  installs on `fileutil`, so a write that never calls `fileutil` cannot raise
+  any of them: on a full or read-only volume these writes failed **silently**
+  while the operator contract kept reporting healthy. Affected: the secure-upload
+  config (whose `Enabled`/`Origin` gate egress), the upload queue entry and its
+  sealed blob, the support-recipient registry, the debug-level elevation, and
+  the support-bundle approval state. This is the defect class
+  `audit_writefail_test.go` already pins for the audit JSONL (ST-8), in a domain
+  whose own sibling `support_telemetry_config.go` already used the chokepoint.
+
+  The durability half matters most at `writeBundleState`. `createSupportBundle`
+  deliberately writes the PENDING state **first**, before the tgz and the
+  manifest, because `readBundleState` grandfathers an **absent** state file to
+  READY — which is exactly what the download gate checks, so a bundle whose
+  manifest committed without its state would be downloadable with no admin
+  approval, exporting its INTERNAL sections without the mandatory redaction
+  preview. That ordering is correct and sufficient for a *process* crash, where
+  the page cache survives. It is not sufficient for power loss or a kernel
+  panic: with no fsync barrier, the relative durability of the state commit and
+  the manifest commit is a filesystem- and mount-option-dependent accident the
+  code never asserted. `AtomicWrite` supplies the barrier (fsync file, then
+  parent directory). The bundle commit sequence (tgz, redaction report, preview,
+  manifest) moves with it, since those are the artifacts the manifest commits.
+  `cdr_health.go` is deliberately unchanged: it documents why it needs a
+  predictable `.tmp` rendezvous and already fsyncs via
+  `fileutil.WriteFileExclusive`. Gates: a table-driven chokepoint test over all
+  six entry points (red before the change at 6/6) plus fault injection on the
+  approval-gate path asserting degradation, exactly one alert, and the inherited
+  base-name path-redaction contract (red before at 0 alerts).
+
+- A support durable write that LANDED was reported as a failure, so the HTTP
+  response and the audit trail could contradict the state on disk.
+  `fileutil.AtomicWrite` returns `ErrReplacedNotSynced` only *after* its rename
+  has succeeded — the target already carries the new bytes and every reader sees
+  them; what is unproven is narrower, the rename's durability across an
+  immediate crash. `apiSupportBundleApprove` returns 500 and returns *before*
+  its `auditEvent`, so a bundle could be READY and downloadable (the
+  mandatory-preview download gate reads exactly that landed file) while the
+  admin was told the approval failed and nothing recorded who authorized
+  exporting its INTERNAL sections. The same audit-after-save shape covers the
+  `support.upload.config` egress posture flip and the debug-level elevation, so
+  the fix sits at the writer: `durableSupportWrite` treats the sentinel as
+  committed for every support writer. The storage-health plane keeps the signal
+  — `AtomicWrite` notifies the write-failure observer on that branch before
+  returning, so the failure is still counted, logged, alerted as
+  `storage_write_failed` and reflected in `storageDegraded()`. This divergence
+  arrived with the chokepoint conversion above: the previous `os.WriteFile` +
+  `os.Rename` pair returned nil whenever the rename succeeded and so had no
+  error-after-landing case at all. Found by Codex review on PR #1658. Gates: the
+  unit contract with a negative control that a pre-rename ENOSPC is still an
+  error, plus the handler contract that a landed approval returns 204 and leaves
+  a `support.bundle.approve` entry; both verified failing against the unfixed
+  shape.
+
+- Every Data-Plane → Control-Plane poll failure was charged **twice**
+  (CHAOS-86): `backoff()` incremented `failCount` that `pollConfig`'s error path
+  had already incremented. Both of the function's documented contracts were
+  violated. The delay schedule, promised as "2s, 4s, 8s, … capped at 60s",
+  actually ran 4s, 16s, 60s — reaching the ceiling on the 3rd consecutive
+  failure instead of the 6th, so policy and blocklist convergence lagged by up
+  to 60s after a blip that had already cleared. And the failover guard
+  `if c.failCount < 3`, written under the comment "Only attempt failover after 3
+  consecutive failures", was already false on the **second** failure, so a ~10s
+  network blip or a rolling CP upgrade moved an entire data-plane fleet off a
+  healthy leader. `failCount` is owned by the caller and `backoff()` now only
+  reads it, which corrects the schedule and the threshold together and makes the
+  `backing off … (failure #N)` log line report the real streak rather than twice
+  it. A `max(failCount, 1)` clamp keeps the documented 2s floor on the one path
+  that reaches `backoff()` with a cleared streak — `failover()` zeroes it on
+  success and its immediate retry can then fail. Gates: the single-count
+  invariant, a success-resets control, the threshold (asserted on `activeIdx`,
+  since a successful failover resets the streak), and the floor; nothing
+  previously pinned either the schedule or the threshold.
+
 ### Changed
 
 - A panic in either of the release-dispatch plane's detached worker goroutines
