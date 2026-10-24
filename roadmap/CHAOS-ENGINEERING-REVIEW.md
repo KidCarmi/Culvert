@@ -95,6 +95,16 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-24 — `CHAOS-88` CLAIMED (placeholder, commit one).** Id allocated in
+this committed line before any code was written, per the convention the header
+above reaches twice independently. `CHAOS-86` is the highest id written up in
+this register and `CHAOS-87` is held by an open sweep (PR #1485, the IdP
+availability/existence split), so this one took 88 and did not move. Scope: the
+**scan sidecar's own buffer window** (`scan_svc.go` `handleScan`) — the
+process-isolated deployment that the CHAOS-52 runbook recommends as the remedy
+for the in-process scanner's failure modes. Findings, risk matrix and
+verification are written up in [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-24.md).
+
 **2026-10-18 — `CHAOS-85` and `CHAOS-86` CLAIMED (placeholder, commit one).**
 Ids allocated in a committed line before any code was written, per the
 convention above. First claimed as `CHAOS-71`/`CHAOS-72` against `dec66e1`,
