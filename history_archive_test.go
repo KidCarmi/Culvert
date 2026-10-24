@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -464,7 +465,7 @@ func TestResolveHistoryImportTarget(t *testing.T) {
 
 func haExportRequest(t *testing.T, role UIRole, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodPost, "/api/logs/history/export", strings.NewReader(body))
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/logs/history/export", strings.NewReader(body))
 	r = withRole(r, role)
 	w := httptest.NewRecorder()
 	apiLogsHistoryExport(w, r)
@@ -557,7 +558,7 @@ func TestAPIHistoryExport_FormAndAbort(t *testing.T) {
 	globalLogStore.Store(src)
 
 	form := "archivePhrase=" + strings.ReplaceAll(haArchivePhrase, " ", "+")
-	r := withRole(httptest.NewRequest(http.MethodPost, "/api/logs/history/export", strings.NewReader(form)), RoleAdmin)
+	r := withRole(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/logs/history/export", strings.NewReader(form)), RoleAdmin)
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	apiLogsHistoryExport(w, r)
@@ -568,7 +569,7 @@ func TestAPIHistoryExport_FormAndAbort(t *testing.T) {
 		t.Fatalf("form export did not verify: %v", err)
 	}
 
-	r = withRole(httptest.NewRequest(http.MethodPost, "/api/logs/history/export", strings.NewReader(`{"archivePhrase":"`+haArchivePhrase+`"}`)), RoleAdmin)
+	r = withRole(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/logs/history/export", strings.NewReader(`{"archivePhrase":"`+haArchivePhrase+`"}`)), RoleAdmin)
 	fw := &haFailingResponse{ResponseRecorder: httptest.NewRecorder(), left: 100 << 10}
 	func() {
 		defer func() {

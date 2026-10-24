@@ -82,7 +82,7 @@ func TestPurgeOnFullFilesystemFreesSpaceAndWritesResume(t *testing.T) {
 
 func usedKB(dir string) int64 {
 	var total int64
-	_ = filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+	_ = filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error { // #nosec G703 -- path under the test-owned t.TempDir() store
 		if err == nil && !fi.IsDir() {
 			total += fi.Size()
 		}
@@ -109,7 +109,7 @@ func bounded(d time.Duration, fn func() error) string {
 // fillRemaining preallocates path until the filesystem refuses, and returns
 // how many KiB it took.
 func fillRemaining(path string) int64 {
-	f, err := os.Create(path)
+	f, err := os.Create(path) // #nosec G703 -- path under the test-owned t.TempDir() store
 	if err != nil {
 		return 0
 	}

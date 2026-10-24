@@ -88,7 +88,7 @@ func newFBHarness(t *testing.T) *fbHarness {
 
 func (h *fbHarness) writeExec(path, body string) {
 	h.t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil { // #nosec G703 -- harness path under the test's t.TempDir() tree
 		h.t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0o700); err != nil {

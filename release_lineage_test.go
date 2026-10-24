@@ -130,7 +130,7 @@ func TestLineage_RefusesWhatItCannotVerify(t *testing.T) {
 	tampered := publishSingle(t, s, "1.0.252", nil)
 	p := filepath.Join(tampered, "manifests", "culvert-1.0.252.json")
 	raw, _ := os.ReadFile(p)
-	if err := os.WriteFile(p, bytes.Replace(raw, []byte(`"normal"`), []byte(`"critical"`), 1), 0o600); err != nil {
+	if err := os.WriteFile(p, bytes.Replace(raw, []byte(`"normal"`), []byte(`"critical"`), 1), 0o600); err != nil { // #nosec G703 -- fixture path under t.TempDir()
 		t.Fatal(err)
 	}
 	if _, err := collectVerifiedPredecessors([]lineageSource{{good}, {tampered}}, s.trust(t), lineageRepo, "1.0.250", "1.0.253", nil); err == nil {

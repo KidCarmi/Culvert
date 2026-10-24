@@ -21,11 +21,11 @@ func TestUISessionRole_DemotionTakesEffectWithoutLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
-	if err := setUISessionCookie(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody), "demoted", RoleAdmin); err != nil {
+	if err := setUISessionCookie(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody), "demoted", RoleAdmin); err != nil {
 		t.Fatal(err)
 	}
 	cookie := w.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/users", strings.NewReader(`{"username":"demoted","role":"viewer"}`))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/auth/users", strings.NewReader(`{"username":"demoted","role":"viewer"}`))
 	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
 	w = httptest.NewRecorder()
 	apiAuthUsers(w, r)
@@ -35,7 +35,7 @@ func TestUISessionRole_DemotionTakesEffectWithoutLogin(t *testing.T) {
 	if role, ok := cfg.VerifyUIUser("demoted", "Str0ngPassw0rd!"); !ok || role != RoleViewer {
 		t.Fatalf("roster role=%s valid=%v", role, ok)
 	}
-	r = httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/users", http.NoBody)
 	r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 	w = httptest.NewRecorder()
 	uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(w, r)
@@ -73,7 +73,7 @@ func TestUISessionRole_NeverExceedsCookieOrRoster(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/status", http.NoBody)
 			r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: raw}) //nolint:gosec // G124: a REQUEST cookie; Secure/HttpOnly/SameSite are response attributes
 			sess, err := readUISessionCookie(r)
 			if tc.denied {
@@ -100,12 +100,12 @@ func TestUISessionRole_RejectsReplayedPortalCookie(t *testing.T) {
 			w := httptest.NewRecorder()
 			// The genuine proxy-portal issuer deliberately carries no admin role.
 			// Even a matching local username must not supply that missing authority.
-			if err := setSessionCookie(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody), &Identity{Sub: "owner", Provider: provider}); err != nil {
+			if err := setSessionCookie(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody), &Identity{Sub: "owner", Provider: provider}); err != nil {
 				t.Fatal(err)
 			}
 			cookie := w.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
 			cookie.Name = uiSessionCookieName //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
-			r := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/users", http.NoBody)
 			r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie replayed from the response; attributes do not apply
 			w = httptest.NewRecorder()
 			uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(w, r)
@@ -131,7 +131,7 @@ func TestUISessionRole_RequiresSignedAudience(t *testing.T) {
 		if _, err := decodeSession(raw); err != nil {
 			t.Fatalf("shared decoder rejected signed purpose %q: %v", audience, err)
 		}
-		r := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/users", http.NoBody)
 		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: raw}) //nolint:gosec // G124: a REQUEST cookie; Secure/HttpOnly/SameSite are response attributes
 		_, err = readUISessionCookie(r)
 		if (err == nil) != (audience == uiSessionAudience) {
@@ -155,7 +155,7 @@ func TestUISessionRole_RequiresSignedAudience(t *testing.T) {
 			t.Fatal(err)
 		}
 		forged := base64.RawURLEncoding.EncodeToString(payload) + "." + parts[1]
-		r = httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+		r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/users", http.NoBody)
 		r.AddCookie(&http.Cookie{Name: uiSessionCookieName, Value: forged}) //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 		if _, err := readUISessionCookie(r); err == nil {
 			t.Fatal("adding the UI audience without re-signing must fail")
@@ -166,12 +166,12 @@ func TestUISessionRole_RequiresSignedAudience(t *testing.T) {
 func TestUISessionRole_ProxyReaderRejectsOtherPurpose(t *testing.T) {
 	initSessionSecret()
 	issued := httptest.NewRecorder()
-	if err := setUISessionCookie(issued, httptest.NewRequest(http.MethodGet, "/", http.NoBody), "viewer", RoleViewer); err != nil {
+	if err := setUISessionCookie(issued, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody), "viewer", RoleViewer); err != nil {
 		t.Fatal(err)
 	}
 	cookie := issued.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
 	cookie.Name = sessionCookieName        //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
-	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 	r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 	if sess, err := readSessionCookie(r); err == nil || sess != nil {
 		t.Fatal("renamed administrator UI cookie must not authenticate a proxy identity")
@@ -194,12 +194,12 @@ func TestUISessionRole_ProxyReaderRejectsOtherPurpose(t *testing.T) {
 				cookie = &http.Cookie{Name: sessionCookieName, Value: raw} //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 			} else {
 				w := httptest.NewRecorder()
-				if err := setSessionCookie(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody), &Identity{Sub: "portal-user", Provider: "oidc"}); err != nil {
+				if err := setSessionCookie(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody), &Identity{Sub: "portal-user", Provider: "oidc"}); err != nil {
 					t.Fatal(err)
 				}
 				cookie = w.Result().Cookies()[0] //nolint:gosec // G124: replayed as a REQUEST cookie in a test; response attributes do not apply
 			}
-			r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 			r.AddCookie(cookie) //nolint:gosec // G124: a REQUEST cookie in a test; Secure/HttpOnly/SameSite are response attributes
 			sess, err := readSessionCookie(r)
 			if tc.audience != "" {

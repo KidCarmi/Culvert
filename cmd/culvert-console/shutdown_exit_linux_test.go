@@ -37,7 +37,7 @@ func TestShutdownExitProcess(t *testing.T) {
 	}
 	// Signal readiness out of band (the tty is deliberately unread), then block.
 	if ready := os.Getenv("CONSOLE_SHUTDOWN_READY"); ready != "" {
-		if err := os.WriteFile(ready, []byte("x"), 0o600); err != nil {
+		if err := os.WriteFile(ready, []byte("x"), 0o600); err != nil { // #nosec G703 -- marker file under t.TempDir()
 			t.Fatalf("readiness: %v", err)
 		}
 	}

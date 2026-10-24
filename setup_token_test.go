@@ -6,6 +6,7 @@ package main
 // path, not a firewall note).
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -30,7 +31,7 @@ func setupTokenTestConfig(t *testing.T) {
 
 func postSetup(t *testing.T, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/setup/complete", strings.NewReader(`{"user":"admin","pass":"Str0ngPassw0rd!"}`))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/setup/complete", strings.NewReader(`{"user":"admin","pass":"Str0ngPassw0rd!"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "198.51.100.77:4000"
 	if token != "" {
@@ -84,7 +85,7 @@ func TestSetupToken_UnsetKeepsOpenBootstrap(t *testing.T) {
 	if setupTokenRequired() {
 		t.Fatal("a blank token must not be required")
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/setup/status", http.NoBody)
 	rec := httptest.NewRecorder()
 	apiSetupStatus(rec, req)
 	if !strings.Contains(rec.Body.String(), `"setupTokenRequired":false`) {
@@ -98,7 +99,7 @@ func TestSetupToken_UnsetKeepsOpenBootstrap(t *testing.T) {
 func TestSetupToken_StatusReportsRequirement(t *testing.T) {
 	setupTokenTestConfig(t)
 	loadSetupToken("per-instance-token-0123456789abcdef")
-	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/setup/status", http.NoBody)
 	rec := httptest.NewRecorder()
 	apiSetupStatus(rec, req)
 	if !strings.Contains(rec.Body.String(), `"setupTokenRequired":true`) {
@@ -125,7 +126,7 @@ func TestSetupToken_ProtectsBootstrapAdminRoutes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setupTokenTestConfig(t)
 			loadSetupToken(tc.configured)
-			req := httptest.NewRequest(http.MethodPost, "/api/auth/users", strings.NewReader(`{"username":"bootstrap-admin","password":"Str0ngPassw0rd!","role":"admin"}`))
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/auth/users", strings.NewReader(`{"username":"bootstrap-admin","password":"Str0ngPassw0rd!","role":"admin"}`))
 			req.RemoteAddr = "198.51.100.78:4000"
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(headerSetupToken, tc.presented)
@@ -157,7 +158,7 @@ func TestSetupToken_BootstrapRoutingAndPostSetup(t *testing.T) {
 			rec := httptest.NewRecorder()
 			uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusNoContent)
-			})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, http.NoBody))
+			})).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, tc.path, http.NoBody))
 			if rec.Code != tc.want {
 				t.Fatalf("want %d, got %d", tc.want, rec.Code)
 			}
@@ -166,7 +167,7 @@ func TestSetupToken_BootstrapRoutingAndPostSetup(t *testing.T) {
 	if err := cfg.SetAuth("admin", "Str0ngPassw0rd!"); err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/auth/users", http.NoBody)
 	req.Header.Set(headerSetupToken, "instance-token")
 	rec := httptest.NewRecorder()
 	uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(rec, req)

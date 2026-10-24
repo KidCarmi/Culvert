@@ -90,7 +90,7 @@ func TestReleaseTrustUnsupportedJumpCannotMutate(t *testing.T) {
 	rig := startApplyRigWithTrustAt(t, t.TempDir(), s)
 	defer rig.stop()
 	t.Setenv("CULVERT_BACKUP_PASSPHRASE", "test-only-passphrase")
-	op, id := rig.acceptAndWait(t, map[string]any{"image_ref": targetRef, "release_proof": p, "prior_release_proof": pp, "pre_backup": true, "passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE"})
+	op, id := rig.acceptAndWait(t, map[string]any{"image_ref": targetRef, "release_proof": p, "prior_release_proof": pp, "pre_backup": true, "passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE"}) // #nosec G101 -- an env-var reference, not a credential
 	if op["state"] != "failed" || !strings.Contains(rig.opLog(t, id), "min_upgrade_from") {
 		t.Fatalf("unsupported transition not refused: %v", op)
 	}

@@ -124,7 +124,7 @@ func TestE2ESeedSignedCatalog(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(ring, b, 0o600); err != nil {
+		if err := os.WriteFile(ring, b, 0o600); err != nil { // #nosec G703 -- opt-in CI E2E helper; path is supplied by the CI job
 			t.Fatalf("write agent keyring: %v", err)
 		}
 	}
@@ -199,7 +199,7 @@ func TestE2EEmitAgentRequest(t *testing.T) {
 	if dir == "" {
 		t.Skip("set CULVERT_E2E_REQ_CATALOG (+_KEYS/_REPO/_RUNNING/_OUT/_MODE) to emit an agent request")
 	}
-	keysRaw, err := os.ReadFile(os.Getenv("CULVERT_E2E_REQ_KEYS")) // #nosec G304 -- CI helper input
+	keysRaw, err := os.ReadFile(os.Getenv("CULVERT_E2E_REQ_KEYS")) // #nosec G304 G703 -- CI helper input
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestE2EEmitAgentRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(os.Getenv("CULVERT_E2E_REQ_OUT"), b, 0o600); err != nil {
+	if err := os.WriteFile(os.Getenv("CULVERT_E2E_REQ_OUT"), b, 0o600); err != nil { // #nosec G703 -- opt-in CI E2E helper; path is supplied by the CI job
 		t.Fatal(err)
 	}
 	t.Logf("wrote %s request (%d bytes)", mode, len(b))

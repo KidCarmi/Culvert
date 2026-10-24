@@ -67,6 +67,7 @@ type RunningProxyImage struct {
 }
 
 // PriorRef returns the first captured reference for legacy inspection callers.
+//
 // Deprecated: mutation callers must use RepositoryRef with host repository policy.
 func (ri *RunningProxyImage) PriorRef() string {
 	if len(ri.RepoDigests) == 0 {

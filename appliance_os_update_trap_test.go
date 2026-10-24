@@ -105,7 +105,7 @@ func runOSUpdateWith(t *testing.T, args, journal []string, env ...string) (out, 
 		}
 	}
 	scriptPath := filepath.Join(dir, "culvert-os-update")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil { // run as `bash <file>`: no execute bit needed
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil { // #nosec G703 -- under t.TempDir(); run as `bash <file>`: no execute bit needed
 		t.Fatal(err)
 	}
 	stubs := map[string]string{

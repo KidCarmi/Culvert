@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -61,7 +62,7 @@ func TestFB1_RolelessRosterAccountLogsInAsAdmin(t *testing.T) {
 
 	// The session the login mints must be accepted on the next request.
 	rec := httptest.NewRecorder()
-	if err := setUISessionCookie(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", http.NoBody), "old", role); err != nil {
+	if err := setUISessionCookie(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/auth/login", http.NoBody), "old", role); err != nil {
 		t.Fatal(err)
 	}
 	var gotRole UIRole
@@ -69,7 +70,7 @@ func TestFB1_RolelessRosterAccountLogsInAsAdmin(t *testing.T) {
 		gotRole, _ = r.Context().Value(uiRoleKey{}).(UIRole)
 		w.WriteHeader(http.StatusOK)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/stats", http.NoBody)
 	for _, c := range rec.Result().Cookies() {
 		req.AddCookie(c)
 	}

@@ -159,7 +159,7 @@ func startShutdownChild(t *testing.T, readyBy time.Time, extraEnv ...string) *sh
 	t.Helper()
 	skipOffLinux(t)
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestShutdownHelperProcess$", "-test.count=1", "-test.v") // #nosec G204 -- re-execs this test binary with fixed arguments; no external input
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestShutdownHelperProcess$", "-test.count=1", "-test.v") // #nosec G204 G702 -- re-execs this test binary with fixed arguments; no external input
 	cmd.Env = append(append(os.Environ(), shutdownHelperEnv+"="+dir), extraEnv...)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.StdoutPipe()

@@ -81,7 +81,7 @@ func orderingCycleReport(t *testing.T, unit string, extra map[string]string) str
 	t.Helper()
 	dir := t.TempDir()
 	write := func(name, body string) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil { // #nosec G703 -- fixture name under t.TempDir()
 			t.Fatal(err)
 		}
 	}

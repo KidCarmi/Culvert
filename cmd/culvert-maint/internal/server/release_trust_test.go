@@ -44,14 +44,14 @@ func TestReleaseProofBodyCapIsRouteSpecific(t *testing.T) {
 	var dst struct {
 		Proof *releaseproof.Evidence `json:"release_proof"`
 	}
-	if err := decodeJSONBody(httptest.NewRequest("POST", "/", strings.NewReader(body)), &dst); err == nil {
+	if err := decodeJSONBody(httptest.NewRequestWithContext(context.Background(), "POST", "/", strings.NewReader(body)), &dst); err == nil {
 		t.Fatal("ordinary body cap expanded")
 	}
-	if err := decodeJSONBodyLimit(httptest.NewRequest("POST", "/", strings.NewReader(body)), &dst, maxProofBodyBytes); err != nil {
+	if err := decodeJSONBodyLimit(httptest.NewRequestWithContext(context.Background(), "POST", "/", strings.NewReader(body)), &dst, maxProofBodyBytes); err != nil {
 		t.Fatal(err)
 	}
 	tooLarge := `{"release_proof":{"index":"` + strings.Repeat("A", maxProofBodyBytes) + `"}}`
-	if err := decodeJSONBodyLimit(httptest.NewRequest("POST", "/", strings.NewReader(tooLarge)), &dst, maxProofBodyBytes); err == nil {
+	if err := decodeJSONBodyLimit(httptest.NewRequestWithContext(context.Background(), "POST", "/", strings.NewReader(tooLarge)), &dst, maxProofBodyBytes); err == nil {
 		t.Fatal("oversized proof body accepted")
 	}
 }

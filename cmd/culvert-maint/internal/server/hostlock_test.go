@@ -31,7 +31,7 @@ func TestHostLock_PendingShutdownSurvivesHelperExit(t *testing.T) {
 			}
 			path := filepath.Join(rig.stateDir, shutdownFenceName)
 			data := "culvert-shutdown-v1 " + strings.TrimSpace(string(boot)) + " reboot " + phase + "\n"
-			// #nosec G306 -- mirrors the root-created fence readable by the agent.
+			// #nosec G306 G703 -- mirrors the root-created fence readable by the agent; path is under the rig's t.TempDir() state dir.
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}

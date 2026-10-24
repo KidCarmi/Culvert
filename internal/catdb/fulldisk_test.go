@@ -71,7 +71,7 @@ func runFullDiskChild(t *testing.T, mode string, want []string) {
 	}
 	t.Cleanup(func() { _ = syscall.Unmount(mnt, syscall.MNT_DETACH) })
 
-	// #nosec G204 -- re-executes this test binary (os.Args[0]) with a fixed -test.run selector
+	// #nosec G204 G702 -- re-executes this test binary (os.Args[0]) with a fixed -test.run selector
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestFullFilesystemWriteReturnsErrorNotSIGBUS$", "-test.v")
 	cmd.Env = append(os.Environ(), "CATDB_FULLDISK_CHILD="+mnt, "CATDB_FULLDISK_MODE="+mode)
 	out, err := cmd.CombinedOutput()
@@ -201,7 +201,7 @@ func fillLeaving(t *testing.T, mnt string, headroom uint64) string {
 		t.Fatalf("only %d bytes free", free)
 	}
 	filler := filepath.Join(mnt, "filler")
-	if err := os.WriteFile(filler, make([]byte, free-headroom), 0o600); err != nil {
+	if err := os.WriteFile(filler, make([]byte, free-headroom), 0o600); err != nil { // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 		t.Fatal(err)
 	}
 	return filler
@@ -242,7 +242,7 @@ func closeWithin(t *testing.T, db *CommunityDB, d time.Duration) {
 func fullDiskChild(t *testing.T, mnt string) {
 	// Leave room for the store to open, then fill the rest during the write.
 	filler := filepath.Join(mnt, "filler")
-	if err := os.WriteFile(filler, make([]byte, 512<<20), 0o600); err != nil {
+	if err := os.WriteFile(filler, make([]byte, 512<<20), 0o600); err != nil { // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 		t.Fatal(err)
 	}
 	dir := filepath.Join(mnt, "catfeeddb")
@@ -281,7 +281,7 @@ func fullDiskChild(t *testing.T, mnt string) {
 
 	// Capacity returns: the same open store must accept writes again,
 	// without a restart.
-	if err := os.Remove(filler); err != nil {
+	if err := os.Remove(filler); err != nil { // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 		t.Fatal(err)
 	}
 	var rerr error
@@ -320,7 +320,7 @@ func fullDiskChild(t *testing.T, mnt string) {
 // space is back.
 func fullDiskCloseChild(t *testing.T, mnt string) {
 	filler := filepath.Join(mnt, "filler")
-	if err := os.WriteFile(filler, make([]byte, 512<<20), 0o600); err != nil {
+	if err := os.WriteFile(filler, make([]byte, 512<<20), 0o600); err != nil { // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 		t.Fatal(err)
 	}
 	dir := filepath.Join(mnt, "catfeeddb")
@@ -336,7 +336,7 @@ func fullDiskCloseChild(t *testing.T, mnt string) {
 		t.Fatalf("expected the write to be refused on the full filesystem, got %v", werr)
 	}
 	closeWithin(t, db, 60*time.Second)
-	if err := os.Remove(filler); err != nil {
+	if err := os.Remove(filler); err != nil { // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 		t.Fatal(err)
 	}
 	db2, err := Open(dir)
@@ -358,7 +358,7 @@ func fullDiskCloseChild(t *testing.T, mnt string) {
 // in place: once space returns, every acknowledged batch reads back.
 func fullDiskSSTChild(t *testing.T, mnt string) {
 	filler := filepath.Join(mnt, "filler")
-	if err := os.WriteFile(filler, make([]byte, 512<<20), 0o600); err != nil {
+	if err := os.WriteFile(filler, make([]byte, 512<<20), 0o600); err != nil { // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 		t.Fatal(err)
 	}
 	dir := filepath.Join(mnt, "catfeeddb")
@@ -378,7 +378,7 @@ func fullDiskSSTChild(t *testing.T, mnt string) {
 	}
 	// Take the rest: whatever the flusher or the next SST would need.
 	rest := filepath.Join(mnt, "filler-rest")
-	f, err := os.OpenFile(rest, os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(rest, os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func fullDiskSSTChild(t *testing.T, mnt string) {
 		t.Fatal("Close did not return within 60s while the final SST could not be created")
 	}
 	for _, p := range []string{filler, rest} {
-		if err := os.Remove(p); err != nil {
+		if err := os.Remove(p); err != nil { // #nosec G703 -- path under the test-owned tmpfs mounted in t.TempDir()
 			t.Fatal(err)
 		}
 	}
