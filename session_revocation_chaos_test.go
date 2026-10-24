@@ -75,8 +75,8 @@ func TestChaos68_ControlPlaneOwnRevocationsReachTheFleet(t *testing.T) {
 	withChaos68Aggregator(t)
 
 	cpLocal := []RevocationEntry{
-		{Token: "cp-logout-token", Expiry: time.Now().Add(time.Hour).Unix()},
-		{Token: "user:deleted-admin", User: "deleted-admin", Expiry: time.Now().Add(time.Hour).Unix()},
+		{Token: "cp-logout-token", Expiry: time.Now().Add(time.Hour).Unix()},                           // #nosec G101 -- test-only fixture token, not a credential
+		{Token: "user:deleted-admin", User: "deleted-admin", Expiry: time.Now().Add(time.Hour).Unix()}, // #nosec G101 -- test-only fixture token, not a credential
 	}
 	globalRevAggregator.UpdateLocal(cpLocal)
 	globalRevAggregator.Update("dp-1", nil)
@@ -1068,7 +1068,7 @@ func TestChaos68_UnconfiguredNodePaysNothingForTheVanishedFileCheck(t *testing.T
 		t.Error("an unconfigured node reports its backing file missing — there is no backing file")
 	}
 	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-unconf", Expiry: exp.Unix()}}
+	entries := []RevocationEntry{{Token: "tok-unconf", Expiry: exp.Unix()}} // #nosec G101 -- test-only fixture token, not a credential
 	mergeAndPersistRevocations(entries, "test")
 	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
 		t.Fatalf("re-merge added %d, want 0", added)
