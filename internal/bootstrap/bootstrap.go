@@ -46,11 +46,25 @@ func tagFor(version string) string {
 	return "latest"
 }
 
+// namesTagOrDigest reports whether a repository already ends in a tag or
+// digest. Image appends its own tag, so such an override would render an
+// unpullable "repo:1.0:tag"; it is ignored like any other unusable override.
+// A colon before the last "/" is a registry port, not a tag.
+func namesTagOrDigest(repo string) bool {
+	last := repo[strings.LastIndex(repo, "/")+1:]
+	return strings.ContainsAny(last, ":@")
+}
+
 // Image returns the image reference for DP nodes, checking registry
 // settings first, falling back to the default ghcr.io image with the
 // current version.
 func Image(settingsPath, version string) string {
-	if base := registryURL(settingsPath); base != "" {
+	raw := registryURL(settingsPath)
+	base := strings.TrimRight(raw, "/")
+	// "host/" trims to a bare "host", which Docker reads as a Docker Hub
+	// repository rather than the registry the operator named: unusable.
+	hostOnly := base != raw && !strings.Contains(base, "/")
+	if base != "" && !hostOnly && !namesTagOrDigest(base) {
 		// The reference is rendered into the compose document a DP node runs.
 		// An override that is not a plain image reference is ignored rather
 		// than propagated (SEC-BOOTSTRAP-HOST-1, defence in depth).

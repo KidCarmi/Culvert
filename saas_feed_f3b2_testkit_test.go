@@ -37,6 +37,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,12 +220,22 @@ func forgedEnvelope(t *testing.T, manifestBytes []byte) []byte {
 // feedOrigin is an httptest TLS server standing in for feeds.culvertlabs.com, plus a
 // fetcher wired to reach it (loopback resolver + a cert bearing the official SAN).
 type feedOrigin struct {
-	srv        *httptest.Server
-	fetcher    *feedFetcher
+	srv     *httptest.Server
+	fetcher *feedFetcher
+	// mu guards dialedAddr and sniName: the transport can run more than one dial
+	// (and handshake) at once, and each one writes what it observed.
+	mu         sync.Mutex
 	dialedAddr string // the addr the transport asked the dialer to reach (the resolved IP:443)
 	sniName    string // the TLS ServerName the origin observed
 	rootPool   *x509.CertPool
 	certSANs   []string
+}
+
+// observed returns the last dialed address and SNI name under the lock.
+func (fo *feedOrigin) observed() (dialedAddr, sniName string) {
+	fo.mu.Lock()
+	defer fo.mu.Unlock()
+	return fo.dialedAddr, fo.sniName
 }
 
 // newFeedOrigin serves handler over TLS with a cert whose SAN is the official feed
@@ -245,7 +256,9 @@ func newFeedOriginCert(t *testing.T, handler http.Handler, certSANs []string, tr
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			fo.mu.Lock()
 			fo.sniName = hello.ServerName
+			fo.mu.Unlock()
 			return nil, nil
 		},
 	}
@@ -265,7 +278,9 @@ func newFeedOriginCert(t *testing.T, handler http.Handler, certSANs []string, tr
 			return nil, net.UnknownNetworkError("unexpected host in test: " + host)
 		},
 		dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			fo.mu.Lock()
 			fo.dialedAddr = addr // capture what the transport tried to dial (the resolved IP:443)
+			fo.mu.Unlock()
 			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, serverAddr)
 		},
 		tlsConfig:    clientTLS,
