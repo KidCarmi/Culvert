@@ -428,33 +428,28 @@ func checkPolicyLoaded() OperatorContractCheck {
 // honour). Before this row the only signal was a boot log line, while
 // policy_loaded still read "policy ruleset loaded": an operator saw an
 // all-green policy that silently lacked rules they had written. Report-only;
-// contributes nothing when nothing was dropped. Names are capped so a large
-// hand-edited file cannot bloat the report.
+// contributes nothing when nothing was dropped. Load retains only a bounded
+// set of names (policyLoadDropped), so a large hand-edited file cannot bloat
+// the report.
 func checkPolicyRulesDroppedOnLoad(ps *PolicyStore) []OperatorContractCheck {
-	p := ps.loadDropped.Load()
-	if p == nil || len(*p) == 0 {
+	d := ps.loadDropped.Load()
+	if d == nil || d.total == 0 {
 		return nil
 	}
-	const maxNames = 5
-	names := *p
-	shown := names
-	if len(shown) > maxNames {
-		shown = shown[:maxNames]
-	}
-	listed := make([]string, len(shown))
-	for i, n := range shown {
+	listed := make([]string, len(d.names))
+	for i, n := range d.names {
 		listed[i] = fmt.Sprintf("%q", n)
 	}
 	more := ""
-	if len(names) > len(shown) {
-		more = fmt.Sprintf(" and %d more", len(names)-len(shown))
+	if d.total > len(d.names) {
+		more = fmt.Sprintf(" and %d more", d.total-len(d.names))
 	}
 	return []OperatorContractCheck{{
 		Code:   "policy_rules_dropped_on_load",
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d rule(s) in the policy file were rejected at load and are NOT enforced: %s%s",
-			len(names), strings.Join(listed, ", "), more),
-		OperatorAction: "Recreate the intended rules under Policy (the editor validates them), then restart; the rejected entries stay in the policy file and are re-reported at every load until they are removed.",
+			d.total, strings.Join(listed, ", "), more),
+		OperatorAction: "Recreate the intended rules under Policy (the editor validates them). The rejected entries are re-reported at every load while they remain in the policy file; the next policy change rewrites the file without them, and this row clears at the next load.",
 	}}
 }
 
