@@ -140,6 +140,7 @@ func TestHA_PR5_ApplyReplicatedCA_WrongTokenFailsClosed(t *testing.T) {
 // missing CAKeyEncrypted must fail closed BEFORE any unrelated replicated state
 // (cluster state / config snapshot) is applied.
 func TestHA_PR5_PartialApply_CAFailureDoesNotImportState(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	dir := t.TempDir()
 	certPEM, _ := withClusterCAForHA(t, dir)
 

@@ -46,8 +46,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc"
 )
 
 // ─── gRPC service definition (no protoc needed) ───────────────────────────────
@@ -330,7 +328,6 @@ var (
 		role     string // "standalone", "control-plane", "data-plane"
 		grpcAddr string // gRPC listen address (CP) or connect-to address (DP)
 		nodeID   string // this node's identifier
-		grpcSrv  *grpc.Server
 		certFile string // TLS cert path (for HA deploy command)
 		keyFile  string // TLS key path (for HA deploy command)
 		caFile   string // CA cert path (for HA deploy command)
@@ -345,9 +342,7 @@ var (
 // the node from the fleet. A standalone or control-plane node is locally
 // authoritative and may edit freely. Read under clusterRoleMu.
 func isManagedDataPlane() bool {
-	clusterRoleMu.RLock()
-	defer clusterRoleMu.RUnlock()
-	return clusterRole.role == "data-plane"
+	return clusterRoleSnapshot().role == "data-plane"
 }
 
 // enrollRateLimit tracks per-IP enrollment attempt timestamps for rate limiting.

@@ -214,4 +214,11 @@ func resetRosterPersistCountersForTest() {
 	rosterNotDurable.Store(0)
 	rosterNotDurableLogLast.Store(0)
 	rosterNotDurableSuppress.Store(0)
+	// The row counts failures since the last landed write against these
+	// bases; zeroing the counters must zero the shared cfg's bases too.
+	if cfg != nil {
+		cfg.mu.Lock()
+		cfg.uiUsersRefusedAtLanded, cfg.uiUsersDegradedAtLanded = 0, 0
+		cfg.mu.Unlock()
+	}
 }
