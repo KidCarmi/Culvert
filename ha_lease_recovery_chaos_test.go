@@ -449,6 +449,17 @@ func TestChaos55_UnfencedLeaderIsVisibleOnMetrics(t *testing.T) {
 	defer restore()
 	resetHALeaseRecoveryStatsForTest()
 	t.Cleanup(resetHALeaseRecoveryStatsForTest)
+	// A Control Plane's activation publishes before its boot resume runs, so
+	// the recovered epoch has a committed snapshot to carry it (CHAOS-71: an
+	// epoch is installed only once a committed snapshot carries it). Without
+	// this the test passed only when an earlier test had published into the
+	// shared store, and failed when run alone.
+	prevStore := globalConfigStore
+	globalConfigStore = &ConfigStore{}
+	t.Cleanup(func() { globalConfigStore = prevStore })
+	if err := globalConfigStore.Update(ConfigSnapshot{}); err != nil {
+		t.Fatalf("seed the committed snapshot: %v", err)
+	}
 
 	// No fence armed at all: every lease series must be ABSENT. `0` on a node
 	// that never had a lease is indistinguishable from a fenced-out one, and

@@ -113,9 +113,7 @@ func pacProfilesWriterLock() func() {
 // edit would silently diverge until the next CP version bump, then be
 // obliterated without trace (Panorama managed-object semantics).
 func pacProfilesMutationAllowed(w http.ResponseWriter) bool {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	if role == "data-plane" {
 		http.Error(w, "PAC profiles are managed by the control plane on this node", http.StatusConflict)
 		return false
