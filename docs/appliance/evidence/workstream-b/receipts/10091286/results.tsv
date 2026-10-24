@@ -1,0 +1,7 @@
+1	0	1792827984.699457499	1792827987.443382723	go build ./...
+2	0	1792827987.445752966	1792827994.667766157	go vet ./...
+3	0	1792827994.669633267	1792828131.051849763	go test -count=1 -race -shuffle=on -run 'TestFB1_|TestFB2_|TestLoadedRosterRole|TestRosterLoad|SECRBAC|SECUISESS|CategoryFeed|CatFeed|APIURLCatFeedStatus' .
+4	0	1792828131.053851511	1792828218.163508960	go test -count=1 -race -shuffle=on ./internal/feedsync/ ./internal/catdb/ ./internal/storeguard/
+5	0	1792828218.165348350	1792828635.057612224	go test -count=1 .
+6	0	1792828635.060555267	1792828653.966997547	make api-verify
+7	0	1792828653.968931182	1792828656.518817039	~/go/bin/golangci-lint run --new-from-rev 0fb4daf9 --timeout 15m . ./internal/feedsync/
