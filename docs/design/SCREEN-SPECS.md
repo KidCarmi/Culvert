@@ -52,6 +52,16 @@ headings for AT; focus ring on items. [U]
    | Logging | `/api/stats.logWriteErrors`, `/api/dashboard/health.logStore` | Persisting / Write errors (n) |
    | Updates | SSE `updateAvailable`, `latestVersion` | Current / Update available |
    Every state is text + color; unknown = "Unknown" (muted), never green.
+
+   > **Correction (post-2026-07-11):** the Updates posture item and its SSE
+   > `updateAvailable` / `latestVersion` source no longer exist: DEBT-008 deleted
+   > the legacy `updater/` module and its `/api/update/*` routes (see
+   > `docs/engineering/TECHNICAL-DEBT-REGISTER.md` DEBT-008 and
+   > `INFORMATION-ARCHITECTURE.md`). Software delivery is **Release** management
+   > (`/api/releases*`) and applying a release is an **Upgrade**
+   > (`PRODUCT-TERMINOLOGY.md`). Do not reintroduce an Updates item or the
+   > "Update available" state; the references to them here are historical.
+
    No fabricated signals; each item links to its owning view.
 2. **Metric cards** [E]: Total / Allowed / Blocked / Auth failures / Active
    connections (ids `d-total`, `d-allowed`, `d-blocked`, `d-auth`, `d-active`,
