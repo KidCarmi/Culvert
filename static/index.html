@@ -952,6 +952,15 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
     <span id="config-freeze-msg"></span>
   </div>
 
+  <!-- Roster role clamp, non-admin view (SEC-RBAC-ROLE-1): the signed-in account
+       may itself be one held at viewer, and the explanation in Admin Users is
+       admin-only. Fixed text driven only by the count /api/stats already
+       returns to every role; which accounts are held stays admin-only. -->
+  <div id="roster-clamp-viewer-banner" class="banner warn" role="status" style="display:none;margin:14px 28px 0">
+    <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+    <span>Some console accounts are held at the viewer role because the saved user file names a role this version does not recognise (for example after restoring a backup from a newer version). If your account should have more access, ask an administrator to choose its role. If no administrator can sign in, recover from the host shell with --reset-password username:newpassword, which restores the admin role (and removes that account's two-factor enrolment).</span>
+  </div>
+
   <div class="content">
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
@@ -2963,6 +2972,10 @@ Firefox (all platforms):
           <button class="btn" data-click="openUserModal">+ Add User</button>
         </div>
         <div class="panel-body">
+          <p class="hint" id="roster-role-clamp-hint" style="display:none;color:var(--warn,#b8860b)">
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <span id="roster-role-clamp-text"></span>
+          </p>
           <p class="hint">
             Manage who can access this dashboard and what they can do.
             <strong>admin</strong> - full access &nbsp;·&nbsp;
@@ -6661,7 +6674,7 @@ function renderUsersTable(users) {
   tbody.innerHTML = tableRows(users, u => `
     <tr>
       <td><strong>${escHtml(u.username)}</strong></td>
-      <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span></td>
+      <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span>${u.roleClamped ? ' <span class="badge" data-role-clamped="1" title="The saved user file names a role this version does not recognise; held at viewer until a role is chosen" style="border-radius:99px;padding:2px 8px;font-size:.68rem;color:var(--warn,#b8860b)">held at viewer</span>' : ''}</td>
       <td>
         <button class="btn ghost sm" data-click="openUserModal" data-arg="${escHtml(u.username)}" data-arg2="${escHtml(u.role)}">Edit</button>
         ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" data-click="deleteUser" data-arg="${JSON.stringify(u.username).replace(/"/g,'&quot;')}">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
@@ -8589,6 +8602,32 @@ async function fetchStats() {
         oversizeHint.style.display = '';
       } else {
         oversizeHint.style.display = 'none';
+      }
+    }
+    // Roster accounts held at viewer (SEC-RBAC-ROLE-1): ui_users.json named a
+    // role this build does not know (typically a backup restored from a newer
+    // build), so the account was lowered to read-only at load. The server
+    // already reports the count; without this note the admin only sees an
+    // account that mysteriously lost its authority. adminRosterRoleClamped is
+    // the canonical field (uiRosterRoleClamped is its deprecated alias).
+    const rc = s.adminRosterRoleClamped || 0;
+    // A clamped account cannot open the admin-only Admin Users view, so a
+    // non-admin also gets a fixed-text banner: it carries nothing beyond the
+    // count /api/stats already returns to every role.
+    const rcvBanner = document.getElementById('roster-clamp-viewer-banner');
+    if (rcvBanner) rcvBanner.style.display = (rc > 0 && uiRole && uiRole !== 'admin') ? '' : 'none';
+    const rcHint = document.getElementById('roster-role-clamp-hint');
+    if (rcHint) {
+      if (rc > 0) {
+        document.getElementById('roster-role-clamp-text').textContent =
+          fmt(rc) + ' account' + (rc === 1 ? ' is' : 's are') +
+          ' held at the viewer role: the saved user file names a role this version does not recognise ' +
+          '(for example after restoring a backup from a newer version). Those accounts are marked "held at viewer" in the list below: edit each one and choose a role to restore its access. ' +
+          'If no administrator can still sign in, recover from the host shell with --reset-password username:newpassword, ' +
+          'which restores the admin role (and removes that account\'s two-factor enrolment).';
+        rcHint.style.display = '';
+      } else {
+        rcHint.style.display = 'none';
       }
     }
     // nav badge
