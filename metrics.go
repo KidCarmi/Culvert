@@ -1651,6 +1651,10 @@ culvert_auth_verify_saturated %d
 # HELP culvert_auth_cache_evictions_total Cached verification results displaced to stay under the cache cap — each one costs somebody a full bcrypt on their next request
 # TYPE culvert_auth_cache_evictions_total counter
 culvert_auth_cache_evictions_total %d
+
+# HELP culvert_identity_cache_evictions_total Cached identity-backend verdicts (LDAP bind / OIDC introspection) displaced to stay under the cache cap — each one costs somebody a full backend round trip on their next request, or a denial while the backend is in its unreachable cooldown
+# TYPE culvert_identity_cache_evictions_total counter
+culvert_identity_cache_evictions_total %d
 `,
 		acSnap.Admitted,
 		acSnap.RefusedPerClient,
@@ -1662,6 +1666,7 @@ culvert_auth_cache_evictions_total %d
 		acSnap.Queued,
 		acSaturated,
 		cfg.AuthCacheEvictions(),
+		identityCacheEvictionsTotal(),
 	)
 
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated

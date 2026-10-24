@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -162,19 +161,16 @@ func decodeStrictJSON(r io.Reader, limit int64, dst any, useNumber bool) error {
 	return nil
 }
 
-type oidcCacheEntry struct {
-	ok       bool
-	identity *Identity
-	expiry   time.Time
-}
-
 // OIDCAuth verifies proxy credentials via RFC 7662 token introspection.
 type OIDCAuth struct {
 	cfg    OIDCConfig
 	ttl    time.Duration
 	client *http.Client
-	mu     sync.Mutex
-	cache  map[string]*oidcCacheEntry // key = cacheKey("", token)
+	// cache holds AUTHORITATIVE verdicts keyed by cacheKey("", token). It
+	// carries its own mutex and the client-attributed eviction policy — see
+	// identityResultCache for why that policy is a security control
+	// (CHAOS-76).
+	cache identityResultCache[*Identity]
 
 	// gate arms when the identity backend is unreachable, so an outage denies
 	// without re-introspecting and recovers on one probe (CHAOS-47,
@@ -204,7 +200,6 @@ func NewOIDCAuth(cfg OIDCConfig) (*OIDCAuth, error) {
 		cfg:    cfg,
 		ttl:    ttl,
 		client: &http.Client{Timeout: 10 * time.Second, Transport: transport},
-		cache:  map[string]*oidcCacheEntry{},
 	}, nil
 }
 
@@ -216,10 +211,27 @@ func (a *OIDCAuth) Verify(username, token string) bool {
 	return ok
 }
 
+// VerifyFrom is Verify carrying the caller's client-fairness key (CHAOS-76);
+// see ResolveIdentityFrom.
+func (a *OIDCAuth) VerifyFrom(client, username, token string) bool {
+	_, ok := a.ResolveIdentityFrom(client, username, token)
+	return ok
+}
+
 // ResolveIdentity binds authorization identity exclusively to claims returned
 // by the introspection endpoint. The Basic username is an untrusted transport
 // hint and is never used as the authenticated subject.
-func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
+func (a *OIDCAuth) ResolveIdentity(username string, token string) (*Identity, bool) {
+	return a.ResolveIdentityFrom("", username, token)
+}
+
+// ResolveIdentityFrom is ResolveIdentity attributing any cache entry it writes
+// to the caller's client-fairness key, so a flood of distinct bogus tokens
+// from one source cannot displace another client's cached verdict (CHAOS-76).
+// Data-plane callers that know their peer MUST use this; the plain
+// ResolveIdentity passes the empty key, which is valid but puts every such
+// caller in one shared fairness bucket.
+func (a *OIDCAuth) ResolveIdentityFrom(client string, _ string, token string) (*Identity, bool) {
 	if token == "" {
 		return nil, false
 	}
@@ -272,7 +284,7 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 	a.gate.recordReachable()
 	noteAuthBackendReachable("oidc")
 
-	id, ok = a.oidcCacheSetIdentityWithExp(k, id, ok, exp)
+	id, ok = a.oidcCacheSetIdentityWithExp(k, client, id, ok, exp)
 	if ok {
 		logger.Printf("OIDC auth OK: subject=%q", sanitizeLog(id.Sub))
 	} else {
@@ -399,15 +411,14 @@ func audienceContains(aud any, want string) bool {
 }
 
 func (a *OIDCAuth) oidcIdentityCacheGet(key string) (identity *Identity, ok, hit bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if e, found := a.cache[key]; found && time.Now().Before(e.expiry) {
-		return cloneIdentity(e.identity), e.ok, true
+	id, verdict, hit := a.cache.get(key)
+	if !hit {
+		return nil, false, false
 	}
-	return nil, false, false
+	return cloneIdentity(id), verdict, true
 }
 
-func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, ok bool, tokenExp *int64) (*Identity, bool) {
+func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key, client string, identity *Identity, ok bool, tokenExp *int64) (*Identity, bool) {
 	// A positive cache entry must always carry the canonical identity needed by
 	// ResolveIdentity. Fail closed if an internal caller violates that invariant.
 	if ok && (identity == nil || strings.TrimSpace(identity.Sub) == "") {
@@ -422,18 +433,19 @@ func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, o
 		identity = nil
 		ok = false
 	}
-	a.mu.Lock()
-	// Evict a random entry when the cache is full to prevent unbounded growth.
-	if len(a.cache) >= maxAuthCacheSize {
-		for k := range a.cache {
-			delete(a.cache, k)
-			break
-		}
-	}
-	a.cache[key] = &oidcCacheEntry{ok: ok, identity: cloneIdentity(identity), expiry: now.Add(ttl)}
-	a.mu.Unlock()
+	// The pre-CHAOS-76 implementation evicted "a random entry when the cache is
+	// full" — whichever entry Go's map order yielded first, live or expired, on
+	// a key space made entirely of caller-supplied bearer tokens.
+	// setUntil, not set: the deadline is the token's own, measured against the
+	// `now` the clamp above used. Handing set a duration would restart the
+	// clock here and let the entry outlive the token by the elapsed interval.
+	a.cache.setUntil(key, client, cloneIdentity(identity), ok, now.Add(ttl))
 	return cloneIdentity(identity), ok
 }
+
+// CacheEvictions reports how many cached introspection verdicts have been
+// displaced to stay under the cap. See LDAPAuth.CacheEvictions.
+func (a *OIDCAuth) CacheEvictions() uint64 { return a.cache.Evictions() }
 
 // clampCacheTTLToTokenExpiry bounds a positive cache entry by the token's own
 // declared lifetime, so a cached "yes" can never outlive the credential it was

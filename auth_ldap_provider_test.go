@@ -321,7 +321,7 @@ func TestLDAPEngine_CacheStoresAndClonesIdentity(t *testing.T) {
 	engine := prov.engine
 	id := &Identity{Sub: "CN=Alice,DC=x", Groups: []string{"CN=G1"}, Provider: "corp-ad"}
 	k := cacheKey("alice", "pw")
-	engine.cacheSet(k, true, id)
+	engine.cacheSet(k, "", true, id)
 
 	got, ok := engine.resolveIdentityFromCacheForTest(k)
 	if !ok || got == nil || got.Sub != "CN=Alice,DC=x" {
@@ -338,11 +338,11 @@ func TestLDAPEngine_CacheStoresAndClonesIdentity(t *testing.T) {
 // resolveIdentityFromCacheForTest reads a cached entry through the same clone
 // path resolveIdentity uses, without needing a live directory.
 func (a *LDAPAuth) resolveIdentityFromCacheForTest(key string) (*Identity, bool) {
-	e, hit := a.cacheGet(key)
-	if !hit || !e.ok {
+	id, verdict, hit := a.cacheGet(key)
+	if !hit || !verdict {
 		return nil, false
 	}
-	return cloneIdentity(e.id), true
+	return cloneIdentity(id), true
 }
 
 // ── Validator ────────────────────────────────────────────────────────────────
