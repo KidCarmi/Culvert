@@ -49,11 +49,12 @@ func TestF3b2Probe_TLSOriginFetch(t *testing.T) {
 	if !bytes.Equal(out.Body, g.EnvelopeBytes) {
 		t.Fatalf("manifest body mismatch")
 	}
-	if fo.dialedAddr != "127.0.0.1:443" {
-		t.Fatalf("dialed %q; want the resolved public IP 127.0.0.1:443", fo.dialedAddr)
+	dialedAddr, sniName := fo.observed()
+	if dialedAddr != "127.0.0.1:443" {
+		t.Fatalf("dialed %q; want the resolved public IP 127.0.0.1:443", dialedAddr)
 	}
-	if fo.sniName != saasFeedOfficialHost {
-		t.Fatalf("SNI = %q; want %q", fo.sniName, saasFeedOfficialHost)
+	if sniName != saasFeedOfficialHost {
+		t.Fatalf("SNI = %q; want %q", sniName, saasFeedOfficialHost)
 	}
 	if mux.artifactHits.Load() != 0 {
 		t.Fatalf("manifest fetch triggered %d artifact hits", mux.artifactHits.Load())

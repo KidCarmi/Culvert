@@ -111,7 +111,7 @@ func TestWrite_NoSecretsInOutput(t *testing.T) {
 		OpID:    "01J0",
 		Kind:    "backup.create",
 		Outcome: OutcomeStarted,
-		Params: map[string]interface{}{
+		Params: map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 			"encrypt":        true,
 			"passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE",
 			"filename":       "culvert-2026-05-03.tar.gz.enc",
