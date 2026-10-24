@@ -7,6 +7,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The pinned Go toolchain moves from go1.26.10 to go1.27.3.** The `go.mod`
+  `toolchain` line, both production Docker builder stages and the maint-agent E2E
+  builder move together, so CI, release binaries and images keep using one
+  compiler (`toolchain_consistency_test.go`). The images are pinned to the
+  multi-arch index `golang:1.27.3-alpine@sha256:b8c9b82a…`. The module minimum
+  (`go 1.26.6`) is unchanged. The two prerequisites from roadmap/CI-REDESIGN.md §20
+  landed first: golangci-lint v2.15.0 (#1683) and graceful GOAWAY for inspected
+  HTTP/2 tunnels on the Go 1.27 x/net server (#1684). 1.27.3 rather than 1.27.2,
+  because 1.27.2 is still affected by GO-2026-6809. The CI gates keep the gosec
+  v2.29.0 rules, but now build them from a `tools/gosec` module that raises only
+  `golang.org/x/tools` to v0.52.0. The released v2.29.0 cannot load Go 1.27
+  export data, and v2.30.0 regressed package loading.
+
 ### Fixed
 
 - **Built with Go 1.27, the shutdown drain sent no GOAWAY to inspected HTTP/2
