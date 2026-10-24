@@ -10809,7 +10809,7 @@ domain — the least-covered entry in this register: one prior mention of NTP) �
 `idleCopyCounted`), `readyz_dp_health.go` (`dpCPPollFailingSince`,
 `appendDPHealthChecks`), `roster_persist_durability.go` (both log gates) ·
 **Register rows:** PX-26 (CLOSED), HA-20 (CLOSED), ST-13 (CLOSED), CA-21 (OPEN) ·
-**Gates:** `monotime_chaos_test.go` (9)
+**Gates:** `monotime_chaos_test.go` (10 — the roster gate was added when the overlapping sweep #1650 handed this sweep the roster row)
 
 ### Executive summary
 
@@ -10947,7 +10947,7 @@ failing, not by inspection.
 | **PX-26** | Tunnel idle reaper measured its 1h deadline on the wall clock, so a backwards step suspended reaping of exactly the idle/half-open tunnels it exists to collect — two sockets, two goroutines and two pooled buffers each, on the CONNECT-bypass and SOCKS5 paths | Medium (any NTP step-back, VM suspend/resume, host clock correction; routine in virtualised fleets) | **High** — FD/goroutine/memory exhaustion on the data plane under connection pressure; forward steps tear down every long-lived tunnel at once | **CLOSED** |
 | **HA-20** | DP `cp_poll` readiness grace measured on the wall clock, so a backwards step kept the row at `ok` while the control plane was unreachable | Medium (same producers; needs a step larger than the 5min grace to fully mask) | **High** — fail-**open** readiness: the outage signal is lost on the default (report-only) probe, and on a strict probe (`/ready?strict=1`) the suppressed `fail` also holds the node in the LB rotation serving policy it cannot refresh | **CLOSED** |
 | **ST-13** | Roster durability-degraded log gate measured on the wall clock; a negative age is always `< interval`, latching the gate suppressed | Medium | Medium — the only operator-visible signal that admin roster writes are not surviving a restart (§40's subject) goes unsaid while the suppressed counter climbs unread | **CLOSED** |
-| **CA-21** | `internal/ocsp`'s `allowTruncationLog` has the identical defect over an `atomic.Int64` nanos stamp | Medium | Low — a log gate with no enforcement consequence | **OPEN — deferred, see residual risk** |
+| **CA-21** | `internal/ocsp`'s `allowTruncationLog` has the identical defect over an `atomic.Int64` nanos stamp | Medium | Low — a log gate with no enforcement consequence | **OPEN — deferred, see residual risk**; the overlapping sweep `CHAOS-84` (#1650) closes it with a package-local magnitude gate |
 | — | HA self-fence deadline (`ha_lease.go:232`), `internal/halease` lease authority, `internal/admission` `FreshCount`, `internal/mcp/rollout` `elapsed()` | — | — | **Already correct** — see the storage-type table above for why |
 
 ### Verification

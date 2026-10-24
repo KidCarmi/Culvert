@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -268,6 +269,64 @@ func TestChaos83_TunnelReaperFiresOnMonotonicElapsed(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("silent tunnel was not reaped once the monotonic elapsed passed the idle window")
+	}
+}
+
+// TestChaos83_RosterLogGatesExpireOnMonotonicElapsed is the gate for the third
+// site: the two roster-durability log gates (CHAOS-70's only operator-visible
+// signal that an admin roster write did not reach the volume). On the wall
+// clock a backwards step left the stamp in the future, the age went negative,
+// and both gates latched into their suppressed branch for as long as the step
+// went. The gates now stamp and measure on monoNanos, so this drives them with
+// a virtual monotonic clock: a stamp must be in that domain, a call inside the
+// interval must still be suppressed (the rate limit survives), and a call one
+// interval later on the MONOTONIC clock must emit again — whatever the wall
+// clock did in between, because the gate never reads it. (Ported from the
+// roster gates the overlapping sweep #1650 first carried for the same row.)
+func TestChaos83_RosterLogGatesExpireOnMonotonicElapsed(t *testing.T) {
+	resetRosterPersistCountersForTest()
+	t.Cleanup(resetRosterPersistCountersForTest)
+
+	var fake atomic.Int64
+	fake.Store(monoNanos())
+	swapMonoNanos(t, fake.Load)
+
+	writeErr := errors.New("read-only file system")
+
+	noteRosterPersistBestEffort("backup codes", writeErr) // emits, claims the interval
+	noteRosterNotDurable()
+	if got, want := rosterPersistLogLast.Load(), fake.Load(); got != want {
+		t.Fatalf("rosterPersistLogLast = %d, want the monotonic stamp %d. A value near %d would be "+
+			"time.Now().UnixNano() — the wall-clock domain CHAOS-83 removed", got, want, time.Now().UnixNano())
+	}
+	if got, want := rosterNotDurableLogLast.Load(), fake.Load(); got != want {
+		t.Fatalf("rosterNotDurableLogLast = %d, want the monotonic stamp %d", got, want)
+	}
+
+	fake.Add(int64(rosterPersistLogInterval / 2))
+	noteRosterPersistBestEffort("backup codes", writeErr)
+	noteRosterNotDurable()
+	if got := rosterPersistSuppress.Load(); got != 1 {
+		t.Fatalf("rosterPersistSuppress = %d inside the interval, want 1 — the rate gate stopped suppressing", got)
+	}
+	if got := rosterNotDurableSuppress.Load(); got != 1 {
+		t.Fatalf("rosterNotDurableSuppress = %d inside the interval, want 1", got)
+	}
+
+	fake.Add(int64(rosterPersistLogInterval))
+	noteRosterPersistBestEffort("backup codes", writeErr)
+	noteRosterNotDurable()
+	// An emitted line swaps the suppressed count back to zero and re-claims the
+	// interval at the current monotonic reading.
+	if got := rosterPersistSuppress.Load(); got != 0 {
+		t.Fatalf("rosterPersistSuppress = %d one interval later on the monotonic clock, want 0 (the line "+
+			"must be emitted, not suppressed)", got)
+	}
+	if got := rosterNotDurableSuppress.Load(); got != 0 {
+		t.Fatalf("rosterNotDurableSuppress = %d one interval later on the monotonic clock, want 0", got)
+	}
+	if got, want := rosterPersistLogLast.Load(), fake.Load(); got != want {
+		t.Fatalf("rosterPersistLogLast = %d after re-claiming, want %d", got, want)
 	}
 }
 
