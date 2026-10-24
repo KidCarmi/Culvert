@@ -458,8 +458,9 @@ func (c *DataPlaneClient) tryDeltaSync(ctx context.Context) bool {
 func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// ADR-0005 S3: fence before ANY mutation. A fenced-out zombie CP's delta is
 	// rejected; skip the cycle rather than fall through to a full pull that would
-	// re-fence identically.
-	if !dpObserveEpoch("config delta", reply.Epoch) {
+	// re-fence identically. The fence reads every epoch the reply carries, not
+	// only its own label (deltaReplyEpochs).
+	if !dpObserveEpoch("config delta", deltaReplyEpochs(reply, 0).highest) {
 		return true
 	}
 	// Base must match ours (strict sequential), and the target must move strictly
@@ -475,6 +476,9 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 		logger.Printf("DataPlane: parse delta remainder v%d: %v — full resync", reply.TargetVersion, err)
 		markConfigSnapshotApplyRejected()
 		return false
+	}
+	if !fenceDeltaTarget(deltaReplyEpochs(reply, remainder.Epoch)) {
+		return true // still before any mutation
 	}
 	if err := validateConfigSnapshot(remainder); err != nil {
 		logger.Printf("DataPlane: rejecting delta remainder v%d: %v", reply.TargetVersion, err)
@@ -511,6 +515,42 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	c.lastPolicyVersion.Store(remainder.PolicyVersion)
 	logger.Printf("DataPlane: applied config delta → v%d (%d step(s))", reply.TargetVersion, len(reply.Deltas))
 	return true
+}
+
+// deltaEpochs is what a delta reply says about fencing epochs: the highest it
+// carries anywhere (its own label, every delta entry's, the remainder's) and
+// the lowest stamp on its TARGET data (the remainder's — the target
+// snapshot's stamp — and the last delta's, which produced the target). The
+// reply's own label is not target data: a stale label on data committed under
+// a higher epoch is ratcheted past, not trusted.
+type deltaEpochs struct{ highest, target int64 }
+
+// deltaReplyEpochs reads every epoch a delta reply carries (Codex P1
+// 4302926140 on #1645). A CP that labelled the reply from live HA state could
+// send version N+1, committed with a new grant's epoch E2, labelled with the
+// old E1; checking the label alone, the Data Plane applied N+1 without
+// ratcheting to E2 and could later accept a higher-version E1 snapshot from a
+// fenced Control Plane. remainderEpoch: 0 until the remainder is parsed.
+func deltaReplyEpochs(reply getConfigDeltaReply, remainderEpoch int64) deltaEpochs {
+	e := deltaEpochs{highest: max(reply.Epoch, remainderEpoch), target: remainderEpoch}
+	for i := range reply.Deltas {
+		e.highest = max(e.highest, reply.Deltas[i].Epoch)
+	}
+	if n := len(reply.Deltas); n > 0 {
+		e.target = min(e.target, reply.Deltas[n-1].Epoch)
+	}
+	return e
+}
+
+// fenceDeltaTarget is the delta fence once the remainder is parsed: ratchet to
+// the highest epoch the reply carries, then require its target to stand at
+// that ratchet. Older chain entries may carry older epochs (a chain can span a
+// failover), but a target labelled below an epoch the same reply carries is a
+// fenced Control Plane's write after a higher-epoch commit (S3's zombie
+// shape): rejected. Two ordinary dpObserveEpoch calls, so its ratchet contract
+// (CAS forward, persisted, 0 accepted only while unseeded) is unchanged.
+func fenceDeltaTarget(e deltaEpochs) bool {
+	return dpObserveEpoch("config delta", e.highest) && dpObserveEpoch("config delta target", e.target)
 }
 
 // buildMetricsReport assembles the DP→CP heartbeat report. The version facts

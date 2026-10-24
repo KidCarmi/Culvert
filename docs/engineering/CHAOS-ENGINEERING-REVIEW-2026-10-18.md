@@ -1,10 +1,13 @@
 # Chaos engineering review — 2026-10-18
 
 Base: `dec66e1` (merged `main`). Branch: `claude/serene-cerf-luo96z`.
-Ids claimed: **CHAOS-71** (support durable-write chokepoint) and **CHAOS-72**
+Ids claimed: **CHAOS-85** (support durable-write chokepoint) and **CHAOS-86**
 (DP→CP backoff double-count), per the id-claiming convention in
 [the register](../../roadmap/CHAOS-ENGINEERING-REVIEW.md). 67/68 are recorded
-there as allocated to other open sweeps; 70 was the highest merged.
+there as allocated to other open sweeps; 70 was the highest merged. First
+claimed as CHAOS-71/CHAOS-72 and renumbered in merge order when main was
+brought in (71 had merged as the CP gRPC listener sweep, 72 is held by an open
+sweep).
 
 Scope of this sweep: durable persistence, background-worker retry/backoff,
 startup ordering and fail-closed posture. Every claim below was verified by
@@ -25,7 +28,7 @@ Two defects were found where an **existing, correct, documented contract had
 unenforced call sites** — the most dangerous shape of resilience bug, because
 the architecture reads as safe:
 
-1. **CHAOS-71 — six support-domain durable writes bypassed the
+1. **CHAOS-85 — six support-domain durable writes bypassed the
    `fileutil.AtomicWrite` chokepoint.** They were hand-rolled
    `os.WriteFile(tmp)` + `os.Rename`: atomic for a *reader*, but **not fsynced**
    and — critically — **invisible to the storage-health plane**. On a full or
@@ -36,7 +39,7 @@ the architecture reads as safe:
    and the support domain's own sibling (`support_telemetry_config.go:198`)
    already used the chokepoint. **Fixed + tested.**
 
-2. **CHAOS-72 — the DP→CP retry charged every failure twice.** `backoff()`
+2. **CHAOS-86 — the DP→CP retry charged every failure twice.** `backoff()`
    incremented `failCount`, which `pollConfig`'s error path had already
    incremented. The documented schedule (`2s, 4s, 8s … 60s`) actually ran
    `4s, 16s, 60s`, hitting the ceiling on the 3rd failure instead of the 6th;
@@ -54,7 +57,7 @@ posture where AGENTS.md reserves the call to the owner.
 
 ## Failure scenarios
 
-### CHAOS-71 — support durable-write chokepoint bypass (FIXED)
+### CHAOS-85 — support durable-write chokepoint bypass (FIXED)
 
 | | |
 |---|---|
@@ -93,7 +96,7 @@ unlikely but nothing in the code guarantees. The fsync barrier is what turns
 and it **does** fsync. That is correct and was left alone. The six support sites
 had no such rationale and no cross-restart temp lookup.
 
-### CHAOS-72 — DP→CP backoff double-count (FIXED)
+### CHAOS-86 — DP→CP backoff double-count (FIXED)
 
 | | |
 |---|---|
@@ -226,8 +229,8 @@ is not recorded at either site. Owner decision.
 
 | Id | Finding | Likelihood | Customer | Security | Data integrity | Visibility | Status |
 |---|---|---|---|---|---|---|---|
-| CHAOS-71 | Support writes bypass durable chokepoint | **High** (any full/RO volume) | Low | **Medium** (approval-gate bypass on power loss) | **High** | **None → full** | **FIXED** |
-| CHAOS-72 | DP→CP failure double-charged | **High** (any CP blip) | Medium (convergence lag) | Low | None | Partial (logs the wrong number) | **FIXED** |
+| CHAOS-85 | Support writes bypass durable chokepoint | **High** (any full/RO volume) | Low | **Medium** (approval-gate bypass on power loss) | **High** | **None → full** | **FIXED** |
+| CHAOS-86 | DP→CP failure double-charged | **High** (any CP blip) | Medium (convergence lag) | Low | None | Partial (logs the wrong number) | **FIXED** |
 | — | SOCKS5 pre-posture accept window | Low (opt-in; ms window) | Low | **Medium** (unfiltered admit) | None | None | Reported |
 | CHAOS-18 | DP default action clobbered at boot | **High** (every restart) | Medium | **Medium** (allow-by-default) | None | None | Open (tracked) |
 | — | `applyWithRetry` zero-delay retry | Medium | Medium (manual re-dispatch) | None | None | Good | Reported |
@@ -239,34 +242,34 @@ is not recorded at either site. Owner decision.
 
 ## Recovery assessment
 
-- **CHAOS-71, automatic:** `storageDegraded()` now clears only on an **observed**
+- **CHAOS-85, automatic:** `storageDegraded()` now clears only on an **observed**
   successful durable write (`noteStorageWriteSuccess`), which is the correct
   "silence is not recovery" posture — a node is not declared healthy merely
   because nothing tried to write. Routing the support writes through the
   chokepoint enrolls them in both halves of that, so they can both *raise* and
   *clear* the signal.
-- **CHAOS-71, manual:** a corrupt support state file still fails closed on read
+- **CHAOS-85, manual:** a corrupt support state file still fails closed on read
   (`loadUploadConfigLocked` → zero value disables egress; `readBundleState` →
   PENDING). Operator action is re-entering the setting; no restart needed.
   The one residual is the absent-state grandfather, discussed under residual risk.
-- **CHAOS-72, automatic:** fully — `resetBackoff()` on any successful poll.
+- **CHAOS-86, automatic:** fully — `resetBackoff()` on any successful poll.
 - **DP boot clobber:** **no automatic recovery** (the `config_unchanged`
   sentinel). Manual: bump the CP config version. This is the most operationally
   surprising item in the sweep.
 
 ## Operational impact
 
-Before CHAOS-71, an operator whose `/data` went read-only would see a healthy
+Before CHAOS-85, an operator whose `/data` went read-only would see a healthy
 `/api/diagnostics` row, no `storage_write_failed` alert and no Prometheus
 series, while support-bundle approvals, upload queue state and recipient keys
 silently failed to persist. After the fix the existing storage-health plane
-covers them with no new surface to learn. Before CHAOS-72, `DataPlane: backing
+covers them with no new surface to learn. Before CHAOS-86, `DataPlane: backing
 off …(failure #N)` reported a count that was double the real consecutive-failure
 streak, so the logs actively misled anyone diagnosing CP churn.
 
 ## Security impact
 
-The material item is the support-bundle approval gate (CHAOS-71). The
+The material item is the support-bundle approval gate (CHAOS-85). The
 mandatory-preview gate is the control that stops a bundle's INTERNAL sections
 leaving the appliance without sighted admin consent, and its crash-safety
 argument rested on a write ordering that had no durability barrier. The fix
@@ -275,7 +278,7 @@ seal-by-name) gain the same durability; note the read path already re-validates
 stored keys against the low-order guard, so a tampered file cannot yield a weak
 key (`lookupSupportRecipientKey`).
 
-CHAOS-72 has no direct security impact, but premature failover is a
+CHAOS-86 has no direct security impact, but premature failover is a
 availability-and-trust concern for a fleet.
 
 ## Suggested improvements (beyond this PR)

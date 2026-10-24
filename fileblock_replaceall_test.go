@@ -34,6 +34,7 @@ func snapshotFileBlocker(t *testing.T) {
 }
 
 func TestCL13_ApplyConfigSnapshot_FileBlockExtensions_UsesReplaceAll(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	snapshotFileBlocker(t)
 
 	dir := t.TempDir()

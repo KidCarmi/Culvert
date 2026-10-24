@@ -58,9 +58,7 @@ func wireSaaSFeedAuthorityStore() {
 // currentFeedAuthority maps the cluster role to the feed's ownership domain. Read under
 // clusterRoleMu to stay race-safe against a control-plane enable/join transition.
 func currentFeedAuthority() feedAuthority {
-	clusterRoleMu.RLock()
-	role := clusterRole.role
-	clusterRoleMu.RUnlock()
+	role := clusterRoleSnapshot().role
 	switch role {
 	case "data-plane":
 		return authorityManagedDP
