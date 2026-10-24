@@ -411,10 +411,60 @@ func TestCDRBreaker_ConcurrentTransitionsKeepInvariants(t *testing.T) {
 	if checker.checks.Load() == 0 {
 		t.Fatal("the invariant checker never ran; the test proves nothing")
 	}
+	assertBreakerInvariants(t, b, "after stress")
+
+	// A stale reclaim needs every slot of one budget abandoned and the newest
+	// to outlive HalfOpenProbeTimeout before any outcome lands, and goroutine
+	// interleaving does not guarantee that. Run serially (GOMAXPROCS=1) it
+	// almost never happens: a worker's next admitted reservation after an
+	// abandon is a success, which leaves half-open. So when the stress
+	// produced none, drive one deterministically: the abandonment arm is then
+	// always covered, and the stress above still covers the concurrency.
+	if b.staleProbes.Load() == 0 {
+		t.Log("stress produced no stale reclaim; driving one deterministically")
+		driveStaleReclaim(t, b, &clock)
+	}
 	if b.staleProbes.Load() == 0 {
 		t.Fatal("no stale reclaim happened; the abandonment arm was not exercised")
 	}
-	assertBreakerInvariants(t, b, "after stress")
+	assertBreakerInvariants(t, b, "after stale reclaim")
+}
+
+// driveStaleReclaim abandons a whole half-open budget, lets the newest
+// reservation outlive HalfOpenProbeTimeout and reclaims it through Reserve,
+// the only path that performs the stale reclaim (Available merely reports
+// it). It runs after the stress workers have stopped, so nothing else
+// touches b or clock.
+func driveStaleReclaim(t *testing.T, b *cdrCircuitBreaker, clock *atomic.Int64) {
+	t.Helper()
+	b.Reset() // the stress leaves an arbitrary state; start from closed
+	tripOpen(t, b)
+	clock.Add(int64(b.cfg.ResetTimeout))
+	for i := int32(0); i < b.cfg.HalfOpenProbes; i++ {
+		ok, r := b.Reserve()
+		if !ok || r.gen == 0 {
+			t.Fatalf("setup: half-open probe %d not reserved (ok=%v gen=%d, state %s)",
+				i, ok, r.gen, breakerStateName(b.State()))
+		}
+		// Abandoned: never released, never reported.
+	}
+	if ok, _ := b.Reserve(); ok {
+		t.Fatal("REGRESSION: a probe was admitted past an exhausted budget before HalfOpenProbeTimeout")
+	}
+	if b.Available() {
+		t.Fatal("REGRESSION: Available reports the budget reclaimable before HalfOpenProbeTimeout")
+	}
+	clock.Add(int64(b.cfg.HalfOpenProbeTimeout))
+	before := b.staleProbes.Load()
+	ok, r := b.Reserve()
+	if !ok || r.gen == 0 {
+		t.Fatalf("REGRESSION: abandoned budget not reclaimed after HalfOpenProbeTimeout (ok=%v gen=%d, state %s)",
+			ok, r.gen, breakerStateName(b.State()))
+	}
+	if n := b.staleProbes.Load(); n != before+1 {
+		t.Fatalf("staleProbes = %d after the reclaim, want %d", n, before+1)
+	}
+	b.Release(r)
 }
 
 // TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath is the AST wall: a
