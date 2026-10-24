@@ -175,7 +175,7 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 	resp.ElapsedMS = time.Since(start).Milliseconds()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck // headers are already sent; an encode failure here is a client-side write the caller cannot be told about
 }
 
 // scanSvcWindow is this process's scan window, with the engine default as the
@@ -184,8 +184,8 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 // derives it from its own security.max_scan_mb and nothing reconciles the
 // caller's window with the sidecar's.
 func scanSvcWindow() int64 {
-	if max := maxScanBufferBytes(); max > 0 {
-		return max
+	if window := maxScanBufferBytes(); window > 0 {
+		return window
 	}
 	return 5 << 20
 }
