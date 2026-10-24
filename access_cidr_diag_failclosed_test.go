@@ -11,16 +11,9 @@ import (
 // admin UI is refused to everyone. Merged without this branch, the row read
 // "the admin UI accepts every client IP" for a UI that was locked shut.
 func TestAccessCIDRListsCheck_FailClosedUIAllowlistIsDescribedAsRefused(t *testing.T) {
-	prevUI := ListUIAllowedCIDRs()
-	t.Cleanup(func() {
-		publishUIAllowedCIDRs(nil)
-		if len(prevUI) > 0 {
-			if err := SetUIAllowedCIDRs(prevUI); err != nil {
-				t.Errorf("restore allowlist: %v", err)
-			}
-		}
-		noteAccessCIDRResult(accessCIDRUIAllow, nil)
-	})
+	// loadUIAccessPolicy writes the allowlist, the refusal latch, the IdP
+	// registry and the access-list rejection record; restore all of them.
+	resetUIAccessPolicyGlobals(t)
 	publishUIAllowedCIDRs(nil)
 
 	// The real startup path, with an entry that cannot parse.
