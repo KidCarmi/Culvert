@@ -127,7 +127,27 @@ func mkdirDurableSupport(dir string, perm os.FileMode) error {
 // syncDirEntry fsyncs a directory so entries created in it become durable. It
 // returns nil for the two conditions AtomicWrite also treats as "nothing more
 // this filesystem can offer", and the real error otherwise.
+//
+// internal/fileutil carries a byte-equivalent syncDirTolerant for
+// WriteFileExclusive's parent sync, but it is unexported. Consolidating the two
+// behind one exported fileutil primitive is the right end state and is left as
+// a follow-up: it is that package's API decision, not something to decide here
+// to settle a lint finding.
 func syncDirEntry(dir string) error {
+	// #nosec G703 -- not reachable traversal, and the gate is not local to this
+	// line, so it is traced here rather than asserted. dir is always
+	// filepath.Dir of a path mkdirDurableSupport itself computed by walking up
+	// from its own argument, and every caller roots that argument in dataDir:
+	// five pass a fixed dataDir-derived path (upload config, recipient
+	// registry, debug-level state, upload queue, sealed-upload parent) and
+	// createSupportBundle passes its own internally generated res.BundleID. The
+	// one path carrying request input, writeSealedUpload via
+	// sealAndEnqueueUpload, is gated at the HTTP boundary by
+	// handleBundleUploadConsent's supportBundleIDRe check (^csb_[a-z2-7]{26}$,
+	// support_upload_wire.go:117) — no separator, dot or traversal element can
+	// survive it. Same shape as the repository's existing accepted sites, e.g.
+	// cmd/culvert-maint/internal/server/server.go:525 (ULID-validated id joined
+	// under a fixed root).
 	d, err := os.Open(dir)
 	if err != nil {
 		return nil // opening a directory is not portable; AtomicWrite skips it too
