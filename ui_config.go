@@ -1797,6 +1797,7 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 			writeUIAccessRefusal(w, "ui_allow_ips_not_saved", "Management access policy could not be saved; the previous policy remains active.")
 			return
 		}
+		noteAccessCIDRResult(accessCIDRUIAllow, nil)
 		values := canonicalUIAllowedCIDRs(nets)
 		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(values)), strings.Join(values, ", "))
 		saveConfigVersion(sessionAdmin(r), "Updated UI access IP allowlist")
@@ -2163,6 +2164,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid trusted_proxy_cidrs: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		noteAccessCIDRResult(accessCIDRTrustedProxy, nil)
 		SetProxyBaseURL(body.BaseURL)
 		uiExtraSANs = body.UISANs
 		trustForwardedHeaders = body.TrustForwardedHeaders

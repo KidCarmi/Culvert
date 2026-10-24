@@ -830,6 +830,11 @@ type UIUserInfo struct {
 	Username    string `json:"username"`
 	Role        UIRole `json:"role"`
 	TOTPEnabled bool   `json:"totpEnabled"`
+	// RoleClamped marks an account whose persisted role this build does not
+	// enroll and which is therefore held at viewer (SEC-RBAC-ROLE-1). Only the
+	// flag is exposed, never the raw persisted role, and only on the admin-only
+	// GET /api/auth/users, so an admin can tell which viewer rows to repair.
+	RoleClamped bool `json:"roleClamped,omitempty"`
 }
 
 // ─── Config (live-editable) ───────────────────────────────────────────────────
@@ -1519,7 +1524,7 @@ func (c *Config) ListUIUsers() []UIUserInfo {
 	defer c.mu.RUnlock()
 	out := make([]UIUserInfo, 0, len(c.uiUsers))
 	for name, u := range c.uiUsers {
-		out = append(out, UIUserInfo{Username: name, Role: u.role, TOTPEnabled: u.totpSecret != ""})
+		out = append(out, UIUserInfo{Username: name, Role: u.role, TOTPEnabled: u.totpSecret != "", RoleClamped: u.persistedRole != ""})
 	}
 	return out
 }

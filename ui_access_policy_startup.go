@@ -23,7 +23,9 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		allowList = append(allowList, nonBlankUIAllowEntries(strings.Split(cfg.AllowIPCLI, ","))...)
 	}
 	if len(allowList) > 0 {
-		if err := SetUIAllowedCIDRs(allowList); err != nil {
+		err := SetUIAllowedCIDRs(allowList)
+		noteAccessCIDRResult(accessCIDRUIAllow, err)
+		if err != nil {
 			refuseLoadedUIAccessPolicy(nil)
 			logger.Printf("UIGuard: invalid ui_allow_ips / --ui-allow-ip (%v) — admin UI refused until the configuration is corrected and the node restarted; proxy traffic is unaffected", err)
 		} else {
@@ -42,7 +44,9 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		}
 	}
 	if len(trustedProxies) > 0 {
-		if err := SetTrustedProxyCIDRs(trustedProxies); err != nil {
+		err := SetTrustedProxyCIDRs(trustedProxies)
+		noteAccessCIDRResult(accessCIDRTrustedProxy, err)
+		if err != nil {
 			logger.Printf("TrustedProxy: invalid IP/CIDR (%v) — X-Forwarded-For will NOT be trusted", err)
 		} else {
 			logger.Printf("TrustedProxy: admin-UI client-IP trusts X-Forwarded-For from %v", ListTrustedProxyCIDRs())

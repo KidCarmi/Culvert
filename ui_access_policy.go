@@ -121,7 +121,9 @@ func applyAdminUIAccessPolicy(s *AdminSettings) {
 	if !s.UIAllowIPsSaved && len(s.UIAllowIPs) == 0 {
 		return
 	}
-	if err := SetUIAllowedCIDRs(s.UIAllowIPs); err != nil {
+	err := SetUIAllowedCIDRs(s.UIAllowIPs)
+	noteAccessCIDRResult(accessCIDRUIAllow, err)
+	if err != nil {
 		refuseLoadedUIAccessPolicy(s.UIAllowIPs)
 		logger.Printf("AdminSettings: invalid management access policy; UI access is refused until local recovery (%v)", err)
 	}
