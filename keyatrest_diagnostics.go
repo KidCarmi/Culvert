@@ -97,11 +97,17 @@ func checkKeyAtRest() OperatorContractCheck {
 	// The toggles treat any value outside the recognised set as "off", so a
 	// typo (for example "enabled") silently leaves private keys as plaintext
 	// while the operator believes encryption is on. Names only — never values.
+	action := "Set each listed variable to one of 1/true/yes/on (enable) or 0/false/no/off (disable) and restart; any other value is treated as disabled."
+	if c.OperatorAction != "" {
+		// Keep the posture's own repair step (for example an invalid
+		// CULVERT_KEK): fixing only the toggle would surface it on enable.
+		action = c.OperatorAction + " " + action
+	}
 	return OperatorContractCheck{
 		Code:           c.Code,
 		Status:         diagWarn,
 		Message:        fmt.Sprintf("%s — ignored: %s has an unrecognised value and is treated as disabled", c.Message, strings.Join(bad, ", ")),
-		OperatorAction: "Set each listed variable to one of 1/true/yes/on (enable) or 0/false/no/off (disable) and restart; any other value is treated as disabled.",
+		OperatorAction: action,
 	}
 }
 
