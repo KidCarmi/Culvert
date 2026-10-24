@@ -420,7 +420,8 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - OIDC credential/JWKS transports now dial the guarded destination directly:
   an inherited forward proxy could bypass the resolved-IP SSRF guard. A
   behavioral regression checks private destinations, DNS rebinding and
-  redirects through a public proxy. OIDC no longer uses environment proxies.
+  redirect targets with a public-proxy hook configured. OIDC no longer uses
+  environment proxies.
   G704 is enforced with scoped exceptions, the expired OpenSSL exception is
   removed, and CI records unfiltered findings and the actual image's package
   and static-binary evidence (RISK-002/RISK-006).

@@ -49,6 +49,20 @@ class MetadataEvidenceTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 self.check(text)
 
+    def test_scanner_native_identifiers_are_accepted(self):
+        for advisory in ("GO-2026-5932", "GHSA-ch52-4w7c-c8xp", "AVD-DS-0002"):
+            with self.subTest(advisory=advisory):
+                self.assertEqual(self.check(self.exception().replace("CVE-2026-14456", advisory)), 1)
+
+    def test_intervening_comment_ends_the_metadata_block(self):
+        block, entry = self.exception().rsplit("# exception-evidence", 1)
+        detached = block + "# exception-evidence" + entry.replace(
+            "CVE-2026-14456", "# unrelated note\nCVE-2026-14456")
+        with self.assertRaisesRegex(ValueError, "missing exception owner"):
+            self.check(detached)
+        # A comment BEFORE the block starts is not an interruption.
+        self.assertEqual(self.check("# rationale\n" + self.exception()), 1)
+
     def test_duplicate_invalid_date_or_external_evidence_refuses(self):
         for text in (
             self.exception() * 2,

@@ -30,8 +30,15 @@ def check_trivy(path, today):
                 if key in metadata:
                     raise ValueError(f"{path}:{number}: duplicate {key}")
                 metadata[key] = value
+            elif metadata:
+                # The block must sit IMMEDIATELY before its entry. An unrelated
+                # comment after a block has started ends it, so earlier review
+                # evidence can never attach silently to a later suppression.
+                metadata = {}
             continue
-        match = re.fullmatch(r"((?:CVE-\d{4}-\d{4,}|GHSA-[a-z0-9-]+)) exp:(\d{4}-\d{2}-\d{2})", line)
+        # Trivy exact-matches any finding ID (CVE, GHSA, GO-, AVD-, ...), so
+        # accept any non-whitespace identifier rather than a fixed family.
+        match = re.fullmatch(r"(\S+) exp:(\d{4}-\d{2}-\d{2})", line)
         if not match:
             raise ValueError(f"{path}:{number}: expected advisory ID and exp:YYYY-MM-DD")
         advisory, expiry = match.groups()
