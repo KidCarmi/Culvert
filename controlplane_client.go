@@ -420,10 +420,6 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 // backoff was applied — the caller must return without applying. Split out of
 // fetchAndApply to keep that function under the funlen budget.
 func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, ok bool) {
-	// CHAOS-91: a CP address list deferred by a failed redial is retried
-	// before the poll, so it is not lost once lastVersion has advanced past
-	// the snapshot that carried it.
-	c.retryPendingAddresses()
 	// P0-3: report the version we already hold so the CP can reply with a tiny
 	// "unchanged" sentinel instead of the full snapshot when nothing changed.
 	// fetchAndApply is the only writer and runs on a single config-loop
@@ -469,6 +465,12 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 }
 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	// CHAOS-91: a CP address list deferred by a failed redial is retried at the
+	// top of EVERY cycle — before the delta fast path, which returns early on
+	// every "unchanged" reply and would otherwise starve the retry (Codex P2 on
+	// #1618) — so it is not lost once lastVersion has advanced past the
+	// snapshot that carried it.
+	c.retryPendingAddresses()
 	// T3 P1: when we already hold a version, try the incremental blocklist delta
 	// first. tryDeltaSync returns true when it fully handled this cycle (nothing
 	// changed, or the delta applied and verified); false falls through to the

@@ -19,6 +19,9 @@ package main
 //         reconnectActive (the certificate-renewal redial) indexes it directly.
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -221,6 +224,52 @@ func TestChaos91_FailedRedialIsRetriedNotDropped(t *testing.T) {
 	c.mu.Unlock()
 	if !slicesEqual(addrs, []string{"cp3:50051", "cp4:50051"}) || pending != nil {
 		t.Fatalf("after a working retry: addrs=%v pending=%v, want the new list and nothing pending", addrs, pending)
+	}
+}
+
+// TestChaos91_PendingAddressesRetryOnTheDeltaFastPath: the retry must run on a
+// cycle the delta fast path handles. A CP that supports GetConfigDelta answers
+// "unchanged" on every steady-state poll and fetchAndApply returns before the
+// full poll, so a retry placed inside pollConfig never ran (Codex P2 on #1618).
+func TestChaos91_PendingAddressesRetryOnTheDeltaFastPath(t *testing.T) {
+	// fetchAndApply reaches the snapshot apply path, which mutates the admission
+	// owners in place (RISK-030).
+	bindFreshAdmissionOwners(t)
+	c := &DataPlaneClient{
+		nodeID:       "dp-chaos91",
+		addrs:        []string{"cp1:50051", "cp2:50051"},
+		activeIdx:    1,
+		pendingAddrs: []string{"cp3:50051", "cp4:50051"},
+	}
+	if err := c.connect("cp2:50051"); err != nil {
+		t.Fatalf("seed connect: %v", err)
+	}
+	t.Cleanup(func() {
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
+	c.lastVersion.Store(7)
+	var fullPolls int
+	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		if method == methodGetConfigDelta {
+			return json.RawMessage(`{"mode":"unchanged"}`), nil
+		}
+		fullPolls++
+		return nil, fmt.Errorf("unexpected full poll %s", method)
+	}
+
+	c.fetchAndApply(t.Context())
+
+	c.mu.Lock()
+	addrs, pending := append([]string(nil), c.addrs...), c.pendingAddrs
+	c.mu.Unlock()
+	if fullPolls != 0 {
+		t.Fatalf("precondition: the delta fast path must have handled the cycle, got %d full polls", fullPolls)
+	}
+	if !slicesEqual(addrs, []string{"cp3:50051", "cp4:50051"}) || pending != nil {
+		t.Fatalf("a cycle handled by the delta fast path left addrs=%v pending=%v; the deferred list "+
+			"must be retried on every cycle", addrs, pending)
 	}
 }
 
