@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -487,7 +488,14 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	}
 	defer f.Close()
 
-	dec := yaml.NewDecoder(f, yaml.DisallowUnknownField())
+	// A UTF-8 BOM (written by Windows editors) is not YAML content; left in
+	// place it fuses with the first key and fails as an "unknown field".
+	br := bufio.NewReader(f)
+	if b, perr := br.Peek(3); perr == nil && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
+		_, _ = br.Discard(3)
+	}
+
+	dec := yaml.NewDecoder(br, yaml.DisallowUnknownField())
 	var fc FileConfig
 	if err := dec.Decode(&fc); err != nil {
 		// An empty, whitespace-only, or comment-only document is not
