@@ -1,0 +1,6 @@
+go version go1.27.3 linux/amd64
+c319d2a57c0647068ac006663a536be569ef4f53
+ access_cidr_diag_failclosed_test.go | 13 +++----------
+ access_cidr_diag_test.go            | 28 ++++++++++++++++++++++++----
+ ui_access_policy_startup_test.go    |  3 +++
+ 3 files changed, 30 insertions(+), 14 deletions(-)

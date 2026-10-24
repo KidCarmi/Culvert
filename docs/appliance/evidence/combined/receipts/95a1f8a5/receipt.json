@@ -1,0 +1,78 @@
+{
+  "commit": "95a1f8a548fb5154b03872e396df03969760cabc",
+  "tree": "068803813c1084bc498bb021710af78d374d4561",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go version && git rev-parse c319d2a5 && git merge-base --is-ancestor c319d2a5 HEAD && git diff --stat 65f28713 HEAD",
+      "exit": 0,
+      "seconds": 0.045,
+      "log": "1.log",
+      "log_sha256": "205005cff80b7d66693afa5890368694c32db2107e3f8809c8ae7b3775981337",
+      "log_bytes": 298
+    },
+    {
+      "n": 2,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go build ./... && go vet ./...",
+      "exit": 0,
+      "seconds": 16.193,
+      "log": "2.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 3,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -race -count=3 -shuffle=on -run 'AccessCIDR|UIAccessPolicy|APINetworkSettings|Diagnostics' .",
+      "exit": 0,
+      "seconds": 79.594,
+      "log": "3.log",
+      "log_sha256": "a09e1c24507274fc0870a9cb44b01da4caa1ea327c3d17370f98b2a4a2949a29",
+      "log_bytes": 41
+    },
+    {
+      "n": 4,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -count=1 .",
+      "exit": 0,
+      "seconds": 448.857,
+      "log": "4.log",
+      "log_sha256": "92faa9c18ca87ed7e60a50e3748db061775ae060c6269bc326a6ad48b9c1b35c",
+      "log_bytes": 42
+    },
+    {
+      "n": 5,
+      "command": "export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --new-from-rev c319d2a5 --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 248.157,
+      "log": "5.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 6,
+      "command": "~/go/bin/gitleaks detect --no-banner --redact --log-opts=c319d2a5..HEAD",
+      "exit": 0,
+      "seconds": 4.692,
+      "log": "6.log",
+      "log_sha256": "bb210104d1ea793f77a73e44445a1a9b281e7a27addc749e669c8d966842f39b",
+      "log_bytes": 189
+    }
+  ],
+  "all_exit_zero": true
+}

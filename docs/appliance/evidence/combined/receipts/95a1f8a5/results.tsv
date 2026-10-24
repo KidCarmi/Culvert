@@ -1,0 +1,6 @@
+1	0	1792857058.184252326	1792857058.229581687	export GOTOOLCHAIN=go1.27.3 && go version && git rev-parse c319d2a5 && git merge-base --is-ancestor c319d2a5 HEAD && git diff --stat 65f28713 HEAD
+2	0	1792857058.231885613	1792857074.424422031	export GOTOOLCHAIN=go1.27.3 && go build ./... && go vet ./...
+3	0	1792857074.426488448	1792857154.020946057	export GOTOOLCHAIN=go1.27.3 && go test -race -count=3 -shuffle=on -run 'AccessCIDR|UIAccessPolicy|APINetworkSettings|Diagnostics' .
+4	0	1792857154.023386804	1792857602.880577017	export GOTOOLCHAIN=go1.27.3 && go test -count=1 .
+5	0	1792857602.882461421	1792857851.039562205	export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --new-from-rev c319d2a5 --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...
+6	0	1792857851.041477291	1792857855.733417132	~/go/bin/gitleaks detect --no-banner --redact --log-opts=c319d2a5..HEAD
