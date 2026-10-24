@@ -84,7 +84,7 @@ func startScanSvc(t *testing.T) string {
 	return addr
 }
 
-func postScan(t *testing.T, addr, contentType string, body []byte) (int, ScanResponse) {
+func postScan(t *testing.T, addr, contentType string, body []byte) (status int, scan ScanResponse) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(),
 		http.MethodPost, "http://"+addr+"/scan", bytes.NewReader(body))
