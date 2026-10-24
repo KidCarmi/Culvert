@@ -12,7 +12,9 @@ import (
 // was first written — it claimed `(&RateLimiter{}).Allow(...)` panics, which it
 // does not, because Allow short-circuits on !enabled before it reaches the
 // uninitialised shard maps. A security record that overstates a residual
-// invites hardening the request path for a fault it cannot have.
+// invites hardening the request path for a fault it cannot have. (The two
+// write rows that DID panic were since made safe by PR #1563's lazy
+// initialization; the table records both outcomes, re-measured.)
 //
 // Prose cannot be unit-tested, but an example can (the CHAOS-69 runbook-example
 // precedent). This gate drives every row of that table against the shipped code
@@ -123,18 +125,32 @@ func TestZeroValueResidual_DocumentMatchesTheEngine(t *testing.T) {
 	}
 
 	// Control: the gate must distinguish the two outcomes. A dispatcher that
-	// reported "no panic" for everything would satisfy a single-sided table.
-	var sawPanic, sawSafe bool
+	// reported "no panic" for everything would satisfy a table whose rows all
+	// say "no panic" — which the table now does, because PR #1563 made the zero
+	// value safe at both write sites that used to panic. So the detector is
+	// proved against a call known to panic (the nil-map write those rows used
+	// to reach: a bucket stored into a zero shard's map) and one known not to,
+	// rather than against the table.
+	if !panics(func() {
+		var shard rlShard
+		shard.clients["203.0.113.7"] = &clientBucket{}
+	}) {
+		t.Fatal("control: panics() did not detect a nil-map write — every " +
+			"\"no panic\" row below would pass vacuously")
+	}
+	if panics(func() {}) {
+		t.Fatal("control: panics() reported a panic for a call that cannot panic")
+	}
+	var sawSafe bool
 	for _, r := range rows {
-		if r.expectPanic {
-			sawPanic = true
-		} else {
+		if !r.expectPanic {
 			sawSafe = true
 		}
 	}
-	if !sawPanic || !sawSafe {
-		t.Fatalf("the table must carry both outcomes to be meaningful "+
-			"(panic rows: %v, safe rows: %v)", sawPanic, sawSafe)
+	if !sawSafe {
+		t.Fatalf("the table carries no \"no panic\" row; the record lists the " +
+			"zero-value calls that are safe, and losing them all means the parser " +
+			"stopped matching it")
 	}
 
 	driven := make(map[string]bool, len(rows))

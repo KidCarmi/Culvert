@@ -314,7 +314,13 @@ func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
 // the IP-enriched display string.
 func mcpLivePrincipal(r *http.Request) (string, error) {
 	sess, err := readUISessionCookie(r)
-	if err != nil || sess == nil || sess.Sub == "" {
+	// Defence in depth on the token CLASS, using classifyUISession's own
+	// discriminator: a session minted for the proxy plane must never supply one
+	// of the two eyes, even though uiAuthMiddleware (SEC-UISESS-1) already
+	// refuses one before this handler runs. Only the provider is re-tested here,
+	// deliberately not classifyUISession's roster and role halves — the gate has
+	// applied those, and repeating them would refuse a principal it admitted.
+	if err != nil || sess == nil || sess.Provider != uiSessionProvider || sess.Sub == "" {
 		return "", mcperr.New(mcperr.ReasonApprovalNotAuthorized, "mcp", "live_execution trust requires an authenticated principal")
 	}
 	return sess.Sub, nil
