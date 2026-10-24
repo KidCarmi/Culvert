@@ -22,6 +22,15 @@ FIXTURE_PUBLIC_SHA256 = '7ea3450aa488c616e3b6c28a191ab4e7c61a4dafce2d172d4527c9a
 UPSTREAM_TREE_SHA256 = '41582dd762962049c5809e6194c649d8fd4c8fad7c6568d425ffba6c0054e06f'
 PREAMBLE = b'//go:build gofuzz\n// +build gofuzz\n\n'
 LOCAL_FILES = {'CULVERT-PROVENANCE.json', 'CULVERT-PATCH.md', '.gitattributes'}
+# Test-data-only delta (CULVERT-PATCH.md, second section): the signed
+# HTTP-Redirect query-string goldens, regenerated for Go 1.27 compress/flate.
+# The scope is fixed here and the record is pinned by hash, so it cannot widen.
+TEST_DATA_FILES = {
+    f'testdata/TestSPCanProduceSignedRequestRedirectBinding/{alg}_queryString'
+    for alg in ('rsa-sha1', 'rsa-sha256', 'rsa-sha384', 'rsa-sha512',
+                'ecdsa-sha1', 'ecdsa-sha256', 'ecdsa-sha384', 'ecdsa-sha512')
+}
+TEST_DATA_PATCH_SHA256 = 'caf330ffbb701fa97f705dd7512af89ef865344045ef93c4ed4fd750fe63643f'
 
 
 class InvalidPatch(Exception):
@@ -53,6 +62,10 @@ def verify_tree(module, upstream_zip=None):
     check(patch['path'] == 'xmlenc/fuzz.go' and patch['prepend'].encode() == PREAMBLE,
           'patch mechanism changed')
     check(patch['upstream_sha256'] == FIXTURE_SHA256, 'upstream fixture changed')
+    test_data = provenance['test_data_patch']['files']
+    check(set(test_data) == TEST_DATA_FILES, 'test-data patch scope changed')
+    check(hashlib.sha256(json.dumps(test_data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+          == TEST_DATA_PATCH_SHA256, 'pinned test-data patch changed')
     for name, digest in expected.items():
         safe = PurePosixPath(name)
         check(not safe.is_absolute() and '..' not in safe.parts and '\\' not in name and ':' not in name,
@@ -62,6 +75,11 @@ def verify_tree(module, upstream_zip=None):
             check(data.startswith(PREAMBLE), 'required build constraint absent')
             check(hashlib.sha256(data).hexdigest() == patch['patched_sha256'], 'patched file hash mismatch')
             data = data[len(PREAMBLE):]
+        elif name in test_data:
+            check(test_data[name]['upstream_sha256'] == digest, 'recorded upstream test-data hash changed')
+            check(hashlib.sha256(data).hexdigest() == test_data[name]['patched_sha256'],
+                  'test-data file differs from the recorded patch')
+            continue
         check(hashlib.sha256(data).hexdigest() == digest, 'unrecorded upstream source change')
     if upstream_zip:
         with upstream_zip.open('rb') as source:
@@ -71,7 +89,8 @@ def verify_tree(module, upstream_zip=None):
             original = {entry.filename[len(prefix):]: hashlib.sha256(archive.read(entry)).hexdigest()
                         for entry in archive.infolist() if not entry.is_dir() and entry.filename.startswith(prefix)}
         check(original == expected, 'upstream zip inventory mismatch')
-    return {'upstream_files_verified': len(expected), 'functional_delta': 'gofuzz_build_constraint_only'}
+    return {'upstream_files_verified': len(expected), 'functional_delta': 'gofuzz_build_constraint_only',
+            'test_data_delta': 'go1.27_flate_redirect_query_string_goldens', 'test_data_files': len(test_data)}
 
 
 def verify_binary(binary):

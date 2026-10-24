@@ -12,6 +12,44 @@
     "upstream_sha256": "f566e1e9b8b98d728fceab6c37e14fc9c0d8f046e80623c4e70c87eda905943b"
   },
   "schema_version": 1,
+  "test_data_patch": {
+    "effect": "test data only: the 8 signed HTTP-Redirect query-string goldens of TestSPCanProduceSignedRequestRedirectBinding, regenerated because Go 1.27 compress/flate emits different (equally valid) DEFLATE bytes; the decoded AuthnRequest goldens and all source are unchanged",
+    "files": {
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/ecdsa-sha1_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      },
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/ecdsa-sha256_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      },
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/ecdsa-sha384_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      },
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/ecdsa-sha512_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      },
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/rsa-sha1_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      },
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/rsa-sha256_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      },
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/rsa-sha384_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      },
+      "testdata/TestSPCanProduceSignedRequestRedirectBinding/rsa-sha512_queryString": {
+        "patched_sha256": "b7817e0a741f624b6b88448689b4ce5d67b8e9cbcd38136b416a7f642a558794",
+        "upstream_sha256": "a92c54c7de429793104d7d0b3927097799d28ae7d4ef2934236a2622a8c5ecb0"
+      }
+    },
+    "regenerated_with": "go1.27.3: go test -mod=readonly -run ^TestSPCanProduceSignedRequestRedirectBinding$ . -test.update-golden"
+  },
   "upstream_commit": "e3d0323a999e14876893e394b91573ba5e5cd453",
   "upstream_files_sha256": {
     ".github/dependabot.yml": "ccb58f30f69602b75709b9ee28526c7db858e3517a7b783706d3b0734c848f44",

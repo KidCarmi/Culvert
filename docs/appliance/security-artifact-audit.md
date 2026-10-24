@@ -104,17 +104,20 @@ historical artifact result.
 ### Reproducible source remediation
 
 `third_party/crewjam-saml` contains the complete verified v0.5.1 module. Its only
-upstream-file change prepends a `gofuzz` build constraint to `xmlenc/fuzz.go`,
+upstream source-file change prepends a `gofuzz` build constraint to `xmlenc/fuzz.go`,
 matching the companion fuzz test's existing constraint. Normal XML-encryption and
 SAML source stays byte-identical; ordinary builds omit the fuzz initializer and
 fixture. Explicit `-tags=gofuzz` builds still contain the legacy fixture and are
 not release builds. No module-cache modification or unmerged upstream patch is
-used. Upstream notices are preserved.
+used. Upstream notices are preserved. Separately, 8 test-data goldens (signed
+HTTP-Redirect query strings) were regenerated for Go 1.27's different DEFLATE
+output; they are test data only and are recorded and pinned the same way (see
+the module's `CULVERT-PATCH.md`).
 
 The local module's `CULVERT-PROVENANCE.json` retains the tag commit, original
 module and go.mod checksums, independently retrieved module zip hash, and all
-235 upstream file hashes. `verify_saml_patch.py` pins the inventory and exact
-build-tag delta, rejects unexpected source changes, and optionally checks the
+235 upstream file hashes. `verify_saml_patch.py` pins the inventory, the exact
+build-tag delta and the 8-file test-data delta, rejects unexpected source changes, and optionally checks the
 original zip. Its normal verification and synthetic tests do not require the
 original module cache or network access. A local replacement appears in Go build
 metadata; release provenance and SBOM consumers must retain the original version

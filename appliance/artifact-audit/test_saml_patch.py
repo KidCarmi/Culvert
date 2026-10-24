@@ -53,6 +53,48 @@ class SamlPatchTests(unittest.TestCase):
             with self.assertRaises(patch.InvalidPatch):
                 patch.verify_tree(copy)
 
+    def test_test_data_patch_is_exact_and_pinned(self):
+        report = patch.verify_tree(MODULE)
+        self.assertEqual(report['test_data_files'], 8)
+        golden = 'testdata/TestSPCanProduceSignedRequestRedirectBinding/rsa-sha256_queryString'
+        decoded = 'testdata/TestSPCanProduceSignedRequestRedirectBinding/rsa-sha256_decodedRequest'
+        with tempfile.TemporaryDirectory() as directory:
+            # A regenerated golden that is then edited is refused.
+            copy = Path(directory) / 'tampered'
+            shutil.copytree(MODULE, copy)
+            (copy / golden).write_bytes((copy / golden).read_bytes() + b'x')
+            with self.assertRaises(patch.InvalidPatch):
+                patch.verify_tree(copy)
+            # The decoded-request goldens (the AuthnRequest XML) stay upstream bytes.
+            copy = Path(directory) / 'decoded'
+            shutil.copytree(MODULE, copy)
+            (copy / decoded).write_bytes((copy / decoded).read_bytes() + b'x')
+            with self.assertRaises(patch.InvalidPatch):
+                patch.verify_tree(copy)
+            # Widening the record to another file is refused even with consistent hashes.
+            copy = Path(directory) / 'widened'
+            shutil.copytree(MODULE, copy)
+            target = copy / 'service_provider.go'
+            target.write_bytes(target.read_bytes() + b'\n// unexpected change\n')
+            manifest = copy / 'CULVERT-PROVENANCE.json'
+            data = json.loads(manifest.read_text())
+            data['test_data_patch']['files']['service_provider.go'] = {
+                'upstream_sha256': data['upstream_files_sha256']['service_provider.go'],
+                'patched_sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
+            }
+            manifest.write_text(json.dumps(data))
+            with self.assertRaises(patch.InvalidPatch):
+                patch.verify_tree(copy)
+            # Re-recording a golden's patched hash in place breaks the pin.
+            copy = Path(directory) / 'rerecorded'
+            shutil.copytree(MODULE, copy)
+            (copy / golden).write_bytes(b'other')
+            manifest = copy / 'CULVERT-PROVENANCE.json'
+            data = json.loads(manifest.read_text())
+            data['test_data_patch']['files'][golden]['patched_sha256'] = hashlib.sha256(b'other').hexdigest()
+            manifest.write_text(json.dumps(data))
+            with self.assertRaises(patch.InvalidPatch):
+                patch.verify_tree(copy)
 
 if __name__ == '__main__':
     unittest.main()
