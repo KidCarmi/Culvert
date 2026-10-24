@@ -952,6 +952,15 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
     <span id="config-freeze-msg"></span>
   </div>
 
+  <!-- Roster role clamp, non-admin view (SEC-RBAC-ROLE-1): the signed-in account
+       may itself be one held at viewer, and the explanation in Admin Users is
+       admin-only. Fixed text driven only by the count /api/stats already
+       returns to every role; which accounts are held stays admin-only. -->
+  <div id="roster-clamp-viewer-banner" class="banner warn" role="status" style="display:none;margin:14px 28px 0">
+    <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+    <span>Some console accounts are held at the viewer role because the saved user file names a role this version does not recognise (for example after restoring a backup from a newer version). If your account should have more access, ask an administrator to choose its role. If no administrator can sign in, recover from the host shell with --reset-password username:newpassword, which restores the admin role (and removes that account's two-factor enrolment).</span>
+  </div>
+
   <div class="content">
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
@@ -8599,10 +8608,16 @@ async function fetchStats() {
     // role this build does not know (typically a backup restored from a newer
     // build), so the account was lowered to read-only at load. The server
     // already reports the count; without this note the admin only sees an
-    // account that mysteriously lost its authority.
+    // account that mysteriously lost its authority. adminRosterRoleClamped is
+    // the canonical field (uiRosterRoleClamped is its deprecated alias).
+    const rc = s.adminRosterRoleClamped || 0;
+    // A clamped account cannot open the admin-only Admin Users view, so a
+    // non-admin also gets a fixed-text banner: it carries nothing beyond the
+    // count /api/stats already returns to every role.
+    const rcvBanner = document.getElementById('roster-clamp-viewer-banner');
+    if (rcvBanner) rcvBanner.style.display = (rc > 0 && uiRole && uiRole !== 'admin') ? '' : 'none';
     const rcHint = document.getElementById('roster-role-clamp-hint');
     if (rcHint) {
-      const rc = s.uiRosterRoleClamped || 0;
       if (rc > 0) {
         document.getElementById('roster-role-clamp-text').textContent =
           fmt(rc) + ' account' + (rc === 1 ? ' is' : 's are') +

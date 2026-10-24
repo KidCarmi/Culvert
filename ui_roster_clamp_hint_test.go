@@ -19,7 +19,7 @@ func TestAdminUsersPanel_SurfacesRosterRoleClamp(t *testing.T) {
 	for _, want := range []string{
 		`id="roster-role-clamp-hint"`,
 		`id="roster-role-clamp-text"`,
-		`s.uiRosterRoleClamped`,
+		`s.adminRosterRoleClamped`,
 		// A clamped sole administrator cannot edit roles from this panel;
 		// the hint must name the host-shell break-glass (main.go
 		// runResetPasswordCommand sets RoleAdmin).
@@ -37,6 +37,34 @@ func TestAdminUsersPanel_SurfacesRosterRoleClamp(t *testing.T) {
 	h := strings.Index(html, `id="roster-role-clamp-hint"`)
 	if v < 0 || h < v || h-v > 2000 {
 		t.Errorf("clamp hint is not inside the Admin Users view (view=%d hint=%d)", v, h)
+	}
+}
+
+// A clamped account is itself a viewer, and the Admin Users view (and its
+// hint) is admin-only, so a non-admin needs a banner outside every view. It is
+// fixed text: it must not interpolate the count or any account detail.
+func TestRosterClampViewerBanner_OutsideAdminOnlyViews(t *testing.T) {
+	b, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	banner := strings.Index(html, `id="roster-clamp-viewer-banner"`)
+	content := strings.Index(html, `<div class="content">`)
+	if banner < 0 || content < 0 || banner > content {
+		t.Fatalf("viewer clamp banner must sit above the views (banner=%d content=%d)", banner, content)
+	}
+	for _, want := range []string{
+		`getElementById('roster-clamp-viewer-banner')`,
+		`uiRole !== 'admin'`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("static/index.html missing %q", want)
+		}
+	}
+	end := strings.Index(html[banner:], `</div>`)
+	if end < 0 || !strings.Contains(html[banner:banner+end], `--reset-password username:newpassword`) {
+		t.Errorf("viewer clamp banner must name the host-shell recovery path")
 	}
 }
 
