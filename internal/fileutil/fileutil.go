@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 )
@@ -91,6 +92,21 @@ var ErrReplacedNotSynced = errors.New("atomic write: target replaced but parent 
 // carry the path's taint.
 func quotePath(path string) string { return fmt.Sprintf("%q", path) }
 
+// escapeCause wraps a filesystem error so its text has CR/LF escaped: an
+// *os.PathError or *os.LinkError repeats the raw path, which quotePath alone
+// does not cover. Unwrap returns the original, so errors.Is/As (fs.ErrNotExist,
+// ErrReplacedNotSynced callers) see the same chain as before.
+func escapeCause(err error) error { return escapedError{err} }
+
+type escapedError struct{ err error }
+
+func (e escapedError) Error() string {
+	s := strings.ReplaceAll(e.err.Error(), "\n", `\n`)
+	return strings.ReplaceAll(s, "\r", `\r`)
+}
+
+func (e escapedError) Unwrap() error { return e.err }
+
 // noteWriteFailure notifies the observer (if any) and returns err unchanged so
 // every failure branch of AtomicWrite can stay a one-line `return`.
 func noteWriteFailure(path string, err error) error {
@@ -167,11 +183,11 @@ func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (WriteResult, e
 	}
 	if err := f.Close(); err != nil {
 		cleanup()
-		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: close: %w", quotePath(path), err))
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: close: %w", quotePath(path), escapeCause(err)))
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		cleanup()
-		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: rename: %w", quotePath(path), err))
+		return WriteResult{}, noteWriteFailure(path, fmt.Errorf("atomic write %s: rename: %w", quotePath(path), escapeCause(err)))
 	}
 	if held != nil {
 		if fi, err := held.Stat(); err == nil {
@@ -187,12 +203,12 @@ func AtomicWriteInfo(path string, data []byte, perm os.FileMode) (WriteResult, e
 func writeSyncedTemp(path, dir string, data []byte, perm os.FileMode) (*os.File, error) {
 	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
 	if err != nil {
-		return nil, noteWriteFailure(path, fmt.Errorf("atomic write %s: create temp: %w", quotePath(path), err))
+		return nil, noteWriteFailure(path, fmt.Errorf("atomic write %s: create temp: %w", quotePath(path), escapeCause(err)))
 	}
 	fail := func(step string, err error) (*os.File, error) {
 		_ = f.Close()
 		_ = os.Remove(f.Name()) // #nosec G104 -- best-effort cleanup
-		return nil, noteWriteFailure(path, fmt.Errorf("atomic write %s: %s: %w", quotePath(path), step, err))
+		return nil, noteWriteFailure(path, fmt.Errorf("atomic write %s: %s: %w", quotePath(path), step, escapeCause(err)))
 	}
 	if _, err := f.Write(data); err != nil {
 		return fail("write", err)
@@ -225,10 +241,10 @@ func syncParentAfterRename(path, dir string, res WriteResult) (WriteResult, erro
 		// Post-rename failure: the target already carries the new content —
 		// mark it so compensating-rollback callers can tell (see
 		// ErrReplacedNotSynced).
-		return res, noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", quotePath(path), syncErr, ErrReplacedNotSynced))
+		return res, noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", quotePath(path), escapeCause(syncErr), ErrReplacedNotSynced))
 	}
 	if closeErr != nil && syncErr == nil {
-		return res, noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w: %w", quotePath(path), closeErr, ErrReplacedNotSynced))
+		return res, noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w: %w", quotePath(path), escapeCause(closeErr), ErrReplacedNotSynced))
 	}
 	res.DirSynced = true
 	noteWriteSuccess(path)
@@ -285,11 +301,11 @@ func syncParentAfterRename(path, dir string, res WriteResult) (WriteResult, erro
 // success seam able to clear it by evidence.
 func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("exclusive write %s: clear existing: %w", quotePath(path), err)
+		return fmt.Errorf("exclusive write %s: clear existing: %w", quotePath(path), escapeCause(err))
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
 	if err != nil {
-		return fmt.Errorf("exclusive write %s: create: %w", quotePath(path), err)
+		return fmt.Errorf("exclusive write %s: create: %w", quotePath(path), escapeCause(err))
 	}
 	// perm is filtered through the process umask at creation, so a umask
 	// that masks owner bits would leave the rendezvous unreadable after a
@@ -327,12 +343,12 @@ func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
 // the returned error, so the caller is never told the path is clear when it
 // may still hold (or, after a crash, regain) the partially written file.
 func exclusiveFail(path, stage string, cause error) error {
-	err := fmt.Errorf("exclusive write %s: %s: %w", quotePath(path), stage, cause)
+	err := fmt.Errorf("exclusive write %s: %s: %w", quotePath(path), stage, escapeCause(cause))
 	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: remove: %w", quotePath(path), rerr))
+		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: remove: %w", quotePath(path), escapeCause(rerr)))
 	}
 	if serr := exclusiveSyncDir(filepath.Dir(path)); serr != nil {
-		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: parent dir fsync: %w", quotePath(path), serr))
+		return errors.Join(err, fmt.Errorf("exclusive write %s: cleanup: parent dir fsync: %w", quotePath(path), escapeCause(serr)))
 	}
 	return err
 }
