@@ -1676,6 +1676,68 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- Session-cookie verification no longer builds HMAC state per request. The
+  signed cookie is the FIRST credential arm `resolveRequestAuth` tries, so
+  `session.Decode` runs on the proxy authentication hot path and not just the
+  admin UI — every authenticated proxied request verified one MAC. Building the
+  state, not hashing the ~250-byte payload, dominated that step:
+  `crypto/hmac.New` costs five allocations (the HMAC struct, the ipad and opad
+  blocks, an inner and an outer `sha256.Digest`), and the old form paid them per
+  request plus a payload copy for `Write`, a digest for `Sum(nil)`, two for
+  `EncodeToString`, and two more for the `[]byte` conversions `hmac.Equal`
+  needed — nine allocations in `mac` alone, each with a named owner under
+  `-memprofilerate=1`.
+
+  HMAC state is explicitly reusable (`Reset` re-primes the inner hash with
+  ipad), so it is now built ONCE per signing key and recycled through a pool
+  published atomically beside the key, and the digest is summed and
+  base64url-encoded through inline buffers so the verify path compares bytes
+  without ever materialising the expected signature as a string. The hashing is
+  untouched — same key, same two block compressions, same alphabet,
+  byte-identical output — and `SetSigningKey` remains the single install
+  funnel, now rebinding the engine only when the key actually CHANGED, because
+  `applySnapshotSessionSecret` reinstalls the CP-synced secret on every
+  snapshot apply whether or not it moved and an unconditional rebind would
+  discard the warm pool on each of those no-ops. Because the engine now caches
+  the key instead of re-reading it per MAC, `SetSigningKey` also stores a COPY:
+  holding the caller's slice would let a caller that mutated the slice it had
+  installed and then reinstalled it hand that comparison the same bytes on both
+  sides, skipping the rebind — after which cookies from before the rotation
+  would keep verifying and `SigningKey`, which feeds the Control Plane snapshot
+  export, would report a key local verification no longer used. The copy sits on
+  the rebind path, so the no-op reinstall stays allocation-free.
+
+  Measured on the development box (linux/amd64, 4-core Xeon @ 2.80GHz, medians
+  of 3 runs, each pair timed in the SAME run against a verbatim copy of the
+  replaced form) under the toolchain this branch now pins, go1.27.3: the verify
+  step 2 521 → 1 454 ns and 9 allocations / 896 B → ZERO; four-way parallel
+  1 061 → 367 ns; a whole `Decode` 6 563 → 3 879 ns, 15 → 6 allocations,
+  1 304 → 408 B; four-way parallel 2 565 → 1 290 ns.
+
+  The same measurement under go1.26.9, the pin when this work began, read
+  `Decode` 6 134 → 4 903 ns, 26 → 17 allocations, 1 648 → 752 B. Go 1.27 made
+  the `encoding/json` half of `Decode` dramatically cheaper on its own — 17
+  allocations to 6, none of it this change — while this change's own
+  contribution is IDENTICAL on both pins: nine allocations and 896 bytes of
+  HMAC construction. The relative timing win on `Decode` therefore GREW, from
+  −20% to −41%, because a fixed cost removed from a smaller total is a larger
+  share of it. The allocation gate's absolute bound was retightened 20 → 10
+  with that remeasurement, since a bound set against 17 would have let a
+  threefold regression pass once the measured value fell to 6.
+
+  What remains in `Decode` is the base64 payload decode and `encoding/json`'s
+  unmarshal into `Session`, deliberately left alone. The size of the timing win
+  depends on how expensive the runner's
+  allocator is relative to SHA-256, so the gate asserts the structural
+  property instead — the verify step builds no HMAC state, no digest and no
+  expected-signature string — and extends the zero bound to the reject path,
+  so an unauthenticated client cannot drive allocation by replaying garbage
+  cookies. Equivalence is pinned by a differential test (five key shapes x ten
+  payload shapes x ten signature shapes, plus an end-to-end `Decode` oracle)
+  and a fuzz target; the pooling-specific hazards — key rotation under
+  concurrent verification, no-op reinstall keeping the pool, a real rotation
+  swapping it, the engine owning its key copy — have their own tests.
+
 - The per-IP connection limiter now does its whole job in ONE critical section
   per call, and stores the counter by value. `Acquire` + a deferred `Release`
   run on every proxied request (`handleRequest`, `socks5.go`), not once per TCP
