@@ -377,9 +377,11 @@ func BenchmarkRingOrderPrimShardedOrdered(b *testing.B) {
 }
 
 // BenchmarkRingOrderPrimShardedOrderedRandomKey is the sharded design measured
-// with the shard key a REQUEST path actually has, and it is the arm that
-// settles the question: 36.5 / 126.7 / 111.5 ns, i.e. a dead heat with the
-// shipped mutex at four cores after costing 36% and 116% more at one and two.
+// with the shard key a REQUEST path actually has, which is what makes it the
+// arm to read: 1.55x / 1.58x / 0.75x against the shipped mutex in the same
+// invocation. So it still crosses over and still wins at four cores, but it
+// keeps only about half the sticky arm's four-core gain (0.75x vs 0.43x) and
+// pays more than it at one and two.
 //
 // A proxied request is a fresh goroutine, so there is no stickiness to inherit
 // — the only key available is tsShardIndex()'s per-P rand.Uint64 (store.go),
@@ -402,13 +404,17 @@ func BenchmarkRingOrderPrimShardedOrderedRandomKey(b *testing.B) {
 	for i := range sh {
 		sh[i] = &ringOrderShard{buf: make([]ringOrderShardSlot, MaxRing/shards)}
 	}
-	var pick atomic.Int64
+	// atomic.Uint64, not Int64: the seed below wants an unsigned word, and
+	// converting one would be an int64 -> uint64 cast that gosec G115 rejects
+	// (CI, PR #1710). Picking the right type is the fix; a //nolint here would
+	// only have hidden a conversion that never needed to exist.
+	var pick atomic.Uint64
 	var seq atomic.Uint64
 	e := benchEntry(0)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		x := uint64(pick.Add(1)) * 0x9E3779B97F4A7C15 // per-worker seed
+		x := pick.Add(1) * 0x9E3779B97F4A7C15 // per-worker seed
 		for pb.Next() {
 			x ^= x << 13
 			x ^= x >> 7
