@@ -215,6 +215,9 @@ func buildOperatorContract() OperatorContract {
 	// that has never activated and is failing). Contributes nothing when the feed
 	// is healthy, disabled, or serving the embedded baseline without failures.
 	checks = append(checks, checkSaaSFeed()...)
+	// PAC profiles last served with compile warnings. Contributes nothing when
+	// every served profile compiled cleanly.
+	checks = append(checks, checkPACDegraded()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
