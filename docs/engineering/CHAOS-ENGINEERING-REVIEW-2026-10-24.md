@@ -401,10 +401,14 @@ a `feedsync` zero-entry and unexpected-layout test; and a
   motivates it, and the alternative — a wire field — is listed above as an
   improvement rather than taken here, because it would break the sidecar's
   compatibility with older clients in the mixed-version window.
-- **The sidecar remains unauthenticated by design**, and this sweep did not
-  revisit that; `/scan` and `/status` are reachable by anything that can
-  reach the listener. Out of scope here, but `handleStatus` returning
-  `secScanStatusMap()` to an unauthenticated caller is worth an owner's eye.
+- **The sidecar remains unauthenticated**, so `/scan`, `/health` and `/status`
+  are reachable by anything that can reach the listener — and `/health` now
+  publishes `scan_window_bytes` and `oversize_refused` to that same
+  unauthenticated caller. Both are deployment-shape facts rather than secrets,
+  and the exposure itself is already tracked, rated High, with a
+  loopback/mTLS/token follow-up recorded in
+  [the API consistency risk register](../api/API-CONSISTENCY-RISK-REGISTER.md)
+  §9. This sweep did not revisit it.
 - **Four verified findings are left open**, three of which actively report
   healthy while failing. They are recorded with file:line evidence rather than
   fixed, to keep this PR to one contract; nothing in this PR improves them.
