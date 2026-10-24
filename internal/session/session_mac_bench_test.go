@@ -19,11 +19,7 @@ import (
 // under a deterministic 32-byte key.
 func benchSessionToken(tb testing.TB) (token, payload, sig string) {
 	tb.Helper()
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
-	SetSigningKey(key)
+	SetSigningKey(testKey("bench session token"))
 	s := &Session{
 		Sub:      "alice@example.com",
 		Email:    "alice@example.com",
@@ -165,10 +161,7 @@ func BenchmarkDecodeKeyRebindPerOp(b *testing.B) {
 	token, _, _ := benchSessionToken(b)
 	withBenchRevocationList(b)
 	issued := SigningKey()
-	other := make([]byte, 32)
-	for i := range other {
-		other[i] = byte(0xC0 | (i & 0x0F))
-	}
+	other := testKey("bench rebind away")
 	b.ReportAllocs()
 	for b.Loop() {
 		SetSigningKey(other)  // rebind away …
