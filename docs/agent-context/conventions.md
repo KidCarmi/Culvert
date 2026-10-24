@@ -41,6 +41,17 @@ Each rule names the source that defines it; verify there at the task revision.
   tests before moving code. Existing root aliases can be intentional boundaries.
 - Take the compiler from [go.mod](../../go.mod) `toolchain`, not the minimum
   `go` line. CI and Docker pins must agree; do not set workflow `GOTOOLCHAIN`.
+- Take the LINTER version from the gate that blocks you, not from `PATH`. The
+  container's `golangci-lint` is older than this module's language version and
+  panics or refuses it, which has repeatedly been recorded as "local lint is
+  unavailable"; the version
+  [pr-fast-gate.yml](../../.github/workflows/pr-fast-gate.yml) installs runs
+  clean when built with the `go.mod` toolchain (`GOTOOLCHAIN=<toolchain> go
+  install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@<pinned>`).
+  Run the gate's own command, `run --new-from-rev origin/<base>`, AND a
+  full-tree pass compared against the same measurement on the base: `cyclop`,
+  `funlen` and `gocognit` attribute to a function's DECLARATION line, so
+  `--new-from-rev` cannot see a function you made more complex.
 - Match the owner's concurrency contract. Immutable published views, sharded
   locks, RWMutex and atomics are different decisions. Do not replace a proven
   lock-free hot path with a generic RWMutex recommendation.
