@@ -4,16 +4,20 @@
 > **Snapshot:** `origin/main` at `dec66e1`. Targeted review of the surfaces changed since the
 > 2026-09-24 report's snapshot `6ec745d` (128 files, 79 first-parent merges). Backlog IDs T-9..T-63
 > remain owned by earlier reports and are not re-verified or re-scored here.
+>
+> **Finding ID.** This report was drafted as T-64. Main has since assigned T-64 (twice: the 2026-10-11
+> operation-ID split and the 2026-10-15 admin-roster rename), T-65 and T-66, and #1672 holds T-67, so this
+> report's finding is renumbered **T-68**.
 
 ## Executive Summary
 
 The window's new admin-facing names are consistent with existing vocabulary (backups, rollback scope,
-SOCKS5 bind-health metrics, DP-bootstrap refusal counters). **One new finding (T-64)**, fixed in this PR:
+SOCKS5 bind-health metrics, DP-bootstrap refusal counters). **One new finding (T-68)**, fixed in this PR:
 the legacy GUI still called the deprecated destination-privacy alias after T-17 made
 `/api/traffic/redaction` canonical. Terminology Health Score: not re-scored (the series' lineage
-figure is disputed between reports); T-64 is opened and closed in the same change, so it adds no open item.
+figure is disputed between reports); T-68 is opened and closed in the same change, so it adds no open item.
 
-## T-64 — Legacy GUI calls the deprecated alias (Medium / Low migration risk)
+## T-68 — Legacy GUI calls the deprecated alias (Medium / Low migration risk)
 
 | Field | Value |
 | --- | --- |
