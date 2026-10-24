@@ -2071,7 +2071,7 @@ func TestChaos68_AU59_QuarantineRowAndRunbookAgreeOnMergeNotRestore(t *testing.T
 
 	// The runbook's §6 must be making the same demand, so the two cannot drift
 	// apart again without one of them failing here.
-	doc, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs/operator/session-revocation.md"))
+	doc, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "session-revocation.md"))
 	if err != nil {
 		t.Fatalf("read runbook: %v", err)
 	}
