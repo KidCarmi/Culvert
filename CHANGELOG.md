@@ -245,6 +245,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- A scheduled rule's **timezone is now resolved once per policy evaluation**
+  instead of once per rule. Both halves of the per-rule work depend only on
+  `(instant, timezone)` and never on the rule, yet `matchScheduleAt` redid both
+  for every scheduled rule of every proxied request:
+
+  - `scheduleLocationResolved` keeps tzdata off the hot path, but its
+    process-wide `sync.Map` is **interface-keyed**, so each probe pays
+    `runtime.nilinterhash` → `typehash` → `aeshashbody`. On a 1 000-scheduled-rule
+    rulebase that probe alone measured **38.7%** of the evaluation
+    (`scheduleLocationResolved` 41.0% cumulative) — a thousand identical
+    lookups of the single timezone the deployment had configured.
+  - `now.In(loc)`, `Weekday()`, `Hour()` and `Minute()` each re-split the
+    absolute seconds: a further **~25%** of the same scan.
+
+  `evalAccessRules` now shares one evaluation-scoped `scheduleClock` across the
+  rulebase, the same lazy pointer-passed idiom `clientSource` and
+  `hostCatScratch` already use — it stays on the caller's stack, is never
+  retained, and a rulebase with no scheduled rule still reads no clock at all.
+  The memo holds **one** entry keyed on the timezone string, which is the shape
+  real postures have (one configured zone, or empty for UTC); a rulebase that
+  alternates zones rule-by-rule simply re-derives, i.e. degrades to the
+  pre-change cost and measured no worse (60.5 µs vs 69.9 µs at 1 000 rules).
+
+  Measured with benchstat (n=6, 4-core Xeon @2.10GHz, go1.26.9):
+  **10 rules 887.7 ns → 401.8 ns (-54.7%)**, **100 rules 7.289 µs → 2.525 µs
+  (-65.4%)**, **1 000 rules 69.92 µs → 23.02 µs (-67.1%)**. Isolated, the
+  per-rule schedule check went from ~66 ns to ~15.2 ns (**-77%**). Allocations
+  stay at **0/op** — the zero-allocation scan contract is unchanged — and an
+  unscheduled rulebase is untouched.
+
+  `scheduleDayMatch` and `scheduleTimeMatch` split into shared cores taking the
+  already-derived weekday and minutes-of-day, and `matchScheduleAt` became a
+  one-shot use of the memo. There is therefore exactly **one** schedule-matching
+  code path, so the Stage-1 auth gate, CDR policy and the policy simulator keep
+  their behavior by construction rather than through a parallel implementation
+  that could drift. `TestBenchGate_PolicyEvalScheduleOverheadBounded` gates the
+  scheduled-to-unscheduled scan ratio at 3.5x (measured 2.19x; 4.63x with the
+  memo un-shared); the existing allocation gate could not see this regression,
+  because resolving per rule allocates nothing.
+
 - The destination host is now canonicalized **once per policy scan** instead of
   once per category-scoped rule. `urlcat.Store.MatchesHost` /
   `MatchesHostAdmin` and `effectiveCategoryView.MatchesCategory` each opened
