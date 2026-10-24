@@ -46,7 +46,7 @@ docker compose up -d          # a working proxy + admin UI, no config required
 | **Distributed** | gRPC Control Plane / Data Plane with mTLS, config-snapshot sync, node groups, per-group bandwidth/QoS, config versioning, rolling upgrades, optional etcd fencing lease for HA |
 | **Supply chain** | Signed release catalog (Ed25519 + Sigstore keyless), digest-pinned image dispatch, SLSA L3 provenance, Cosign-signed artifacts |
 
-See the interactive **[architecture overview](docs/architecture.md)** and the **[Admin UI / Control Plane reference](CLAUDE.md#admin-ui--control-plane)** for detail.
+See the interactive **[architecture overview](docs/architecture.md)** and the **[Admin UI / Control Plane reference](docs/agent-context/domains/admin-control-plane.md)** for detail.
 
 ---
 
@@ -177,7 +177,7 @@ Core        -port 8080  -ui-port 9090  -socks5-port 0  -config <file>
 TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
 Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
 Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
-Logging     -logfile  -log-max-mb 50  -request-log-max-mb 100  -audit-log  -syslog
+Logging     -logfile  -log-max-mb 50  -request-log <file>  -request-log-max-mb 100  -audit-log  -syslog
 Metrics     -metrics-token  -rate-limit  -otlp-endpoint <url>
 Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
@@ -387,7 +387,7 @@ Development phases, production-readiness items, and the engineering governance m
 
 1. Fork and branch (`git checkout -b feature/my-feature`)
 2. `go test -race ./...`
-3. Keep the admin-API route-metadata and config-surface parity tests green (see [`CLAUDE.md`](CLAUDE.md))
+3. Keep the admin-API route-metadata and config-surface parity tests green (see [current conventions](docs/agent-context/conventions.md))
 4. Open a PR - the full CI pipeline (CodeQL, security gate, golangci-lint) runs automatically
 
 ---
