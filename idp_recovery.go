@@ -524,6 +524,17 @@ func revalidateCacheServingProviders() int {
 		// Lost the race to an admin write, a snapshot or a retirement; the
 		// fresh document is in the cache, and the next pass (or the dark
 		// recovery path) adopts it for whatever generation is now in service.
+		//
+		// The same ownership question as the branch above, carried here to
+		// close the CLASS rather than the instance. The path is narrower and
+		// was NOT reproduced: adoption normally implies this fetch succeeded,
+		// which clears the episode by evidence. It is reachable only when a
+		// CONCURRENT compile wrote a newer document while THIS fetch failed
+		// and fell back, so this pass adopts a document it did not fetch while
+		// carrying an episode its own 5xx opened. Being a no-op whenever the
+		// source is still authoritative, the guarded call costs nothing to
+		// carry and removes the need to re-derive that argument next round.
+		discardSupersededRecoveryEpisode(rc.darkCandidate)
 		noteIdPRecoverySuperseded(rc.candidate.ID)
 	}
 	return replaced
@@ -638,6 +649,28 @@ func runIdPRecoveryLoop(ctx context.Context) {
 			// refresh into the live registry — register row IDP-4, whose whole
 			// content is that this needs the transactional mutation model rather
 			// than a second publication path bolted onto this loop.
+			//
+			// AND THE EPISODE IS STILL OWNED BY SOMEBODY (Codex round 21).
+			// "The compile SUCCEEDED" does not mean the FETCH did: a dark
+			// profile with a usable cached document compiles from it while the
+			// IdP is down, and the 5xx behind that fallback opens an episode
+			// exactly as a stale acquisition does. So when publication is
+			// refused BECAUSE THE PROFILE WAS DISABLED mid-fetch, the disable's
+			// own cleanup already ran — before this episode existed — and the
+			// episode is left for a configuration no longer in service:
+			// unclearable by evidence, ageing past idpMetadataDegradedAfter
+			// into a page for a provider the operator turned off. Reproduced
+			// end to end.
+			//
+			// FOURTH INSTANCE IN THIS SWEEP of one rule enforced at one layer
+			// and not the next, and the second in this function's own file: the
+			// FAILURE branch above has discarded since round 12 and the
+			// revalidation loop's non-adopting branch since round 20, while
+			// this one only logged. The discard is a no-op whenever the source
+			// is still authoritative — notably the went-live case, where the
+			// episode is the new provider's live outage signal — which is why
+			// it is the guarded call and not a bare forget.
+			discardSupersededRecoveryEpisode(dc)
 			noteIdPRecoverySuperseded(dc.candidate.ID)
 		}
 		if recovered > 0 {
