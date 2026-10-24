@@ -23,17 +23,18 @@ func mustRemainder(t *testing.T, snap ConfigSnapshot) json.RawMessage {
 	return b
 }
 
-// restoreBlAndIPF snapshots the shared blocklist + IP-filter globals the client
-// apply tests mutate, restoring them on cleanup so the determinism gate
-// (-shuffle -count=2) can't observe wiped state in a later test.
+// restoreBlAndIPF snapshots the shared blocklist the client apply tests
+// mutate and binds FRESH IP-filter and rate-limiter owners into the
+// composition handles, restoring all three on cleanup so the determinism gate
+// (-shuffle -count=2) can't observe wiped state in a later test. The apply
+// path mutates ipf and rl IN PLACE (RISK-030: it no longer swaps the ipf
+// pointer), so saving the old pointers and applying over them would restore
+// objects already carrying this test's snapshot.
 func restoreBlAndIPF(t *testing.T) {
 	t.Helper()
 	feed := bl.FeedList()
-	oldIPF := ipf
-	t.Cleanup(func() {
-		bl.ReplaceFeedEntries(feed)
-		ipf = oldIPF
-	})
+	bindFreshAdmissionOwners(t)
+	t.Cleanup(func() { bl.ReplaceFeedEntries(feed) })
 }
 
 // TestApplyBlocklistDeltaSnapshot_ConvergesAndAppliesRemainder: the DP delta
@@ -143,6 +144,7 @@ func TestDataPlaneClient_DeltaSyncApplies(t *testing.T) {
 // TestDataPlaneClient_DeltaUnchanged: an unchanged reply advances nothing and
 // does not fall through to a full pull.
 func TestDataPlaneClient_DeltaUnchanged(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
 	c := &DataPlaneClient{}

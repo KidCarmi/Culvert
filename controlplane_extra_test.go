@@ -339,7 +339,7 @@ func TestCPServerOption_NoTLS_NoInsecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = false
 
-	_, err := cpServerOption(":50051", "", "", "")
+	_, err := cpServerOption("", "", "")
 	if err == nil {
 		t.Fatal("expected error when no TLS and not insecure")
 	}
@@ -350,7 +350,7 @@ func TestCPServerOption_Insecure(t *testing.T) {
 	defer func() { clusterInsecure = origInsecure }()
 	clusterInsecure = true
 
-	opt, err := cpServerOption(":50051", "", "", "")
+	opt, err := cpServerOption("", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -362,6 +362,7 @@ func TestCPServerOption_Insecure(t *testing.T) {
 // ── applyConfigSnapshot Tests ──────────────────────────────────────────────
 
 func TestApplyConfigSnapshot(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	// Save and restore global state.
 	origBL := bl
 	origIPF := ipf

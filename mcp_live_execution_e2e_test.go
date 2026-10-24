@@ -200,14 +200,37 @@ func TestLiveE2E_ControlOperationRejectedByReadFirst(t *testing.T) {
 // returning a zero target would make every gate test using it deny with canaryAdmitNotReviewed and
 // stop exercising whatever it was actually about.
 func stubTrustPrecheckEligible(string, string, string, string) liveTrustPrecheck {
-	rt := testReviewedTarget()
-	return liveTrustPrecheck{
-		Eligible: true,
-		Target: canary.LiveTarget{
-			Tenant: rt.Tenant, ServerID: rt.ServerID, ToolName: rt.ToolName,
-			Fingerprint: rt.Fingerprint, FingerprintFormat: rt.FingerprintFormat,
-		},
-		ServerIdentity: rt.ServerIdentity,
+	return stubTrustPrecheckObservedAt(liveHarnessInstant)("", "", "", "")
+}
+
+// liveHarnessInstant is the fixed instant this whole harness composes, arms and executes at.
+// The peer observation below is stamped at the same instant so the target is FRESH by
+// construction, with no dependence on wall-clock time.
+var liveHarnessInstant = time.Unix(0, 1)
+
+// stubTrustPrecheckObservedAt is stubTrustPrecheckEligible with the peer observation stamped at an
+// explicit instant, for the gates that need it stale, future-dated or absent.
+//
+// THE OBSERVATION IS PART OF WHAT "ELIGIBLE" MEANS NOW (blocker #11). Before the send-boundary
+// freshness re-check, a precheck could describe a fully trustworthy target while carrying no
+// evidence that any peer had ever confirmed it; the boundary now refuses exactly that, so a
+// fixture meaning "this request should cross" has to say the peer was seen. The identity matches
+// the reviewed target's AND the registry pin, because the verdict requires the observation to
+// agree with both — a fixture that satisfied only one would be asserting less than production
+// demands.
+func stubTrustPrecheckObservedAt(at time.Time) func(string, string, string, string) liveTrustPrecheck {
+	return func(string, string, string, string) liveTrustPrecheck {
+		rt := testReviewedTarget()
+		return liveTrustPrecheck{
+			Eligible: true,
+			Target: canary.LiveTarget{
+				Tenant: rt.Tenant, ServerID: rt.ServerID, ToolName: rt.ToolName,
+				Fingerprint: rt.Fingerprint, FingerprintFormat: rt.FingerprintFormat,
+			},
+			ServerIdentity: rt.ServerIdentity,
+			Observed:       canary.PeerObservationFacts{At: at, Identity: rt.ServerIdentity},
+			RegistryPin:    rt.ServerIdentity,
+		}
 	}
 }
 

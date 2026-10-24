@@ -75,6 +75,7 @@ func snapshotBL(t *testing.T) {
 // the path preserved, the pre-fix Save used os.Rename without
 // fsync. The fix in this PR closes all three.
 func TestApplyConfigSnapshot_BlocklistPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	ensureClusterPersistTestLogger(t)
 	snapshotBL(t)
 
@@ -140,6 +141,7 @@ func TestApplyConfigSnapshot_BlocklistPersist(t *testing.T) {
 // This test passes once the fix replaces `bl = newBL` with an
 // in-place ReplaceFeedEntries that touches only exact + wildcards.
 func TestApplyConfigSnapshot_BlocklistPreservesLocalState(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	ensureClusterPersistTestLogger(t)
 	snapshotBL(t)
 
@@ -223,6 +225,7 @@ func TestApplyConfigSnapshot_BlocklistPreservesLocalState(t *testing.T) {
 // This test focuses solely on mode preservation, verified via
 // bl.Mode() (a direct read, not affected by allow-mode inversion).
 func TestApplyConfigSnapshot_BlocklistPreservesMode(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	ensureClusterPersistTestLogger(t)
 	snapshotBL(t)
 
