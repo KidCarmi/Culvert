@@ -166,6 +166,7 @@ func TestConfigStoreVersion_HAPromotionSeedsFromReplicatedLeader(t *testing.T) {
 // fails (here the empty cluster-state import), because the leader already
 // published that Version to the DPs.
 func TestApplyHABundle_RecordsReplicatedLeaderVersion(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	resetReplicatedLeaderVersion(t)
 
 	const leaderVersion int64 = 987654

@@ -59,6 +59,26 @@ exclude some mutations, including [password changes](../../auth_password_change_
 but contains historical inventories; use current source/tests for capture decisions.
 A credential mutation must not introduce a restore path to old credentials.
 
+## Tracing-header control bytes and suite size
+
+[Original L212](history/observability-and-alerts.md#claude-main-l212-l212)
+says `ESC`, `NUL`, `BEL`, `VT`, `FF` and `DEL` in `X-Request-Id` reached the
+forensic log verbatim. That was measured on a hand-built request, not the wire.
+Over a real socket, net/http refuses every C0 byte except `TAB`, and `DEL`, with
+a 400 before the handler runs, so those bytes never reached a log line. The
+bound in [request tracing](../../request_tracing_bounds.go) is still
+load-bearing: `TAB`, `SPACE` and every byte `0x80`–`0xFF` are delivered and
+stopped only by it, and the length half is reachable in full.
+[The socket gates](../../request_tracing_wire_bounds_test.go) pin the
+delivered/refused partition in both directions. Keep the charset and length
+bound; do not treat the control-byte gate as evidence of a reachable exposure.
+
+That reachability argument rests on `setupRequestTracing` having exactly one
+caller, `handleRequest`, whose request always comes from that parser: the
+inspected-H2 server dispatches to `h2InspectStream` instead, and the
+SSL-inspect inner loop's `http.ReadRequest` applies the same validation.
+The same block also counts the suite at 25 gates; it has 23.
+
 ## General advice versus domain exceptions
 
 - Generic RWMutex advice does not supersede immutable views or sharded ownership
@@ -88,3 +108,32 @@ PR [#1528](https://github.com/KidCarmi/Culvert/pull/1528), observed head
 `72c827b7f59f4e43ff2a813241be9029f58f23a9`, contains additional instructions
 and a different toolchain pin. Its guide was inspected but is not imported as
 main behavior. See [rebase instructions](migration.md#branch-reconciliation).
+
+## Oversize-host refusal reporting
+
+[Original L198](history/proxy-tls-and-certificates.md#claude-main-l198-l198)
+credits the `OVERSIZE_HOST` line as rate-limited to one per minute and ends its
+review-round sequence at the fifth round. Two later source-backed contracts are
+absent from that text; both live in the
+[destination-bounds owner](../../proxy_host_bounds.go). The window is claimed
+with an atomic compare-and-swap (`noteOversizeHostLog`), never a mutex: this gate
+is reached ahead of connection limiting, the IP filter and the per-IP limiter, so
+a process-wide lock there would serialize every refusal during the flood it
+bounds, including the suppressed ones. Those three avoid such a lock by two
+different primitives, which a copying reader must not merge:
+[connection counting](../../internal/connlimit) and the per-IP rate limiter shard
+their locks, while `IPFilter.Allowed` is lock-free over an `atomic.Pointer` view
+([admission engine](../../internal/admission/engine.go)). A negative age re-arms instead of
+suppressing, so a clock rollback still reports. The client address is resolved
+only after the window is won (`noteOversizeHostRejectionReq` takes the request;
+both admin entry points in [the admin handlers](../../ui_policy.go) use it):
+passing `realClientIP` as an argument resolves it per refusal and joins and
+splits the whole `X-Forwarded-For` header on the suppressed path.
+[The gates](../../proxy_host_bounds_test.go) pin the no-lock property
+structurally, because a mutex and an atomic stamp share one observable, and
+measure allocated bytes rather than allocation count, because one `strings.Split`
+slice makes the count flat in hop count. The equivalent corrections in
+[request tracing](../../request_tracing_bounds.go) predate these and were not
+inherited; treat both client-supplied-input bounds as one dialect rather than
+re-deriving either. Narrative and measurements:
+[register](../../roadmap/CHAOS-ENGINEERING-REVIEW.md).
