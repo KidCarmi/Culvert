@@ -792,8 +792,8 @@ func snapshotAdminEndpoints(s *AdminSettings) {
 	}
 	if syslogConfigured != "" {
 		s.SyslogAddr = syslogConfigured
-		if globalSyslog != nil {
-			s.SyslogFormat = globalSyslog.Format()
+		if sw := syslogHandle(); sw != nil {
+			s.SyslogFormat = sw.Format()
 		}
 	}
 	s.OTLPEndpoint = globalOTLP.Endpoint()
@@ -828,7 +828,7 @@ func snapshotAutoExcludeTunables(s *AdminSettings, override *autoExcludeTunables
 // snapshotBlocklistFeeds copies the live feed set into s. blFeedSyncer is
 // nil until main() runs loadBlocklist, and SaveAdminSettings can run from a
 // detached goroutine (adminSettingsSave) that outlives the caller — so guard
-// against nil rather than deref it, mirroring the globalSyslog guard. The
+// against nil rather than deref it, mirroring the globalSyslogHandle guard. The
 // legacy single-feed fields are intentionally not written anymore (read-only
 // migration path). BlocklistFeedsSaved stays false on a nil syncer so the
 // snapshot's (necessarily empty) list is not treated as authoritative on load.

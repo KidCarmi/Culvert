@@ -24,6 +24,74 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The syslog/SIEM writer handle was published without synchronization, so a
+  "disable forwarding" click could abort an in-flight proxy request, and every
+  runtime retarget leaked a delivery goroutine and its collector socket
+  (CHAOS-78).** `globalSyslog` was a plain `*syslogWriter`: written at runtime
+  from the admin handler goroutine (`InitSyslog` via `POST /api/syslog`; the
+  disable branch stored `nil`) and read unsynchronized on the proxy request
+  path at `persistLogEntry` — the chokepoint every request-log record flows
+  through — and on the audit SIEM hook.
+
+  The nil check and the dereference were two separate unsynchronized loads, so
+  a request goroutine could pass the check and then dereference the `nil` the
+  disable branch had just stored. Measured: 14 reported data races under
+  `-race` between `persistLogEntry` and `InitSyslog`. The proxy crash guard
+  contains the panic per request, so the cost is a dead request or tunnel and a
+  crash record, not a dead appliance.
+
+  The subtler half is the one a nil guard would **not** have fixed. The engine
+  sets its queue in `startAsync` *after* the struct literal and treats a zero
+  queue as "deliver synchronously" — a path that holds the writer mutex across
+  three serialized network ops, which the engine's own comment puts at ~15 s
+  worst case (`writeTimeout` + dial + `writeTimeout`). A plain pointer write
+  carries no
+  release edge, so on a weakly ordered target (the appliance ships
+  `linux/arm64`) a request goroutine could observe a non-nil writer whose queue
+  was still zero, take that path, and pay ~15 s on the data path with every
+  other logging caller queued behind it — exactly the proxy-wide stall the
+  async design exists to prevent, reached through the pointer rather than the
+  engine.
+
+  The handle is now an `atomic.Pointer[syslogWriter]` read once into a local at
+  every site, which supplies both the single load and the release edge. This is
+  the pattern the codebase already uses for every other hot-path-read,
+  runtime-reconfigured global (`globalLogStore`, `logSink`, `obs.sink`, and the
+  syslog engine's own `panicObserver`); the pointer holding the engine was the
+  one left plain.
+
+  Separately, `InitSyslog` published over the previous writer without closing
+  it, and the engine's `drainLoop` exits **only** via `Close` — so each runtime
+  SIEM retarget stranded one delivery goroutine and one collector socket for
+  the life of the process (measured: 8 retargets, 8 leaked, 7 still live after
+  a disable). `InitSyslog` now closes the writer it displaces. The enable
+  branch also dereferenced the global twice more with no nil guard at all, so a
+  second admin's concurrent disable nil-panicked the admin handler; the format
+  now resolves from one load.
+
+  Closing that leak opened a narrower hole, which review caught: `send` read
+  `closed` and only *then* enqueued, while `Close` closed `stop` and let
+  `drainLoop` exit — so a sender preempted between its check and its enqueue
+  could put a line on a queue whose drain goroutine had already returned.
+  `Close` never closes the channel, so the send succeeds and the line is
+  **neither delivered nor counted in `Drops`** — silent loss, in audit records.
+  The leak had been masking it: a leaked `drainLoop` keeps running, so that same
+  line was delivered. `Close` now stores `closed`, waits for in-flight senders,
+  and only then closes `stop`, so every line is either delivered or counted
+  provided the sender clears within the bound; the wait is bounded so it can
+  never hang shutdown, and that bound is the one path that can still lose a
+  line. Measured: against the pre-fix ordering the conservation test fails 6
+  runs in 10, typically losing exactly one line (`delivered 2091 + dropped 5273
+  = 7364; want exactly 7365 sent`), and the `Close`-waits-for-a-sender ordering
+  is ~108 µs pre-fix against a required 150 ms.
+
+  Closes `OBS-1` of the chaos register's §42, which nominated it as the
+  recommended first follow-up. Gated by a `-race` reconfigure-versus-request
+  test, a goroutine-leak test counting delivery goroutines by stack, an AST
+  wall (the handle stays an `atomic.Pointer`, only `syslog.go` names it, and
+  no caller may write `syslogHandle().Method()`), and a compile-time type
+  assertion. Full write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §45.
+
 - **Built with Go 1.27, the shutdown drain sent no GOAWAY to inspected HTTP/2
   tunnels.** Under `go1.27 && !http2legacy`, x/net v0.61 compiles a different
   `http2.Server` (`server_wrap.go`) that wraps net/http's HTTP/2 server. That
@@ -417,6 +485,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The IDNA memo's value bound (`len(norm) > maxMemoHostLen`, 253 bytes) had no
+  gate on its main-tier axis: an in-limit host that **expands** past the bound
+  through punycode encoding. The long tier's oversize cases exercise the same
+  branch, but nothing pinned that a host arriving inside the limit cannot be
+  retained once encoded, so a tier-specific rewrite of the check could drop it
+  silently; measured with the main-tier check removed, the table retains
+  **969 KB against its 554 KB ceiling**, holding a 668-byte canonical form in a
+  slot. The guard itself is present and correct, so no release was affected and
+  no behavior changes here. The ACE overhead (`xn--`, the delimiter, the
+  encoded deltas) is paid per **label**, so while a dense script compresses — a
+  252-byte CJK host measures 98 bytes as an A-label — one non-ASCII rune in
+  each of many short labels expands instead: `é.é.é…` at 251 bytes normalizes
+  to 671 and `aé.aé.aé…` at 251 bytes to 629, up to ~2.7x the bound, from
+  ordinary authorities well inside the 1 KiB HTTP raw pre-cap.
+  `TestIDNMemo_PunycodeExpansionIsNotRetained` (per-shape retention, with both
+  preconditions asserted so a future `x/net` encoding change fails loudly
+  rather than passing vacuously) and `TestIDNMemo_ExpansionCannotBreachTheCeiling`
+  (the bound under a stream of nothing but expanding hosts) now gate it, and
+  `TestIDNMemo_StoredEntriesRespectTheBound`'s corpus carries the expanding
+  shapes, which it previously reached for only through CJK. Verdicts were
+  never at issue — an expanding host is still normalized, just not retained.
+- `fileutil.AtomicWrite`'s new post-rename `fstat` duplicate was created
+  without `syscall.ForkLock`, so the descriptor was briefly inheritable
+  (CWE-403). `holdInode` ran `syscall.Dup` and then `syscall.CloseOnExec` as
+  two separate calls; `dup(2)` cannot set `FD_CLOEXEC` itself, so between them
+  the duplicate was an ordinary inheritable descriptor. A `fork`+`exec` started
+  in that window by any goroutine would hand the child a **read** descriptor of
+  the file the write is landing — and `AtomicWrite` is the single chokepoint for
+  every durable write in the appliance, the admin roster, data-plane and cluster
+  CA key-at-rest material and enrollment receipts among them.
+
+  No shipped `culvert` binary execs a subprocess, so this was latent rather
+  than reachable; the duplicate is new on every durable write regardless, and
+  the exposure would turn on whenever a future caller does exec. The dup and
+  the flag now run inside `syscall.ForkLock.RLock`, the pattern the `syscall`
+  package documents for descriptor-creating code: `forkExec` takes that lock
+  for writing, so no exec can begin in the window. The failure path releases
+  the lock (holding it would wedge every later exec in the process).
+  Pinned by `TestHoldInode_DuplicateIsCloseOnExec` and
+  `TestHoldInode_ReleasesForkLockWhenTheDupFails`.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
@@ -920,6 +1028,141 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (`TestRISK030_*`, RED under `-race` against the previous code),
   `TestIPFilterReplace_*` and the `Replace` republish case in the IPFilter
   mutator inventory.
+
+- A read-only **viewer** could read the HA join token and from it obtain the
+  **cluster CA private key** (SEC-HATOKEN-1). `GET /api/cluster/ha` is gated at
+  `RoleViewer` — correctly, it is a dashboard — and on a leader it
+  unconditionally included `deploy_cmd`, which interpolates the live
+  `--ha-token` plus the gRPC address and the CP TLS cert/key/CA paths. That
+  token is the *sole* credential for the `HASync` RPC (`VerifyToken` is the only
+  gate, and the CP listener uses `tls.VerifyClientCertIfGiven`, so no client
+  certificate is required), and `HASync` answers with the exported cluster
+  state, the full published `ConfigSnapshot`, and the cluster CA private key
+  wrapped under PBKDF2 of *that same token*. With that key an attacker mints
+  node certificates the Control Plane trusts and enrolls as a data plane. The
+  field is now suppressed per role rather than by raising the route's `MinRole`,
+  which would have removed the HA panel from operators and viewers.
+
+  The admin UI needed the same fix on its own side: the HA panel's
+  `<pre id="ha-deploy-cmd">` was only ever *assigned* when a response carried
+  `deploy_cmd` and never cleared, so in a single tab an admin who opened the
+  Cluster panel and logged out left the join token in the DOM — and in the
+  click-to-copy handler — for whoever signed in next. Three guards now close it:
+  the render path clears on an absent field, `applySession` clears on any
+  non-admin session, and the write re-checks the current role — `loadHA` is
+  async, so an admin response still in flight could otherwise resolve after the
+  session changed and write the token back into the DOM that had just been
+  cleared.
+
+- Host-header case variation evaded every country-scoped **deny** rule
+  (SEC-GEOHOST-1). `geoHostKey` stripped a port and nothing else — no
+  lowercasing, no IDNA, no trailing-dot trim — while `matchDestNorm` hands the
+  country branch the raw host; its comment claiming country checks "normalize
+  internally" was false, and every other destination matcher (blocklist, urlcat,
+  policy FQDN) already normalized. Each spelling was a distinct host→IP cache
+  key and the warm is off the request path, so every first request missed, the
+  rule did not match, and evaluation fell through to a lower-priority allow. A
+  19-character hostname has ~2^15 spellings, so the supply of misses is
+  unlimited, and DNS is case-insensitive so the connection still reached the
+  blocked destination. `geoHostKey` now returns `hostutil.NormalizeHost`, which
+  is the chokepoint all four call sites share, closing case, trailing-dot and
+  IDN U-label variance at once while passing IP literals through verbatim.
+
+- A matched rule carrying an **action this build does not dispatch** was
+  ALLOWED, and shadowed every deny rule beneath it (SEC-POLICYACTION-1).
+  `applyPolicyDecision`'s `switch match.Action` had no `default:`, so an
+  unrecognized action fell through to the trailing `return "OK", false`: the
+  request proceeded, no decision was recorded, and because the scan is
+  first-match-wins, no lower-priority rule was consulted. One such action on a
+  priority-1 `destFqdn: "*"` rule disabled the whole rulebase under it. `Action`
+  was validated only on the API ingress path, so `PolicyStore.Load` (the
+  operator-managed policy file) and `PolicyStore.ReplaceAll` (the CP→DP snapshot
+  apply and replace-mode import) installed one verbatim — reachable from a
+  mixed-version cluster, a restored backup or a renamed action without any hand
+  editing. Now fail-closed on both sides: `applyPolicyDecision` resolves the
+  action through `canonicalPolicyAction` and blocks when it cannot, and
+  `policyRulePersistable` refuses to install such a rule — both halves, because
+  blocking at dispatch *without* dropping at install would turn a rule that
+  previously allowed into one that blocks and shadows everything beneath it.
+
+  `canonicalPolicyAction` is deliberately tolerant in two ways, neither ever
+  more permissive than the pre-fix fall-through: **case is folded**, because
+  policy files carry lowercase spellings and pre-fix `"allow"` was allowed (it
+  still is, while `"drop"` and `"block_page"` now block where they previously
+  allowed); and **unset is not unrecognized** — an empty action resolves to
+  `Allow`, exactly what the fall-through did, so no deployment's traffic changes
+  direction. The hole being closed is the version-skew case, which is never
+  empty. The API ingress validator keeps its exact-spelling contract, because
+  ingress refuses sloppy input at the door while this decides what to do with
+  data already on disk. The sibling gate in the same engine already behaves this
+  way: `IPFilter.Allowed` denies all traffic on an unrecognized mode.
+
+- A policy file the load gate refused **in full** read downstream as "no policy
+  configured" and flipped the startup default action to passthrough
+  (SEC-POLICYDROP-1). With `proxy.default_action` unset, the derivation in
+  `loadRewriteAndDefaultAction` selects `allow` for an empty rulebase and `deny`
+  for a non-empty one — and the shim fed it `len(policyStore.List())`, the
+  **installed** count. Because `PolicyStore.Load` drops the rules its
+  fail-closed gate refuses, and `initPolicy` runs before
+  `initRewriteAndDefaultAction`, a file whose every rule was refused installed
+  nothing, counted zero, and turned the gateway into an open forward proxy on
+  restart. The composition is the defect: a gate refusing one fail-open *rule*
+  produced a fail-open *default*. Fixing SEC-POLICYACTION-1 made it reachable
+  from the most plausible shape of all — a hand-written or downgraded-binary
+  policy with one consistently wrong action spelling — so for that
+  configuration the fail-closed fix alone would have admitted strictly more
+  traffic than the defect it closed. The older `SubjectMatch` and invalid-auth
+  refusals could empty a rulebase the same way.
+
+  `PolicyStore.ConfiguredRuleCount()` now reports installed **plus** refused
+  (banked per load by `droppedOnLoad`, cleared by a clean reload, untouched by a
+  load that failed to read or parse), and the shim passes it. `Load` also emits
+  one aggregate warning when it refused anything, since the per-rule warnings
+  said what was dropped but not what it meant for the posture. The loader's own
+  logic is unchanged — it was always correct for the question it was asked, and
+  only the question changed — and an explicit `default_action` still wins in
+  both directions. Rejecting the load outright was considered and not taken:
+  `initPolicy` escalates a `Load` error to `logFatalf`, so one unrecognized
+  action in an operator's file would become a boot failure, which is an
+  availability decision for the product owner rather than a regression fix.
+
+- An **unauthenticated** `POST /api/auth/logout` wrote attacker-chosen,
+  **unsigned** entries into the persisted and cluster-gossiped revocation list
+  (SEC-REVOKE-1). `apiAuthLogout` discarded `decodeSession`'s error
+  (`sess, _ :=`) and then called `revokeSessionCookie` unconditionally — and
+  that function does its own base64+JSON decode with no signature check, on the
+  stated premise that the "HMAC [was] already verified by decodeSession", which
+  was false on exactly this path. The route is on the public allowlist, so a
+  cookie of the shape `base64({"sub":"…","exp":9999999999}).garbage` inserted a
+  permanent entry (the expiry is attacker-chosen and eviction is lazy-on-expiry)
+  into an unbounded map. `SaveRevocations` then rewrote the whole revocations
+  file on every request — O(n) per insert over a set the caller is growing — and
+  the cluster revocation sync gossiped the entries to every node, which merged
+  and persisted them. The admin server sets no `MaxHeaderBytes`, and the 1 MiB
+  `MaxBytesReader` bounds the body rather than the `Cookie` header, so each of
+  the 60 requests/min/IP the API limiter allows could carry ~1 MiB of
+  permanently retained key. The revocation write now requires a cookie whose
+  HMAC actually **verified** — and deliberately not an *admissible* session: a
+  token this build refuses (a deleted user's, or one minted for the proxy plane)
+  is still a token the appliance signed, and revoking it is right. A signed
+  token can only revoke itself, and whoever holds it could already use it. What
+  must not be revocable is a payload nobody signed. Clearing the cookie stays
+  unconditional and the answer stays 200, so a browser holding a junk cookie can
+  still get rid of it and the endpoint is not an oracle.
+
+- A **partial** `POST /api/security` silently disabled the per-IP rate limiter
+  and persisted the change (SEC-SECPARTIAL-1). `rateLimitRPM` was a plain `int`
+  guarded by `if body.RateLimitRPM >= 0`; an absent JSON field decodes to `0`
+  and `0 >= 0` is always true, so every body omitting it called
+  `rl.Configure(0, …)` = disabled, after which `adminSettingsSave` and
+  `saveConfigVersion` made it durable. The endpoint's own published contract
+  declares the body a "Partial update — supply only the fields to change" with
+  `rateLimitRPM` optional, every other field honoured that, and three of the
+  shipped admin UI's buttons send exactly such bodies (`{ipAdd}`, `{ipRemove}`,
+  `{ipFilterMode}`) — so adding one IP to the IP filter turned off proxy rate
+  limiting. The field is now a `*int`, so absence means unchanged and an
+  explicit `0` still disables; a negative value is refused with 400 **before**
+  any field is applied, where it was previously ignored in silence.
 
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
