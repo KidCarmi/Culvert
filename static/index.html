@@ -1266,7 +1266,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div style="padding:14px 16px">
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:.95rem;font-weight:600">
             <input type="checkbox" id="ret-enabled" data-change="toggleLogSaving"> Save logs to disk
-            <span style="font-weight:400;font-size:.78rem;color:var(--muted)">(off = live feed only, last 5,000 in memory)</span>
+            <span style="font-weight:400;font-size:.78rem;color:var(--muted)">(off = live traffic only, last 5,000 in memory)</span>
           </label>
 
           <div id="ret-controls" style="margin-top:14px">
@@ -1795,7 +1795,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         Connect OIDC or SAML 2.0 providers for single sign-on. Group memberships from the IdP are available as conditions in policy rules.
       </p>
       <div id="idp-persist-warning" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.5">
-        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or upgrade</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
       </div>
       <div id="idp-legacy-ldap-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6"></div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
@@ -3291,7 +3291,7 @@ Firefox (all platforms):
       </div>
 
       <div id="pol-persist-warning" class="banner crit" style="display:none" role="alert">
-        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or upgrade</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
       </div>
 
       <!-- Rule Table -->
@@ -3902,7 +3902,7 @@ Firefox (all platforms):
             How much of this node's TLS is actually being inspected right now, and why the rest is not.
             Coverage is <strong>inspected ÷ (inspected + bypass/exclusion)</strong> - decryption
             <em>failures</em> are counted separately (they are sessions to triage, not a deliberate coverage gap).
-            Counts are per-process since start; click any outcome or failure to see those sessions in the Live Feed.
+            Counts are per-process since start; click any outcome or failure to see those sessions in Traffic.
           </p>
           <div id="dechealth-coverage" style="margin:14px 0"></div>
           <div id="dechealth-bar" style="margin:14px 0"></div>
@@ -5258,7 +5258,7 @@ Firefox (all platforms):
                 <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
               </button>
             </div>
-            <p class="hint">Version and health of the host-root agent that applies updates and runs backups - the same detail <code>systemctl status culvert-maint</code> shows, without SSH.</p>
+            <p class="hint">Version and health of the host-root agent that applies upgrades and runs backups - the same detail <code>systemctl status culvert-maint</code> shows, without SSH.</p>
             <div id="support-maint-agent" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
@@ -6152,7 +6152,7 @@ const viewMeta = {
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
   policylearn: { title: 'Policy Learning', meta: 'Advisory, node-local learning - observes traffic during an explicit session and proposes born-disabled Allow rules with evidence; cannot alter enforcement policy' },
   decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) - volatile, per-node, expiring; every entry reduces inspection coverage' },
-  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into the Live Feed' },
+  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into Traffic' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension - Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice - enrolled instances, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
@@ -9110,7 +9110,7 @@ async function loadDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    const d = await api('/api/decryption/redaction');
+    const d = await api('/api/traffic/redaction');
     cb.checked = !!d.redact_hosts;
   } catch (e) { /* not permitted / unavailable — leave unchecked */ }
 }
@@ -9120,7 +9120,7 @@ async function toggleDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    await api('/api/decryption/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
+    await api('/api/traffic/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
     toast('Host/SNI redaction ' + (cb.checked ? 'enabled' : 'disabled'), 'success');
   } catch (e) {
     cb.checked = !cb.checked; // revert the optimistic flip
