@@ -1,0 +1,1 @@
+1	0	1792878183.138539511	1792878189.451867920	export PYTHONDONTWRITEBYTECODE=1 && python3 -I .github/scripts/security-exceptions.py trivy .trivyignore && python3 .github/scripts/test/security-evidence-test.py && bash .github/scripts/test/candidate-promotion-cases.sh | tail -1

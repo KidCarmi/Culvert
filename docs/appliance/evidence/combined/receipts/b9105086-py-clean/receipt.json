@@ -1,0 +1,33 @@
+{
+  "commit": "b910508629e9d80352067bc8ec608753ddf0924e",
+  "tree": "b6b80fc5628b14c3489b20d970f5c81f038c087f",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "export PYTHONDONTWRITEBYTECODE=1 && python3 -I .github/scripts/security-exceptions.py trivy .trivyignore && python3 .github/scripts/test/security-evidence-test.py && bash .github/scripts/test/candidate-promotion-cases.sh | tail -1",
+      "exit": 0,
+      "seconds": 6.313,
+      "log": "1.log",
+      "log_sha256": "d73f1c003bb3ad8f1c4b0d21d64a75a857d38c05a8abc03eb9e2a74a1a3668d1",
+      "log_bytes": 227
+    }
+  ],
+  "all_exit_zero": true
+}
