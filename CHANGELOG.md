@@ -112,6 +112,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   list, the per-tunnel context, and the GOAWAY re-fire for a tunnel that starts
   after the first wave. The default build (go1.26.10) is unchanged in behavior.
 
+- **A bodyless `POST`/`PUT` was forwarded upstream re-framed as
+  `Transfer-Encoding: chunked` instead of the client's own `Content-Length: 0`.**
+  Both legs that serialize an outbound request wrapped the request body
+  unconditionally — `prepareHTTPForward` with a `MaxBytesReader` plus a
+  `countingReader`, and the SSL-inspected H1 inner loop with a
+  `stallDetectReadCloser`. `net/http` keys its no-body fast path on the
+  **identity** of `http.NoBody` (`Request.outgoingLength` returns 0 only for a
+  nil body or that sentinel, and reads `ContentLength == 0` on any other
+  non-nil body as "length unknown"), so wrapping the sentinel told
+  `newTransferWriter` the length was unknown. For methods that normally *do*
+  carry a body it does not probe — it chunks. A forward proxy re-framing a
+  request the client framed correctly is wrong on its own terms, and origins,
+  WAFs and CDNs do not all treat the two forms alike.
+
+  Both legs now leave the sentinel alone, so the origin sees the client's
+  framing. Pinned by `TestHandleHTTP_EmptyBodyPOSTKeepsContentLengthZero` on
+  the plain-HTTP leg and `TestInspectInnerLeg_EmptyBodyKeepsClientFraming`
+  through a real CONNECT / forged-leaf tunnel; reverting either guard alone
+  fails its own test. The cost half of the same root cause is under
+  **Performance**.
 - **go-ldap v3.4.15 would have reclassified malformed-packet faults as "the directory answered".** v3.4.15 adds `ErrorMalformedPacket` (207) for decode
   faults that v3.4.14 returned as plain errors, which `ldapUserBindIsUnreachable`
   treats as unreachable. With the client-error ceiling still at 206, those faults
@@ -352,6 +372,64 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   scheduled-to-unscheduled scan ratio at 3.5x (measured 2.19x; 4.63x with the
   memo un-shared); the existing allocation gate could not see this regression,
   because resolving per rule allocates nothing.
+- A **known-empty request body is no longer wrapped** on either leg that
+  serializes an outbound request, so `net/http` stops probing it. Wrapping the
+  `http.NoBody` sentinel reports the body length as unknown (see the companion
+  entry under **Fixed** for why), and for the methods that usually lack a body —
+  `GET`, `HEAD`, `DELETE`, `OPTIONS`, `PROPFIND`, `SEARCH` —
+  `transferWriter.shouldSendChunkedRequestBody` resolves that unknown with
+  `probeRequestBody`: a fresh **goroutine** reading one byte, a buffered
+  channel and a 200 ms `time.Timer`, with the request line blocked on that
+  channel round trip. Bodyless methods are most of proxied web traffic, and on
+  an inspecting gateway nearly every decrypted inner request takes the second
+  leg too, so this was paid on the majority of requests the product serves —
+  and it bought nothing: the probe's only conclusion was the emptiness the
+  sentinel had already stated.
+
+  Nothing is lost by skipping the wrappers. An empty body cannot exceed
+  `maxRequestBody`, its byte counter would stay at 0 — exactly what the
+  pre-existing nil branch contributes to `statBytesSent` — and a body with no
+  bytes has no trickle for the inspect loop's stall detector to catch, with
+  that loop's 60 s header read deadline still bounding a client that sends
+  nothing. Scope is the sentinel's identity only: every other body, `nil`
+  included, behaves as before.
+
+  Measured on go1.27.3 (the `go.mod` toolchain pin), linux/amd64, 4-core Xeon
+  @2.10GHz, medians of n=5, as *before* → **after** — the "before" arm being the
+  frozen pre-change wrapping kept in `proxy_emptybody_bench_test.go` so the
+  comparison stays reproducible in-tree:
+
+  | | allocs/op | B/op | ns/op |
+  |---|---|---|---|
+  | bodyless `GET` forward | 80 → **69** | 10 485 → **9 662** | loopback-bound |
+  | bodyless `POST` forward | 82 → **70** | 10 341 → **9 676** | loopback-bound |
+  | inspected inner-leg `Request.Write` | 13 → **6** | 665 → **248** | 3 734 → **1 088** |
+
+  The same benchmarks on go1.26.10 (the pin before the go1.27.3 bump) measured
+  the forward pair one allocation lower on **both** arms — 79 → 68 and 81 → 69 —
+  and the inner-leg pair identically. The absolute counts track the toolchain;
+  the saving does not move: **−11** allocations on a bodyless `GET`, **−12** on a
+  bodyless `POST`, **−7** on the inner leg, on both toolchains.
+
+  The inner-leg pair is the strongest evidence: it carries no network at all,
+  so its **~3.4× CPU** gap is the probe's channel round trip and nothing else,
+  reproduced in all five runs on both toolchains with no overlap. The forward pair's `ns/op` is
+  loopback- and scheduler-bound on a shared 4-vCPU runner and its medians
+  overlap across runs, so it is **not** quoted as a result; allocation counts
+  are deterministic, which is why `TestBenchGate_EmptyBodyForwardAllocs` and
+  `TestBenchGate_EmptyBodyInnerWriteAllocs` key on them and assert the
+  before/after relationship as well as an absolute bound.
+
+  End to end, `BenchmarkPerfQual_ProxyHTTPForward` goes from **176 to 165
+  allocs/op** and ~14 765 to ~13 895 B/op, identically at `rules=10/100/500`
+  and in every run of an A/B against the pre-change tree. Its `ns/op` and
+  `cpu-ns/op` move the same way (~−3%) but inside this runner's spread, so they
+  are reported as directional only.
+
+  The inspected **H2** leg is deliberately untouched: `x/net/http2`'s server
+  never hands out `http.NoBody` (`newWriterAndRequestNoBody` always installs a
+  `*requestBody`), so this guard cannot fire there and the analogous cost on
+  that path is not one Culvert's wrapper introduces.
 
 - The destination host is now canonicalized **once per policy scan** instead of
   once per category-scoped rule. `urlcat.Store.MatchesHost` /
