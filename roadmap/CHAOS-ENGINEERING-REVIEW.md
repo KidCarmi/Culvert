@@ -10778,3 +10778,233 @@ required before merge; each is now in the tree.
 Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
 listener is dark is still allowed (break-glass by design); it will withhold and
 fence again until the listener serves.
+
+---
+
+## 48. CHAOS-84 — The wall clock steps backwards and four recovery bounds stop expiring
+
+**Date:** 2026-10-17 · **Domain:** cross-cutting (data plane / upstream plane /
+readiness / persistence signals) — a property of a REPRESENTATION, not of a
+domain, which is why forty sections of domain sweeps did not surface it ·
+**Code:** `internal/upstream/upstream.go`, `internal/ocsp/ocsp.go`,
+`crashguard.go`, `internal/secscan/secscan.go`, `internal/yara/yara.go`,
+`cdr_proxy.go`, `policy.go` ·
+**Full write-up:** [docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md)
+
+> **Id and scope, reconciled when main was brought in.** Claimed as `CHAOS-71`
+> / §41 on its branch; renumbered in merge order to **`CHAOS-84` / §48**, because
+> `CHAOS-71` merged as §44 (the CP gRPC listener), §41–§43 are `CHAOS-74`/`75`,
+> 76–83 are claimed by open branches and §45–§47 by open sweeps. The scope also
+> narrowed. This sweep and the sibling sweep `CHAOS-83` (§47, #1644) both fixed
+> the tunnel idle reaper (CK-1), the DP readiness grace (CK-4) and the two
+> roster log gates (CK-5) — with contradictory contracts on the readiness row
+> (this sweep failed `cp_poll` on a future stamp; `CHAOS-83` pins that a
+> future stamp leaves it `ok`). Those three sites are owned by `CHAOS-83`, whose
+> monotonic stamps cannot go negative at all, so this sweep's alternative fixes
+> and gates for them were withdrawn rather than merged twice. CK-3 (the CDR
+> breaker) was already closed on main, which moved its reset comparison onto a
+> monotonic stamp (`openedMono`). The rows below keep the original analysis and
+> say which change closes each.
+
+### Executive summary
+
+Go's monotonic clock protects an interval only while it stays inside a
+`time.Time`. `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild a `time.Time`
+with **no** monotonic reading, so every interval measured from a stamp held as a
+bare `int64` is a WALL-CLOCK interval. A backward step — an NTP correction after
+a wrong RTC, a resumed hypervisor snapshot, an operator fixing the date — makes
+that interval negative, so every `elapsed >= limit` test is false and a bound
+whose job is to END a degraded state never fires again until the clock catches
+up. Nothing errors, nothing is counted, nothing is logged.
+
+**Twenty-two** such comparisons exist. **Eight were already guarded**
+(`internal/scanner` `budgetRemaining`, `internal/admission` `engine.go`,
+`internal/mcp/canary` `windowOpenLocked` ×2, `internal/mcp/rollout` `elapsed`,
+`store.go` `advanceLocked`, `proxy_host_bounds.go`, `request_tracing_bounds.go`)
+— the rule was adopted, written into a comment and shipped. **Twelve were not:**
+seven recovery bounds or sole operator signals (CK-1…CK-5) and five evidence/log
+gates (CK-9) that this sweep's first inventory MISSED and a second review round
+surfaced.
+
+### Register rows
+
+- **CK-1 (P1, CLOSED by `CHAOS-83` §47 — both step directions)** — `idleCopyCounted` is the ONLY
+  bound on a half-open CONNECT tunnel, and its staleness verdict was wall-clock. The read deadline is
+  monotonic (netpoll converts against `runtimeNano`), so after a step the loop
+  keeps waking exactly on schedule — it is the *verdict* that is lost, not the
+  wake-up, and every pop re-arms forever. Per dead tunnel: two goroutines, two
+  FDs, a pooled relay buffer and the connlimit slot, held for the whole step. A
+  half-open peer is the normal outcome of a NAT timeout or a packet-loss
+  blackhole, so the leak needs no attacker — only a clock correction while
+  tunnels are open. The FORWARD direction was the other half, and the first
+  write-up wrongly called it immune: a tunnel that is quiet but ALIVE (idle SSH,
+  a long-poll) moves no bytes, so nothing refreshes its stamp, and a forward step
+  — the same dead-RTC appliance boot seen from the other side, where NTP jumps
+  the clock forward, possibly by years — tears it down at the next deadline pop.
+  Closed by moving the stamp to a MONOTONIC basis (`relayEpoch`,
+  `relayMonoNanos`), which is strictly stronger than guarding a wall-clock one:
+  a step cannot be represented in the stamp, so there is no negative case left to
+  decide. Available here, and not for the breakers, because the stamp is
+  process-internal — all five holders pass it straight to `idleCopyCounted` and
+  nothing publishes it. (This sweep's own `relayEpoch` version of that fix was
+  withdrawn on reconciliation; `CHAOS-83`'s `monoNanos` is the same basis.)
+- **CK-2 (P1, CLOSED)** — `internal/upstream` `CircuitBreaker.Allow` held
+  `openedAt` as `UnixMilli`; a step pinned every tripped breaker OPEN. This is
+  the security row, because `Pool.Next` falls back to **direct egress** when
+  nothing is eligible (the deliberate PX-2 / CHAOS-11 posture): one parent blip
+  plus a clock correction leaves the appliance egressing AROUND the enterprise
+  parent-proxy chain for the duration of the step, long after the parents
+  recovered. The fallback alert fires once and then tells the truth forever; what
+  never happened was the recovery it waits for.
+- **CK-3 (P2, CLOSED on main — monotonic `openedMono`)** — the same shape on `cdr_breaker.go`, so content disarm
+  stayed unavailable after the Sluice came back.
+- **CK-4 (P1, CLOSED by `CHAOS-83` §47 — monotonic stamp)** — `readyz_dp_health.go`'s `cp_poll` grace became
+  UNEXPIRABLE: a DP node whose control-plane link is known dead kept answering
+  `ok` on `/ready`, so a load balancer kept routing production traffic to it on
+  indefinitely stale configuration.
+- **CK-5 (P2, CLOSED — roster half by `CHAOS-83` §47, OCSP half here)** — the two roster-durability log gates (CHAOS-70's only
+  notice that a credential/roster mutation did not reach the volume) and the OCSP
+  responder-cap gate read a future stamp as *"already logged"*, converting a
+  visible degradation into a silent one for the duration of the step.
+
+**Posture, and the asymmetry that is the finding's substance.** "An unmeasurable
+interval must never count as INFINITE" fixes all five, but what it counts as
+instead depends on what the bound protects. CK-1 goes further and leaves the wall
+clock altogether (monotonic basis), which it can because its stamp is private;
+CK-2/CK-3 cannot, because `OpenedAt()` publishes their trip instant on
+`/api/diagnostics`. Those two govern a live dependency, so they **re-anchor**
+(CAS, so a concurrent writer's fresher stamp survives) and serve one fresh window
+measured from the step — treating a step as
+"expired" would reap every quiet tunnel on the appliance and fire every breaker's
+probe at parents that may still be down, a mass reset caused by the mitigation.
+CK-4/CK-5 only report, have no live resource to protect and an
+already-established failing state, so they count it **expired** — fail-closed for
+the probe, and audible for the log gates. Recovery is automatic everywhere,
+bounded by one window of the bound in question, never by the step size; no state
+latches and no restart is needed. **No new metric and no new alert** — every one
+of these faults already lands on a series that means it; what was missing was the
+recovery, not the signal.
+
+**Review round (CodeRabbit, PR #1650) — two Minor findings, both real.** (1) The
+forward half of CK-1 was documented as immune and was not, which is what moved
+CK-1 to a monotonic basis; (2) the CK-5 guard mistook its own staleness for a
+rollback — a caller that LOSES the CAS re-reads a stamp the winner stored from a
+later sample, so the negative interval was an ORDERING artifact, and the guard
+emitted a duplicate line and moved the stamp backwards, reintroducing the
+amplification the CAS was added to prevent. The proposed fix (re-sample after the
+Load) was measured INSUFFICIENT — the winner's sample may still be later — so the
+gates now discriminate on MAGNITUDE, not sign: suppress while the stamp is within
+one interval of now in EITHER direction. A rollback therefore costs at most one
+suppressed line instead of silencing the warning for the whole step. The OCSP
+half of (2) was NOT a live defect (no CAS loop; a lost CAS suppresses) and took
+the same rule only for uniformity. **The general lesson: a guard on the SIGN of
+an interval guards the wrong thing — a negative interval means the two readings
+are out of order, which concurrency produces with no clock involved. Compare
+against the quantity's natural scale, or leave the wall clock entirely.**
+
+**Second review round (Codex, P2) — see CK-9 above. Its lesson is about method:
+an inventory is only as exhaustive as the shapes its search can express.** This
+sweep said "seventeen comparisons" as if it had counted a closed set, when it had
+counted the matches of three regexes. The honest claim names the shape searched
+for and admits what it cannot reach. It is also the strongest argument for CK-7:
+a convention applied by hand across twenty-two sites was wrong at five of them,
+and what caught it was a different reader, not a check.
+
+- **CK-9 (P2, CLOSED) — the inventory was not exhaustive, and the SEARCH was
+  why.** Codex rejected §1's exhaustiveness claim and named `crashguard.go:167`,
+  `internal/secscan/secscan.go:828` and `internal/yara/yara.go:643`. Correct on
+  all three, and the cause was the search: the first sweep grepped for the
+  subtraction sitting syntactically beside the time call (`UnixNano() -`,
+  `time.Since(time.Unix(`), which cannot match the far more common two-step form
+  `now := time.Now().UnixNano()` … `now - prev`. Re-sweeping the generalised
+  shape found Codex's three plus **two more it had not named**: `cdr_proxy.go`
+  (Sluice call-error log) and `policy.go` (file-profile unresolved-block
+  warning). `policy.go` compares against a bare literal in Unix SECONDS, so even
+  the generalised `int64(<duration>)` search missed it — it took enumerating
+  every file that seeds an int64 from a time call. **`crashguard.go` is the
+  sharpest member of the whole sweep:** after one crash and a backward step,
+  `recordCrash` returns before updating `lastCrash` and before emitting the
+  stack-bearing log and audit entry, for every subsequent same-component crash —
+  and crash evidence is the one record an operator cannot reconstruct. All five
+  take the symmetric-window rule (absolute interval), four via
+  `time.Duration(d).Abs()` and `policy.go` by explicit negation.
+
+**Gates.** As first shipped, 15 defect + 15 control = 30, all fifteen defect
+gates verified FAILING against the pre-fix tree. After the reconciliation above
+this change carries 8 defect + 9 control = 17: the tunnel, readiness, roster and
+CDR-breaker gates left with their fixes (`CHAOS-83`'s `monotime_chaos_test.go`
+and main's `cdr_breaker_monotonic_test.go` gate those sites). Fault injection is deterministic and needs no host
+clock: a backward step of Δ is observationally identical to a stamp Δ in the
+FUTURE, because the stamp is written before the step and read after it. The
+breaker gates with an injectable clock additionally pin the recovery INTERVAL, so
+the fix cannot degrade into an instant probe flood.
+
+### Deliberately left, and recorded
+
+- **CK-6 — nothing detects or reports the step itself.** Each bound now recovers
+  locally, but no subsystem emits "the wall clock moved backwards by an hour" —
+  the single line that would have made all five diagnosable at once. A
+  process-wide monotonic-vs-wall drift detector is the right home for it and
+  needs its own threshold and alert design; larger than this fault.
+- **CK-7 — nothing structural stops the next bound repeating this.** A lint rule
+  or AST wall over `time.Unix(` / `time.UnixMilli(` inside a comparison would,
+  but the honest version has to tell a recovery bound from a log gate, because
+  the correct guard differs between them. Not built here.
+- **CK-8 — the MCP canary RATE window is the same class, left in place.**
+  `internal/mcp/canary` `budget_enforce.go` rolls its per-minute window on an
+  unguarded `now.UnixNano()-e.rateWindowStart >= budgetRateWindow`, in `Reserve`
+  and in the matching read, while the *activation* window two functions away
+  guards it explicitly. A step pins the window, `rateCount` never resets, and a
+  capped canary denies every reserve for the duration. Left because the direction
+  is **fail-closed** (it stalls rather than over-executes, which is that
+  boundary's posture) and because `Reserve` carries its own reviewed invariants —
+  a monotonic total, and an explicit "do NOT mutate here, this is a read"
+  contract on the twin — so re-anchoring it is a change to a security budget, not
+  a chaos remediation. Fix shape recorded for an owner: re-anchor
+  `rateWindowStart` without resetting `rateCount`, which holds the deny for one
+  more window and then rolls over normally.
+- **Cross-node clock skew is not this sweep.** `internal/halease` delegates lease
+  expiry to etcd, which decides it server-side, so the leader lease is not exposed
+  to a local step; gossiped freshness was closed separately and `internal/admission`
+  `engine.go` already guards `age < 0`. This sweep stayed on single-node steps.
+- **NTP failure as such is not a fault here.** A clock that never corrects is a
+  clock that never steps, which is the benign case for every bound above. The
+  fault is the correction, not its absence.
+
+### The flaky gate this sweep shipped and then fixed
+
+`Race · non-root packages` went red, and the first reading was "red on a
+superseded head". That was wrong. Reproducing the shard locally showed
+`TestChaos84_BreakerRecoveryIsBoundedFromTheStep` failing: `openedAt` is a
+`UnixMilli` stamp, so truncation moves the re-anchor instant down by up to 1ms
+and recovery lands that much before the nominal timeout (measured worst case over
+40 `-race` runs: −791µs). The GATE was stricter than the resolution of the clock
+it read. Fixed by tolerating exactly the stamp resolution — the property under
+test, a full timeout versus an instant half-open, is 0ms versus ~300ms and cannot
+be masked by 1ms. **Two rules out of it: a timing gate must be no stricter than
+the resolution of the clock it reads; and "red on a superseded head" is not a
+diagnosis when the check ran against code still in the PR — reproduce it, because
+the local shard is the authority, not the head SHA.**
+
+### The process lesson
+
+**A rule that lives in a comment is not a rule the tree follows.** The backward-step
+guard had been derived, argued and shipped eight times, once with the reasoning
+written out in full. What never happened was anyone asking where else the same
+subtraction appears — and the answer was the four places where the interval was
+not a log window or a scan budget but the recovery bound for a degraded state.
+
+The second half is about which faults get swept. Forty sections have gone domain
+by domain. A wall-clock step is not a domain; it is a property of a
+REPRESENTATION that cuts across all of them, and it produced one P1 in the data
+plane, one in the upstream plane and one in the readiness plane, in code three
+different sweeps had already visited for other reasons. Sweeping by domain cannot
+find that class. The question that finds it is *"what does this measurement
+depend on, and what happens when that dependency moves?"* — asked of the whole
+tree at once.
+
+> **The rule this sweep produces:** an interval measured from a stamp that has
+> left a `time.Time` is a WALL-CLOCK interval, and a wall-clock interval can go
+> negative. An unmeasurable interval must never count as INFINITE. Where the
+> bound protects a live resource, re-anchor and serve one fresh window; where it
+> only reports, count it as expired.
