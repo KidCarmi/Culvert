@@ -2930,6 +2930,89 @@ func TestChaos87_StillAuthoritativeRecoveryFailureKeepsItsEpisode(t *testing.T) 
 	}
 }
 
+// A same-source REPUBLISH is not a supersession (Codex P2). Episodes are keyed
+// by (profile, document ref), so a recovery attempt for an older generation
+// must keep an episode the newer generation still owns because it depends on
+// the same document. The earlier predicate compared generation pointers and
+// deleted it, resetting the newer provider's degradation clock and alert latch.
+func TestChaos87_SameSourceRepublishKeepsTheEpisode(t *testing.T) {
+	chaos87Env(t)
+	const id = "corp"
+	src := chaos87Source(id)
+	dc := chaos87SeedDarkProfile(t, id)
+
+	// An admin Upsert publishes a NEWER generation for the same source while
+	// the recovery compile is in flight.
+	idpRegistry.mu.Lock()
+	idpRegistry.profiles = []*IdPProfile{chaos87Profile(id, src)}
+	idpRegistry.mu.Unlock()
+
+	noteIdPMetadataOutcome(id, chaos87Ref(src), idpMetaUnavailable, fmt.Errorf("still down"))
+	if !idpMetadataState().Failing {
+		t.Fatal("precondition: the failure must have opened an episode")
+	}
+
+	discardSupersededRecoveryEpisode(dc)
+
+	if !idpMetadataState().Failing {
+		t.Fatal("the newer generation still fetches the same source, so the episode is its live " +
+			"outage signal and must survive the older generation's failed recovery")
+	}
+}
+
+// A revalidation that falls back to the SAME cached document must not leave an
+// episode behind for a profile disabled while the fetch was in flight (Codex
+// P2). The disable's own cleanup ran before the late 503 reopened the episode,
+// and nothing fetches for a disabled profile, so the watchdog would page for it.
+func TestChaos87_StaleRevalidationAfterADisableLeavesNoEpisode(t *testing.T) {
+	chaos87Env(t)
+	idp := newChaos87IdP(t)
+
+	if err := idpRegistry.Upsert(chaos87Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	idp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos87Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("upsert during the outage must publish from cache: %v", err)
+	}
+	if !idpRegistry.hasCacheServingProfile() {
+		t.Fatal("setup: the live provider must be serving from cache")
+	}
+
+	release := idp.holdRequests()
+	defer release()
+	before := idp.hits.Load()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		revalidateCacheServingProviders()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for idp.hits.Load() == before {
+		if time.Now().After(deadline) {
+			t.Fatal("the revalidation fetch never reached the IdP")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	disabled := chaos87Profile("corp", idp.URL())
+	disabled.Enabled = false
+	if err := idpRegistry.Upsert(disabled); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("revalidation did not finish")
+	}
+
+	if idpMetadataState().Failing {
+		t.Fatal("a stale revalidation that completed after the profile was disabled left an episode " +
+			"nothing will ever clear — the watchdog would page for a provider no longer in service")
+	}
+}
+
 // ── ROUND 13: a negative cache age is EXPIRED on the live-provider path too ───
 
 // ROUND 13 P2 (DEFECT GATE). idpmeta.Get already refuses a negative age — the
@@ -3504,7 +3587,6 @@ func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile
 func TestChaos87_SupersededCleanupIsExcludedByAWriterAndCompletes(t *testing.T) {
 	chaos87Env(t)
 	const source = "https://superseded.invalid/metadata"
-	gen := chaos87Profile("corp", source)
 
 	idpRegistry.mu.Lock()
 	unlocked := false
@@ -3519,7 +3601,7 @@ func TestChaos87_SupersededCleanupIsExcludedByAWriterAndCompletes(t *testing.T) 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		idpRegistry.forgetEpisodeIfSuperseded("corp", gen, chaos87Ref(source))
+		idpRegistry.forgetEpisodeIfSuperseded("corp", chaos87Ref(source))
 	}()
 
 	select {
@@ -3840,8 +3922,15 @@ func TestChaos87_SupersessionRunsOnlyFromTheCommitSites(t *testing.T) {
 	body := string(root)
 	// Delete is the third commit site, and it sweeps the whole profile.
 	del := chaos87SliceFunc(t, body, "func (r *IdPRegistry) Delete(")
-	if !strings.Contains(del, "Forget(") {
+	// Delete delegates to forgetDeletedProfileDocuments, shared with
+	// ReplaceAll's snapshot commit; the delegation is self-checking, like
+	// retireAfterSnapshotCommit's below.
+	if !strings.Contains(del, "forgetDeletedProfileDocuments(") ||
+		!strings.Contains(chaos87SliceFunc(t, body, "func forgetDeletedProfileDocuments("), "Forget(") {
 		t.Fatal("Delete must retire the deleted profile's cached documents after its persist lands (IDP-11)")
+	}
+	if !strings.Contains(chaos87SliceFunc(t, body, "func retireAfterSnapshotCommit("), "forgetDeletedProfileDocuments(") {
+		t.Fatal("ReplaceAll's commit must retire the cached documents of profiles the snapshot removed")
 	}
 	for _, fn := range []string{"func (r *IdPRegistry) Upsert(", "func (r *IdPRegistry) ReplaceAll("} {
 		w := chaos87SliceFunc(t, body, fn)
@@ -3928,6 +4017,58 @@ func TestChaos87_DeleteRetiresTheProfilesCachedDocuments(t *testing.T) {
 	if err := idpRegistry.Upsert(chaos87Profile("corp", idp.URL())); err == nil {
 		t.Fatal("a profile recreated during an outage must NOT compile from the " +
 			"deleted profile's document")
+	}
+}
+
+// TestChaos87_SnapshotRemovalRetiresTheProfilesCachedDocuments is Delete's
+// rule on the other writer that removes profiles. A CP->DP snapshot that drops
+// an id is a deletion on that DP, and ReplaceAll's commit used to forget
+// nothing for it, so a later snapshot reintroducing the same id and source
+// during an outage compiled from the pre-deletion metadata (Codex, P2).
+func TestChaos87_SnapshotRemovalRetiresTheProfilesCachedDocuments(t *testing.T) {
+	chaos87Env(t)
+	idp := newChaos87IdP(t)
+	kind := chaos87Ref(idp.URL()).Kind
+
+	if err := idpRegistry.ReplaceAll([]*IdPProfile{chaos87Profile("corp", idp.URL())}); err != nil {
+		t.Fatalf("healthy snapshot: %v", err)
+	}
+	if _, _, err := idpMetadataStore().Get("corp", kind, idp.URL()); err != nil {
+		t.Fatalf("setup: the profile must have a cached document: %v", err)
+	}
+
+	if err := idpRegistry.ReplaceAll(nil); err != nil {
+		t.Fatalf("snapshot removing the profile: %v", err)
+	}
+	if _, _, err := idpMetadataStore().Get("corp", kind, idp.URL()); err == nil {
+		t.Fatal("a committed snapshot that removes a profile must retire its cached documents")
+	}
+
+	idp.down.Store(true)
+	if err := idpRegistry.ReplaceAll([]*IdPProfile{chaos87Profile("corp", idp.URL())}); err == nil {
+		t.Fatal("a profile reintroduced by a snapshot during an outage must NOT compile from " +
+			"the removed profile's document")
+	}
+}
+
+// TestChaos87_SnapshotDisableKeepsTheCachedDocuments is the CONTROL: a snapshot
+// that keeps a profile but disables it has not deleted it, and its documents
+// are retained so re-enabling it during an outage still compiles.
+func TestChaos87_SnapshotDisableKeepsTheCachedDocuments(t *testing.T) {
+	chaos87Env(t)
+	idp := newChaos87IdP(t)
+	kind := chaos87Ref(idp.URL()).Kind
+
+	if err := idpRegistry.ReplaceAll([]*IdPProfile{chaos87Profile("corp", idp.URL())}); err != nil {
+		t.Fatalf("healthy snapshot: %v", err)
+	}
+	disabled := chaos87Profile("corp", idp.URL())
+	disabled.Enabled = false
+	if err := idpRegistry.ReplaceAll([]*IdPProfile{disabled}); err != nil {
+		t.Fatalf("snapshot disabling the profile: %v", err)
+	}
+	if _, _, err := idpMetadataStore().Get("corp", kind, idp.URL()); err != nil {
+		t.Fatalf("a DISABLED profile must keep its cached document: %v", err)
 	}
 }
 

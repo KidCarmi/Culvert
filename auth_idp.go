@@ -679,22 +679,31 @@ func (r *IdPRegistry) Delete(id string) error {
 		// The profile is gone, so nothing will ever fetch for it again and no
 		// evidence can clear an episode it left behind.
 		forgetIdPMetadataEpisode(id)
-		// Nor can anything serve its cached documents to it again — and left
-		// behind they would feed the liveness-blind eviction on behalf of a
-		// profile that no longer exists, and would be served to a profile
-		// RECREATED under the same id and source during an outage, since Get
-		// keys on exactly that triple. Post-commit only, like every other
-		// retirement here (IDP-11).
-		if err := idpMetadataStore().Forget(id); err != nil {
-			// Advisory: the deletion itself has landed. A failure here leaves
-			// unreachable entries that evictLocked still bounds, so it must not
-			// fail a write that is already durable.
-			logger.Printf("IdP[%s]: could not retire cached metadata after delete: %v",
-				sanitizeLog(id), sanitizeLog(fmt.Sprint(err)))
-		}
+		forgetDeletedProfileDocuments(id)
 		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
+}
+
+// forgetDeletedProfileDocuments retires every cached document of a profile
+// whose DELETION has been persisted. Nothing can serve those documents to it
+// again — and left behind they would feed the liveness-blind eviction on
+// behalf of a profile that no longer exists, and would be served to a profile
+// RECREATED under the same id and source during an outage, since Get keys on
+// exactly that triple. Post-commit only, like every other retirement here
+// (IDP-11). Shared by Delete and by ReplaceAll's snapshot commit, which removes
+// profiles too (a CP->DP snapshot that drops an id is a deletion on that DP).
+//
+// A DISABLED profile is not deleted and must not reach this: its documents are
+// retained deliberately so re-enabling it during an outage still compiles.
+func forgetDeletedProfileDocuments(id string) {
+	if err := idpMetadataStore().Forget(id); err != nil {
+		// Advisory: the deletion itself has landed. A failure here leaves
+		// unreachable entries that evictLocked still bounds, so it must not
+		// fail a write that is already durable.
+		logger.Printf("IdP[%s]: could not retire cached metadata after delete: %v",
+			sanitizeLog(id), sanitizeLog(fmt.Sprint(err)))
+	}
 }
 
 // Get returns the profile with the given ID (nil if not found).
@@ -856,16 +865,32 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 // fetches, and it has no prevSources entry to be found under. Retiring nothing
 // rewrites nothing, so the extra ids are free.
 //
+// DELETED PROFILES: an id in prevSources that is absent from the committed set
+// was removed by this snapshot, and is forgotten exactly as Delete forgets it
+// (forgetDeletedProfileDocuments). Without this, a CP->DP snapshot that drops a
+// profile left its documents on the DP, and a later snapshot reintroducing the
+// same id and source during an outage compiled from the pre-deletion metadata,
+// signing material included. A profile still present but disabled keeps its
+// documents (it has no `kept` entry, but it is not deleted).
+//
 // CALLED ONLY AFTER persist, so a rejected snapshot never reaches it.
 func retireAfterSnapshotCommit(nextProfiles []*IdPProfile, prevSources map[string]idpDocRef) {
 	kept := make(map[string]idpDocRef, len(nextProfiles))
+	present := make(map[string]bool, len(nextProfiles))
 	for _, p := range nextProfiles {
+		if p == nil {
+			continue
+		}
+		present[p.ID] = true
 		if ref := effectiveRemoteDocRef(p); ref.Source != "" {
 			kept[p.ID] = ref
 		}
 	}
 	for id, prev := range prevSources {
 		retireEpisodeAfterCommit(id, prev, kept[id])
+		if !present[id] {
+			forgetDeletedProfileDocuments(id)
+		}
 	}
 	for id, ref := range kept {
 		retireSupersededDocuments(id, ref)

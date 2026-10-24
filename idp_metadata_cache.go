@@ -149,8 +149,8 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 			// line is emitted only on a SUCCESSFUL fetch, which is bounded by
 			// the compile rate, and a persistently failing write is already
 			// carried by the storage-health plane.
-			logger.Printf("IdP[%s]: metadata cached document could not be persisted (%v); a future IdP outage will have no fallback on this node",
-				sanitizeLog(profileID), putErr)
+			logger.Printf("IdP[%q]: metadata cached document could not be persisted (%q); a future IdP outage will have no fallback on this node",
+				sanitizeLog(profileID), sanitizeLog(putErr.Error()))
 		}
 		noteIdPMetadataOutcome(profileID, idpDocRef{Kind: kind, Source: source}, idpMetaFresh, nil)
 		return doc, time.Time{}, nil
