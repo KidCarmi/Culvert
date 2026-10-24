@@ -1707,14 +1707,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   export, would report a key local verification no longer used. The copy sits on
   the rebind path, so the no-op reinstall stays allocation-free.
 
-  Measured on the development box (Go 1.26, linux/amd64, 4-core Xeon @
-  2.80GHz, medians of 3x500k, each pair timed in the SAME run against a
-  verbatim copy of the replaced form): the verify step 2 196 → 1 254 ns and 9
-  allocations / 896 B → ZERO; four-way parallel 1 035 → 361 ns; a whole
-  `Decode` 6 134 → 4 903 ns, 26 → 17 allocations, 1 648 → 752 B; four-way
-  parallel 2 393 → 1 583 ns. What remains in `Decode` is the base64 payload
-  decode and `encoding/json`'s unmarshal into `Session`, deliberately left
-  alone. The size of the timing win depends on how expensive the runner's
+  Measured on the development box (linux/amd64, 4-core Xeon @ 2.80GHz, medians
+  of 3 runs, each pair timed in the SAME run against a verbatim copy of the
+  replaced form) under the toolchain this branch now pins, go1.27.3: the verify
+  step 2 521 → 1 454 ns and 9 allocations / 896 B → ZERO; four-way parallel
+  1 061 → 367 ns; a whole `Decode` 6 563 → 3 879 ns, 15 → 6 allocations,
+  1 304 → 408 B; four-way parallel 2 565 → 1 290 ns.
+
+  The same measurement under go1.26.9, the pin when this work began, read
+  `Decode` 6 134 → 4 903 ns, 26 → 17 allocations, 1 648 → 752 B. Go 1.27 made
+  the `encoding/json` half of `Decode` dramatically cheaper on its own — 17
+  allocations to 6, none of it this change — while this change's own
+  contribution is IDENTICAL on both pins: nine allocations and 896 bytes of
+  HMAC construction. The relative timing win on `Decode` therefore GREW, from
+  −20% to −41%, because a fixed cost removed from a smaller total is a larger
+  share of it. The allocation gate's absolute bound was retightened 20 → 10
+  with that remeasurement, since a bound set against 17 would have let a
+  threefold regression pass once the measured value fell to 6.
+
+  What remains in `Decode` is the base64 payload decode and `encoding/json`'s
+  unmarshal into `Session`, deliberately left alone. The size of the timing win
+  depends on how expensive the runner's
   allocator is relative to SHA-256, so the gate asserts the structural
   property instead — the verify step builds no HMAC state, no digest and no
   expected-signature string — and extends the zero bound to the reject path,

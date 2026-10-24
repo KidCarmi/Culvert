@@ -73,17 +73,35 @@ func TestBenchGate_MacVerifyRejectAllocFree(t *testing.T) {
 // TestBenchGate_DecodeAllocs bounds the whole per-request step, so the win
 // cannot be given back one caller up.
 //
-// Measured (Go 1.26, linux/amd64): 17 allocs/op and 752 B/op, against 26 and
-// 1648 for the pre-change shape. What remains is the base64 payload decode and
+// What remains after the engine is the base64 payload decode and
 // encoding/json's unmarshal into Session — a SEPARATE concern, deliberately
-// not touched here. The bound sits at 20: above the measured value so stdlib
-// churn across Go releases does not flip the gate, and well below the legacy
-// 26 so restoring per-request HMAC construction fails here too.
+// not touched here. That remainder is also the part a toolchain bump moves, so
+// this file records what each pin measured rather than one frozen number:
+//
+//	toolchain    Decode        legacyDecode   engine delta
+//	go1.26.9     17 / 752 B    26 / 1648 B    9 allocs, 896 B
+//	go1.27.3      6 / 408 B    15 / 1305 B    9 allocs, 896 B
+//
+// Go 1.27 made the JSON half dramatically cheaper on its own — 17 allocations
+// to 6, none of it this change's doing — while the engine's contribution is
+// IDENTICAL on both: legacy minus engine is exactly the nine allocations and
+// 896 bytes of HMAC construction. (The relative timing win on Decode grew as a
+// result, from -20% to -41%, because the fixed HMAC cost became a larger share
+// of a smaller total.)
+//
+// The bound moved 20 -> 10 with that measurement. Leaving it at 20 would have
+// let a 3x regression pass silently once the measured value fell to 6, which is
+// not a gate. 10 keeps both properties the bound exists for: comfortably above
+// the measured 6 so ordinary stdlib churn does not flip it, and below the
+// legacy 15 so restoring per-request HMAC construction still fails here. The
+// RELATIONSHIP assertions below need no such maintenance — they are measured in
+// the same run and held across the bump unchanged, which is why they, not the
+// absolute bound, are the real protection.
 //
 // legacyDecode is the current body with the ONE changed line put back, so the
 // relationship below is an end-to-end before/after measured in the same run.
 func TestBenchGate_DecodeAllocs(t *testing.T) {
-	const maxAllocs int64 = 20
+	const maxAllocs int64 = 10
 
 	decode := testing.Benchmark(BenchmarkDecode)
 	legacy := testing.Benchmark(BenchmarkDecodeLegacyMac)
