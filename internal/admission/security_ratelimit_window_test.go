@@ -12,11 +12,11 @@ import (
 // sliding window in RateLimiter.Allow / AllowClusterAware.
 //
 // The change is a COST change (O(occupancy) filter-and-copy per request →
-// amortized O(1)), so it is only admissible if the accept/reject verdict for
-// every request sequence is unchanged. legacyWindow below is the pre-change
-// algorithm kept verbatim as the oracle; if it and clientBucket ever disagree,
-// the optimization changed observable behavior and must be reverted — not the
-// test relaxed.
+// amortized O(1)). For non-decreasing sampled timestamps, verdicts and occupancy
+// must match legacyWindow, the verbatim pre-change oracle. Out-of-order samples
+// can be clamped forward, delaying expiration. Separate fixed-history tests
+// pin ordering and conservative expiration without assuming identical verdicts
+// for histories that diverge after an earlier rejection.
 
 // legacyWindow is character-for-character the pre-change window maintenance
 // from RateLimiter.Allow: a filter-and-copy eviction over the whole slice, an
@@ -46,7 +46,8 @@ func (w *legacyWindow) admit(now time.Time, window time.Duration, limit int) boo
 }
 
 // ringAdmit runs one request against the new bucket, mirroring exactly what
-// Allow does between taking and releasing the shard lock.
+// Allow does between taking and releasing the shard lock; now is the timestamp
+// sampled BEFORE acquiring that lock, not the lock-acquisition time.
 func ringAdmit(b *clientBucket, now time.Time, window time.Duration, limit int) bool {
 	b.lastSeen = now
 	b.expire(now.Add(-window))
@@ -59,7 +60,8 @@ func ringAdmit(b *clientBucket, now time.Time, window time.Duration, limit int) 
 
 // TestRateLimitWindow_DifferentialAgainstLegacy is the spine: for randomized
 // (limit, window, arrival-gap) shapes, the ring must return the legacy verdict
-// on every single request, and must agree on the in-window occupancy after it.
+// on every single request with non-decreasing sampled timestamps, and must
+// agree on the in-window occupancy after it.
 //
 // The arrival gaps deliberately straddle the window boundary — some sequences
 // never expire anything (the bucket saturates), some expire every entry between
@@ -110,7 +112,7 @@ func TestRateLimitWindow_DifferentialAgainstLegacy(t *testing.T) {
 // asserted here against a stamp placed exactly one window back.
 func TestRateLimitWindow_ExpiryBoundaryMatchesLegacy(t *testing.T) {
 	const window = 100 * time.Millisecond
-	base := time.Now()
+	base := time.Unix(1_700_000_000, 0)
 
 	for _, tc := range []struct {
 		name   string
@@ -206,7 +208,7 @@ func TestRateLimitWindow_GrowPreservesOrderAcrossWrap(t *testing.T) {
 		ringAdmit(b, mid.Add(time.Duration(i+1)*time.Millisecond), window, limit)
 	}
 
-	// Every stamp still present must be strictly ordered from head — the
+	// Every stamp still present must be in non-decreasing order from head — the
 	// invariant prefix-expiry depends on.
 	prev := time.Time{}
 	for i := 0; i < b.n; i++ {
@@ -224,54 +226,95 @@ func TestRateLimitWindow_GrowPreservesOrderAcrossWrap(t *testing.T) {
 	}
 }
 
-// TestRateLimitWindow_OutOfOrderArrivalStaysOrderedAndFailsClosed pins the one
-// place the ring is deliberately NOT verdict-identical to the filter-and-copy
-// form it replaces.
-//
-// Allow samples time.Now() before taking the shard lock, so under concurrency a
-// stamp can reach add out of order. clientBucket.add clamps it up to the newest
-// stamp present, which keeps the ring ordered (prefix-expiry depends on it) at
-// the cost of recording a slightly earlier time than the caller observed. Two
-// properties must hold, and both are the safe direction: the ring stays
-// ordered, and a clamped stamp expires no LATER than its true arrival would
-// have — so an inversion can never let the window admit past the limit.
+// Allow samples the clock before locking. This explicit append order models
+// goroutines reaching the lock in a different order from their clock samples.
+// Every admitted sample must keep its identity through growth and clamping:
+// recorded timestamps stay ordered and are never earlier than those samples.
 func TestRateLimitWindow_OutOfOrderArrivalStaysOrderedAndFailsClosed(t *testing.T) {
-	const (
-		limit  = 8
-		window = time.Second
-	)
-	base := time.Now()
+	const limit = 8
+	base := time.Unix(1_700_000_000, 0)
 	b := &clientBucket{}
-
-	// Interleave forward and backward arrivals, the shape a pre-lock clock read
-	// produces when goroutines are descheduled between sampling and appending.
-	offsets := []time.Duration{0, 40, 20, 90, 60, 55, 130}
-	for _, off := range offsets {
-		b.add(base.Add(off*time.Millisecond), limit)
+	admissions := []struct {
+		sampledMS  int
+		recordedMS int
+	}{
+		{0, 0}, {40, 40}, {20, 40}, {90, 90}, {60, 90}, {55, 90}, {130, 130},
 	}
-	if b.n != len(offsets) {
-		t.Fatalf("occupancy %d, want %d", b.n, len(offsets))
+	for _, admission := range admissions {
+		b.add(base.Add(time.Duration(admission.sampledMS)*time.Millisecond), limit)
+	}
+	if b.n != len(admissions) {
+		t.Fatalf("occupancy %d, want %d", b.n, len(admissions))
 	}
 
 	var prev time.Time
-	newest := base
-	for i := 0; i < b.n; i++ {
+	for i, admission := range admissions {
 		got := b.stamps[(b.head+i)%len(b.stamps)]
+		sampled := base.Add(time.Duration(admission.sampledMS) * time.Millisecond)
+		if got.Before(sampled) {
+			t.Fatalf("admission %d: recorded %s before original sample %s", i, got, sampled)
+		}
 		if i > 0 && got.Before(prev) {
 			t.Fatalf("ring out of order at %d: %s before %s", i, got, prev)
 		}
-		prev, newest = got, got
+		want := base.Add(time.Duration(admission.recordedMS) * time.Millisecond)
+		if !got.Equal(want) {
+			t.Fatalf("admission %d: recorded %s, want %s", i, got, want)
+		}
+		prev = got
 	}
+}
 
-	// Fail-closed: every recorded stamp is at or before the true arrival it
-	// stands for, so expiring at the newest true arrival empties the window.
-	trueNewest := base.Add(130 * time.Millisecond)
-	if newest.After(trueNewest) {
-		t.Fatalf("clamped stamp %s is later than the true arrival %s — that would extend the window", newest, trueNewest)
-	}
-	b.expire(trueNewest)
-	if b.n != 0 {
-		t.Fatalf("occupancy %d after expiring at the newest true arrival, want 0", b.n)
+// Compare expiration of the SAME preloaded admissions, without admitting any
+// new requests into either history. Forward clamping can retain extra entries,
+// but cannot expire any admission while its original sample is still live.
+// Independently evolving limiters need not keep identical verdicts: an earlier
+// conservative rejection changes the occupancy seen by subsequent requests.
+func TestRateLimitWindow_ClampedExpiryNeverReleasesCapacityEarly(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	samplesMS := []int{0, 40, 20, 90, 60, 55, 130}
+	limit := len(samplesMS)
+	for _, tc := range []struct {
+		cutoff        time.Duration
+		wantRemaining int
+	}{
+		{-time.Nanosecond, 7},
+		{0, 6},
+		{20 * time.Millisecond, 6}, // Original 20ms sample remains clamped to 40ms.
+		{40*time.Millisecond - time.Nanosecond, 6},
+		{40 * time.Millisecond, 4}, // Both 40ms records expire at equality.
+		{40*time.Millisecond + time.Nanosecond, 4},
+		{60 * time.Millisecond, 4}, // Original 55/60ms samples remain until 90ms.
+		{90*time.Millisecond - time.Nanosecond, 4},
+		{90 * time.Millisecond, 1}, // All three 90ms records expire together.
+		{130*time.Millisecond - time.Nanosecond, 1},
+		{130 * time.Millisecond, 0},
+		{130*time.Millisecond + time.Nanosecond, 0},
+	} {
+		t.Run(tc.cutoff.String(), func(t *testing.T) {
+			b := &clientBucket{}
+			for _, sampleMS := range samplesMS {
+				b.add(base.Add(time.Duration(sampleMS)*time.Millisecond), limit)
+			}
+			cutoff := base.Add(tc.cutoff)
+			b.expire(cutoff)
+
+			originalRemaining := 0
+			for i, sampleMS := range samplesMS {
+				if base.Add(time.Duration(sampleMS) * time.Millisecond).After(cutoff) {
+					originalRemaining++
+					if i < len(samplesMS)-b.n {
+						t.Errorf("admission %d expired while original sample %s is live", i, time.Duration(sampleMS)*time.Millisecond)
+					}
+				}
+			}
+			if free, originalFree := limit-b.n, limit-originalRemaining; free > originalFree {
+				t.Errorf("released capacity %d exceeds original samples' %d", free, originalFree)
+			}
+			if b.n != tc.wantRemaining {
+				t.Errorf("remaining %d, want %d", b.n, tc.wantRemaining)
+			}
+		})
 	}
 }
 
