@@ -199,32 +199,38 @@ func (r *applyRig) canned(argv []string) []byte {
 		}
 		return []byte(`{"Descriptor":{"digest":"sha256:` + r.targetDigest + `"}}`)
 	case has("image") && has("inspect"):
-		ref := argv[len(argv)-1]
-		if ref == runner.PinnedProxyTag {
-			if r.pinnedDigest == "" {
-				return nil
-			}
-			return []byte(`[{"Id":"sha256:` + r.cfgFor(r.pinnedDigest) + `","RepoDigests":["` + repo + `@sha256:` + r.pinnedDigest + `"]}]`)
-		}
-		if d := digestRE.FindString(ref); strings.Contains(ref, "@sha256:") && r.localImages != nil {
-			bare := strings.TrimPrefix(d, "sha256:")
-			if !r.localImages[bare] {
-				return nil
-			}
-			return []byte(`[{"Id":"sha256:` + r.cfgFor(bare) + `","RepoDigests":["` + ref + `"]}]`)
-		}
-		if id, ok := r.localRefIDs[ref]; ok {
-			if id == "unreadable" {
-				return []byte("not json")
-			}
-			return []byte(`[{"Id":"` + id + `","RepoTags":["` + ref + `"]}]`)
-		}
-		if r.noPriorDigest && !r.pulled.Load() {
-			return []byte(`[{"RepoDigests":[]}]`) // no rollback target available
-		}
-		return []byte(`[{"Id":"sha256:` + cfg + `","RepoDigests":["` + repo + `@sha256:` + running + `"]}]`)
+		return r.cannedImageInspect(argv[len(argv)-1], cfg, running)
 	}
 	return nil
+}
+
+// cannedImageInspect is the fake daemon's `docker image inspect <ref>` answer
+// (nil = the image is absent). Split out of canned to keep its complexity
+// under the gocognit threshold.
+func (r *applyRig) cannedImageInspect(ref, cfg, running string) []byte {
+	if ref == runner.PinnedProxyTag {
+		if r.pinnedDigest == "" {
+			return nil
+		}
+		return []byte(`[{"Id":"sha256:` + r.cfgFor(r.pinnedDigest) + `","RepoDigests":["` + repo + `@sha256:` + r.pinnedDigest + `"]}]`)
+	}
+	if d := digestRE.FindString(ref); strings.Contains(ref, "@sha256:") && r.localImages != nil {
+		bare := strings.TrimPrefix(d, "sha256:")
+		if !r.localImages[bare] {
+			return nil
+		}
+		return []byte(`[{"Id":"sha256:` + r.cfgFor(bare) + `","RepoDigests":["` + ref + `"]}]`)
+	}
+	if id, ok := r.localRefIDs[ref]; ok {
+		if id == "unreadable" {
+			return []byte("not json")
+		}
+		return []byte(`[{"Id":"` + id + `","RepoTags":["` + ref + `"]}]`)
+	}
+	if r.noPriorDigest && !r.pulled.Load() {
+		return []byte(`[{"RepoDigests":[]}]`) // no rollback target available
+	}
+	return []byte(`[{"Id":"sha256:` + cfg + `","RepoDigests":["` + repo + `@sha256:` + running + `"]}]`)
 }
 
 // cfgFor maps a bare digest to the config digest the fake daemon reports for
