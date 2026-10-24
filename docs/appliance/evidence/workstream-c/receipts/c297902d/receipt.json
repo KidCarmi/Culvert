@@ -1,0 +1,105 @@
+{
+  "commit": "c297902d2f344e43fd1baa18eb6d0c2c235371a7",
+  "tree": "aa6384f1fbdb3e7a9374309630ef3bfa623451d2",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.26.10 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "go build ./...",
+      "exit": 0,
+      "seconds": 4.592,
+      "log": "1.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 2,
+      "command": "go vet ./...",
+      "exit": 0,
+      "seconds": 1.449,
+      "log": "2.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 3,
+      "command": "go test -count=1 -run 'Install|Deploy|Appliance|Maint|OSUpdate|ClamAV' .",
+      "exit": 0,
+      "seconds": 13.149,
+      "log": "3.log",
+      "log_sha256": "5c717dc64da26f227d8f95766345c3278898ce536d24e38109ee96659d6a83b9",
+      "log_bytes": 41
+    },
+    {
+      "n": 4,
+      "command": "go test -count=1 .",
+      "exit": 0,
+      "seconds": 427.082,
+      "log": "4.log",
+      "log_sha256": "dca310f34d20dae7ea96dc1654c23d8f1ad02e6d7f78b39f0087ebf7f0d21b8c",
+      "log_bytes": 42
+    },
+    {
+      "n": 5,
+      "command": "cd cmd/culvert-maint && go vet ./... && go test -count=1 -race ./...",
+      "exit": 0,
+      "seconds": 18.724,
+      "log": "5.log",
+      "log_sha256": "b7d1fe7f34340b628d6f04ea2109069b84c9609cd23cdfc3fffcca0df873b272",
+      "log_bytes": 449
+    },
+    {
+      "n": 6,
+      "command": "~/go/bin/golangci-lint run --new-from-rev 0fb4daf9 --timeout 15m .",
+      "exit": 0,
+      "seconds": 2.788,
+      "log": "6.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 7,
+      "command": "cd cmd/culvert-maint && ~/go/bin/golangci-lint run --new-from-rev 0fb4daf9 --timeout 15m ./...",
+      "exit": 0,
+      "seconds": 1.072,
+      "log": "7.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 8,
+      "command": "shellcheck -S warning appliance/provision/culvert-clamav-image appliance/os-maintenance/culvert-os-update packaging/culvert-maint/install.sh",
+      "exit": 0,
+      "seconds": 0.572,
+      "log": "8.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 9,
+      "command": "bash appliance/os-maintenance/power_test.sh",
+      "exit": 0,
+      "seconds": 4.327,
+      "log": "9.log",
+      "log_sha256": "dcd6fe4000db9231109894c894186c6b6bf4b1f3ba8a040f7bce8823ce80debc",
+      "log_bytes": 71
+    }
+  ],
+  "all_exit_zero": true
+}
