@@ -426,3 +426,17 @@ the first GOAWAY; `drainActiveTunnels` re-fires the GOAWAY each tick and force-c
 the registered H2 conns at the 15s deadline (single envelope); `docker-compose.yml`
 gains `stop_grace_period: 60s`; three `culvert_*` metrics; operator doc gains the
 drain sequence + the HA-scope statement. Everything else in v1 stands.
+
+## 12. Addendum: Go 1.27 and the x/net wrapping server
+
+The `BaseConfig: sh.base` in §3.2 is correct only for the original x/net server
+(`http2/server.go`). Under `go1.27 && !http2legacy`, x/net v0.61 compiles
+`http2/server_wrap.go` instead. That server serves a `ServeConn` call with a non-nil
+`BaseConfig` through a one-off copy of the `http.Server`, which `base.Shutdown`
+never reaches, so no GOAWAY is sent. With a nil `BaseConfig` it serves through the
+ConfigureServer'd base. The original server reads `MaxHeaderBytes` only from
+`BaseConfig`, so it still needs the base passed in. The shipped code therefore
+calls `ServeConn` from one place, `h2InspectShared.serveConn`. That method picks
+`BaseConfig` with `h2InspectServeBaseConfig`, which has two build-constrained
+variants. `TestH2InspectDrain_*` and `TestH2InspectServe_*` pin the GOAWAY and the
+limits on each implementation.
