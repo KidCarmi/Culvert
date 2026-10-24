@@ -163,6 +163,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigSnapshotApply(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
+		checkAccessCIDRLists(),
 		checkOIDCBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),

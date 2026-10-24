@@ -672,7 +672,7 @@ func applyAdminLogStore(s *AdminSettings) {
 // applyAdminNetwork applies UI access, TLS, and network settings.
 func applyAdminNetwork(s *AdminSettings) {
 	if len(s.UIAllowIPs) > 0 {
-		_ = SetUIAllowedCIDRs(s.UIAllowIPs)
+		noteAccessCIDRResult(accessCIDRUIAllow, SetUIAllowedCIDRs(s.UIAllowIPs))
 	}
 	if s.BaseURL != "" {
 		SetProxyBaseURL(s.BaseURL)
@@ -687,7 +687,9 @@ func applyAdminNetwork(s *AdminSettings) {
 		// Authoritative replace (empty list wipes the YAML seed), mirroring the
 		// UpstreamProxiesSaved sentinel. Sentinel-less legacy files keep the
 		// YAML/CLI seed applied by the startup slice.
-		if err := SetTrustedProxyCIDRs(s.TrustedProxyCIDRs); err != nil {
+		err := SetTrustedProxyCIDRs(s.TrustedProxyCIDRs)
+		noteAccessCIDRResult(accessCIDRTrustedProxy, err)
+		if err != nil {
 			logger.Printf("AdminSettings: invalid trusted_proxy_cidrs (%v) — X-Forwarded-For will NOT be trusted", err)
 		}
 	}
