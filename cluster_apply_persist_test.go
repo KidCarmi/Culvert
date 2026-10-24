@@ -74,6 +74,7 @@ import (
 // triggered by applyConfigSnapshot's snap.FileProfiles branch
 // (controlplane.go:1521–1523).
 func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origProfiles := globalProfileStore.List()
 	t.Cleanup(func() {
 		globalProfileStore.SetPath("") // drop the test's temp persistence path
@@ -141,6 +142,7 @@ func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
 //
 //nolint:dupl // Intentional structural symmetry with
 func TestApplyConfigSnapshot_BandwidthPoliciesPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origMgr := globalBandwidth
 	t.Cleanup(func() { globalBandwidth = origMgr })
 
@@ -191,6 +193,7 @@ func TestApplyConfigSnapshot_BandwidthPoliciesPersist(t *testing.T) {
 // efficiency observation (out of P3.4 scope per the brief's
 // "no broad persistence framework rewrite" constraint).
 func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origExts := fileBlocker.List()
 	t.Cleanup(func() {
 		fileBlocker.SetPath("") // drop the test's temp persistence path
@@ -267,6 +270,7 @@ func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
 //
 //nolint:dupl // Intentional structural symmetry with
 func TestApplyConfigSnapshot_NodeGroupsPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origStore := globalNodeGroups
 	t.Cleanup(func() { globalNodeGroups = origStore })
 
@@ -314,6 +318,7 @@ func TestApplyConfigSnapshot_NodeGroupsPersist(t *testing.T) {
 // caller-side sslBypass.Save() hook after sslBypass.Set() in
 // applyConfigSnapshot's snap.SSLBypassPatterns branch.
 func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origPath := sslBypass.Path()
 	origPatterns := sslBypass.List()
 	t.Cleanup(func() {
@@ -349,6 +354,7 @@ func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
 // caller-side catStore.Save() hook after catStore.ReplaceAll() in
 // applyConfigSnapshot's snap.URLCategories branch (P6.1 UC-2 closure).
 func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origPath := catStore.Path()
 	origEntries := catStore.All()
 	t.Cleanup(func() {
@@ -389,6 +395,7 @@ func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
 // caller-side dpiScanner.Save() hook after dpiScanner.Set() in
 // applyConfigSnapshot's snap.DPIPatterns branch (P6.2 SC-3 closure).
 func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origPath := dpiScanner.Path()
 	origPatterns := append([]string(nil), dpiScanner.List()...)
 	t.Cleanup(func() {
@@ -430,6 +437,7 @@ func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
 // (threatfeed.go:266); ImportFeedData does NOT — this test verifies
 // the latter branch becomes durable after the caller-side hook.
 func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "threatfeed.json")
 	origDbPath := globalThreatFeed.SetDBPathForTest(path)
@@ -473,6 +481,7 @@ func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
 }
 
 func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	dbPath := filepath.Join(t.TempDir(), "threatfeed.json")
 	origDbPath := globalThreatFeed.SetDBPathForTest(dbPath)
 	origAllowlist := globalThreatFeed.DomainAllowlist()
@@ -573,6 +582,7 @@ func keysOf(m map[string]any) []string {
 // caller-side globalCategoryGroups.Save() hook after ReplaceAll in
 // applyConfigSnapshot's snap.CategoryGroups branch (P6.1 UC-2 closure).
 func TestApplyConfigSnapshot_CategoryGroupsPersist(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	origPath := globalCategoryGroups.Path()
 	origGroups := globalCategoryGroups.List()
 	t.Cleanup(func() {

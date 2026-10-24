@@ -106,7 +106,7 @@ func oidcWellKnownURL(issuer string) string {
 var oidcDiscoveryURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
 
 // fetchOIDCDiscoveryOverNetwork performs exactly the request the
-// pre-CHAOS-71 code performed: same 10 s budget, same SSRF-safe dialer, same
+// pre-CHAOS-87 code performed: same 10 s budget, same SSRF-safe dialer, same
 // 64 KiB read limit, same HTTP-status rule. Split out only so
 // acquireIdPDocument can own the cache/fallback decision around it.
 //
@@ -201,7 +201,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 		return nil, time.Time{}, fmt.Errorf("oidc discovery: %w", err)
 	}
 
-	// CHAOS-71: a discovery endpoint that is momentarily unreachable must not
+	// CHAOS-87: a discovery endpoint that is momentarily unreachable must not
 	// destroy the provider. acquireIdPDocument prefers the network and falls
 	// back to the last successfully fetched document within
 	// idpmeta.StaleMaxAge. The bytes are decoded and RE-VALIDATED below by the
@@ -256,7 +256,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 
 // parseAndValidateOIDCDiscovery decodes and validates a discovery document.
 //
-// CHAOS-71 makes this the SINGLE parser for the document, reached identically
+// CHAOS-87 makes this the SINGLE parser for the document, reached identically
 // whether the bytes came off the network or out of the last-known-good cache.
 // That is the load-bearing half of the cache's safety argument: the discovery
 // document names the authorization and token endpoints this appliance sends
@@ -265,7 +265,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 // including one edited on disk by something that got write access to dataDir.
 //
 // The endpoints are NOT all guarded the same way, and the difference is the
-// point (CHAOS-71 round 3). The token and JWKS endpoints are ones this
+// point (CHAOS-87 round 3). The token and JWKS endpoints are ones this
 // appliance DIALS, so ssrfSafeDialContext refuses a private resolved address
 // at connect time and is rebinding-proof — a structural check is enough for
 // them. The AUTHORIZATION endpoint is not dialled by us at all: it is handed

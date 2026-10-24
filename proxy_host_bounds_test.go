@@ -1770,3 +1770,98 @@ func TestChaos69_ControlRejectionLogStillNamesTheRealClient(t *testing.T) {
 			"downgrade what the operator sees: %q", got)
 	}
 }
+
+// TestHostutilLongRawULabelReachesTheMemo pins the agreement between this
+// file's two dispatch-gate bounds and internal/hostutil's IDNA-memo retention
+// bounds, for the shape where they used to disagree.
+//
+// IDNA SHRINKS a U-label authority — this file's own derivation records the
+// worst legitimate case as 883 raw bytes collapsing to a 251-byte A-label,
+// which is why maxRawDestAuthorityBytes is 1 KiB and not maxDestHostLen. The
+// memo's first retention bound was measured on the RAW key at 253 bytes, on
+// the stated reasoning that "both dispatch gates refuse it immediately after
+// canonicalizing it". They do not: a long U-label authority that canonicalizes
+// inside the DNS limit passes BOTH gates and goes on to be normalized ~10x per
+// request by engines that each canonicalize their own input (handleRequest
+// hands them the RAW host deliberately), so every one of those requests paid
+// the full un-memoized idna.ToASCII fan-out.
+//
+// This test is the root half of the proof — the half that can call the real
+// gate predicates. hostutil's TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained
+// is the other half: same shape, asserting it is retained. If either bound
+// moves so that an accepted destination stops being memoizable, one of the two
+// fails rather than the asymmetry silently returning.
+func TestHostutilLongRawULabelReachesTheMemo(t *testing.T) {
+	// Eight U-labels of 20 CJK code points, so every canonical label lands
+	// well inside the 63-byte A-label limit: a resolvable name, not merely an
+	// accepted string.
+	label := strings.Repeat("日", 20)
+	host := strings.TrimSuffix(strings.Repeat(label+".", 8), ".") + ".example.com"
+
+	normHost, ok := canonicalDestHost(host)
+	if !ok {
+		t.Fatalf("canonicalDestHost refused %d-byte probe authority; the shape proves nothing", len(host))
+	}
+	if len(host) <= maxDestHostLen {
+		t.Fatalf("probe authority is %d raw bytes, inside the DNS bound at %d — "+
+			"it does not exercise the raw/canonical asymmetry", len(host), maxDestHostLen)
+	}
+
+	// ── Both gates accept it, so the per-request fan-out is reachable ───────
+	if rawAuthorityOversize(host) {
+		t.Fatalf("raw tier refuses the probe at %d bytes (cap %d); the fan-out is unreachable",
+			len(host), maxRawDestAuthorityBytes)
+	}
+	if canonicalHostOversize(normHost) {
+		t.Fatalf("canonical tier refuses the probe at %d canonical bytes (cap %d); "+
+			"the fan-out is unreachable", len(normHost), maxDestHostLen)
+	}
+
+	// ── It is a name DNS can actually carry ────────────────────────────────
+	for _, l := range strings.Split(normHost, ".") {
+		if len(l) > 63 {
+			t.Fatalf("canonical label %q is %d bytes, over the RFC 1035 limit of 63", l, len(l))
+		}
+	}
+
+	// ── And therefore hostutil must be willing to retain it ────────────────
+	// Stated as the property rather than by reaching into the memo's slots,
+	// which are package-private to hostutil: a destination both gates accept
+	// must have a raw spelling within what the memo will key on.
+	if len(host) > hostutilMaxMemoKeyLenForTest {
+		t.Errorf("REGRESSION: a %d-byte raw authority that BOTH dispatch gates accept "+
+			"(canonical %d bytes) exceeds hostutil's %d-byte memo key bound, so every request "+
+			"to it pays the full un-memoized IDNA fan-out",
+			len(host), len(normHost), hostutilMaxMemoKeyLenForTest)
+	}
+
+	// ── The relation, not just this one probe ──────────────────────────────
+	// The probe above is one reachable instance; this is the invariant that
+	// makes the whole band safe. Anything the RAW tier admits can go on to the
+	// per-request fan-out, so the memo must be able to key on all of it. Pinned
+	// as a relation between the two constants, so raising maxRawDestAuthorityBytes
+	// fails HERE rather than silently re-opening the asymmetry for the newly
+	// admitted band.
+	if hostutilMaxMemoKeyLenForTest < maxRawDestAuthorityBytes {
+		t.Errorf("REGRESSION: the raw tier admits %d bytes but hostutil keys the memo on at "+
+			"most %d, leaving a %d-byte band of ACCEPTED authorities that can never be "+
+			"memoized", maxRawDestAuthorityBytes, hostutilMaxMemoKeyLenForTest,
+			maxRawDestAuthorityBytes-hostutilMaxMemoKeyLenForTest)
+	}
+	t.Logf("raw=%d canonical=%d: accepted by both gates; memo key bound %d covers the raw cap %d",
+		len(host), len(normHost), hostutilMaxMemoKeyLenForTest, maxRawDestAuthorityBytes)
+}
+
+// hostutilMaxMemoKeyLenForTest mirrors internal/hostutil's maxMemoLongKeyLen,
+// which is package-private.
+//
+// A mirror does NOT move when the real constant does, so this test alone cannot
+// prove the relation it asserts: if maxMemoLongKeyLen were lowered to 900, the
+// comparison below would still weigh 1024 against the raw cap and still pass
+// (CodeRabbit on PR #1624, verified and correct — an earlier version of this
+// comment claimed the mirror could only ever fail in the safe direction, which
+// was wrong). hostutil's TestIDNMemo_KeyBoundCoversTheRequestRawCap owns the
+// other half, asserting its REAL maxMemoLongKeyLen against its own mirror of
+// maxRawDestAuthorityBytes. Each half asserts the side whose real constant its
+// package owns, so moving either one fails one of them.
+const hostutilMaxMemoKeyLenForTest = 1024

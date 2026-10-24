@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -22,10 +23,8 @@ import (
 // a runtime input, deliberately not part of the resolved config.
 func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnrollmentConfig) {
 	// Node identity: standalone until a CP/DP/HA path below claims a role.
-	clusterRole.role = "standalone"
-	if h, err := os.Hostname(); err == nil {
-		clusterRole.nodeID = h
-	}
+	host, _ := os.Hostname()
+	initStandaloneClusterRole(host)
 
 	// Cluster state persistence.
 	clusterDBPathGlobal = cfg.ClusterDBPath
@@ -69,11 +68,12 @@ func startHAStandby(cfg clusterStartupConfig, ctx context.Context, leaderAddr, t
 	// ADR-0005 S4: record the material a later demotion needs to resync
 	// (a promoted standby that self-fences re-enters standby mode).
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
-	globalHA.StartAsStandby(ctx, leaderAddr, token,
+	globalHA.StartAsStandbyWithUndo(ctx, leaderAddr, token,
 		cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, autoFailover,
 		func() error {
 			return enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath)
 		},
+		undoPromoteControlPlane, // a promote that fails after the activation leaves no Control Plane behind
 	)
 }
 
@@ -85,30 +85,200 @@ func startHAStandby(cfg clusterStartupConfig, ctx context.Context, leaderAddr, t
 // leader cannot probe its peer (ADR-0004 scope note).
 func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context) {
 	haCfg, haErr := loadHAConfig()
-	if haRestartAction(haCfg, haErr) == "standby" {
+	action, unreadable := haPersistedAction(haCfg, haErr)
+	if unreadable != nil {
+		// Standby or leader cannot be told apart: never come up as an ungated
+		// Control Plane. The node is HA-gated from here, and the deferred
+		// resume re-reads (and retries) once the listener binds (ha_intent.go).
+		noteHAIntentUnreadable(unreadable)
+		logWarnf("HA: %s could not be read at boot (%q) — leader-gated RPCs and CA issuance stay refused until it can be; the read is retried once the Control Plane listener binds",
+			haConfigFile, sanitizeLog(unreadable.Error()))
+	}
+	if action == "standby" {
 		startHAStandby(cfg, ctx, haCfg.PeerAddr, haCfg.Token, haCfg.AutoFailover)
 		logger.Printf("HA: restarted as standby from %s (leader=%s) — not self-asserting leader (ADR-0004)",
 			haConfigFile, sanitizeLog(haCfg.PeerAddr))
 		return
 	}
 
-	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
-		logFatalf("ControlPlane gRPC: %v", err)
-	}
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.
+	// Unconditional, and deliberately ahead of the listener: it only RECORDS
+	// where a later demotion would resync from, so a node whose listener is
+	// still coming up is better off having it than not.
 	globalHA.SetResyncMaterial(ctx, cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA)
-	// Persisted leader (or legacy config with no role) resumes leadership.
-	if haErr == nil && haCfg.Enabled {
-		globalHA.ResumeAsLeader(haCfg) // restores role+token+term+auto_failover (no term bump)
-		if haCfg.AutoFailover {
-			logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
-				"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
-				"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
-		} else {
-			logger.Printf("HA: resumed as leader from %s after restart (peer=%s)", haConfigFile, haCfg.PeerAddr)
-		}
+
+	// CHAOS-71 — this used to be:
+	//
+	//	if err := enableControlPlane(...); err != nil {
+	//	        logFatalf("ControlPlane gRPC: %v", err)   // ← os.Exit(1)
+	//	}
+	//
+	// which terminated the whole appliance — proxy, SOCKS5, admin UI, health
+	// endpoints, none of which have started yet at this point in main.go — for
+	// any reason the CLUSTER plane's listener could not bind. See
+	// cp_grpc_bind.go for the finding, the reproduction and why process death
+	// is not "fail closed" here.
+	//
+	// The leadership resume is the onActivated callback rather than a statement
+	// after this call, so this node never asserts a term it cannot exercise: a
+	// "leader" no Data Plane can reach cannot serve HASync. On the happy path
+	// (the listener binds on its first attempt, i.e. every healthy boot) the
+	// callback runs synchronously inside this call and the ordering is
+	// byte-identical to the code above.
+	//
+	// The callback deliberately does NOT close over the boot-time haCfg: with
+	// the retrying supervisor it can run minutes after boot, and resuming from
+	// a config the operator has since disabled or flipped to standby would
+	// restore and re-persist a stale leader (CodeRabbit review of #1556).
+	resumeLeadership := func() { resumeLeadershipIfStillPersisted() }
+	if err := enableControlPlaneResilient(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath, resumeLeadership); err != nil {
+		// Reached only for a refusal that no retry can fix (an empty address, or
+		// a listener already starting) — never for a bind or TLS fault, which
+		// the supervisor owns. Still not fatal: a misconfigured cluster plane
+		// must not cost this node's traffic.
+		logErrorf("ControlPlane: not enabled: %v — this node continues as a standalone gateway", err)
 	}
+}
+
+// haBootResumeAsLeader is the boot path's leadership-resume action. A seam so
+// the gate for resumeLeadershipIfStillPersisted can observe the decision
+// without mutating the process-global HA state.
+//
+// It resumes through ResumeAsLeaderIfUnclaimed: the lease acquisition can take
+// seconds, during which an admin HA enable may claim the node, so the resume
+// revalidates the persisted config and applies only while no HA role is held
+// (atomic with every HA transition under HAState.mu). Reports whether it was
+// applied.
+var haBootResumeAsLeader = func(cfg *haConfig) bool {
+	// restores role+token+term+auto_failover (no term bump)
+	return globalHA.ResumeAsLeaderIfUnclaimed(cfg, func() bool { return haConfigStillResumable(cfg) })
+}
+
+// haConfigStillResumable reports whether the persisted HA config still says
+// this node leads with the same peer and token as cfg — the config a resume
+// started from.
+func haConfigStillResumable(cfg *haConfig) bool {
+	now, err := loadHAConfig()
+	if haRestartAction(now, err) != "leader" {
+		return false
+	}
+	return now.PeerAddr == cfg.PeerAddr && now.Token == cfg.Token && now.Term == cfg.Term
+}
+
+// resumeLeadershipIfStillPersisted is the boot path's onActivated callback: it
+// resumes HA leadership on the first OBSERVED bind, from the HA config as it is
+// persisted NOW.
+//
+// It re-reads the config rather than using the one loaded at boot because the
+// callback runs on the first successful bind, which with the retrying
+// supervisor can be long after boot. It resumes only if the CURRENT config
+// still says this node leads (haPersistedAction == "leader": decoded, enabled,
+// not standby), and never when this process already holds an HA role — an
+// operator acting through the live HA API in the meantime has already decided
+// it, and ResumeAsLeader would overwrite that and persist the stale leader.
+//
+// The callback runs ONCE (the supervisor's sync.Once), so it must not spend
+// that chance on a read it could not decide (Codex review of #1556): the
+// node is then HA-gated (ha_intent.go) and the attempt is re-armed in the
+// background with capped backoff until a read decides it.
+func resumeLeadershipIfStillPersisted() {
+	if resumeLeadershipAttempt() {
+		return
+	}
+	haIntentRetrySpawn(retryLeadershipResume)
+}
+
+// retryLeadershipResume re-runs resumeLeadershipAttempt with capped backoff
+// until it decides, or the HA shutdown latch interrupts it (the gate then
+// stays set: a node going away serves nothing leader-gated).
+func retryLeadershipResume() {
+	defer func() {
+		if r := recover(); r != nil {
+			logErrorf("HA: the leadership-resume retry panicked (contained): %v — the node stays HA-gated until restarted", r)
+		}
+	}()
+	backoff := haIntentRetryMin
+	for {
+		if !haIntentRetrySleep(backoff) {
+			return
+		}
+		if resumeLeadershipAttempt() {
+			return
+		}
+		backoff = min(backoff*2, haIntentRetryMax)
+	}
+}
+
+// resumeLeadershipAttempt is one decision on the persisted HA intent. It
+// reports whether the intent was DECIDED (resumed, or nothing to resume);
+// false means it could not be — the node is left HA-gated for a retry.
+func resumeLeadershipAttempt() (decided bool) {
+	haCfg, haErr := loadHAConfig()
+	action, err := haPersistedAction(haCfg, haErr)
+	if err != nil {
+		haIntentStillUnknown(err)
+		return false
+	}
+	if action != "leader" {
+		return haIntentDecidedNotLeader(action)
+	}
+	if role := globalHA.Status().Role; role != "" {
+		logger.Printf("HA: this node already holds HA role %q — not resuming leadership from %s on the "+
+			"Control Plane listener's first bind", role, haConfigFile)
+		globalHA.clearIntentUnknown()
+		return true
+	}
+	if !haBootResumeAsLeader(haCfg) {
+		// Lost to shutdown or a live HA transition (decided), or the
+		// revalidation after the lease acquisition did not confirm the
+		// persisted config — its re-read failed or changed it: decide again.
+		if globalHA.shuttingDown() || globalHA.Status().Role != "" {
+			return true
+		}
+		haIntentStillUnknown(errHAIntentNotRevalidated)
+		return false
+	}
+	globalHA.clearIntentUnknown()
+	if haCfg.AutoFailover {
+		logger.Printf("HA: resumed as leader from %s after restart. WARNING: automatic failover is "+
+			"enabled — if the standby promoted while this node was down, BOTH may now lead. Verify via "+
+			"/healthz or the HA panel and reconcile (ADR-0004/RISK-001).", haConfigFile)
+	} else {
+		logger.Printf("HA: resumed as leader from %s after restart (peer=%q)", haConfigFile, sanitizeLog(haCfg.PeerAddr))
+	}
+	return true
+}
+
+// errHAIntentNotRevalidated: the resume's post-acquisition revalidation did
+// not confirm the persisted config, and nothing else decided the intent.
+var errHAIntentNotRevalidated = errors.New("the persisted HA config was not confirmed after the fencing-lease acquisition")
+
+// haIntentStillUnknown gates the node on an undecided read, logs it, and
+// pages once per episode if it keeps failing.
+func haIntentStillUnknown(err error) {
+	noteHAIntentUnreadable(err)
+	logWarnf("HA: the persisted HA intent in %s could not be decided on the Control Plane listener's bind (%q) — "+
+		"leader-gated RPCs and CA issuance stay refused; retrying", haConfigFile, sanitizeLog(err.Error()))
+}
+
+// haIntentDecidedNotLeader handles a decided read that is not "leader". A
+// standby record that this process could not read earlier (the gate is set,
+// no HA role held) means it came up as a plain Control Plane although the node
+// is persisted as a standby: it cannot re-enter standby at runtime, so it
+// stays HA-gated and asks for a restart. Otherwise the intent is decided.
+func haIntentDecidedNotLeader(action string) bool {
+	if action == "standby" {
+		if globalHA.intentUnknown() && globalHA.Status().Role == "" {
+			logErrorf("HA: %s records this node as standby, but it could not be read when this process started, "+
+				"so the node came up as a plain Control Plane — it stays HA-gated; restart it to re-enter standby (ADR-0004)", haConfigFile)
+			return true
+		}
+		logger.Printf("HA: %s now records this node as standby — not resuming leadership on the "+
+			"Control Plane listener's first bind", haConfigFile)
+	}
+	globalHA.clearIntentUnknown()
+	return true
 }
 
 // dpWiring is the resolved Data-Plane connection material.
@@ -172,13 +342,14 @@ func armHALease(cfg clusterStartupConfig) error {
 	if err != nil {
 		return err
 	}
-	globalHA.SetLeaseProvider(provider, clusterRole.nodeID)
+	nodeID := clusterRoleSnapshot().nodeID
+	globalHA.SetLeaseProvider(provider, nodeID)
 	// CHAOS-55: the recovery loop must look at the fence more often than a
 	// holder's key can appear and expire, or a peer's whole tenure can pass
 	// between two observations. That bound is the TTL.
 	globalHA.SetLeaseTTL(time.Duration(cfg.HALeaseTTLSec) * time.Second)
 	logger.Printf("HA: etcd fencing lease ARMED (endpoints=%s, ttl=%ds, candidate=%s) — leadership is lease-arbitrated (ADR-0005)",
-		sanitizeLog(cfg.HAEtcdEndpoints), cfg.HALeaseTTLSec, sanitizeLog(clusterRole.nodeID))
+		sanitizeLog(cfg.HAEtcdEndpoints), cfg.HALeaseTTLSec, sanitizeLog(nodeID))
 	return nil
 }
 

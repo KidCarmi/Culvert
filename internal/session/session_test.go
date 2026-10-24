@@ -230,7 +230,17 @@ func TestRevocationList_PastExpiryEvicts(t *testing.T) {
 	}
 
 	// Revoke with past expiry — lazy eviction, should return false.
-	rl.Revoke("token2", time.Now().Add(-time.Millisecond))
+	//
+	// SEC-REVEXP-1: this used to pass `-time.Millisecond`, which is an expiry
+	// INSIDE the current wall-clock second. That is no longer "expired": the
+	// revocation oracle now mirrors Decode, which still accepts a session
+	// whose `exp` is the current second, so an entry naming it must still be
+	// honoured (see revocation_expiry.go). The second-resolution boundary
+	// itself is pinned by TestRevocationExpiry_EntrySurvivesTheFinalSecond and
+	// TestRevocationExpiry_EvictionNeverPrecedesDecode; what this assertion is
+	// actually for — an entry whose expiry has genuinely passed is evicted — is
+	// unchanged, and now stated at a resolution the oracle can distinguish.
+	rl.Revoke("token2", time.Now().Add(-time.Minute))
 	if rl.IsRevoked("token2") {
 		t.Error("expired revocation should be evicted and return false")
 	}

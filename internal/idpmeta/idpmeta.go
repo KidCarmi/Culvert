@@ -3,7 +3,7 @@
 // SAML IdP EntityDescriptor (metadata_url) and the OIDC discovery document
 // (issuer/.well-known/openid-configuration).
 //
-// # Why this package exists (CHAOS-71)
+// # Why this package exists (CHAOS-87)
 //
 // Compiling an enabled SAML or OIDC profile used to perform a synchronous
 // outbound fetch against the customer's IdP, with no cache and no fallback, on
@@ -69,7 +69,7 @@ import (
 const (
 	// StaleMaxAge bounds how long a cached document may substitute for a
 	// live fetch. Past it the entry is refused and the caller fails closed
-	// (pre-CHAOS-71 behaviour). Seven days comfortably covers an IdP
+	// (pre-CHAOS-87 behaviour). Seven days comfortably covers an IdP
 	// maintenance window, a weekend outage and an egress misconfiguration,
 	// while staying far short of a key-rotation interval.
 	//
@@ -149,7 +149,7 @@ func docFileName(k string) string { return sourceSum(k) + ".doc" }
 // Put is a no-op returning nil. That is the deliberate posture for a node with
 // no writable state root — the cache is an availability aid, never a
 // correctness dependency, so its absence must degrade to exactly the
-// pre-CHAOS-71 behaviour rather than fail a compile.
+// pre-CHAOS-87 behaviour rather than fail a compile.
 type Store struct {
 	mu      sync.Mutex
 	dir     string
@@ -386,7 +386,7 @@ func (s *Store) Put(profileID string, kind Kind, source string, doc []byte) erro
 // fails to persist. In those cases the OLD source stays authoritative, so
 // retiring at Put time deleted the last-known-good of the document still in
 // service and the next outage took a healthy profile dark: the exact
-// pre-CHAOS-71 failure this package exists to prevent, reintroduced by the
+// pre-CHAOS-87 failure this package exists to prevent, reintroduced by the
 // round that bounded the cache (CodeRabbit + Codex, independently, on the
 // owner-decision round).
 //

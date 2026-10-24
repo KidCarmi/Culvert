@@ -1,4 +1,4 @@
-# IdP metadata and discovery availability (CHAOS-71)
+# IdP metadata and discovery availability (CHAOS-87)
 
 Applies to interactive identity providers — SAML profiles with a
 `metadataUrl`, and OIDC profiles (which fetch
@@ -111,7 +111,7 @@ silent.
 | State | Severity | Meaning |
 |---|---|---|
 | No remote IdP metadata/discovery documents in use | ok | Nothing to report on this node. |
-| *N* of *M* enabled interactive IdP profile(s) have NO live provider | **warn** | **Browser SSO is not working for those profiles.** This is the state that had no surface at all before CHAOS-71. |
+| *N* of *M* enabled interactive IdP profile(s) have NO live provider | **warn** | **Browser SSO is not working for those profiles.** This is the state that had no surface at all before CHAOS-87. |
 | IdP metadata/discovery fetches have been failing for *D* | warn | Authentication still works from cached documents; IdP-side changes are not being picked up. |
 | IdP metadata/discovery healthy | ok | Carries cumulative counts so past transient outages stay visible. |
 

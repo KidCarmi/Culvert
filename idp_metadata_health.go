@@ -1,12 +1,12 @@
 package main
 
-// idp_metadata_health.go — CHAOS-71: the interactive IdP compile path.
+// idp_metadata_health.go — CHAOS-87: the interactive IdP compile path.
 //
 // Why this file exists.
 //
 // Compiling an enabled SAML or OIDC profile performs a synchronous outbound
 // fetch against the customer's identity provider — `fetchSAMLMetadata` for a
-// `metadata_url`, `fetchOIDCDiscovery` for an issuer. Before CHAOS-71 that
+// `metadata_url`, `fetchOIDCDiscovery` for an issuer. Before CHAOS-87 that
 // fetch had no cache, no fallback and no fallback posture, and its failure was
 // reported by exactly one `logger.Printf`. Five consequences, each reproduced
 // against the pre-fix tree (`idp_metadata_chaos_test.go`):
@@ -261,7 +261,7 @@ var fireIdPMetadataAlert = func(detail string) {
 // it was deleted, disabled, switched away from a remote URL, or its candidate
 // mutation was REJECTED and never entered the registry at all.
 //
-// The last case is the one that motivated this (CHAOS-71 round 3). Compilation
+// The last case is the one that motivated this (CHAOS-87 round 3). Compilation
 // records an episode before the transactional Upsert/ReplaceAll decides
 // whether to publish, so a refused candidate could leave an episode behind for
 // a profile that does not exist. Degradation is derived from ELAPSED TIME
@@ -517,7 +517,7 @@ type idpServedDocumentAger interface {
 // symmetric paths (the admission gates, the endpoint validator, the fetch
 // pre-flight, the wall scoped to one fetcher), so it is walled as a PAIR here
 // and derived from IdPType.Interactive() in
-// TestChaos71_EveryInteractiveProviderIsBoundToTheCeiling — a third
+// TestChaos87_EveryInteractiveProviderIsBoundToTheCeiling — a third
 // interactive type must fail the build or the wall, never lose its ceiling
 // quietly. Deliberately NOT a runtime counter: these assertions make the
 // !ok-with-a-remote-source case unreachable, and a gate that cannot fire is
@@ -759,7 +759,7 @@ func resetIdPMetadataHealthForTest() {
 //   - never used → ok, with no claim. A node with no remote interactive IdP
 //     has nothing to report and a permanent row would be noise.
 //   - an enabled profile has no live provider → WARN, and this is the row that
-//     matters most: before CHAOS-71 this state had no surface at all. Browser
+//     matters most: before CHAOS-87 this state had no surface at all. Browser
 //     SSO is not working for those profiles.
 //   - degraded (sustained fetch failures, still serving cached documents) →
 //     warn, NOT fail. Authentication is still working from the last-known-good

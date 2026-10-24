@@ -101,7 +101,7 @@ func TestGet_FutureStampIsStaleNotFresh(t *testing.T) {
 	}
 }
 
-// An inert store (no directory) must degrade to exactly the pre-CHAOS-71
+// An inert store (no directory) must degrade to exactly the pre-CHAOS-87
 // behaviour: Get finds nothing and Put is a silent no-op. The cache is an
 // availability aid, never a correctness dependency, so a node with no writable
 // state root must not have its compiles FAIL because of it.
@@ -588,7 +588,7 @@ func TestServable_AgreesWithGet(t *testing.T) {
 // validate, compile or persist. Round 19 retired the other sources inside Put,
 // so a repoint from S1 to S2 that was then REFUSED left S1 authoritative with
 // its last-known-good already deleted, and the next S1 outage took a healthy
-// profile dark: the pre-CHAOS-71 failure this package exists to prevent,
+// profile dark: the pre-CHAOS-87 failure this package exists to prevent,
 // reintroduced by the round that bounded the cache (CodeRabbit + Codex,
 // independently).
 func TestPut_DoesNotRetireTheInServiceSourcesFallback(t *testing.T) {

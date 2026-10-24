@@ -1,6 +1,6 @@
 package main
 
-// idp_recovery.go — CHAOS-71: the way BACK for an IdP profile that could not
+// idp_recovery.go — CHAOS-87: the way BACK for an IdP profile that could not
 // be compiled.
 //
 // `IdPRegistry.Load` logs a compile error and moves on, leaving the profile
@@ -70,7 +70,7 @@ const (
 // exist and how many of them have a live compiled provider.
 //
 // The gap between the two is the state that had no surface at all before
-// CHAOS-71: a profile the operator enabled, that is persisted, that the admin
+// CHAOS-87: a profile the operator enabled, that is persisted, that the admin
 // UI lists, and that cannot authenticate anybody. It is deliberately computed
 // over INTERACTIVE types only — an enabled LDAP profile that failed to compile
 // is a credential-path concern already covered by the CHAOS-47 `authProbeGate`
@@ -414,7 +414,7 @@ var idpRecoveryRunning atomic.Bool
 // armIdPRecoveryLoop starts the recovery loop unless one is already running.
 //
 // runIdPRecoveryLoop RETURNS once nothing is dark, and it was started exactly
-// once from the startup slice — so before CHAOS-71 round 8 any LATER transition
+// once from the startup slice — so before CHAOS-87 round 8 any LATER transition
 // into dark (notably a staleness-ceiling retirement) had nothing retrying it, and
 // SSO stayed down until a restart or a config change. That is strictly worse than
 // the expired document the retirement exists to stop serving, which is why the

@@ -282,7 +282,7 @@ func validateUpsertProfile(p *IdPProfile) error {
 	}
 	// Security: validate issuer/metadata URLs before compiling.
 	//
-	// STRUCTURAL, deliberately (CHAOS-71 round 3). The resolving form gated
+	// STRUCTURAL, deliberately (CHAOS-87 round 3). The resolving form gated
 	// this admission path, so a resolver outage rejected the admin write and —
 	// via ReplaceAll — aborted the WHOLE CP->DP snapshot, which is this
 	// sweep's headline defect surviving on the one path it was about: the
@@ -351,7 +351,7 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		}
 	}
 	// A refused edit must leave behind no episode of its OWN, and must never
-	// touch the live profile's. Since CHAOS-71 round 6 those are DISTINCT KEYS
+	// touch the live profile's. Since CHAOS-87 round 6 those are DISTINCT KEYS
 	// unless the candidate points at the source already in service, so this is
 	// one comparison rather than a predicate over two profiles — and the
 	// persist path needs it too, not just the compile path: a candidate that
@@ -476,7 +476,7 @@ func effectiveRemoteDocRef(p *IdPProfile) idpDocRef {
 // by each recompile and `culvert_idp_metadata_degraded` can never reach its
 // threshold — strictly worse than the leak this function exists to fix.
 // Mutation-verified: removing it fails every subtest of
-// TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode, including at the
+// TestChaos87_CommittedRepointRetiresThePreviousSourcesEpisode, including at the
 // fixture that establishes an ongoing outage.
 //
 // prevSource is deliberately the profile's raw source rather than its
@@ -513,7 +513,7 @@ func retireEpisodeAfterCommit(profileID string, prev, next idpDocRef) {
 // before either registry writer has decided to publish: a repoint from S1 to
 // S2 whose persist then failed, or whose snapshot a later profile aborted,
 // left S1 authoritative with its last-known-good already deleted, so the next
-// S1 outage took a healthy profile dark — the pre-CHAOS-71 failure the cache
+// S1 outage took a healthy profile dark — the pre-CHAOS-87 failure the cache
 // exists to prevent, reintroduced by the round that bounded the cache
 // (CodeRabbit + Codex, independently). COMPILING IS NOT COMMITTING: this
 // section's own rule from rounds 4 and 6, which had been applied to episode
@@ -617,7 +617,7 @@ func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
 	}
 	if cfg.MetadataURL != "" {
 		// STRUCTURAL, deliberately, and for exactly the reason the OIDC issuer
-		// gate is (CHAOS-71 rounds 2/3). Admission runs BEFORE compilation and
+		// gate is (CHAOS-87 rounds 2/3). Admission runs BEFORE compilation and
 		// the last-known-good cache lives BEHIND it, so a resolving check here
 		// refuses the admin write — and aborts the whole CP->DP snapshot via
 		// ReplaceAll — during a resolver outage this node could have ridden out
@@ -1277,7 +1277,7 @@ func (r *IdPRegistry) HasEnabledOIDC() bool {
 // string alone (absolute, http/https, and — when the host is an IP LITERAL —
 // not a private address).
 //
-// CHAOS-71: validateExternalURL resolves the host, and a resolver that cannot
+// CHAOS-87: validateExternalURL resolves the host, and a resolver that cannot
 // answer makes it fail. Used as an admission gate it therefore turns "DNS is
 // down" into "this IdP does not exist", which is precisely the outage the
 // last-known-good cache exists to survive — the gate ran before the cache

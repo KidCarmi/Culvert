@@ -425,7 +425,10 @@ func TestGenerateTraceparent_MatchesLoneForm(t *testing.T) {
 func TestRequestTracing_SanitisesClientRequestID(t *testing.T) {
 	resetTracingBoundsStateForTest()
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/", http.NoBody)
-	r.Header.Set(headerRequestID, "abc\r\nX-Injected: 1\ndef")
+	// The markers around the CR/LF are deliberately non-hex: the minted id is
+	// lowercase hex, so a hex marker such as "abc" matches a fresh id by chance
+	// (~0.7% of runs) and fails the "nothing survives" assertion below.
+	r.Header.Set(headerRequestID, "xyz\r\nX-Injected: 1\nqrs")
 	rec := httptest.NewRecorder()
 
 	got := setupRequestTracing(rec, r)
@@ -434,7 +437,7 @@ func TestRequestTracing_SanitisesClientRequestID(t *testing.T) {
 		t.Errorf("returned request id %q still carries CR/LF", got)
 	}
 	// Nothing the client chose survives: the value is replaced wholesale.
-	if strings.Contains(got, "X-Injected") || strings.Contains(got, "abc") || strings.Contains(got, "def") {
+	if strings.Contains(got, "X-Injected") || strings.Contains(got, "xyz") || strings.Contains(got, "qrs") {
 		t.Errorf("client-chosen bytes survived into the request id %q", got)
 	}
 	if len(got) != requestIDHexLen {
