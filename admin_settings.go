@@ -486,6 +486,16 @@ var (
 	rewriteSeedLedgerAtLoad           []RewriteRule
 )
 
+// applySessionTimeoutHours applies a persisted session lifetime. Clamp BEFORE
+// converting: a persisted/restored file is not range-checked by the API, and
+// hours*time.Hour wraps int64 past ~2.5M hours, which would land on the
+// 15-minute floor instead of the 168h ceiling.
+func applySessionTimeoutHours(hours int) {
+	if hours > 0 {
+		SetSessionTTL(time.Duration(min(hours, 168)) * time.Hour)
+	}
+}
+
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
@@ -507,9 +517,7 @@ func applyAdminServices(s *AdminSettings) {
 	if s.LogLevel != "" {
 		SetLogLevel(ParseLogLevel(s.LogLevel))
 	}
-	if s.SessionTimeoutHours > 0 {
-		SetSessionTTL(time.Duration(s.SessionTimeoutHours) * time.Hour)
-	}
+	applySessionTimeoutHours(s.SessionTimeoutHours)
 	applyAdminLogStore(s)
 	applyBlocklistFeeds(s)
 	// F3a-2: the signed-feed URL is NO LONGER routed into the legacy additive
@@ -664,7 +672,7 @@ func applyAdminLogStore(s *AdminSettings) {
 // applyAdminNetwork applies UI access, TLS, and network settings.
 func applyAdminNetwork(s *AdminSettings) {
 	if len(s.UIAllowIPs) > 0 {
-		_ = SetUIAllowedCIDRs(s.UIAllowIPs)
+		noteAccessCIDRResult(accessCIDRUIAllow, SetUIAllowedCIDRs(s.UIAllowIPs))
 	}
 	if s.BaseURL != "" {
 		SetProxyBaseURL(s.BaseURL)
@@ -679,7 +687,9 @@ func applyAdminNetwork(s *AdminSettings) {
 		// Authoritative replace (empty list wipes the YAML seed), mirroring the
 		// UpstreamProxiesSaved sentinel. Sentinel-less legacy files keep the
 		// YAML/CLI seed applied by the startup slice.
-		if err := SetTrustedProxyCIDRs(s.TrustedProxyCIDRs); err != nil {
+		err := SetTrustedProxyCIDRs(s.TrustedProxyCIDRs)
+		noteAccessCIDRResult(accessCIDRTrustedProxy, err)
+		if err != nil {
 			logger.Printf("AdminSettings: invalid trusted_proxy_cidrs (%v) — X-Forwarded-For will NOT be trusted", err)
 		}
 	}
@@ -784,8 +794,8 @@ func snapshotAdminEndpoints(s *AdminSettings) {
 	}
 	if syslogConfigured != "" {
 		s.SyslogAddr = syslogConfigured
-		if globalSyslog != nil {
-			s.SyslogFormat = globalSyslog.Format()
+		if sw := syslogHandle(); sw != nil {
+			s.SyslogFormat = sw.Format()
 		}
 	}
 	s.OTLPEndpoint = globalOTLP.Endpoint()
@@ -820,7 +830,7 @@ func snapshotAutoExcludeTunables(s *AdminSettings, override *autoExcludeTunables
 // snapshotBlocklistFeeds copies the live feed set into s. blFeedSyncer is
 // nil until main() runs loadBlocklist, and SaveAdminSettings can run from a
 // detached goroutine (adminSettingsSave) that outlives the caller — so guard
-// against nil rather than deref it, mirroring the globalSyslog guard. The
+// against nil rather than deref it, mirroring the globalSyslogHandle guard. The
 // legacy single-feed fields are intentionally not written anymore (read-only
 // migration path). BlocklistFeedsSaved stays false on a nil syncer so the
 // snapshot's (necessarily empty) list is not treated as authoritative on load.
