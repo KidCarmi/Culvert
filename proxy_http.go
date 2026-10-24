@@ -100,8 +100,9 @@ func (cr *countingReader) Close() error { return cr.r.Close() }
 //     PROPFIND/SEARCH), calls probeRequestBody: a fresh GOROUTINE reading one
 //     byte, a buffered channel and a 200 ms time.Timer, all on the critical path
 //     before the request line can be written. Measured on a bodyless GET
-//     forward: 68 → 79 allocs/op and 9 643 → 10 471 B/op for the same bytes on
-//     the wire (proxy_emptybody_bench_test.go).
+//     forward: 69 → 80 allocs/op and 9 662 → 10 485 B/op for the same bytes on
+//     the wire (proxy_emptybody_bench_test.go, go1.27.3; the +11 delta is the
+//     same on go1.26.10).
 //   - for every other method it does not probe at all: it frames the empty body
 //     as "Transfer-Encoding: chunked", so a client's own "Content-Length: 0"
 //     POST/PUT reaches the origin re-framed as a zero-length chunked body.

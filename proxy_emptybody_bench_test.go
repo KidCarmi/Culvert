@@ -26,17 +26,25 @@ package main
 // called by production and must not be "kept in sync"; their whole value is
 // that they do not move.
 //
-// Measured on this container class (Go 1.26.10, linux/amd64, 4 vCPU Xeon
-// @2.1GHz, real *http.Transport against a local origin over keep-alive),
-// median of n=5 at -benchtime=5000x / 20000x:
+// Measured on this container class (go1.27.3 — the go.mod toolchain pin —
+// linux/amd64, 4 vCPU Xeon @2.1GHz, real *http.Transport against a local origin
+// over keep-alive), median of n=5 at -benchtime=5000x:
 //
 //	                                 ns/op    B/op  allocs/op
-//	EmptyBodyForward_Sentinel        84933    9643      68
-//	EmptyBodyForward_Wrapped         88105   10471      79   (+11 allocs, +828 B)
-//	EmptyBodyForward_POSTSentinel    85578    9658      69
-//	EmptyBodyForward_POSTWrapped     93273   10313      81   (+12 allocs, +655 B)
-//	EmptyBodyInnerWrite_Sentinel      1222     253       6
-//	EmptyBodyInnerWrite_Wrapped       4228     665      13   (+7 allocs, 3.5x ns)
+//	EmptyBodyForward_Sentinel       104335    9662      69
+//	EmptyBodyForward_Wrapped        105422   10485      80   (+11 allocs, +823 B)
+//	EmptyBodyForward_POSTSentinel    97205    9676      70
+//	EmptyBodyForward_POSTWrapped     97191   10341      82   (+12 allocs, +665 B)
+//	EmptyBodyInnerWrite_Sentinel      1088     248       6
+//	EmptyBodyInnerWrite_Wrapped       3734     665      13   (+7 allocs, 3.4x ns)
+//
+// The same benchmarks on go1.26.10 (the pin before #1688) measured the forward
+// pair one allocation lower on BOTH arms — 68/79 and 69/81 — and the inner-leg
+// pair identically at 6/13. So the absolute counts track the toolchain while the
+// DELTAS the skip buys do not move: +11 on a bodyless GET, +12 on a bodyless
+// POST, +7 on the inner leg, on both toolchains. That is why the gates key on a
+// bound with headroom rather than an exact count: a +1 stdlib shift must not
+// turn a gate red on its own.
 //
 // Read the ALLOCATION columns as the signal on the forward pair: ns/op there is
 // loopback- and scheduler-bound on a shared 4-vCPU runner and the two medians

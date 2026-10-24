@@ -287,20 +287,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   nothing. Scope is the sentinel's identity only: every other body, `nil`
   included, behaves as before.
 
-  Measured on go1.26.10, linux/amd64, 4-core Xeon @2.10GHz, medians of n=5,
-  as *before* → **after** — the "before" arm being the frozen pre-change
-  wrapping kept in `proxy_emptybody_bench_test.go` so the comparison stays
-  reproducible in-tree:
+  Measured on go1.27.3 (the `go.mod` toolchain pin), linux/amd64, 4-core Xeon
+  @2.10GHz, medians of n=5, as *before* → **after** — the "before" arm being the
+  frozen pre-change wrapping kept in `proxy_emptybody_bench_test.go` so the
+  comparison stays reproducible in-tree:
 
   | | allocs/op | B/op | ns/op |
   |---|---|---|---|
-  | bodyless `GET` forward | 79 → **68** | 10 471 → **9 643** | loopback-bound |
-  | bodyless `POST` forward | 81 → **69** | 10 313 → **9 658** | loopback-bound |
-  | inspected inner-leg `Request.Write` | 13 → **6** | 665 → **253** | 4 228 → **1 222** |
+  | bodyless `GET` forward | 80 → **69** | 10 485 → **9 662** | loopback-bound |
+  | bodyless `POST` forward | 82 → **70** | 10 341 → **9 676** | loopback-bound |
+  | inspected inner-leg `Request.Write` | 13 → **6** | 665 → **248** | 3 734 → **1 088** |
+
+  The same benchmarks on go1.26.10 (the pin before the go1.27.3 bump) measured
+  the forward pair one allocation lower on **both** arms — 79 → 68 and 81 → 69 —
+  and the inner-leg pair identically. The absolute counts track the toolchain;
+  the saving does not move: **−11** allocations on a bodyless `GET`, **−12** on a
+  bodyless `POST`, **−7** on the inner leg, on both toolchains.
 
   The inner-leg pair is the strongest evidence: it carries no network at all,
-  so its **3.5× CPU** gap is the probe's channel round trip and nothing else,
-  reproduced in all five runs with no overlap. The forward pair's `ns/op` is
+  so its **~3.4× CPU** gap is the probe's channel round trip and nothing else,
+  reproduced in all five runs on both toolchains with no overlap. The forward pair's `ns/op` is
   loopback- and scheduler-bound on a shared 4-vCPU runner and its medians
   overlap across runs, so it is **not** quoted as a result; allocation counts
   are deterministic, which is why `TestBenchGate_EmptyBodyForwardAllocs` and

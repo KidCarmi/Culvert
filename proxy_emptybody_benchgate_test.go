@@ -40,12 +40,16 @@ import (
 
 // TestBenchGate_EmptyBodyForwardAllocs locks in the forward leg's skip.
 //
-// Measured (Go 1.26, linux/amd64, 4 vCPU): 68 allocs/op with the sentinel
-// preserved, 79 allocs/op for the frozen pre-change wrapping — the difference
+// Measured (go1.27.3, linux/amd64, 4 vCPU): 69 allocs/op with the sentinel
+// preserved, 80 allocs/op for the frozen pre-change wrapping — the difference
 // being net/http's probeRequestBody machinery (goroutine, channel, 200 ms
-// timer) plus the two wrapper objects. The bound sits at 73: above the measured
-// value so stdlib churn does not flip the gate, and below the legacy 79 so
-// reintroducing an unconditional wrapper fails here.
+// timer) plus the two wrapper objects. On go1.26.10 the same pair measured
+// 68/79: both arms moved by one, the gap did not.
+//
+// The bound sits at 73, between the two and clear of both: above the measured
+// sentinel value so stdlib churn does not flip the gate (that headroom is what
+// absorbed the go1.26→go1.27 +1), and below the legacy 80 so reintroducing an
+// unconditional wrapper fails here.
 func TestBenchGate_EmptyBodyForwardAllocs(t *testing.T) {
 	const maxAllocs int64 = 73
 
@@ -68,7 +72,8 @@ func TestBenchGate_EmptyBodyForwardAllocs(t *testing.T) {
 
 // TestBenchGate_EmptyBodyInnerWriteAllocs locks in the inspected inner leg's
 // skip. This one carries no network at all, so it is the cleanest view of the
-// cost: measured 6 allocs/op with the sentinel against 13 for the frozen
+// cost, and it did not move across the toolchain bump at all (6/13 on both
+// go1.26.10 and go1.27.3): measured 6 allocs/op with the sentinel against 13 for the frozen
 // wrapping, and 1.2 µs against 4.2 µs of pure CPU. Bound at 9.
 func TestBenchGate_EmptyBodyInnerWriteAllocs(t *testing.T) {
 	const maxAllocs int64 = 9
