@@ -1,0 +1,961 @@
+=== Symbol Results ===
+
+Vulnerability #1: GO-2026-6809
+    Distrust compromised intermediate certificates in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-6809
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.10
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.Verify
+
+Vulnerability #2: GO-2026-6617
+    HTTP/2 server crash due to HPACK encoder race in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6617
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #2: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #3: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #5: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #6: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #7: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #8: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #9: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #10: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #11: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #12: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #13: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #14: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #15: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #16: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #17: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #18: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #19: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #20: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #21: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #22: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #23: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #24: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #25: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #26: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #27: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #28: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #29: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #30: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #31: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #32: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #33: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #34: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #35: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #36: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #37: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #38: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #39: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #40: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #41: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #42: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #43: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #44: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #45: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #46: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #47: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #48: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #49: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #50: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #51: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #52: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #53: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #54: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #55: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #56: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #57: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #58: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #59: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #60: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #61: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #62: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #63: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #64: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #65: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #66: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #67: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #68: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #69: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #70: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #71: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #72: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #73: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #74: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #75: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #76: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #77: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #78: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #79: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #80: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #81: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #82: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #83: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #84: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #85: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #86: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #87: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #88: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #89: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #90: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #91: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #92: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #93: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #94: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #95: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #96: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #97: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #98: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #99: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #100: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #101: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #102: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #103: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #104: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #105: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #106: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #107: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #108: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #109: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #110: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #111: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #112: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #113: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #114: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #115: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #116: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #117: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #118: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #119: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #120: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #121: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #122: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #123: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #124: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #125: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #126: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #127: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #128: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #129: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #130: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #131: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #132: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #133: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #134: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #135: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #136: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #137: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #138: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #139: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+      #140: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+
+Vulnerability #3: GO-2026-6613
+    HTTP/1 server connection desynchronization after 2xx CONNECT response in
+    net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6613
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #2: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #3: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #4: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #5: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #6: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #7: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #8: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #9: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #10: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #11: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #12: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #13: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #14: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #15: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #16: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #17: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #18: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #19: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #20: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #21: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #22: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #23: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #24: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #25: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #26: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #27: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #28: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #29: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #30: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #31: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #32: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #33: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #34: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #35: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #36: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #37: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #38: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #39: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #40: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #41: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #42: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #43: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #44: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+
+Vulnerability #4: GO-2026-6612
+    Double flow control refund on HTTP/2 server streams in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6612
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #2: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #3: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #5: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #6: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #7: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #8: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #9: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #10: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #11: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #12: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #13: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #14: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #15: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #16: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #17: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #18: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #19: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #20: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #21: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #22: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #23: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #24: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #25: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #26: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #27: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #28: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #29: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #30: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #31: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #32: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #33: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #34: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #35: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #36: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #37: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #38: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #39: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #40: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #41: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #42: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #43: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #44: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #45: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #46: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #47: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #48: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #49: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #50: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #51: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #52: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #53: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #54: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #55: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #56: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #57: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #58: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #59: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #60: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #61: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #62: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #63: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #64: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #65: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #66: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #67: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #68: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #69: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #70: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #71: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #72: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #73: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #74: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #75: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #76: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #77: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #78: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #79: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #80: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #81: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #82: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #83: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #84: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #85: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #86: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #87: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #88: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #89: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #90: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #91: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #92: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #93: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #94: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #95: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #96: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #97: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #98: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #99: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #100: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #101: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #102: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #103: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #104: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #105: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #106: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #107: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #108: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #109: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #110: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #111: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #112: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #113: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #114: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #115: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #116: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #117: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #118: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #119: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #120: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #121: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #122: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #123: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #124: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #125: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #126: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #127: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #128: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #129: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #130: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #131: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #132: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #133: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #134: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #135: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #136: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #137: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #138: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #139: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+      #140: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+
+Vulnerability #5: GO-2026-6611
+    Excessive CPU consumption from repeated initial window changes in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6611
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #2: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #3: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #5: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #6: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #7: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #8: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #9: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #10: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #11: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #12: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #13: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #14: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #15: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #16: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #17: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #18: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #19: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #20: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #21: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #22: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #23: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #24: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #25: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #26: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #27: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #28: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #29: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #30: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #31: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #32: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #33: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #34: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #35: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #36: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #37: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #38: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #39: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #40: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #41: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #42: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #43: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #44: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #45: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #46: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #47: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #48: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #49: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #50: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #51: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #52: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #53: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #54: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #55: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #56: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #57: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #58: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #59: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #60: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #61: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #62: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #63: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #64: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #65: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #66: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #67: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #68: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #69: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #70: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #71: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #72: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #73: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #74: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #75: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #76: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #77: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #78: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #79: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #80: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #81: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #82: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #83: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #84: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #85: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #86: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #87: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #88: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #89: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #90: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #91: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #92: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #93: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #94: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #95: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #96: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #97: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #98: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #99: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #100: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #101: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #102: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #103: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #104: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #105: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #106: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #107: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #108: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #109: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #110: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #111: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #112: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #113: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #114: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #115: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #116: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #117: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #118: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #119: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #120: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #121: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #122: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #123: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #124: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #125: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #126: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #127: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #128: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #129: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #130: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #131: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #132: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #133: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #134: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #135: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #136: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #137: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #138: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #139: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+      #140: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+
+Vulnerability #6: GO-2026-6610
+    HTTP/2 transport accepts malformed framing-related headers in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6610
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #2: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+
+Vulnerability #7: GO-2026-6608
+    Memory limit bypass when parsing MIME headers in net/textproto,
+    mime/multipart
+  More info: https://pkg.go.dev/vuln/GO-2026-6608
+  Standard library
+    Found in: net/textproto@go1.26
+    Fixed in: net/textproto@go1.26.9
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls multipart.Reader.ReadForm
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls textproto.Reader.ReadMIMEHeader
+
+Vulnerability #8: GO-2026-6607
+    Reject malformed ECH outer extension references in crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-6607
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.9
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls tls.Conn.HandshakeContext
+      #2: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls tls.Conn.Read
+      #3: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls tls.Conn.Write
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do, which eventually calls tls.Dialer.DialContext
+
+Vulnerability #9: GO-2026-6605
+    HTTP/1 client connection desynchronization after CONNECT rejection in
+    net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6605
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+
+Vulnerability #10: GO-2026-6603
+    HTTP/2 server memory exhaustion due to Trailer headers in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6603
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #2: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+      #3: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+      #5: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #6: internal/server/handlers_rollback.go:24:2: server.init calls releaseproof.init, which eventually calls http.HandleFunc
+      #7: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #8: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Header.Add
+      #9: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #10: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Del
+      #11: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #12: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.Header.Get
+      #13: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #14: internal/health/health.go:362:40: health.probeOnce calls http.NewRequestWithContext
+      #15: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #16: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.ReadResponse
+      #17: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #18: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Request.Write
+      #19: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #20: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.Response.Write
+      #21: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #22: internal/server/server.go:422:16: server.Server.routes calls http.ServeMux.HandleFunc
+      #23: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #24: internal/server/server.go:403:22: server.Server.Close calls http.Server.Close
+      #25: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #26: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+      #27: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #28: internal/server/server.go:367:23: server.Serve calls http.Server.Shutdown
+      #29: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #30: internal/health/health.go:370:36: health.probeOnce calls http.body.Close
+      #31: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #32: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.body.Read
+      #33: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #34: internal/health/health.go:370:36: health.probeOnce calls http.bodyEOFSignal.Close
+      #35: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #36: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.bodyEOFSignal.Read
+      #37: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #38: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bodyLocked.Read
+      #39: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #40: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.bufioFlushWriter.Write
+      #41: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #42: internal/health/health.go:370:36: health.probeOnce calls http.cancelTimerBody.Close
+      #43: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #44: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.cancelTimerBody.Read
+      #45: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #46: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.checkConnErrorWriter.Write
+      #47: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #48: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.chunkWriter.Write
+      #49: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #50: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.connReader.Read
+      #51: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #52: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.expectContinueReader.Close
+      #53: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #54: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.expectContinueReader.Read
+      #55: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #56: internal/health/health.go:370:36: health.probeOnce calls http.gzipReader.Close
+      #57: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #58: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.gzipReader.Read
+      #59: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #60: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2ConnectionError.Error
+      #61: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #62: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+      #63: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #64: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameHeader.String
+      #65: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #66: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+      #67: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #68: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2FrameWriteRequest.String
+      #69: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #70: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2GoAwayError.Error
+      #71: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #72: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2Setting.String
+      #73: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #74: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+      #75: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #76: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2StreamError.Error
+      #77: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #78: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #79: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #80: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+      #81: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #82: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2connError.Error
+      #83: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #84: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2duplicatePseudoHeaderError.Error
+      #85: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #86: internal/health/health.go:370:36: health.probeOnce calls http.http2gzipReader.Close
+      #87: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #88: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2gzipReader.Read
+      #89: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #90: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldNameError.Error
+      #91: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #92: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2headerFieldValueError.Error
+      #93: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #94: internal/ops/orchestrator.go:282:61: ops.Run calls http.http2pseudoHeaderError.Error
+      #95: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #96: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.http2requestBody.Close
+      #97: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #98: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2requestBody.Read
+      #99: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #100: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.http2responseWriter.Write
+      #101: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #102: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.http2responseWriter.WriteString
+      #103: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #104: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.http2stickyErrWriter.Write
+      #105: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #106: internal/health/health.go:370:36: health.probeOnce calls http.http2transportResponseBody.Close
+      #107: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #108: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.http2transportResponseBody.Read
+      #109: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #110: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls http.http2writeData.String
+      #111: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #112: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.loggingConn.Read
+      #113: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #114: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls http.loggingConn.Write
+      #115: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #116: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.maxBytesReader.Close
+      #117: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #118: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.maxBytesReader.Read
+      #119: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #120: internal/auth/auth.go:64:24: auth.NewPolicy calls user.Lookup, which eventually calls http.onceCloseListener.Close
+      #121: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #122: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConn.Read
+      #123: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #124: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+      #125: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #126: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which eventually calls http.persistConnWriter.Write
+      #127: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #128: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which eventually calls http.readTrackingBody.Close
+      #129: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #130: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readTrackingBody.Read
+      #131: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #132: internal/health/health.go:371:22: health.probeOnce calls io.ReadAll, which calls http.readWriteCloserBody.Read
+      #133: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #134: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.ReadFrom
+      #135: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #136: main.go:53:14: culvert.main calls fmt.Println, which eventually calls http.response.Write
+      #137: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #138: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls http.response.WriteString
+      #139: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+      #140: internal/ops/orchestrator.go:282:61: ops.Run calls http.transportReadFromServerError.Error
+
+Vulnerability #11: GO-2026-6600
+    Recognize yield as regexp preceder keyword in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-6600
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.9
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Execute
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.ExecuteTemplate
+
+Vulnerability #12: GO-2026-6599
+    Reset context tracking on consecutive template expressions in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-6599
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.9
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Execute
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.ExecuteTemplate
+
+Vulnerability #13: GO-2026-6218
+    Avoid quadratic complexity in resolvePath in net/url
+  More info: https://pkg.go.dev/vuln/GO-2026-6218
+  Standard library
+    Found in: net/url@go1.26
+    Fixed in: net/url@go1.26.6
+    Example traces found:
+      #1: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do, which eventually calls url.URL.Parse
+
+Vulnerability #14: GO-2026-6091
+    Fix Javascript regexp context tracking in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-6091
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.6
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Execute
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.ExecuteTemplate
+
+Vulnerability #15: GO-2026-6090
+    Limit handshake messages we are willing to accept post-handshake in
+    crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-6090
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.6
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls tls.Conn.HandshakeContext
+      #2: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls tls.Conn.Read
+      #3: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls tls.Conn.Write
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do, which eventually calls tls.Dialer.DialContext
+
+Vulnerability #16: GO-2026-6089
+    Apply ReadHeaderTimeout when doing unencrypted HTTP/2 check in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6089
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.6
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve
+
+Vulnerability #17: GO-2026-5972
+    Enforce maximum recursion depth in encoding/asn1
+  More info: https://pkg.go.dev/vuln/GO-2026-5972
+  Standard library
+    Found in: encoding/asn1@go1.26
+    Fixed in: encoding/asn1@go1.26.6
+    Example traces found:
+      #1: internal/releasetrust/recover.go:70:36: releasetrust.Recover calls releaseproof.NewVerifier, which eventually calls asn1.Unmarshal
+      #2: internal/releasetrust/store.go:194:38: releasetrust.Store.knownAuthorization calls releaseproof.Verifier.VerifyAuthenticity, which eventually calls asn1.UnmarshalWithParams
+
+Vulnerability #18: GO-2026-5856
+    Invoking Encrypted Client Hello privacy leak in crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-5856
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.5
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls tls.Conn.HandshakeContext
+      #2: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls tls.Conn.Read
+      #3: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls tls.Conn.Write
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do, which eventually calls tls.Dialer.DialContext
+
+Vulnerability #19: GO-2026-5039
+    Arbitrary inputs are included in errors without any escaping in
+    net/textproto
+  More info: https://pkg.go.dev/vuln/GO-2026-5039
+  Standard library
+    Found in: net/textproto@go1.26
+    Fixed in: net/textproto@go1.26.4
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls textproto.Reader.ReadMIMEHeader
+
+Vulnerability #20: GO-2026-5037
+    Inefficient candidate hostname parsing in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-5037
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.4
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.Verify
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.VerifyHostname
+      #3: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls x509.HostnameError.Error
+
+Vulnerability #21: GO-2026-5026
+    Invoking failure to reject ASCII-only Punycode-encoded labels in
+    golang.org/x/net/idna
+  More info: https://pkg.go.dev/vuln/GO-2026-5026
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.6
+    Example traces found:
+      #1: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+
+Vulnerability #22: GO-2026-4982
+    Bypass of meta content URL escaping causes XSS in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-4982
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.3
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Execute
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.ExecuteTemplate
+
+Vulnerability #23: GO-2026-4980
+    Escaper bypass leads to XSS in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-4980
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.3
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Execute
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.ExecuteTemplate
+
+Vulnerability #24: GO-2026-4971
+    Panic in Dial and LookupPort when handling NUL byte on Windows in net
+  More info: https://pkg.go.dev/vuln/GO-2026-4971
+  Standard library
+    Found in: net@go1.26
+    Fixed in: net@go1.26.3
+    Example traces found:
+      #1: recover_trust.go:90:39: culvert.agentSocketLive calls net.Dialer.DialContext
+      #2: internal/server/server.go:317:22: server.listen calls net.ListenConfig.Listen
+
+Vulnerability #25: GO-2026-4947
+    Unexpected work during chain building in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4947
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.2
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.Verify
+
+Vulnerability #26: GO-2026-4946
+    Inefficient policy validation in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4946
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.2
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.Verify
+
+Vulnerability #27: GO-2026-4918
+    Infinite loop in HTTP/2 transport when given bad SETTINGS_MAX_FRAME_SIZE in
+    net/http/internal/http2 in golang.org/x/net
+  More info: https://pkg.go.dev/vuln/GO-2026-4918
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.3
+    Example traces found:
+      #1: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do
+
+Vulnerability #28: GO-2026-4870
+    Unauthenticated TLS 1.3 KeyUpdate record can cause persistent connection
+    retention and DoS in crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-4870
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.2
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls tls.Conn.HandshakeContext
+      #2: internal/health/health.go:372:16: health.probeOnce calls io.Copy, which eventually calls tls.Conn.Read
+      #3: internal/ops/oplog.go:168:24: ops.OpLog.write calls fmt.Fprintf, which calls tls.Conn.Write
+      #4: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do, which eventually calls tls.Dialer.DialContext
+
+Vulnerability #29: GO-2026-4866
+    Case-sensitive excludedSubtrees name constraints cause Auth Bypass in
+    crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4866
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.2
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.Verify
+
+Vulnerability #30: GO-2026-4865
+    JsBraceDepth Context Tracking Bugs (XSS) in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-4865
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.2
+    Example traces found:
+      #1: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls template.Error.Error
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Execute
+      #3: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.ExecuteTemplate
+      #4: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Funcs
+      #5: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Parse
+      #6: internal/health/health.go:286:27: health.Probe.Baseline calls fmt.Sprintf, which eventually calls template.context.String
+
+Vulnerability #31: GO-2026-4603
+    URLs in meta content attribute actions are not escaped in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-4603
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.1
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.Execute
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls template.Template.ExecuteTemplate
+
+Vulnerability #32: GO-2026-4602
+    FileInfo can escape from a Root in os
+  More info: https://pkg.go.dev/vuln/GO-2026-4602
+  Standard library
+    Found in: os@go1.26
+    Fixed in: os@go1.26.1
+    Example traces found:
+      #1: internal/journal/journal.go:186:28: journal.Journal.List calls os.ReadDir
+
+Vulnerability #33: GO-2026-4601
+    Incorrect parsing of IPv6 host literals in net/url
+  More info: https://pkg.go.dev/vuln/GO-2026-4601
+  Standard library
+    Found in: net/url@go1.26
+    Fixed in: net/url@go1.26.1
+    Example traces found:
+      #1: internal/config/config.go:353:22: config.validate calls url.Parse
+      #2: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls url.ParseRequestURI
+      #3: internal/health/health.go:366:24: health.probeOnce calls http.Client.Do, which eventually calls url.URL.Parse
+
+Vulnerability #34: GO-2026-4600
+    Panic in name constraint checking for malformed certificates in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4600
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.1
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.Verify
+
+Vulnerability #35: GO-2026-4599
+    Incorrect enforcement of email constraints in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4599
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.1
+    Example traces found:
+      #1: internal/server/server.go:376:21: server.Server.Serve calls http.Server.Serve, which eventually calls x509.Certificate.Verify
+
+Your code is affected by 35 vulnerabilities from the Go standard library.
+This scan also found 11 vulnerabilities in packages you import and 2
+vulnerabilities in modules you require, but your code doesn't appear to call
+these vulnerabilities.
+Use '-show verbose' for more details.
