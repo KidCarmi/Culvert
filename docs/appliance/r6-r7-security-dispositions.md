@@ -121,6 +121,13 @@ That closes ASTRA's R7 binding gap. The image ID E1 observed is now tied, throug
 - Reuse first needs an engine/config/library/signature delta map from that proof to `ea362f9b…`. Only unmatched or changed behaviour then needs an affected check, in the owner-selected R4.
 - E1's exact-`27006cf4` content and outage passes remain credited.
 
+### Follow-up: brotli-libs on `culvert.2` (Deep gate, 2026-10-24)
+
+- **Found by:** the Deep gate's trivy scan of the sidecar built from source on draft PR #1705 (the `culvert/clamav:1.5.4-culvert.2` recipe, Alpine 3.24.2). The DB had refreshed since the 2026-10-23 scan above.
+- **Finding:** `CVE-2026-111497`, **HIGH**, in `brotli-libs` `1.2.0-r1`, fixed in `1.2.1-r0` (present in Alpine v3.24 `main`).
+- **Disposition:** FIXED in source, the same way as musl. `brotli-libs=1.2.1-r0` is pinned and asserted inside the build, and the tag moves to `culvert/clamav:1.5.4-culvert.3`.
+- **What this does not cover:** the shipped OVA `27006cf4` still carries `culvert.1`, and no OVA has been built with `culvert.3`. F-P2 has **not** been run on `culvert.3` bytes, and no reuse is claimed.
+
 ---
 
 ## R7 — OS / kernel applicability on the exact disk (`r7-kernel/`)
