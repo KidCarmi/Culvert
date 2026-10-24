@@ -417,6 +417,75 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The C2 route-metadata index resolved every wildcard admin route to the
+  **public `/` catch-all** (SEC-C2WILDCARD-1). `buildMetadataIndex` classified a
+  Go 1.22 `{name}` pattern as an *exact* path and stored it under its literal
+  pattern text, so a real request path — `/api/support/bundles/csb_…` — never
+  matched it, fell through the prefix list and landed on the SPA shell's entry,
+  which is `Public: true`, `RolePublic`. For all ten such routes (the
+  support-bundle download, sealed-export, delete, manifest and upload-consent
+  surfaces, plus `/api/support/recipients/{name}`) that silently disabled C2
+  role enforcement, the C4 role-divergence observation and the C2c audit-gap
+  check — and because `Lookup` still answered "found", `c2ShadowMissingMetaTotal`
+  never incremented, so nothing showed it in metrics either.
+
+  Not exploitable as it stood: every one of those handlers carries its own
+  handler-level `requireRole`, so what was lost is the second layer, not the
+  only one. The mux itself resolves these patterns correctly; only the mirror
+  did not. The index now keeps wildcard patterns in a segment-matched list,
+  tried after the exact map and before the prefix list, with ServeMux's own
+  semantics — literals byte-for-byte, `{name}` exactly one non-empty segment,
+  `{name...}` the trailing segments, most specific first. Exact lookups and the
+  catch-all fallback are unchanged, and the new matcher cannot over-claim:
+  `/api/support/bundles/` and a path with one segment too many are both
+  refused. `TestC2_MetadataIndex_ResolvesEveryRoute` passed vacuously because it
+  iterates the pattern literals; the new gates substitute a concrete value for
+  each `{…}` segment and were verified failing against the pre-fix index, where
+  10 of 10 routes resolve to `"/"` with `public=true`.
+
+  Resolution for a live request goes through the ESCAPED path. `*http.ServeMux`
+  matches on `EscapedPath()` and unescapes each segment on its own, so a `%2F`
+  stays inside one wildcard value — it routes
+  `/api/support/bundles/foo%2Fbar` to `{id}` with `id="foo/bar"`, while
+  `r.URL.Path` has already turned that into a second segment. Resolving from
+  the decoded path therefore reopened the same hole for one percent-encoded
+  character, which the built index confirmed by answering `("/", public=true)`
+  for all three affected shapes. Matching the raw escaped text would be wrong
+  in the other direction, because `appro%76e` really does reach the literal
+  `approve` route, so each segment is unescaped separately; a malformed escape
+  is left as-is, making the worst case a miss rather than a wrong route. The
+  decoded path still feeds the exact and prefix tiers unchanged.
+
+- Revoking a cluster **enrollment token** left no audit record
+  (SEC-ENROLLAUDIT-1). `DELETE /api/cluster/tokens` destroys cluster trust
+  material, yet it was the one mutation on that route with no `auditEvent`: the
+  POST that mints a token audits, node revocation audits, and the route
+  metadata claimed `"audit delegated"` for a method that had no delegate. With
+  `AuditExpected` false, C2c's runtime audit-gap check could not notice the
+  omission either, and `api/route-classification.yaml` agreed with the wrong
+  answer. An admin-session holder could therefore remove enrollment capability —
+  durably, the store is saved — with nothing recording who did it or when.
+  The handler now emits `enrollment.token_revoked` **after** the store has
+  persisted, so a record cannot claim a revocation that did not survive the
+  write; the metadata and the manifest declare it. `saveConfigVersion` is
+  deliberately still absent — enrollment tokens are outside the rollback
+  surface. The write-failure path is covered too: `DeleteToken()` runs before
+  `Save()`, so a failed store write leaves the token already gone from memory
+  — this node has stopped honouring it whatever the 500 says, and a later
+  successful save makes the deletion durable — which now records a distinct
+  `enrollment.token_revoke_unpersisted` event rather than nothing. The token is
+  not restored; putting live enrollment material back because a disk write
+  failed is the less safe direction, and the 500 already says to retry.
+  Gates include two negative controls (a 404 and a 400 must audit nothing),
+  assert on unique entry content rather than a length delta because the audit
+  ring is bounded, and mint a fresh token hash per invocation so a `-count=2`
+  run cannot satisfy the positive assertion from the previous run's entry.
+
+  Both findings were recorded as R2 and R4 in the 2026-10-17 review and are
+  closed here. Full analysis, plus a review of the 28 open pull requests —
+  including one that flips a fail-closed installer gate to fail-open and four
+  pairs of mutually incompatible remediations of the same defect — is in
+  `docs/engineering/security-reviews/2026-10-18-open-pr-fleet-and-metadata-audit-gaps.md`.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example

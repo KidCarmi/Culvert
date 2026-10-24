@@ -142,9 +142,38 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 		}
 		if err := globalClusterStore.Save(); err != nil {
 			logger.Printf("ClusterDB save error: %v", err)
+			// The token is ALREADY gone from the in-memory store — DeleteToken
+			// ran above — so this node has stopped honouring it whatever the
+			// response says, and a later successful Save persists that
+			// deletion. Answering 500 with no record at all would leave the
+			// only durable trace of the revocation on the next unrelated
+			// write (CWE-778; CodeRabbit, PR #1656). The token is NOT restored
+			// here: putting live enrollment material back because a disk write
+			// failed is the less safe of the two directions, and the 500
+			// already tells the operator to retry.
+			auditEvent(r, "enrollment.token_revoke_unpersisted", sanitizeLog(tokenHash),
+				"cluster enrollment token revoked in memory but the store write failed")
 			http.Error(w, "failed to persist token deletion", http.StatusInternalServerError)
 			return
 		}
+		// SEC-ENROLLAUDIT-1. Destroying cluster trust material was the one
+		// mutation on this route with no audit record: the POST that MINTS a
+		// token audits (apiClusterTokenCreate), and so does node revocation
+		// (apiClusterRevoke), but the DELETE that revokes a token left no
+		// trace of who removed it or when. The route metadata declared
+		// "audit delegated" for this method, which was true of POST and had
+		// no delegate at all here, so C2c's runtime audit-gap check could not
+		// notice either. Emitted only after the store has persisted, so the
+		// record cannot claim a revocation that did not survive the write.
+		//
+		// The hash comes from the query string, so it is sanitised like any
+		// other untrusted value (CWE-117) even though DeleteToken only
+		// returns true for a hash already in the store.
+		auditEvent(r, "enrollment.token_revoked", sanitizeLog(tokenHash),
+			"cluster enrollment token revoked")
+		// No saveConfigVersion: enrollment tokens are deliberately outside
+		// the rollback surface, for the reason recorded on
+		// apiClusterTokenCreate below.
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
