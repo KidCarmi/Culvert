@@ -588,7 +588,7 @@ func TestWall_OperatorContractRenderer_NegativeControls(t *testing.T) {
 // a restart) and non-durable mutations are admin-only under the PR #1545
 // policy table.
 var (
-	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser"}
+	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser", "hasLocalAdministrator", "rosterPersistTarget", "rosterWriteEvidence"}
 	rosterCounterVars     = []string{"rosterPersistRefused", "rosterPersistBestEffort", "rosterNotDurable"}
 )
 
@@ -628,11 +628,38 @@ var rosterRowExceptions = map[string]rosterClass{
 		Reason: "the inventory checkOversizeConfiguredUsernames renders; every consumer is classified"},
 	"hasCredentialCapableProvider": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
 		"existence probe; renders no name, role, count or second-factor posture"},
+	// buildOperatorContract reads the roster facts ONCE per contract and
+	// renders both rows from them (Codex P2 4320228851 on PR #1601), so the
+	// classified producers are rosterDurabilityFacts' own methods.
+	"rosterDurabilityFacts.adminRow": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "the admin_roster_durability row; redactContractForRole replaces it with the contract's " +
+			"precomputed viewerRow below admin (gated by diagnostics_roster_durability_test.go)"},
+	"rosterDurabilityFacts.notDurableAdminRow": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "adminRow's rendering when no roster file is configured; the same row, replaced the same way"},
+	"rosterDurabilityFacts.adminRowAt": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "adminRow's rendering of one rosterRowPrecedence state; the same row, replaced the same way"},
+	"rosterDurabilityFacts.writeFailuresAdminRow": {Kind: rosterRedactedRow, Code: "adminRosterDurabilityCode",
+		Reason: "adminRow's rendering of refused or failed roster writes; the same row, replaced the same way"},
+	"rosterDurabilityFacts.selectRosterRowRank": {Kind: rosterInput, Reason: "walks rosterRowPrecedence; " +
+		"its only callers are the two classified renderings"},
+	"rosterDurabilityFacts.stateActive": {Kind: rosterInput, Reason: "one roster fact per state, for " +
+		"selectRosterRowRank"},
+	"rosterDurabilityFacts.targetStateActive": {Kind: rosterInput, Reason: "stateActive for the file and " +
+		"directory states"},
+	"rosterDurabilityFacts.applyProbe": {Kind: rosterInput, Reason: "copies the live probe's findings into " +
+		"the facts readRosterDurabilityFacts returns"},
+	"rosterDurabilityFacts.viewerRow": {Kind: rosterProbe, Reason: "the viewer rendering itself: fixed " +
+		"constants only, reviewed as safe below admin (SEC-DIAG-ROSTER-1)"},
+	"readRosterDurabilityFacts": {Kind: rosterInput, Reason: "the CHAOS-70 counters, local-admin probe and " +
+		"roster-target load outcome behind admin_roster_durability"},
 }
 
 const (
 	rosterContractRoot = "buildOperatorContract"
 	rosterRedactor     = "redactContractForRole"
+	// rosterFactsType is the roster-derived facts type; its methods render
+	// roster state whatever they read.
+	rosterFactsType = "rosterDurabilityFacts"
 )
 
 // contractReachable returns every function reachable from
@@ -712,6 +739,10 @@ func rosterTaint(idx *contractIndex, reachable map[*contractFunc]bool) map[*cont
 		refs[fn] = contractRefs(idx, fn)
 		if p := rosterPrimitiveIn(fn); p != "" {
 			taint[fn] = "reads " + p
+		} else if strings.HasPrefix(fn.Key, rosterFactsType+".") {
+			// Its receiver IS roster-derived state (readRosterDurabilityFacts'
+			// result), so every method renders roster state.
+			taint[fn] = "renders " + rosterFactsType
 		}
 	}
 	for changed := true; changed; {
@@ -768,7 +799,7 @@ func rosterRowViolations(idx *contractIndex) (violations []string, classifiedSee
 				"classify it in rosterRowExceptions, or record there why its detail is safe below admin")
 		default:
 			classifiedSeen++
-			violations = append(violations, rosterClassViolations(fn, class, redactor)...)
+			violations = append(violations, rosterClassViolations(idx, fn, class, redactor)...)
 		}
 	}
 	for key := range rosterRowExceptions {
@@ -781,10 +812,140 @@ func rosterRowViolations(idx *contractIndex) (violations []string, classifiedSee
 	return violations, classifiedSeen
 }
 
+// returnedRowCodes collects the Code of every row fn can return (Codex P2
+// 4319946930 on PR #1601): each return statement's value is followed — a
+// composite OperatorContractCheck literal's Code, a call into another
+// function or method that returns one (recursively), or a local variable
+// through every assignment to it and every assignment to its Code field.
+// Anything it cannot resolve to a code identifier is reported in unknown, so
+// the check fails closed.
+func returnedRowCodes(idx *contractIndex, fn *contractFunc, seen map[*contractFunc]bool) (codes, unknown []string) {
+	if seen[fn] {
+		return nil, nil
+	}
+	seen[fn] = true
+	add := func(c, u []string) {
+		codes, unknown = append(codes, c...), append(unknown, u...)
+	}
+	inspectOwnBody(fn.Decl.Body, func(n ast.Node) {
+		if ret, ok := n.(*ast.ReturnStmt); ok {
+			for _, res := range ret.Results {
+				add(rowExprCodes(idx, fn, res, seen))
+			}
+		}
+	})
+	return codes, unknown
+}
+
+// inspectOwnBody visits body without descending into function literals,
+// whose returns are not fn's.
+func inspectOwnBody(body ast.Node, visit func(ast.Node)) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		if n != nil {
+			visit(n)
+		}
+		return true
+	})
+}
+
+// rowExprCodes resolves the codes a row-valued expression in fn can carry.
+func rowExprCodes(idx *contractIndex, fn *contractFunc, e ast.Expr, seen map[*contractFunc]bool) (codes, unknown []string) {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return rowExprCodes(idx, fn, x.X, seen)
+	case *ast.CompositeLit:
+		for _, el := range x.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Code" {
+					return codeIdent(kv.Value)
+				}
+			}
+		}
+		return nil, []string{"a row literal without a Code"}
+	case *ast.CallExpr:
+		callees := rowReturningCallees(idx, x)
+		if len(callees) == 0 {
+			return nil, []string{"a row from an unresolved call"}
+		}
+		for _, callee := range callees {
+			c, u := returnedRowCodes(idx, callee, seen)
+			codes, unknown = append(codes, c...), append(unknown, u...)
+		}
+		return codes, unknown
+	case *ast.Ident:
+		return localRowCodes(idx, fn, x.Name, seen)
+	}
+	return nil, []string{"a row from an expression the wall cannot follow"}
+}
+
+// codeIdent is the code a Code field is set to: a named constant, or unknown.
+func codeIdent(e ast.Expr) (codes, unknown []string) {
+	if id, ok := e.(*ast.Ident); ok {
+		return []string{id.Name}, nil
+	}
+	return nil, []string{"a Code that is not a named constant"}
+}
+
+// rowReturningCallees resolves a call to the package functions or methods it
+// may name that return an OperatorContractCheck.
+func rowReturningCallees(idx *contractIndex, call *ast.CallExpr) []*contractFunc {
+	var cands []*contractFunc
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		cands = idx.byName[f.Name]
+	case *ast.SelectorExpr:
+		cands = idx.methods[f.Sel.Name]
+	}
+	var out []*contractFunc
+	for _, c := range cands {
+		if r := c.Decl.Type.Results; r != nil && len(r.List) == 1 {
+			if id, ok := r.List[0].Type.(*ast.Ident); ok && id.Name == "OperatorContractCheck" {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// localRowCodes follows a local row variable through every assignment to it
+// and every assignment to its Code field in fn.
+func localRowCodes(idx *contractIndex, fn *contractFunc, name string, seen map[*contractFunc]bool) (codes, unknown []string) {
+	assigned := false
+	inspectOwnBody(fn.Decl.Body, func(n ast.Node) {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != len(as.Rhs) {
+			return
+		}
+		for i, lhs := range as.Lhs {
+			switch l := lhs.(type) {
+			case *ast.Ident:
+				if l.Name == name {
+					assigned = true
+					c, u := rowExprCodes(idx, fn, as.Rhs[i], seen)
+					codes, unknown = append(codes, c...), append(unknown, u...)
+				}
+			case *ast.SelectorExpr:
+				if id, ok := l.X.(*ast.Ident); ok && id.Name == name && l.Sel.Name == "Code" {
+					c, u := codeIdent(as.Rhs[i])
+					codes, unknown = append(codes, c...), append(unknown, u...)
+				}
+			}
+		}
+	})
+	if !assigned {
+		unknown = append(unknown, "the row variable "+name+", which the wall cannot trace")
+	}
+	return codes, unknown
+}
+
 // rosterClassViolations checks that a classified reader's entry is coherent:
 // a reason is recorded and a redacted row is actually classified by the
-// redactor under the code the row renders.
-func rosterClassViolations(fn *contractFunc, class rosterClass, redactor *contractFunc) []string {
+// redactor under the code the row renders (in its own body or in a function
+// it reaches, such as rosterDurabilityFacts.adminRow).
+func rosterClassViolations(idx *contractIndex, fn *contractFunc, class rosterClass, redactor *contractFunc) []string {
 	where := fn.File + ": " + fn.Key
 	var out []string
 	if strings.TrimSpace(class.Reason) == "" {
@@ -792,9 +953,20 @@ func rosterClassViolations(fn *contractFunc, class rosterClass, redactor *contra
 	}
 	switch class.Kind {
 	case rosterRedactedRow:
-		if class.Code == "" || identUses(fn.Decl.Body, class.Code) == 0 {
+		codes, unknown := returnedRowCodes(idx, fn, map[*contractFunc]bool{})
+		if class.Code == "" || len(codes) == 0 {
 			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but does not render "+
 				"that code", where, class.Code))
+		}
+		for _, c := range codes {
+			if c != class.Code {
+				out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but can return a "+
+					"row coded %s, which the redactor does not handle as this row", where, class.Code, c))
+			}
+		}
+		for _, u := range unknown {
+			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but returns %s",
+				where, class.Code, u))
 		}
 		if redactor != nil && (class.Code == "" || identUses(redactor.Decl.Body, class.Code) == 0) {
 			out = append(out, fmt.Sprintf("%s is classified as a redacted row under %q but %s does not "+
@@ -903,11 +1075,29 @@ func TestWall_RosterConsumers_NegativeControls(t *testing.T) {
 		}
 	}
 
+	// Codex P2 4319946930 on #1601: a branch of a classified row returns a row
+	// under another code. A reachable helper still references the classified
+	// code, so "the code is referenced somewhere" is not enough.
+	for name, inject := range map[string]string{
+		"returns an unclassified literal": "\t\tcase rosterStateOK + 1000:\n" +
+			"\t\t\treturn OperatorContractCheck{Code: \"fixture_unclassified\", Status: diagWarn}\n",
+		"re-codes the row":    "\t\tcase rosterStateOK + 1000:\n\t\t\trow.Code = fixtureOtherCode\n",
+		"returns another row": "\t\tcase rosterStateOK + 1000:\n\t\t\treturn checkStorage()\n",
+	} {
+		const anchor = "\t\tcase rosterStateRefused, rosterStateLoginWritesFailed, rosterStateNotYetVerified, rosterStateOK:\n"
+		recoded := base.clone()
+		recoded.replaceOnce(t, "diagnostics.go", anchor, inject+anchor)
+		v, _ := rosterRowViolations(parseContractSources(t, recoded))
+		if !rosterViolationFor(v, "rosterDurabilityFacts.adminRow is classified as a redacted row") {
+			t.Errorf("an adminRow branch that %s passed the wall; violations=%q", name, v)
+		}
+	}
+
 	// The redactor stops classifying the row's code: the classification alone
 	// must not keep the wall green.
 	unredacted := base.clone()
-	unredacted.replaceOnce(t, "diagnostics.go", "if checks[i].Code != adminUsernameLengthCode {",
-		"if checks[i].Code != \"fixture_other_code\" {")
+	unredacted.replaceOnce(t, "diagnostics.go", "\t\tcase adminUsernameLengthCode:\n",
+		"\t\tcase \"fixture_other_code\":\n")
 	if v, _ := rosterRowViolations(parseContractSources(t, unredacted)); !rosterViolationFor(v,
 		"checkOversizeConfiguredUsernames is classified as a redacted row") {
 		t.Errorf("a classified row that redactContractForRole no longer handles passed the wall; violations=%q", v)
@@ -930,6 +1120,17 @@ func TestWall_RosterConsumers_NegativeControls(t *testing.T) {
 // here.
 var rosterRowProducers = rosterProducerKeys()
 
+// rosterProducerNames are the identifiers a producer is referenced by: its
+// function name, or a method's name ("rosterDurabilityFacts.adminRow" is
+// referenced as adminRow).
+var rosterProducerNames = func() map[string]bool {
+	names := map[string]bool{}
+	for k := range rosterRowProducers {
+		names[k[strings.LastIndexByte(k, '.')+1:]] = true
+	}
+	return names
+}()
+
 func rosterProducerKeys() map[string]bool {
 	keys := map[string]bool{}
 	for k, c := range rosterRowExceptions {
@@ -939,10 +1140,6 @@ func rosterProducerKeys() map[string]bool {
 	}
 	return keys
 }
-
-// rosterProducerCallerExceptions are callers outside the contract walk that
-// may reference a producer, with the reason.
-var rosterProducerCallerExceptions = map[string]string{}
 
 // contractReachableKeys is contractReachable keyed by function key.
 func contractReachableKeys(idx *contractIndex) map[string]bool {
@@ -962,19 +1159,20 @@ func rosterProducerViolations(idx *contractIndex) []string {
 		if reachable[fn.Key] || rosterRowProducers[fn.Key] {
 			continue
 		}
-		if _, ok := rosterProducerCallerExceptions[fn.Key]; ok {
-			continue
-		}
 		violations = append(violations, producerUsesIn(fn)...)
 	}
 	sort.Strings(violations)
 	return violations
 }
 
+// producerUsesIn reports fn's roster-row producer uses. There are no
+// exceptions: the redactor, the one caller outside the contract walk that
+// needs the roster row, uses the viewer row buildOperatorContract rendered
+// from the same single read of the facts (Codex P2 4320228851 on PR #1601).
 func producerUsesIn(fn *contractFunc) []string {
 	var out []string
 	ast.Inspect(fn.Decl.Body, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && rosterRowProducers[id.Name] {
+		if id, ok := n.(*ast.Ident); ok && rosterProducerNames[id.Name] {
 			out = append(out, fn.File+": "+fn.Key+" uses roster-row producer "+id.Name+
 				" outside the operator-contract path, so its output bypasses redactContractForRole")
 		}
@@ -1012,5 +1210,38 @@ func TestWall_RosterRowProducersOnlyReachedViaContract(t *testing.T) {
 	}
 	if !found {
 		t.Error("a handler serializing checkOversizeConfiguredUsernames() directly passed the wall")
+	}
+}
+
+// TestWall_RedactorReadsNoRosterProducer (Codex P2s 4317365515 and
+// 4320228851 on PR #1601): redactContractForRole uses no roster-row producer
+// at all — it swaps in the viewer row the contract already carries — so
+// copying another row's Message, re-reading the facts (a second probe of the
+// roster's storage per request), or rendering the admin row inside it fails
+// the wall.
+func TestWall_RedactorReadsNoRosterProducer(t *testing.T) {
+	base := loadContractSources(t)
+	const anchor = "\t\t\tchecks[i].Message = diagnosticsRedactedUsernameMessage\n"
+	for name, inject := range map[string]string{
+		"copies another roster row's Message": "\t\t\tchecks[i].Message = checkOversizeConfiguredUsernames().Message\n",
+		"reads the facts another way":         "\t\t\tchecks[i].Message = fmt.Sprint(readRosterDurabilityFacts().refused)\n",
+		"keeps the facts for later":           "\t\t\tfacts := readRosterDurabilityFacts\n\t\t\t_ = facts\n",
+		// The right producer through the wrong method: the ADMIN row below admin.
+		"renders the admin row": "\t\t\tchecks[i] = readRosterDurabilityFacts().adminRow()\n",
+		// Re-reading the facts here would probe the roster's storage a second
+		// time per request (Codex P2 4320228851 on PR #1601).
+		"re-reads the facts for the viewer row": "\t\t\tchecks[i] = readRosterDurabilityFacts().viewerRow()\n",
+	} {
+		srcs := base.clone()
+		srcs.replaceOnce(t, "diagnostics.go", anchor, inject)
+		found := false
+		for _, v := range rosterProducerViolations(parseContractSources(t, srcs)) {
+			if strings.Contains(v, "redactContractForRole uses roster-row producer") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: a redactor that %s passed the wall", name, name)
+		}
 	}
 }
