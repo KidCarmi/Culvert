@@ -417,6 +417,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The IDNA memo's value bound (`len(norm) > maxMemoHostLen`, 253 bytes) had no
+  gate on its main-tier axis: an in-limit host that **expands** past the bound
+  through punycode encoding. The long tier's oversize cases exercise the same
+  branch, but nothing pinned that a host arriving inside the limit cannot be
+  retained once encoded, so a tier-specific rewrite of the check could drop it
+  silently; measured with the main-tier check removed, the table retains
+  **969 KB against its 554 KB ceiling**, holding a 668-byte canonical form in a
+  slot. The guard itself is present and correct, so no release was affected and
+  no behavior changes here. The ACE overhead (`xn--`, the delimiter, the
+  encoded deltas) is paid per **label**, so while a dense script compresses — a
+  252-byte CJK host measures 98 bytes as an A-label — one non-ASCII rune in
+  each of many short labels expands instead: `é.é.é…` at 251 bytes normalizes
+  to 671 and `aé.aé.aé…` at 251 bytes to 629, up to ~2.7x the bound, from
+  ordinary authorities well inside the 1 KiB HTTP raw pre-cap.
+  `TestIDNMemo_PunycodeExpansionIsNotRetained` (per-shape retention, with both
+  preconditions asserted so a future `x/net` encoding change fails loudly
+  rather than passing vacuously) and `TestIDNMemo_ExpansionCannotBreachTheCeiling`
+  (the bound under a stream of nothing but expanding hosts) now gate it, and
+  `TestIDNMemo_StoredEntriesRespectTheBound`'s corpus carries the expanding
+  shapes, which it previously reached for only through CJK. Verdicts were
+  never at issue — an expanding host is still normalized, just not retained.
+- `fileutil.AtomicWrite`'s new post-rename `fstat` duplicate was created
+  without `syscall.ForkLock`, so the descriptor was briefly inheritable
+  (CWE-403). `holdInode` ran `syscall.Dup` and then `syscall.CloseOnExec` as
+  two separate calls; `dup(2)` cannot set `FD_CLOEXEC` itself, so between them
+  the duplicate was an ordinary inheritable descriptor. A `fork`+`exec` started
+  in that window by any goroutine would hand the child a **read** descriptor of
+  the file the write is landing — and `AtomicWrite` is the single chokepoint for
+  every durable write in the appliance, the admin roster, data-plane and cluster
+  CA key-at-rest material and enrollment receipts among them.
+
+  No shipped `culvert` binary execs a subprocess, so this was latent rather
+  than reachable; the duplicate is new on every durable write regardless, and
+  the exposure would turn on whenever a future caller does exec. The dup and
+  the flag now run inside `syscall.ForkLock.RLock`, the pattern the `syscall`
+  package documents for descriptor-creating code: `forkExec` takes that lock
+  for writing, so no exec can begin in the window. The failure path releases
+  the lock (holding it would wedge every later exec in the process).
+  Pinned by `TestHoldInode_DuplicateIsCloseOnExec` and
+  `TestHoldInode_ReleasesForkLockWhenTheDupFails`.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
