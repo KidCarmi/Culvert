@@ -9,10 +9,13 @@
 
 ## Executive Summary
 
-**No production-worthy terminology improvements were identified.**
+**No new production-worthy terminology improvement was identified** (one drift in the window is already
+owned by the 2026-10-10 review; see Cross-referenced).
 
-No new backlog ID is minted and no ID is closed, so the open backlog and the Terminology Health Score are
-carried unchanged from the 2026-09-24 report (7.5 audited / 7.9 with the later fixes, same lineage).
+This report mints and closes no backlog ID. The `dec66e1` snapshot already contains the T-57, T-58, T-17
+and T-59 fixes (#1407, #1434, #1444, #1456), which the 2026-09-24 report counted as post-snapshot closures in
+its comparison row, so the state carried here is that row: **23 open IDs / 22 entries** and a Terminology
+Health Score of **7.9** (lineage figure; fully charged 7.8), not the 7.5 of `6ec745d` itself.
 
 ## What was checked
 
@@ -34,13 +37,19 @@ existing name for the same concept:
   on certificate-bearing diagnostics; `expires_at` is used on Culvert-issued records (permits, sessions).
   The distinction is defensible and the fields are shipped wire contracts, so a rename's migration cost is
   not justified. Revisit only if a third meaning appears.
-- **Title Case on legacy buttons** ("Backup Now", "Change Password") versus the glossary's sentence-case
-  rule. The legacy panel is uniformly Title Case; changing individual labels would be cosmetic and would
-  create inconsistency inside that surface. The sentence-case rule applies to the React frontend.
+
+### Cross-referenced (owned by another report)
+
+- **Title Case on new legacy buttons** ("Change Password", "Backup Now", "Start Backup").
+  The glossary's sentence-case rule covers all labels, headings and buttons, not only the React frontend,
+  and the legacy console already uses sentence case elsewhere ("Create bundle", "Apply range"). These
+  additions are real drift. They are recorded, with the window's other Title Case additions, as an open
+  Low item by the 2026-10-10 review (#1595), which owns the finding; this report cross-references it and
+  does not mint a duplicate ID or charge it again.
 
 ## Priority summary
 
-Critical: none · High: none · Medium: none · Low: none.
+Critical: none · High: none · Medium: none · Low: none new (sentence-case drift is owned by the 2026-10-10 review).
 
 ## Limits
 
