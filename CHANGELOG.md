@@ -24,6 +24,54 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The backup archive was published world-readable, and a restore accepted an
+  archive that was never encrypted (CHAOS-82).** Four defects on the two paths
+  that decide who can read a backup and what a restore will install, all
+  recorded with file and line by the CHAOS-74 sweep and unfixed until now.
+
+  `writeBackupTarball` used `os.Create` — 0666 before umask, so **0644** as
+  measured — with no `Chmod` anywhere in the file, while the archive aggregates
+  files that are individually 0600: `cluster-ca.key` (the fleet's MITM-capable
+  CA key), `ui_users.json` (password hashes, TOTP secrets) and
+  `idp_profiles.json` (OIDC client secrets, LDAP bind credentials). Any local
+  account or co-mounted container with read access to `/backup` obtained all of
+  it. The same writer published through a fixed, symlink-following
+  `<out>.tmp`: with the pre-fix writer restored, a symlink planted at that path
+  **received the entire archive** (687 bytes onto a canary outside the output
+  directory) and `runBackup` returned success — an exfiltration primitive for
+  the CA key available to anyone who can create one directory entry in
+  `/backup`. `os.Create` also truncates, so a stale file there was destroyed,
+  and two concurrent backups to one `outPath` shared an inode and interleaved
+  into a corrupt archive reported as success. Publication now goes through
+  `os.CreateTemp` (`O_EXCL` on an unpredictable name) plus an explicit `Chmod`
+  to 0600, which is what makes the mode independent of the process umask;
+  streaming is preserved.
+
+  On the restore side, `loadAndMaybeDecrypt` chose the envelope by magic-byte
+  sniff and consulted the passphrase **only** in the encrypted branch, so a
+  plaintext blob returned before the passphrase was ever examined. Anyone who
+  could write into `/backup` substituted a hand-built unencrypted tarball
+  carrying their own `ui_users.json`; the manifest is self-referential, so every
+  content check still passed and the restore installed an attacker-authored
+  admin roster. A plaintext archive is now refused when a passphrase is
+  configured, symmetric with the KDF-iteration downgrade `backupcrypt` already
+  refuses at the header level. The legitimate plaintext restore — no passphrase
+  supplied, which is what the maintenance agent already does for an unencrypted
+  archive — is unaffected, and is pinned by a negative control.
+
+  Finally, `parseEncHeader` enforced an iteration floor and no ceiling, and
+  `DecryptBlob` fed the archive-declared count straight to `pbkdf2.Key`: with
+  the new `encMaxIters` removed, a declared `0xFFFFFFFF` did not complete in
+  280 s before the harness killed it, against an instant refusal with the
+  ceiling in place — four attacker-controlled header bytes on a blob that could
+  never have authenticated.
+
+  Every gate was mutation-tested against its reverted fix. Two backup-plane
+  rows stay open with their reasoning recorded (§45.5): unbounded restore
+  memory, and `modeFull` silently dropping live artifacts absent from the
+  archive — the latter needs an operator-contract decision because
+  `admin_settings.json` is where `default_action` persists.
+
 - **Built with Go 1.27, the shutdown drain sent no GOAWAY to inspected HTTP/2
   tunnels.** Under `go1.27 && !http2legacy`, x/net v0.61 compiles a different
   `http2.Server` (`server_wrap.go`) that wraps net/http's HTTP/2 server. That
