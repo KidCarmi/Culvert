@@ -296,6 +296,15 @@ const (
 	remoteOutcomeVerdict  = "verdict"
 	remoteOutcomeBudget   = "budget exceeded"
 	remoteOutcomeCapacity = "sidecar at capacity"
+
+	// remoteOutcomeOversize is HTTP 413: the sidecar read the body only as far
+	// as its OWN window and says so rather than answering for a prefix
+	// (CHAOS-88). That is a size limit, not a fault — the same phenomenon the
+	// local path reports via logScanLimitExceeded — so it gets the size-limit
+	// vocabulary in remoteScanOversize instead of being laundered into a
+	// generic sidecar fault. A proxy or load balancer in front of the sidecar
+	// enforcing its own smaller body limit returns the same status for the same
+	// reason, so the classification is right for that topology too.
 	remoteOutcomeOversize = "scan window exceeded"
 	remoteFaultRequest    = "request build error"
 	remoteFaultTransport  = "transport error"
@@ -335,15 +344,7 @@ func (rs *RemoteScanner) scanOnce(ctx context.Context, client *http.Client, base
 			return nil, remoteOutcomeCapacity, "HTTP 429"
 		}
 		if resp.StatusCode == http.StatusRequestEntityTooLarge {
-			// CHAOS-88: the sidecar read the body only as far as its OWN
-			// window and is saying so rather than answering for a prefix. That
-			// is a size limit, not a fault — the same phenomenon the local path
-			// reports via logScanLimitExceeded — so it gets the size-limit
-			// vocabulary below instead of being laundered into a generic
-			// sidecar fault. A proxy or load balancer in front of the sidecar
-			// that enforces its own smaller body limit returns the same status
-			// for the same reason, and classifying it here is correct for that
-			// topology too.
+			// A size limit, not a fault (CHAOS-88; see remoteOutcomeOversize).
 			return nil, remoteOutcomeOversize, "HTTP 413"
 		}
 		// The status code IS the class here: it is bounded (a few dozen

@@ -131,34 +131,11 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(&statScanSvcRequests, 1)
 	start := time.Now()
 
-	// Read body up to the configured max.
-	maxBytes := maxScanBufferBytes()
-	if maxBytes <= 0 {
-		maxBytes = 5 << 20
-	}
-	// maxBytes+1 is the overflow PROBE: one byte past the window is enough to
-	// learn that the body continues, and the engines never see it.
-	data, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	maxBytes := scanSvcWindow()
+	data, truncated, err := readScanWindow(r.Body, maxBytes)
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
-	}
-
-	// CHAOS-88 — a body that filled the window and kept going was only
-	// PARTIALLY read, so anything this process can say about it is a statement
-	// about a prefix. Answering `clean: true` for one switched scanning off for
-	// every byte past the window with no counter, no log line and no alert
-	// anywhere in the fleet: the caller buffers maxScanBufferBytes() in ITS
-	// process from ITS security.max_scan_mb, nothing makes the two windows
-	// agree, and a fleet of 20 MiB proxies in front of a sidecar left at the
-	// 5 MiB default hands this handler bodies it cannot read to the end.
-	//
-	// truncated is the probe byte's only purpose; the engines below never see
-	// it, so what they scan stays byte-identical to LimitReader(body, maxBytes)
-	// and the hash the client computes still describes the bytes it sent.
-	truncated := int64(len(data)) > maxBytes
-	if truncated {
-		data = data[:maxBytes]
 	}
 
 	resp := ScanResponse{Clean: true}
@@ -187,32 +164,11 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The refusal is decided LAST, and only for a prefix that came back CLEAN.
-	//
-	// Ordering is the whole correctness argument. Refusing on size first — the
-	// obvious shape — turns a body whose malware sits INSIDE the window into a
-	// 413, which the client classifies as a size limit and therefore forwards
-	// fail-open: the one case where this handler holds a real block verdict is
-	// the case the refusal would throw away, so the "safe" check would admit
-	// known-malicious content that the unfixed code blocked. A caught verdict
-	// is strictly better news than "I could not read it all", so the verdict
-	// wins and the truncation is not reported at all on a block — the same
-	// asymmetry the local path documents (readScanPrefix: block paths never
-	// forward the tail, so they never signal).
-	//
-	// 413 is the honest status for the remaining case: the entity genuinely is
-	// too large for this scanner. The client classifies it as the size-limit
-	// outcome it is, reusing the LOCAL path's scan-skipped vocabulary rather
-	// than being laundered into a generic sidecar fault (internal/secscan
-	// remote.go remoteScanOversize). A body of exactly maxBytes was read whole
-	// and still gets its real clean verdict.
+	// A truncated read is refused LAST, and only when the prefix came back
+	// clean — see refuseTruncatedScan for why that ordering is the whole
+	// correctness argument.
 	if truncated && resp.Clean {
-		atomic.AddInt64(&statScanSvcOversize, 1)
-		if scanSvcOversizeLogAllowed() {
-			logger.Printf("ScanSvc: refused /scan from %q — body exceeds this scanner's %d-byte window (declared content-length %d); total %d",
-				sanitizeLog(r.RemoteAddr), maxBytes, r.ContentLength, atomic.LoadInt64(&statScanSvcOversize))
-		}
-		http.Error(w, "scan body exceeds this scanner's window", http.StatusRequestEntityTooLarge)
+		refuseTruncatedScan(w, r, maxBytes)
 		return
 	}
 
@@ -220,6 +176,74 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+// scanSvcWindow is this process's scan window, with the engine default as the
+// floor. It is deliberately the SAME maxScanBufferBytes() the in-process path
+// uses, computed in THIS process — which is the root of CHAOS-88: each process
+// derives it from its own security.max_scan_mb and nothing reconciles the
+// caller's window with the sidecar's.
+func scanSvcWindow() int64 {
+	if max := maxScanBufferBytes(); max > 0 {
+		return max
+	}
+	return 5 << 20
+}
+
+// readScanWindow buffers at most limit bytes and reports whether the body
+// continued past them.
+//
+// limit+1 is the overflow PROBE: one byte past the window is all it takes to
+// learn that there is more, and the engines never see it — the returned slice
+// is capped at limit, so what gets scanned stays byte-identical to
+// LimitReader(body, limit) and the hash the client computes still describes the
+// bytes it sent. A read error is propagated, never laundered into a truncation.
+func readScanWindow(body io.Reader, limit int64) (data []byte, truncated bool, err error) {
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(raw)) > limit {
+		return raw[:limit], true, nil
+	}
+	return raw, false, nil
+}
+
+// refuseTruncatedScan answers 413 for a body this process could not read to the
+// end, instead of reporting the prefix's verdict as the whole object's.
+//
+// CHAOS-88. Answering `clean: true` for a partial read switched scanning off
+// for every byte past the window with no counter, no log line and no alert
+// anywhere in the fleet: the caller buffers maxScanBufferBytes() in ITS process
+// from ITS security.max_scan_mb, nothing makes the two windows agree, and a
+// fleet of 20 MiB proxies in front of a sidecar left at the 5 MiB default hands
+// this handler bodies it cannot finish. The caller's own overflow signal
+// correctly does not fire, because the body fit the CALLER's window.
+//
+// ORDERING IS THE WHOLE CORRECTNESS ARGUMENT, and the caller must keep it.
+// Refusing on size BEFORE scanning — the obvious shape — turns a body whose
+// malware sits INSIDE the window into a 413, which the client classifies as a
+// size limit and therefore forwards fail-open: the one case where this handler
+// holds a real block verdict is the case the refusal would throw away, so the
+// "safe" check would admit known-malicious content that the unfixed code
+// blocked. A caught verdict is strictly better news than "I could not read it
+// all", so the verdict wins and truncation is not reported at all on a block —
+// the same asymmetry the local path documents (readScanPrefix: block paths
+// never forward the tail, so they never signal).
+//
+// 413 is the honest status for what remains: the entity genuinely is too large
+// for this scanner. The client classifies it as the size-limit outcome it is
+// and charges the LOCAL path's scan-skipped vocabulary, rather than laundering
+// it into a generic sidecar fault (internal/secscan remote.go
+// remoteScanOversize). A body of exactly limit bytes was read whole and still
+// gets its real clean verdict.
+func refuseTruncatedScan(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	atomic.AddInt64(&statScanSvcOversize, 1)
+	if scanSvcOversizeLogAllowed() {
+		logger.Printf("ScanSvc: refused /scan from %q — body exceeds this scanner's %d-byte window (declared content-length %d); total %d",
+			sanitizeLog(r.RemoteAddr), maxBytes, r.ContentLength, atomic.LoadInt64(&statScanSvcOversize))
+	}
+	http.Error(w, "scan body exceeds this scanner's window", http.StatusRequestEntityTooLarge)
 }
 
 // scanSvcOversizeLogAllowed reports whether enough time has passed to log
