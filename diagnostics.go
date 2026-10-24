@@ -177,6 +177,7 @@ func buildOperatorContract() OperatorContract {
 		checkAuditPersistence(),
 		roster.adminRow(),
 		checkCategoryFeedDB(),
+		checkSessionRevocation(),
 		checkThreatFeed(),
 		checkRequestHistory(),
 		checkBandwidthQoSEnforcement(),

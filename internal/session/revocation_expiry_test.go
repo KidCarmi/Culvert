@@ -403,3 +403,87 @@ func TestRevocationExpiry_ConcurrentReadersAndWriters(t *testing.T) {
 		return ""
 	})
 }
+
+// TestRevocationExpiry_CountingNeverEvictsALiveRevocation is SEC-REVEXP-1's
+// measurement aimed at the eviction site added AFTER it: pruneExpiredLocked,
+// reached by Count and UserCount.
+//
+// Count/UserCount are called from READ-ONLY surfaces — a /metrics scrape, the
+// session_revocation diagnostics row, /api/cluster/revocations — and they
+// DELETE. Using a raw now.After(exp) there evicts during the whole wall-clock
+// second numbered Exp, while Decode still accepts the cookie, so a scrape
+// landing in that second resurrected a logged-out session for the remainder of
+// it (Codex P2, PR #1437). Verified failing against `now.After(exp)`.
+func TestRevocationExpiry_CountingNeverEvictsALiveRevocation(t *testing.T) {
+	initSecret(t)
+	withFreshRevocationList(t)
+
+	observeWithinSecond(t, func(sec int64) string {
+		s := &Session{Sub: "victim", Exp: sec}
+		cookie, b64 := revokeToken(t, s)
+
+		// Control: the cookie is still inside its lifetime, so Decode accepts
+		// it and the revocation is what denies the session.
+		if _, err := Decode(cookie); err == nil {
+			return "logged-out cookie was accepted inside its final second (fail-open)"
+		}
+
+		// The read-only surface. This must not be able to destroy the entry
+		// that is doing the denying.
+		if n := Revoked.Count(); n != 1 {
+			return "Count() evicted a revocation whose cookie Decode still honours"
+		}
+		if !Revoked.IsRevoked(b64) {
+			return "revocation gone after a counting read inside the final second"
+		}
+		return ""
+	})
+}
+
+// TestRevocationExpiry_UserCountingNeverEvictsALiveRevocation is the same
+// property for the account-level map, which has its own accessor and so its
+// own chance to diverge.
+func TestRevocationExpiry_UserCountingNeverEvictsALiveRevocation(t *testing.T) {
+	rl := NewRevocationList()
+
+	observeWithinSecond(t, func(sec int64) string {
+		rl.mu.Lock()
+		rl.users["alice"] = time.Unix(sec, 0) // the current second, truncated
+		rl.mu.Unlock()
+
+		if n := rl.UserCount(); n != 1 {
+			return "UserCount() evicted an account revocation inside its final second"
+		}
+		if !rl.IsUserRevoked("alice") {
+			return "account revocation gone after a counting read inside the final second"
+		}
+		return ""
+	})
+}
+
+// CONTROL. The prune must still collect a GENUINELY expired entry — the whole
+// reason pruneExpiredLocked exists is that expiry is otherwise lazy and an
+// entry on a standalone node would sit in the map for the life of the process,
+// making the "currently in force" gauges wrong. The cheapest way to pass the
+// two gates above is to stop pruning at all.
+func TestRevocationExpiry_CountingStillCollectsExpiredEntries(t *testing.T) {
+	rl := NewRevocationList()
+	past := time.Now().Add(-2 * time.Second)
+	rl.Revoke("stale-token", past)
+	rl.mu.Lock()
+	rl.users["stale-user"] = past
+	rl.mu.Unlock()
+
+	if n := rl.Count(); n != 0 {
+		t.Errorf("Count() = %d, want 0: an expired token revocation was not collected", n)
+	}
+	if n := rl.UserCount(); n != 0 {
+		t.Errorf("UserCount() = %d, want 0: an expired account revocation was not collected", n)
+	}
+	rl.mu.Lock()
+	nTok, nUsr := len(rl.tokens), len(rl.users)
+	rl.mu.Unlock()
+	if nTok != 0 || nUsr != 0 {
+		t.Errorf("entries left in the maps after counting: tokens=%d users=%d", nTok, nUsr)
+	}
+}
