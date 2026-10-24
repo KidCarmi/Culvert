@@ -93,11 +93,38 @@ const liveCompositionFile = "mcp_live_startup.go"
 // types only — never the live-executor construction symbols).
 const liveGateFile = "mcp_live_gate.go"
 
+// peerRefreshFile is the governed operator peer-refresh path (blocker #11, §7). It imports the
+// execution package for ONE thing: Discovery, the authenticated tools/list read that turns an
+// operator-declared catalog record into a peer-observed one.
+//
+// It is admitted here rather than exempted, and it is admitted on a STRICTER rule than any other
+// importer: peerRefreshSymbols below is an ALLOWLIST, so this file may name exactly Discovery,
+// its constructor and the caller interface the constructor takes — and nothing else in the
+// package, ever. The other importers are governed by a denylist, which admits any symbol nobody
+// thought to forbid; this one cannot grow that way.
+//
+// Why it must use the production upstream client at all: a freshness claim gathered over a
+// weaker transport is not a freshness claim. Destination policy, the pinned destination, TLS ≥
+// 1.2 and SPKI verification are what make the observed identity mean anything, so the refresh
+// dials through the SAME constructor the live tier does. It composes no executor, assigns no
+// Deps.Executor, and touches no arming primitive — each pinned by its own gate in this file.
+const peerRefreshFile = "mcp_peer_refresh.go"
+
+// peerRefreshSymbols is the EXACT set of execution-package symbols peerRefreshFile may name.
+// Discovery performs a protocol-level tools/list read; it is not the guarded-execution plane and
+// carries no tool-call capability.
+var peerRefreshSymbols = map[string]bool{
+	"NewDiscovery":   true,
+	"Discovery":      true,
+	"UpstreamCaller": true, // the seam's type — the caller INTERFACE, not an executor
+}
+
 // execImporters is the exact set of production files permitted to import the execution package.
 var execImporters = map[string]bool{
 	shadowCompositionFile: true,
 	liveCompositionFile:   true,
 	liveGateFile:          true,
+	peerRefreshFile:       true, // Discovery only — see peerRefreshSymbols
 }
 
 // execAssigners is the exact set of production files permitted to assign runtime.Deps.Executor.
@@ -256,6 +283,37 @@ func TestExecPosture_LiveExecutorConstructedOnlyByLiveComposition(t *testing.T) 
 			continue // this file does not import the execution package
 		}
 		fset := pf.fset
+		// The peer-refresh path is governed by an ALLOWLIST instead: it may name Discovery and
+		// nothing else, which is strictly narrower than the denylist below.
+		if filepath.Base(pf.path) == peerRefreshFile {
+			named := 0
+			ast.Inspect(pf.file, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				x, ok := sel.X.(*ast.Ident)
+				if !ok || x.Name != local {
+					return true
+				}
+				named++
+				if !peerRefreshSymbols[sel.Sel.Name] {
+					t.Errorf("%s: %s names %s.%s, which is not on the peer-refresh allowlist.\n"+
+						"The governed refresh may reach Discovery — an authenticated tools/list READ "+
+						"— and nothing else in the execution package. Observing a peer must never "+
+						"become a route to the guarded-execution plane.",
+						fset.Position(sel.Pos()), peerRefreshFile, local, sel.Sel.Name)
+				}
+				return true
+			})
+			if named == 0 {
+				t.Errorf("%s imports the execution package and names nothing from it. Either the "+
+					"discovery path moved — in which case move this entry with it — or the import "+
+					"is dead and must go; an unused import here quietly widens the composition set.",
+					peerRefreshFile)
+			}
+			continue
+		}
 		ast.Inspect(pf.file, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
