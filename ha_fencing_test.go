@@ -206,6 +206,7 @@ func TestDPObserveEpoch_Ratchet(t *testing.T) {
 }
 
 func TestApplyConfigSnapshot_RejectsStaleEpoch(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
 	dpLastSeenEpoch.Store(10)

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,6 +90,60 @@ func truncateForAudit(s string) string {
 	if len(s) <= loginAuditActorMax {
 		return s
 	}
+	return fmt.Sprintf("%s…[truncated, %d bytes]", s[:auditCut(s)], len(s))
+}
+
+// boundAuditIdentity is truncateForAudit for an AUTHENTICATED identity rendered
+// into an audit field (AuditEntry.Actor, or the account named as the Object).
+// A prefix plus the original length is not enough there: two distinct
+// configured accounts that share the first loginAuditActorMax bytes and the
+// total length would render identically, and their audit trails would merge.
+// The marker therefore also carries a short stable digest of the full name, so
+// the bounded renderings stay distinguishable and an operator can match an
+// entry to an account by recomputing it. It is a RENDERING only — never compare
+// it for authorization; the full principal is auditActor's.
+func boundAuditIdentity(s string) string {
+	if len(s) <= loginAuditActorMax {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%s…[truncated, %d bytes, sha256:%x]", s[:auditCut(s)], len(s), sum[:8])
+}
+
+// maxAuditActorIPLen is the longest textual IP address (an IPv4-mapped IPv6
+// literal) that boundAuditActor keeps verbatim as the "@<ip>" suffix.
+const maxAuditActorIPLen = len("ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255")
+
+// boundAuditActor renders an AuditEntry.Actor for the audit ring. It is the
+// ONE place the CHAOS-63 actor bound is applied: addAuditEntry (behind auditAdd)
+// calls it for every entry, so no producer — auditEventDiffID, the release
+// DispatchService, the PAC lifecycle, HA, cluster, CDR or any future one — can
+// retain an oversize identity by building its AuditEntry directly.
+//
+// Producers hand it the FULL principal (auditActor's "name@ip", sessionAdmin's
+// name, or a fixed system actor). When the value ends in "@<ip>" only the name
+// is bounded, so the attributed client address stays readable and an oversize
+// name renders exactly as boundAuditIdentity renders it in an Object field;
+// any other oversize value is bounded whole. Either way the result is bounded
+// and two distinct oversize identities stay distinguishable (the digest). The
+// value this returns is display-only: authorization and identity comparisons
+// use the unbounded principal, never this rendering.
+func boundAuditActor(actor string) string {
+	if len(actor) <= loginAuditActorMax {
+		return actor
+	}
+	if at := strings.LastIndexByte(actor, '@'); at >= 0 {
+		if ip := actor[at+1:]; len(ip) <= maxAuditActorIPLen && net.ParseIP(ip) != nil {
+			return boundAuditIdentity(actor[:at]) + "@" + ip
+		}
+	}
+	return boundAuditIdentity(actor)
+}
+
+// auditCut returns the byte offset at which an oversize s is clamped to
+// loginAuditActorMax on a UTF-8 rune boundary. Callers guarantee
+// len(s) > loginAuditActorMax.
+func auditCut(s string) int {
 	// Same bounded rune-boundary search as lockout.boundUsername: a rune is at
 	// most 4 bytes, and falling back to the raw cut for input that is not valid
 	// UTF-8 keeps the result bounded and deterministic.
@@ -100,7 +157,7 @@ func truncateForAudit(s string) string {
 	if cut == 0 || !utf8.RuneStart(s[cut]) {
 		cut = loginAuditActorMax
 	}
-	return fmt.Sprintf("%s…[truncated, %d bytes]", s[:cut], len(s))
+	return cut
 }
 
 // rejectOversizeLoginUser refuses a login whose username exceeds
