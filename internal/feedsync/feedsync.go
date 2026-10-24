@@ -532,8 +532,13 @@ func (fs *Syncer) syncRound() bool {
 	if class, why := fs.spaceRefusal(len(entries)); class != "" {
 		fs.noteFailure(class)
 		coverage := "the previous category data keeps serving"
-		if fs.StoreEmpty() {
+		switch {
+		case fs.StoreEmpty():
 			coverage = "no community category data is loaded yet (admin-managed categories only)"
+		case !fs.ImportComplete():
+			// A failed partial write left the store uncertified: what serves is
+			// a partial mix, not "the previous category data".
+			coverage = "the store holds an incomplete import, so lookups may return a partial set of categories"
 		}
 		obs.Printf("FeedSync: write REFUSED (%s): %s; %s", class, why, coverage)
 		return false

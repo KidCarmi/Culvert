@@ -26936,7 +26936,7 @@
     },
     "/api/urlcat/feed-status": {
       "get": {
-        "description": "Freshness and failure counts for the UT1 community feed and the SaaS category feed (previously visible only via /metrics).",
+        "description": "Freshness and failure counts for the UT1 community feed and the SaaS category feed (previously visible only via /metrics). entries and lastSync describe the last SUCCESSFUL (certified) import and are historical: they are not reset while a later import is in progress, has failed partway, or was abandoned, so they do not say what the store is serving now. The current coverage and recovery state of the community store (incomplete import, deferred sync, restart required) is the category_feed_db row of GET /api/diagnostics.",
         "operationId": "getURLCatFeedStatus",
         "responses": {
           "200": {
