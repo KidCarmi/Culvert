@@ -402,7 +402,10 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			if session.IsWriteFenced(err) {
 				noteRevocationPersistRefused(1)
 			} else {
-				logger.Printf("Session: failed to persist user revocation for %q: %v", sanitizeLog(username), err)
+				// CWE-117: username was already sanitised and `err` was not —
+				// the SEC-SOCKS5-LOG-1 shape exactly, where a sanitised argument
+				// sits beside a raw one that can re-emit the same bytes.
+				logger.Printf("Session: failed to persist user revocation for %q: %q", sanitizeLog(username), sanitizeLog(err.Error()))
 			}
 		}
 		auditEvent(r, "auth.users.delete", username, "")

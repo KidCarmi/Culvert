@@ -176,7 +176,12 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 		if session.IsWriteFenced(err) {
 			noteRevocationPersistRefused(1)
 		} else {
-			logger.Printf("Session: failed to persist revocations: %v", err)
+			// CWE-117: the error is wrapped from json.Marshal over a map whose
+			// KEYS are request-supplied cookie tokens, so CodeQL traces it as
+			// tainted and the repo convention is to make the sanitiser visible
+			// at the call site. Sanitising one argument does not sanitise the
+			// call (SEC-SOCKS5-LOG-1).
+			logger.Printf("Session: failed to persist revocations: %q", sanitizeLog(err.Error()))
 		}
 	}
 }

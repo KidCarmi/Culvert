@@ -786,7 +786,10 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 		}
 		// Onset only. While degraded the counter carries the magnitude.
 		if !failing {
-			logger.Printf("%s: failed to persist merged revocations: %v", who, err)
+			// CWE-117: as in session.go, the error is wrapped from a marshal
+			// over request-supplied token keys. `who` is a caller-chosen
+			// constant, not request data.
+			logger.Printf("%s: failed to persist merged revocations: %q", who, sanitizeLog(err.Error()))
 		}
 		return added
 	}
