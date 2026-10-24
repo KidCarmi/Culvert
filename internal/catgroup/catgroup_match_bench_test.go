@@ -18,11 +18,11 @@ import (
 	"testing"
 )
 
-// benchStore builds a store of n groups, each holding catsPerGroup categories,
+// matchBenchStore builds a store of n groups, each holding catsPerGroup categories,
 // and returns it with the ID and name of a group in the MIDDLE of the set (so
 // an ID lookup that scans pays about half the set, the average case rather than
 // the best or the worst).
-func benchStore(tb testing.TB, n, catsPerGroup int) (s *Store, midID, midName string) {
+func matchBenchStore(tb testing.TB, n, catsPerGroup int) (s *Store, midID, midName string) {
 	tb.Helper()
 	s = New()
 	groups := make([]Group, n)
@@ -42,16 +42,16 @@ func benchStore(tb testing.TB, n, catsPerGroup int) (s *Store, midID, midName st
 	return s, fmt.Sprintf("gid-%08d", mid), fmt.Sprintf("group-%d", mid)
 }
 
-// benchGroupCounts is the admin-set sizing swept below. 8 is a small posture,
+// matchBenchGroupCounts is the admin-set sizing swept below. 8 is a small posture,
 // 64 a large one, 256 the ceiling a big multi-tenant deployment reaches.
-var benchGroupCounts = []int{8, 64, 256}
+var matchBenchGroupCounts = []int{8, 64, 256}
 
 // BenchmarkMatchesCategoryByID_Hit measures the production path: a rule whose
 // DestCategoryGroupID resolves. The host category is the group's FIRST
 // category, so a set probe hits.
 func BenchmarkMatchesCategoryByID_Hit(b *testing.B) {
-	for _, n := range benchGroupCounts {
-		s, id, _ := benchStore(b, n, 12)
+	for _, n := range matchBenchGroupCounts {
+		s, id, _ := matchBenchStore(b, n, 12)
 		cat := fmt.Sprintf("category-%d-0", n/2)
 		b.Run(fmt.Sprintf("groups=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
@@ -68,8 +68,8 @@ func BenchmarkMatchesCategoryByID_Hit(b *testing.B) {
 // BenchmarkMatchesCategoryByID_HitParallel is the row that matters: it puts the
 // same op on every core, the shape a gateway under load is in.
 func BenchmarkMatchesCategoryByID_HitParallel(b *testing.B) {
-	for _, n := range benchGroupCounts {
-		s, id, _ := benchStore(b, n, 12)
+	for _, n := range matchBenchGroupCounts {
+		s, id, _ := matchBenchStore(b, n, 12)
 		cat := fmt.Sprintf("category-%d-0", n/2)
 		b.Run(fmt.Sprintf("groups=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
@@ -89,8 +89,8 @@ func BenchmarkMatchesCategoryByID_HitParallel(b *testing.B) {
 // case, which is also the ID path's WORST case: no group carries the id, so a
 // scan cannot stop early and the caller then falls back to the name path.
 func BenchmarkMatchesCategoryByID_Miss(b *testing.B) {
-	for _, n := range benchGroupCounts {
-		s, _, _ := benchStore(b, n, 12)
+	for _, n := range matchBenchGroupCounts {
+		s, _, _ := matchBenchStore(b, n, 12)
 		b.Run(fmt.Sprintf("groups=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -107,7 +107,7 @@ func BenchmarkMatchesCategoryByID_Miss(b *testing.B) {
 // what a rule with no DestCategoryGroupID reaches and what package main's
 // BenchmarkPolicyEvaluate_CategoryGroupRulesParallel exercises today.
 func BenchmarkMatchesCategory_NameParallel(b *testing.B) {
-	s, _, name := benchStore(b, 64, 12)
+	s, _, name := matchBenchStore(b, 64, 12)
 	cat := "category-32-0"
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -124,7 +124,7 @@ func BenchmarkMatchesCategory_NameParallel(b *testing.B) {
 // shape a rule referencing a deleted group has, and the one the empty-store
 // policy benchmark in package main measures.
 func BenchmarkMatchesCategory_UnknownNameParallel(b *testing.B) {
-	s, _, _ := benchStore(b, 64, 12)
+	s, _, _ := matchBenchStore(b, 64, 12)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {

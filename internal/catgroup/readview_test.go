@@ -257,10 +257,13 @@ func rvAssignsGroups(x *ast.AssignStmt) bool {
 	return false
 }
 
-// rvIsPublishCall reports whether c is a call to publishLocked.
+// rvIsPublishCall reports whether c publishes the view: a direct publishLocked
+// call, or bumpRevLocked, the content-mutation chokepoint that ends with
+// publishLocked. TestReadView_ChokepointPublishes pins that second half, so
+// counting bumpRevLocked here cannot make the wall vacuous.
 func rvIsPublishCall(c *ast.CallExpr) bool {
 	sel, ok := c.Fun.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "publishLocked"
+	return ok && (sel.Sel.Name == "publishLocked" || sel.Sel.Name == "bumpRevLocked")
 }
 
 // rvIsGroupsDelete reports whether c is `delete(<recv>.groups, k)`.
@@ -345,8 +348,47 @@ func rvPackageWriters(t *testing.T) (writers, publishers []string) {
 	return writers, publishers
 }
 
+// TestReadView_ChokepointPublishes requires bumpRevLocked — which every group
+// writer calls instead of a bare s.rev.Add(1) (catgroup_byid_index_test.go
+// pins that) — to publish the view. Without it, rvIsPublishCall's acceptance of
+// bumpRevLocked would let every writer pass the wall below while publishing
+// nothing.
+func TestReadView_ChokepointPublishes(t *testing.T) {
+	src, err := os.ReadFile("catgroup.go")
+	if err != nil {
+		t.Fatalf("read catgroup.go: %v", err)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "catgroup.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || fn.Name.Name != "bumpRevLocked" {
+			continue
+		}
+		direct := false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "publishLocked" {
+					direct = true
+				}
+			}
+			return true
+		})
+		if !direct {
+			t.Fatal("bumpRevLocked no longer calls publishLocked: every writer that relies on the " +
+				"chokepoint would advance the revision and rebuild byID while the policy path " +
+				"kept probing the old view")
+		}
+		return
+	}
+	t.Fatal("not vacuous check: bumpRevLocked not found in catgroup.go")
+}
+
 // TestReadView_EveryWriterPublishes requires every function that writes the
-// group tree to publish the view before it returns.
+// group tree to publish the view before it returns, directly or through the
+// bumpRevLocked chokepoint.
 func TestReadView_EveryWriterPublishes(t *testing.T) {
 	writers, publishers := rvPackageWriters(t)
 	if len(writers) < 5 {
@@ -358,7 +400,7 @@ func TestReadView_EveryWriterPublishes(t *testing.T) {
 	}
 	for _, w := range writers {
 		if !published[w] {
-			t.Errorf("%s writes the group tree but never calls publishLocked: the policy "+
+			t.Errorf("%s writes the group tree but never publishes (publishLocked/bumpRevLocked): the policy "+
 				"path would keep probing the old view, so a group it just changed would "+
 				"silently never match", w)
 		}
