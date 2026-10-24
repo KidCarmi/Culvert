@@ -21,6 +21,16 @@ package main
 // many ServeConn calls); per-conn config is derived per call, only the
 // mutex-guarded activeConns map is shared.
 //
+// Go 1.27: x/net v0.61 compiles a DIFFERENT server under `go1.27 && !http2legacy`
+// (http2/server_wrap.go) that wraps net/http's HTTP/2 server. There, ServeConn with
+// a non-nil BaseConfig serves through a one-off COPY of that http.Server, so
+// base.Shutdown never reaches the conn and no GOAWAY is sent; only a nil
+// BaseConfig serves through the serve func bound to base. The original server, by
+// contrast, reads MaxHeaderBytes only from BaseConfig. serveConn therefore picks
+// BaseConfig per implementation (h2InspectServeBaseConfig, build-constrained
+// exactly as x/net selects its file) so every tunnel gets BOTH the GOAWAY and the
+// caps on either toolchain.
+//
 // Because base.Shutdown here closes nothing (the base owns no listeners/conns) and
 // the per-conn graceful path has no forced timeout, a never-ending in-flight stream
 // (SSE, gRPC server-streaming, multi-GB download) would hold its conn — and thus
@@ -90,10 +100,14 @@ func warnH2InspectFallbackOnce() {
 func newH2InspectServer() *h2InspectShared {
 	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	srv := &http2.Server{
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 		MaxConcurrentStreams: h2MaxConcurrentStreams,
-		IdleTimeout:          tunnelIdleTimeout,
-		WriteByteTimeout:     h2ConnWriteByteTimeout,
-		MaxReadFrameSize:     h2MaxReadFrameSize,
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
+		IdleTimeout: tunnelIdleTimeout, //nolint:staticcheck // SA1019 bridge, see lint:ignore above
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
+		WriteByteTimeout: h2ConnWriteByteTimeout, //nolint:staticcheck // SA1019 bridge, see lint:ignore above
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
+		MaxReadFrameSize: h2MaxReadFrameSize, //nolint:staticcheck // SA1019 bridge, see lint:ignore above
 	}
 	base := &http.Server{MaxHeaderBytes: h2MaxHeaderBytes, ReadHeaderTimeout: h2ConnWriteByteTimeout}
 	// ConfigureServer sets srv.state and wires base.RegisterOnShutdown ->
@@ -107,6 +121,23 @@ func newH2InspectServer() *h2InspectShared {
 		logger.Printf("SSL_INSPECT(h2) ConfigureServer: %v", err)
 	}
 	return &h2InspectShared{srv: srv, base: base}
+}
+
+// serveConn serves one inspected-H2 client leg on the shared server and blocks
+// until the conn is done (client close, GOAWAY drain, or the backstop force-close).
+// ctx is the per-tunnel base context for every stream. This is the ONLY place that
+// calls ServeConn, so production and the drain/caps tests exercise the same wiring.
+func (sh *h2InspectShared) serveConn(ctx context.Context, c net.Conn, h http.Handler) {
+	// Both directives name the same reviewed SA1019 bridge: staticcheck honors
+	// lint:ignore, golangci-lint honors only nolint (pre-existing bridge lines are
+	// quiet there only because --new-from-rev skips unchanged lines). net/http has no
+	// ServeConn equivalent for an already-accepted conn.
+	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
+	sh.srv.ServeConn(c, &http2.ServeConnOpts{ //nolint:staticcheck // SA1019 bridge, see lint:ignore above
+		Context:    ctx,
+		Handler:    h,
+		BaseConfig: h2InspectServeBaseConfig(sh.base),
+	})
 }
 
 // initH2InspectServer eagerly builds the shared server at startup. Called once from

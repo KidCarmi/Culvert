@@ -60,6 +60,7 @@ func TestPolicyStore_ReplaceAll_DropsSubjectMatch(t *testing.T) {
 
 // Path 2 — cluster Control-Plane → Data-Plane sync (applyConfigSnapshot).
 func TestApplyConfigSnapshot_DropsSubjectMatch(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	withFreshPolicyStore(t)
 	applyConfigSnapshot(ConfigSnapshot{
 		PolicyRules: []PolicyRule{

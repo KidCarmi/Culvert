@@ -92,7 +92,7 @@ func captureDPCertAlerts(t *testing.T) *alertCapture {
 	captured := &alertCapture{}
 	startupAlertFire = func(event string, p AlertPayload) {
 		captured.mu.Lock()
-		captured.alerts = append(captured.alerts, queuedStartupAlert{event, p})
+		captured.alerts = append(captured.alerts, queuedStartupAlert{event: event, payload: p})
 		captured.mu.Unlock()
 	}
 	dpCertExpiryAlert.mu.Lock()
