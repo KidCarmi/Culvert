@@ -36,6 +36,9 @@ func TestInstallScript_SecretAlreadySet_EmptyValuesAreNotSet(t *testing.T) {
 		{"empty quotes with inline comment", "CULVERT_CA_PASSPHRASE=\"\" # not set\n", false},
 		{"quoted value with inline comment", "CULVERT_CA_PASSPHRASE=\"abcdef123456\" # note\n", true},
 		{"commented out", "# CULVERT_CA_PASSPHRASE=abcdef123456\n", false},
+		{"absent while other vars set", "CULVERT_LOG_PASSPHRASE=abcdef123456\r\nOTHER=x\n", false},
+		{"empty CRLF before a set var", "CULVERT_CA_PASSPHRASE=\r\nCULVERT_LOG_PASSPHRASE=abcdef123456\r\n", false},
+		{"set CRLF after an empty var", "CULVERT_LOG_PASSPHRASE=\r\nCULVERT_CA_PASSPHRASE=abcdef123456\r\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
