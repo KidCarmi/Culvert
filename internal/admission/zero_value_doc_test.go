@@ -128,11 +128,12 @@ func TestZeroValueResidual_DocumentMatchesTheEngine(t *testing.T) {
 	// reported "no panic" for everything would satisfy a table whose rows all
 	// say "no panic" — which the table now does, because PR #1563 made the zero
 	// value safe at both write sites that used to panic. So the detector is
-	// proved against a call known to panic (the exact nil-map write those rows
-	// used to reach) and one known not to, rather than against the table.
+	// proved against a call known to panic (the nil-map write those rows used
+	// to reach: a bucket stored into a zero shard's map) and one known not to,
+	// rather than against the table.
 	if !panics(func() {
-		var m map[string]*clientBucket
-		m["203.0.113.7"] = &clientBucket{}
+		var shard rlShard
+		shard.clients["203.0.113.7"] = &clientBucket{}
 	}) {
 		t.Fatal("control: panics() did not detect a nil-map write — every " +
 			"\"no panic\" row below would pass vacuously")
