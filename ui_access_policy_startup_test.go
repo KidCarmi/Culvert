@@ -41,6 +41,9 @@ func resetUIAccessPolicyGlobals(t *testing.T) {
 	origPath := idpRegistry.path
 	origProfiles := append([]*IdPProfile(nil), idpRegistry.profiles...)
 	idpRegistry.mu.RUnlock()
+	// loadUIAccessPolicy records allowlist/trusted-proxy rejections for the
+	// Diagnostics row; restore that too, or an invalid-CIDR case leaks a warning.
+	snapshotAccessCIDRRejects(t)
 	t.Cleanup(func() {
 		uiAllowedNetsMu.Lock()
 		uiAllowedNets = origNets
