@@ -281,6 +281,48 @@ type PolicyStore struct {
 	// false (the GUI warning stays up) until a later write succeeds. Only a
 	// successful SaveErr, or a later Load, clears it.
 	adoptUnsaved atomic.Bool
+	// loadDropped is the bounded record of rules the most recent Load
+	// rejected (policyRulePersistable). Read-only diagnostic state for the
+	// operator contract; it never feeds evaluation. Replaced wholesale on
+	// every successful Load (a parsed file, or the adoption of a missing one)
+	// so a clean reload clears it. Written under mu, together with the rules
+	// or path that Load publishes; read lock-free by Diagnostics.
+	loadDropped atomic.Pointer[policyLoadDropped]
+}
+
+// policyLoadDropped records the rules a Load rejected without retaining the
+// whole set: total counts every rejected rule, names keeps at most
+// policyLoadDroppedMaxNames display names of at most
+// policyLoadDroppedMaxNameBytes each, so a large hand-edited file bounds both
+// the resident state and the viewer-readable Diagnostics row.
+type policyLoadDropped struct {
+	names []string
+	total int
+}
+
+const (
+	policyLoadDroppedMaxNames     = 5
+	policyLoadDroppedMaxNameBytes = 128
+)
+
+// add counts one rejected rule and keeps its name while there is room,
+// truncated on a rune boundary to the byte bound.
+func (d *policyLoadDropped) add(name string) {
+	d.total++
+	if len(d.names) >= policyLoadDroppedMaxNames {
+		return
+	}
+	if len(name) > policyLoadDroppedMaxNameBytes {
+		cut := 0
+		for i := range name {
+			if i > policyLoadDroppedMaxNameBytes {
+				break
+			}
+			cut = i
+		}
+		name = name[:cut] + "…"
+	}
+	d.names = append(d.names, name)
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -382,6 +424,12 @@ func (ps *PolicyStore) Load(path string) error {
 			ps.mu.Lock()
 			ps.path = path
 			ps.adoptUnsaved.Store(true)
+			// The adopted file holds only the current (already filtered)
+			// rules, so nothing in it was rejected: clear any record left by
+			// an earlier Load of a different file. Published under ps.mu with
+			// the path, like the parsed-file branch below, so two concurrent
+			// Loads cannot leave one's record beside the other's state.
+			ps.loadDropped.Store(&policyLoadDropped{})
 			ps.mu.Unlock()
 			if saveErr := ps.SaveErr(); saveErr != nil {
 				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
@@ -408,6 +456,7 @@ func (ps *PolicyStore) Load(path string) error {
 	// only; the file is not rewritten here, so an offending line is inert and
 	// re-warned each load until removed.
 	kept := rules[:0]
+	dropped := &policyLoadDropped{}
 	for _, r := range rules {
 		if ok, reason := policyRulePersistable(r); !ok {
 			name := ""
@@ -415,6 +464,7 @@ func (ps *PolicyStore) Load(path string) error {
 				name = r.Name
 			}
 			logWarnf("Policy: dropping rule %q on load — %s", sanitizeLog(name), sanitizeLog(reason))
+			dropped.add(name)
 			continue
 		}
 		kept = append(kept, r)
@@ -422,6 +472,10 @@ func (ps *PolicyStore) Load(path string) error {
 	rules = kept
 	ps.mu.Lock()
 	ps.path = path
+	// Published in the same critical section as ps.rules, so the record
+	// always describes the Load whose rules are live, even when two Loads
+	// race (the last one to take ps.mu wins both).
+	ps.loadDropped.Store(dropped)
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
 	for _, current := range ps.rules {
 		if validRuleID(current.ID) && current.counters != nil {
