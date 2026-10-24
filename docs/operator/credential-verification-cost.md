@@ -1,7 +1,7 @@
 # Credential verification cost and the `auth_verify_saturated` alert
 
 **Applies to:** Culvert nodes using a **local account** for proxy authentication
-(`-auth-user` / `auth.user`, or an admin created through the setup wizard).
+(`-user` / `auth.user`, or an admin created through the setup wizard).
 Deployments that authenticate every request against LDAP, OIDC or SAML are not
 governed by this control — their cost and failure modes belong to the
 identity-backend health plane instead (`identity_backend`,
@@ -181,7 +181,7 @@ workstation needs.
 2. Block it at a front-door limiter — **both ship disabled and both are worth
    enabling on any internet-adjacent deployment**:
    - **IP filter** (Security → IP Filter) — the direct block.
-   - **Per-IP connection limiter** (`-max-conns-per-ip`) — caps concurrency.
+   - **Per-IP connection limiter** (`security.max_conns_per_ip` in config.yaml, or the "Connection Limits" panel via `/api/connlimit`) — caps concurrency.
    - **Rate limiter** (`-rate-limit`) — caps arrival rate.
 3. Nothing else is required. The governor is already containing the CPU cost;
    the limiters stop the source from reaching the proxy at all.
