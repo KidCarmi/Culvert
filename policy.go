@@ -1575,8 +1575,12 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 	// string literals are referenced only inside the `if trace != nil` guards, so
 	// they are never materialized on the hot path (no per-rule string work). The
 	// guards themselves are predicted-not-taken when trace is nil.
-	var scanNow time.Time
-	var scanNowSet bool
+	// Schedule state for the whole scan: the instant is read once on the first
+	// scheduled rule reached (a rulebase with none never reads the clock), and
+	// the timezone resolution plus the derived clock fields are memoised across
+	// the remaining rules. See scheduleClock.
+	var schedClock scheduleClock
+	var schedNowSet bool
 	for i := range rules {
 		rule := rules[i]
 		if !ruleIsEnabled(rule) {
@@ -1601,11 +1605,11 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 			continue
 		}
 		if rule.Schedule != nil {
-			if !scanNowSet {
-				scanNow = now()
-				scanNowSet = true
+			if !schedNowSet {
+				schedClock.now = now()
+				schedNowSet = true
 			}
-			if !matchScheduleAt(rule.Schedule, scanNow) {
+			if !matchScheduleMemo(rule.Schedule, &schedClock) {
 				if trace != nil {
 					trace(rule, accessSkipSchedule)
 				}
@@ -1783,28 +1787,96 @@ func matchSchedule(s *PolicySchedule) bool {
 // instant to every scheduled rule — previously each rule paid its own
 // time.Now() inside the scan (and one decision could straddle a minute
 // boundary mid-scan).
+//
+// It is a ONE-SHOT use of the evaluation-scoped memo below, so this entry point
+// and the Stage-2 scan share a single implementation: there is exactly one
+// schedule-matching code path, and the memo cannot drift from it.
 func matchScheduleAt(s *PolicySchedule, now time.Time) bool {
-	loc := time.UTC
-	if s.Timezone != "" {
-		loc = scheduleLocation(s.Timezone)
+	c := scheduleClock{now: now}
+	return matchScheduleMemo(s, &c)
+}
+
+// scheduleClock memoises, for ONE evaluation scan, the per-timezone work a
+// scheduled rule needs: the *time.Location resolution and the derived clock
+// fields (weekday, minutes since midnight).
+//
+// Both halves of that are load bearing, and both were previously redone per
+// RULE even though they depend only on (instant, timezone) — never on the rule:
+//
+//   - The LOCATION lookup. scheduleLocationResolved already keeps tzdata off
+//     the hot path, but its process-wide sync.Map is keyed by an interface, so
+//     every probe pays runtime.nilinterhash → typehash → aeshashbody. Measured
+//     on a 1 000-scheduled-rule scan that map probe alone was 38.7% of the
+//     evaluation (scheduleLocationResolved 41.0% cumulative): one thousand
+//     identical lookups of the one timezone the deployment configured.
+//   - The CLOCK FIELDS. now.In(loc), Weekday(), Hour() and Minute() each
+//     re-derive the absolute-seconds split from scratch; together they were a
+//     further ~25% of the same scan.
+//
+// The memo is SINGLE-ENTRY and keyed on the timezone STRING, which is the shape
+// real rulebases have: a posture configures one timezone (or leaves it empty
+// for UTC), so the first scheduled rule resolves and every later one hits. A
+// rulebase that alternates timezones rule-by-rule simply re-derives, i.e. falls
+// back to exactly the pre-change cost — never worse.
+//
+// Passed by POINTER for the same reason clientSource is: a by-value copy would
+// throw the memo away before the next rule could see it. It stays on the
+// caller's stack and is never retained.
+type scheduleClock struct {
+	// now is the instant the whole scan decides against, captured once. The
+	// zero value means "not read yet"; the Stage-2 scan fills it lazily so a
+	// rulebase with no scheduled rule never reads the clock at all.
+	now time.Time
+
+	set     bool         // true once tz/local/weekday/minutes below are valid
+	tz      string       // timezone string the memo was derived for
+	local   time.Time    // now.In(loc), kept for the legacy string comparison
+	weekday time.Weekday // local.Weekday()
+	minutes int          // local minutes since midnight
+}
+
+// at returns the derived clock fields for tz, resolving and memoising on a
+// miss. The returned local time is only needed by the malformed-bounds legacy
+// path; the weekday and minutes carry the strict path.
+func (c *scheduleClock) at(tz string) (local time.Time, weekday time.Weekday, minutes int) {
+	if c.set && c.tz == tz {
+		return c.local, c.weekday, c.minutes
 	}
-	now = now.In(loc)
-	if !scheduleDayMatch(s.Days, now) {
+	loc := time.UTC
+	if tz != "" {
+		loc = scheduleLocation(tz)
+	}
+	l := c.now.In(loc)
+	c.set, c.tz = true, tz
+	c.local, c.weekday, c.minutes = l, l.Weekday(), l.Hour()*60+l.Minute()
+	return c.local, c.weekday, c.minutes
+}
+
+// matchScheduleMemo is the single schedule-matching implementation, reading the
+// instant and timezone through an evaluation-scoped memo. Decision order and
+// every comparison are those of the pre-memo matchScheduleAt.
+func matchScheduleMemo(s *PolicySchedule, c *scheduleClock) bool {
+	local, weekday, minutes := c.at(s.Timezone)
+	if !scheduleDayMatchWeekday(s.Days, weekday) {
 		return false
 	}
 	if s.TimeStart == "" || s.TimeEnd == "" {
 		return true
 	}
-	return scheduleTimeMatch(s.TimeStart, s.TimeEnd, now)
+	return scheduleTimeMatchMinutes(s.TimeStart, s.TimeEnd, minutes, local)
 }
 
-// scheduleDayMatch is the day-of-week check ("Mon", "Tue" …, case-insensitive).
-// An empty Days list means every day.
-func scheduleDayMatch(days []string, now time.Time) bool {
+// scheduleDayMatchWeekday is the day-of-week check ("Mon", "Tue" …,
+// case-insensitive); an empty Days list means every day. It takes an
+// ALREADY-DERIVED weekday so a scan that memoises it does not re-split the
+// instant per rule; comparison semantics are those of the pre-memo
+// scheduleDayMatch, which took a time.Time and is gone because the memo left it
+// without a caller.
+func scheduleDayMatchWeekday(days []string, wd time.Weekday) bool {
 	if len(days) == 0 {
 		return true
 	}
-	day := now.Weekday().String()[:3] // "Mon", "Tue" …
+	day := wd.String()[:3] // "Mon", "Tue" …
 	for _, d := range days {
 		if strings.EqualFold(d, day) {
 			return true
@@ -1820,12 +1892,19 @@ func scheduleDayMatch(days []string, now time.Time) bool {
 // allocation that put O(rules) heap garbage on the policy hot path. Malformed
 // bounds fall back to the legacy string comparison unchanged.
 func scheduleTimeMatch(startStr, endStr string, now time.Time) bool {
+	return scheduleTimeMatchMinutes(startStr, endStr, now.Hour()*60+now.Minute(), now)
+}
+
+// scheduleTimeMatchMinutes is scheduleTimeMatch against an already-derived
+// minutes-of-day, so a scan that memoises it does not re-split the instant per
+// rule. now is still required: the malformed-bounds fallback below compares
+// formatted strings and must stay byte-identical, and cur is ignored there.
+func scheduleTimeMatchMinutes(startStr, endStr string, cur int, now time.Time) bool {
 	start, okStart := parseClockMinutes(startStr)
 	end, okEnd := parseClockMinutes(endStr)
 	if !okStart || !okEnd {
 		return scheduleTimeMatchLegacy(startStr, endStr, now)
 	}
-	cur := now.Hour()*60 + now.Minute()
 	if start <= end {
 		// Normal range e.g. 09:00–17:00.
 		return cur >= start && cur < end
