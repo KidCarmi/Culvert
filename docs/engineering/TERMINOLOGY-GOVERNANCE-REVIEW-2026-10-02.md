@@ -4,10 +4,17 @@
 > **Snapshot:** `origin/main` at `3fcc07e`. **Window:** `45eaf07..3fcc07e` (the merge of the 2026-09-24 report to now;
 > 12 first-parent merges, 126 files). Findings and citations describe that snapshot; the one fix below is
 > applied by this PR. Carried backlog items are not re-verified here (their owning reports hold the evidence).
+>
+> **Finding ID.** This report was drafted as T-64. Main has since assigned T-64 (twice), T-65 and T-66, and
+> open PRs hold T-67 (#1672) and T-68 (#1646), so this report's finding is renumbered **T-69** (residual
+> **T-69b**). Its snapshot citations ("12 operator-facing strings in `diagnostics.go`", "No operator doc quotes
+> the string") describe `3fcc07e`; the merge of main into this PR also renames the two later "Admin Users
+> panel" mentions in `docs/operator/admin-roster-durability.md` and the pinned disclosure token in
+> `diagnostics_username_role_test.go`.
 
 ## Executive Summary
 
-One new drift found and fixed (**T-64**). Everything else added in the window is consistent with the glossary.
+One new drift found and fixed (**T-69**). Everything else added in the window is consistent with the glossary.
 
 Glossary sweep of the window's added lines (literal patterns, `docs/design/PRODUCT-TERMINOLOGY.md`):
 `unauth mode`, `blacklist/whitelist`, `Users & Roles`, `Cluster Nodes`, `Live Feed`, `Recent Requests`,
@@ -19,12 +26,12 @@ The context-sensitive glossary rules (sentence case, "status" vs "health", bare 
 pattern count and were not swept; the legacy GUI is predominantly Title Case, so new "Backup Now" /
 "Change Password" labels match their neighbours.
 
-**Terminology Health Score: 7.9 / 10** (lineage of the 2026-09-24 report's comparison row). T-64 is opened
+**Terminology Health Score: 7.9 / 10** (lineage of the 2026-09-24 report's comparison row). T-69 is opened
 and closed in this PR, so it nets 0.0.
 
 ## Finding
 
-### T-64 — "Admin Users" is a screen that does not exist (Medium · Low risk · XS)
+### T-69 — "Admin Users" is a screen that does not exist (Medium · Low risk · XS)
 
 | | |
 |---|---|
@@ -40,15 +47,15 @@ and closed in this PR, so it nets 0.0.
 
 **Fixed in this PR.** Not renamed: the `+ Add User` button inside that panel. The glossary says "user" alone
 should not mean a console account, so "Add administrator" would be consistent, but it is a single-button copy
-change with no operator-instruction impact; recorded as a low-priority residual (**T-64b**), not charged.
+change with no operator-instruction impact; recorded as a low-priority residual (**T-69b**), not charged.
 
 ## Carried backlog
 
 Unchanged from the 2026-09-24 report's comparison row (23 IDs / 22 entries open; owners listed there),
-plus T-64b (Low). No carried item was opened or closed by the window's merges, which touch no
+plus T-69b (Low). No carried item was opened or closed by the window's merges, which touch no
 route, metric, alert name, config key or audit-action rename.
 
 ## Stop-condition assessment
 
-Apart from T-64, no production-worthy terminology improvement was identified in this window. No cosmetic
+Apart from T-69, no production-worthy terminology improvement was identified in this window. No cosmetic
 renames proposed.
