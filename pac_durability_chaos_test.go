@@ -69,7 +69,7 @@ func chaos77FreshArtifactCache(t *testing.T) {
 // unauthenticated, no cache validators — and returns the artifact body.
 func servedPAC(t *testing.T) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/proxy.pac", http.NoBody)
 	req.Host = "gateway.corp.example:8080"
 	rec := httptest.NewRecorder()
 	servePACFile(rec, req)
@@ -102,7 +102,7 @@ func TestChaos77_FailedPACSaveIsNotServedToTheFleet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/pac-config", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/pac-config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "198.51.100.77:0"
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
@@ -244,7 +244,7 @@ func TestChaos77_ClockRollbackCannotHoldTheFleetOnASupersededPAC(t *testing.T) {
 			}
 
 			// That client revalidates with If-Modified-Since only.
-			req := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/proxy.pac", http.NoBody)
 			req.Host = "gateway.corp.example:8080"
 			req.Header.Set("If-Modified-Since", cached.UTC().Format(http.TimeFormat))
 			rec := httptest.NewRecorder()
@@ -263,7 +263,7 @@ func TestChaos77_ClockRollbackCannotHoldTheFleetOnASupersededPAC(t *testing.T) {
 
 			// Negative control: an UNCHANGED artifact must still revalidate
 			// to 304, or the fix would have simply disabled PAC caching.
-			req2 := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
+			req2 := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/proxy.pac", http.NoBody)
 			req2.Host = "gateway.corp.example:8080"
 			req2.Header.Set("If-Modified-Since", pacStore.ModTime().UTC().Format(http.TimeFormat))
 			rec2 := httptest.NewRecorder()
