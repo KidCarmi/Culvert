@@ -1,0 +1,105 @@
+{
+  "commit": "a8df88c2bdfca32a77f094dc609bb43c3cedbbb8",
+  "tree": "a47abce6fde689ece278b90ea080213d5493bffd",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go version && git rev-parse 039295bc986697b5221f01015b58b01f63ff4c1b && git merge-base --is-ancestor 039295bc986697b5221f01015b58b01f63ff4c1b HEAD && for c in 0fb4daf9 1e50cf9c 41e2e86f 783f7142 0e190a94; do git merge-base --is-ancestor $c HEAD && echo \"ancestor $c\"; done && git diff --stat 0e190a94 HEAD | tail -1",
+      "exit": 0,
+      "seconds": 0.237,
+      "log": "1.log",
+      "log_sha256": "7cff4d4c98485980e99d4e9272a83024305fd21b48965d504f4048eb0c4941e2",
+      "log_bytes": 218
+    },
+    {
+      "n": 2,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go build ./... && go vet ./...",
+      "exit": 0,
+      "seconds": 97.526,
+      "log": "2.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 3,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -race -count=2 -shuffle=on -run 'EmptyBody|NoBody|CDR|Cdr|HTTPForward|SSLInspect|Inspect|StallDetect|MCPDistribution|ComposeUX|Diagnostics|OperatorContract|Readiness_Posture|AccessCIDR|SECUISESS|SECREVOKE1|ScanAVUnavailable|AVUnavailable' .",
+      "exit": 0,
+      "seconds": 375.207,
+      "log": "3.log",
+      "log_sha256": "27b641a4cb8dd4f6238f0ceed6aa608453bc8b658dbd7f3fecb1c7abfc7fd1c5",
+      "log_bytes": 42
+    },
+    {
+      "n": 4,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -race -count=2 -shuffle=on ./internal/admission/",
+      "exit": 0,
+      "seconds": 3.296,
+      "log": "4.log",
+      "log_sha256": "81eafb4ee56789d2d1553d9c6337ff4f91201e89a9027a1ab0b7ce9e59a860ba",
+      "log_bytes": 59
+    },
+    {
+      "n": 5,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -tags benchgate -run 'TestBenchGate_' -count=1 . ./internal/admission",
+      "exit": 0,
+      "seconds": 195.602,
+      "log": "5.log",
+      "log_sha256": "805980e0a0444ba109c9b0d82093b6a4897e343aed0ac75f5108a97e802f0e77",
+      "log_bytes": 101
+    },
+    {
+      "n": 6,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -count=1 ./...",
+      "exit": 0,
+      "seconds": 468.944,
+      "log": "6.log",
+      "log_sha256": "138f6c982d82c8241a6eabed87ad3dce5947bd1952ae9078c1c05849abf49db4",
+      "log_bytes": 7476
+    },
+    {
+      "n": 7,
+      "command": "export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --new-from-rev 039295bc986697b5221f01015b58b01f63ff4c1b --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 267.454,
+      "log": "7.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 8,
+      "command": "PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH make api-verify",
+      "exit": 0,
+      "seconds": 15.677,
+      "log": "8.log",
+      "log_sha256": "8d2e5766cda94ab24d17e495bd98108de1c74b609d8cf8786ce451ca430db8f8",
+      "log_bytes": 513
+    },
+    {
+      "n": 9,
+      "command": "~/go/bin/gitleaks detect --no-banner --redact --log-opts=0e190a94..HEAD",
+      "exit": 0,
+      "seconds": 0.152,
+      "log": "9.log",
+      "log_sha256": "3a8dbc224140b87d7f97c4b68ea87344cf7e0a71ef603708217b5f2d331ecc56",
+      "log_bytes": 189
+    }
+  ],
+  "all_exit_zero": true
+}

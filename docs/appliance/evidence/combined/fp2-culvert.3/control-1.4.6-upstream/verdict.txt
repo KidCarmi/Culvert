@@ -1,0 +1,4 @@
+image: sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23
+wrong-cleans (EICAR -> bare OK): 56; expect=nonzero
+EICAR streams sent with <= 64 KiB temp free: 520
+control: EICAR FOUND 100/100, clean OK 100/100 (functional=1)

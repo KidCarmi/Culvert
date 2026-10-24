@@ -1,0 +1,7 @@
+total 110152
+-rw-r--r--    1 clamav   clamav      281702 Sep 28 01:25 bytecode.cvd
+-rw-r--r--    1 clamav   clamav    23434704 Sep 28 01:25 daily.cvd
+-rw-r--r--    1 clamav   clamav    89072577 Sep 28 01:25 main.cvd
+6d4aa01f219e988060fc419f495d07f27e0cdf1a2cccc065971da922c76f7ffb  /var/lib/clamav/bytecode.cvd
+0f7520addba76ca2fc500a95a9da946f3f12de512b42f861f7f89a4fddeb2375  /var/lib/clamav/daily.cvd
+0b2182d229f46981ec8f535382222f7c9dfdd656b250ad47988b910a8d302365  /var/lib/clamav/main.cvd

@@ -1,0 +1,4 @@
+14:LogFile /var/log/clamav/clamd.log
+112:LocalSocket /tmp/clamd.sock
+113:LocalSocket /tmp/clamd.sock
+129:TCPSocket 3310
