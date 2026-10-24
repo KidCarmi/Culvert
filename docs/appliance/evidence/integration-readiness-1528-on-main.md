@@ -48,7 +48,9 @@ Ancestry is verified: `4524311b ⊂ cfae7d67 ⊂ 95e68e65 ⊂ tip`, and `e380b90
    - **Fix:** one decision. `classifyUISession` now checks provider plus audience, the enrolled role, roster membership, and a roster-capped role. `verifyUISessionCookie` only verifies the signature, expiry and revocation. The resolver and the strict reader both classify through it.
 
 3. **Where the two sides set different policy, the stricter one is kept.** This is not a new trade-off.
-   - **Empty role is refused.** Main kept it as pre-RBAC admin compatibility. But #1528's required audience already refuses every pre-upgrade cookie once (one re-login), and this build never mints a role-less session. The compatibility case therefore protects no session that can still be presented.
+   - **Empty role is refused.** Main kept it as pre-RBAC admin compatibility. #1528's required audience already refuses every pre-upgrade cookie once (one re-login).
+     - **Correction (Workstream B pre-review F-B1):** the claim originally recorded here, that "this build never mints a role-less session", was **false** on this tree. A pre-RBAC roster (a bare array with no role field) loaded its accounts with role `""`, login minted a role-less cookie, and the gate refused it on every request: a login loop that locked the admin out. It also left such a roster without a legacy admin, which could reopen first-time setup.
+     - **Fix:** fixed on `review/1528-wsb-fixes`. The roster loader migrates `""` to `admin` (owner decision), so a role-less session really is never minted, and `TestFB1_*` pins it.
    - **The session role is capped by the current roster.** Demotion takes effect immediately; promotion needs a fresh login.
    - Main's SEC-UISESS-1 fixtures now carry the audience and seed the roster role under test. Main's empty-role control test is replaced by `TestSECUISESS1_EmptyRoleIsRefused`.
 

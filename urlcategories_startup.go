@@ -120,6 +120,7 @@ func loadCommunityFeedDB(cfg urlCategoriesStartupConfig, ctx context.Context) *F
 	communityDB = db
 	health.Available = true
 	health.Recovered = rec.Quarantined
+	health.InterruptedImportKept = rec.Trigger == catdb.TriggerInterruptedImport && !rec.Quarantined
 	noteCatFeedDBState(health)
 	reportCatFeedDBOpened(cfg.FeedDBPath, rec)
 
