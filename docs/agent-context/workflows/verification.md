@@ -13,7 +13,7 @@ This procedure grants no additional permission to install tools, use privileged 
 
 ## Toolchains and module boundaries
 
-- The compiler pin is the root [`go.mod`](../../../go.mod) `toolchain` line, currently `go1.26.10`. Its `go 1.26.6` line is the minimum language version, not the compiler pin. Record `go env GOVERSION` and `go env GOTOOLCHAIN`. CI uses [setup-go-cache](../../../.github/actions/setup-go-cache/action.yml) to install and verify the exact compiler. Do not add a workflow-level `GOTOOLCHAIN` override; it can prevent setup-go from honoring the pin.
+- The compiler pin is the root [`go.mod`](../../../go.mod) `toolchain` line, currently `go1.27.3`. Its `go 1.26.6` line is the minimum language version, not the compiler pin. Record `go env GOVERSION` and `go env GOTOOLCHAIN`. CI uses [setup-go-cache](../../../.github/actions/setup-go-cache/action.yml) to install and verify the exact compiler. Do not add a workflow-level `GOTOOLCHAIN` override; it can prevent setup-go from honoring the pin.
 - [`cmd/culvert-maint/go.mod`](../../../cmd/culvert-maint/go.mod) defines a separate module. Its language minimum is currently Go 1.25, but CI builds it with the root compiler pin. Root `go test ./...` does not test this module; run its checks from `cmd/culvert-maint`.
 - The frontend is a separate npm tree. Read [`frontend/.node-version`](../../../frontend/.node-version), [`frontend/package.json`](../../../frontend/package.json), and [`assert-toolchain.sh`](../../../frontend/scripts/assert-toolchain.sh); current pins are Node 24.19.0 and npm 11.17.0. Its OpenAPI generator has another npm tree at `frontend/tools/openapi-gen`. Preserve both trees' ignore-scripts policy.
 - Re-read pins after rebasing. If the exact toolchain or required service is unavailable, record that check as blocked or not run, with the actual reason. A different compiler's result is not the pinned result.
@@ -34,7 +34,7 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null .
 TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=20m ./...
 ```
 
-The shuffled double run is the existing Deep determinism command. Capture the printed shuffle seed on failure. Formatting and lint settings come from CI and [`.golangci.yml`](../../../.golangci.yml); Fast's root lint is diff-scoped with `--new-from-rev`, not a demand to fix unrelated legacy findings. Its currently pinned golangci-lint version is v2.5.0. Use the actual review base for that comparison.
+The shuffled double run is the existing Deep determinism command. Capture the printed shuffle seed on failure. Formatting and lint settings come from CI and [`.golangci.yml`](../../../.golangci.yml); Fast's root lint is diff-scoped with `--new-from-rev`, not a demand to fix unrelated legacy findings. Its currently pinned golangci-lint version is v2.15.0. Use the actual review base for that comparison.
 
 For a local full-root race/coverage diagnostic, Fast's unsharded reference uses:
 

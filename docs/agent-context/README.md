@@ -70,6 +70,8 @@ to this checkout, not to an unmerged branch.
   [internal/ocsp](../../internal/ocsp). Use the matching tests and
   [proxy/TLS history](history/proxy-tls-and-certificates.md), including raw attacker
   log bytes, hop-by-hop stripping, no-redirect forwarding and fail-open/closed boundaries.
+  Check [oversize-host refusal errata](errata.md#oversize-host-refusal-reporting):
+  the preserved destination-bounds block stops at its fifth review round.
   See also [transport/relay cost context](history/admission-and-connection-limits.md#claude-main-l238-l238).
 - Policy, GeoIP/DNS, category/blocklist/threat feeds: [policy.go](../../policy.go),
   [host/category composition](../../policy_hostcat.go), [geoip.go](../../geoip.go),
