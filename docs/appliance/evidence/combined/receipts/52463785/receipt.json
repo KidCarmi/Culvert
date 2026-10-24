@@ -1,0 +1,267 @@
+{
+  "commit": "524637857f6aa56df20d938b814da55dfc8f9465",
+  "tree": "db36a9a86cf7956d19f9838f5f30508e5d213026",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go version && (cd cmd/culvert-maint && go version) && (cd pkg/releaseproof && go version) && (cd third_party/crewjam-saml && go version) && ~/go/bin/golangci-lint version && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck -version | head -3 && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH node --version && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm --version",
+      "exit": 0,
+      "seconds": 2.189,
+      "log": "1.log",
+      "log_sha256": "1fa5deed4619dc68e0cc64eee7cb4990438ecaa2bb02467e81395fbe1ad7de48",
+      "log_bytes": 364
+    },
+    {
+      "n": 2,
+      "command": "git rev-parse 3202717b && git merge-base --is-ancestor 3202717b HEAD && git diff --stat 3202717b HEAD | tail -1 && grep -n '^toolchain' go.mod",
+      "exit": 0,
+      "seconds": 0.984,
+      "log": "2.log",
+      "log_sha256": "34665150263438cf2271e8bc2439841aeb340eab2042a234613992fcc7a3d283",
+      "log_bytes": 124
+    },
+    {
+      "n": 3,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go build ./... && go vet ./...",
+      "exit": 0,
+      "seconds": 16.712,
+      "log": "3.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 4,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go mod tidy && git diff --exit-code go.mod go.sum",
+      "exit": 0,
+      "seconds": 1.301,
+      "log": "4.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 5,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -count=1 -race -shuffle=on -run 'TestFB1_|TestFB2_|TestLoadedRosterRole|TestRosterLoad|SECRBAC|SECUISESS|CategoryFeed|CatFeed|APIURLCatFeedStatus|SECREVOKE1|AccessCIDR|Readiness_Posture' .",
+      "exit": 0,
+      "seconds": 142.974,
+      "log": "5.log",
+      "log_sha256": "f0d557270a81c65145974afc85db521a83d9adfb840698b2b4f7d8aa5b2b4bcc",
+      "log_bytes": 41
+    },
+    {
+      "n": 6,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -race -count=2 -shuffle=on ./internal/feedsync/ ./internal/catdb/ ./internal/storeguard/ ./internal/logstore/ ./internal/shutdown/ ./internal/fileutil/",
+      "exit": 0,
+      "seconds": 198.225,
+      "log": "6.log",
+      "log_sha256": "a072467b18825b6864503c5f8f143abf427a30a72783fa9aebaf0d60a17ff9e7",
+      "log_bytes": 352
+    },
+    {
+      "n": 7,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -race -count=1 -run 'Install|Appliance|ClamAV|Sidecar|OSUpdate|Maint|Deploy|Toolchain|Schedule|KillSwitch' .",
+      "exit": 0,
+      "seconds": 39.761,
+      "log": "7.log",
+      "log_sha256": "e166ccb70e0d7f4fa3fa9188e2fba7382dbe1f748fc5d7feee1dc4db3461c474",
+      "log_bytes": 41
+    },
+    {
+      "n": 8,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -count=1 ./...",
+      "exit": 0,
+      "seconds": 427.421,
+      "log": "8.log",
+      "log_sha256": "0040d7c6cf5e77c70856618e5379e2df78065d4bfd15454a35774075833bfbec",
+      "log_bytes": 7477
+    },
+    {
+      "n": 9,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd cmd/culvert-maint && go vet ./... && go test -count=1 -race ./...",
+      "exit": 0,
+      "seconds": 18.087,
+      "log": "9.log",
+      "log_sha256": "5d84d397563483a892935931656b1d25880dd1288221d593651be7e5a71568e4",
+      "log_bytes": 449
+    },
+    {
+      "n": 10,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd pkg/releaseproof && go vet ./... && go test -count=1 -race ./...",
+      "exit": 0,
+      "seconds": 3.865,
+      "log": "10.log",
+      "log_sha256": "d8298da6a7a52363f9bbd3605dbdcc9b46e5bee1440974261df6ddce64f1ebab",
+      "log_bytes": 53
+    },
+    {
+      "n": 11,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd third_party/crewjam-saml && go test -mod=readonly -count=1 ./...",
+      "exit": 0,
+      "seconds": 6.246,
+      "log": "11.log",
+      "log_sha256": "9f7c4fa05b8d916cd6a50a8fe4c7b0ffabfd9967a087ff92c63d9e12fcadb7f4",
+      "log_bytes": 443
+    },
+    {
+      "n": 12,
+      "command": "python3 -I appliance/artifact-audit/verify_saml_patch.py && python3 -I -m unittest discover -s appliance/artifact-audit -p 'test_saml_patch.py'",
+      "exit": 1,
+      "seconds": 0.038,
+      "log": "12.log",
+      "log_sha256": "7016f45773a5dd8cff292f806c8a8e8c9c9bf1496b4d548feedcc391285fa75b",
+      "log_bytes": 270
+    },
+    {
+      "n": 13,
+      "command": "PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH make api-verify",
+      "exit": 0,
+      "seconds": 15.863,
+      "log": "13.log",
+      "log_sha256": "244a75b046c8a319be8a3bca466e227246bb47a8c612f1192888928779740697",
+      "log_bytes": 513
+    },
+    {
+      "n": 14,
+      "command": "cd frontend && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm ci --ignore-scripts && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm install --package-lock-only --ignore-scripts && git diff --exit-code package-lock.json package.json && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm run verify",
+      "exit": 0,
+      "seconds": 87.269,
+      "log": "14.log",
+      "log_sha256": "97c825a1fe9fd839ca6e0d642b296188e4944ece23610cc2dba7da45eaae0820",
+      "log_bytes": 3062
+    },
+    {
+      "n": 15,
+      "command": "export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --new-from-rev 3202717b --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 275.11,
+      "log": "15.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 16,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd cmd/culvert-maint && ~/go/bin/golangci-lint run --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 0.947,
+      "log": "16.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 17,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd pkg/releaseproof && ~/go/bin/golangci-lint run --new-from-rev 3202717b --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 0.913,
+      "log": "17.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 18,
+      "command": "shellcheck -S warning appliance/provision/culvert-clamav-image appliance/os-maintenance/culvert-os-update packaging/culvert-maint/install.sh",
+      "exit": 0,
+      "seconds": 1.419,
+      "log": "18.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 19,
+      "command": "bash appliance/os-maintenance/power_test.sh",
+      "exit": 0,
+      "seconds": 4.398,
+      "log": "19.log",
+      "log_sha256": "dcd6fe4000db9231109894c894186c6b6bf4b1f3ba8a040f7bce8823ce80debc",
+      "log_bytes": 71
+    },
+    {
+      "n": 20,
+      "command": "bash appliance/build/boot-splash_test.sh",
+      "exit": 0,
+      "seconds": 3.315,
+      "log": "20.log",
+      "log_sha256": "cce4b14b7b083f4c609883c0bc15ce659e2e1a9b7e614d6d36e6071856b89e8c",
+      "log_bytes": 137
+    },
+    {
+      "n": 21,
+      "command": "export GOTOOLCHAIN=go1.27.3 && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck ./...",
+      "exit": 0,
+      "seconds": 5.069,
+      "log": "21.log",
+      "log_sha256": "b5ae54ddcfa4cb39e85f84ad2d9e43556bd817c480eaab2a71bab63bfc29353b",
+      "log_bytes": 299
+    },
+    {
+      "n": 22,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd cmd/culvert-maint && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck ./...",
+      "exit": 0,
+      "seconds": 3.532,
+      "log": "22.log",
+      "log_sha256": "b5ae54ddcfa4cb39e85f84ad2d9e43556bd817c480eaab2a71bab63bfc29353b",
+      "log_bytes": 299
+    },
+    {
+      "n": 23,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd pkg/releaseproof && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck ./...",
+      "exit": 0,
+      "seconds": 3.204,
+      "log": "23.log",
+      "log_sha256": "b5ae54ddcfa4cb39e85f84ad2d9e43556bd817c480eaab2a71bab63bfc29353b",
+      "log_bytes": 299
+    },
+    {
+      "n": 24,
+      "command": "export GOTOOLCHAIN=go1.27.3 && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/gosec -quiet -exclude=G104,G302,G304,G703,G704 ./...",
+      "exit": 0,
+      "seconds": 21.488,
+      "log": "24.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 25,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd cmd/culvert-maint && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/gosec -quiet -exclude=G104,G302,G304,G703,G704 ./...",
+      "exit": 0,
+      "seconds": 1.06,
+      "log": "25.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 26,
+      "command": "export GOTOOLCHAIN=go1.27.3 && cd pkg/releaseproof && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/gosec -quiet -exclude=G104,G302,G304,G703,G704 ./...",
+      "exit": 0,
+      "seconds": 0.328,
+      "log": "26.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 27,
+      "command": "~/go/bin/gitleaks detect --no-banner --redact --log-opts=3202717b..HEAD",
+      "exit": 0,
+      "seconds": 30.893,
+      "log": "27.log",
+      "log_sha256": "9053a24eca9de02f8a6eff03c5ef8cf1ef86dee5448fc75179b4c5f54668f0b1",
+      "log_bytes": 189
+    }
+  ],
+  "all_exit_zero": false
+}

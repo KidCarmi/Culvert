@@ -1,0 +1,1 @@
+PASS: splash staging, alternatives/initramfs/GRUB ordering, failure fences, failed-unit display, GRUB preservation, runtime-only overlay

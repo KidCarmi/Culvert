@@ -1,0 +1,10 @@
+test_exact_upstream_tree_and_only_build_tag_delta_without_module_cache (test_saml_patch.SamlPatchTests.test_exact_upstream_tree_and_only_build_tag_delta_without_module_cache) ... ok
+test_known_public_fixture_remains_detectable_and_is_rejected (test_saml_patch.SamlPatchTests.test_known_public_fixture_remains_detectable_and_is_rejected) ... ok
+test_missing_constraint_is_rejected_without_changing_upstream_bytes (test_saml_patch.SamlPatchTests.test_missing_constraint_is_rejected_without_changing_upstream_bytes) ... ok
+test_test_data_patch_is_exact_and_pinned (test_saml_patch.SamlPatchTests.test_test_data_patch_is_exact_and_pinned) ... ok
+test_unrecorded_source_change_and_manifest_rewrite_are_rejected (test_saml_patch.SamlPatchTests.test_unrecorded_source_change_and_manifest_rewrite_are_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.287s
+
+OK

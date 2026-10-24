@@ -1,0 +1,104 @@
+
+added 312 packages, and audited 313 packages in 5s
+
+found 0 vulnerabilities
+
+up to date, audited 313 packages in 638ms
+
+found 0 vulnerabilities
+
+> culvert-frontend@0.0.0 verify
+> sh scripts/verify.sh
+
+== [1/9] toolchain identity
+toolchain: node v24.19.0 / npm 11.17.0 OK
+== [2/9] clean install + lifecycle-script policy (both npm trees)
+
+added 312 packages in 3s
+ignore-scripts: true (app tree) / true (openapi-gen tree)
+== [3/9] OpenAPI type generation + drift gate
+toolchain: node v24.19.0 / npm 11.17.0 OK
+
+added 33 packages in 1s
+generated src/api/types.gen.ts from openapi.json (sha256:cb150163f8c62a4c…) with openapi-typescript v7.13.0
+drift(types): committed generated output matches regeneration
+== [4/9] lint + format
+
+> culvert-frontend@0.0.0 lint
+> eslint .
+
+
+> culvert-frontend@0.0.0 format:check
+> prettier --check "src/**/*.{ts,tsx,css}" "e2e/**/*.ts" "*.{ts,html}" "scripts/**/*.mjs"
+
+Checking formatting...
+All matched files use Prettier code style!
+== [5/9] strict typecheck
+
+> culvert-frontend@0.0.0 typecheck
+> tsc --noEmit
+
+== [6/9] unit tests
+
+> culvert-frontend@0.0.0 test
+> vitest run
+
+
+ RUN  v4.1.12 /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/combined/frontend
+
+
+ Test Files  70 passed (70)
+      Tests  788 passed (788)
+   Start at  15:40:53
+   Duration  37.40s (transform 3.90s, setup 0ms, import 11.90s, tests 31.57s, environment 55.25s)
+
+== [7/9] production build + committed-dist drift gate
+
+> culvert-frontend@0.0.0 build
+> vite build
+
+vite v8.3.5 building client environment for production...
+transforming...
+✓ 253 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/manifest.json                      0.56 kB │ gzip:   0.24 kB
+dist/index.html                         0.85 kB │ gzip:   0.55 kB
+dist/assets/GalleryPage-CX8IVPpe.css    0.29 kB │ gzip:   0.19 kB
+dist/assets/index-rP_dbCju.css         40.07 kB │ gzip:   7.82 kB
+dist/assets/GalleryPage-DPnF6VHN.js     8.80 kB │ gzip:   3.34 kB
+dist/assets/index-TYzbMUbj.js         894.46 kB │ gzip: 242.83 kB
+
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 770ms
+drift(dist): committed generated output matches regeneration
+== [8/9] generated-bundle security scan
+check-dist: OK (6 files)
+== [9/9] license + vulnerability policy
+licenses: app tree
+├─ MIT: 178
+├─ ISC: 63
+├─ Apache-2.0: 28
+├─ BlueOak-1.0.0: 11
+├─ BSD-2-Clause: 10
+├─ BSD-3-Clause: 4
+├─ MIT-0: 2
+├─ MPL-2.0: 2
+├─ CC0-1.0: 2
+├─ CC-BY-3.0: 1
+└─ (MIT AND CC-BY-3.0): 1
+
+licenses: openapi-gen tree
+├─ MIT: 26
+├─ ISC: 3
+├─ Apache-2.0: 2
+├─ Python-2.0: 1
+└─ (MIT OR CC0-1.0): 1
+
+found 0 vulnerabilities
+found 0 vulnerabilities
+frontend verify: ALL GATES PASSED

@@ -1,0 +1,10 @@
+go version go1.27.3 linux/amd64
+go version go1.27.3 linux/amd64
+go version go1.27.3 linux/amd64
+go version go1.27.3 linux/amd64
+golangci-lint has version 2.15.0 built with go1.27.3 from (unknown, modified: ?, mod sum: "h1:w94zf8HAYI7hm3164kwKsvZRuqXvY+YxeFoTbu1OLg8=") on (unknown)
+Go: go1.27.3
+Scanner: govulncheck@v1.5.0
+DB: https://vuln.go.dev
+v24.19.0
+11.17.0

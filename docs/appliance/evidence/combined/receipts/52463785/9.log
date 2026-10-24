@@ -1,0 +1,11 @@
+ok  	culvert-maint	1.054s
+ok  	culvert-maint/internal/audit	1.568s
+ok  	culvert-maint/internal/auth	1.020s
+ok  	culvert-maint/internal/config	1.070s
+ok  	culvert-maint/internal/health	13.403s
+ok  	culvert-maint/internal/journal	1.034s
+ok  	culvert-maint/internal/ops	3.825s
+ok  	culvert-maint/internal/releasetrust	1.185s
+ok  	culvert-maint/internal/runner	2.396s
+ok  	culvert-maint/internal/server	13.252s
+ok  	culvert-maint/internal/status	3.836s

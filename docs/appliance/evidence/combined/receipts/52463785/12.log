@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/combined/appliance/artifact-audit/verify_saml_patch.py", line 12, in <module>
+    import raw_keys
+ModuleNotFoundError: No module named 'raw_keys'
