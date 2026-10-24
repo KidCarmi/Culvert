@@ -68,13 +68,15 @@ func TestNoBuildHost_UpgradeProceedsAndUpCarriesNoBuild(t *testing.T) {
 	assertEveryUpIsNoBuild(t, rig)
 }
 
-// An inspect that fails WITHOUT the "No such image" signature (daemon,
-// permission, timeout) is not evidence of absence and does not refuse: with
-// --no-build the worst case is an explicit `up` failure, never new bytes.
+// A PRESENCE-ONLY entry (no recorded ID): an inspect that fails WITHOUT the
+// "No such image" signature (daemon, permission, timeout) is not evidence of
+// absence and does not refuse — with --no-build the worst case is an explicit
+// `up` failure, never new bytes. An ID-bound entry refuses instead
+// (TestNoBuildHost_IDBoundRefusesWhenInspectFails).
 func TestNoBuildHost_InspectFailureWithoutSignatureDoesNotRefuse(t *testing.T) {
 	rig := startNoBuildRig(t)
 	defer rig.stop()
-	rig.inspectErrRefs = map[string]bool{sidecarRef: true}
+	rig.inspectErrRefs = map[string]string{sidecarRef: inspectErrPermission}
 
 	op, opID := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
 	if op["state"] != "succeeded" {
@@ -175,4 +177,55 @@ func TestNoBuildHost_RecordedBytesProceed(t *testing.T) {
 		t.Fatalf("state %v:\n%s", op["state"], rig.opLog(t, opID))
 	}
 	assertEveryUpIsNoBuild(t, rig)
+}
+
+// Failed inspects that carry no "No such image" signature. The text is what
+// the docker CLI prints for each case.
+const (
+	inspectErrPermission = "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"
+	inspectErrDaemonDown = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+	inspectErrDeadline   = "context deadline exceeded"
+)
+
+// An ID-bound entry demands that the tag resolve to the recorded bytes. When
+// the inspect FAILS without the absence signature, that identity was not
+// established, so apply and image rollback refuse before anything moves
+// (ASTRA 5978949299, 08:15: the error branch used to `continue` past the ID
+// check and the op went ahead on unverified bytes).
+func TestNoBuildHost_IDBoundRefusesWhenInspectFails(t *testing.T) {
+	for name, stderr := range map[string]string{
+		"permission denied":  inspectErrPermission,
+		"daemon unreachable": inspectErrDaemonDown,
+		"deadline":           inspectErrDeadline,
+		"no stderr":          "",
+	} {
+		t.Run(name+"/apply", func(t *testing.T) {
+			rig := startNoBuildRigWithID(t)
+			defer rig.stop()
+			rig.inspectErrRefs = map[string]string{sidecarRef: stderr}
+			op, opID := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+			if op["state"] != "failed" || op["failure_reason"] != "validation" {
+				t.Fatalf("an unverifiable ID-bound image must refuse: state=%v reason=%v\n%s", op["state"], op["failure_reason"], rig.opLog(t, opID))
+			}
+			if rig.sawCommand("pull") || rig.sawCommand("up") || rig.sawCommand("tag") {
+				t.Fatalf("nothing may move while refusing:\n%s", rig.opLog(t, opID))
+			}
+			log := rig.opLog(t, opID)
+			if !strings.Contains(log, "could not verify which image the local tag names: "+sidecarRef) {
+				t.Fatalf("the refusal must name the image and say it could not be verified:\n%s", log)
+			}
+			if strings.Contains(log, "does not name the recorded bytes") || strings.Contains(log, "required local image absent") {
+				t.Fatalf("an unanswered inspect is neither proof of other bytes nor of absence:\n%s", log)
+			}
+		})
+		t.Run(name+"/rollback", func(t *testing.T) {
+			rig := startNoBuildRigWithID(t)
+			defer rig.stop()
+			rig.inspectErrRefs = map[string]string{sidecarRef: stderr}
+			op, _ := rig.rollbackAndWait(t, map[string]interface{}{"mode": "image", "image_ref": repo + "@sha256:" + digNew})
+			if op["state"] != "failed" || rig.sawCommand("up") || rig.sawCommand("pull") || rig.sawCommand("tag") {
+				t.Fatalf("a rollback must refuse before pull/tag/up: %+v", op)
+			}
+		})
+	}
 }

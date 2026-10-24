@@ -21,13 +21,16 @@
 #
 # A refusal exits 2 and is recorded in the state file so the operator sees
 # it. There is no build fallback, no registry pull and no network access on
-# any path. A refusal never leaves the tag naming unverified bytes: if the tag
-# names anything other than the recorded image ID — already, or because the
-# archive loaded something else — the tag is removed, so a later
-# `compose up --no-build` cannot start those bytes (a running container keeps
-# running; Docker runs it by image ID, not by tag). The cost is explicit: a
-# stack that was stopped while the image was lost stays down (the proxy
-# depends on a healthy sidecar) until the verified image is back.
+# any path. When a refusal finds the tag naming anything other than the
+# recorded image ID — already, or because the archive loaded something else —
+# it removes the tag, so a later `compose up --no-build` cannot start those
+# bytes (a running container keeps running; Docker runs it by image ID, not by
+# tag). Removal is reported from a re-inspect, never assumed: if the tag is
+# still there, or the daemon cannot say, the refusal says so (tag=retained or
+# tag=unconfirmed in the state file) and tells the operator to remove it by
+# hand before starting the stack. The cost is explicit: a stack that was
+# stopped while the image was lost stays down (the proxy depends on a healthy
+# sidecar) until the verified image is back.
 #
 # Exit codes: 0 present or reloaded, 2 refused, 64 usage.
 set -euo pipefail
@@ -42,12 +45,13 @@ DOCKER="${CULVERT_DOCKER:-docker}"
 
 log() { printf 'culvert-clamav-image: %s\n' "$*" >&2; }
 
-# record STATUS REASON — the last outcome, rewritten atomically.
+# record STATUS REASON [TAG] — the last outcome, rewritten atomically. TAG is
+# what a refusal did to the local tag: unchanged, removed, retained, unconfirmed.
 record() {
   local tmp
   tmp="$(mktemp "$STATE_DIR/.clamav-image.state.XXXXXX")" || return 0
-  printf 'status=%s\nreason=%s\nref=%s\nexpected_id=%s\nat=%s\n' \
-    "$1" "$2" "${REF:-}" "${EXPECT_ID:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+  printf 'status=%s\nreason=%s\nref=%s\nexpected_id=%s\ntag=%s\nat=%s\n' \
+    "$1" "$2" "${REF:-}" "${EXPECT_ID:-}" "${3:-unchanged}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
@@ -55,16 +59,34 @@ record() {
 refuse() { # REASON MESSAGE
   # Only a VALID recorded ID can prove the tag names other bytes; with damaged
   # metadata the tag is left alone (it may be the genuine sidecar).
-  local cid=""
+  local cid="" tag=unchanged
   [[ -n "${REF:-}" && "${EXPECT_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]] && cid="$(current_id)"
   if [[ -n "$cid" && "$cid" != "$EXPECT_ID" ]]; then
-    "$DOCKER" image rm -f "$REF" >/dev/null 2>&1 || true
-    log "$REF named unverified image $cid; the tag was removed so nothing can be started from it"
+    tag="$(untag_unverified "$cid")"
   fi
-  record refused "$1"
+  record refused "$1" "$tag"
   log "REFUSED ($1): $2"
   log "The sidecar was NOT rebuilt or pulled. A sidecar container that is still running keeps running; a stack that is down stays down (the proxy waits for a healthy sidecar) until the verified image is restored."
   exit 2
+}
+
+# untag_unverified CID — remove the tag naming unverified image CID and print
+# what is TRUE afterwards, decided by a re-inspect rather than by the rm exit
+# status: removed (the daemon reports no such image), retained (the tag still
+# names an image), unconfirmed (the daemon could not answer).
+untag_unverified() {
+  local rmout rc=0 out
+  rmout="$("$DOCKER" image rm -f "$REF" 2>&1)" || rc=$?
+  if out="$("$DOCKER" image inspect "$REF" --format '{{.Id}}' 2>&1)"; then
+    log "WARNING: $REF still names unverified image ${out:-$1} (image rm exit $rc: ${rmout:-no output}). Do NOT start the stack: remove the tag (sudo docker image rm -f $REF), then run: sudo culvert-clamav-image ensure"
+    echo retained
+  elif grep -qi 'no such image' <<<"$out"; then
+    log "$REF named unverified image $1; the tag was removed, so compose up --no-build cannot start it"
+    echo removed
+  else
+    log "WARNING: could not confirm that $REF no longer names unverified image $1 (image rm exit $rc; inspect: ${out:-no output}). Do NOT start the stack until 'sudo docker image inspect $REF' reports no such image or 'sudo culvert-clamav-image ensure' reports present."
+    echo unconfirmed
+  fi
 }
 
 # manifest_value KEY — read one KEY=value line; the manifest is never sourced.

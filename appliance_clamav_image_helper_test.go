@@ -50,9 +50,12 @@ func newClamHelperRig(t *testing.T, archiveID, recordSHA string) *clamHelperRig 
 	r.write(bin, `#!/bin/bash
 echo "$*" >> "$LOG"
 case "$1 $2" in
-  "image inspect") [[ -s "$STORE" ]] || { echo "Error: No such image: $3" >&2; exit 1; }; cat "$STORE" ;;
+  "image inspect") [[ -e "$STORE.down" ]] && { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; }
+                   [[ -s "$STORE" ]] || { echo "Error: No such image: $3" >&2; exit 1; }; cat "$STORE" ;;
   "load -q") cp "$4" "$STORE" ;;
-  "image rm") rm -f "$STORE" ;;
+  "image rm") [[ -e "$STORE.rmfails" ]] && { echo "Error response from daemon: conflict: unable to remove repository reference" >&2; exit 1; }
+              [[ -e "$STORE.rmdown" ]] && { touch "$STORE.down"; echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+              rm -f "$STORE" ;;
   *) echo "unexpected docker $*" >&2; exit 99 ;;
 esac
 `)
@@ -216,6 +219,46 @@ func TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes(t *testing.T)
 			if !strings.Contains(out, "the tag was removed") {
 				t.Fatalf("the removal must be stated:\n%s", out)
 			}
+			if s := r.stateFile(); s["status"] != "refused" || s["tag"] != "removed" {
+				t.Fatalf("state must record the removal: %v", s)
+			}
+		})
+	}
+}
+
+// A removal that does not happen is never reported as one (ASTRA 5978949299,
+// 08:15: `image rm … || true` was followed by an unconditional success line).
+// The refusal stands, the state file says what is true, and the operator is
+// told not to start the stack and how to remove the tag.
+func TestClamAVImageHelper_FailedRemovalIsReportedTruthfully(t *testing.T) {
+	for _, tc := range []struct {
+		name, flag, tag, says string
+		tagKept               bool
+	}{
+		{"rm fails, tag kept", ".rmfails", "retained", "still names unverified image", true},
+		{"rm fails, daemon stops answering", ".rmdown", "unconfirmed", "could not confirm", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newClamHelperRig(t, otherID, "")
+			r.storeHolds(otherID)
+			_ = os.Remove(filepath.Join(r.state, "images", "clamav.tar.gz"))
+			r.write(r.store+tc.flag, "")
+			out, code := r.run()
+			if code != 2 {
+				t.Fatalf("must still refuse, got %d\n%s", code, out)
+			}
+			if strings.Contains(out, "the tag was removed") {
+				t.Fatalf("a removal that did not happen must not be claimed:\n%s", out)
+			}
+			if !strings.Contains(out, tc.says) || !strings.Contains(out, "Do NOT start the stack") {
+				t.Fatalf("the operator must be told the tag state and not to start:\n%s", out)
+			}
+			if s := r.stateFile(); s["status"] != "refused" || s["tag"] != tc.tag {
+				t.Fatalf("state must record tag=%s: %v", tc.tag, s)
+			}
+			if b, _ := os.ReadFile(r.store); tc.tagKept && strings.TrimSpace(string(b)) != otherID {
+				t.Fatalf("fixture: the wrong tag should still be present, store=%q", b)
+			}
 		})
 	}
 }
@@ -230,5 +273,8 @@ func TestClamAVImageHelper_DamagedManifestLeavesTheTagAlone(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(r.store); strings.TrimSpace(string(b)) != helperID {
 		t.Fatalf("the tag must be left alone without a valid recorded ID, store=%q", b)
+	}
+	if s := r.stateFile(); s["tag"] != "unchanged" {
+		t.Fatalf("state must record that the tag was not touched: %v", s)
 	}
 }
