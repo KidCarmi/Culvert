@@ -387,6 +387,15 @@ func (f *IPFilter) addLocked(entry string) error {
 		return nil
 	}
 	if ip := net.ParseIP(entry); ip != nil {
+		// Lazy init, exactly as addExemptionLocked does: a bare IPFilter{}
+		// composite literal compiles anywhere (its fields are unexported, so
+		// it is the only literal form outside this package), and a nil map here
+		// would panic on the first mutation instead of storing the entry.
+		// Defensive: production filters (including the snapshot apply path's,
+		// which calls NewIPFilter before AddAll) are constructor-created.
+		if f.single == nil {
+			f.single = map[string]bool{}
+		}
 		f.single[ip.String()] = true
 		return nil
 	}
@@ -954,6 +963,27 @@ func (r *RateLimiter) Enabled() bool {
 	return r.enabled.Load()
 }
 
+// bucketFor returns ip's sliding-window bucket in this shard, creating it on
+// first sight. Callers MUST hold s.mu.
+//
+// Allow and AllowClusterAware share this one bucket-creation path so the two
+// admission entry points cannot drift apart. A nil shard map reads as a miss,
+// so the cold branch is the only one that writes: a bare RateLimiter{} that
+// was Configure()d would otherwise panic here, on the request path. This is
+// defensive (production limiters come from NewRateLimiter); the lazy init keeps
+// the limit enforced against a real bucket, at zero cost once warm.
+func (s *rlShard) bucketFor(ip string) *clientBucket {
+	b, ok := s.clients[ip]
+	if !ok {
+		if s.clients == nil {
+			s.clients = map[string]*clientBucket{}
+		}
+		b = &clientBucket{}
+		s.clients[ip] = b
+	}
+	return b
+}
+
 // Allow returns true if the IP is within its rate limit or is exempt.
 func (r *RateLimiter) Allow(ip string) bool {
 	if !r.enabled.Load() {
@@ -971,11 +1001,7 @@ func (r *RateLimiter) Allow(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).
@@ -1249,11 +1275,7 @@ func (r *RateLimiter) AllowClusterAware(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).
