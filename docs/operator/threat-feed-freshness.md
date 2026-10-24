@@ -30,8 +30,8 @@ No operator action is required unless the condition persists.
 
 | Feed | Normal interval | Retry after a failure | Origins |
 |---|---|---|---|
-| Threat feed (URLhaus + OpenPhish) | 6 h (`-feed-sync-interval`) | 5 min, doubling to 1 h | `urlhaus.abuse.ch`, `openphish.com` |
-| UT1 category feed | 24 h | 15 min, doubling to 2 h | `raw.githubusercontent.com` (NethServer mirror) |
+| Threat feed (URLhaus + OpenPhish) | 6 h (`security_scan.sync_interval` in config.yaml; no CLI flag) | 5 min, doubling to 1 h | `urlhaus.abuse.ch`, `openphish.com` |
+| UT1 category feed | 24 h (`-cat-sync-interval`) | 15 min, doubling to 2 h | `raw.githubusercontent.com` (NethServer mirror) |
 
 Both intervals carry a stable per-node jitter of ±10%, chosen once at startup.
 That is deliberate: without it every node in a fleet that booted together would

@@ -531,7 +531,7 @@ func cdrOrphanRevocationPath(fp string) map[string]any {
 func cdrPickClientNotHolding(fp string) *CDRClient {
 	now := time.Now()
 	for _, pc := range cdrPool.List() {
-		if !pc.Breaker.Allow() {
+		if !pc.Breaker.Available() { // non-consuming: no sanitize outcome is recorded here
 			continue
 		}
 		if inst, ok := cdrInstances.GetCopy(pc.Name); ok {

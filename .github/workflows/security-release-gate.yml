@@ -92,7 +92,7 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+        run: go install -C tools/gosec github.com/securego/gosec/v2/cmd/gosec  # v2.29.0 rules, Go 1.27 loader: see tools/gosec/tools.go
 
       # Root G304/G703 retirement still needs file-access triage (RISK-006).
       # G704 is enforced with scoped evidence; the maintenance module also
@@ -403,7 +403,7 @@ jobs:
       - name: Run staticcheck (proxy module — root)
         uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
         with:
-          version: "2025.1"
+          version: "2026.2.2"
           install-go: false
 
       - name: Run staticcheck (cmd/culvert-maint nested module)
@@ -413,7 +413,7 @@ jobs:
         # the Security gate so coverage is visible here as well.
         uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
         with:
-          version: "2025.1"
+          version: "2026.2.2"
           install-go: false
           working-directory: cmd/culvert-maint
 
