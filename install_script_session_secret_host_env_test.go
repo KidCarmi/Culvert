@@ -43,7 +43,7 @@ import (
 // content.
 func runPersistHostEnvSessionSecret(t *testing.T, dir, envSetup string) (output string, exitCode int, envContent string) {
 	t.Helper()
-	fn := extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
+	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
 
 	stubs := `
@@ -80,7 +80,7 @@ error() { echo "ERROR: $*" >&2; exit 7; }
 // actually run as an unprivileged user against a root-owned file.
 func runPersistHostEnvSessionSecretWithStub(t *testing.T, dir, envSetup, stubbedBuiltins string) (output string, exitCode int, envContent string) {
 	t.Helper()
-	fn := extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
+	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
 
 	stubs := `
