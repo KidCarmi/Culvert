@@ -335,6 +335,13 @@ func recoverBeforeOpen(dir string, rec *Recovery, fsys markerFS) error {
 		// breadcrumb must survive for the next start.
 		return nil
 	}
+	return clearActedMarkers(dir, rec, poison, faulted, interrupted, fsys)
+}
+
+// clearActedMarkers removes the breadcrumbs a completed quarantine resolved.
+// Split out of recoverBeforeOpen to keep its complexity under the cyclop bar;
+// it runs only after rec.Quarantined.
+func clearActedMarkers(dir string, rec *Recovery, poison []string, faulted, interrupted bool, fsys markerFS) error {
 	// Clear only markers this call acted on — markers belonging to a LIVE
 	// opener are never in the poison list to begin with.
 	for _, m := range poison {
