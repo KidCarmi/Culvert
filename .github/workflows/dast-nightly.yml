@@ -249,7 +249,7 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       - name: Install gosec (pinned)
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
 
       - name: gosec with the blocking-gate exclusions dropped (non-test, report-only)
         # G401 (weak crypto) + G402 (InsecureSkipVerify) are now ENFORCED by the

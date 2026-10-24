@@ -92,7 +92,7 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
 
       # G703 (taint-analysis path traversal) is the taint-mode variant of the
       # already-excluded G304 (CWE-22 file access via variable): a new gosec
@@ -402,7 +402,7 @@ jobs:
       - name: Run staticcheck (proxy module — root)
         uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
         with:
-          version: "2025.1"
+          version: "2026.2.2"
           install-go: false
 
       - name: Run staticcheck (cmd/culvert-maint nested module)
@@ -412,7 +412,7 @@ jobs:
         # the Security gate so coverage is visible here as well.
         uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
         with:
-          version: "2025.1"
+          version: "2026.2.2"
           install-go: false
           working-directory: cmd/culvert-maint
 
