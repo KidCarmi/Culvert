@@ -1,0 +1,78 @@
+{
+  "commit": "642409f04d5600eb9f43e6d2c79720fd760da969",
+  "tree": "0c3a81f30f2dfccdf3af8c81ca82de1be624fda4",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go version && git diff --stat ff6b22be HEAD",
+      "exit": 0,
+      "seconds": 0.018,
+      "log": "1.log",
+      "log_sha256": "a35eecf1bd519500d3670f28539ca65b697e29ce40583389f7468900ffdceb16",
+      "log_bytes": 112
+    },
+    {
+      "n": 2,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go build ./... && go vet ./internal/storeguard/ ./internal/catdb/ ./internal/logstore/ .",
+      "exit": 0,
+      "seconds": 30.272,
+      "log": "2.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 3,
+      "command": "export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --max-issues-per-linter=0 --max-same-issues=0 --enable-only cyclop,gocognit,funlen ./internal/storeguard/",
+      "exit": 0,
+      "seconds": 0.291,
+      "log": "3.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 4,
+      "command": "export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --new-from-rev c319d2a5 --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 282.568,
+      "log": "4.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 5,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -race -count=2 -shuffle=on ./internal/storeguard/ ./internal/catdb/ ./internal/logstore/ ./internal/feedsync/",
+      "exit": 0,
+      "seconds": 201.304,
+      "log": "5.log",
+      "log_sha256": "6d11a3b162d83493020930203ed1fa20e61746c5952cc9fee97d9e3d82907999",
+      "log_bytes": 236
+    },
+    {
+      "n": 6,
+      "command": "export GOTOOLCHAIN=go1.27.3 && go test -race -count=1 -shuffle=on -run 'CatFeed|CategoryFeed|FB2_|StoreGuard|Storeguard|Logstore|LogStore|RequestHistory|Chaos50|Chaos62' .",
+      "exit": 0,
+      "seconds": 82.274,
+      "log": "6.log",
+      "log_sha256": "2d1258a43eb0774ca4c716a0ec63668b371b1d4984aa5a5ba41863c84cb49be2",
+      "log_bytes": 41
+    }
+  ],
+  "all_exit_zero": true
+}
