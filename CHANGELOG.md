@@ -565,6 +565,41 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the lock (holding it would wedge every later exec in the process).
   Pinned by `TestHoldInode_DuplicateIsCloseOnExec` and
   `TestHoldInode_ReleasesForkLockWhenTheDupFails`.
+- Defensive zero-value hardening of the admission engine. No production crash
+  is reachable today: every production `IPFilter`/`RateLimiter` (including the
+  one `applySnapshotAdmission` builds before `AddAll`) comes from
+  `NewIPFilter`/`NewRateLimiter`, and no non-test code constructs a bare value.
+  The ADR-0039 admission extraction nevertheless left the zero value of both
+  front-door gates usable only under a documented PRECONDITION, with nothing
+  enforcing it.
+  Three map writes panicked on a nil map — `IPFilter.addLocked`,
+  `RateLimiter.Allow` and `RateLimiter.AllowClusterAware` — while
+  `addExemptionLocked` in the same file already lazily initialized, so the
+  package was internally inconsistent about an invariant it already asserts for
+  the exemption path (`TestRLExemptView_BareLiteralLimiterIsSafe`: a bare
+  limiter "must still accept a first mutation").
+
+  Measured against the tree: a bare `IPFilter{}` panics on `Add` and on
+  `AddAll`, and a bare `RateLimiter{}` that has been `Configure`d panics on
+  `Allow`. The extraction makes that trap easier to reach rather than harder —
+  both types now carry only unexported fields, so the complete literal package
+  main used to write (`&IPFilter{single: map[string]bool{}}`) no longer compiles
+  outside the package and `&IPFilter{}`, the silently broken shape, is the only
+  literal form left. A future caller that wrote it would have panicked on its
+  first `Add`/`AddAll`, or on the request path once a bare limiter was
+  `Configure`d.
+
+  The precondition is replaced by a guarantee using the idiom already present
+  in `addExemptionLocked`. This is an availability hardening, not a policy
+  change: the nil checks sit in the cold miss branch (a nil map reads as a
+  miss), so the steady-state hot path pays nothing, the allocation benchgates
+  still measure zero, and no allow/deny verdict moves — a bare instance is
+  differentially pinned equal to a constructed one across every mode and probe.
+  Gates: 5 in `internal/admission/bare_literal_safety_test.go`, each verified
+  failing against the reintroduced pre-fix shape and four of them additionally
+  against the cheapest wrong fix (skip the store when the map is nil, which
+  silences the panic while silently not enforcing the entry). `doc.go` and
+  ADR-0039 are amended rather than left asserting the narrower contract.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
