@@ -820,6 +820,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   against the cheapest wrong fix (skip the store when the map is nil, which
   silences the panic while silently not enforcing the entry). `doc.go` and
   ADR-0039 are amended rather than left asserting the narrower contract.
+- OIDC credential/JWKS transports now dial the guarded destination directly:
+  an inherited forward proxy could bypass the resolved-IP SSRF guard. A
+  behavioral regression checks private destinations, DNS rebinding and
+  redirect targets with a public-proxy hook configured. OIDC no longer uses
+  environment proxies.
+  G704 is enforced with scoped exceptions, the expired OpenSSL exception is
+  removed, and CI records unfiltered findings and the actual image's package
+  and static-binary evidence (RISK-002/RISK-006).
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
