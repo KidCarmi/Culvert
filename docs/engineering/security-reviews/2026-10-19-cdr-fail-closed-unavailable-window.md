@@ -345,4 +345,6 @@ against the fixed one, rather than being written to the fix.
    visible as `culvert_cdr_fail_closed_total` rising and the existing
    `cdr_unavailable` alert on the error path, but a pool that is empty because
    no instance is enrolled produces no engine errors to alert on. The
-   `enabled-broken` diagnostics state covers it for anyone looking at the page.
+   `enabled-broken` diagnostics state covers it for anyone looking at the page,
+   and `enabled-dark` (every enrolled instance's breaker open, ported from
+   #1421) covers the outage case.

@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -211,8 +212,8 @@ func (s *stageResponder) snapshot() (calls int, page string) {
 
 func runStageForTest(t *testing.T, br blockResponder, body []byte) cdrStageDecision {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodConnect, "https://files.example.com:443", http.NoBody)
-	req := httptest.NewRequest(http.MethodGet, "https://files.example.com/downloads/invoice.docx", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodConnect, "https://files.example.com:443", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://files.example.com/downloads/invoice.docx", http.NoBody)
 	return runCDRStage(r, req, body, body, "application/pdf", "", br,
 		"files.example.com", sampleID.ClientIP, sampleID)
 }
@@ -442,5 +443,42 @@ func TestCDRUnavailable_FailOpenSurvivesPoolInitFailureWithoutBlocking(t *testin
 	}
 	if n := atomic.LoadInt64(&statCDRFailClosed); n != 0 {
 		t.Errorf("statCDRFailClosed = %d, want 0", n)
+	}
+}
+
+// ─── Diagnostics: the cdr row must report availability, not pool length ────
+
+// An enrolled instance whose breaker is open cannot scan anything, which is
+// the state the request path consults. The row used to key on pool length
+// alone and reported enabled-healthy on a node handling every inspected
+// document unscanned. The read must also not reserve a half-open probe.
+func TestCheckCDR_OpenBreakerPoolReportsEnabledDark(t *testing.T) {
+	pc := openBreakerPool(t)
+	withActiveCDRConfig(t, CDRConfig{Enabled: true, FailMode: "closed", DefaultProfile: "default"})
+	staleBefore := pc.Breaker.staleProbes.Load()
+
+	got := checkCDR()
+
+	if got.Status != diagFail || !strings.HasPrefix(got.Message, "enabled-dark") {
+		t.Fatalf("checkCDR() = %s %q, want FAIL enabled-dark", got.Status, got.Message)
+	}
+	if pc.Breaker.State() != cbStateOpen {
+		t.Errorf("breaker state = %s after the diagnostics read, want open", breakerStateName(pc.Breaker.State()))
+	}
+	if n := pc.Breaker.staleProbes.Load(); n != staleBefore {
+		t.Errorf("staleProbes = %d, want %d: the diagnostics read must not reserve a probe", n, staleBefore)
+	}
+}
+
+// Negative control: a serviceable instance with fail-mode and default profile
+// set still reports enabled-healthy.
+func TestCheckCDR_AvailablePoolStillReportsHealthy(t *testing.T) {
+	pc, stop := newPooledFake(t, "healthy", &fakeSluice{})
+	defer stop()
+	withTempPool(t, pc)
+	withActiveCDRConfig(t, CDRConfig{Enabled: true, FailMode: "closed", DefaultProfile: "default"})
+
+	if got := checkCDR(); got.Status != diagOK || got.Message != "enabled-healthy" {
+		t.Fatalf("checkCDR() = %s %q, want OK enabled-healthy", got.Status, got.Message)
 	}
 }

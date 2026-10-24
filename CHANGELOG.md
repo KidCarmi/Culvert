@@ -667,6 +667,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   negative control) drives the real `initCDRClient` failure and was confirmed
   to fail against the un-fixed `cdrstore.go` before it passed against the
   fixed one.
+  The Diagnostics `cdr` row now keys on availability as well as pool size:
+  enrolled instances whose breakers are all open report FAIL `enabled-dark`
+  instead of `enabled-healthy` (ported from #1421, CHAOS-67), read without
+  reserving a half-open probe.
 
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
