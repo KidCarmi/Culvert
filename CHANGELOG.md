@@ -17,7 +17,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (`go 1.26.6`) is unchanged. The two prerequisites from roadmap/CI-REDESIGN.md §20
   landed first: golangci-lint v2.15.0 (#1683) and graceful GOAWAY for inspected
   HTTP/2 tunnels on the Go 1.27 x/net server (#1684). 1.27.3 rather than 1.27.2,
-  because 1.27.2 is still affected by GO-2026-6809.
+  because 1.27.2 is still affected by GO-2026-6809. The CI gates keep the gosec
+  v2.29.0 rules, but now build them from a `tools/gosec` module that raises only
+  `golang.org/x/tools` to v0.52.0. The released v2.29.0 cannot load Go 1.27
+  export data, and v2.30.0 regressed package loading.
 
 ### Fixed
 
