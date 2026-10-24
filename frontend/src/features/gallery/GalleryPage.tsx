@@ -83,7 +83,7 @@ const nodeRows: readonly NodeRow[] = [
     version: "v1.9.1",
     requests: 88_302,
     status: "warn",
-    statusLabel: "Update available",
+    statusLabel: "Release available",
   },
   {
     name: "gw-ams-02",
@@ -143,7 +143,7 @@ export function GalleryPage(): JSX.Element {
             <StatusBadge status="ok">Proxy Healthy</StatusBadge>
             <StatusBadge status="warn">ClamAV Degraded</StatusBadge>
             <StatusBadge status="critical">Rule evaluation blocked</StatusBadge>
-            <StatusBadge status="info">Update available</StatusBadge>
+            <StatusBadge status="info">Release available</StatusBadge>
             <StatusBadge status="unknown">State unknown</StatusBadge>
             <StatusBadge status="neutral">Disabled</StatusBadge>
           </div>

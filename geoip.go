@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/geoip"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -398,9 +399,9 @@ func resolveAsFlightLeader(host string, fl *hostIPFlight) (ip net.IP) {
 // blocking and cache-only entry points so both key the cache identically.
 func geoHostKey(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
+		return hostutil.NormalizeHost(h)
 	}
-	return host
+	return hostutil.NormalizeHost(host)
 }
 
 // resolveHostCached is resolveHost's NON-BLOCKING half: it answers only from
