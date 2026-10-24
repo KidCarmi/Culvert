@@ -299,6 +299,8 @@ func TestQAGateCoverage_FloorTableUnchanged(t *testing.T) {
 	for file, floor := range map[string]string{
 		"totp.go":                         "85",
 		"security.go":                     "70",
+		"internal/ssrf/ssrf.go":           "85",
+		"internal/hostutil/hostutil.go":   "80",
 		"internal/admission/engine.go":    "70",
 		"internal/admission/freshness.go": "70",
 		"session.go":                      "75",

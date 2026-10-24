@@ -128,7 +128,7 @@ func apiBootstrapCompose(w http.ResponseWriter, r *http.Request) {
 	//
 	// SEC-BOOTSTRAP-HOST-1: the address is request-derived and the document is
 	// run by the DP node, so it is validated before a header is written.
-	cpAddr, addrOK := bootstrap.EnrollmentAddr(r, clusterRole.grpcAddr, trustForwardedHeaders)
+	cpAddr, addrOK := bootstrap.EnrollmentAddr(r, clusterRoleSnapshot().grpcAddr, trustForwardedHeaders)
 	if !addrOK {
 		noteBootstrapHostRefused("compose")
 		http.Error(w, "invalid host", http.StatusBadRequest)

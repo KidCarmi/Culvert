@@ -38,13 +38,26 @@ func swapFeedSyncer(t *testing.T, bs *BlocklistSyncer) {
 	t.Cleanup(func() { blFeedSyncer = orig })
 }
 
+// swapAdminSettingsPath points the admin-settings file at path for one test.
+//
+// It drains pending best-effort saves on both edges. adminSettingsSave spawns
+// a detached SaveAdminSettings on every admin mutation, and that goroutine
+// reads adminSettingsPath when it runs, not when it was spawned. Without the
+// first drain, a predecessor's save (TestAPISyslogConfig_Post_EmptyAddr's, in
+// #1527 seed 1792141333146841338) landed on THIS test's fixture between its
+// write and its load, and TestAdminSettings_LegacyMigrationSealsUserinfo read
+// back an empty upstream document. Without the second, this test's own saves
+// can land on the next test's file. The PR-C7b/C30 class, handled the way
+// dcFinBoot and withLegacyLDAPAuthorityReset handle it.
 func swapAdminSettingsPath(t *testing.T, path string) {
 	t.Helper()
+	adminSettingsSaveWG.Wait()
 	adminSettingsMu.Lock()
 	orig := adminSettingsPath
 	adminSettingsPath = path
 	adminSettingsMu.Unlock()
 	t.Cleanup(func() {
+		adminSettingsSaveWG.Wait()
 		adminSettingsMu.Lock()
 		adminSettingsPath = orig
 		adminSettingsMu.Unlock()

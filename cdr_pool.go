@@ -9,13 +9,14 @@ package main
 //   - A per-instance circuit breaker
 //   - Last-known health response + timestamp
 //
-// safeCDRSanitize (cdr_proxy.go) calls cdrPickPooled() to get the best
-// available instance.  The picker ignores clients whose breaker is open
-// and round-robins across the rest.  All-open → nil → safeCDRSanitize
-// applies fail-mode.
+// safeCDRSanitize (cdr_proxy.go) calls cdrPickPooledReserved() to get the
+// best available instance AND own its half-open probe reservation.  The
+// picker ignores clients whose breaker is open and round-robins across the
+// rest.  All-open → nil → safeCDRSanitize applies fail-mode.
 //
-// Backwards compatibility: cdrActiveClient() still returns a *CDRClient
-// (or nil), so code paths that only need "is CDR live?" keep working.
+// Every other caller — liveness, status, UI, admin diagnostics — selects
+// through Pick() / cdrActiveClient(), which never reserve: a reservation is
+// only safe in a caller that records the sanitize outcome or releases it.
 
 import (
 	"errors"
@@ -148,18 +149,36 @@ func (p *cdrClientPool) Get(name string) *cdrPooledClient {
 }
 
 // Pick returns the next available client using round-robin with
-// circuit-breaker filtering.  Returns nil when every instance has an
-// open breaker (caller applies fail-mode).
+// circuit-breaker filtering, WITHOUT reserving a half-open probe.  Returns
+// nil when no instance is available.  For liveness, status, UI and admin
+// diagnostic callers; the sanitize RPC path uses PickReserved.
 //
-// Strategy: start from the rr cursor; the first client whose breaker
-// Allow() returns true wins.  Advances the cursor before returning so
-// subsequent calls on a stable pool spread load.
+// Strategy: start from the rr cursor; the first client whose breaker is
+// Available() wins.  Advances the cursor before returning so subsequent
+// calls on a stable pool spread load.
 func (p *cdrClientPool) Pick() *cdrPooledClient {
+	pc, _ := p.pick(func(b *cdrCircuitBreaker) (bool, cdrProbeReservation) {
+		return b.Available(), cdrProbeReservation{}
+	})
+	return pc
+}
+
+// PickReserved is Pick for the sanitize RPC path: the winning breaker hands
+// out a half-open reservation that the caller OWNS and must either report on
+// (OnSuccess/OnFailure) or hand back (Release). Only the Sanitize RPC callers
+// may reserve (TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath), and every
+// one of them must (TestCDRRPC_EverySanitizeCallOwnsAReservation).
+func (p *cdrClientPool) PickReserved() (*cdrPooledClient, cdrProbeReservation) {
+	return p.pick((*cdrCircuitBreaker).Reserve)
+}
+
+// pick is the shared round-robin walk; sel decides each candidate.
+func (p *cdrClientPool) pick(sel func(*cdrCircuitBreaker) (bool, cdrProbeReservation)) (*cdrPooledClient, cdrProbeReservation) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	n := len(p.clients)
 	if n == 0 {
-		return nil
+		return nil, cdrProbeReservation{}
 	}
 	// Reserve the starting cursor once so concurrent Pick() calls
 	// don't all probe the same client.
@@ -169,11 +188,11 @@ func (p *cdrClientPool) Pick() *cdrPooledClient {
 	}
 	for i := 0; i < n; i++ {
 		candidate := p.clients[(start+i)%n]
-		if candidate.Breaker.Allow() {
-			return candidate
+		if ok, resv := sel(candidate.Breaker); ok {
+			return candidate, resv
 		}
 	}
-	return nil
+	return nil, cdrProbeReservation{}
 }
 
 // replace swaps the pool contents atomically.  Old clients NOT in the new
@@ -216,12 +235,35 @@ func (p *cdrClientPool) shutdown() {
 
 // ─── Package-level conveniences ────────────────────────────────────────────
 
-// cdrPickPooled returns the pool-aware selected client with full
-// per-instance state (profileCap, breaker, health).  Returns nil when
-// no instance is available — callers treat nil as "skip CDR" and apply
-// fail_mode.  This is the proxy hot path's selector.
-func cdrPickPooled() *cdrPooledClient {
-	return cdrPool.Pick()
+// anyAvailable reports whether ANY pooled instance would plausibly admit a
+// request, without consuming a half-open probe reservation from any breaker.
+// Pick() mutates breaker state; a liveness nil-check must not.
+func (p *cdrClientPool) anyAvailable() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, c := range p.clients {
+		if c.Breaker.Available() {
+			return true
+		}
+	}
+	return false
+}
+
+// cdrAnyInstanceAvailable is the hot path's non-consuming liveness gate. Use
+// it for "is CDR usable at all?"; only the sanitize RPC path reserves
+// (cdrPickPooledReserved), because only the caller that issues the RPC can
+// report the outcome that releases a half-open reservation.
+func cdrAnyInstanceAvailable() bool {
+	return cdrPool.anyAvailable()
+}
+
+// cdrPickPooledReserved is the proxy hot path's selector: the pool-aware
+// client with full per-instance state (profileCap, breaker, health) plus the
+// half-open reservation it holds.  Returns nil when no instance is available
+// — callers treat nil as "skip CDR" and apply fail_mode.  The caller must
+// record an outcome or Release the reservation on every return path.
+func cdrPickPooledReserved() (*cdrPooledClient, cdrProbeReservation) {
+	return cdrPool.PickReserved()
 }
 
 // cdrPoolInstallSingleForTest registers `c` as the sole pool member
@@ -278,16 +320,19 @@ var promLabelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 // cdrMarkOutcome reports an instance's outcome to its circuit breaker.
 // `isFailure` is the caller's classification (transport / ERROR status
 // count; CLEAN / SANITIZED / BLOCKED / UNSUPPORTED / file_too_large
-// do NOT count as failures).
-func cdrMarkOutcome(instanceName string, isFailure bool) {
+// do NOT count as failures). resv is the reservation the RPC ran under
+// (from cdrPickPooledReserved): the breaker drops an outcome whose
+// reservation was superseded, so a reclaimed probe's late report cannot
+// override the probe that replaced it.
+func cdrMarkOutcome(instanceName string, resv cdrProbeReservation, isFailure bool) {
 	pc := cdrPool.Get(instanceName)
 	if pc == nil {
 		return
 	}
 	if isFailure {
-		pc.Breaker.OnFailure()
+		pc.Breaker.OnFailure(resv)
 	} else {
-		pc.Breaker.OnSuccess()
+		pc.Breaker.OnSuccess(resv)
 	}
 }
 
@@ -371,7 +416,7 @@ func dialEnrolledInstance(inst CDREnrolledInstance, cfg CDRConfig, oldPool []*cd
 		clientCfg.SecondaryValidUntil = time.Unix(inst.RotatedFingerprintUntilUnix, 0)
 	}
 	if cfg.TimeoutSec > 0 {
-		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
+		clientCfg.Timeout = cdrTimeoutSecDuration(cfg.TimeoutSec)
 	}
 	if cfg.ChunkSizeKB > 0 {
 		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
@@ -392,7 +437,11 @@ func dialEnrolledInstance(inst CDREnrolledInstance, cfg CDRConfig, oldPool []*cd
 		return nil, fmt.Errorf("dial: %w", derr)
 	}
 	if carriedBreaker == nil {
-		carriedBreaker = newCDRCircuitBreaker(cdrBreakerConfig{})
+		// Seeded from cfg, not the active config: initCDRClient publishes
+		// cdrActiveCfg only AFTER this pool is built.
+		carriedBreaker = newCDRCircuitBreaker(cdrBreakerConfig{
+			PerFileDeadline: cdrConfigPerFileDeadline(cfg),
+		})
 	}
 	return &cdrPooledClient{
 		Name:    inst.Name,
@@ -411,7 +460,7 @@ func dialSingleFromConfig(cfg CDRConfig) (*cdrPooledClient, error) {
 	// Timeout/chunk are independent of the certs; set them first so both the
 	// keyed and keyless NewCDRClient paths below see them.
 	if cfg.TimeoutSec > 0 {
-		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
+		clientCfg.Timeout = cdrTimeoutSecDuration(cfg.TimeoutSec)
 	}
 	if cfg.ChunkSizeKB > 0 {
 		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
@@ -447,8 +496,11 @@ func dialSingleFromConfig(cfg CDRConfig) (*cdrPooledClient, error) {
 		return nil, err
 	}
 	return &cdrPooledClient{
-		Name:    "default",
-		Client:  client,
-		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{}),
+		Name:   "default",
+		Client: client,
+		// Seeded from cfg, not the active config — see dialEnrolledInstance.
+		Breaker: newCDRCircuitBreaker(cdrBreakerConfig{
+			PerFileDeadline: cdrConfigPerFileDeadline(cfg),
+		}),
 	}, nil
 }

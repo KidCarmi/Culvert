@@ -422,7 +422,7 @@ func init() {
 
 // Engine funcs re-exposed under their original names.
 var (
-	auditAdd                = audit.Add
+	auditAdd                = addAuditEntry
 	auditGet                = audit.Get
 	auditGetMemory          = audit.GetMemory
 	auditGetPersistent      = audit.GetPersistent
@@ -432,6 +432,20 @@ var (
 	auditWriteErrors        = audit.WriteErrors
 	auditPendingDrops       = audit.PendingDrops
 )
+
+// addAuditEntry is the single write chokepoint from package main into the audit
+// engine, and the only non-test caller of audit.Add (TestAuditActorBoundWall
+// enforces both across main and internal/). It applies the CHAOS-63 render-only
+// actor bound (boundAuditActor) before the entry reaches the ring, the JSONL
+// file, the SIEM hook and the Data-Plane push queue. Producers keep handing the
+// FULL principal — auditActor is compared for identity by MCP four-eyes, so it
+// must never be truncated at its source (Codex review, PR #1532) — and the
+// bound lands here once, whether the entry came from auditEventDiffID or was
+// built directly (release DispatchService, PAC lifecycle, HA, cluster, CDR).
+func addAuditEntry(e AuditEntry) {
+	e.Actor = boundAuditActor(e.Actor)
+	audit.Add(e)
+}
 
 // InitAuditLog opens path for append-only JSONL audit persistence.
 func InitAuditLog(path string) error { return audit.Init(path) }
@@ -849,6 +863,48 @@ type Config struct {
 	// uiUsersFile is the path to persist UI users across restarts.
 	// Empty = in-memory only (auth resets on every restart).
 	uiUsersFile string
+
+	// uiUsersLoadErr is the outcome of the most recent LoadUIUsersFile for
+	// uiUsersFile (nil = loaded, or absent on first run), until a roster
+	// write lands at that path (noteRosterWriteLanded clears it). Startup continues
+	// after a failed load, so without this the admin_roster_durability row
+	// would report a configured-but-unusable roster as persisted.
+	uiUsersLoadErr error
+
+	// uiUsersWriteLanded is the admin_roster_durability row's evidence that a
+	// write to uiUsersFile has landed in this process (a roster save): until
+	// one has, persistence is not verified yet. A stat cannot supply this: a
+	// readable roster on a read-only mount, or one owned by another user in a
+	// sticky directory, stats exactly like a writable one, and only the
+	// rename over the real file is refused. Reset by SetUIUsersFile and
+	// LoadUIUsersFile.
+	uiUsersWriteLanded bool
+	// uiUsersWritten identifies the bytes the last landed write put at
+	// uiUsersFile, so the row can tell when the file was replaced or edited
+	// outside Culvert afterwards (roster_disk_identity.go). Reset with the
+	// evidence above.
+	uiUsersWritten rosterWrittenDigest
+	// uiUsersWriteGen and uiUsersWritesInFlight bracket every Culvert write
+	// to uiUsersFile (beginRosterWrite/endRosterWrite) so the row's identity
+	// read can run with no lock held and still tell a Culvert write racing it
+	// from an external one (roster_disk_identity.go). SetUIUsersFile moves the
+	// generation too.
+	uiUsersWriteGen       atomic.Uint64
+	uiUsersWritesInFlight atomic.Int32
+	// uiUsersWriteSynced is whether the last landed write's directory was
+	// synced (fileutil.WriteResult.DirSynced): a landed but unsynced write
+	// may not survive a power loss, and the row says so.
+	uiUsersWriteSynced bool
+	// uiUsersRefusedAtLanded and uiUsersDegradedAtLanded are the CHAOS-70
+	// refused and degraded counters as they stood when the last write landed,
+	// so the row reports the failures since then (rosterCounterBase). A later
+	// landed save writes the whole roster in use, including a login-path
+	// change whose own write failed, so it is what clears them; a refused
+	// change stays visible until then, before and after any earlier landed
+	// write. Zero until the first landed write, so before it every failure
+	// since startup counts.
+	uiUsersRefusedAtLanded  int64
+	uiUsersDegradedAtLanded int64
 
 	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
 	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
@@ -1434,6 +1490,27 @@ func (c *Config) DeleteUIUser(username string) error {
 	return nil
 }
 
+// hasLocalAdministrator reports whether at least one LOCAL account can sign in
+// to the console as admin, independent of any identity provider: a roster
+// entry with RoleAdmin, or the legacy single-user login when no roster entry
+// shadows it (VerifyUIUser grants that login RoleAdmin). A boolean existence
+// probe only; it never exposes a name, role or count. Used by the
+// admin_roster_durability diagnostics row to name the break-glass gap.
+func (c *Config) hasLocalAdministrator() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, u := range c.uiUsers {
+		if u.role.HasRole(RoleAdmin) {
+			return true
+		}
+	}
+	if c.user == "" {
+		return false
+	}
+	_, shadowed := c.uiUsers[c.user]
+	return !shadowed
+}
+
 // ListUIUsers returns a snapshot of all admin UI users (without password hashes).
 func (c *Config) ListUIUsers() []UIUserInfo {
 	c.mu.RLock()
@@ -1450,7 +1527,75 @@ func (c *Config) ListUIUsers() []UIUserInfo {
 func (c *Config) SetUIUsersFile(path string) {
 	c.mu.Lock()
 	c.uiUsersFile = path
+	c.uiUsersLoadErr = nil // a new path has not been loaded yet
+	c.uiUsersWriteLanded = false
+	c.uiUsersWritten = rosterWrittenDigest{}
+	c.uiUsersWriteSynced = false
+	c.uiUsersWriteGen.Add(2) // an identity read of the old path is discarded
 	c.mu.Unlock()
+}
+
+// rosterPersistTarget returns the configured roster path and the outcome of
+// the last LoadUIUsersFile for it. Read-only; used by the
+// admin_roster_durability diagnostics row, which never renders either value.
+func (c *Config) rosterPersistTarget() (path string, loadErr error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersFile, c.uiUsersLoadErr
+}
+
+// rosterWriteLanded reports whether a roster write has landed at the
+// configured path in this process (see uiUsersWriteLanded). Read-only.
+func (c *Config) rosterWriteLanded() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersWriteLanded
+}
+
+// noteRosterWriteLanded records that a roster save of data to path landed:
+// the evidence that persistence works, and the identity of what is now on
+// disk (rosterWrittenDigest). It is evidence of that write, not a promise
+// that the next one will be authorised. A save that fails is
+// not recorded here; the refused/degraded counters report it.
+//
+// landed is the FileInfo of the file the write put at path, taken from its
+// own descriptor after the rename (fileutil.AtomicWriteInfo) — never a stat
+// of the path afterwards, which an external replacement could already have
+// won (Codex P2 4319694771 on PR #1601).
+func (c *Config) noteRosterWriteLanded(path string, data []byte, landed os.FileInfo, dirSynced bool) {
+	c.mu.Lock()
+	if c.uiUsersFile == path {
+		c.uiUsersWriteLanded = true
+		c.uiUsersWritten = digestRosterWrite(path, data, landed)
+		c.uiUsersWriteSynced = dirSynced
+		// The file at this exact path now holds the roster in use, so a
+		// failed startup load of it no longer describes it (Codex P2
+		// 4327431894 on PR #1601). Cleared under the same lock as the
+		// evidence; SetUIUsersFile (another path) resets it on its own.
+		c.uiUsersLoadErr = nil
+		// Read inside the save transaction: a refusal is counted after its
+		// handler's transaction ends, so one racing this landing may still be
+		// counted as since it — the visible side, never a hidden refusal.
+		c.uiUsersRefusedAtLanded = rosterPersistRefused.Load()
+		c.uiUsersDegradedAtLanded = rosterPersistBestEffort.Load()
+	}
+	c.mu.Unlock()
+}
+
+// rosterWriteSynced reports whether the last landed roster write's directory
+// was synced. Read-only.
+func (c *Config) rosterWriteSynced() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersWriteSynced
+}
+
+// rosterCounterBase returns the refused and degraded counters as they stood
+// when the last roster write landed (zero before the first). Read-only.
+func (c *Config) rosterCounterBase() (refused, degraded int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.uiUsersRefusedAtLanded, c.uiUsersDegradedAtLanded
 }
 
 // uiUserRecord is the on-disk representation of a UI admin user.
@@ -1483,11 +1628,36 @@ type uiUsersFileEnvelope struct {
 }
 
 // LoadUIUsersFile reads persisted UI users from disk and populates the roster.
-// Silently returns nil if the file does not exist yet (first run).
+// Silently returns nil if the file does not exist yet (first run). The outcome
+// is recorded (rosterPersistTarget) so diagnostics can report a configured but
+// unusable roster file instead of reading it as persisted. It writes nothing:
+// until the first admin account change lands, the admin_roster_durability
+// row reports persistence as not verified yet (rosterTargetNotYetVerified).
+// saveUIUsersMu is held across the read (lock order saveUIUsersMu → c.mu),
+// as for any roster writer — a corrupt roster's quarantine writes a fresh
+// file.
 func (c *Config) LoadUIUsersFile() error {
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
 	c.mu.RLock()
 	path := c.uiUsersFile
 	c.mu.RUnlock()
+	c.beginRosterWrite() // a quarantine's fresh file is a roster write
+	err := c.loadUIUsersFile(path)
+	c.endRosterWrite()
+	c.mu.Lock()
+	if c.uiUsersFile == path { // not re-pointed while loading
+		c.uiUsersLoadErr = err
+		c.uiUsersWriteLanded = false
+		c.uiUsersWritten, c.uiUsersWriteSynced = rosterWrittenDigest{}, false
+	}
+	c.mu.Unlock()
+	return err
+}
+
+// loadUIUsersFile parses the roster at path into c. A missing file (first run)
+// or an unset path is not an error.
+func (c *Config) loadUIUsersFile(path string) error {
 	if path == "" {
 		return nil
 	}
@@ -1496,7 +1666,7 @@ func (c *Config) LoadUIUsersFile() error {
 	// time, so the /readyz row would otherwise vanish while the evidence
 	// and the empty-roster state persist.
 	noteResidualQuarantine("ui_users", path)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- operator-configured -ui-users-file path
 	if os.IsNotExist(err) {
 		logger.Printf("Loader: ui_users.json: file %q missing — caller may bootstrap defaults (D1.2-flag-F1)", sanitizeLog(path))
 		return nil
@@ -1639,6 +1809,8 @@ func (c *Config) SaveUIUsersFile() error {
 // landing between this call and a rollback would persist state the rollback is
 // about to undo.
 func (c *Config) saveUIUsersLocked() error {
+	c.beginRosterWrite()
+	defer c.endRosterWrite()
 	c.mu.RLock()
 	path := c.uiUsersFile
 	// Canonicalize for serialization: an unset in-memory value persists as the
@@ -1680,8 +1852,21 @@ func (c *Config) saveUIUsersLocked() error {
 	// rename: concurrent admin mutations save from separate handler
 	// goroutines, and a shared temp name lets two writers interleave into
 	// the same file before one renames the torn result over the roster.
-	return fileutil.AtomicWrite(path, data, 0o600)
+	res, err := rosterAtomicWrite(path, data, 0o600)
+	if err == nil || errors.Is(err, fileutil.ErrReplacedNotSynced) {
+		// Landed (ErrReplacedNotSynced: renamed into place, only the parent
+		// fsync failed) — exact evidence for admin_roster_durability, with
+		// whether the directory was synced (the strict answer AtomicWrite's
+		// error deliberately does not give).
+		c.noteRosterWriteLanded(path, data, res.Landed, err == nil && res.DirSynced)
+	}
+	return err
 }
+
+// rosterAtomicWrite is the roster save's durable write. A seam only for
+// tests, which replace the target between the rename and the return to show
+// the recorded owner is the landed file's, not whatever is at the path then.
+var rosterAtomicWrite = fileutil.AtomicWriteInfo
 
 // rosterSnapshot is a deep copy of every piece of state SaveUIUsersFile
 // serialises. It exists so a mutation whose durable write fails can be undone
