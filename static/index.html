@@ -1275,7 +1275,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div style="padding:14px 16px">
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:.95rem;font-weight:600">
             <input type="checkbox" id="ret-enabled" data-change="toggleLogSaving"> Save logs to disk
-            <span style="font-weight:400;font-size:.78rem;color:var(--muted)">(off = live feed only, last 5,000 in memory)</span>
+            <span style="font-weight:400;font-size:.78rem;color:var(--muted)">(off = live traffic only, last 5,000 in memory)</span>
           </label>
 
           <div id="ret-controls" style="margin-top:14px">
@@ -1804,7 +1804,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         Connect OIDC or SAML 2.0 providers for single sign-on. Group memberships from the IdP are available as conditions in policy rules.
       </p>
       <div id="idp-persist-warning" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.5">
-        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or upgrade</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
       </div>
       <div id="idp-legacy-ldap-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6"></div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
@@ -2968,7 +2968,7 @@ Firefox (all platforms):
     <div class="view" id="view-users">
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Admin Users</span>
+          <span class="panel-title">Administrators</span>
           <button class="btn" data-click="openUserModal">+ Add User</button>
         </div>
         <div class="panel-body">
@@ -3304,7 +3304,7 @@ Firefox (all platforms):
       </div>
 
       <div id="pol-persist-warning" class="banner crit" style="display:none" role="alert">
-        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or upgrade</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
       </div>
 
       <!-- Rule Table -->
@@ -3915,7 +3915,7 @@ Firefox (all platforms):
             How much of this node's TLS is actually being inspected right now, and why the rest is not.
             Coverage is <strong>inspected ÷ (inspected + bypass/exclusion)</strong> - decryption
             <em>failures</em> are counted separately (they are sessions to triage, not a deliberate coverage gap).
-            Counts are per-process since start; click any outcome or failure to see those sessions in the Live Feed.
+            Counts are per-process since start; click any outcome or failure to see those sessions in Traffic.
           </p>
           <div id="dechealth-coverage" style="margin:14px 0"></div>
           <div id="dechealth-bar" style="margin:14px 0"></div>
@@ -5271,7 +5271,7 @@ Firefox (all platforms):
                 <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
               </button>
             </div>
-            <p class="hint">Version and health of the host-root agent that applies updates and runs backups - the same detail <code>systemctl status culvert-maint</code> shows, without SSH.</p>
+            <p class="hint">Version and health of the host-root agent that applies upgrades and runs backups - the same detail <code>systemctl status culvert-maint</code> shows, without SSH.</p>
             <div id="support-maint-agent" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
@@ -6165,7 +6165,7 @@ const viewMeta = {
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
   policylearn: { title: 'Policy Learning', meta: 'Advisory, node-local learning - observes traffic during an explicit session and proposes born-disabled Allow rules with evidence; cannot alter enforcement policy' },
   decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) - volatile, per-node, expiring; every entry reduces inspection coverage' },
-  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into the Live Feed' },
+  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into Traffic' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension - Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice - enrolled instances, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
@@ -6470,6 +6470,17 @@ function applySession(user, role) {
   window.currentRole = role || '';
   uiRole     = role || '';
   uiUsername = user || '';
+
+  // SEC-HATOKEN-1 (client half). The HA join command is admin-only server-side,
+  // but this is a single-page app: a panel already rendered for an admin keeps
+  // its DOM across a logout and the next sign-in. Clearing here, at the one
+  // chokepoint every session change goes through (login and doLogout both call
+  // it), means the token cannot outlive the session that was allowed to see it
+  // even if the panel is never re-rendered.
+  const haCmdEl = document.getElementById('ha-deploy-cmd');
+  if (haCmdEl && role !== 'admin') {
+    haCmdEl.textContent = '';
+  }
 
   // Topbar info
   const info = document.getElementById('topbar-user-info');
@@ -9149,7 +9160,7 @@ async function loadDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    const d = await api('/api/decryption/redaction');
+    const d = await api('/api/traffic/redaction');
     cb.checked = !!d.redact_hosts;
   } catch (e) { /* not permitted / unavailable — leave unchecked */ }
 }
@@ -9159,7 +9170,7 @@ async function toggleDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    await api('/api/decryption/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
+    await api('/api/traffic/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
     toast('Host/SNI redaction ' + (cb.checked ? 'enabled' : 'disabled'), 'success');
   } catch (e) {
     cb.checked = !cb.checked; // revert the optimistic flip
@@ -19290,8 +19301,29 @@ async function loadHA(isCP) {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';
       }
-      if (r.deploy_cmd) {
-        document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
+      // SEC-HATOKEN-1 (client half). Three things have to line up here, and
+      // the server omitting deploy_cmd for a non-admin is only the first.
+      //
+      //  - An ABSENT field must CLEAR this element rather than leave the
+      //    previous value rendered. This is a single-page app, so the <pre>
+      //    survives a session change in the same tab; without the else, an
+      //    admin who opened the HA panel and logged out left their join token
+      //    in the DOM — and in the click-to-copy handler — for whoever signed
+      //    in next.
+      //  - The CURRENT role is re-checked at the moment of the write, because
+      //    loadHA is async: an admin response already in flight can resolve
+      //    AFTER applySession has switched the tab to a non-admin session, and
+      //    would otherwise write the token straight back into the DOM that
+      //    applySession had just cleared. Checking only on the way in, or only
+      //    at session change, leaves that window open (CodeRabbit on PR #1651,
+      //    verified — loadHA awaits its fetch).
+      //  - textContent, never innerHTML.
+      const haCmd = document.getElementById('ha-deploy-cmd');
+      const haIsAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
+      if (haIsAdmin && r.deploy_cmd) {
+        haCmd.textContent = r.deploy_cmd;
+      } else {
+        haCmd.textContent = '';
       }
       // Recent role transitions (M5) - newest first, from the bounded ring.
       const fevWrap = document.getElementById('ha-failover-events');
