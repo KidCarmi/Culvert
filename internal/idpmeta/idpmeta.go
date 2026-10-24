@@ -3,7 +3,7 @@
 // SAML IdP EntityDescriptor (metadata_url) and the OIDC discovery document
 // (issuer/.well-known/openid-configuration).
 //
-// # Why this package exists (CHAOS-71)
+// # Why this package exists (CHAOS-87)
 //
 // Compiling an enabled SAML or OIDC profile used to perform a synchronous
 // outbound fetch against the customer's IdP, with no cache and no fallback, on
@@ -69,7 +69,7 @@ import (
 const (
 	// StaleMaxAge bounds how long a cached document may substitute for a
 	// live fetch. Past it the entry is refused and the caller fails closed
-	// (pre-CHAOS-71 behaviour). Seven days comfortably covers an IdP
+	// (pre-CHAOS-87 behaviour). Seven days comfortably covers an IdP
 	// maintenance window, a weekend outage and an egress misconfiguration,
 	// while staying far short of a key-rotation interval.
 	//
@@ -149,7 +149,7 @@ func docFileName(k string) string { return sourceSum(k) + ".doc" }
 // Put is a no-op returning nil. That is the deliberate posture for a node with
 // no writable state root — the cache is an availability aid, never a
 // correctness dependency, so its absence must degrade to exactly the
-// pre-CHAOS-71 behaviour rather than fail a compile.
+// pre-CHAOS-87 behaviour rather than fail a compile.
 type Store struct {
 	mu      sync.Mutex
 	dir     string
@@ -365,37 +365,140 @@ func (s *Store) Put(profileID string, kind Kind, source string, doc []byte) erro
 		return fmt.Errorf("idpmeta: write document: %w", err)
 	}
 	s.entries[k] = e
-	s.supersedeLocked(profileID, kind, k)
+	// DELIBERATELY NOT superseding here — see RetireSuperseded. Put is reached
+	// from a SPECULATIVE compile, before the registry has decided to publish
+	// anything, so retiring the other sources here destroys the fallback of
+	// the source that is still in service.
 	s.evictLocked()
 	return s.saveIndexLocked()
 }
 
-// supersedeLocked retires every OTHER cached document for this (profile, kind).
+// RetireSuperseded drops every cached document for (profileID, kind) EXCEPT the
+// one for keepSource.
 //
-// A superseded entry is not merely old, it is UNREACHABLE: Get is keyed by the
-// profile's CURRENT source, so once a profile is repointed from S1 to S2 the
-// entry for S1 can never be served again. Leaving it behind made the cache
-// accumulate one dead key per repoint for the life of the appliance, and
-// because evictLocked is global oldest-first and liveness-blind, that
-// accumulation evicted the ONLY fallback of a profile that was still live and
-// still serving — the cache failing at precisely the job it exists for
-// (Codex review round 19).
+// IT MUST BE CALLED ONLY AFTER THE PUBLICATION THAT MADE keepSource
+// AUTHORITATIVE HAS BEEN PERSISTED, and that is the whole point of its
+// existing. Round 19 did this retirement inside Put, which looked equivalent
+// and was not: Put is reached from compileIdPProfile, i.e. from the
+// SPECULATIVE half of a registry write, and both of the registry's writers
+// can abandon that candidate afterwards — Upsert when r.persist fails, and
+// ReplaceAll when any later profile fails to validate, fails to compile or
+// fails to persist. In those cases the OLD source stays authoritative, so
+// retiring at Put time deleted the last-known-good of the document still in
+// service and the next outage took a healthy profile dark: the exact
+// pre-CHAOS-87 failure this package exists to prevent, reintroduced by the
+// round that bounded the cache (CodeRabbit + Codex, independently, on the
+// owner-decision round).
 //
-// It runs AFTER the new entry is stored and skips it by key, so a profile is
-// never left with no fallback at all: the document that replaces the retired
-// ones is already on disk and in the index when this runs.
+// COMPILING IS NOT COMMITTING — this section's own rule, from rounds 4 and 6,
+// applied to durable cache state instead of to episode state. The surrounding
+// registry code states the same contract in three places ("the published
+// slice/map must not be touched until persistence succeeds", "the generation is
+// PUBLISHED only here, after the save landed"), and a durable store write is a
+// publication like any other.
+//
+// What round 19 was right about is unchanged: a superseded entry is
+// UNREACHABLE, since Get is keyed by the profile's CURRENT source, so leaving
+// it behind accumulates one dead key per repoint and the global, oldest-first,
+// liveness-blind evictLocked can then drop the ONLY fallback of a profile that
+// is still live. Moving the retirement to the commit site keeps that bound for
+// every repoint that actually commits — the case that accumulates in practice
+// — and leaves only a refused candidate's own entry behind, which eviction
+// bounds.
+//
+// keepSource == "" retires NOTHING. A profile with no remote source left
+// (disabled, or switched to inline SAML metadata) is the Forget(profileID)
+// case recorded as register row IDP-11, which needs its own gates.
 //
 // Deleting rather than moving aside is deliberate and matches evictLocked: the
 // CHAOS-50/62 "quarantine, never delete" rule governs a store whose content is
 // EVIDENCE of a fault, and this content is a cache of a remote document that
 // the next successful fetch reproduces.
+func (s *Store) RetireSuperseded(profileID string, kind Kind, keepSource string) error {
+	if s == nil || keepSource == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dir == "" {
+		return nil // inert store
+	}
+	s.loadLocked()
+	if !s.supersedeLocked(profileID, kind, key(profileID, kind, keepSource)) {
+		return nil // nothing retired, so nothing to rewrite
+	}
+	return s.saveIndexLocked()
+}
+
+// Forget removes every cached document for profileID, whatever its kind or
+// source.
+//
+// IT MUST BE CALLED ONLY AFTER A PROFILE DELETION HAS BEEN PERSISTED — the same
+// ordering rule as RetireSuperseded, for the same reason: the registry's
+// deletion is not committed until r.persist returns, and sweeping a profile's
+// documents before that would destroy the fallback of a profile that is still
+// in service if the write then fails.
+//
+// Two things this closes (register row IDP-11, raised again by CodeRabbit on
+// the owner-decision round). A deleted profile's final entry used to linger
+// forever: it fed the global, oldest-first, liveness-blind evictLocked, so with
+// more than MaxEntries profiles having ever existed a LIVE profile's only
+// fallback could be evicted on behalf of a profile that no longer exists. And
+// because Get is keyed by (profile, kind, source), recreating a profile under
+// the SAME id pointed at the SAME source would be served the PRE-DELETION
+// document during an outage — metadata the operator had deliberately deleted,
+// including whatever signing material it carried, coming back for up to
+// StaleMaxAge.
+//
+// Deleting rather than moving aside matches evictLocked and RetireSuperseded:
+// the CHAOS-50/62 "quarantine, never delete" rule governs a store whose content
+// is EVIDENCE of a fault, and this content is a cache of a remote document that
+// the next successful fetch reproduces.
+func (s *Store) Forget(profileID string) error {
+	if s == nil || profileID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dir == "" {
+		return nil // inert store
+	}
+	s.loadLocked()
+	removed := false
+	for k, e := range s.entries {
+		if e == nil || e.ProfileID != profileID {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.dir, docFileName(k)))
+		delete(s.entries, k)
+		removed = true
+	}
+	if !removed {
+		return nil // nothing retired, so nothing to rewrite
+	}
+	return s.saveIndexLocked()
+}
+
+// supersedeLocked retires every OTHER cached document for this (profile, kind),
+// keeping the entry named by keep. It reports whether it removed anything, so
+// the caller can skip rewriting an unchanged index.
+//
+// THE CALLER MUST BE A COMMIT SITE. This is reachable only from
+// RetireSuperseded, whose comment carries the ordering rule and why Put is not
+// allowed to call it; a caller on the speculative path deletes the fallback of
+// the source still in service.
+//
+// It skips the kept entry by key, so the document that replaces the retired
+// ones is on disk and in the index before any of them goes.
 //
 // RESIDUAL, recorded rather than closed here: this bounds accumulation to one
-// entry per (profile, kind) that has ever fetched, so a DELETED profile's last
-// entry still lingers. Closing that needs a Forget(profileID) the registry
-// calls on delete, i.e. a new cross-layer mutation path into the episode/commit
-// code rounds 6-10 repeatedly got wrong — its own change, not this one.
-func (s *Store) supersedeLocked(profileID string, kind Kind, keep string) {
+// entry per (profile, kind) that has ever COMMITTED a fetch, so a DELETED
+// profile's last entry still lingers. Closing that needs a Forget(profileID)
+// the registry calls on delete, i.e. a new cross-layer mutation path into the
+// episode/commit code rounds 6-10 repeatedly got wrong — register row IDP-11,
+// its own change, not this one.
+func (s *Store) supersedeLocked(profileID string, kind Kind, keep string) bool {
+	retired := false
 	for k, e := range s.entries {
 		if k == keep || e == nil {
 			continue
@@ -405,7 +508,9 @@ func (s *Store) supersedeLocked(profileID string, kind Kind, keep string) {
 		}
 		_ = os.Remove(filepath.Join(s.dir, docFileName(k)))
 		delete(s.entries, k)
+		retired = true
 	}
+	return retired
 }
 
 // evictLocked keeps the store within MaxEntries, oldest fetch first. The

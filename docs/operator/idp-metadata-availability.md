@@ -1,4 +1,4 @@
-# IdP metadata and discovery availability (CHAOS-71)
+# IdP metadata and discovery availability (CHAOS-87)
 
 Applies to interactive identity providers — SAML profiles with a
 `metadataUrl`, and OIDC profiles (which fetch
@@ -96,7 +96,7 @@ outage is adopted within minutes of recovery, not when the 7-day ceiling
 expires. It logs `IDP_METADATA_REVALIDATED` when it does. While the IdP is
 still unreachable the cached provider keeps serving.
 
-**The degradation alert does not depend on another fetch.** A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence. It runs on **every** node, including one that has no remote-metadata profile yet: a Data Plane receives its profiles through the CP→DP snapshot, so starting the watchdog only where a profiles file is configured would leave exactly the pushed-configuration nodes unwatched. With no open episode its sweep does nothing.
+**The degradation alert does not depend on another fetch.** A separate detection-only watchdog therefore evaluates open episodes against the clock and fires the page once the threshold is crossed, even if no further fetch is ever attempted. It never fetches, never compiles and never clears an episode — recovery still requires observed evidence. It runs on EVERY node, including one with no remote-metadata profile at boot: a profile added later by an admin save or a CP->DP snapshot is covered, which is why the start is deliberately unconditional. With no open episode its check is a no-op.
 
 **A dark provider recovers on its own.** If a profile still cannot be compiled
 — unreachable at boot with nothing cached — the appliance retries at a bounded
@@ -111,7 +111,7 @@ silent.
 | State | Severity | Meaning |
 |---|---|---|
 | No remote IdP metadata/discovery documents in use | ok | Nothing to report on this node. |
-| *N* of *M* enabled interactive IdP profile(s) have NO live provider | **warn** | **Browser SSO is not working for those profiles.** This is the state that had no surface at all before CHAOS-71. |
+| *N* of *M* enabled interactive IdP profile(s) have NO live provider | **warn** | **Browser SSO is not working for those profiles.** This is the state that had no surface at all before CHAOS-87. |
 | IdP metadata/discovery fetches have been failing for *D* | warn | Authentication still works from cached documents; IdP-side changes are not being picked up. |
 | IdP metadata/discovery healthy | ok | Carries cumulative counts so past transient outages stay visible. |
 
@@ -264,9 +264,13 @@ safe at any time; it costs only the fallback.
   authorization host — even though the user's browser can — and would let a
   resolver outage reject a cached document, which is the whole failure this
   page exists to prevent. So the trade is deliberate and it is visible:
-  `culvert_idp_authz_endpoint_unverified_total` rising, plus one
-  `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line **per 5 minutes** naming the profile
-  that triggered it (the counter carries the full magnitude).
+  `culvert_idp_authz_endpoint_unverified_total` rising, plus at most one
+  `IDP_AUTHZ_ENDPOINT_UNVERIFIED` log line per 5 minutes — ONE process-global
+  rate gate shared by every profile, naming whichever profile triggered it.
+  The counter counts EVENTS and includes the ones suppressed from the log (the
+  line prints the running total); it is NOT a count of distinct affected
+  profiles, because one profile recompiling — a recovery pass, or a CP->DP
+  snapshot — increments it each time.
   **If you see it: fix this node's DNS.** A provider compiled while the
   resolver was healthy carries a verified endpoint.
 

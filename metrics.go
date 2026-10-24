@@ -1080,7 +1080,12 @@ culvert_upstream_direct_fallback_total %d
 	// visible across restarts even after the store self-healed.
 	cfdb := catFeedDBState()
 	cfdbAvailable, cfdbRecovered := 0, 0
-	if cfdb.Available {
+	// CHAOS-74: this gauge's contract is "open and SERVING LOOKUPS", and it was
+	// sourced purely from the boot record — so a store that lost its mapped
+	// tables at 03:00 kept reporting 1 while every lookup returned
+	// "uncategorised". A latched runtime degradation is reported as 0, which is
+	// what the HELP text already promised.
+	if cfdb.Available && !cfdb.RuntimeDegraded {
 		cfdbAvailable = 1
 	}
 	if cfdb.Recovered {
@@ -1097,10 +1102,20 @@ culvert_catfeeddb_recovered %d
 # HELP culvert_catfeeddb_quarantined_copies Quarantined (.corrupt.*) copies of the community category store still on the data volume
 # TYPE culvert_catfeeddb_quarantined_copies gauge
 culvert_catfeeddb_quarantined_copies %d
+
+# HELP culvert_catfeeddb_lookup_errors_total Community category lookups that failed with a store error instead of a clean miss since startup
+# TYPE culvert_catfeeddb_lookup_errors_total counter
+culvert_catfeeddb_lookup_errors_total %d
+
+# HELP culvert_catfeeddb_memory_faults_total Contained memory faults reading the community category store's mapped tables; non-zero means the data volume damaged the store while it was open and Layer-2 categorisation is off until this node restarts
+# TYPE culvert_catfeeddb_memory_faults_total counter
+culvert_catfeeddb_memory_faults_total %d
 `,
 		cfdbAvailable,
 		cfdbRecovered,
 		cfdb.ResidualCopies,
+		cfdb.RuntimeFaults,
+		cfdb.RuntimeMemoryFaults,
 	)
 
 	// CHAOS-60: GeoIP resolution health. Emitted ONLY when a GeoIP database is
@@ -1364,6 +1379,9 @@ culvert_admin_ui_listen_backoff_seconds %g
 		)
 	}
 
+	// CHAOS-71: Control Plane gRPC listener health (cp_grpc_health.go).
+	writeCPGRPCMetrics(w)
+
 	// CHAOS-64: destination-host DNS resolution health. Emitted ONLY once this
 	// node has actually resolved something — resolution runs on the policy path
 	// only for a DestCountry rule on a node with a GeoIP database, and a block
@@ -1415,7 +1433,7 @@ culvert_dns_resolve_degraded %d
 		)
 	}
 
-	// CHAOS-71: interactive IdP metadata/discovery document health. Emitted
+	// CHAOS-87: interactive IdP metadata/discovery document health. Emitted
 	// ONLY on a node that has an enabled interactive IdP profile OR has
 	// actually acquired a remote document — a block of zeros on an appliance
 	// that never configured SSO is indistinguishable from one whose IdP is
@@ -1427,7 +1445,7 @@ culvert_dns_resolve_degraded %d
 	//
 	// The signal an operator pages on is `culvert_idp_enabled_not_live > 0`:
 	// an IdP profile that is enabled and stored but cannot authenticate
-	// anybody. Before CHAOS-71 that state had no surface at all.
+	// anybody. Before CHAOS-87 that state had no surface at all.
 	// `culvert_idp_metadata_degraded == 1` is the earlier, softer warning —
 	// authentication still works from cached documents, but an IdP-side
 	// signing-key rotation is no longer being picked up.

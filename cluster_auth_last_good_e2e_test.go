@@ -23,6 +23,7 @@ import (
 )
 
 func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	fixture := newClusterAuthLiveSyncFixture(t)
 	setupProxyTest(t)
 	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
@@ -81,6 +82,7 @@ func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
 }
 
 func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	withClusterAuthLastGoodGlobals(t)
 	setupProxyTest(t)
 
@@ -264,6 +266,7 @@ func (f *clusterAuthLiveSyncFixture) call(ctx context.Context, method string, re
 }
 
 func applyLiveClusterSnapshot(t *testing.T, snap ConfigSnapshot) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	t.Helper()
 	applyExternalAuthSnapshotSettings(snap)
 	if err := syncSnapshotIdPProfiles(snap); err != nil {
@@ -351,7 +354,7 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 		Email:  "alice@example.test",
 		Groups: []string{"engineering"},
 		// OIDC-SHAPED and LIVE: the prefixed spelling is what this fixture
-		// exists to cover, and since CHAOS-72 a session naming a provider
+		// exists to cover, and since CHAOS-88 a session naming a provider
 		// outside the live set is no longer an identity — so it points at the
 		// profile setupProxyIdentityE2E installs rather than an id no
 		// registry holds.
@@ -364,6 +367,7 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 }
 
 func TestClusterAuth_LoginURLUsesCachedBaseURL(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	withClusterAuthLastGoodGlobals(t)
 	setupProxyTest(t)
 	snap := ConfigSnapshot{

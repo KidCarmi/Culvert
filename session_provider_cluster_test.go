@@ -1,10 +1,10 @@
 package main
 
-// session_provider_cluster_test.go — CHAOS-72 §42.6d: the revocation lever
+// session_provider_cluster_test.go — CHAOS-88 §50.6d: the revocation lever
 // must REACH the Data Plane, including when the profile removed was the LAST
 // one.
 //
-// §42.4 reason 3 justified building the revocation as derived state rather
+// §50.4 reason 3 justified building the revocation as derived state rather
 // than a `RevokeProvider` event partly on the claim that "`ConfigSnapshot.
 // IdPProfiles` already carries the set fleet-wide, so a CP deletion reaches
 // every DP on the next sync". That claim was FALSE in exactly the case an
@@ -57,7 +57,7 @@ func c72Wire(t *testing.T, snap ConfigSnapshot) (decoded ConfigSnapshot, keyPres
 // DEFECT GATE. Deleting the LAST IdP profile on the Control Plane must revoke
 // that federation's sessions on a Data Plane node. Fails against the
 // reintroduced `omitempty`.
-func TestChaos72_DefectLastProfileRemovalReachesTheDataPlane(t *testing.T) {
+func TestChaos88_DefectLastProfileRemovalReachesTheDataPlane(t *testing.T) {
 	c72Setup(t, "live")
 
 	// The node is a DP holding one live profile; its sessions authenticate.
@@ -96,7 +96,7 @@ func TestChaos72_DefectLastProfileRemovalReachesTheDataPlane(t *testing.T) {
 // registry untouched. The cheapest way to pass the defect gate is to wipe
 // whenever the field is not a non-empty list, which would delete the registry
 // of every node syncing from such a CP.
-func TestChaos72_ControlAbsentProfileSetDoesNotWipe(t *testing.T) {
+func TestChaos88_ControlAbsentProfileSetDoesNotWipe(t *testing.T) {
 	c72Setup(t, "live")
 
 	var decoded ConfigSnapshot
@@ -122,7 +122,7 @@ func TestChaos72_ControlAbsentProfileSetDoesNotWipe(t *testing.T) {
 // applies it. Without `omitempty` that nil now serialises as `null`; if null
 // were ever read as an explicit clear, every enrolling node would wipe its own
 // IdP registry, and an unauthenticated caller could drive it.
-func TestChaos72_ControlRedactedSnapshotDoesNotWipeAnEnrollingNode(t *testing.T) {
+func TestChaos88_ControlRedactedSnapshotDoesNotWipeAnEnrollingNode(t *testing.T) {
 	c72Setup(t, "live")
 
 	snap := ConfigSnapshot{IdPProfiles: []*IdPProfile{{ID: "corp", Type: IdPTypeSAML, Enabled: true}}}
@@ -151,13 +151,13 @@ func TestChaos72_ControlRedactedSnapshotDoesNotWipeAnEnrollingNode(t *testing.T)
 // the defect. The survivor is DISABLED so ReplaceAll stores it without
 // compiling (no network from a unit test); storage, not compilation, is what
 // ProfileEnabled reads.
-func TestChaos72_ControlNonLastRemovalStillPropagates(t *testing.T) {
+func TestChaos88_ControlNonLastRemovalStillPropagates(t *testing.T) {
 	c72Setup(t, "live")
 
 	// A VALID profile shape: ReplaceAll validates every profile, enabled or
 	// not, and only skips COMPILATION for a disabled one — which is what keeps
 	// this gate off the network. The metadata URL is never fetched here.
-	survivor := chaos71Profile("partner", "https://partner.example/metadata")
+	survivor := chaos87Profile("partner", "https://partner.example/metadata")
 	survivor.Enabled = false
 	decoded, present := c72Wire(t, ConfigSnapshot{IdPProfiles: []*IdPProfile{survivor}})
 	if !present || len(decoded.IdPProfiles) != 1 {
@@ -175,9 +175,9 @@ func TestChaos72_ControlNonLastRemovalStillPropagates(t *testing.T) {
 	c72AssertRevoked(t, "removing one of two profiles on the CP")
 }
 
-// DOCUMENTED RESIDUAL (AU-22, §42.6f). Re-enabling a provider under the SAME
+// DOCUMENTED RESIDUAL (AU-22, §50.6f). Re-enabling a provider under the SAME
 // id revives the sessions it minted: the predicate is pure derived state, and
-// §42.7 deliberately does not clear the cookie on refusal, so nothing durable
+// §50.7 deliberately does not clear the cookie on refusal, so nothing durable
 // records that a cut happened.
 //
 // This pins the AGREEMENT between the runbook and the code, not the gap — the
@@ -189,7 +189,7 @@ func TestChaos72_ControlNonLastRemovalStillPropagates(t *testing.T) {
 // WHEN A PROVIDER GENERATION IS STAMPED INTO THE COOKIE, THIS TEST MUST FAIL,
 // and that is the point: invert it and correct §4 in the same change, so the
 // runbook can never be left promising something the code stopped doing.
-func TestChaos72_DocumentedResidual_SameIDRestoration(t *testing.T) {
+func TestChaos88_DocumentedResidual_SameIDRestoration(t *testing.T) {
 	c72Setup(t, "live")
 	c72AssertAuthenticates(t, "the live provider")
 

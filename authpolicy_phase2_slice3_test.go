@@ -115,7 +115,7 @@ func TestP2S3_CRSuppressesBrowserRedirect(t *testing.T) {
 
 func TestP2S3_ValidSessionWinsOverCR(t *testing.T) {
 	setupAuthGateTest(t)
-	installAuthGateTestIdP(t) // the session below names it; see CHAOS-72
+	installAuthGateTestIdP(t) // the session below names it; see CHAOS-88
 	const host = "p2s3-session.example.test"
 	policyStore.Add(p2s3CR("cr-1", host))
 	start := crCount()

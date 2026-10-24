@@ -84,8 +84,29 @@ func oidcWellKnownURL(issuer string) string {
 	return issuer + "/.well-known/openid-configuration"
 }
 
+// oidcDiscoveryURLShape is the go/request-forgery barrier for
+// fetchOIDCDiscoveryOverNetwork, and it is the SAME regexp as
+// samlMetadataURLShape on purpose: CodeQL recognises Regexp.MatchString on the
+// tainted value as a sanitiser, whereas whether it models the
+// isPrivateHostContext wrapper is NOT established.
+//
+// That is not a guess. The SAML half carried the wrapper and no regexp and was
+// flagged critical by this PR's own CodeQL run; the barrier was added there and
+// cleared it. This half kept the wrapper alone and was flagged identically on
+// the owner-decision round — the FIFTH finding this sweep has produced from the
+// same SAML/OIDC asymmetry (the admission gates, the endpoint validator, the
+// pre-flight bound and the fetcher wall were the others). A fix applied to one
+// of two symmetric paths is how that asymmetry keeps surviving.
+//
+// It admits only what the scheme check below admits anyway (case-insensitive
+// http/https followed by an authority), so it narrows nothing a valid discovery
+// URL uses. The one shape it refuses that the check below would have admitted
+// is an EMPTY authority ("http:///x"), which could never be fetched and would
+// have reached isPrivateHostContext with an empty host — fail-closed, earlier.
+var oidcDiscoveryURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
+
 // fetchOIDCDiscoveryOverNetwork performs exactly the request the
-// pre-CHAOS-71 code performed: same 10 s budget, same SSRF-safe dialer, same
+// pre-CHAOS-87 code performed: same 10 s budget, same SSRF-safe dialer, same
 // 64 KiB read limit, same HTTP-status rule. Split out only so
 // acquireIdPDocument can own the cache/fallback decision around it.
 //
@@ -94,27 +115,7 @@ func oidcWellKnownURL(issuer string) string {
 // same function as the outbound request so CodeQL can verify it; a check in a
 // calling function is what raised a critical go/request-forgery alert when
 // this helper was first split out.
-// oidcDiscoveryURLShape is the go/request-forgery barrier for
-// fetchOIDCDiscoveryOverNetwork, mirroring samlMetadataURLShape in
-// auth_saml.go. CodeQL recognises Regexp.MatchString on the tainted value as a
-// sanitiser; whether it models the isPrivateHostContext wrapper is NOT
-// established — moving the guard inline was not enough on its own, and this
-// request was still flagged critical (go/request-forgery) on the CI run of
-// 85f685f. It admits only what the scheme check below admits anyway
-// (case-insensitive http/https followed by an authority), so it narrows
-// nothing a valid discovery URL uses.
-//
-// THE SAML/OIDC ASYMMETRY, A FOURTH TIME. The comment on the function below
-// already records three findings produced by fixing one half of this pair and
-// not the other, and the barrier itself was then added to the SAML half alone.
-// When you change one of these two fetchers, change the other in the same
-// commit or say why not.
-var oidcDiscoveryURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
-
 func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
-	if !oidcDiscoveryURLShape.MatchString(wellKnown) {
-		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
-	}
 	// Inline url.Parse + scheme check + private-host check, in the SAME
 	// function as the request, per the repo's SSRF convention.
 	//
@@ -137,6 +138,9 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 	// (fetchSAMLMetadataOverNetwork) and did not carry across — the third time
 	// the SAML/OIDC asymmetry has produced a finding here. A bounded operation
 	// is only as bounded as its first step. Do not un-bound this for CodeQL.
+	if !oidcDiscoveryURLShape.MatchString(wellKnown) {
+		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
+	}
 	u, err := url.Parse(wellKnown)
 	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
@@ -152,11 +156,9 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 		Timeout:   oidcDiscoveryFetchBudget,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
-	// Built from the PARSED url, never from the raw string beside it: the
-	// barrier and the scheme/host checks above all measure `u`, so handing the
-	// request `wellKnown` would leave the value actually fetched outside every
-	// check that was just performed (CHAOS-69 round 5's measure-vs-use rule, and
-	// what auth_saml.go already does with metaURL.String()).
+	// The request is built from the PARSED url, as the SAML sibling is: the
+	// guard above checked u, so fetching the raw string would be validating
+	// one URL and requesting another. For a URL this shape it round-trips.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
@@ -199,7 +201,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 		return nil, time.Time{}, fmt.Errorf("oidc discovery: %w", err)
 	}
 
-	// CHAOS-71: a discovery endpoint that is momentarily unreachable must not
+	// CHAOS-87: a discovery endpoint that is momentarily unreachable must not
 	// destroy the provider. acquireIdPDocument prefers the network and falls
 	// back to the last successfully fetched document within
 	// idpmeta.StaleMaxAge. The bytes are decoded and RE-VALIDATED below by the
@@ -254,7 +256,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 
 // parseAndValidateOIDCDiscovery decodes and validates a discovery document.
 //
-// CHAOS-71 makes this the SINGLE parser for the document, reached identically
+// CHAOS-87 makes this the SINGLE parser for the document, reached identically
 // whether the bytes came off the network or out of the last-known-good cache.
 // That is the load-bearing half of the cache's safety argument: the discovery
 // document names the authorization and token endpoints this appliance sends
@@ -263,7 +265,7 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 // including one edited on disk by something that got write access to dataDir.
 //
 // The endpoints are NOT all guarded the same way, and the difference is the
-// point (CHAOS-71 round 3). The token and JWKS endpoints are ones this
+// point (CHAOS-87 round 3). The token and JWKS endpoints are ones this
 // appliance DIALS, so ssrfSafeDialContext refuses a private resolved address
 // at connect time and is rebinding-proof — a structural check is enough for
 // them. The AUTHORIZATION endpoint is not dialled by us at all: it is handed

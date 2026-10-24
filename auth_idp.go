@@ -282,7 +282,7 @@ func validateUpsertProfile(p *IdPProfile) error {
 	}
 	// Security: validate issuer/metadata URLs before compiling.
 	//
-	// STRUCTURAL, deliberately (CHAOS-71 round 3). The resolving form gated
+	// STRUCTURAL, deliberately (CHAOS-87 round 3). The resolving form gated
 	// this admission path, so a resolver outage rejected the admin write and —
 	// via ReplaceAll — aborted the WHOLE CP->DP snapshot, which is this
 	// sweep's headline defect surviving on the one path it was about: the
@@ -351,7 +351,7 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		}
 	}
 	// A refused edit must leave behind no episode of its OWN, and must never
-	// touch the live profile's. Since CHAOS-71 round 6 those are DISTINCT KEYS
+	// touch the live profile's. Since CHAOS-87 round 6 those are DISTINCT KEYS
 	// unless the candidate points at the source already in service, so this is
 	// one comparison rather than a predicate over two profiles — and the
 	// persist path needs it too, not just the compile path: a candidate that
@@ -427,7 +427,11 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	// and its episode is a live outage signal — those paths take
 	// discardCandidateEpisode instead, which touches only the candidate's own
 	// key. See retireEpisodeAfterCommit for the rule itself.
-	retireEpisodeAfterCommit(p.ID, liveRef, effectiveRemoteDocRef(p))
+	committedRef := effectiveRemoteDocRef(p)
+	retireEpisodeAfterCommit(p.ID, liveRef, committedRef)
+	// The cache half of the same rule, at the same commit site — see
+	// retireSupersededDocuments for why it may not run on the compile path.
+	retireSupersededDocuments(p.ID, committedRef)
 	return nil
 }
 
@@ -472,7 +476,7 @@ func effectiveRemoteDocRef(p *IdPProfile) idpDocRef {
 // by each recompile and `culvert_idp_metadata_degraded` can never reach its
 // threshold — strictly worse than the leak this function exists to fix.
 // Mutation-verified: removing it fails every subtest of
-// TestChaos71_CommittedRepointRetiresThePreviousSourcesEpisode, including at the
+// TestChaos87_CommittedRepointRetiresThePreviousSourcesEpisode, including at the
 // fixture that establishes an ongoing outage.
 //
 // prevSource is deliberately the profile's raw source rather than its
@@ -493,6 +497,41 @@ func retireEpisodeAfterCommit(profileID string, prev, next idpDocRef) {
 	// rather than inherit it (Codex review round 19).
 	if prev.Source != "" && prev != next {
 		forgetIdPMetadataEpisodeForSource(profileID, prev)
+	}
+}
+
+// retireSupersededDocuments drops the cached documents a committed profile can
+// no longer reach, keeping the one for the source it now fetches.
+//
+// It is the CACHE half of the same question retireEpisodeAfterCommit asks of
+// the episode store — "what is this profile's source now that the write has
+// landed?" — so it is called from the SAME two commit sites, immediately after
+// persistence, and never from the compile path.
+//
+// That placement is the whole finding. Round 19 retired superseded documents
+// inside idpmeta.Store.Put, which is reached from compileIdPProfile, i.e.
+// before either registry writer has decided to publish: a repoint from S1 to
+// S2 whose persist then failed, or whose snapshot a later profile aborted,
+// left S1 authoritative with its last-known-good already deleted, so the next
+// S1 outage took a healthy profile dark — the pre-CHAOS-87 failure the cache
+// exists to prevent, reintroduced by the round that bounded the cache
+// (CodeRabbit + Codex, independently). COMPILING IS NOT COMMITTING: this
+// section's own rule from rounds 4 and 6, which had been applied to episode
+// state and not to durable cache state.
+//
+// A profile with no remote source left is skipped rather than swept, because
+// sweeping it is the Forget(profileID) case of register row IDP-11.
+func retireSupersededDocuments(profileID string, next idpDocRef) {
+	if next.Source == "" {
+		return
+	}
+	if err := idpMetadataStore().RetireSuperseded(profileID, next.Kind, next.Source); err != nil {
+		// Advisory: the authoritative document is already stored and the
+		// profile is published. A failure here leaves an unreachable entry
+		// that evictLocked still bounds, so it must not fail the write that
+		// has already landed.
+		logger.Printf("IdP[%s]: could not retire superseded cached metadata: %v",
+			sanitizeLog(profileID), sanitizeLog(fmt.Sprint(err)))
 	}
 }
 
@@ -578,7 +617,7 @@ func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
 	}
 	if cfg.MetadataURL != "" {
 		// STRUCTURAL, deliberately, and for exactly the reason the OIDC issuer
-		// gate is (CHAOS-71 rounds 2/3). Admission runs BEFORE compilation and
+		// gate is (CHAOS-87 rounds 2/3). Admission runs BEFORE compilation and
 		// the last-known-good cache lives BEHIND it, so a resolving check here
 		// refuses the admin write — and aborts the whole CP->DP snapshot via
 		// ReplaceAll — during a resolver outage this node could have ridden out
@@ -640,6 +679,19 @@ func (r *IdPRegistry) Delete(id string) error {
 		// The profile is gone, so nothing will ever fetch for it again and no
 		// evidence can clear an episode it left behind.
 		forgetIdPMetadataEpisode(id)
+		// Nor can anything serve its cached documents to it again — and left
+		// behind they would feed the liveness-blind eviction on behalf of a
+		// profile that no longer exists, and would be served to a profile
+		// RECREATED under the same id and source during an outage, since Get
+		// keys on exactly that triple. Post-commit only, like every other
+		// retirement here (IDP-11).
+		if err := idpMetadataStore().Forget(id); err != nil {
+			// Advisory: the deletion itself has landed. A failure here leaves
+			// unreachable entries that evictLocked still bounds, so it must not
+			// fail a write that is already durable.
+			logger.Printf("IdP[%s]: could not retire cached metadata after delete: %v",
+				sanitizeLog(id), sanitizeLog(fmt.Sprint(err)))
+		}
 		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
@@ -781,15 +833,31 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	// Published: only now may the served-generation evidence change (round 14).
 	idpReplacePublishedGenerations(nextProfiles, nextLive)
 
-	// Whatever this snapshot dropped, disabled, or switched to inline metadata
-	// has no remote fetch left, so its episode can never be cleared by
-	// evidence again. The inline arm mirrors Upsert's: a profile keeps its
-	// episode only while it still names a remote source to fetch from.
-	// Reached only after persist, so a rejected snapshot never gets here. A
-	// profile absent from `kept` has no remote source left in the published
-	// set, which retireEpisodeAfterCommit reads as the sweep-everything case —
-	// an absent key yields the zero idpDocRef, whose Source is "", so the two
-	// cases need no branch here.
+	retireAfterSnapshotCommit(nextProfiles, prevSources)
+	return nil
+}
+
+// retireAfterSnapshotCommit is ReplaceAll's post-persist retirement, both
+// halves of it, extracted so the two stores are swept from one place and so
+// ReplaceAll stays under the complexity gate.
+//
+// EPISODES: whatever this snapshot dropped, disabled, or switched to inline
+// metadata has no remote fetch left, so its episode can never be cleared by
+// evidence again. The inline arm mirrors Upsert's — a profile keeps its episode
+// only while it still names a remote source to fetch from. A profile absent
+// from `kept` has no remote source in the published set, which
+// retireEpisodeAfterCommit reads as the sweep-everything case: an absent key
+// yields the zero idpDocRef, whose Source is "", so the two cases need no
+// branch here.
+//
+// CACHED DOCUMENTS: swept over the COMMITTED set rather than over prevSources,
+// because a profile whose id is new to this snapshot — including an id reused
+// after a delete — can still carry cached documents for a source it no longer
+// fetches, and it has no prevSources entry to be found under. Retiring nothing
+// rewrites nothing, so the extra ids are free.
+//
+// CALLED ONLY AFTER persist, so a rejected snapshot never reaches it.
+func retireAfterSnapshotCommit(nextProfiles []*IdPProfile, prevSources map[string]idpDocRef) {
 	kept := make(map[string]idpDocRef, len(nextProfiles))
 	for _, p := range nextProfiles {
 		if ref := effectiveRemoteDocRef(p); ref.Source != "" {
@@ -799,7 +867,9 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	for id, prev := range prevSources {
 		retireEpisodeAfterCommit(id, prev, kept[id])
 	}
-	return nil
+	for id, ref := range kept {
+		retireSupersededDocuments(id, ref)
+	}
 }
 
 // liveRemoteSourceLocked returns the remote document source of the profile
@@ -1230,7 +1300,7 @@ func (r *IdPRegistry) HasEnabledOIDC() bool {
 // string alone (absolute, http/https, and — when the host is an IP LITERAL —
 // not a private address).
 //
-// CHAOS-71: validateExternalURL resolves the host, and a resolver that cannot
+// CHAOS-87: validateExternalURL resolves the host, and a resolver that cannot
 // answer makes it fail. Used as an admission gate it therefore turns "DNS is
 // down" into "this IdP does not exist", which is precisely the outage the
 // last-known-good cache exists to survive — the gate ran before the cache

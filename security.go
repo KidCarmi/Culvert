@@ -35,7 +35,7 @@ func isPrivateHost(hostport string) error { return ssrf.PrivateHost(hostport) }
 
 // isPrivateHostContext is isPrivateHost with the DNS lookup bounded by ctx.
 //
-// CHAOS-71: isPrivateHost resolves under context.Background(), so a wedged
+// CHAOS-87: isPrivateHost resolves under context.Background(), so a wedged
 // resolver blocks for the OS budget. On a path that already owns a deadline —
 // an IdP metadata fetch during boot or a config sync — a pre-flight guard that
 // outlives that deadline is the unbounded-resolver-call shape CHAOS-60/64

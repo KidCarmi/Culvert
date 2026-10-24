@@ -353,7 +353,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
 		sess, sessErr := readSessionCookie(r)
-		// CHAOS-72: a verified session is an identity only while the provider
+		// CHAOS-88: a verified session is an identity only while the provider
 		// that minted it is still live. Delete or disable an IdP and its
 		// cookies used to keep their subject AND the groups that provider
 		// asserted for the rest of the TTL, straight into policyStore.Evaluate

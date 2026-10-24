@@ -580,7 +580,7 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "SessionHMAC", Apply: semValidatedSkip}}},
 	{ID: "idp_profiles", Kind: kindConfig, Owner: "idpRegistry", Sensitive: true,
 		ClusterSynced: true, SnapshotCap: maxSnapIdPProfiles, WireWipeCapable: true,
-		Note:     "carries OIDC client secrets and LDAP bind credentials by design (DP-local auth); redacted for unenrolled callers (nil ⇒ absent ⇒ skip, so an enrolling DP is never wiped); compile-validated ReplaceAll, rejection aborts extended state; no omitempty — the stored+enabled set IS the CHAOS-72 revocation lever, so deleting the LAST profile must wipe DP copies",
+		Note:     "carries OIDC client secrets and LDAP bind credentials by design (DP-local auth); redacted for unenrolled callers (nil ⇒ absent ⇒ skip, so an enrolling DP is never wiped); compile-validated ReplaceAll, rejection aborts extended state; no omitempty — the stored+enabled set IS the CHAOS-88 revocation lever, so deleting the LAST profile must wipe DP copies",
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "IdPProfiles", Apply: semNilSkipEmptyWipe}}},
 	{ID: "bandwidth_policies", Kind: kindConfig, Owner: "globalBandwidth",
 		ClusterSynced: true, SnapshotCap: maxSnapBandwidthPolicies,

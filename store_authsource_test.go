@@ -71,7 +71,7 @@ func TestAuthSource_IdPRegistryBasic(t *testing.T) {
 // provider ID proves the scheme-prefixed form round-trips verbatim.
 //
 // The id names the LIVE profile startAuthProxy installs, in its prefixed
-// `saml:<id>` spelling. CHAOS-72 made a session naming a provider that is not
+// `saml:<id>` spelling. CHAOS-88 made a session naming a provider that is not
 // in the live set stop being an identity, so a fixture pointing at a profile
 // no registry holds would be modelling the removed-provider case rather than
 // ordinary browser SSO. The prefixed form is still what is being pinned — and

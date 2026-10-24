@@ -6,7 +6,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// CHAOS-72 — a session is an identity only while the provider that minted it
+// CHAOS-88 — a session is an identity only while the provider that minted it
 // is still an identity source this appliance honours.
 //
 // A `ps_session` cookie is minted in exactly two places, both interactive IdP
@@ -77,7 +77,7 @@ const sessionProviderLocal = "local"
 //     carried into the policy decision as a federation name. Two layers
 //     disagreeing about which values mean "no provider" is the defect; the
 //     rule is that this predicate asks the SAME question `identityAuthSource`
-//     asks, never a re-derived one, and `TestChaos72_ProviderEmptinessAgreesWithIdentityAuthSource`
+//     asks, never a re-derived one, and `TestChaos88_ProviderEmptinessAgreesWithIdentityAuthSource`
 //     pins the agreement from both sides. Caught by this sweep's own
 //     `ControlPrefixAloneIsNotAProvider` gate, which is why that control
 //     enumerates whitespace.
@@ -92,7 +92,7 @@ const sessionProviderLocal = "local"
 //
 //     It is deliberately NOT `LiveProvider` (enabled AND compiled). A profile
 //     also drops out of `r.live` when its metadata/discovery fetch fails at
-//     compile time, or when its cached document is retired at the CHAOS-71
+//     compile time, or when its cached document is retired at the CHAOS-87
 //     staleness ceiling — and neither is a revocation. Keyed on `r.live`,
 //     restarting a node while an IdP is unreachable logged out every session
 //     of that IdP and sent users to an IdP that was down, contradicting the

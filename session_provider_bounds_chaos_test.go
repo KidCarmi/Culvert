@@ -13,7 +13,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// CHAOS-72 — deleting or disabling an identity provider must revoke the
+// CHAOS-88 — deleting or disabling an identity provider must revoke the
 // sessions it already minted.
 //
 // Every DEFECT gate below was verified failing against the pre-fix tree (the
@@ -49,7 +49,7 @@ func c72Setup(t *testing.T, posture string) {
 		reg.profiles = []*IdPProfile{&disabled}
 	case "dark":
 		// STORED and ENABLED, but no live provider: what a failed compile (IdP
-		// unreachable at boot, nothing cached) or a CHAOS-71 staleness-ceiling
+		// unreachable at boot, nothing cached) or a CHAOS-87 staleness-ceiling
 		// retirement leaves behind. Degraded availability, not revocation.
 		reg.profiles = []*IdPProfile{prof}
 	case "deleted":
@@ -103,7 +103,7 @@ func c72Request(t *testing.T, provider string) *http.Request {
 func c72Resolve(t *testing.T, provider string) (outcome authOutcome, proceed bool, status int) {
 	t.Helper()
 	w := httptest.NewRecorder()
-	outcome, proceed = resolveRequestAuth(w, c72Request(t, provider), "192.0.2.10", "chaos-72")
+	outcome, proceed = resolveRequestAuth(w, c72Request(t, provider), "192.0.2.10", "chaos-88")
 	return outcome, proceed, w.Code
 }
 
@@ -111,7 +111,7 @@ func c72Resolve(t *testing.T, provider string) (outcome authOutcome, proceed boo
 
 // A deleted provider's session must stop being an identity. Pre-fix this
 // returned proceed=true with identity "alice@corp.example".
-func TestChaos72_DefectDeletedProviderSessionIsNotAnIdentity(t *testing.T) {
+func TestChaos88_DefectDeletedProviderSessionIsNotAnIdentity(t *testing.T) {
 	c72Setup(t, "deleted")
 	outcome, proceed, code := c72Resolve(t, "corp")
 	if proceed || outcome.identity != "" {
@@ -121,7 +121,7 @@ func TestChaos72_DefectDeletedProviderSessionIsNotAnIdentity(t *testing.T) {
 }
 
 // Disabling is the same revocation intent with the profile left in place.
-func TestChaos72_DefectDisabledProviderSessionIsNotAnIdentity(t *testing.T) {
+func TestChaos88_DefectDisabledProviderSessionIsNotAnIdentity(t *testing.T) {
 	c72Setup(t, "disabled")
 	outcome, proceed, code := c72Resolve(t, "corp")
 	if proceed || outcome.identity != "" {
@@ -136,7 +136,7 @@ func TestChaos72_DefectDisabledProviderSessionIsNotAnIdentity(t *testing.T) {
 // group-scoped allow rule kept matching for a federation the operator had
 // just cut off. Asserting on the identity alone would leave that reachable
 // through any future change that cleared the subject and kept the groups.
-func TestChaos72_DefectRemovedProviderGroupsNeverReachPolicy(t *testing.T) {
+func TestChaos88_DefectRemovedProviderGroupsNeverReachPolicy(t *testing.T) {
 	for _, posture := range []string{"deleted", "disabled"} {
 		t.Run(posture, func(t *testing.T) {
 			c72Setup(t, posture)
@@ -158,7 +158,7 @@ func TestChaos72_DefectRemovedProviderGroupsNeverReachPolicy(t *testing.T) {
 // `syncSnapshotIdPProfiles` path, none of which run that handler. A
 // `RevokeProvider` entry emitted from the handler would cover none of them;
 // probing the live set covers all of them with one predicate.
-func TestChaos72_DefectProviderRemovedByReplaceAllIsAlsoRevoked(t *testing.T) {
+func TestChaos88_DefectProviderRemovedByReplaceAllIsAlsoRevoked(t *testing.T) {
 	c72Setup(t, "live")
 	if _, proceed, _ := c72Resolve(t, "corp"); !proceed {
 		t.Fatal("precondition: the live provider's session must authenticate first")
@@ -179,7 +179,7 @@ func TestChaos72_DefectProviderRemovedByReplaceAllIsAlsoRevoked(t *testing.T) {
 // cookie, which is the point of the fix and the reason it needs its own
 // counter. An operator with no metrics scraper has no other way to tell
 // whether the revocation reached live traffic.
-func TestChaos72_DefectRefusalIsCounted(t *testing.T) {
+func TestChaos88_DefectRefusalIsCounted(t *testing.T) {
 	c72Setup(t, "deleted")
 	if got := sessionProviderRevokedCount(); got != 0 {
 		t.Fatalf("counter = %d before any request, want 0", got)
@@ -195,7 +195,7 @@ func TestChaos72_DefectRefusalIsCounted(t *testing.T) {
 // The refusal must degrade to EXACTLY "no cookie" and not invent a posture of
 // its own: the client is re-challenged through the existing no-credential
 // dispatch, so there is no second code path to keep in step with arm 3.
-func TestChaos72_DefectRefusalIsIndistinguishableFromNoCookie(t *testing.T) {
+func TestChaos88_DefectRefusalIsIndistinguishableFromNoCookie(t *testing.T) {
 	c72Setup(t, "deleted")
 	revoked, revokedProceed, revokedCode := c72Resolve(t, "corp")
 	none, noneProceed, noneCode := c72Resolve(t, "<none>")
@@ -216,7 +216,7 @@ func TestChaos72_DefectRefusalIsIndistinguishableFromNoCookie(t *testing.T) {
 // rather than second defect gates.
 
 // Browser SSO through the gateway must keep working, groups included.
-func TestChaos72_ControlLiveProviderStillAuthenticatesWithGroups(t *testing.T) {
+func TestChaos88_ControlLiveProviderStillAuthenticatesWithGroups(t *testing.T) {
 	c72Setup(t, "live")
 	outcome, proceed, code := c72Resolve(t, "corp")
 	if !proceed || outcome.identity != "alice@corp.example" {
@@ -235,7 +235,7 @@ func TestChaos72_ControlLiveProviderStillAuthenticatesWithGroups(t *testing.T) {
 // admin UI owns its own backstop (uiAuthMiddleware's cfg.UIUserExists check);
 // refusing "local" here would lock every administrator out of the appliance
 // the moment no IdP is configured, which is the default posture.
-func TestChaos72_ControlLocalProviderIsNeverRefused(t *testing.T) {
+func TestChaos88_ControlLocalProviderIsNeverRefused(t *testing.T) {
 	c72Setup(t, "deleted")
 	if !sessionProviderLive(sessionProviderLocal) {
 		t.Fatal("the local admin-UI provider must never be refused")
@@ -249,7 +249,7 @@ func TestChaos72_ControlLocalProviderIsNeverRefused(t *testing.T) {
 // would log out every pre-upgrade session on the deploy that adds this check,
 // for no security gain: such a cookie names no federation, so there is no
 // federation to have been cut off.
-func TestChaos72_ControlLegacyEmptyProviderIsNeverRefused(t *testing.T) {
+func TestChaos88_ControlLegacyEmptyProviderIsNeverRefused(t *testing.T) {
 	c72Setup(t, "deleted")
 	if !sessionProviderLive("") {
 		t.Fatal("a pre-pvd legacy session must not be refused")
@@ -263,7 +263,7 @@ func TestChaos72_ControlLegacyEmptyProviderIsNeverRefused(t *testing.T) {
 // Ordinary anonymous traffic must never charge the counter, or the metric
 // stops meaning "a removed provider's session was cut" and starts meaning
 // "somebody browsed".
-func TestChaos72_ControlAbsentCookieChargesNothing(t *testing.T) {
+func TestChaos88_ControlAbsentCookieChargesNothing(t *testing.T) {
 	c72Setup(t, "deleted")
 	for i := 0; i < 5; i++ {
 		c72Resolve(t, "<none>")
@@ -283,7 +283,7 @@ func TestChaos72_ControlAbsentCookieChargesNothing(t *testing.T) {
 // customer-visible outage rather than a tightening (CHAOS-69's round-1 IDN
 // regression), so both forms must resolve while a removed provider is refused
 // in EITHER spelling.
-func TestChaos72_BothProviderRepresentationsResolve(t *testing.T) {
+func TestChaos88_BothProviderRepresentationsResolve(t *testing.T) {
 	c72Setup(t, "live")
 	for _, spelling := range []string{"corp", "saml:corp", "oidc:corp", "ldap:corp"} {
 		if !sessionProviderLive(spelling) {
@@ -300,7 +300,7 @@ func TestChaos72_BothProviderRepresentationsResolve(t *testing.T) {
 
 // Probing both spellings must never WIDEN: a bare id that names nothing live
 // stays refused however it is prefixed, and a prefix alone is not a provider.
-func TestChaos72_ControlPrefixAloneIsNotAProvider(t *testing.T) {
+func TestChaos88_ControlPrefixAloneIsNotAProvider(t *testing.T) {
 	c72Setup(t, "live")
 	for _, spelling := range []string{"saml:", "oidc:", "other", "saml:other", "  ", "CORP"} {
 		if sessionProviderLive(spelling) {
@@ -321,7 +321,7 @@ func TestChaos72_ControlPrefixAloneIsNotAProvider(t *testing.T) {
 // Enumerated from the PRIMITIVE, not from the file being edited: CHAOS-70's
 // own note records that its wall AST-walked one file while the mutator that
 // escaped it lived in another.
-func TestChaos72_WallSessionCookieMintersAreEnumerated(t *testing.T) {
+func TestChaos88_WallSessionCookieMintersAreEnumerated(t *testing.T) {
 	// callSite → why the pvd value it stamps is one sessionProviderLive admits.
 	known := map[string]string{
 		"ui_auth.go:authOIDCCallback": "OIDCFlowProvider.ExchangeCode stamps the BARE profile id",
@@ -365,7 +365,7 @@ func TestChaos72_WallSessionCookieMintersAreEnumerated(t *testing.T) {
 // round-1 lesson: a TOCTOU on an atomic is invisible to `-race` and was
 // measured unreachable behaviourally, so the claim mechanism is asserted
 // structurally below instead.
-func TestChaos72_ControlLogIsSuppressedButTheCountNeverIs(t *testing.T) {
+func TestChaos88_ControlLogIsSuppressedButTheCountNeverIs(t *testing.T) {
 	c72Setup(t, "deleted")
 	frozen := time.Now()
 	prev := timeNowSessionProvider
@@ -382,7 +382,7 @@ func TestChaos72_ControlLogIsSuppressedButTheCountNeverIs(t *testing.T) {
 
 // A clock rollback must RE-ARM the gate rather than silence the line until
 // wall-clock catches up (CHAOS-61: a negative age is STALE, not fresh).
-func TestChaos72_LogGateReArmsOnClockRollback(t *testing.T) {
+func TestChaos88_LogGateReArmsOnClockRollback(t *testing.T) {
 	c72Setup(t, "deleted")
 	now := time.Now()
 	prev := timeNowSessionProvider
@@ -407,7 +407,7 @@ func TestChaos72_LogGateReArmsOnClockRollback(t *testing.T) {
 // `-race` (atomics are race-free by definition) and, measured on the CHAOS-70
 // precedent, a behavioural gate passes against the defect — which is worse
 // than no gate.
-func TestChaos72_WallLogGateIsClaimedNotRead(t *testing.T) {
+func TestChaos88_WallLogGateIsClaimedNotRead(t *testing.T) {
 	src := readSourceForC71Wall(t, "session_provider_bounds.go")
 	if !strings.Contains(src, "sessionProviderLogGate.CompareAndSwap(") {
 		t.Fatal("the log rate gate must claim its window with CompareAndSwap: " +
@@ -421,7 +421,7 @@ func TestChaos72_WallLogGateIsClaimedNotRead(t *testing.T) {
 // The accounting must be exact under the concurrency a real refusal arrives
 // with: a whole fleet's browsers re-send their dead cookies at once when a
 // provider is removed.
-func TestChaos72_RefusalAccountingIsExactUnderConcurrency(t *testing.T) {
+func TestChaos88_RefusalAccountingIsExactUnderConcurrency(t *testing.T) {
 	c72Setup(t, "deleted")
 	const workers, each = 16, 25
 	var wg sync.WaitGroup
@@ -432,7 +432,7 @@ func TestChaos72_RefusalAccountingIsExactUnderConcurrency(t *testing.T) {
 			for i := 0; i < each; i++ {
 				rec := httptest.NewRecorder()
 				resolveRequestAuth(rec, c72Request(t, "corp"),
-					fmt.Sprintf("192.0.2.%d", id+1), "chaos-72-conc")
+					fmt.Sprintf("192.0.2.%d", id+1), "chaos-88-conc")
 			}
 		}(w)
 	}
@@ -466,7 +466,7 @@ func readSourceForC71Wall(t *testing.T, name string) string {
 // TestTOTPSameKey_AgreesWithTheVerifier / LoginNameConfiguredMatchesVerifyUIUser
 // precedent). Verified failing against the trimming shape this sweep shipped
 // first.
-func TestChaos72_ProviderEmptinessAgreesWithIdentityAuthSource(t *testing.T) {
+func TestChaos88_ProviderEmptinessAgreesWithIdentityAuthSource(t *testing.T) {
 	c72Setup(t, "deleted")
 	for _, pvd := range []string{"", " ", "  ", "\t", "\n", " corp ", "corp", "local", " local"} {
 		// What identityAuthSource considers "no provider at all".
@@ -491,9 +491,10 @@ func TestChaos72_ProviderEmptinessAgreesWithIdentityAuthSource(t *testing.T) {
 // THE ADMIN-UI COOKIE IS OUT OF SCOPE ONLY BECAUSE IT IS ALWAYS "local", and
 // that is worth a wall rather than a sentence.
 //
-// `uiAuthMiddleware`'s deleted-user backstop is keyed on
-// `sess.Provider == "local"`, and `sessionProviderLive` exempts "local"
-// because the middleware owns that check. So a future change that minted an
+// The admin plane's gate (`classifyUISession`, ui_session.go, reached from
+// `uiAuthMiddleware`) refuses any provider other than `uiSessionProvider`
+// ("local") and any deleted account, and `sessionProviderLive` exempts "local"
+// because that gate owns the check. So a future change that minted an
 // SSO-backed ADMIN session would skip BOTH backstops at once: the middleware
 // would not consult the roster (not local) and this predicate would not be
 // consulted at all (the admin UI does not call it). The two exemptions are
@@ -501,19 +502,24 @@ func TestChaos72_ProviderEmptinessAgreesWithIdentityAuthSource(t *testing.T) {
 //
 // If this gate fails, the admin-UI path needs its own provider check before
 // the new minter ships — do not simply widen the inventory.
-func TestChaos72_WallAdminUISessionIsAlwaysLocal(t *testing.T) {
+func TestChaos88_WallAdminUISessionIsAlwaysLocal(t *testing.T) {
+	// The minter and the gate share ONE constant (SEC-UISESS-1, ui_session.go):
+	// pin the constant's value and that both sites read it.
 	src := readSourceForC71Wall(t, "ui_session.go")
-	if !strings.Contains(src, `Provider: "local",`) {
-		t.Fatal("setUISessionCookie no longer hardcodes Provider: \"local\" — " +
+	if !strings.Contains(src, `const uiSessionProvider = "local"`) {
+		t.Fatal("uiSessionProvider is no longer \"local\" — sessionProviderLive " +
+			"exempts \"local\" on the basis that only the admin UI mints it")
+	}
+	if !strings.Contains(src, `Provider: uiSessionProvider,`) {
+		t.Fatal("setUISessionCookie no longer stamps uiSessionProvider — " +
 			"uiAuthMiddleware's roster backstop is keyed on it and " +
 			"sessionProviderLive exempts it on that basis, so an SSO-backed " +
 			"admin session would skip both checks")
 	}
-	// And the middleware's backstop must still be the local-only one the
-	// exemption assumes.
-	mw := readSourceForC71Wall(t, "ui_middleware.go")
-	if !strings.Contains(mw, `sess.Provider == "local" && !cfg.UIUserExists(sess.Sub)`) {
-		t.Fatal("uiAuthMiddleware's deleted-user backstop changed shape; " +
+	// And the admin-plane gate must still refuse any other provider and any
+	// deleted account, which is what the exemption assumes.
+	if !strings.Contains(src, `sess.Provider != uiSessionProvider || !cfg.UIUserExists(sess.Sub)`) {
+		t.Fatal("classifyUISession's provider/roster backstop changed shape; " +
 			"re-derive whether sessionProviderLive may still exempt \"local\"")
 	}
 }

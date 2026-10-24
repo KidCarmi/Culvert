@@ -1,9 +1,9 @@
 package main
 
-// session_provider_availability_test.go — CHAOS-72 narrowed by the owner
+// session_provider_availability_test.go — CHAOS-88 narrowed by the owner
 // decision on #1485/#1564: an unreachable IdP is degraded AVAILABILITY, not
 // revocation. Only an explicit delete, disable or removal by ReplaceAll revokes
-// the sessions a provider minted; a compile failure and the CHAOS-71
+// the sessions a provider minted; a compile failure and the CHAOS-87
 // staleness-ceiling retirement must not.
 //
 // Keyed on `LiveProvider` (enabled AND compiled), restarting a node while an
@@ -41,7 +41,7 @@ func c72AssertRevoked(t *testing.T, why string) {
 }
 
 // A dark profile (stored + enabled, nothing compiled) keeps its sessions.
-func TestChaos72_DarkEnabledProfileDoesNotRevoke(t *testing.T) {
+func TestChaos88_DarkEnabledProfileDoesNotRevoke(t *testing.T) {
 	c72Setup(t, "dark")
 	c72AssertAuthenticates(t, "a stored, enabled profile with no live provider")
 }
@@ -49,10 +49,10 @@ func TestChaos72_DarkEnabledProfileDoesNotRevoke(t *testing.T) {
 // END TO END: the boot path with the IdP unreachable and nothing cached. Load
 // logs the compile error and leaves the profile enabled-but-dark; a session
 // that profile minted before the restart must keep authenticating.
-func TestChaos72_CompileFailureDoesNotRevokeSessions(t *testing.T) {
+func TestChaos88_CompileFailureDoesNotRevokeSessions(t *testing.T) {
 	c72Setup(t, "deleted") // local admin + counter isolation; registry replaced below
-	chaos71Env(t)
-	idp := newChaos71IdP(t)
+	chaos87Env(t)
+	idp := newChaos87IdP(t)
 	idp.down.Store(true) // 503 with nothing cached: the compile fails
 
 	path := filepath.Join(t.TempDir(), "idp_profiles.json")
@@ -72,20 +72,20 @@ func TestChaos72_CompileFailureDoesNotRevokeSessions(t *testing.T) {
 	c72AssertAuthenticates(t, "a compile failure (IdP unreachable at boot)")
 }
 
-// END TO END: a provider retired at the CHAOS-71 staleness ceiling (#1485's
+// END TO END: a provider retired at the CHAOS-87 staleness ceiling (#1485's
 // retireStaleProvider) goes dark but stays enabled; its sessions survive. The
 // seven-day expiry by itself must never become a mass logout.
-func TestChaos72_StaleExpiryRetirementDoesNotRevokeSessions(t *testing.T) {
+func TestChaos88_StaleExpiryRetirementDoesNotRevokeSessions(t *testing.T) {
 	c72Setup(t, "deleted")
-	chaos71Env(t)
-	idp := newChaos71IdP(t)
-	if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+	chaos87Env(t)
+	idp := newChaos87IdP(t)
+	if err := idpRegistry.Upsert(chaos87Profile("corp", idp.URL())); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	c72AssertAuthenticates(t, "a live provider (precondition)")
 
-	src := idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))
-	served := chaos71SeedStaleServe("corp", src)
+	src := idpRemoteDocumentSource(chaos87Profile("corp", idp.URL()))
+	served := chaos87SeedStaleServe("corp", src)
 	if !idpRegistry.retireStaleProvider("corp", src, served) {
 		t.Fatal("setup: the stale provider must be retired")
 	}
@@ -98,7 +98,7 @@ func TestChaos72_StaleExpiryRetirementDoesNotRevokeSessions(t *testing.T) {
 // The CONTROLS on a REAL registry that has gone dark: an explicit delete,
 // disable or ReplaceAll removal still revokes. A dark provider must not mask
 // the operator's revocation lever.
-func TestChaos72_ExplicitRemovalStillRevokesADarkProvider(t *testing.T) {
+func TestChaos88_ExplicitRemovalStillRevokesADarkProvider(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		remove func(t *testing.T, url string)
@@ -109,7 +109,7 @@ func TestChaos72_ExplicitRemovalStillRevokesADarkProvider(t *testing.T) {
 			}
 		}},
 		{"disable", func(t *testing.T, url string) {
-			p := chaos71Profile("corp", url)
+			p := chaos87Profile("corp", url)
 			p.Enabled = false
 			if err := idpRegistry.Upsert(p); err != nil {
 				t.Fatalf("disable upsert: %v", err)
@@ -123,13 +123,13 @@ func TestChaos72_ExplicitRemovalStillRevokesADarkProvider(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c72Setup(t, "deleted")
-			chaos71Env(t)
-			idp := newChaos71IdP(t)
-			if err := idpRegistry.Upsert(chaos71Profile("corp", idp.URL())); err != nil {
+			chaos87Env(t)
+			idp := newChaos87IdP(t)
+			if err := idpRegistry.Upsert(chaos87Profile("corp", idp.URL())); err != nil {
 				t.Fatalf("upsert: %v", err)
 			}
-			src := idpRemoteDocumentSource(chaos71Profile("corp", idp.URL()))
-			if !idpRegistry.retireStaleProvider("corp", src, chaos71SeedStaleServe("corp", src)) {
+			src := idpRemoteDocumentSource(chaos87Profile("corp", idp.URL()))
+			if !idpRegistry.retireStaleProvider("corp", src, chaos87SeedStaleServe("corp", src)) {
 				t.Fatal("setup: the provider must be dark before removal")
 			}
 			c72AssertAuthenticates(t, "the dark provider (precondition)")
@@ -145,7 +145,7 @@ func TestChaos72_ExplicitRemovalStillRevokesADarkProvider(t *testing.T) {
 
 // ProfileEnabled answers "stored and enabled" and nothing else, and it is on
 // the proxy request path, so it must not allocate.
-func TestChaos72_ProfileEnabledSemanticsAndAllocations(t *testing.T) {
+func TestChaos88_ProfileEnabledSemanticsAndAllocations(t *testing.T) {
 	reg := &IdPRegistry{
 		live: map[string]IdentityProvider{},
 		profiles: []*IdPProfile{

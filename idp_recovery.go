@@ -1,6 +1,6 @@
 package main
 
-// idp_recovery.go — CHAOS-71: the way BACK for an IdP profile that could not
+// idp_recovery.go — CHAOS-87: the way BACK for an IdP profile that could not
 // be compiled.
 //
 // `IdPRegistry.Load` logs a compile error and moves on, leaving the profile
@@ -47,6 +47,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
@@ -69,7 +70,7 @@ const (
 // exist and how many of them have a live compiled provider.
 //
 // The gap between the two is the state that had no surface at all before
-// CHAOS-71: a profile the operator enabled, that is persisted, that the admin
+// CHAOS-87: a profile the operator enabled, that is persisted, that the admin
 // UI lists, and that cannot authenticate anybody. It is deliberately computed
 // over INTERACTIVE types only — an enabled LDAP profile that failed to compile
 // is a credential-path concern already covered by the CHAOS-47 `authProbeGate`
@@ -413,7 +414,7 @@ var idpRecoveryRunning atomic.Bool
 // armIdPRecoveryLoop starts the recovery loop unless one is already running.
 //
 // runIdPRecoveryLoop RETURNS once nothing is dark, and it was started exactly
-// once from the startup slice — so before CHAOS-71 round 8 any LATER transition
+// once from the startup slice — so before CHAOS-87 round 8 any LATER transition
 // into dark (notably a staleness-ceiling retirement) had nothing retrying it, and
 // SSO stayed down until a restart or a config change. That is strictly worse than
 // the expired document the retirement exists to stop serving, which is why the
@@ -477,17 +478,22 @@ func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfil
 // a cached document and swaps in the result when it was built from a NEWER
 // document (normally: the IdP answered again). Returns how many it replaced.
 //
-// A compile that fails, or that merely fell back to the same cached document
-// because the IdP is still down, leaves the serving provider in place: it is
-// still within its ceiling (the watchdog retires it at
-// min(StaleMaxAge, validUntil)), and an availability failure is not a reason
-// to stop serving it.
+// A compile that fails for an AVAILABILITY reason, or that merely fell back to
+// the same cached document because the IdP is still down, leaves the serving
+// provider in place: it is still within its ceiling (the watchdog retires it at
+// min(StaleMaxAge, validUntil)), and an availability failure is not a reason to
+// stop serving it.
+//
+// A compile that fails because the IdP ANSWERED — 404 withdrawn, 410 gone,
+// 401/403 refused, or a 200 whose document is empty or unusable — retires the
+// provider instead. See retireOnDefinitiveAnswer.
 func revalidateCacheServingProviders() int {
 	replaced := 0
 	for _, rc := range idpRegistry.cacheServingProfiles() {
 		prov, err := compileIdPProfile(rc.candidate)
 		if err != nil {
 			discardSupersededRecoveryEpisode(rc.darkCandidate)
+			retireOnDefinitiveAnswer(rc, err)
 			continue
 		}
 		if !idpRevalidationAdopts(prov, rc.servedAt) {
@@ -504,6 +510,44 @@ func revalidateCacheServingProviders() int {
 		noteIdPRecoverySuperseded(rc.candidate.ID)
 	}
 	return replaced
+}
+
+// retireOnDefinitiveAnswer retires a cache-serving provider when the IdP has
+// ANSWERED that the document this node holds is not the one to use.
+//
+// The owner decision this round implements separates an OUTAGE from an ANSWER:
+// a transport failure or a 5xx may be served from the last-known-good copy, and
+// a 404/410/401/403 or an unusable 200 may not. That rule was applied where a
+// document is ACQUIRED and not where a provider is REVALIDATED, so a provider
+// already live from cache kept serving withdrawn SAML signing material until
+// the seven-day ceiling even though the IdP was answering and saying it was
+// gone — which is the exact seven-day exposure the decision's first item
+// describes (Codex P1 on the owner-decision round). A rule enforced at one
+// layer and not carried to the next is this review's most repeated defect
+// shape; the OCSP sweep hit it three times in one round.
+//
+// It requires a POSITIVELY classified answer (idpFetchIsDefinitive): an
+// unclassified compile failure — a parse bug, an SP key-pair error, an SSRF
+// policy refusal — must never retire a provider that is serving SSO.
+//
+// Retirement reuses retireStaleProvider, so there is ONE retirement path with
+// one identity rule: it re-checks the profile under the lock and CLAIMS the
+// stale-serve stamp atomically, which is what rounds 9 and 10 established after
+// two comparison-based attempts raced an admin write and took a healthy
+// provider dark. The profile stays ENABLED and STORED, so this is a withdrawal
+// of the stale document and not a revocation: the recovery loop keeps retrying
+// and republishes as soon as the IdP serves a usable document again.
+func retireOnDefinitiveAnswer(rc revalidationCandidate, err error) {
+	if !idpFetchIsDefinitive(err) {
+		return
+	}
+	source := effectiveRemoteSource(rc.candidate)
+	if !idpRegistry.retireStaleProvider(rc.candidate.ID, source, rc.servedAt) {
+		return // republished, repointed or already dark since selection
+	}
+	logger.Printf("IDP_METADATA_WITHDRAWN idp=%q — the IdP answered that the cached document it was serving is no longer valid (%v); the provider is no longer live and new browser SSO through it is unavailable until a usable document is fetched (the profile stays enabled and existing sessions are not revoked)",
+		sanitizeLog(rc.candidate.ID), sanitizeLog(fmt.Sprint(err)))
+	fireIdPMetadataAlert("IdP answered that its published metadata is withdrawn or invalid; the provider is no longer live")
 }
 
 // runIdPRecoveryLoop retries compilation of enabled-but-dark profiles, and

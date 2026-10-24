@@ -3,7 +3,7 @@
 **Audience:** operators and incident responders.
 **Scope:** the proxy data path's session identity (`ps_session`), not the admin
 UI session (`ps_ui_session`), which is a separate cookie covered below.
-**Engineering reference:** `roadmap/CHAOS-ENGINEERING-REVIEW.md` §42 (CHAOS-72),
+**Engineering reference:** `roadmap/CHAOS-ENGINEERING-REVIEW.md` §50 (CHAOS-88),
 register row **AU-2**.
 
 ---
@@ -150,7 +150,7 @@ id** (sessions naming the old id then resolve to nothing), or rotate the
 session signing key, which invalidates every proxy session on the appliance.
 Closing this properly needs a provider generation stamped into the cookie —
 tracked as register row **AU-22** in
-`roadmap/CHAOS-ENGINEERING-REVIEW.md` §42.6f.
+`roadmap/CHAOS-ENGINEERING-REVIEW.md` §50.6f.
 
 If you removed the **only** interactive provider and no local admin account
 exists, the proxy falls back to the global default authentication outcome. On a
