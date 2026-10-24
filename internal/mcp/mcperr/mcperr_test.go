@@ -154,6 +154,7 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonApprovalStoreUnavailable, "approval_store_unavailable"},
 		{ReasonRolloutBudgetExhausted, "rollout_budget_exhausted"},
 		{ReasonLiveTrustRevalidationFailed, "live_trust_revalidation_failed"},
+		{ReasonPeerObservationNotFresh, "peer_observation_not_fresh"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
