@@ -58,7 +58,7 @@ func findAuditByActionObject(t *testing.T, action, object string) (AuditEntry, b
 func deleteClusterToken(t *testing.T, hash string) *httptest.ResponseRecorder {
 	t.Helper()
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/cluster/tokens?hash="+hash, http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/cluster/tokens?hash="+hash, http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiClusterTokens(w, adminCtx(r))
 	return w
@@ -118,7 +118,7 @@ func TestEnrollAudit_MissingHashIsNotAudited(t *testing.T) {
 	globalClusterStore = newTestClusterStore(t)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodDelete, "/api/cluster/tokens", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/cluster/tokens", http.NoBody)
 	r.RemoteAddr = "127.0.0.1:9999"
 	apiClusterTokens(w, adminCtx(r))
 	if w.Code != http.StatusBadRequest {
