@@ -92,7 +92,7 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+        run: go install -C tools/gosec github.com/securego/gosec/v2/cmd/gosec  # v2.29.0 rules, Go 1.27 loader: see tools/gosec/tools.go
 
       # G703 (taint-analysis path traversal) is the taint-mode variant of the
       # already-excluded G304 (CWE-22 file access via variable): a new gosec

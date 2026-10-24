@@ -409,7 +409,7 @@ jobs:
 
       - name: gosec (root module)
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          go install -C tools/gosec github.com/securego/gosec/v2/cmd/gosec  # v2.29.0 rules, Go 1.27 loader: see tools/gosec/tools.go
           gosec -exclude=G104,G302,G304,G703,G704 ./...
 
       - name: gosec (cmd/culvert-maint)
