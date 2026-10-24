@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"go/ast"
@@ -67,7 +68,7 @@ func logoutTestSession(t *testing.T, sub string) (value, key string) {
 }
 
 func logoutRequestWithCookie(name, value string) *http.Request {
-	req := httptest.NewRequest(http.MethodGet, "/auth/logout", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/auth/logout", http.NoBody)
 	// Only Name=Value serializes on an inbound cookie; the rest satisfies gosec G124.
 	req.AddCookie(&http.Cookie{
 		Name: name, Value: value,

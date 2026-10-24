@@ -207,7 +207,10 @@ func (r *RevocationList) IsRevoked(token string) bool {
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
+	// SEC-REVEXP-1: the eviction test is Decode's acceptance test, so this
+	// entry cannot be dropped while a cookie it revokes would still be
+	// honoured. See revocation_expiry.go.
+	if revocationExpired(time.Now(), exp) {
 		delete(r.tokens, token) // lazy eviction
 		return false
 	}
@@ -231,7 +234,8 @@ func (r *RevocationList) IsUserRevoked(username string) bool {
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
+	// SEC-REVEXP-1: same single oracle as the token list above.
+	if revocationExpired(time.Now(), exp) {
 		delete(r.users, username) // lazy eviction
 		return false
 	}
@@ -297,7 +301,10 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	now := time.Now()
 	entries := make([]RevocationEntry, 0, len(r.tokens)+len(r.users))
 	for tok, exp := range r.tokens {
-		if now.After(exp) {
+		// SEC-REVEXP-1: this loop both PERSISTS (SaveRevocations) and GOSSIPS
+		// (the DP→CP push), so evicting a still-honoured entry here removed it
+		// from the on-disk file and from every peer, not just from this map.
+		if revocationExpired(now, exp) {
 			delete(r.tokens, tok)
 			continue
 		}
@@ -336,7 +343,10 @@ func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 	added := 0
 	for _, e := range entries {
 		exp := time.Unix(e.Expiry, 0)
-		if now.After(exp) {
+		// SEC-REVEXP-1: admit on the same oracle that retains. A peer's entry
+		// for a session Decode would still accept must not be refused as
+		// "already expired".
+		if revocationExpired(now, exp) {
 			continue // already expired
 		}
 		user := e.User
