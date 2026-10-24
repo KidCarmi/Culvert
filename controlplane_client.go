@@ -78,6 +78,9 @@ type DataPlaneClient struct {
 	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
 	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	// pendingAddrs is a CP address list whose redial failed (CHAOS-91), held
+	// for retryPendingAddresses. Guarded by mu.
+	pendingAddrs []string
 	// jitter decorrelates this node's retry delays from the rest of the fleet
 	// (CHAOS-89). Assigned once by NewDataPlaneClient and never mutated, so the
 	// loop goroutines that read it need no synchronisation. A nil value — every
@@ -417,6 +420,10 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 // backoff was applied — the caller must return without applying. Split out of
 // fetchAndApply to keep that function under the funlen budget.
 func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, ok bool) {
+	// CHAOS-91: a CP address list deferred by a failed redial is retried
+	// before the poll, so it is not lost once lastVersion has advanced past
+	// the snapshot that carried it.
+	c.retryPendingAddresses()
 	// P0-3: report the version we already hold so the CP can reply with a tiny
 	// "unchanged" sentinel instead of the full snapshot when nothing changed.
 	// fetchAndApply is the only writer and runs on a single config-loop
@@ -997,9 +1004,42 @@ func updateDPAddresses(addrs []string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.pendingAddrs = nil // a newer list supersedes any deferred one
+	if !c.applyAddressesLocked(addrs) {
+		// Deferred, not dropped: fetchAndApply has already persisted this
+		// snapshot and will advance lastVersion, so an unchanged CP never
+		// re-sends the list. retryPendingAddresses re-applies it before each
+		// config poll until the redial succeeds (Codex P2 on #1618).
+		c.pendingAddrs = append([]string(nil), addrs...)
+	}
+}
+
+// retryPendingAddresses re-applies an address list whose redial failed.
+// Called at the start of every config poll, so a list deferred by a transient
+// dial failure (for example a certificate renewal caught between writing the
+// cert and the key) converges within one poll interval of the dial working
+// again, instead of waiting for the next config version.
+func (c *DataPlaneClient) retryPendingAddresses() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pendingAddrs == nil {
+		return
+	}
+	addrs := c.pendingAddrs
+	c.pendingAddrs = nil
+	if !c.applyAddressesLocked(addrs) {
+		c.pendingAddrs = addrs
+	}
+}
+
+// applyAddressesLocked installs addrs as the CP address list and reports
+// whether it did. It reports false only when the active address was dropped
+// and the redial to the new list failed; the caller decides whether to retry.
+// The caller must hold c.mu.
+func (c *DataPlaneClient) applyAddressesLocked(addrs []string) bool {
 	// Only update if the addresses actually changed.
 	if slicesEqual(c.addrs, addrs) {
-		return
+		return true
 	}
 	old := c.addrs
 	// CHAOS-91 (found while fixing CHAOS-71 address-republish rider): activeIdx is an index INTO
@@ -1046,13 +1086,14 @@ func updateDPAddresses(addrs []string) {
 	// reject it either.
 	//
 	// A failed redial keeps BOTH the old list and the old connection, rather than
-	// adopting a list this node cannot reach: the snapshot is re-applied on the
-	// next poll, so the update is deferred, not lost.
+	// adopting a list this node cannot reach; the caller holds the new list as
+	// pending and retries it before the next poll, so the update is deferred,
+	// not lost.
 	if !activeListed && c.conn != nil {
 		if err := c.connect(addrs[0]); err != nil {
-			logger.Printf("DataPlane: CP address list dropped the active address %q but redial to %q failed, keeping the current list and connection: %v",
-				sanitizeLog(active), sanitizeLog(addrs[0]), err)
-			return
+			logger.Printf("DataPlane: CP address list dropped the active address %q but redial to %q failed, keeping the current list and connection and retrying before the next poll: %q",
+				sanitizeLog(active), sanitizeLog(addrs[0]), sanitizeLog(err.Error()))
+			return false
 		}
 	}
 	c.addrs = addrs
@@ -1064,6 +1105,7 @@ func updateDPAddresses(addrs []string) {
 	// bare %v.
 	logger.Printf("DataPlane: CP address list updated: %q -> %q (active %q at index %d)",
 		sanitizeLog(fmt.Sprint(old)), sanitizeLog(fmt.Sprint(addrs)), sanitizeLog(active), c.activeIdx)
+	return true
 }
 
 func slicesEqual(a, b []string) bool {

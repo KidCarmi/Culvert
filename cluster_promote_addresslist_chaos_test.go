@@ -170,6 +170,60 @@ func TestChaos91_DroppedActiveAddressRedialsRatherThanOnlyReindexing(t *testing.
 	}
 }
 
+// TestChaos91_FailedRedialIsRetriedNotDropped: a redial that fails keeps the old
+// list and connection, and the new list must then be RETRIED, not dropped.
+// fetchAndApply persists the snapshot and advances lastVersion either way, so an
+// unchanged CP never re-sends the list (Codex P2 on #1618) — without the pending
+// retry the DP stays pinned to a de-listed CP until the next config version.
+func TestChaos91_FailedRedialIsRetriedNotDropped(t *testing.T) {
+	c := &DataPlaneClient{
+		nodeID:    "dp-chaos91",
+		addrs:     []string{"cp1:50051", "cp2:50051"},
+		activeIdx: 1,
+	}
+	if err := c.connect("cp2:50051"); err != nil {
+		t.Fatalf("seed connect: %v", err)
+	}
+	t.Cleanup(func() {
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+	})
+	prev := activeDPClient.Load()
+	activeDPClient.Store(c)
+	t.Cleanup(func() { activeDPClient.Store(prev) })
+
+	// Make the redial fail: the client TLS material cannot be loaded (the shape
+	// of a certificate renewal caught between writing the cert and the key).
+	missing := t.TempDir() + "/missing"
+	c.mu.Lock()
+	c.certFile, c.keyFile = missing+".crt", missing+".key"
+	c.mu.Unlock()
+
+	updateDPAddresses([]string{"cp3:50051", "cp4:50051"})
+	c.mu.Lock()
+	addrs, pending := append([]string(nil), c.addrs...), append([]string(nil), c.pendingAddrs...)
+	c.mu.Unlock()
+	if !slicesEqual(addrs, []string{"cp1:50051", "cp2:50051"}) {
+		t.Fatalf("a failed redial adopted the new list %v; it must keep the reachable one", addrs)
+	}
+	if !slicesEqual(pending, []string{"cp3:50051", "cp4:50051"}) {
+		t.Fatalf("pending = %v: the list whose redial failed was dropped instead of retained for retry", pending)
+	}
+
+	// The dial works again; the retry the next poll runs adopts the list.
+	c.mu.Lock()
+	c.certFile, c.keyFile = "", ""
+	c.mu.Unlock()
+	c.retryPendingAddresses()
+	c.mu.Lock()
+	addrs, pending = append([]string(nil), c.addrs...), c.pendingAddrs
+	c.mu.Unlock()
+	if !slicesEqual(addrs, []string{"cp3:50051", "cp4:50051"}) || pending != nil {
+		t.Fatalf("after a working retry: addrs=%v pending=%v, want the new list and nothing pending", addrs, pending)
+	}
+}
+
 // TestChaos91_RetainedActiveAddressKeepsItsConnection is the negative control
 // for the redial: when the active address is STILL a member, the connection must
 // be left alone. Redialling unconditionally would throw away a working link on
