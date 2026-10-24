@@ -10778,3 +10778,324 @@ required before merge; each is now in the tree.
 Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
 listener is dark is still allowed (break-glass by design); it will withhold and
 fence again until the listener serves.
+
+---
+
+## 45. CHAOS-78 — The syslog/SIEM writer handle, published without synchronization
+
+**Id claimed in a committed placeholder row as commit one**, per the convention
+the header above reaches twice independently after ten collisions. `CHAOS-77`
+was the highest id claimed on any open branch (PR #1669), so this sweep took 78
+and will not move.
+
+**Date:** 2026-10-20 · **Domain:** Audit / SIEM forwarding, proxy request path ·
+**Follow-up to:** §42 `OBS-1`, which this file nominated as the *recommended
+first follow-up* and left unfixed because it "touches ~32 sites across a
+different domain".
+
+### 45.1 Executive summary
+
+The syslog/SIEM forwarder's engine is sound. The pointer holding it was not.
+
+`globalSyslog` was a plain `var globalSyslog *syslogWriter`, written at runtime
+from the admin handler goroutine (`InitSyslog` via the `apiSyslogConfig` POST;
+the disable branch stored `nil`) and read unsynchronized on the proxy request
+path at `persistLogEntry` — the single chokepoint every request-log record
+flows through — and on the audit SIEM hook. §42 nominated this as the
+*recommended first follow-up* and left it only for its site count. It is closed
+here, and the sweep found two further defects while reading the write sites.
+
+**Three findings — SIEM-1 and SIEM-3 measured, SIEM-2 confirmed by construction
+and NOT reproduced (see §45.3):**
+
+| | Finding | Impact |
+|---|---|---|
+| **SIEM-1** | The nil check and the dereference were two separate unsynchronized loads, so a request goroutine could pass the check and dereference the `nil` the disable branch had just stored | Aborts an in-flight request or tunnel, over a routine "disable SIEM forwarding" click |
+| **SIEM-2** | A plain pointer write carries no release edge, and the engine treats a zero `queue` as *deliver synchronously* — a path holding the writer mutex across three serialized network ops | A request goroutine pays ~15 s on the data path (the engine's own figure), every other logging caller queued behind it |
+| **SIEM-3** | `InitSyslog` published over the previous writer without closing it, and `drainLoop` exits ONLY via `Close` | One delivery goroutine and one collector socket stranded per runtime SIEM retarget, permanently, with nothing to show it |
+
+SIEM-2 is the load-bearing one, and the reason a nil guard would have been the
+wrong fix: it is not reachable by adding a check, because the pointer is not
+what is unset — the *object behind it* is partially published. The engine sets
+its `queue` in `startAsync`, **after** the struct literal, and
+`internal/syslog`'s `send()` reads `if s.queue == nil { s.writeMsg(...) }`. A
+reader with no acquire edge may observe the non-nil writer and the zero queue,
+fall into `writeMsg` → `deliverLine`, and take `s.mu` across the
+connect/backoff/write state machine on the proxy request goroutine.
+`deliverLine`'s own comment accounts for that cost — "`writeTimeout` + dial
+(5s) + `writeTimeout` — three serialized network ops (~15s worst case) under
+`s.mu`" — which it wrote about the drain goroutine, the only caller it expected
+to be there. That is
+precisely the proxy-wide stall the async design and the engine's own
+`TestAsync_WedgedCollectorNeverBlocksCaller` exist to prevent — reached not
+through the engine but through the pointer holding it. This appliance ships
+`linux/amd64` **and `linux/arm64`** (`.github/workflows/ci.yml`, the release
+images), and arm64 is weakly ordered, so this is a shipped-target property, not
+a thought experiment.
+
+### 45.2 What was NOT wrong, and why that matters
+
+The engine is genuinely well built, and three of the scenarios this sweep set
+out to find were already handled. Recording them is the point of the register.
+
+* **Use-after-`Close` on the request path is safe.** The disable branch closes
+  the writer and a request goroutine may still hold the old handle. `Close`
+  never closes the `queue` channel — it sets `closed atomic.Bool`, closes
+  `stop` under a `closeOnce`, and waits on `done`
+  (`internal/syslog/syslog.go` `Close`). `send` checks `s.closed.Load()` and
+  counts a drop. A send that races `Close` and loses lands on a still-open
+  channel. **No panic, no send-on-closed-channel, and the line is counted.**
+  This is why the fix publishes first and closes second: either order is
+  correct, and that order is merely narrower.
+* **A panic in delivery cannot take the appliance down.** `deliverGuarded`
+  contains per LINE, not per goroutine, counts the line as a drop, and
+  forwards to an optional observer that is itself panic-contained (CHAOS-24).
+  An exited drain goroutine would silently strand every subsequent line, and
+  the code says so.
+* **A wedged collector cannot backpressure the proxy** on the async path:
+  bounded queue at `queueCap`, non-blocking select, counted overflow, and one
+  drain goroutine owning every socket write. `deliverLine`'s own comment is
+  accurate — the mutex "no longer serializes request goroutines". SIEM-2 is the
+  one way back onto that path, and it is a publication bug, not an engine bug.
+* **The nil deref does not kill the process.** The crash-guard framework
+  (`crashguard.go`, M1/CHAOS-24) taps the proxy plane and every detached
+  goroutine birth site, so the panic becomes a crash record and a dead request
+  or tunnel. Stating this plainly matters: §43's own review round had to walk
+  back a 500 that over-claimed, and the honest severity here is
+  "request-fatal, contained", not "appliance-fatal".
+
+### 45.3 Evidence (measured against the real paths, pre-fix)
+
+Reverting the publication to a plain variable behind the same accessor names,
+and splitting the request-path read back into check-then-deref, under `-race`:
+
+```
+WARNING: DATA RACE
+Read at 0x000005cf62a8 by goroutine 15:
+  github.com/KidCarmi/Culvert.persistLogEntry()   store.go:2587
+Previous write at 0x000005cf62a8 by goroutine 23:
+  github.com/KidCarmi/Culvert.setSyslogHandle()   syslog.go:91
+  github.com/KidCarmi/Culvert.InitSyslog()        syslog.go:126
+```
+
+14 reported races in one run — the proxy request path against the admin
+handler, which is the finding verbatim. The leak gate on the same tree:
+
+```
+after 8 retargets: 8 syslog delivery goroutines; want 1 (baseline 0 + the live writer)
+after disable:     7 syslog delivery goroutines; want the 0 baseline
+```
+
+SIEM-3 is therefore exact, not estimated: **one stranded goroutine and socket
+per retarget**, and the disable branch reclaims only the last one.
+
+SIEM-2's reordering was **not** reproduced — no weakly ordered host was
+available in this environment, and a race detector on amd64 reports the race
+but cannot exhibit the reordering. It is reported as a finding confirmed by
+construction (the missing release edge is in the source; the synchronous
+fallback is in the source; the arm64 target is in CI) rather than as a measured
+stall. Stated explicitly, per §42's own standard for mixing measured and
+reasoned items.
+
+### 45.4 The fix
+
+`atomic.Pointer[syslogWriter]`, read once into a local at every site. It supplies
+both missing properties at once — a single load, and the release/acquire edge —
+and it is what this codebase **already** does for every other hot-path-read,
+runtime-reconfigured global: `globalLogStore` (`logstore.go`), `logSink`
+(`logger.go`), `obs.sink` (`internal/obs`), and the syslog engine's own
+`panicObserver`. The pointer holding the engine was the one left plain. The fix
+is not a new pattern; it is the house pattern, applied to the site that missed it.
+
+Access goes through `syslogHandle()` / `setSyslogHandle()` so that a caller
+needing both a nil test and a method call naturally holds ONE value in a local.
+The symbol was renamed `globalSyslog` → `globalSyslogHandle` deliberately: it
+makes the compiler enumerate all ~50 sites instead of trusting a grep over a
+32-reference global.
+
+`setSyslogHandle` returns the writer it displaces, and `InitSyslog` closes it
+(publish first, then release — readers move to the new writer before the old is
+torn down, and post-`Close` sends are already safe per §45.2). The disable
+branch uses the same swap-then-close shape.
+
+**Also fixed, found while reading the write sites:** the enable branch
+dereferenced the global twice more — once for the audit detail, once for the
+JSON reply — with no nil guard at all. A second admin's concurrent disable
+between `InitSyslog` and those reads nil-panicked the admin handler. The format
+now resolves from one load with a fallback to the requested value.
+
+### 45.5 Risk matrix
+
+| Finding | Likelihood | Severity | Customer | Security | Data integrity |
+|---|---|---|---|---|---|
+| SIEM-1 nil deref on the request path | Low (needs a disable concurrent with traffic) | Medium | One request/tunnel aborted; contained to a crash record | None | None — the ring write precedes the forward |
+| SIEM-2 synchronous path on a torn read | Low, arm64 only | **High** | Up to ~15 s stall with all logging queued behind it | None | None |
+| SIEM-3 writer leak per retarget | **High** (every retarget) | Low | Goroutine + fd growth, unbounded in principle | None | None |
+| Enable-branch deref | Low | Low | Admin request 500s, contained | None | None |
+
+### 45.6 Recovery assessment
+
+* **Automatic:** none was needed for SIEM-1/2 — both are per-occurrence and
+  self-clearing (the request dies, or the stall ends). SIEM-3 never recovers: a
+  stranded goroutine and socket persist for the life of the process.
+* **Manual:** a restart reclaimed the leaked writers, which is the only reason
+  SIEM-3 stayed invisible — appliances restart on upgrade often enough to mask
+  a slow fd leak driven by an infrequent admin action.
+* **Monitoring visibility, pre-fix: nil.** This is the register's §1 theme
+  again. Lines lost to a torn or stale handle are not counted by `Drops()`
+  (they never reach `send`), the leaked goroutines are not on any surface, and
+  the crash record names the request, not the cause. §42 `OBS-2` remains open
+  and compounds it: `Drops()` is admin-JSON-only and is never scraped, so even
+  the drops the engine *does* count cannot raise an alert.
+
+### 45.7 Operational and security impact
+
+Operationally the SIEM feed is an audit path: `store.go`'s `audit.SetSIEM` hook
+forwards **audit** entries, which are compliance evidence. A dropped audit line
+leaves no local trace beyond the bounded ring. None of the three findings
+*silently* drops audit records in a way the fix changes — SIEM-1 aborts a
+request loudly (a crash record), SIEM-3 drops nothing — so the security impact
+is honestly **none** for all three. The availability impact of SIEM-2 is the
+real one, and it lands on the data plane.
+
+The sweep found no fail-open: nothing here decides whether traffic is allowed,
+and a syslog forwarder that is nil, closed, wedged or leaked never changes a
+policy outcome. The forwarding path is correctly positioned *after* the ring
+write in `persistLogEntry`, so a fault in it cannot cost the local record.
+
+### 45.8 Gates
+
+* `TestChaos78_ReconfigureRacesTheRequestPath` — 8 readers on the real read
+  paths (`persistLogEntry`, the audit hook) against 60 enable/disable cycles on
+  the real write paths. Bounded by work, not a sleep. Pre-fix: 14 data races.
+* `TestChaos78_RetargetLeaksNoDeliveryGoroutine` — counts delivery goroutines
+  by stack (`syslog.(*Writer).drainLoop`), exact where `runtime.NumGoroutine()`
+  would be suggestive. Pre-fix: 8 leaked of 8 retargets.
+* `TestChaos78_Wall_SyslogHandleIsPublishedAtomically` — AST wall, anchored to
+  the package directory: the handle must be a generic `atomic.Pointer`, no file
+  but `syslog.go` may name it, and nobody may write `syslogHandle().Method()`
+  (two calls in one expression are two loads, reopening the window). Three
+  negative controls prove each rule fires.
+* `TestChaos78_HandleTypeIsAtomicPointer` — fails to BUILD, not to run, if the
+  handle regresses to a plain pointer.
+
+### 45.9 Deliberately left, and recorded
+
+* **§42 `OBS-2` (drop counters are not scrapeable) is NOT fixed here** and is
+  now the sharpest open item in this domain — see §45.6. It needs a metrics
+  surface and its own gates; bundling it would make one unreviewable change out
+  of two reviewable ones, which is §42's own stated reason for splitting.
+* **§42 `OBS-3` (the fully serial alert retry round)** is untouched: a
+  different owner (`internal/alerts`) and a different failure shape.
+* **`syslogConfigured` / `syslogConfiguredAddr` remain plain strings**, written
+  by the same admin handler and read by `buildOperatorContract`. They are
+  racy by the same argument, but they are diagnostic strings, not a pointer
+  that gets dereferenced: the worst outcome is one stale Diagnostics row, and
+  `checkSyslogFeed` already compares them for exactly the mismatch case. Left
+  as a recorded, lower-severity residual rather than widened into this PR.
+* **The engine's `Format()` takes `s.mu`**, which `deliverLine` can hold for
+  ~15 s against a wedged collector — so the admin readback can park for that
+  long. Pre-existing, admin-plane-only, and unchanged by this PR; recorded
+  because the fix moved two `Format()` calls, and it would be wrong to imply
+  they became cheap.
+
+### 45.9b Codex round 1 — the fix traded a leak for silent loss
+
+Closing SIEM-3 opened a narrower hole, and the reviewer was right to call it.
+
+`InitSyslog` now closes the writer it displaces. But `send` reads
+`closed.Load()` and only *then* enqueues, while `Close` stored `closed`, closed
+`stop` and let `drainLoop` exit — so a sender preempted between its check and
+its enqueue could put a line on a queue whose drain goroutine had already
+returned. `Close` deliberately never closes the channel, so the send succeeds:
+the line is **neither delivered nor counted in `Drops`**. Silent loss, invisible
+on every surface, in audit records.
+
+**The shape of the trade is the lesson.** Before SIEM-3's fix the displaced
+writer was leaked, and a leaked `drainLoop` keeps running — so that same
+in-flight line *was* delivered. Fixing the leak is what created the loss. A
+containment fix that moves the failure instead of removing it is the same
+pattern §43 recorded ("containment alone makes it worse"), reached from a
+different direction.
+
+`Close` now stores `closed`, **waits for in-flight senders**, and only then
+closes `stop` (`waitForSenders`, bounded by `senderDrainTimeout`). With that
+ordering a sender either loses the race and is counted as a drop, or wins it and
+has its line on the queue before the flush begins. Every line is accounted for
+**provided the sender clears within `senderDrainTimeout`**; the bound is
+deliberate and the one path that can still lose a line is stated in the
+residual below, rather than being glossed by an unqualified "every".
+The cost is two atomic adds bracketing a buffered channel send that already
+takes the channel's lock and a `formatMsg` that already allocates — noise
+against what the path does anyway, so the engine's "request path never blocks on
+the collector" contract is untouched.
+
+**REPRODUCED AND MEASURED — after a correction this section originally got
+wrong.** Against the pre-fix ordering the conservation test fails **6 runs in
+10**, typically losing exactly one line:
+
+```
+delivered 2091 + dropped 5273 = 7364; want exactly 7365 sent
+```
+
+That one missing line is the finding: enqueued onto a queue whose drain
+goroutine had already returned, so neither delivered nor counted.
+
+**This section first said the opposite, and the reason is the more useful
+lesson.** The original write-up recorded the finding as "confirmed by
+construction, not reproduced", on the strength of ~500 failed attempts across
+two strategies. That conclusion was an artifact of a bug in the test's own fake
+collector: `countingConn` embedded a bare `net.Conn`, so `writeLine`'s
+`SetWriteDeadline` nil-panicked on every line, `deliverGuarded` recovered each
+one and counted it as a drop, and **zero lines were ever delivered**
+(measured: `delivered=0 dropped=50 panics=50`). The conservation law then held
+trivially and the test passed on fixed and broken code alike — a vacuous gate
+that looked like coverage, and a "could not reproduce" that was really "could
+not deliver".
+
+A review comment rated **minor** is what caught it. The generalisable rule: a
+conservation law over two counters is only evidence if BOTH counters can move,
+so assert that they do. The test now requires `delivered > 0` and
+`Panics() == 0` before the law is allowed to mean anything. The same trap
+applies to any differential oracle whose negative case is "a number did not
+change".
+
+Note what this does **not** change: SIEM-2 remains confirmed-by-construction
+and unreproduced, for the unrelated reason that no weakly ordered host was
+available here.
+
+The mechanism is separately measured:
+`TestClose_WaitsForAnInFlightSenderBeforeStoppingTheDrain` parks a registration
+and requires `Close` not to return before it clears — pre-fix `Close` returns in
+**~108 µs** against a required **150 ms**. `TestClose_SenderWaitIsBounded` pins
+the other half: an unreleased registration must never hang shutdown.
+`TestClose_EveryLineIsDeliveredOrDropped` carries the conservation law
+(delivered + dropped == sent) and is the differential above, with the two
+anti-vacuity guards that episode earned.
+
+One assertion was removed rather than kept: an earlier version of this round
+checked `inFlight == 0` once `Close` returned. That is a **false** invariant —
+senders arriving after `waitForSenders` finishes still register briefly before
+taking the closed branch — and the fixed code failed it, which is how the error
+surfaced. The property that matters is the ordering against `close(stop)`, which
+is what the timing assertion measures.
+
+**Residual:** `waitForSenders` is bounded, so a registration that never clears
+within `senderDrainTimeout` lets `Close` proceed and that one line may still go
+unaccounted. Bounding it is deliberate — a wait that cannot finish must not be
+able to hang shutdown — and senders in that window do only CPU work and a
+non-blocking send, never a syscall, so reaching the bound means the goroutine
+was descheduled for a second mid-function.
+
+### 45.10 Residual risk
+
+A caller can still defeat the discipline by loading the handle into a local and
+holding it across a long operation — the value stays valid (the engine tolerates
+post-`Close` use), so this is safe today, but it would stop being safe if
+`Close` ever started releasing state that `send` touches. The AST wall catches
+the two-loads shape, not a long-lived local. Nothing in the tree does this now.
+
+SIEM-2's reordering remains unexhibited rather than disproven (§45.3). The fix
+removes the race that would permit it, so the residual is only that the *cost*
+of the pre-fix bug on arm64 is an upper bound from reading `deliverLine`, not a
+measurement.
