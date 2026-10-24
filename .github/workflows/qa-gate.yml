@@ -308,7 +308,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build proxy image (local only)
         run: |
@@ -571,14 +571,14 @@ jobs:
         # and does not descend into the nested module. Here we run it
         # explicitly inside cmd/culvert-maint with the same project config.
         # Checksum-verified install (sum.golang.org), not curl|sh off a tag ref.
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
       - name: golangci-lint (agent module)
         working-directory: cmd/culvert-maint
         run: $(go env GOPATH)/bin/golangci-lint run --timeout=5m ./...
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+        run: go install -C tools/gosec github.com/securego/gosec/v2/cmd/gosec  # v2.29.0 rules, Go 1.27 loader: see tools/gosec/tools.go
 
       - name: gosec (agent module)
         # G703 excluded for parity with security-release-gate.yml (taint-mode
@@ -591,7 +591,7 @@ jobs:
             ./...
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 
       - name: staticcheck (agent module)
         working-directory: cmd/culvert-maint
@@ -658,7 +658,7 @@ jobs:
         run: go mod download
 
       - name: Allocation-regression gate (policy + scrub hot paths)
-        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v . ./internal/admission ./internal/session
+        run: go test -tags benchgate -run 'TestBenchGate_' -count=1 -p 1 -timeout=10m -v . ./internal/admission ./internal/threatfeed ./internal/catgroup ./internal/session
 
   # ─── Audit: the unsharded race reference (CI-REDESIGN stage 5B) ────────────
   # QUALIFICATION mode: the weekly schedule, or a dispatch with
