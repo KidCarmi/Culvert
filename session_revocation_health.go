@@ -627,7 +627,7 @@ func checkSessionRevocation() OperatorContractCheck {
 				Code:           "session_revocation",
 				Status:         diagFail,
 				Message:        "the persisted session-revocation list could not be PARSED — revocations applied before this restart are NOT in force on this node, and the damaged file has been quarantined",
-				OperatorAction: "See the state_file_session_revocations row and the server logs. Restore the quarantined .corrupt.* copy or a backup and restart; until then, re-apply any logout or account deletion that must hold.",
+				OperatorAction: "See the state_file_session_revocations row and the server logs. Writes are NOT fenced here, so the next logout or cluster sync creates a fresh file holding the revocations applied since boot: record the token and account counts shown above FIRST, then MERGE the quarantined .corrupt.* copy or a backup with the current file — keeping the later expiry where an entry appears in both — rather than restoring over it, and restart. A plain restore replaces those entries and their cookies become valid again. Re-apply any logout or account deletion that must hold.",
 			}
 		}
 		return OperatorContractCheck{

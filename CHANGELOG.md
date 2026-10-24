@@ -1161,6 +1161,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   have no disabled state, so deleting the account — which the procedure already
   covers — is the only action that answers.
 
+  Counting revocations no longer deletes one a second before the cookie stops
+  being honoured. The live-count helper behind the metrics gauges, the
+  diagnostics row and the cluster revocations API pruned expired entries on a
+  test that disagreed with the cookie verifier: session expiries are whole
+  seconds while the clock carries a sub-second remainder, so for the whole
+  second an expiry names, the prune considered the entry gone while the verifier
+  still accepted the cookie. A metrics scrape landing in that second therefore
+  destroyed the revocation and the logged-out cookie authenticated again for the
+  rest of it. The prune now uses the same shared expiry test as the verifier, so
+  an entry survives for exactly as long as some cookie could still be accepted.
+
+  The corrupt-file diagnostics row now gives the same recovery action as the
+  runbook. The procedure was corrected to require merging the quarantined copy
+  with the file written since boot, keeping the later expiry on a collision,
+  because a successful quarantine leaves writes unfenced and a plain restore
+  replaces the revocations applied in the meantime. The diagnostics row — which
+  an operator reads first — still said to restore and restart.
+
   Revocation persistence remains opt-in (`-revocations-file`) and is not
   changed here, but it is no longer silent: a new `session_revocation`
   diagnostics row and `culvert_session_revocation_*` metrics report whether a

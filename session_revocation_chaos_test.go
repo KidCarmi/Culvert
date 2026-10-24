@@ -2032,6 +2032,61 @@ func TestChaos68_AU51_ControlRegularFileTargetStaysDurable(t *testing.T) {
 	}
 }
 
+// DEFECT (AU-59, Codex P2, PR #1437): the RUNBOOK required a merge and the
+// DIAGNOSTICS ROW still directed a blind restore.
+//
+// AU-57 corrected §6 because a SUCCESSFUL quarantine frees the path and leaves
+// writes unfenced, so the next logout or cluster sync creates a fresh file
+// holding the revocations applied since boot — and "restore the quarantined
+// copy and restart" replaces them, making their cookies valid again. The row
+// is the surface an operator reads FIRST (it is on /api/diagnostics), and it
+// kept the instruction the runbook had just removed.
+//
+// This gate pins the AGREEMENT rather than either wording, because the twin
+// surfaces are what let the defect through twice: fixing one surface does not
+// fix its twin (AU-52's lesson, and AU-57's).
+func TestChaos68_AU59_QuarantineRowAndRunbookAgreeOnMergeNotRestore(t *testing.T) {
+	withChaos68Revocations(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
+
+	row := checkSessionRevocation()
+	if row.Status != diagFail {
+		t.Fatalf("status = %q, want %q", row.Status, diagFail)
+	}
+	action := row.OperatorAction
+
+	// The row must require the merge and say why a plain restore is unsafe.
+	for _, want := range []string{"MERGE", "later expiry", "NOT fenced"} {
+		if !strings.Contains(action, want) {
+			t.Errorf("row does not carry %q:\n  %q", want, action)
+		}
+	}
+	// And it must not still be telling the operator to restore over the file.
+	if strings.Contains(action, "Restore the quarantined") {
+		t.Errorf("row still directs a blind restore: %q", action)
+	}
+
+	// The runbook's §6 must be making the same demand, so the two cannot drift
+	// apart again without one of them failing here.
+	doc, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs/operator/session-revocation.md"))
+	if err != nil {
+		t.Fatalf("read runbook: %v", err)
+	}
+	// Whitespace-normalised: the contract is the requirement, not the line
+	// wrapping, and the runbook wraps "keep the LATER\n   expiry" across lines.
+	// Matching raw prose would make this gate fail on a reflow, which is how a
+	// doc gate earns a mute.
+	body := strings.ToLower(strings.Join(strings.Fields(string(doc)), " "))
+	for _, want := range []string{"not fenced", "merge", "later expiry"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("runbook no longer requires %q; the row and the runbook have drifted", want)
+		}
+	}
+}
+
 // DEFECT (AU-56, Codex P2, PR #1437): a DEFINITIVE path fault was MASKED by the
 // generic failure branches that it causes.
 //

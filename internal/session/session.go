@@ -409,11 +409,24 @@ func (r *RevocationList) UserCount() int {
 // Pruning rather than skipping also bounds the map on exactly that node, which
 // is the one where nothing else would ever collect it.
 //
+// The eviction test is SEC-REVEXP-1's shared oracle, NOT a raw now.After(exp),
+// and that is a security property rather than tidiness. This function DELETES,
+// and it is reached from read-only surfaces — a /metrics scrape, the
+// session_revocation diagnostics row, /api/cluster/revocations — so a looser
+// test here destroys a revocation that Decode would still honour. Every
+// production expiry is a whole second while time.Now() carries a sub-second
+// remainder, so for the whole wall-clock second numbered Exp, now.After(exp) is
+// already true while Decode still accepts the cookie: counting would evict the
+// entry and the logged-out cookie would authenticate again for the rest of that
+// second. revocation_expiry.go documents that exact hole, measured against the
+// real Decode, for the eviction sites that existed when it was written; this
+// function was added afterwards and reintroduced it (Codex P2, PR #1437).
+//
 // Reported by Codex on PR #1437 as a P2.
 func pruneExpiredLocked(m map[string]time.Time) int {
 	now := time.Now()
 	for k, exp := range m {
-		if now.After(exp) {
+		if revocationExpired(now, exp) {
 			delete(m, k)
 		}
 	}
