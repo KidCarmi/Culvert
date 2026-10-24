@@ -1636,8 +1636,10 @@ persist_host_env_session_secret() {
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -f "$envfile" ]]; then
-    grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null
-    local rc=$?
+    # `|| rc=$?` keeps grep's "not found" exit 1 from tripping `set -e`
+    # (this script runs under `set -euo pipefail`) before rc is inspected.
+    local rc=0
+    grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null || rc=$?
     if [[ $rc -eq 0 ]]; then
       return 0 # already configured — never overwrite
     elif [[ $rc -ne 1 ]]; then
