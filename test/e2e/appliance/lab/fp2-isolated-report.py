@@ -47,6 +47,28 @@ if _count_mode:
     print(n)
     sys.exit(0)
 
+# --functional: the scanner must WORK when nothing is under pressure, or a zero
+# wrong-clean count could come from a clamd that refuses everything. In the
+# no-pressure "control" variant every EICAR must be FOUND and every clean body
+# answered a bare OK. Prints the tallies; exits 1 when either fails or the
+# variant is absent.
+if "--functional" in sys.argv[1:]:
+    ctl = [r for r in rows if r["variant"] == "control"]
+    ef = sum(1 for r in ctl if r["eicar"] and cls(r) == "FOUND")
+    et = sum(1 for r in ctl if r["eicar"])
+    co = sum(1 for r in ctl if not r["eicar"] and cls(r) == "OK")
+    ct = sum(1 for r in ctl if not r["eicar"])
+    print(f"control: EICAR FOUND {ef}/{et}, clean OK {co}/{ct}")
+    sys.exit(0 if et and ct and ef == et and co == ct else 1)
+
+# --pressure: how many EICAR streams were sent while clamd's temp filesystem had
+# at most 64 KiB free (the edge F-P2 needs). Zero means the pressure path was
+# not exercised and no verdict about it can be drawn.
+if "--pressure" in sys.argv[1:]:
+    n = sum(1 for r in rows if r["eicar"] and r["tmp_free_before"] <= 65536)
+    print(n)
+    sys.exit(0)
+
 out = []
 w = out.append
 w("# F-P2 isolated reproduction — attribution summary\n")

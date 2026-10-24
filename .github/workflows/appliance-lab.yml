@@ -1249,39 +1249,42 @@ jobs:
     if: ${{ contains(github.event.head_commit.message, '[fp2-isolated]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # Owner decision 6387402372 (#1528): ONE run for the NEW sidecar
+    # culvert/clamav:1.5.4-culvert.3 (brotli-libs 1.2.1-r0). No OVA carries it and
+    # that approval forbids building one, so BOTH arms come from pinned inputs on
+    # this runner instead of a retained OVA (the bad788e5 artifact 11666266481 has
+    # expired, 410):
+    #   candidate: appliance/clamav/Dockerfile at the exact source commit, its
+    #     content pinned by sha256, built TWICE exactly as build-ova.sh does
+    #     (buildx --no-cache, rewrite-timestamp, a FIXED recorded SOURCE_DATE_EPOCH)
+    #     and refused unless both builds give one manifest digest; the tested
+    #     identity is that digest = the loaded image ID. An OVA built with the
+    #     same SOURCE_DATE_EPOCH bakes the same ID; if it does not, F-P2 reruns.
+    #   control: the upstream ClamAV 1.4.6 index pinned by digest (the base of the
+    #     shipped 1.4.6 derivative, i.e. the engine F-P2 lives in), which must
+    #     REPRODUCE F-P2 on this harness, or the candidate's zero proves nothing.
     strategy:
       fail-fast: false
       matrix:
         include:
-          # CONTROL: the shipped 1.4.6 sidecar must REPRODUCE F-P2 (wrong-cleans
-          # > 0) — the bug the fix closes. appliance-lab-ova-candidate-bad788e54ffe.
-          - label: control-1.4.6-bad788e5
-            ova_artifact: "11666266481"
-            ova_sha256: "87c8ae617f9a802f6a046627043c5609d0cb3fe260ce9b845409918c8bbe855c"
-            sidecar_archive_sha256: "b5ae3c1f804ff1a155ac4a9cd7d6a50e0ccc4d5c74de266533567d74f3810445"
-            sidecar_index: "sha256:d62dd495591dcb1f6558b09f6737f4cfe57cf2e5d33825d30d07544e4f9bf251"
+          - label: control-1.4.6-upstream
+            kind: pull
+            image_ref: "docker.io/clamav/clamav@sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23"
             expect: nonzero
-          # CANDIDATE (operator-status deadline fix, 246cb73d): the 1.5.4 sidecar
-          # baked into THIS candidate OVA must show ZERO wrong-cleans — F-P2
-          # closed on the shipped engine. Pins are this OVA's OWN build record
-          # (build-info.json clamav_baked_tar_sha256 78fef25a /
-          # clamav_sidecar_image_id 32c2be57, run 39140010708). The sidecar bytes
-          # differ from 6248daf7's (image id 32c2be57 vs 8af92aa4, archive
-          # 78fef25a vs 7fefc79c) — an INDEPENDENT rebuild off the same upstream
-          # clamav/clamav:1.5 index (638d9020) + pcre2-10.49-r0 — so its F-P2
-          # result is not reusable from the prior candidate's. bind kind is
-          # `either`, so sidecar_index is matched as the config/image id.
-          - label: candidate-1.5.4-246cb73d
-            ova_artifact: "12141566476"
-            ova_sha256: "b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a"
-            sidecar_archive_sha256: "78fef25aaef82784619c4be4820e31231a8ae83730d4c86218c39128096b313c"
-            sidecar_index: "sha256:32c2be57bc73d2aedf3e4178386ff30011290131bf08db225ed97c64522b3f90"
+          - label: candidate-1.5.4-culvert.3
+            kind: build
+            src_commit: "524637857f6aa56df20d938b814da55dfc8f9465"
+            dockerfile_sha256: "dccebff1c328b80d6134e5160c00f763e40c1cc72a26009a389a8d859174afc7"
+            sidecar_ref: "culvert/clamav:1.5.4-culvert.3"
+            source_date_epoch: "1792855424"
             expect: zero
     env:
-      OVA_ARTIFACT_ID: ${{ matrix.ova_artifact }}
-      OVA_SHA256: ${{ matrix.ova_sha256 }}
-      SIDECAR_ARCHIVE_SHA256: ${{ matrix.sidecar_archive_sha256 }}
-      SIDECAR_INDEX: ${{ matrix.sidecar_index }}
+      ARM_KIND: ${{ matrix.kind }}
+      IMAGE_REF: ${{ matrix.image_ref }}
+      SRC_COMMIT: ${{ matrix.src_commit }}
+      DOCKERFILE_SHA256: ${{ matrix.dockerfile_sha256 }}
+      SIDECAR_REF: ${{ matrix.sidecar_ref }}
+      ARM_SDE: ${{ matrix.source_date_epoch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -1316,31 +1319,50 @@ jobs:
           sudo systemctl restart docker
           for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
           docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee "$W/evidence/docker-engine.txt" | grep -q 'server=29.9.0 .*io.containerd.snapshotter.v1'
-      - name: Retained OVA → the baked sidecar archive (hash-checked at each step)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: "Sidecar under test: build the exact source twice (candidate) or pull by digest (control)"
         run: |
           set -euo pipefail
           cd "$W"; E="$W/evidence"
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OVA_ARTIFACT_ID/zip" > ova.zip
-          unzip -q ova.zip -d ova && rm -f ova.zip
-          ova="$(ls ova/*.ova)"; got="$(sha256sum "$ova" | cut -d' ' -f1)"
-          echo "$got  $(basename "$ova")" | tee "$E/ova.sha256"
-          [ "$got" = "$OVA_SHA256" ] || { echo "::error::OVA sha256 $got, expected $OVA_SHA256"; exit 1; }
-          mkdir x && tar -xf "$ova" -C x && rm -rf ova
-          disk="$(ls "$W"/x/*.vmdk)"
-          sudo env LIBGUESTFS_BACKEND=direct virt-copy-out -a "$disk" /var/lib/culvert-appliance/images/clamav.tar.gz "$W/"
-          sudo chown "$(id -u):$(id -g)" "$W/clamav.tar.gz"; rm -rf x
-          got="$(sha256sum clamav.tar.gz | cut -d' ' -f1)"
-          echo "$got  /var/lib/culvert-appliance/images/clamav.tar.gz" | tee "$E/archive.sha256"
-          [ "$got" = "$SIDECAR_ARCHIVE_SHA256" ] || { echo "::error::archive sha256 $got, expected $SIDECAR_ARCHIVE_SHA256"; exit 1; }
-          gunzip -c clamav.tar.gz > clamav.tar
-          cfg="$("$GITHUB_WORKSPACE/test/e2e/appliance/lab/sidecar-scan.sh" bind "$W/clamav.tar" "$SIDECAR_INDEX" either "$E/binding.json")"
-          docker load -i clamav.tar | tee "$E/docker-load.txt"
-          ref="$(sed -n 's/^Loaded image: //p; s/^Loaded image ID: //p' "$E/docker-load.txt" | head -1)"
-          id="$(docker image inspect -f '{{.Id}}' "$ref")"
-          echo "loaded image id $id; bound config $cfg" | tee -a "$E/docker-load.txt"
-          [ "$id" = "$cfg" ] || [ "$id" = "$SIDECAR_INDEX" ] || { echo "::error::loaded image $id is neither the bound config $cfg nor the index"; exit 1; }
+          docker version --format 'client={{.Client.Version}} server={{.Server.Version}}' | tee "$E/docker-version.txt"
+          docker buildx version | tee -a "$E/docker-version.txt"
+          case "$ARM_KIND" in
+            pull)
+              docker pull -q "$IMAGE_REF" | tee "$E/docker-pull.txt"
+              id="$(docker image inspect -f '{{.Id}}' "$IMAGE_REF")"
+              want="${IMAGE_REF##*@}"
+              echo "pulled $IMAGE_REF -> image id $id" | tee "$E/binding.txt"
+              [ "$id" = "$want" ] || { echo "::error::pulled image id $id is not the pinned index digest $want"; exit 1; } ;;
+            build)
+              git -C "$GITHUB_WORKSPACE" fetch -q --depth=1 origin "$SRC_COMMIT"
+              mkdir -p ctx
+              git -C "$GITHUB_WORKSPACE" show "$SRC_COMMIT:appliance/clamav/Dockerfile" > ctx/Dockerfile
+              git -C "$GITHUB_WORKSPACE" ls-tree "$SRC_COMMIT" appliance/clamav/ | tee "$E/source-tree.txt"
+              [ "$(git -C "$GITHUB_WORKSPACE" ls-tree "$SRC_COMMIT" appliance/clamav/ | wc -l)" -eq 1 ] || { echo "::error::build context is not the single Dockerfile"; exit 1; }
+              got="$(sha256sum ctx/Dockerfile | cut -d' ' -f1)"
+              echo "$got  appliance/clamav/Dockerfile @ $SRC_COMMIT" | tee "$E/dockerfile.sha256"
+              [ "$got" = "$DOCKERFILE_SHA256" ] || { echo "::error::Dockerfile sha256 $got, expected $DOCKERFILE_SHA256"; exit 1; }
+              echo "SOURCE_DATE_EPOCH=$ARM_SDE ($(date -u -d "@$ARM_SDE" +%Y-%m-%dT%H:%M:%SZ), commit time of $SRC_COMMIT)" | tee "$E/source-date-epoch.txt"
+              build() { docker buildx build -q --no-cache --platform linux/amd64 --provenance=false --sbom=false \
+                  --build-arg SOURCE_DATE_EPOCH="$ARM_SDE" \
+                  --output "type=oci,dest=$1,name=$SIDECAR_REF,rewrite-timestamp=true" ctx >/dev/null; }
+              top() { tar -xOf "$1" index.json | python3 -I -c 'import json,sys; m=json.load(sys.stdin)["manifests"]; assert len(m)==1, len(m); print(m[0]["digest"])'; }
+              build first.tar; build rebuild.tar
+              d1="$(top first.tar)"; d2="$(top rebuild.tar)"
+              echo "build 1: $d1"$'\n'"build 2: $d2" | tee "$E/reproducible.txt"
+              [ "$d1" = "$d2" ] || { echo "::error::culvert.3 is not reproducible ($d1 vs $d2) — identity cannot be bound"; exit 1; }
+              gzip -n -6 < first.tar > clamav.tar.gz
+              sha256sum clamav.tar.gz | sed 's#clamav.tar.gz#clamav.tar.gz (gzip -n -6 of the OCI archive, as build-ova.sh bakes it)#' | tee "$E/archive.sha256"
+              sha256sum first.tar | tee -a "$E/archive.sha256"
+              docker load -q -i first.tar | tee "$E/docker-load.txt"
+              id="$(docker image inspect -f '{{.Id}}' "$SIDECAR_REF")"
+              echo "built $SIDECAR_REF -> image id $id (reproduced manifest $d1)" | tee "$E/binding.txt"
+              [ "$id" = "$d1" ] || { echo "::error::loaded image $id is not the reproduced manifest $d1"; exit 1; }
+              rm -f rebuild.tar ;;
+            *) echo "::error::unknown arm kind '$ARM_KIND'"; exit 1 ;;
+          esac
+          echo "$id" > "$E/image-id.txt"
+          docker run --rm --network none --entrypoint sh "$id" -c "apk info -v 2>/dev/null | sort" > "$E/apk-packages.txt"
+          grep -E '^(clamav|libclamav|musl|musl-utils|pcre2|zlib|nghttp2-libs|brotli-libs)-[0-9]' "$E/apk-packages.txt" | tee "$E/packages.txt" || true
           echo "IMG=$id" >> "$GITHUB_ENV"
       - name: Stock clamd.conf + bounded temp filesystem + clamd up (freshclam off, signatures recorded)
         run: |
@@ -1379,8 +1401,18 @@ jobs:
         run: |
           set -euo pipefail
           L=test/e2e/appliance/lab
-          n="$(python3 -I "$L/fp2-isolated-report.py" "$W/evidence/requests.jsonl" --count)"
-          echo "wrong-cleans (EICAR -> bare OK): $n; expect=${{ matrix.expect }}" | tee "$W/evidence/verdict.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          R="$W/evidence/requests.jsonl"
+          n="$(python3 -I "$L/fp2-isolated-report.py" "$R" --count)"
+          p="$(python3 -I "$L/fp2-isolated-report.py" "$R" --pressure)"
+          f="$(python3 -I "$L/fp2-isolated-report.py" "$R" --functional)" && fok=1 || fok=0
+          { echo "image: $IMG"
+            echo "wrong-cleans (EICAR -> bare OK): $n; expect=${{ matrix.expect }}"
+            echo "EICAR streams sent with <= 64 KiB temp free: $p"
+            echo "$f (functional=$fok)"; } | tee "$W/evidence/verdict.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          # A verdict needs a working scanner AND an exercised pressure path; either
+          # missing is UNKNOWN (a failure), never a pass.
+          [ "$fok" = 1 ] || { echo "::error::scanner not functional without pressure ($f) — no F-P2 verdict possible"; exit 1; }
+          [ "$p" -gt 0 ] || { echo "::error::no EICAR stream was sent at the temp-exhaustion edge — pressure path not exercised"; exit 1; }
           case "${{ matrix.expect }}" in
             zero)
               # F-P2 closed on the 1.5.4 engine: NO EICAR may be answered a bare clean.
