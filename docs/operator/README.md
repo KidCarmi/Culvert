@@ -10,8 +10,8 @@ For the product-level overview, quick start, and feature list, start at the
 repository [`README.md`](../../README.md) instead — it links directly to the
 runbook for anything it calls out as needing operator attention. For the
 underlying design/engineering record behind a given behavior (ADRs, chaos-
-engineering sweeps, technical registers), see `CLAUDE.md`'s Architecture Notes
-and `docs/engineering/`.
+engineering sweeps, technical registers), see the [agent-context
+index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/engineering/`.
 
 ## Install, upgrade, and release management
 
