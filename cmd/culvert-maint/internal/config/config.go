@@ -60,8 +60,9 @@ type Config struct {
 
 	// LocalOnlyImages are images that must already be present locally on a
 	// ComposeNoBuild host. An image change is refused before anything is
-	// mutated when one is explicitly absent.
-	LocalOnlyImages []string
+	// mutated when one is explicitly absent, or — for an entry carrying an
+	// image ID — when its tag names any other image.
+	LocalOnlyImages []LocalImage
 
 	// UDS path. Default "/run/culvert-maint/culvert-maint.sock" (under the
 	// systemd RuntimeDirectory the service user owns). Mode is fixed at
@@ -516,6 +517,18 @@ func validateHealthPath(name, supplied, def string) (string, error) {
 	return v, nil
 }
 
+// LocalImage is one local_only_images entry: a local repo:tag and, when the
+// entry is written "repo:tag=sha256:<64 hex>", the image ID the tag must name.
+// Presence alone proves nothing about which bytes a tag names, so an entry
+// with an ID makes the preflight refuse a tag that resolves to anything else.
+type LocalImage struct {
+	Ref string
+	ID  string // "" ⇒ presence-only (an entry without "=sha256:…")
+}
+
+// localImageIDRE is a Docker image ID (the content address of the image config).
+var localImageIDRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 // localImageRefRE is a local repo:tag reference. local_only_images entries flow
 // into a sudo argv token (docker image inspect), so they are held to this shape.
 var localImageRefRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,199}:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
@@ -527,7 +540,7 @@ const maxLocalOnlyImages = 8
 // on a compose_no_build host (elsewhere Compose can still build a missing
 // image), so setting it without compose_no_build is refused rather than
 // silently ignored.
-func validateLocalOnlyImages(refs []string, noBuild bool) ([]string, error) {
+func validateLocalOnlyImages(refs []string, noBuild bool) ([]LocalImage, error) {
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -537,13 +550,16 @@ func validateLocalOnlyImages(refs []string, noBuild bool) ([]string, error) {
 	if len(refs) > maxLocalOnlyImages {
 		return nil, fmt.Errorf("config: local_only_images allows at most %d entries, got %d", maxLocalOnlyImages, len(refs))
 	}
-	out := make([]string, 0, len(refs))
+	out := make([]LocalImage, 0, len(refs))
 	for _, r := range refs {
-		r = strings.TrimSpace(r)
-		if !localImageRefRE.MatchString(r) {
+		ref, id, hasID := strings.Cut(strings.TrimSpace(r), "=")
+		if !localImageRefRE.MatchString(ref) {
 			return nil, fmt.Errorf("config: local_only_images entry must be a local repo:tag reference, got %q", r)
 		}
-		out = append(out, r)
+		if hasID && !localImageIDRE.MatchString(id) {
+			return nil, fmt.Errorf("config: local_only_images entry %q: the image ID after '=' must be sha256:<64 hex>", r)
+		}
+		out = append(out, LocalImage{Ref: ref, ID: id})
 	}
 	return out, nil
 }

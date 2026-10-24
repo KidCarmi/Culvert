@@ -20,7 +20,7 @@ func startNoBuildRig(t *testing.T) *applyRig {
 	t.Helper()
 	return startApplyRigCfg(t, t.TempDir(), allowReleaseTrustForTest{}, func(c *config.Config) {
 		c.ComposeNoBuild = true
-		c.LocalOnlyImages = []string{sidecarRef}
+		c.LocalOnlyImages = []config.LocalImage{{Ref: sidecarRef}}
 	})
 }
 
@@ -119,4 +119,60 @@ func assertEveryUpIsNoBuild(t *testing.T, rig *applyRig) {
 	if ups == 0 {
 		t.Fatal("no `compose up` was issued; the assertion would be vacuous")
 	}
+}
+
+// An entry that records the image ID binds the tag to those bytes: presence is
+// not approval (the same rule ASTRA 5978949299 applied to the installer).
+func startNoBuildRigWithID(t *testing.T) *applyRig {
+	t.Helper()
+	return startApplyRigCfg(t, t.TempDir(), allowReleaseTrustForTest{}, func(c *config.Config) {
+		c.ComposeNoBuild = true
+		c.LocalOnlyImages = []config.LocalImage{{Ref: sidecarRef, ID: sidecarRecordedID}}
+	})
+}
+
+const (
+	sidecarRecordedID = "sha256:" + "abababababababababababababababababababababababababababababababab"
+	sidecarOtherID    = "sha256:" + "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+)
+
+func TestNoBuildHost_RefusesWhenTheTagNamesOtherBytes(t *testing.T) {
+	for name, reported := range map[string]string{"different image": sidecarOtherID, "unreadable answer": "unreadable"} {
+		t.Run(name+"/apply", func(t *testing.T) {
+			rig := startNoBuildRigWithID(t)
+			defer rig.stop()
+			rig.localRefIDs = map[string]string{sidecarRef: reported}
+			op, opID := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+			if op["state"] != "failed" || op["failure_reason"] != "validation" {
+				t.Fatalf("a tag naming other bytes must refuse: state=%v reason=%v", op["state"], op["failure_reason"])
+			}
+			if rig.sawCommand("pull") || rig.sawCommand("up") || rig.sawCommand("tag") {
+				t.Fatalf("nothing may move while refusing:\n%s", rig.opLog(t, opID))
+			}
+			if !strings.Contains(rig.opLog(t, opID), "does not name the recorded bytes: "+sidecarRef) {
+				t.Fatalf("the refusal must name the image:\n%s", rig.opLog(t, opID))
+			}
+		})
+		t.Run(name+"/rollback", func(t *testing.T) {
+			rig := startNoBuildRigWithID(t)
+			defer rig.stop()
+			rig.localRefIDs = map[string]string{sidecarRef: reported}
+			op, _ := rig.rollbackAndWait(t, map[string]interface{}{"mode": "image", "image_ref": repo + "@sha256:" + digNew})
+			if op["state"] != "failed" || rig.sawCommand("up") || rig.sawCommand("pull") {
+				t.Fatalf("a rollback must refuse before pull/up: %+v", op)
+			}
+		})
+	}
+}
+
+// CONTROL: the recorded bytes under the tag let the op run, still --no-build.
+func TestNoBuildHost_RecordedBytesProceed(t *testing.T) {
+	rig := startNoBuildRigWithID(t)
+	defer rig.stop()
+	rig.localRefIDs = map[string]string{sidecarRef: sidecarRecordedID}
+	op, opID := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
+	if op["state"] != "succeeded" {
+		t.Fatalf("state %v:\n%s", op["state"], rig.opLog(t, opID))
+	}
+	assertEveryUpIsNoBuild(t, rig)
 }

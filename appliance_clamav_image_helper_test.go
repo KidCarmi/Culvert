@@ -52,6 +52,7 @@ echo "$*" >> "$LOG"
 case "$1 $2" in
   "image inspect") [[ -s "$STORE" ]] || { echo "Error: No such image: $3" >&2; exit 1; }; cat "$STORE" ;;
   "load -q") cp "$4" "$STORE" ;;
+  "image rm") rm -f "$STORE" ;;
   *) echo "unexpected docker $*" >&2; exit 99 ;;
 esac
 `)
@@ -182,10 +183,52 @@ func TestClamAVImageHelper_Refusals(t *testing.T) {
 			if s := r.stateFile(); s["status"] != "refused" || s["reason"] != tc.reason {
 				t.Fatalf("state: %v want reason %s", s, tc.reason)
 			}
-			if !strings.Contains(out, "NOT rebuilt") {
+			if !strings.Contains(out, "NOT rebuilt or pulled") {
 				t.Fatalf("the refusal must say nothing was rebuilt:\n%s", out)
 			}
 			r.assertNeverBuiltOrPulled()
 		})
+	}
+}
+
+// A refusal never leaves the tag naming unverified bytes (ASTRA 5978949299 C7:
+// "nothing changed" was too broad — a refused load had already retagged). With
+// a valid recorded ID proving the tag names other bytes, the tag is removed so
+// `compose up --no-build` cannot start them.
+func TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes(t *testing.T) {
+	for name, setup := range map[string]func(r *clamHelperRig){
+		"archive loaded other bytes": func(*clamHelperRig) {},
+		"wrong image already under the tag, archive missing": func(r *clamHelperRig) {
+			r.storeHolds(otherID)
+			_ = os.Remove(filepath.Join(r.state, "images", "clamav.tar.gz"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newClamHelperRig(t, otherID, "")
+			setup(r)
+			out, code := r.run()
+			if code != 2 {
+				t.Fatalf("must refuse, got %d\n%s", code, out)
+			}
+			if b, err := os.ReadFile(r.store); err == nil && len(b) > 0 {
+				t.Fatalf("the tag still names unverified bytes %q:\n%s", b, out)
+			}
+			if !strings.Contains(out, "the tag was removed") {
+				t.Fatalf("the removal must be stated:\n%s", out)
+			}
+		})
+	}
+}
+
+// CONTROL: with damaged metadata nothing proves the tag wrong, so it is kept.
+func TestClamAVImageHelper_DamagedManifestLeavesTheTagAlone(t *testing.T) {
+	r := newClamHelperRig(t, helperID, "")
+	r.storeHolds(helperID)
+	r.write(filepath.Join(r.state, "manifest.env"), "CLAMAV_SIDECAR_REF="+helperRef+"\nCLAMAV_SIDECAR_ID=latest\n")
+	if _, code := r.run(); code != 2 {
+		t.Fatal("a damaged manifest must refuse")
+	}
+	if b, _ := os.ReadFile(r.store); strings.TrimSpace(string(b)) != helperID {
+		t.Fatalf("the tag must be left alone without a valid recorded ID, store=%q", b)
 	}
 }

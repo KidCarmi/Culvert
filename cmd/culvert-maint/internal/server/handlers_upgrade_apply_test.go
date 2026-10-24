@@ -99,6 +99,9 @@ type applyRig struct {
 	// that signature (daemon/permission/timeout). Keyed by the exact ref.
 	absentRefs     map[string]bool
 	inspectErrRefs map[string]bool
+	// localRefIDs: what `docker image inspect <ref>` reports for a non-digest
+	// ref — the image ID, or "unreadable" for an answer that is not JSON.
+	localRefIDs map[string]string
 	// dockerDown makes EVERY docker command fail (daemon not up).
 	dockerDown atomic.Bool
 	// stackDown makes `compose ps` report no containers at all.
@@ -208,6 +211,12 @@ func (r *applyRig) canned(argv []string) []byte {
 				return nil
 			}
 			return []byte(`[{"Id":"sha256:` + r.cfgFor(bare) + `","RepoDigests":["` + ref + `"]}]`)
+		}
+		if id, ok := r.localRefIDs[ref]; ok {
+			if id == "unreadable" {
+				return []byte("not json")
+			}
+			return []byte(`[{"Id":"` + id + `","RepoTags":["` + ref + `"]}]`)
 		}
 		if r.noPriorDigest && !r.pulled.Load() {
 			return []byte(`[{"RepoDigests":[]}]`) // no rollback target available

@@ -19,11 +19,15 @@
 #      recorded image ID                                     -> reloaded
 #   3. anything else                                         -> refused
 #
-# A refusal changes nothing, exits 2 and is recorded in the state file so
-# the operator sees it. There is no build fallback, no registry pull and no
-# network access on any path. The cost is explicit: a stack that was stopped
-# while the image was lost stays down (the proxy depends on a healthy
-# sidecar) until the verified image is back — never up on unscanned bytes.
+# A refusal exits 2 and is recorded in the state file so the operator sees
+# it. There is no build fallback, no registry pull and no network access on
+# any path. A refusal never leaves the tag naming unverified bytes: if the tag
+# names anything other than the recorded image ID — already, or because the
+# archive loaded something else — the tag is removed, so a later
+# `compose up --no-build` cannot start those bytes (a running container keeps
+# running; Docker runs it by image ID, not by tag). The cost is explicit: a
+# stack that was stopped while the image was lost stays down (the proxy
+# depends on a healthy sidecar) until the verified image is back.
 #
 # Exit codes: 0 present or reloaded, 2 refused, 64 usage.
 set -euo pipefail
@@ -49,9 +53,17 @@ record() {
 }
 
 refuse() { # REASON MESSAGE
+  # Only a VALID recorded ID can prove the tag names other bytes; with damaged
+  # metadata the tag is left alone (it may be the genuine sidecar).
+  local cid=""
+  [[ -n "${REF:-}" && "${EXPECT_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]] && cid="$(current_id)"
+  if [[ -n "$cid" && "$cid" != "$EXPECT_ID" ]]; then
+    "$DOCKER" image rm -f "$REF" >/dev/null 2>&1 || true
+    log "$REF named unverified image $cid; the tag was removed so nothing can be started from it"
+  fi
   record refused "$1"
   log "REFUSED ($1): $2"
-  log "The sidecar was NOT rebuilt and nothing was changed. A sidecar container that is still running keeps running; a stack that is down stays down (the proxy waits for a healthy sidecar) until the verified image is restored."
+  log "The sidecar was NOT rebuilt or pulled. A sidecar container that is still running keeps running; a stack that is down stays down (the proxy waits for a healthy sidecar) until the verified image is restored."
   exit 2
 }
 

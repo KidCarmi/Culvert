@@ -33,11 +33,13 @@ Without `--no-build`, every missing-tag state makes Compose rebuild the sidecar 
 |---|---|---|
 | `culvert-os-update` stack start (engine upgrade, resume) | `compose up -d` | `culvert-clamav-image ensure`, then `up -d --no-build`. On refusal the stack is **not** started and the resume marker is kept. |
 | `install.sh` first `up` and agent-override `up` | plain `up` | Appliance: `ensure`, then `up --no-build`. Quick-start: unchanged. |
-| `install.sh` `refresh_deploy_bundle` with a new sidecar tag | `docker build` | Appliance: refuse (rc 3); nothing is built or replaced. Quick-start: builds as before. |
-| Maintenance agent `compose.up` (apply, rollback, inline rollback) | `up -d` | `compose_no_build = true` ⇒ `up -d --no-build`, and `preflight_dependencies` refuses before any pull/tag/up if a `local_only_images` entry is absent. |
+| `install.sh` `refresh_deploy_bundle` with a new sidecar tag | `docker build` | Appliance: the bundle's sidecar must equal the manifest's `CLAMAV_SIDECAR_REF` and, if present, resolve to `CLAMAV_SIDECAR_ID`; otherwise refuse (rc 3), nothing built or replaced. An approved-but-absent tag is adopted and restored from the archive at start, never built. Quick-start: builds as before. |
+| Maintenance agent `compose.up` (apply, image rollback, inline rollback) | `up -d` | `compose_no_build = true` ⇒ `up -d --no-build`. On **apply and image rollback**, `preflight_dependencies` refuses before any pull/tag/up if a `local_only_images` entry is absent or, for an entry written `ref=sha256:<id>` (the installer writes the recorded ID), names other bytes. **Inline rollback** has no preflight of its own: it runs only after an apply that passed one, and refusing there would strand the failed new image; its `up` is `--no-build`, so it can only fail explicitly, never build. |
 | Agent sudoers | Plain `up -d` forms | A no-build host keeps **only** the `--no-build` forms, so the agent user cannot run a build-capable `up`. Other hosts are unchanged. |
 
-**How an appliance is detected:** the guest manifest records `CLAMAV_SIDECAR_ID=sha256:<64hex>`. An environment variable was not used because an operator re-running `install.sh` by hand carries no first-boot environment. A malformed manifest is treated as quick-start (pinned by test).
+**How an appliance is detected:** by the directories the OVA build installs (`/var/lib/culvert-appliance`, `/opt/culvert-appliance`, `/etc/culvert-appliance`), never by whether the metadata inside them is valid. An appliance whose manifest is missing, unreadable or damaged is still an appliance: it keeps `--no-build` and **refuses**. (Corrected from `a4101839`, which keyed identity on a valid recorded ID and so treated a damaged manifest as quick-start and built the sidecar — ASTRA 5978949299 C blocker 1.) An environment variable was not used because an operator re-running `install.sh` by hand carries no first-boot environment.
+
+**What may be adopted or started:** only the sidecar the appliance was built with. Before adoption (refresh) and before the first `up`, the compose file's sidecar must equal the manifest's ref and resolve to its recorded ID. A locally present tag is not approval: presence proves nothing about which bytes it names (ASTRA C blocker 2).
 
 **How the sidecar comes back:** `appliance/provision/culvert-clamav-image ensure`.
 1. If the tag already names the recorded ID, the result is `present`.
@@ -49,13 +51,15 @@ Without `--no-build`, every missing-tag state makes Compose rebuild the sidecar 
    All three passing gives `reloaded`.
 3. Anything else is `refused`, with exit 2 and a reason recorded in `clamav-image.state`. The reasons are: `manifest_missing`, `manifest_incomplete`, `archive_missing`, `archive_hash_unrecorded`, `archive_hash_mismatch`, `load_failed`, `loaded_id_mismatch`.
 
-The helper never builds or pulls.
+The helper never builds or pulls. A refusal is **not** "nothing changed": a `loaded_id_mismatch` comes after `docker load`, which can retag. A refusal therefore never leaves the tag naming unverified bytes: when a valid recorded ID proves the tag names other bytes (already, or after the load), the tag is removed, so `up --no-build` cannot start them. A running container keeps running (Docker runs it by image ID). With damaged metadata nothing proves the tag wrong, so it is left alone.
 
 **Accepted cost (refusal):** a stack that was stopped while the image was lost stays **down** until the verified image is restored, because the proxy `depends_on` a healthy sidecar. Measured: E5 step 52. It is never started on unscanned bytes. A sidecar that is still running keeps running (E2 step 21).
 
 ## 3. Real-docker end-to-end (sandbox dockerd 29.6.2, Compose 5.6.1 from the signed deb)
 
-The sidecar bytes, archive and build-info are the **frozen OVA's** (`culvert.1`, ID `ea362f9b…`). The helper is the branch's script, unmodified. Raw output: `workstream-c/e2e-real-docker.txt`, produced by script `workstream-c/e2e-c.sh`.
+The sidecar bytes, archive and build-info are the **frozen OVA's** (`culvert.1`, ID `ea362f9b…`). Raw output: `workstream-c/e2e-real-docker.txt`, produced by script `workstream-c/e2e-c.sh`.
+
+**Helper bytes tested vs submitted.** The E2E header records the helper it ran: SHA-256 `c843caa71fb66cf4bd5e4f8a85667565aa8754f3190e5a6d331200f95484e80f`. After the run, two text lines changed before commit (the header comment and one refusal log message, no logic), giving the `a4101839` blob `20dbd9db99adf38fb79df69838ceb841e89dc4ef25689480b978de8095fac9f5`. The tested bytes were reconstructed by reverting exactly those two lines and hash to `c843caa7…`; the delta is `workstream-c/helper-tested-to-a4101839.diff`. The current helper (`8715486471dec22afc523b990fd969f8b9f32ed13f3cc34540b812c62d449721`) adds the refusal un-tag described in §2; that change is covered by `appliance_clamav_image_helper_test.go`, **not** by this E2E.
 
 | Step | Result |
 |---|---|
@@ -63,7 +67,7 @@ The sidecar bytes, archive and build-info are the **frozen OVA's** (`culvert.1`,
 | **Apply** (re-pin proxy a→b, agent argv) | rc 0; proxy is b; **the clamav container is untouched** (same container ID); volume marker kept |
 | **Rollback** (re-pin b→a, agent argv) | rc 0; proxy is a; volume kept |
 | Tag removed while running | The daemon says `Error response from daemon: No such image: …`, which matches the agent's `imageNotFoundRE` |
-| Agent argv while the tag is missing | rc 1, **0 build calls**, running clamav untouched (the agent preflight refuses before this point) |
+| Agent argv while the tag is missing | rc 1, **0 build calls**, running clamav untouched. (In production the agent preflight refuses before reaching `up`; that is unit-tested in the agent, not exercised by this E2E.) |
 | **Maintenance path:** stop → tag lost → `ensure` → `up --no-build` | Reloaded, rc 0, clamav running EXPECTED, volume kept |
 | **Whole image store lost:** down (volumes kept) → prune all → `ensure` → `up --no-build` | Reloaded, rc 0, EXPECTED, volume kept |
 | **Refusal:** archive tampered | Helper exit 2 `archive_hash_mismatch`; `up --no-build` rc 1; 0 build calls; nothing started; volume kept |
@@ -86,7 +90,7 @@ Build, session and pull calls were **0 on every step**.
   - stock `clamd.conf`, freshclam off;
   - one fixed signature set shared by every arm: main 63, daily 28162, bytecode 339;
   - a 256 MiB ext4 loop device as clamd's `/tmp`;
-  - variants control, serial-full, serial-sweep, conc8 and conc8-full, at 1672 requests per arm.
+  - variants control, serial-full, serial-sweep, conc8 and conc8-full: **1,600 scans plus 72 fill events** per arm. (Corrected: the earlier "1672 requests" counted JSONL lines, fill events included; re-counted from each arm's `requests.jsonl`.)
 - Verdict = count of EICAR streams answered with a bare clean.
 
 | Arm | Image | musl | Wrong cleans | tmpdir errors | Expected | Verdict |
@@ -103,18 +107,24 @@ Both 1.5.4 arms ran the same `clamd.conf` (`eaeee6ea…`) and the same signature
 
 `DOCKER_COMPOSE_PLUGIN_VERSION=5.6.1-1~ubuntu.24.04~noble`, from the same signed apt repository and key as the engine. The trust chain and scan deltas are recorded in `../r6-r7-security-dispositions.md` §R6.
 
-It is not a zero-finding binary: GO-2026-6610 and GO-2026-5932 remain. The reachable x/net rows are on the build path, which the appliance no longer executes.
+It is not a zero-finding binary. Remaining govulncheck rows (`../r6-r7-security-dispositions.md` §R6):
+- **symbol-level:** GO-2026-6603, GO-2026-6611, GO-2026-6612, GO-2026-6617;
+- **package-only:** GO-2026-5932 (x/crypto `openpgp`, no fix), GO-2026-6610 (x/net).
+
+The measured change is narrower than "HTTP/2 eliminated": `--no-build` removes the missing-tag **build** traffic observed in §1. It is not all-path HTTP/2 elimination, and it is not a waiver for these rows; their disposition stays with ASTRA's R6/R7 matrix.
 
 ## 6. Tests added or changed (all local, all green)
 
 | Test | What it pins |
 |---|---|
-| `config_nobuild_test.go` (agent) | Defaults are off. `local_only_images` requires `compose_no_build`. Only plain local `repo:tag` entries, at most 8. |
+| `config_nobuild_test.go` (agent) | Defaults are off. `local_only_images` requires `compose_no_build`. Only local `repo:tag` entries, optionally `=sha256:<64 hex>`, at most 8. |
 | `runner_test.go` `TestBuildArgv_ComposeNoBuild` | `--no-build` is the last token only on a no-build host, and never leaks onto other templates. |
-| `preflight_local_image_test.go` (agent server) | Apply **and** rollback refuse before pull/tag/up when the image is absent. Present ⇒ the op succeeds and every `up` ends in `--no-build`. An inspect failure without the "No such image" signature does not refuse. A default host never probes and keeps plain `up -d`. |
+| `preflight_local_image_test.go` (agent server) | Apply **and** image rollback refuse before pull/tag/up when the image is absent, or (ID-bound entry) when the tag names other bytes or the inspect answer cannot be read. Recorded bytes ⇒ the op succeeds and every `up` ends in `--no-build`. An inspect failure without the "No such image" signature does not refuse. A default host never probes and keeps plain `up -d`. |
 | `install_script_maint_sudoers_nobuild_test.go` | The real render keeps exactly one `up` family per host type (with and without the override); `visudo -c` passes. `compose_no_build` accepts only absent/false/true. |
-| `install_script_host_refresh_appliance_test.go` | An appliance refuses a bundle naming an absent sidecar (nothing built or replaced) and adopts one whose sidecar is present. A malformed manifest is quick-start. |
-| `appliance_clamav_image_helper_test.go` | The real helper: present, reloaded (absent / wrong image under the tag), and all six refusal reasons; it never builds, pulls or composes. |
+| `install_script_host_refresh_appliance_test.go` | An appliance refuses a different tag (absent **or present**), the baked tag naming other bytes, an invalid/missing manifest, and identity from `/opt` or `/etc` alone; nothing built or replaced. Controls: the approved sidecar (present with the recorded ID, or absent) is adopted without a build. Replaces the test that pinned "malformed manifest is quick-start". |
+| `install_script_appliance_sidecar_start_test.go` | Before the first `up`: the helper runs, then the compose sidecar must equal the baked ref and ID; a damaged manifest keeps `--no-build` and refuses; quick-start skips all of it. |
+| `install_script_agent_local_images_test.go` | The installer writes `compose_no_build = true` and `local_only_images = ["<ref>=<recorded ID>"]`, replacing any earlier entry, in the agent's accepted grammar. |
+| `appliance_clamav_image_helper_test.go` | The real helper: present, reloaded (absent / wrong image under the tag), the six refusal reasons it reaches with fixtures, and refusal removing a tag that names unverified bytes (after a mismatched load, or pre-existing with the archive missing); with damaged metadata the tag is left alone. It never builds, pulls or composes. |
 | `appliance_os_update_clamav_image_test.go` + `power_test.sh` | `ensure` runs before every `up`, every `up` is `--no-build`, and a refusal starts nothing, keeps the marker, and goes through the existing docker-upgrade recovery. |
 | `appliance_ci_lane_test.go` | The musl pin and asserts, and the `culvert.2` content→tag binding (`culvert.1` retired). |
 
@@ -122,14 +132,24 @@ It is not a zero-finding binary: GO-2026-6610 and GO-2026-5932 remain. The reach
 - removing the agent refusal ⇒ 2 server tests fail;
 - dropping the argv token ⇒ 3 fail;
 - dropping sudoers Pass 3 ⇒ 2 render cases fail;
-- removing the appliance refresh guard ⇒ the refresh test fails.
+- removing the appliance refresh guard ⇒ the refresh test fails;
+- identity back to manifest validity ⇒ 3 tests fail; dropping the start binding ⇒ 2 fail; dropping the present-tag ID check ⇒ 2 fail;
+- dropping the agent's ID comparison ⇒ the mismatch test fails.
 
-**Gates on this tree:**
+**Gates.** On `a4101839` (original delivery):
 - agent `go vet` + `go test -race ./...`: pass;
 - root `go build`/`go vet`: pass;
-- root `go test ./...`: 118 packages ok. The root package had one load-induced failure (`TestChaos64_StaleServesDoNotStackRefreshes`; it ran concurrently with lint and the agent race suite; no DNS file is touched). That test passes 10/10 in isolation, and the root package rerun on its own passes (`ok`, 423 s).
+- root `go test ./...`: 118 packages ok. The root package had one load-induced failure (`TestChaos64_StaleServesDoNotStackRefreshes`; it ran concurrently with lint and the agent race suite; no DNS file is touched). That test passes 10/10 in isolation, and the root package rerun on its own passes (`ok`, 423 s). Both outcomes are kept.
 - golangci-lint v2.5.0 `--new-from-rev`: 0 issues in both modules;
 - Deep Gate shellcheck set + installer: clean.
+
+On the correction commit (ASTRA 5978949299 items), run on its own tree:
+- root `go vet ./...` + `go test .`: pass (`ok`, 418 s, no concurrent load);
+- agent `go vet` + `go test -race ./...`: all packages ok;
+- golangci-lint v2.5.0 `--new-from-rev HEAD`: 0 issues in both modules;
+- helper shellcheck `-S warning`: clean; `power_test.sh`: pass.
+
+Exact command/environment/exit receipts bound to the commit and tree are published separately (`workstream-c/receipts/`).
 
 ## 7. NOT RUN
 

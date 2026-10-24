@@ -2657,9 +2657,17 @@ wire_release_agent_for_compose() {
     sudo sed -i -e '$a\' "$cfg"   # end in a newline (adds one only when missing)
     printf 'compose_no_build = true\n' | sudo tee -a "$cfg" >/dev/null
     if [[ -n "$sidecar_ref" ]]; then
-      printf 'local_only_images = ["%s"]\n' "$sidecar_ref" | sudo tee -a "$cfg" >/dev/null
+      # Bind the tag to the recorded image ID, so the agent refuses an image
+      # change while the tag names any other bytes (presence is not approval).
+      local sidecar_id
+      sidecar_id="$(appliance_manifest_value CLAMAV_SIDECAR_ID)"
+      if [[ "$sidecar_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        printf 'local_only_images = ["%s=%s"]\n' "$sidecar_ref" "$sidecar_id" | sudo tee -a "$cfg" >/dev/null
+      else
+        printf 'local_only_images = ["%s"]\n' "$sidecar_ref" | sudo tee -a "$cfg" >/dev/null
+      fi
     fi
-    info "Maintenance agent: appliance mode (compose up --no-build; sidecar ${sidecar_ref:-unnamed} must be present locally)."
+    info "Maintenance agent: appliance mode (compose up --no-build; sidecar ${sidecar_ref:-unnamed} must be present locally and name its recorded image)."
   fi
 
   # Re-render sudoers after the config patch, then start the service.

@@ -24,7 +24,7 @@ func TestLoad_ComposeNoBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load (valid): %v", err)
 	}
-	if !cfg.ComposeNoBuild || len(cfg.LocalOnlyImages) != 1 || cfg.LocalOnlyImages[0] != "culvert/clamav:1.5.4-culvert.2" {
+	if !cfg.ComposeNoBuild || len(cfg.LocalOnlyImages) != 1 || cfg.LocalOnlyImages[0] != (LocalImage{Ref: "culvert/clamav:1.5.4-culvert.2"}) {
 		t.Fatalf("got no_build=%v images=%q", cfg.ComposeNoBuild, cfg.LocalOnlyImages)
 	}
 
@@ -64,5 +64,30 @@ func TestLoad_LocalOnlyImagesRefused(t *testing.T) {
 	body := minimalValid + "\ncompose_no_build = true\nlocal_only_images = [" + strings.Join(many, ",") + "]"
 	if _, err := Load(writeConfig(t, body)); err == nil {
 		t.Fatalf("more than %d entries must be refused", maxLocalOnlyImages)
+	}
+}
+
+// An entry may bind the tag to the image ID it must name: "repo:tag=sha256:<64 hex>".
+func TestLoad_LocalOnlyImagesWithImageID(t *testing.T) {
+	id := "sha256:" + strings.Repeat("ab", 32)
+	body := minimalValid + "\ncompose_no_build = true\nlocal_only_images = [\"culvert/clamav:1.5.4-culvert.2=" + id + "\"]"
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := (LocalImage{Ref: "culvert/clamav:1.5.4-culvert.2", ID: id}); len(cfg.LocalOnlyImages) != 1 || cfg.LocalOnlyImages[0] != want {
+		t.Fatalf("got %+v, want %+v", cfg.LocalOnlyImages, want)
+	}
+	for name, bad := range map[string]string{
+		"short id":     "culvert/clamav:1=sha256:abc",
+		"no algorithm": "culvert/clamav:1=" + strings.Repeat("ab", 32),
+		"uppercase":    "culvert/clamav:1=sha256:" + strings.Repeat("AB", 32),
+		"empty id":     "culvert/clamav:1=",
+		"two ids":      "culvert/clamav:1=" + id + "=" + id,
+	} {
+		b := minimalValid + "\ncompose_no_build = true\nlocal_only_images = [\"" + bad + "\"]"
+		if _, err := Load(writeConfig(t, b)); err == nil {
+			t.Errorf("%s (%q): expected rejection", name, bad)
+		}
 	}
 }
