@@ -245,7 +245,7 @@ that landed, or from startup before the first one. A refused change stays
 visible until a later save lands. That later save writes the whole roster in
 use, including any login-time change whose own write failed, so it clears
 both counts. The since-startup totals still appear in the message, in the
-Admin Users panel and in the metrics, and they clear on restart.
+Administrators panel and in the metrics, and they clear on restart.
 
 ## Recovery
 
@@ -323,7 +323,7 @@ Admin Users panel and in the metrics, and they clear on restart.
    first one). That state outranks every file and directory problem listed
    above; only a missing `-ui-users-file` and storage that is not responding
    outrank it. See
-   [Which state the row shows](#which-state-the-row-shows). The Admin Users
+   [Which state the row shows](#which-state-the-row-shows). The Administrators
    panel shows the since-startup refused/degraded counts, which clear on
    restart.
 
