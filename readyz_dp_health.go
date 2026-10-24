@@ -80,7 +80,7 @@ const dpCPPollFailGrace = 5 * time.Minute
 // see TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow), so what the
 // suppressed row costs there is the SIGNAL; on a strict probe
 // (/ready?strict=1), which does gate on it, it also keeps the node's verdict
-// "ready" and so holds it in the load-balancer rotation (CHAOS-71).
+// "ready" and so holds it in the load-balancer rotation (CHAOS-83).
 var dpCPPollFailingSince atomic.Int64
 
 // dpMarkCPPollFailing flags CP polling as failing, stamping the transition

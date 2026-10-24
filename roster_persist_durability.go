@@ -64,10 +64,10 @@ var (
 	// configure -ui-users-file rather than investigate a failing volume.
 	rosterNotDurable atomic.Int64
 
-	rosterPersistLogLast  atomic.Int64 // monoNanos stamp of the last emitted line (CHAOS-71)
+	rosterPersistLogLast  atomic.Int64 // monoNanos stamp of the last emitted line (CHAOS-83)
 	rosterPersistSuppress atomic.Int64
 
-	rosterNotDurableLogLast  atomic.Int64 // monoNanos stamp (CHAOS-71), own gate
+	rosterNotDurableLogLast  atomic.Int64 // monoNanos stamp (CHAOS-83), own gate
 	rosterNotDurableSuppress atomic.Int64
 )
 
@@ -152,7 +152,7 @@ func noteRosterPersistBestEffort(what string, err error) {
 		return
 	}
 	n := rosterPersistBestEffort.Add(1)
-	// CHAOS-71: the gate's stamps are MONOTONIC (monoNanos), never UnixNano. On
+	// CHAOS-83: the gate's stamps are MONOTONIC (monoNanos), never UnixNano. On
 	// the wall clock a backwards step left the stamp in the future, so the age
 	// went NEGATIVE, which is always < the interval — latching this line into
 	// the suppressed branch for however far the step went. That silences the
@@ -191,7 +191,7 @@ func noteRosterPersistBestEffort(what string, err error) {
 // must not share a rate gate).
 func noteRosterNotDurable() {
 	n := rosterNotDurable.Add(1)
-	// Monotonic stamps, for the reason noted on the gate above (CHAOS-71).
+	// Monotonic stamps, for the reason noted on the gate above (CHAOS-83).
 	for {
 		last := rosterNotDurableLogLast.Load()
 		if last != 0 && monoSince(last) < rosterPersistLogInterval {
@@ -219,4 +219,11 @@ func resetRosterPersistCountersForTest() {
 	rosterNotDurable.Store(0)
 	rosterNotDurableLogLast.Store(0)
 	rosterNotDurableSuppress.Store(0)
+	// The row counts failures since the last landed write against these
+	// bases; zeroing the counters must zero the shared cfg's bases too.
+	if cfg != nil {
+		cfg.mu.Lock()
+		cfg.uiUsersRefusedAtLanded, cfg.uiUsersDegradedAtLanded = 0, 0
+		cfg.mu.Unlock()
+	}
 }

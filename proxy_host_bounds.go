@@ -156,9 +156,13 @@ var proxyOversizeHostRejected atomic.Int64
 //
 // The gate is an ATOMIC STAMP, not a mutex, and that is not a micro-optimisation
 // (Codex P2, PR #1446 round 6). This gate is reached on the proxy path AHEAD of
-// internal/connlimit, the IP filter and the rate limiter — all three of which are
-// SHARDED precisely because an unsharded process-wide lock on the request path is
-// a throughput ceiling. A mutex here serialises every rejection in the process,
+// internal/connlimit, the IP filter and the rate limiter — none of which takes a
+// process-wide lock to decide, precisely because an unsharded lock on the request
+// path is a throughput ceiling. They avoid it by DIFFERENT primitives, and the
+// distinction matters when copying one of them: internal/connlimit and the per-IP
+// rate limiter shard their locks 64 ways, while IPFilter.Allowed is lock-free,
+// loading an immutable view through an atomic.Pointer (internal/admission). Do not
+// record them as one model. A mutex here serialises every rejection in the process,
 // including the suppressed ones that are every rejection during a flood, and so
 // reintroduces that ceiling in front of the very limiters meant to bound the
 // flood. The CHAOS-63 precedent correctly uses a mutex because its login endpoint

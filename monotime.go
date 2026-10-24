@@ -12,7 +12,7 @@ var monoEpoch = time.Now()
 // monoNanos returns the nanoseconds elapsed since monoEpoch, measured on the
 // monotonic clock. It is the stamp source for any value that is later turned
 // back into an elapsed duration, and it replaces time.Now().UnixNano() on
-// those paths (CHAOS-71).
+// those paths (CHAOS-83).
 //
 // Why the replacement matters: UnixNano() DISCARDS the monotonic reading (a
 // time.Time carries one only in-process), and time.Unix(0, n) reconstructs a

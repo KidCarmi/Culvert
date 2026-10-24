@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// CHAOS-71 gates: elapsed time on the data path and the readiness probe is
+// CHAOS-83 gates: elapsed time on the data path and the readiness probe is
 // measured on the MONOTONIC clock, never the wall clock.
 //
 // The pre-fix idiom was
@@ -42,16 +42,16 @@ func swapMonoNanos(t *testing.T, fn func() int64) {
 	t.Cleanup(func() { monoNanos = old })
 }
 
-// TestChaos71_MonoEpochCarriesMonotonicReading is the foundational invariant:
+// TestChaos83_MonoEpochCarriesMonotonicReading is the foundational invariant:
 // monoEpoch must carry a monotonic reading, because time.Sub only subtracts
 // monotonic readings when BOTH operands have one. If monoEpoch ever loses its
 // reading (a round-trip through Unix()/UTC()/a struct field that strips it),
 // every monoNanos measurement silently degrades back to the wall clock and
 // every gate below keeps passing.
-func TestChaos71_MonoEpochCarriesMonotonicReading(t *testing.T) {
+func TestChaos83_MonoEpochCarriesMonotonicReading(t *testing.T) {
 	if !hasMonotonicReading(monoEpoch) {
 		t.Fatalf("monoEpoch has no monotonic reading (%v) — monoNanos has silently degraded to a "+
-			"wall-clock measurement and every CHAOS-71 fix is inert", monoEpoch)
+			"wall-clock measurement and every CHAOS-83 fix is inert", monoEpoch)
 	}
 	// CONTROL: the detector must reject a value whose reading was stripped,
 	// otherwise it matches everything and proves nothing.
@@ -64,10 +64,10 @@ func TestChaos71_MonoEpochCarriesMonotonicReading(t *testing.T) {
 // documented " m=" suffix time.Time.String() appends for exactly that case.
 func hasMonotonicReading(t time.Time) bool { return strings.Contains(t.String(), " m=") }
 
-// TestChaos71_MonoSinceNeverNegativeForPriorStamp pins the property that makes
+// TestChaos83_MonoSinceNeverNegativeForPriorStamp pins the property that makes
 // both fixes work: an elapsed duration measured against an EARLIER monoNanos
 // stamp is never negative, so no caller needs a negative-age branch.
-func TestChaos71_MonoSinceNeverNegativeForPriorStamp(t *testing.T) {
+func TestChaos83_MonoSinceNeverNegativeForPriorStamp(t *testing.T) {
 	for i := 0; i < 2000; i++ {
 		stamp := monoNanos()
 		if d := monoSince(stamp); d < 0 {
@@ -76,13 +76,13 @@ func TestChaos71_MonoSinceNeverNegativeForPriorStamp(t *testing.T) {
 	}
 }
 
-// TestChaos71_MonoNanosIsNeverZero pins the sentinel invariant: 0 must stay
+// TestChaos83_MonoNanosIsNeverZero pins the sentinel invariant: 0 must stay
 // outside the stamp domain, because every caller holding a stamp in an
 // atomic.Int64 uses 0 to mean "never stamped" (readyz's `since != 0`, the
 // roster log gates' `last != 0`). On the wall clock that was free — 0 is 1970 —
 // but a process-relative stamp really can be 0 at the first nanosecond, which
 // would read as "no stamp" and suppress the very transition it recorded.
-func TestChaos71_MonoNanosIsNeverZero(t *testing.T) {
+func TestChaos83_MonoNanosIsNeverZero(t *testing.T) {
 	for i := 0; i < 2000; i++ {
 		if got := monoNanos(); got == 0 {
 			t.Fatalf("monoNanos() = 0 on iteration %d — 0 is the callers' \"never stamped\" sentinel "+
@@ -91,12 +91,12 @@ func TestChaos71_MonoNanosIsNeverZero(t *testing.T) {
 	}
 }
 
-// TestChaos71_Control_WallClockIdiomGoesNegativeOnBackwardsStep is the CONTROL
+// TestChaos83_Control_WallClockIdiomGoesNegativeOnBackwardsStep is the CONTROL
 // that proves the gates above are testing something real. It reproduces the
 // pre-fix arithmetic against the stamp a backwards wall-clock step leaves
 // behind, and shows the negative elapsed satisfies NEITHER predicate — the
 // tunnel reaper's deadline nor the readiness grace window.
-func TestChaos71_Control_WallClockIdiomGoesNegativeOnBackwardsStep(t *testing.T) {
+func TestChaos83_Control_WallClockIdiomGoesNegativeOnBackwardsStep(t *testing.T) {
 	const step = 30 * time.Minute
 
 	// A stamp written just before the clock stepped back by `step` reads, on
@@ -120,25 +120,25 @@ func TestChaos71_Control_WallClockIdiomGoesNegativeOnBackwardsStep(t *testing.T)
 		step, elapsed, elapsed >= tunnelIdleTimeout, elapsed >= dpCPPollFailGrace)
 }
 
-// TestChaos71_TunnelActivityStampIsMonotonicDomain is a DEFECT GATE: it fails
+// TestChaos83_TunnelActivityStampIsMonotonicDomain is a DEFECT GATE: it fails
 // against the pre-fix code. newTunnelActivityStamp stored time.Now().UnixNano()
 // (~1.7e18, nanoseconds since 1970); it must now store a monotonic reading
 // taken from monoNanos (nanoseconds since this process started).
-func TestChaos71_TunnelActivityStampIsMonotonicDomain(t *testing.T) {
+func TestChaos83_TunnelActivityStampIsMonotonicDomain(t *testing.T) {
 	before := monoNanos()
 	got := newTunnelActivityStamp().Load()
 	after := monoNanos()
 
 	if got < before || got > after {
 		t.Fatalf("newTunnelActivityStamp() = %d, want a monotonic stamp within [%d, %d]. A value near "+
-			"%d would be time.Now().UnixNano() — the wall-clock domain CHAOS-71 removed",
+			"%d would be time.Now().UnixNano() — the wall-clock domain CHAOS-83 removed",
 			got, before, after, time.Now().UnixNano())
 	}
 }
 
-// TestChaos71_CPPollFailingSinceIsMonotonicDomain is the same DEFECT GATE for
+// TestChaos83_CPPollFailingSinceIsMonotonicDomain is the same DEFECT GATE for
 // the readiness probe's healthy→failing transition stamp.
-func TestChaos71_CPPollFailingSinceIsMonotonicDomain(t *testing.T) {
+func TestChaos83_CPPollFailingSinceIsMonotonicDomain(t *testing.T) {
 	prevFailing := dpControlPlanePollFailing.Load()
 	prevSince := dpCPPollFailingSince.Load()
 	t.Cleanup(func() {
@@ -155,19 +155,19 @@ func TestChaos71_CPPollFailingSinceIsMonotonicDomain(t *testing.T) {
 	got := dpCPPollFailingSince.Load()
 	if got < before || got > after {
 		t.Fatalf("dpCPPollFailingSince = %d, want a monotonic stamp within [%d, %d]. A value near %d "+
-			"would be time.Now().UnixNano() — the wall-clock domain CHAOS-71 removed",
+			"would be time.Now().UnixNano() — the wall-clock domain CHAOS-83 removed",
 			got, before, after, time.Now().UnixNano())
 	}
 }
 
-// TestChaos71_CPPollGraceFlipsOnMonotonicElapsedOnly drives the probe's grace
+// TestChaos83_CPPollGraceFlipsOnMonotonicElapsedOnly drives the probe's grace
 // window off an injected monotonic clock: the row flips to fail once the
 // monotonic elapsed reaches the grace window, and — the NEGATIVE CONTROL
 // against the wrong fix — a stamp that appears to be in the FUTURE must leave
 // the row ok rather than flipping it. "Negative age means expired" would be
 // fail-closed here but would flap the probe of every node in the fleet on any
 // backwards step, however small.
-func TestChaos71_CPPollGraceFlipsOnMonotonicElapsedOnly(t *testing.T) {
+func TestChaos83_CPPollGraceFlipsOnMonotonicElapsedOnly(t *testing.T) {
 	withDPMode(t)
 
 	prevFailing := dpControlPlanePollFailing.Load()
@@ -222,10 +222,10 @@ func dpCPPollRow(t *testing.T) string {
 	return row.Status
 }
 
-// TestChaos71_TunnelReaperFiresOnMonotonicElapsed is the behavioural end of the
+// TestChaos83_TunnelReaperFiresOnMonotonicElapsed is the behavioural end of the
 // tunnel fix: a silent tunnel is reaped once the MONOTONIC elapsed time passes
 // the idle window, with the deadline decision taken entirely off monoNanos.
-func TestChaos71_TunnelReaperFiresOnMonotonicElapsed(t *testing.T) {
+func TestChaos83_TunnelReaperFiresOnMonotonicElapsed(t *testing.T) {
 	setTunnelIdleTimeout(t, 200*time.Millisecond)
 
 	// A virtual monotonic clock running 100x real time. It must RUN rather than
@@ -271,13 +271,13 @@ func TestChaos71_TunnelReaperFiresOnMonotonicElapsed(t *testing.T) {
 	}
 }
 
-// TestChaos71_NoWallClockElapsedIdiomInPackageMain is the durable guard: the
+// TestChaos83_NoWallClockElapsedIdiomInPackageMain is the durable guard: the
 // `time.Unix(0, stamp)` elapsed-measurement idiom must not come back into
 // package main. The ban is deliberately narrow — time.Unix(0, nanos) is only
 // ever an elapsed-measurement stamp, while time.Unix(seconds, 0) is a genuine
 // absolute instant (a wire-carried token expiry, a timestamp formatted for
 // display) and stays legal.
-func TestChaos71_NoWallClockElapsedIdiomInPackageMain(t *testing.T) {
+func TestChaos83_NoWallClockElapsedIdiomInPackageMain(t *testing.T) {
 	dir := pkgSourceDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -299,7 +299,7 @@ func TestChaos71_NoWallClockElapsedIdiomInPackageMain(t *testing.T) {
 			t.Errorf("%s:%s measures elapsed time with time.Unix(0, stamp): that subtraction is "+
 				"WALL-clock (the reconstructed value has no monotonic reading), so a backwards clock "+
 				"step makes it negative and the deadline never fires. Stamp with monoNanos() and "+
-				"measure with monoSince() (CHAOS-71).", name, pos)
+				"measure with monoSince() (CHAOS-83).", name, pos)
 		}
 	}
 	if scanned == 0 {
