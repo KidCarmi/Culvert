@@ -149,8 +149,20 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 			// line is emitted only on a SUCCESSFUL fetch, which is bounded by
 			// the compile rate, and a persistently failing write is already
 			// carried by the storage-health plane.
+			// putErr is sanitized like every other error in this function:
+			// Store.Put wraps os.MkdirAll/fileutil.AtomicWrite, whose text
+			// carries the cache path, and that path is built from key(profileID,
+			// kind, source) — values that reach a DP through the CP->DP snapshot
+			// and a CP through the admin API or a config import.
+			// docFileName hashes the key, so no raw byte reaches the path today
+			// and the practical exposure is low; CodeQL does not model the hash
+			// as a barrier, and the repo convention is that an error printed to
+			// the log goes through sanitizeLog regardless (go/log-injection,
+			// alert 421). Leaving it raw also made this the ONE log site in this
+			// function whose error was unsanitized while the other three were —
+			// the asymmetry that keeps producing CWE-117 findings here.
 			logger.Printf("IdP[%s]: metadata cached document could not be persisted (%v); a future IdP outage will have no fallback on this node",
-				sanitizeLog(profileID), putErr)
+				sanitizeLog(profileID), sanitizeLog(fmt.Sprint(putErr)))
 		}
 		noteIdPMetadataOutcome(profileID, idpDocRef{Kind: kind, Source: source}, idpMetaFresh, nil)
 		return doc, time.Time{}, nil
