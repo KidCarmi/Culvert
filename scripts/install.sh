@@ -1661,7 +1661,16 @@ is_fresh_deployment() {
 secret_already_set() {
   local var="$1" envfile="$2"
   [[ -n "${!var:-}" ]] && return 0
-  [[ -f "$envfile" ]] && grep -Eq "^${var}=.+" "$envfile" 2>/dev/null
+  # "Non-empty" means what docker compose resolves: only CR/blanks, an empty
+  # quote pair ("" / ''), or a blank followed by an inline # comment is EMPTY
+  # there, so it must not count as configured (the passphrase would never be
+  # generated and the CA key would be persisted unencrypted). A lone opening
+  # quote at end of line starts a multiline value (valid compose syntax) and
+  # counts as set.
+  # Process substitution, not a pipe: grep -q exits at the first match, and under
+  # pipefail the producer's SIGPIPE (141) would override that success.
+  [[ -f "$envfile" ]] &&
+    grep -Eq "^${var}=([^[:space:]\"']|[[:space:]]+([^[:space:]\"'#]|\"([^\"]|$)|'([^']|$))|\"([^\"]|$)|'([^']|$))" <(tr -d '\r' <"$envfile" 2>/dev/null)
 }
 
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).

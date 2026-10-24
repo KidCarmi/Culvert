@@ -81,17 +81,41 @@ type DataPlaneClient struct {
 
 // backoff sleeps for an exponentially increasing duration after consecutive
 // Control Plane failures: 2s, 4s, 8s, … capped at 60s.
+//
+// failCount is owned by the CALLER. Every call site is inside pollConfig's
+// error path, which has already charged this failure (`c.failCount++`), so
+// incrementing here too double-counted every failure: the delay schedule ran
+// 4s, 16s, 60s (ceiling on the 3rd failure instead of the 6th) and the
+// `failCount < 3` failover guard below tripped on the SECOND consecutive
+// failure, contradicting its own "only after 3 consecutive failures" contract
+// and churning a whole DP fleet off a healthy CP after one transient blip.
 func (c *DataPlaneClient) backoff(ctx context.Context) {
-	c.failCount++
-	delay := time.Duration(1<<min(c.failCount, 6)) * time.Second // 2s…64s
-	if delay > 60*time.Second {
-		delay = 60 * time.Second
-	}
+	delay := controlPlaneBackoffDelay(c.failCount)
 	logger.Printf("DataPlane: backing off %s (failure #%d)", delay, c.failCount)
 	select {
 	case <-time.After(delay):
 	case <-ctx.Done():
 	}
+}
+
+// controlPlaneBackoffDelay maps a consecutive-failure streak to its wait:
+// 2s, 4s, 8s, 16s, 32s, then the 60s ceiling from the 6th failure on.
+//
+// Split out of backoff() so the schedule is assertable without waiting out a
+// real timer — backoff() observes its delay only through a select that a
+// cancelled context short-circuits, so a test driving backoff() directly can
+// confirm the streak bookkeeping but NOT the delay, and would still pass if the
+// curve regressed. Raised by CodeRabbit on PR #1658.
+//
+// max(…,1) keeps the documented 2s FLOOR even when the caller's streak is 0,
+// which is the state failover() leaves behind when it switches CP and its
+// immediate retry then fails.
+func controlPlaneBackoffDelay(failCount int) time.Duration {
+	delay := time.Duration(1<<min(max(failCount, 1), 6)) * time.Second // 2s…64s
+	if delay > 60*time.Second {
+		delay = 60 * time.Second
+	}
+	return delay
 }
 
 func (c *DataPlaneClient) resetBackoff() {
@@ -265,6 +289,13 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 		raw, err = c.call(ctx, methodGetConfig, reqBody)
 		if err != nil {
 			dpMarkCPPollFailing()
+			// Charge this failure too. failover() zeroed the streak for the NEW
+			// CP, and backoff() only reads it, so without this the retry's
+			// failure went uncounted and the new CP got a fourth failed request
+			// before the next failover instead of a third. The old
+			// double-charging backoff() happened to cover this path; removing
+			// that increment exposed it. Raised by CodeRabbit on PR #1658.
+			c.failCount++
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
 			return nil, false

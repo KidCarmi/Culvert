@@ -727,7 +727,10 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "audit delegated"},
-			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, Note: "audit delegated"},
+			// SEC-ENROLLAUDIT-1: the DELETE branch audits in this handler —
+			// it has no delegate, and before the fix it had no audit call
+			// either, while this entry claimed one.
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
 	{Path: "/api/cluster/nodes", Handler: "apiClusterNodes", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
