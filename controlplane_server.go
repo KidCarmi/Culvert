@@ -1031,10 +1031,22 @@ var cpGRPCStopBudget = cpGRPCGracefulStopBudget
 // finishes, and neither surfaces an error to abort it:
 //
 //   - A handler that does not return. Enroll and RenewCert sign a CSR and
-//     write it out; PushAuditEvents appends to a fileutil.RotatingFile. On a
-//     wedged volume — the hung NFS mount and slow-filesystem cases the rest of
-//     this review's storage work is built around — the handler blocks in a
-//     write(2) that never completes.
+//     write it out. On a wedged volume — the hung NFS mount and
+//     slow-filesystem cases the rest of this review's storage work is built
+//     around — the handler blocks in a write(2) that never completes.
+//
+//     CHAOS-88 CORRECTION: this list previously also named PushAuditEvents,
+//     "appends to a fileutil.RotatingFile". It does not, and never did:
+//     PushAuditEvents calls globalClusterAudit.Append, which is a mutex and an
+//     in-memory slice trimmed to 5000 entries (controlplane.go:279-299) with no
+//     file writer anywhere on the path. So that handler cannot block on a
+//     volume and is NOT an instance of this hang case — but the reason is far
+//     worse than the claim: the centralized audit trail is not durable at all,
+//     the trim is uncounted, and the handler still answers {"ok":true}, after
+//     which the DP clears its queue permanently (controlplane_client.go:724).
+//     Recorded with evidence as an open row of the 2026-10-24 sweep; the
+//     durable sink it implies is an owner decision, not a sweep's to invent.
+//
 //   - A response the peer stops reading. GetConfig returns up to a 128 MiB
 //     ConfigSnapshot; a DP that freezes mid-read leaves the server blocked on
 //     HTTP/2 flow control over a TCP zero-window, and the kernel's persist
