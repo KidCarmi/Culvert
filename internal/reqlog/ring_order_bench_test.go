@@ -4,20 +4,23 @@ package reqlog
 // BenchmarkAddParallel's comment left open: can ringMu, the one process-wide
 // exclusive lock every logged request takes, be removed?
 //
-// Measured answer: NO. Three alternatives were built and measured; the best of
-// them ties the shipped mutex at four cores while costing 36% more at one, and
-// the obvious one is three times WORSE. The shipped lock stands, and the
-// remaining ceiling is recorded with its headroom instead of acted on.
+// Short answer: ringMu is NOT simply removable — a totally ordered ring pays
+// one shared read-modify-write per entry however it is built, and that floor
+// is measured below. But the longer answer is a CROSSOVER rather than a
+// closed question, and that is the finding: core-local shards carrying a
+// global sequence stamp are slower than the shipped mutex at one and two
+// cores and 1.3-2.3x FASTER at four. On 4 vCPUs that is not enough to justify
+// rewriting a durable admin-visible surface. It is enough to make the sharded
+// design a candidate worth qualifying on real 16-/32-core appliance hardware,
+// which is what these arms are for.
 //
-// Everything here is benchmark-only (no production code changes), and it is
-// in-tree rather than in a commit message for the same reason
-// BenchmarkHTTPForward_LegacyClientPerRequest is: the comparison has to stay
-// reproducible. The rejected alternative keeps its OWN state, so no arm can
-// perturb Add, Get or SwapRingForTest, and
+// Everything here is benchmark-only (no production code changes), in-tree for
+// the same reason BenchmarkHTTPForward_LegacyClientPerRequest is: the
+// comparison has to stay reproducible. The rejected alternative keeps its OWN
+// state, so no arm can perturb Add, Get or SwapRingForTest, and
 // TestTicketRing_OrderMatchesShippedRing proves it reproduces Get()'s window
-// byte for byte — so the rejection rests on its cost, not on a broken
-// prototype. It must not be "kept in sync" with Add; its value is that it
-// does not move.
+// byte for byte — so its rejection rests on cost, not on a broken prototype.
+// It must not be "kept in sync" with Add; its value is that it does not move.
 //
 // WHY ORDER IS THE CONSTRAINT. Get() returns the newest MaxRing entries in
 // arrival order, newest first, and the admin request feed renders them in that
@@ -25,67 +28,82 @@ package reqlog
 // read-modify-write on one shared word per entry, and that word is the whole
 // game: every arm below either pays it or gives up the order.
 //
-// Measured on this tree (go1.27.3, linux/amd64, 4-vCPU Xeon @2.30GHz,
-// -count=5 medians, all arms in ONE invocation so machine drift hits them
-// equally). These are RunParallel arms, so ns/op is wall time per op across
-// ALL workers — lower is more throughput, a genuinely parallel cost FALLS as
-// cores are added and one that serialises rises:
+// HOW TO READ THESE NUMBERS, because it is easy to get wrong and an earlier
+// revision of this comment did. All arms are RunParallel, so ns/op is wall
+// time per op across ALL workers: lower is more throughput, a genuinely
+// parallel cost FALLS as cores are added and one that serialises rises.
+// Absolute ns/op on a shared 4-vCPU VM is NOT comparable between invocations —
+// the shipped arm's own P=4 median moved 110.9 -> 158.4 ns between two runs of
+// this same file, a 43% drift, which is larger than most gaps worth claiming.
+// Within one invocation the spread is tight (shipped arm, n=7: 32.8-40.8 at
+// P=1, 71.3-74.2 at P=2, 135.4-164.4 at P=4), so the honest unit is the RATIO
+// to the shipped arm measured in the SAME interleaved invocation. That is what
+// the table reports. Re-measure the whole set in one go; never compare a new
+// arm against a number quoted here.
 //
-//	                                     │ P=1  │ P=2   │ P=4   │ 1→4 throughput
-//	ringMu ring write (SHIPPED)          │ 26.8 │  58.7 │ 110.9 │ 0.24x
-//	ticket ring, per-slot mutex          │ 28.1 │ 178.8 │ 123.7 │ 0.23x  (1.1-3.0x WORSE)
-//	sharded + global seq, sticky key     │ 32.4 │  95.2 │  86.2 │ 0.38x  (unreachable, see below)
-//	sharded + global seq, realistic key  │ 36.5 │ 126.7 │ 111.5 │ 0.33x  (a tie at P=4)
-//	─ primitives that bound any design ─ │      │       │       │
-//	global atomic.Uint64.Add             │  8.2 │  32.1 │  27.1 │ 0.30x
-//	time.Now() (unshared ordering key)   │ 46.4 │  23.4 │  11.6 │ 4.0x
-//	unordered core-local ring write      │  7.9 │   3.4 │   1.9 │ 4.1x   (the floor)
+// go1.27.3, linux/amd64, 4-vCPU Xeon @2.30GHz, all arms in ONE invocation,
+// -count=7, medians. Ratio <1.00x means faster than the shipped ringMu write:
 //
-// Run-to-run spread on this shared VM is roughly ±20% at P=4 (the shipped arm
-// measured 110.9 here and 131.8 in an earlier identical run), so only the
-// large gaps below are claims; the tie is reported as a tie.
+//	                                     │  P=1  │  P=2  │  P=4  │
+//	ringMu ring write (SHIPPED)           │ 1.00x │ 1.00x │ 1.00x │  35.0/73.3/158.4 ns
+//	ticket ring, per-slot mutex           │ 1.07x │ 1.91x │ 0.76x │
+//	shards + global seq, sticky key       │ 1.19x │ 1.02x │ 0.43x │
+//	shards + global seq, realistic key    │ 1.55x │ 1.58x │ 0.75x │
+//	─ primitives that bound any design ─  │       │       │       │
+//	global atomic.Uint64.Add              │ 0.25x │ 0.34x │ 0.16x │   8.7/24.6/25.6 ns
+//	time.Now() (unshared ordering key)    │ 1.53x │ 0.40x │ 0.09x │  53.5/29.5/14.8 ns
+//	unordered core-local ring write       │ 0.31x │ 0.07x │ 0.01x │  10.7/5.0/2.3 ns
 //
-// FIRST, the ticket ring is not merely no better, it is ~3x worse at two
-// cores. The mutex serialises writers, which means one core at a time owns the
-// head region and writes several consecutive 352-byte slots while its lines
-// stay exclusive to it — the lock buys BATCHING. Direct-mapped tickets
-// interleave the cores slot by slot, so every write pulls ~6 lines away from
-// whichever core wrote them one ring-cycle ago. One contended lock was traded
-// for six contended cache lines.
+// WHAT IS ROBUST — held across two independent interleaved runs:
 //
-// SECOND, sharding does not pay here, and it fails for the reason store.go
-// already recorded rather than a new one. Core-local shards do fix the line
-// migration — the sticky-key arm is the fastest ordered shape at four cores —
-// but a proxied request is a FRESH GOROUTINE, so the request path has no
-// stickiness to offer. The only key available is tsShardIndex()'s per-P
-// rand.Uint64, redrawn per entry, and against a 352-byte Entry that lands
-// every write on a shard whose lines are cold or owned elsewhere. The
-// realistic arm is therefore a dead heat with the shipped mutex at four cores
-// and 36%/116% worse at one and two. That is the same verdict store.go
-// reaches for the 60-bucket time-series ring — "against an object that size
-// its cost ate the gain" — and the same contrast with the current-minute
-// counter that DOES shard: a counter needs only its sum, so its shards never
-// have to be put back in order. This ring cannot give that up, which is why
-// the tsLiveShard shape does not transfer.
+//  1. The floor is real. One global atomic add costs 25.6 ns at four cores,
+//     ~16% of the entire shipped write and more than the whole write costs
+//     serially. No totally ordered design gets under it.
+//  2. The direct-mapped ticket ring is the WRONG design: 1.91x worse at two
+//     cores (3.05x in the other run), and never consistently better anywhere.
+//     The mutex serialises writers, so one core at a time owns the head region
+//     and writes consecutive 352-byte slots with its lines exclusive to it —
+//     the lock buys BATCHING. Tickets interleave the cores slot by slot and
+//     trade one contended lock for six contended cache lines.
+//  3. Sharding CROSSES OVER rather than winning outright: slower at one core
+//     (1.19x), level at two, and 0.43x at four. Both runs agree on the
+//     direction at four cores.
+//  4. The shard key matters as much as the sharding. A proxied request is a
+//     fresh goroutine with no stickiness to inherit, so production's only key
+//     is tsShardIndex()'s per-entry rand.Uint64; against a 352-byte Entry that
+//     lands every write on a shard whose lines are cold or owned elsewhere.
+//     It costs most of the gain (1.55x vs 1.19x at P=1; 0.75x vs 0.43x at
+//     P=4) — the same effect store.go records for the 60-bucket time-series
+//     ring, "against an object that size its cost ate the gain". Note the
+//     contrast with the current-minute counter that DOES shard: a counter
+//     needs only its sum, so its shards never have to be put back in order.
+//     That is exactly what this ring cannot give up, and why tsLiveShard's
+//     shape does not transfer unchanged.
+//  5. Only the UNORDERED core-local write scales (0.31x -> 0.01x, improving
+//     with every core). time.Now() scales too — it needs no shared word, so
+//     it goes 1.53x -> 0.09x. So a timestamp-keyed core-local ring is the fast
+//     design, and it is fast precisely because ns timestamps are an
+//     APPROXIMATE order (ties, cross-core read skew) rather than a total one.
+//     Adopting it would change what the admin request feed shows: a product
+//     decision about an admin-visible surface, not a performance fix.
 //
-// THIRD, the floor, and the one shape that genuinely scales: an unordered
-// core-local write runs at 1.9 ns and IMPROVES with cores. Note also that
-// time.Now() is not the obstacle an earlier reading of these numbers made it
-// out to be — it needs no shared word and so falls 46.4 → 11.6 as cores are
-// added. A timestamp-keyed, core-local ring is thus the fast design, and it is
-// fast precisely because ns timestamps are an APPROXIMATE order (ties, and
-// cross-core read skew) rather than a total one. Adopting it would change what
-// the admin request feed shows. That is a product decision about an
-// admin-visible surface, not a performance fix, and it is not taken here.
+// WHAT THIS HARDWARE CANNOT RESOLVE. The ticket ring's P=4 ratio flipped
+// between runs (1.12x then 0.76x), so its four-core standing is unknown — it
+// is rejected on P=2 and on mechanism, not on P=4. More importantly, four
+// vCPUs is the widest measurement available here, and both sharded arms are
+// still improving at the edge of it while the mutex degrades. The crossover is
+// established; where it lands on 16 and 32 cores is not.
 //
-// WHAT THE SHIPPED LOCK COSTS, in the units that decide whether to act:
-// ~37M entries/s at one core falling to ~9M at four. Negative scaling is an
-// unattractive shape on the 16- and 32-core hardware this appliance ships
-// onto, and it is why the question was asked. It is also one to two orders of
-// magnitude above the request rate of the gateways this serves, and every
-// ordered alternative measured above is a tie or a regression. So: recorded,
-// not acted on. Re-open it if a profile ever shows ringMu as a real
-// bottleneck, and re-run these arms first if it does.
+// RECOMMENDATION. Keep ringMu for now: on the only hardware measured, the
+// ordered alternative that wins does so at the core count where this product
+// is least latency-sensitive, and it costs 19-55% at one and two cores. Do not
+// ship a rewrite of the request-feed ring on 4-vCPU evidence. The sharded
+// design IS the candidate to qualify if ringMu ever shows up in a real
+// profile: re-run this whole set on the target appliance, in one invocation,
+// and read the ratios. ~9M entries/s at four cores (the shipped arm's own
+// ceiling) still carries one to two orders of magnitude of headroom over the
+// request rates these gateways serve, which is why this is recorded rather
+// than acted on.
 //
 // One incidental correction carried in this change: the ring comments in
 // reqlog.go and persist.go sized an Entry at 328 bytes, which the schema has
@@ -273,6 +291,13 @@ func BenchmarkRingOrderPrimClock(b *testing.B) {
 	})
 }
 
+// ringOrderLocalDepth is one worker's private ring depth, held CONSTANT rather
+// than derived from the worker count: the measurement is about where the
+// written cache lines live, so the per-worker working set must not move with
+// GOMAXPROCS or the figures stop being comparable across core counts. It is
+// the depth the published numbers were taken at (MaxRing split 64 ways).
+const ringOrderLocalDepth = MaxRing / 64
+
 // ringOrderLocal is one writer's private ring, padded so neighbouring workers
 // never share a cache line.
 type ringOrderLocal struct {
@@ -286,17 +311,21 @@ type ringOrderLocal struct {
 // nothing is ever put back in order. It is the only shape here that improves
 // with core count, and it is reachable only by giving up Get()'s total order.
 func BenchmarkRingOrderPrimCoreLocal(b *testing.B) {
-	const workers = 64
-	rings := make([]*ringOrderLocal, workers)
-	for i := range rings {
-		rings[i] = &ringOrderLocal{buf: make([]Entry, MaxRing/workers)}
-	}
-	var pick atomic.Int64
 	e := benchEntry(0)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		r := rings[pick.Add(1)%workers] // sticky for this worker's whole run
+		// Allocated INSIDE the worker, so "private" is structural: there is no
+		// pool to run out of and no modulo to wrap, at any GOMAXPROCS. A fixed
+		// pool of 64 indexed by `pick.Add(1)%64` looked equivalent and was not
+		// — above 64 workers two of them shared a ring and raced on head/buf,
+		// which the race detector confirms at GOMAXPROCS=128 (Codex P2,
+		// PR #1710). That is the wrong bug to ship in THIS arm in particular:
+		// it is the one asserting an unshared write is the floor, and it broke
+		// precisely on the many-core hardware this file asks people to
+		// re-measure on. The one allocation per worker is amortized over that
+		// worker's whole share of b.N.
+		r := &ringOrderLocal{buf: make([]Entry, ringOrderLocalDepth)}
 		for pb.Next() {
 			r.buf[r.head] = e
 			r.head = (r.head + 1) % len(r.buf)
@@ -326,18 +355,18 @@ type ringOrderShardSlot struct {
 // arrange. Read it as the unreachable upper bound and
 // BenchmarkRingOrderPrimShardedOrderedRandomKey as the reachable one.
 func BenchmarkRingOrderPrimShardedOrdered(b *testing.B) {
-	const shards = 64
-	sh := make([]*ringOrderShard, shards)
-	for i := range sh {
-		sh[i] = &ringOrderShard{buf: make([]ringOrderShardSlot, MaxRing/shards)}
-	}
-	var pick atomic.Int64
 	var seq atomic.Uint64
 	e := benchEntry(0)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		s := sh[pick.Add(1)%shards]
+		// One shard per worker, allocated per worker for the same reason as the
+		// core-local arm above: a fixed pool wrapped at 64 workers, which here
+		// silently broke the STICKINESS this arm exists to model (the mutex
+		// meant it was contention, not a race). "Sticky" now means one shard
+		// per worker by construction, at any GOMAXPROCS. The global seq stamp
+		// below stays shared — that is the cost being measured.
+		s := &ringOrderShard{buf: make([]ringOrderShardSlot, ringOrderLocalDepth)}
 		for pb.Next() {
 			s.mu.Lock()
 			s.buf[s.head] = ringOrderShardSlot{seq: seq.Add(1), e: e}
@@ -364,6 +393,10 @@ func BenchmarkRingOrderPrimShardedOrdered(b *testing.B) {
 // math/rand/v2, so the arm measures the sharding and not a particular
 // generator; tsShardIndex's real draw costs ~7 ns on top.
 func BenchmarkRingOrderPrimShardedOrderedRandomKey(b *testing.B) {
+	// This arm KEEPS the fixed 64-shard pool, deliberately: a shared shard
+	// array addressed by a per-entry key is exactly the production shape being
+	// modelled, so workers sharing shards is the point rather than a defect,
+	// and every access is under the shard's mutex (contention, never a race).
 	const shards = 64
 	sh := make([]*ringOrderShard, shards)
 	for i := range sh {

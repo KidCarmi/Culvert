@@ -67,17 +67,19 @@ func BenchmarkAdd(b *testing.B) {
 // state, not a nil check — and removing it means changing what Get()
 // guarantees about ordering.
 //
-// That has now been MEASURED, and the answer is to keep the lock. Three
-// ordered alternatives were built and benchmarked in
-// ring_order_bench_test.go: a lock-free-per-slot ticket ring (1.1-3.0x
-// WORSE), and core-local sharding with a global sequence stamp, which ties
-// this arm at four cores only when given a stickiness the request path cannot
-// supply and is a tie-or-regression with the realistic per-entry shard key.
-// The reason is in that file: a total order costs one shared read-modify-write
-// per entry whoever pays it, and at four cores that single atomic add already
-// costs a quarter of this whole arm. Read ring_order_bench_test.go's header
-// before re-deriving any of it — including the ~9M entries/s ceiling this
-// leaves and the headroom it carries.
+// That has now been MEASURED, in ring_order_bench_test.go, and the outcome is
+// a CROSSOVER rather than a closed question. A total order costs one shared
+// read-modify-write per entry whoever pays it — at four cores that single
+// atomic add is ~16% of this whole arm and more than it costs serially — so
+// ringMu is not simply removable. But core-local shards carrying a global
+// sequence stamp measure 1.3-2.3x FASTER than this arm at four cores while
+// costing 19-55% at one and two; the direct-mapped ticket ring is the wrong
+// design either way (1.9-3.0x worse at two cores). The conclusion is to keep
+// ringMu on 4-vCPU evidence and treat the sharded design as the candidate to
+// qualify on real 16-/32-core hardware. Read that file's header before
+// re-deriving any of it, especially the note on why absolute ns/op here is not
+// comparable between invocations (this arm's own P=4 median moved 43% between
+// two runs) and why only same-invocation ratios are quoted.
 func BenchmarkAddParallel(b *testing.B) {
 	restore := SwapRingForTest()
 	defer restore()
