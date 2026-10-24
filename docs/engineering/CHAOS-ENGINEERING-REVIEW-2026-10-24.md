@@ -422,7 +422,7 @@ Recorded so later sweeps do not re-dig, and because several of these are the
 precedents the fix above reuses:
 
 - **The remote scan client's posture switch** —
-  `internal/secscan/remote.go:211-253`: budget/capacity fail **closed**,
+  `internal/secscan/remote.go:246-291`: budget/capacity fail **closed**,
   faults fail open and counted, and a 200 without an affirmative `Clean` is a
   fault, not a verdict. The `Result.Hash` is computed locally, never taken
   from the sidecar, specifically so a compromised sidecar cannot name objects in
