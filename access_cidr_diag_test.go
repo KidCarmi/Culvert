@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+// snapshotAccessCIDRRejects restores the access-list rejection state after the
+// test. The state is process-global and startup/settings loaders record into
+// it, so a test that feeds them an invalid list must not leak the warning into
+// a later test under -shuffle.
+func snapshotAccessCIDRRejects(t *testing.T) {
+	t.Helper()
+	accessCIDRRejectMu.Lock()
+	orig := make(map[string]string, len(accessCIDRRejects))
+	for k, v := range accessCIDRRejects {
+		orig[k] = v
+	}
+	accessCIDRRejectMu.Unlock()
+	t.Cleanup(func() {
+		accessCIDRRejectMu.Lock()
+		accessCIDRRejects = orig
+		accessCIDRRejectMu.Unlock()
+	})
+}
+
 func TestAccessCIDRListsCheck(t *testing.T) {
 	t.Cleanup(func() {
 		noteAccessCIDRResult(accessCIDRUIAllow, nil)
@@ -66,11 +85,12 @@ func TestAccessCIDRListsCheck_DescribesRetainedSet(t *testing.T) {
 func TestAPINetworkSettings_ValidSaveClearsTrustedProxyRejection(t *testing.T) {
 	snapshotNetworkSettings(t)
 	snapshotAdminSettingsPath(t)
+	snapshotAccessCIDRRejects(t)
 	prevTP := ListTrustedProxyCIDRs()
-	t.Cleanup(func() {
-		_ = SetTrustedProxyCIDRs(prevTP)
-		noteAccessCIDRResult(accessCIDRTrustedProxy, nil)
-	})
+	t.Cleanup(func() { _ = SetTrustedProxyCIDRs(prevTP) })
+	// Only the trusted-proxy rejection is under test; start with no admin
+	// allowlist rejection so the row's overall status reflects this save.
+	noteAccessCIDRResult(accessCIDRUIAllow, nil)
 	noteAccessCIDRResult(accessCIDRTrustedProxy, errors.New("invalid IP/CIDR: x"))
 
 	body := strings.NewReader(`{"trusted_proxy_cidrs":["192.0.2.0/24"]}`)
