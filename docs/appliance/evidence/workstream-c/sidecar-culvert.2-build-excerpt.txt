@@ -1,0 +1,5 @@
+#8 [stage-0 2/2] RUN --mount=type=bind,source=sandbox-ca.crt,target=/tmp/sandbox-ca.crt SSL_CERT_FILE=/tmp/sandbox-ca.crt apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=1.70.0-r0' 'musl=1.2.6-r3' 'musl-utils=1.2.6-r3'  && test "$(apk info -v 2>/dev/null | grep '^musl-[0-9]')" = 'musl-1.2.6-r3'  && test "$(apk info -v 2>/dev/null | grep '^musl-utils-[0-9]')" = 'musl-utils-1.2.6-r3'  && test "$(apk info -v 2>/dev/null | grep '^pcre2-[0-9]')" = 'pcre2-10.49-r0'  && test "$(apk info -v 2>/dev/null | grep '^zlib-[0-9]')" = 'zlib-1.3.2-r1'  && test "$(apk info -v 2>/dev/null | grep '^nghttp2-libs-[0-9]')" = 'nghttp2-libs-1.70.0-r0'  && rm -rf /var/log/apk.log /var/cache/apk/*
+#8 0.916 (1/2) Upgrading musl (1.2.6-r2 -> 1.2.6-r3)
+#8 1.352 (2/2) Upgrading musl-utils (1.2.6-r2 -> 1.2.6-r3)
+#9 exporting config sha256:f17e3c4a9b6afe2a4c8f64332bee3a656cae6fc4f20fcc38ab5651fa0e58ca85 done
+#9 exporting manifest list sha256:fc44c3ca1e238b804714062ba9e3b0aecb9db14192d4d7ea572495a59e33b842 done

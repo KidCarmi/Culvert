@@ -89,6 +89,7 @@ func newRunner(cfg *config.Config) (*runner.Runner, error) {
 		ComposeProjectDir:   cfg.ComposeProjectDir,
 		ComposeFile:         cfg.ComposeFile,
 		ComposeOverrideFile: cfg.ComposeOverrideFile,
+		ComposeNoBuild:      cfg.ComposeNoBuild,
 		UseSudo:             cfg.PrivilegeMode == config.PrivilegeSudoers,
 		StageTimeout:        cfg.StageTimeout,
 		ProxyRepo:           cfg.ProxyRepo,

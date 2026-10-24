@@ -439,6 +439,15 @@ reject_unsafe "compose_file" "$COMPOSE_FILE"
 # chars, and distinct from compose_file. Empty ⇒ single-`-f` recreate; the
 # {compose_override_path} sudoers line is DELETED (see the render step below).
 COMPOSE_OVERRIDE_FILE=$(extract_toml_string compose_override_file)
+
+# compose_no_build (appliance hosts): the agent's compose.up carries --no-build
+# and the sudoers render keeps ONLY the --no-build forms (Pass 3 below).
+COMPOSE_NO_BUILD=$(extract_toml_string compose_no_build)
+case "$COMPOSE_NO_BUILD" in
+    "" | false) COMPOSE_NO_BUILD=false ;;
+    true) ;;
+    *) die "compose_no_build must be true or false, got '$COMPOSE_NO_BUILD'" ;;
+esac
 if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
     case "$COMPOSE_OVERRIDE_FILE" in
         "." | "..")   die "compose_override_file must not be '.' or '..', got '$COMPOSE_OVERRIDE_FILE'" ;;
@@ -542,6 +551,18 @@ else
 fi
 rm -f "$RENDERED_SUDOERS_TMP"
 
+# Pass 3 — keep exactly one compose.up family. A no-build host deletes the
+# plain `up -d` lines (it must not be able to run an `up` that can build); every
+# other host deletes the `--no-build` lines (unchanged surface for quick-start).
+# Both programs anchor on the full line ending, so neither touches the other.
+RENDERED_SUDOERS_TMP="$RENDERED_SUDOERS.pass3"
+if [ "$COMPOSE_NO_BUILD" = true ]; then
+    sed '/^culvert-maint .* up -d$/d' "$RENDERED_SUDOERS" > "$RENDERED_SUDOERS_TMP"
+else
+    sed '/^culvert-maint .* up -d --no-build$/d' "$RENDERED_SUDOERS" > "$RENDERED_SUDOERS_TMP"
+fi
+mv "$RENDERED_SUDOERS_TMP" "$RENDERED_SUDOERS"
+
 # Refuse to install a sudoers file with any leftover placeholder.
 if grep -qE '\{compose_path\}|\{compose_file\}|\{compose_project_dir\}|\{compose_override_path\}|\{proxy_repo\}' "$RENDERED_SUDOERS"; then
     warn "rendered sudoers file still contains placeholders:"
@@ -557,7 +578,7 @@ if ! visudo -c -f "$RENDERED_SUDOERS" >/dev/null; then
 fi
 
 install -m 0440 -o root -g root "$RENDERED_SUDOERS" "$SUDOERS_DEST"
-log "rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH)"
+log "rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH, compose_no_build=$COMPOSE_NO_BUILD)"
 
 # Re-validate in place; roll back if the installed copy is somehow invalid.
 if ! visudo -c -f "$SUDOERS_DEST" >/dev/null; then

@@ -113,7 +113,8 @@ func (h *hostRefreshHarness) run(env ...string) (out string, rc int) {
 	h.t.Helper()
 	var fns []string
 	for _, name := range []string{"copy_bundle_file", "stage_deploy_bundle", "install_staged_bundle",
-		"sidecar_image_of", "staged_bundle_differs", "refresh_deploy_bundle"} {
+		"sidecar_image_of", "is_appliance", "appliance_manifest_value", "appliance_sidecar_check",
+		"staged_bundle_differs", "refresh_deploy_bundle"} {
 		fns = append(fns, extractShellFunction(h.t, "scripts/install.sh", name))
 	}
 	script := `set -uo pipefail
@@ -130,7 +131,10 @@ docker() {
     "create culvert/proxy:pinned") echo cid1 ;;
     "cp cid1:/app/deploy/.") cp -a "$IMAGE_DEPLOY/." "$3" ;;
     "rm -f") ;;
-    "image inspect") [[ -e "$ROOT/img-$(printf '%s' "$3" | tr '/:' '__')" ]] ;;
+    "image inspect")
+      f="$ROOT/img-$(printf '%s' "$3" | tr '/:' '__')"
+      [[ -e "$f" ]] || return 1
+      cat "$f" ;;
     "build -t")
       [[ -z "${FAIL_BUILD:-}" ]] || return 1
       cp "$4/Dockerfile" "$ROOT/built-dockerfile"
@@ -139,6 +143,9 @@ docker() {
   esac
 }
 PINNED_TAG=culvert/proxy:pinned
+APPLIANCE_STATE_DIR="$ROOT/appliance-state"
+APPLIANCE_OPT_DIR="$ROOT/appliance-opt"
+APPLIANCE_ETC_DIR="$ROOT/appliance-etc"
 ` + strings.Join(fns, "\n") + `
 refresh_deploy_bundle; echo "RC=$?"
 `

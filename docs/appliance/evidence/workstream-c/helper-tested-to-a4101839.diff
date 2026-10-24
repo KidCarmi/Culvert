@@ -1,0 +1,24 @@
+--- tested c843caa7
++++ a4101839 20dbd9db
+@@ -20,8 +20,10 @@
+ #   3. anything else                                         -> refused
+ #
+ # A refusal changes nothing, exits 2 and is recorded in the state file so
+-# `culvert-status` and the operator see it. There is no build fallback, no
+-# registry pull and no network access on any path.
++# the operator sees it. There is no build fallback, no registry pull and no
++# network access on any path. The cost is explicit: a stack that was stopped
++# while the image was lost stays down (the proxy depends on a healthy
++# sidecar) until the verified image is back — never up on unscanned bytes.
+ #
+ # Exit codes: 0 present or reloaded, 2 refused, 64 usage.
+ set -euo pipefail
+@@ -49,7 +51,7 @@
+ refuse() { # REASON MESSAGE
+   record refused "$1"
+   log "REFUSED ($1): $2"
+-  log "The sidecar was NOT rebuilt and nothing was changed. ClamAV stays unavailable until the verified image is restored; the proxy follows its configured ClamAV-unavailable posture."
++  log "The sidecar was NOT rebuilt and nothing was changed. A sidecar container that is still running keeps running; a stack that is down stays down (the proxy waits for a healthy sidecar) until the verified image is restored."
+   exit 2
+ }
+ 

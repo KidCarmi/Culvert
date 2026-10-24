@@ -324,7 +324,7 @@ rm -rf "$OV"; mkdir -p "$OV/opt/culvert-appliance" "$OV/var/lib/culvert-applianc
 # scripts and could pick up ignored local material from a developer checkout.
 mkdir -p "$OV/opt/culvert-appliance/provision" "$OV/opt/culvert-appliance/os-maintenance"
 for runtime_file in 60-culvert-readahead.rules 72-culvert-drm.rules modprobe-culvert-unused.conf net-autoload-reviewed.txt initramfs-culvert-trim cloud-90-culvert.cfg culvert-appliance-reset-identity \
-  culvert-firstboot.service culvert-firstboot.sh culvert-issue-update \
+  culvert-clamav-image culvert-firstboot.service culvert-firstboot.sh culvert-issue-update \
   culvert-issue.service culvert-issue.timer culvert-net culvert-status \
   culvert-sudo-policy nftables.conf sshd-50-culvert.conf; do
   [[ -f "$REPO/appliance/provision/$runtime_file" && ! -L "$REPO/appliance/provision/$runtime_file" ]] \

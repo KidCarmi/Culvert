@@ -227,12 +227,12 @@ func TestClamAVSidecar_DerivesFromThePinnedOfficialImage(t *testing.T) {
 	}
 	// Exact versions only: a floating `apk upgrade` would make the evidence
 	// describe an image nobody can rebuild. pcre2 (CVE-2026-103111), zlib
-	// (CVE-2026-85091) and nghttp2-libs (CVE-2026-58055), each also asserted
-	// inside the build.
-	if !strings.Contains(string(df), "apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=1.70.0-r0'") {
-		t.Fatal("the sidecar must upgrade exactly pcre2, zlib and nghttp2-libs, each to a pinned version")
+	// (CVE-2026-85091), nghttp2-libs (CVE-2026-58055) and musl/musl-utils
+	// (CVE-2026-107891), each also asserted inside the build.
+	if !strings.Contains(string(df), "apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=1.70.0-r0' 'musl=1.2.6-r3' 'musl-utils=1.2.6-r3'") {
+		t.Fatal("the sidecar must upgrade exactly pcre2, zlib, nghttp2-libs, musl and musl-utils, each to a pinned version")
 	}
-	for _, want := range []string{"= 'pcre2-10.49-r0'", "= 'zlib-1.3.2-r1'", "= 'nghttp2-libs-1.70.0-r0'"} {
+	for _, want := range []string{"= 'pcre2-10.49-r0'", "= 'zlib-1.3.2-r1'", "= 'nghttp2-libs-1.70.0-r0'", "= 'musl-1.2.6-r3'", "= 'musl-utils-1.2.6-r3'"} {
 		if !strings.Contains(string(df), want) {
 			t.Errorf("the sidecar build must assert the installed version %s", want)
 		}
@@ -248,7 +248,8 @@ var sidecarTagByContent = map[string]string{
 	"26a01bef80bc1cb6b6e89354f8b00944f04fa9424902f8af003b4fc016d817ab": "culvert/clamav:1.4.6-pcre2-10.49", // pcre2 only (retired)
 	"822f51c5f6bca0e4162d792932df487507f0f19c8cdef72074df25b91c2dbc1a": "culvert/clamav:1.4.6-culvert.2",   // + zlib, nghttp2-libs (retired)
 	"bca8f40f93b375602b2a55ea1977ebb34724fec34bcd4b5b0e898813176f7db6": "culvert/clamav:1.4.6-culvert.3",   // reproducible: no apk.log / index cache (retired)
-	"8bf0bda709c5b7418aed2159cb2f120ba6846125eef900e8c93dec60d0a9ae7a": "culvert/clamav:1.5.4-culvert.1",   // ClamAV 1.5.4 engine (F-P2); same three CVE package versions, now native to the base
+	"8bf0bda709c5b7418aed2159cb2f120ba6846125eef900e8c93dec60d0a9ae7a": "culvert/clamav:1.5.4-culvert.1",   // ClamAV 1.5.4 engine (F-P2); same three CVE package versions, now native to the base (retired)
+	"8e24f28b12d6ef715ce302cbf9d018c4f624990185c03cfbbb9495efde57604c": "culvert/clamav:1.5.4-culvert.2",   // + musl/musl-utils 1.2.6-r3 (CVE-2026-107891); new bytes, F-P2 re-run required
 }
 
 func TestClamAVSidecar_EveryContentChangeGetsANewTag(t *testing.T) {

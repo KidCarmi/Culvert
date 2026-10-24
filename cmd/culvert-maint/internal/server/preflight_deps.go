@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -21,6 +22,21 @@ import (
 // only an explicit "unhealthy" refuses.
 func (s *Server) preflightDependencies() stageRun {
 	return func(ctx context.Context) ([]byte, []byte, error) {
+		if missing, wrong, unverified := s.localOnlyImageProblems(ctx); len(missing) > 0 || len(wrong) > 0 || len(unverified) > 0 {
+			if len(unverified) > 0 {
+				msg := fmt.Sprintf("preflight_dependencies: REFUSED — could not verify which image the local tag names: %s. This entry records an image ID and the inspect did not answer, so the recreate could start unverified bytes; nothing was changed. Check that Docker is running and readable, restore the verified image if needed (`sudo culvert-clamav-image ensure`), then retry",
+					strings.Join(unverified, ","))
+				return []byte(msg), nil, fmt.Errorf("local_image_unverified: %s", strings.Join(unverified, ","))
+			}
+			if len(wrong) > 0 {
+				msg := fmt.Sprintf("preflight_dependencies: REFUSED — local image does not name the recorded bytes: %s. This host runs `compose up --no-build`, so the recreate would start whatever the tag names; nothing was changed. Restore the verified image (`sudo culvert-clamav-image ensure`), then retry",
+					strings.Join(wrong, ","))
+				return []byte(msg), nil, fmt.Errorf("local_image_mismatch: %s", strings.Join(wrong, ","))
+			}
+			msg := fmt.Sprintf("preflight_dependencies: REFUSED — required local image absent: %s. This host runs `compose up --no-build`, so the image is never built here and the recreate would fail; nothing was changed. Restore it from the verified local archive (`sudo culvert-clamav-image ensure`), then retry",
+				strings.Join(missing, ","))
+			return []byte(msg), nil, fmt.Errorf("local_image_absent: %s", strings.Join(missing, ","))
+		}
 		res, err := s.opts.Runner.ComposeStatus(ctx)
 		if err != nil || res == nil {
 			return []byte("preflight_dependencies: compose ps unavailable (" + errString(err) + "); proceeding"), nil, nil
@@ -36,4 +52,54 @@ func (s *Server) preflightDependencies() stageRun {
 		}
 		return []byte("preflight_dependencies: no unhealthy dependency"), nil, nil
 	}
+}
+
+// localOnlyImageProblems checks the configured local-only images on a
+// compose_no_build host. missing: the daemon's own "no such image" signature.
+// wrong: an entry that records an image ID whose tag names a different image,
+// or whose answer cannot be resolved to an ID — presence alone proves nothing
+// about which bytes `up` would start. unverified: an entry that records an
+// image ID whose inspect FAILED without the absence signature (daemon down,
+// permission, timeout) — the identity the entry demands was not established,
+// so it refuses (ASTRA 5978949299, 08:15). A presence-only entry (no recorded
+// ID) keeps the older rule: such a failure is not evidence of absence and
+// does not refuse; `compose up --no-build` still cannot build.
+func (s *Server) localOnlyImageProblems(ctx context.Context) (missing, wrong, unverified []string) {
+	if s.opts.Cfg == nil || !s.opts.Cfg.ComposeNoBuild {
+		return nil, nil, nil
+	}
+	for _, img := range s.opts.Cfg.LocalOnlyImages {
+		res, err := s.opts.Runner.ComposeImageInspect(ctx, img.Ref)
+		if err != nil {
+			switch {
+			case res != nil && imageNotFoundRE.Match(res.Stderr):
+				missing = append(missing, img.Ref)
+			case img.ID != "":
+				unverified = append(unverified, img.Ref)
+			}
+			continue
+		}
+		if img.ID == "" {
+			continue
+		}
+		if id := inspectedImageID(res); id != img.ID {
+			wrong = append(wrong, img.Ref)
+		}
+	}
+	return missing, wrong, unverified
+}
+
+// inspectedImageID is the Id of the single image a `docker image inspect`
+// answered with, or "" when the answer cannot be read.
+func inspectedImageID(res *runner.Result) string {
+	if res == nil {
+		return ""
+	}
+	var imgs []struct {
+		ID string `json:"Id"`
+	}
+	if json.Unmarshal(res.Stdout, &imgs) != nil || len(imgs) != 1 {
+		return ""
+	}
+	return imgs[0].ID
 }

@@ -153,9 +153,17 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --p
 # an unresolved placeholder or extra surface — the deletion targets the sole
 # line bearing that placeholder token, keeping this comment intact). Both files
 # are fixed literals — never a wildcard.
+#
+# Each compose.up form also exists with a trailing --no-build. An appliance
+# (compose_no_build = true) keeps ONLY the --no-build forms: its ClamAV sidecar
+# is a scanned, baked image, so this host must never be able to rebuild a
+# missing tag from source. Every other host keeps ONLY the plain forms. The
+# installer deletes the other pair by its exact line ending.
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} down
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} up -d
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} -f {compose_override_path} up -d
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} up -d --no-build
+culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} -f {compose_override_path} up -d --no-build
 
 # ─── compose.cli.cleanup.* (D1.6b) ──────────────────────────────────
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --cleanup-restore-leftovers --older-than * --keep-last *

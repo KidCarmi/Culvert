@@ -167,6 +167,7 @@ type Runner struct {
 	// recreate. Empty ⇒ single-file recreate (historical behavior). It is a
 	// fixed sudoers literal, never a wildcard.
 	composeOverrideFile string
+	composeNoBuild      bool
 	useSudo             bool
 	envAllow            []string
 	// envOverlayOnly is the subset of envAllow that may ONLY be sourced
@@ -203,8 +204,12 @@ type Options struct {
 	// Empty ⇒ no override. Validated when non-empty: bare filename, no
 	// traversal, and must differ from ComposeFile.
 	ComposeOverrideFile string
-	UseSudo             bool
-	StageTimeout        time.Duration
+	// ComposeNoBuild appends --no-build to the proxy-recreate `up` (the
+	// {compose_no_build} placeholder). Set on appliance hosts, whose sudoers
+	// carries only the --no-build forms of that line.
+	ComposeNoBuild bool
+	UseSudo        bool
+	StageTimeout   time.Duration
 
 	// CaptureMax bounds per-stream capture (stdout, stderr) in bytes.
 	// Default 1 MiB if zero.
@@ -352,6 +357,7 @@ func New(opts Options) (*Runner, error) {
 		composeProjectDir:   filepath.Clean(opts.ComposeProjectDir),
 		composeFile:         opts.ComposeFile,
 		composeOverrideFile: opts.ComposeOverrideFile,
+		composeNoBuild:      opts.ComposeNoBuild,
 		useSudo:             opts.UseSudo,
 		envAllow:            envAllow,
 		envOverlayOnly:      envOverlayOnly,
@@ -380,13 +386,14 @@ func (r *Runner) ComposeStatus(ctx context.Context) (*Result, error) {
 // placeholder (present only on TemplateComposeUp) expands to
 // `-f <compose_project_dir>/<compose_override_file>` when an override is
 // configured, or to NOTHING when it is not — so a host with no override
-// keeps the exact single-`-f` recreate. argv[0] is the executable; the
+// keeps the exact single-`-f` recreate. `{compose_no_build}` (also only on
+// TemplateComposeUp) expands to `--no-build` when ComposeNoBuild is set. argv[0] is the executable; the
 // runner prepends `sudo -n` if useSudo.
 //
 // D1.6a templates have no operator-supplied positional args. D1.6b/c
 // expansions will accept validated args via additional methods.
 func (r *Runner) buildArgv(tmpl *Template) []string {
-	out := make([]string, 0, len(tmpl.BaseArgv)+4) // +2 sudo, +2 override
+	out := make([]string, 0, len(tmpl.BaseArgv)+4) // +2 sudo, +2 override; {compose_no_build} replaces its own slot
 	if r.useSudo {
 		out = append(out, r.sudoBinary, "-n")
 	}
@@ -403,6 +410,12 @@ func (r *Runner) buildArgv(tmpl *Template) []string {
 			// before the `up -d` verb (Compose applies later -f over earlier).
 			if r.composeOverrideFile != "" {
 				out = append(out, "-f", filepath.Join(r.composeProjectDir, r.composeOverrideFile))
+			}
+		case "{compose_no_build}":
+			// Expands to `--no-build` on a no-build host, to nothing otherwise.
+			// It is the LAST token, matching the sudoers line exactly.
+			if r.composeNoBuild {
+				out = append(out, "--no-build")
 			}
 		default:
 			out = append(out, a)

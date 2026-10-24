@@ -105,8 +105,16 @@ in `/etc/docker/daemon.json`, but an engine upgrade still restarts containerd,
 so the tool stops the stack first:
 
 ```
-sudo culvert-os-update docker      # candidate versions → compose stop → unhold → upgrade → hold → restart docker → compose up
+sudo culvert-os-update docker      # candidate versions → compose stop → unhold → upgrade → hold → restart docker → sidecar check → compose up --no-build
 ```
+
+Every stack start on the appliance runs `culvert-clamav-image ensure` first, then
+`docker compose up -d --no-build`. If the engine upgrade lost the ClamAV sidecar
+image, it is reloaded from the baked archive after the archive's SHA-256 and the
+loaded image ID match what the OVA build recorded. Anything else is refused:
+the stack is **not** started, the reason is in
+`/var/lib/culvert-appliance/clamav-image.state`, and nothing is ever built or
+pulled. `sudo culvert-clamav-image status` shows the last outcome.
 
 Cadence: review monthly against Docker's release notes; apply within the
 window; immediately for an engine/runc/containerd CVE with a published
@@ -122,10 +130,12 @@ repo-bound digest and retags `culvert/proxy:pinned` at the sudo boundary
 Alpine package CVEs in the image are fixed by a new Culvert release (the image
 is rebuilt per release); the SBOM/CVE evidence for the pinned image is in
 [`sbom-cve-evidence.md`](sbom-cve-evidence.md). The ClamAV sidecar's **engine**
-is the compose file's local `culvert/clamav` tag — the official 1.4.6 image
-pinned by digest plus pcre2 10.49 (CVE-2026-103111), built from
-`appliance/clamav` and updated with Culvert releases; its **signatures** are
-refreshed by freshclam inside the container.
+is the compose file's local `culvert/clamav` tag — the official 1.5.4 image
+pinned by digest plus the package pins in `appliance/clamav/Dockerfile`. On
+the appliance it is baked into the OVA as a scanned archive and is never built
+on the guest: a new sidecar arrives with a new appliance image (a re-run of the
+installer refuses a bundle naming a sidecar this appliance does not have). Its
+**signatures** are refreshed by freshclam inside the container.
 
 ## Ownership and cadence summary
 
