@@ -32,6 +32,7 @@ func bulkCapOverCategory(name string) CategoryEntry {
 }
 
 func TestBulkCap_ClusterSnapshotApplyRejectsOverCapCategory(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	snapshotCatStore(t)
 	catStore.ReplaceAll([]CategoryEntry{{Name: "keep", Hosts: []string{"keep.example.com"}}})
 

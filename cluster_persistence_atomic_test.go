@@ -311,7 +311,7 @@ func TestPersistEnrollCerts_SiblingCertsAtomicWriteFile(t *testing.T) {
 	if loadedKey.Curve != privKey.Curve {
 		t.Errorf("dp-node.key: curve mismatch")
 	}
-	if loadedKey.D.Cmp(privKey.D) != 0 {
-		t.Errorf("dp-node.key: D scalar mismatch")
+	if !loadedKey.Equal(privKey) {
+		t.Errorf("dp-node.key: private key mismatch")
 	}
 }
