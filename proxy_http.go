@@ -84,6 +84,40 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 
 func (cr *countingReader) Close() error { return cr.r.Close() }
 
+// requestBodyIsKnownEmpty reports whether b is net/http's known-empty request
+// body, the http.NoBody sentinel.
+//
+// It exists because the stdlib's "this request carries no body" fast path is
+// keyed on the sentinel's IDENTITY, not on ContentLength: Request.outgoingLength
+// returns 0 only for a nil body or http.NoBody, and reads ContentLength == 0 on
+// any OTHER non-nil body as "length unknown" (-1). So wrapping a known-empty
+// body does not merely add a Read layer — it tells the framing layer the length
+// is unknown, and net/http then pays to find out, once per request, on both legs
+// that serialize an outbound request:
+//
+//   - transferWriter.shouldSendChunkedRequestBody sees an unknown length and,
+//     for the methods that usually lack a body (GET/HEAD/DELETE/OPTIONS/
+//     PROPFIND/SEARCH), calls probeRequestBody: a fresh GOROUTINE reading one
+//     byte, a buffered channel and a 200 ms time.Timer, all on the critical path
+//     before the request line can be written. Measured on a bodyless GET
+//     forward: 69 → 80 allocs/op and 9 662 → 10 485 B/op for the same bytes on
+//     the wire (proxy_emptybody_bench_test.go, go1.27.3; the +11 delta is the
+//     same on go1.26.10).
+//   - for every other method it does not probe at all: it frames the empty body
+//     as "Transfer-Encoding: chunked", so a client's own "Content-Length: 0"
+//     POST/PUT reaches the origin re-framed as a zero-length chunked body.
+//
+// Both costs apply to Transport.RoundTrip (the plain-HTTP forward) and to
+// Request.Write (the SSL-inspected inner leg), because both route through
+// newTransferWriter. Verified against the go.mod toolchain's net/http; the
+// NoBody check itself is the documented contract of http.NoBody, so a wrapper
+// that skips the sentinel stays correct regardless of how the probe evolves.
+//
+// Scope is exactly the sentinel: any other body — a real one, a chunked one, an
+// HTTP/1.0 close-delimited one, or nil — is reported as not-known-empty and its
+// caller behaves exactly as before.
+func requestBodyIsKnownEmpty(b io.ReadCloser) bool { return b == http.NoBody }
+
 // readErrTracker wraps a response body and remembers the first non-EOF read
 // error, so the caller can distinguish a parent-side body failure from a
 // client-side write failure after io.Copy (which folds both into one error).
@@ -110,7 +144,13 @@ func (t *readErrTracker) Read(p []byte) (int, error) {
 // body). Extracted from handleHTTP verbatim (funlen; behavior identical).
 func prepareHTTPForward(w http.ResponseWriter, r *http.Request) (string, *countingReader) {
 	var reqCounter *countingReader
-	if r.Body != nil {
+	// A known-empty body is left as the http.NoBody sentinel — see
+	// requestBodyIsKnownEmpty for why the identity matters. Both jobs of the
+	// wrapper are vacuous on an empty body: it cannot exceed maxRequestBody, and
+	// the counter would stay at 0, which is exactly what the skip branch
+	// contributes to statBytesSent today. So this is value-preserving on the
+	// accounting and the bound, and it keeps the transport's no-body fast path.
+	if r.Body != nil && !requestBodyIsKnownEmpty(r.Body) {
 		// Wrap request body: limit + count bytes sent upstream.
 		reqCounter = &countingReader{r: http.MaxBytesReader(w, r.Body, maxRequestBody)}
 		r.Body = reqCounter

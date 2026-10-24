@@ -16,6 +16,15 @@ Security-critical state MUST be visible without opening multiple screens:
   healthy? CA valid? logs persisting? updates current?) computed from real
   endpoints only: `/api/stats.logWriteErrors`, `/api/dashboard/health.logStore`,
   `/api/ca-cert.notAfter`, SSE `updateAvailable`, `/api/diagnostics`.
+
+  > **Correction (post-2026-07-11):** the Updates posture item and its SSE
+  > `updateAvailable` / `latestVersion` source no longer exist: DEBT-008 deleted
+  > the legacy `updater/` module and its `/api/update/*` routes (see
+  > `docs/engineering/TECHNICAL-DEBT-REGISTER.md` DEBT-008 and
+  > `INFORMATION-ARCHITECTURE.md`). Software delivery is **Release** management
+  > (`/api/releases*`) and applying a release is an **Upgrade**
+  > (`PRODUCT-TERMINOLOGY.md`). Do not reintroduce an Updates item or the
+  > "Update available" state; the references to them here are historical.
 - Degradations that today live only in Diagnostics (risky-mode warnings) or in
   raw JSON (`logWriteErrors`) surface as dashboard "needs attention" items with
   a drill-down link.
