@@ -95,6 +95,25 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-16 — `CHAOS-83` CLAIMED (placeholder, commit one). Domain: elapsed-time
+measurement taken on the WALL clock on the data path and the readiness probe —
+the `time.Since(time.Unix(0, stamp))` idiom, where the stamp was written by
+`time.Now().UnixNano()` and the monotonic reading was therefore discarded on
+both sides. `internal/admission` already treats this exact hazard as a
+contract (`FreshCount`, engine.go: "A NEGATIVE age (the clock moved back
+between the stamp and this read) is stale, not fresh", and
+`internal/admission/AGENTS.md` lists "future stamps" as a standing review
+control); the sweep asks where else the idiom appears WITHOUT that reasoning
+applied. Claimed as `CHAOS-71` / §41 after reading merged `main`: 67 and 68
+remain allocated to other open sweeps (§§37–38 reserved), 69 and 70 are
+merged. Renumbered in merge order to `CHAOS-83` / §47 when main was brought
+in again: `CHAOS-71` had merged as §44 (the CP gRPC listener) with §41–§43
+taken by `CHAOS-74`/`CHAOS-75`, 76–82 were claimed by open branches, and §45/§46
+are claimed by open sweeps. Findings and gates are written up in §47 below.** This row is
+committed before any code is written — the remedy the header above reaches
+independently after ten collisions, and which §35, §39 and §40 each applied
+first.
+
 **2026-10-11 — `CHAOS-75` sweep (the release-dispatch plane's detached executor
 goroutines). Id claimed in a committed placeholder row as commit one**, per the
 convention the header above reaches twice independently after ten collisions;
@@ -10778,3 +10797,237 @@ required before merge; each is now in the tree.
 Remaining risk, recorded rather than fixed: MANUAL promotion of a node whose
 listener is dark is still allowed (break-glass by design); it will withhold and
 fence again until the listener serves.
+
+---
+
+## 47. CHAOS-83 — Elapsed time measured on the wall clock, and the storage type that caused it
+
+**Date:** 2026-10-16 · **Domain:** Proxy data path / readiness probe /
+durability observability (the clock-skew, clock-rollback and NTP-failure
+domain — the least-covered entry in this register: one prior mention of NTP) ·
+**Code:** `monotime.go` (new), `proxy_tunnel.go` (`newTunnelActivityStamp`,
+`idleCopyCounted`), `readyz_dp_health.go` (`dpCPPollFailingSince`,
+`appendDPHealthChecks`), `roster_persist_durability.go` (both log gates) ·
+**Register rows:** PX-26 (CLOSED), HA-20 (CLOSED), ST-13 (CLOSED), CA-21 (OPEN) ·
+**Gates:** `monotime_chaos_test.go` (10 — the roster gate was added when the overlapping sweep #1650 handed this sweep the roster row)
+
+### Executive summary
+
+Three production decisions measured elapsed time with this idiom:
+
+```go
+stamp := time.Now().UnixNano()   // writes the stamp
+elapsed := time.Since(time.Unix(0, stamp))   // reads it back
+```
+
+`UnixNano()` **discards** the monotonic reading, and `time.Unix(0, n)`
+reconstructs a value that has none, so `Sub` falls back to **wall-clock**
+subtraction — Go subtracts monotonic readings only when *both* operands carry
+one. A backwards clock step (an NTP correction of a long-drifted clock, a VM
+suspend/resume, a container host's clock change, `hwclock` at boot, a manual
+`date`) therefore leaves the stamp in the **future**, and `elapsed` goes
+**negative** — which satisfies neither `elapsed >= deadline` nor
+`elapsed >= grace`. Each decision simply stops firing, for as long as the step
+went:
+
+- **the tunnel idle reaper** (`proxy_tunnel.go`, 1h window) stops reaping. It is
+  the only thing that collects a half-open tunnel — peer still ACKs, never sends,
+  never FINs — and each one it holds costs two sockets, two goroutines and two
+  pooled relay buffers. The tunnels it then holds are *precisely* the idle ones
+  it exists to collect, and the CONNECT-bypass and SOCKS5 paths
+  (`socks5.go:587`) both depend on it. Under the connection pressure this
+  register's brief names — thousands of simultaneous connections, long-lived
+  tunnels, a mass reconnect storm — that is FD and memory exhaustion on the data
+  plane. The forward-step direction is the mirror image: every long-lived tunnel
+  in the fleet is torn down at once on its next deadline pop.
+- **the DP readiness grace window** (`readyz_dp_health.go`, 5min) stops closing.
+  `cp_poll` keeps reporting `ok` while the control plane is genuinely
+  unreachable and the node's policy goes stale — with the probe asserting it is
+  fine. This is the fail-**open** direction of a probe whose whole job is to
+  make a sustained CP outage visible. Be precise about the blast radius: the
+  DEFAULT `/ready` verdict is report-only on this row (200/ready either way —
+  `TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow` pins that, and it
+  is a deliberate contract so a CP outage cannot eject the whole DP fleet from a
+  default-configured LB), so what the suppressed row costs there is the SIGNAL.
+  On a **strict** probe (`/ready?strict=1`), which does gate on the row
+  (`TestHandleReady_StrictGatesFailRows`: 503/not_ready), the suppressed `fail`
+  also keeps the verdict `ready` and so holds the node in the load-balancer
+  rotation.
+- **the roster durability-degraded log gate** (`roster_persist_durability.go`)
+  stops opening. A negative age is always `< interval`, so the gate latches into
+  its suppressed branch and the one operator-visible line saying admin roster
+  writes are **not surviving a restart** — §40's entire subject — goes unsaid,
+  while `rosterPersistSuppress` keeps counting where nobody reads it.
+
+### The finding is the storage type, not the carelessness
+
+This codebase already knows this contract, and states it, in the place where it
+matters most. `ha_lease.go:232` — the HA fencing lease's self-fence deadline,
+where getting it wrong means **split brain** — carries the comment:
+
+> `time.Since` over the monotonic clock keeps this immune to wall-clock jumps
+
+and it is correct, because `h.leaseConfirmedAt` is a **`time.Time` struct
+field**: a `time.Time` retains its monotonic reading, so `time.Since` over it is
+monotonic *for free*, and the author had to do nothing but not convert it.
+`internal/halease` is correct for a second, independent reason — the etcd
+backend, not the caller's wall clock, is the lease-time authority (ADR-0005
+Finding 3). `internal/mcp/rollout/evidence.go`'s `elapsed()` is correct too: an
+injected `now` plus a `d < 0` clamp over a genuinely absolute persisted
+soak-start. And `internal/admission`'s `clusterCountStore.FreshCount` is
+correct, with the hazard spelled out explicitly —
+
+> A NEGATIVE age (the clock moved back between the stamp and this read) is
+> stale, not fresh. `age >= maxAge` alone reads a future stamp as brand new and
+> would honour the broadcast for however far back the clock went
+
+— and `internal/admission/AGENTS.md` lists "future stamps" as a standing review
+control.
+
+So the contract was understood, written down, commented and reviewed. Sort the
+sites by how they **store** the stamp and the pattern is exact:
+
+| stamp storage | sites | monotonic? |
+|---|---|---|
+| `time.Time` struct field | `ha_lease.go` (self-fence) | correct **for free** |
+| injected `now` + absolute instant | `internal/mcp/rollout`, `internal/ocsp` (arg) | correct by clamp (rollout) |
+| `atomic.Int64` | `internal/admission` | correct, by an **explicit** negative-age guard |
+| `atomic.Int64` | `proxy_tunnel.go`, `readyz_dp_health.go`, `roster_persist_durability.go` ×2, `internal/ocsp` | **wrong** |
+
+Every site that got it wrong stores its stamp in an `atomic.Int64`, and every
+`atomic.Int64` site is either wrong or carries a hand-written guard. That is not
+a coincidence and it is not inattention: `atomic.Int64` is the *right* choice at
+all five sites — a lock-free stamp shared between two relay goroutines, or read
+on a probe path, is exactly what it is for, and `conventions.md` explicitly
+forbids replacing a proven lock-free hot path with a generic `RWMutex`. But
+`atomic.Int64` cannot hold a `time.Time`, so it **forces** a conversion through
+`UnixNano()` — and that conversion is the precise point at which the monotonic
+reading is silently dropped. The type system does not notice, the linters do not
+notice, and the resulting code reads exactly like the correct version.
+
+**The defect is therefore a property of the representation, not of the author.**
+That is why this sweep's fix is a shared primitive rather than four local
+patches: `monoNanos()` makes the `atomic.Int64` representation safe by
+construction, so the next lock-free stamp is correct by default instead of
+correct only if its author reasons about NTP.
+
+### Why monotonic, and NOT admission's negative-age guard
+
+Copying `FreshCount`'s `age < 0 ⇒ stale` into these three callers would have been
+the obvious move and it would have been **wrong**. Admission's guard is right for
+admission: a bad stamp there must fail toward the local decision, so reading a
+future stamp as stale is fail-closed.
+
+At these sites "expired" does not mean *fall back* — it means **tear something
+down**, or **flip a readiness row to fail**. `negative ⇒ expired` would reap live tunnels
+and flap `cp_poll` on every node in the fleet on *any* backwards step, including
+the sub-second NTP corrections that are entirely routine. Measuring on the
+monotonic clock removes the choice: the elapsed time is simply correct across a
+step in either direction, and no caller needs a negative branch at all.
+`monotime_chaos_test.go` pins that decision as a **negative control** — a future
+stamp must leave `cp_poll` at `ok`, not flip it to `fail`.
+
+### A sentinel the domain change would have broken
+
+`0` is the "never stamped" sentinel at every one of these call sites
+(`since != 0`, `last != 0`), and the readiness probe has a *tested* contract that
+a bare failing flag with no transition stamp stays `ok`. On the wall clock that
+sentinel was unreachable for free: `0` is 1970. In a process-relative domain `0`
+is the process's own first nanosecond — a legitimate stamp that would read as "no
+stamp" and suppress the transition it had just recorded. `monoNanos` is therefore
+defined to return **strictly positive** stamps (elapsed + 1; `monoSince`
+subtracts two stamps so the offset cancels and no caller sees it), and
+`TestChaos83_MonoNanosIsNeverZero` pins it. This was found by the probe gate
+failing, not by inspection.
+
+### Risk matrix
+
+| Row | Finding | Likelihood | Impact | Status |
+|---|---|---|---|---|
+| **PX-26** | Tunnel idle reaper measured its 1h deadline on the wall clock, so a backwards step suspended reaping of exactly the idle/half-open tunnels it exists to collect — two sockets, two goroutines and two pooled buffers each, on the CONNECT-bypass and SOCKS5 paths | Medium (any NTP step-back, VM suspend/resume, host clock correction; routine in virtualised fleets) | **High** — FD/goroutine/memory exhaustion on the data plane under connection pressure; forward steps tear down every long-lived tunnel at once | **CLOSED** |
+| **HA-20** | DP `cp_poll` readiness grace measured on the wall clock, so a backwards step kept the row at `ok` while the control plane was unreachable | Medium (same producers; needs a step larger than the 5min grace to fully mask) | **High** — fail-**open** readiness: the outage signal is lost on the default (report-only) probe, and on a strict probe (`/ready?strict=1`) the suppressed `fail` also holds the node in the LB rotation serving policy it cannot refresh | **CLOSED** |
+| **ST-13** | Roster durability-degraded log gate measured on the wall clock; a negative age is always `< interval`, latching the gate suppressed | Medium | Medium — the only operator-visible signal that admin roster writes are not surviving a restart (§40's subject) goes unsaid while the suppressed counter climbs unread | **CLOSED** |
+| **CA-21** | `internal/ocsp`'s `allowTruncationLog` has the identical defect over an `atomic.Int64` nanos stamp | Medium | Low — a log gate with no enforcement consequence | **OPEN — deferred, see residual risk**; the overlapping sweep `CHAOS-84` (#1650) closes it with a package-local magnitude gate |
+| — | HA self-fence deadline (`ha_lease.go:232`), `internal/halease` lease authority, `internal/admission` `FreshCount`, `internal/mcp/rollout` `elapsed()` | — | — | **Already correct** — see the storage-type table above for why |
+
+### Verification
+
+`monotime_chaos_test.go` carries 9 gates. Four of them were confirmed to **fail
+against the pre-fix tree** (the production change was reverted and the suite
+re-run), which is the only evidence that a gate is a defect gate rather than a
+tautology:
+
+- `TestChaos83_TunnelActivityStampIsMonotonicDomain` and
+  `..._CPPollFailingSinceIsMonotonicDomain` — the stamp must land in the
+  monotonic domain, not near `time.Now().UnixNano()`.
+- `TestChaos83_CPPollGraceFlipsOnMonotonicElapsedOnly` — the grace window closes
+  on monotonic elapsed, and a future stamp does **not** flip the row (the
+  negative control above).
+- `TestChaos83_NoWallClockElapsedIdiomInPackageMain` — an AST guard over all 385
+  package-main sources banning the `time.Unix(0, stamp)` elapsed idiom. The ban
+  is deliberately narrow: `time.Unix(0, nanos)` is only ever an elapsed stamp,
+  while `time.Unix(seconds, 0)` is a genuine absolute instant (a wire-carried
+  token expiry in `controlplane.go:257` and `session.go:118`, an IdP token expiry
+  in `auth_oidc.go:450`, a timestamp formatted for display) and stays legal. It
+  ships with a verbatim pre-fix/legitimate control source and asserts it flags
+  exactly the two pre-fix shapes — so the guard cannot silently match nothing.
+
+The remaining gates pin the foundations: `monoEpoch` must carry a monotonic
+reading (if it is ever round-tripped through a value that strips it, every
+measurement silently degrades back to the wall clock and every gate above keeps
+passing), `monoSince` is never negative for a prior stamp, `monoNanos` is never
+zero, and the behavioural end — a silent tunnel is reaped once the *monotonic*
+elapsed passes the idle window, driven by a virtual clock running 100× real time.
+
+> **The behavioural test's first draft was wrong in an instructive way.** It
+> advanced a frozen fake clock by one step before the first read-deadline pop.
+> The relay refreshes the activity stamp whenever a copy returns bytes, so the
+> refresh captured the already-advanced value and the tunnel then looked freshly
+> active *forever* — the test timed out against correct code. A one-step clock
+> cannot model this path; the clock has to **run**, which is also the honest
+> model of the thing being tested.
+
+Checks run: `go vet ./...`, `go mod tidy -diff`, `CGO_ENABLED=0` amd64 build and
+`GOOS=linux GOARCH=arm64` cross-build, `go test -race` over the 73 tests in the
+touched areas (tunnel idle/drain, readyz DP, roster durability, SOCKS5), the
+shuffled double determinism run on the root package, and
+`docs/agent-context/check.py`. **`golangci-lint` could not run in this
+environment** and is recorded as blocked, not passed: the available v2.5.0 binary
+is built with go1.24 and `go/types` panics on this tree's go1.26 sources
+(`package requires newer Go version go1.26`), and `go install ...@v2.5.0`
+re-execs the linter module's own pinned toolchain, so a go1.26-built binary could
+not be produced here. CI's `go install` under the pinned compiler is unaffected.
+`gofmt` is clean on every changed file and `go vet` passes.
+
+### Residual risk / deliberately left
+
+- **`internal/ocsp`'s `allowTruncationLog` is the same defect, unfixed**
+  (`internal/ocsp/ocsp.go:101`): `now.Sub(time.Unix(0, last))` over an
+  `atomic.Int64` nanos stamp, so a backwards step latches the responder-cap
+  notice into its suppressed branch. Left open as **CA-21** rather than fixed
+  here: it is a log gate with no enforcement consequence, and the fix belongs to
+  that package — it takes an injected `now time.Time`, so it needs either a
+  package-local monotonic source or admission's negative-age guard, not package
+  main's `monoNanos`. Widening this sweep into an internal package to change a
+  log interval is not proportionate.
+- **The AST guard covers package main only.** Internal packages are not scanned;
+  extending it needs a per-package decision about absolute-vs-elapsed stamps,
+  which is the same judgement CA-21 defers.
+- **Monotonic readings do not advance while the machine is suspended** on some
+  platforms, so `monoNanos` measures elapsed *running* time. For an idle-teardown
+  deadline and a probe grace window — both of which bound how long this process
+  holds something or hides something — running time is the intended quantity, not
+  civil time. A tunnel idle across a host suspend is reaped one window after the
+  host resumes, which is the desired behaviour and a strict improvement on the
+  pre-fix code, where the suspend's clock correction *delayed* the reap.
+- **Nothing here changes an absolute-time decision.** Session and IdP token
+  expiry, certificate validity and the OCSP `nextUpdate` horizon are wire- or
+  disk-carried civil instants and must stay on the wall clock; a token that
+  outlives its `exp` because the local clock rolled back is an inherent property
+  of a signed bearer token, not a defect this sweep could fix. `store_logclock.go`
+  is likewise correct: it memoises the render of an absolute wall-clock second.
+- **`RevokeUser`'s non-persistence was re-derived independently** during this
+  sweep (the `users` map is neither persisted by `SaveRevocations` nor gossiped by
+  `ExportRevocations`, and `ui_middleware.go:271`'s per-request `UIUserExists`
+  check is what currently backstops it). It is already recorded as **AU-19** and
+  is not re-opened here.

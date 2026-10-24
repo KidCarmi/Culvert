@@ -2234,6 +2234,58 @@ endpoints for credentialed parents.
 
 ### Fixed
 
+- Three decisions measured elapsed time on the **wall clock** and stopped firing
+  across a backwards clock step — an NTP correction of a drifted clock, a VM
+  suspend/resume, a container host's clock change, `hwclock` at boot. All three
+  stamped with `time.Now().UnixNano()` and read back with
+  `time.Since(time.Unix(0, stamp))`; `UnixNano()` discards the monotonic reading
+  and `time.Unix(0, n)` reconstructs a value that has none, so Go subtracts two
+  wall-clock values. A step backwards leaves the stamp in the *future* and the
+  elapsed duration goes **negative**, which satisfies neither `>= deadline` nor
+  `>= grace`, so each decision was suspended for however far the step went.
+
+  The **tunnel idle reaper** (1h window) stopped reaping, and the tunnels it
+  then held were precisely the idle, possibly half-open ones it exists to
+  collect — peer still ACKs, never sends, never FINs — at two sockets, two
+  goroutines and two pooled relay buffers each, on the CONNECT-bypass and
+  SOCKS5 paths alike. Under many simultaneous connections or long-lived tunnels
+  that is file-descriptor and memory exhaustion on the data plane; a step
+  *forwards* is the mirror image and tears down every long-lived tunnel at once.
+  The **data-plane readiness grace** (5min) stopped closing, so `/ready` kept
+  reporting `cp_poll: ok` while the control plane was genuinely unreachable and
+  the node's policy went stale. The default verdict is report-only on that row,
+  so there the loss is the signal itself; on a strict probe (`/ready?strict=1`),
+  which does gate on the row, the suppressed `fail` also kept the node's verdict
+  `ready` and so held it in the load-balancer rotation. And both **roster durability-degraded log gates** latched
+  suppressed (a negative age is always under the interval), silencing the only
+  operator-visible signal that admin roster writes are not surviving a restart
+  while the suppressed counter climbed where nobody reads it.
+
+  Sorting the affected and unaffected sites by how they *store* the stamp makes
+  the cause exact: every site that was wrong holds it in an `atomic.Int64`,
+  which cannot hold a `time.Time` and so forces the `UnixNano()` conversion that
+  drops the monotonic reading. `atomic.Int64` remains the right choice at all of
+  them — a lock-free stamp shared between two relay goroutines, or read on a
+  probe path — so the fix is one shared primitive (`monoNanos`/`monoSince`) that
+  makes that representation safe by construction rather than four local patches.
+  The HA self-fence deadline was already correct and explicitly so, because it
+  keeps a `time.Time` field, which retains its monotonic reading for free.
+
+  Deliberately *not* implemented as `internal/admission`'s negative-age guard:
+  there a bad stamp must fail toward the local decision, but here "expired"
+  tears a tunnel down or flips a readiness row to fail, so "negative means expired"
+  would reap live tunnels and flap every node's probe on any backwards step,
+  including the sub-second NTP corrections that are routine. A negative control
+  pins that choice. Absolute-time decisions are untouched: session and IdP token
+  expiry, certificate validity and log-timestamp rendering are civil instants
+  and stay on the wall clock. Gates: 9, four verified failing against the
+  pre-fix tree, including an AST guard over all 385 package-main sources that
+  bans the `time.Unix(0, nanos)` elapsed idiom while leaving the legitimate
+  `time.Unix(seconds, 0)` absolute uses alone. `internal/ocsp` has the same
+  defect in a log gate, recorded as register row CA-21 rather than widening this
+  change into another package. Review:
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §47 (CHAOS-83).
+
 - A leaf-certificate sign already in flight could outlive the CA it was started
   against. Replacing the root CA (`InitCA`, `ImportBundle`, `LoadCustomCA`, and
   `ClearCache`) cleared the leaf cache, which is not sufficient on its own: a
