@@ -146,10 +146,12 @@ func sseAuthStillValid(r *http.Request) bool {
 		return false // revoked, expired, or tampered session
 	}
 	if sess != nil {
-		if sess.Provider == "local" && !cfg.UIUserExists(sess.Sub) {
-			return false
-		}
-		return true
+		// The SAME admission decision the connect-time gate made
+		// (classifyUISession, SEC-UISESS-1), not a restatement of it: a
+		// deleted user, a foreign-provider token or a role this build does
+		// not enroll ends the stream.
+		_, verdict := classifyUISession(sess)
+		return verdict == uiSessionValid
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
 	if user, pass, ok := r.BasicAuth(); ok {
@@ -311,6 +313,17 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_proxy_oversize_host_rejected_total Requests refused because the client-supplied destination authority exceeded the byte limit. Sustained growth means a client is probing the proxy port with unresolvable oversize hosts\n")
 	fmt.Fprintf(w, "# TYPE culvert_proxy_oversize_host_rejected_total counter\nculvert_proxy_oversize_host_rejected_total %d\n",
 		proxyOversizeHostRejected.Load())
+
+	// Inner requests on a TLS-inspected tunnel whose Host/:authority did not
+	// name the CONNECT target policy authorized. Always emitted, for the same
+	// reason as the counter above: the pin is unconditional in every build, so a
+	// flat zero means "no client has done this", never "the gate is off". A
+	// conforming client cannot trip it — the forged leaf names exactly one host
+	// — so sustained growth is a client reusing an authorized tunnel to reach a
+	// destination the policy engine never evaluated.
+	fmt.Fprintf(w, "\n# HELP culvert_proxy_inner_host_mismatch_blocked_total Inner requests on an inspected tunnel refused because their Host/:authority did not match the authorized CONNECT destination. A conforming client cannot trip this; sustained growth means tunnel reuse against an unevaluated destination\n")
+	fmt.Fprintf(w, "# TYPE culvert_proxy_inner_host_mismatch_blocked_total counter\nculvert_proxy_inner_host_mismatch_blocked_total %d\n",
+		proxyInnerHostMismatchBlocked.Load())
 
 	// CHAOS-70: admin-roster durability. These are deliberately distinct from
 	// the storage plane's generic storage_write_failed, which says only that

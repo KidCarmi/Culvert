@@ -7,7 +7,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The pinned Go toolchain moves from go1.26.10 to go1.27.3.** The `go.mod`
+  `toolchain` line, both production Docker builder stages and the maint-agent E2E
+  builder move together, so CI, release binaries and images keep using one
+  compiler (`toolchain_consistency_test.go`). The images are pinned to the
+  multi-arch index `golang:1.27.3-alpine@sha256:b8c9b82a…`. The module minimum
+  (`go 1.26.6`) is unchanged. The two prerequisites from roadmap/CI-REDESIGN.md §20
+  landed first: golangci-lint v2.15.0 (#1683) and graceful GOAWAY for inspected
+  HTTP/2 tunnels on the Go 1.27 x/net server (#1684). 1.27.3 rather than 1.27.2,
+  because 1.27.2 is still affected by GO-2026-6809. The CI gates keep the gosec
+  v2.29.0 rules, but now build them from a `tools/gosec` module that raises only
+  `golang.org/x/tools` to v0.52.0. The released v2.29.0 cannot load Go 1.27
+  export data, and v2.30.0 regressed package loading.
+
 ### Fixed
+
+- **Built with Go 1.27, the shutdown drain sent no GOAWAY to inspected HTTP/2
+  tunnels.** Under `go1.27 && !http2legacy`, x/net v0.61 compiles a different
+  `http2.Server` (`server_wrap.go`) that wraps net/http's HTTP/2 server. That
+  server serves a `ServeConn` call with a non-nil `BaseConfig` through a one-off
+  copy of the `http.Server`, so the shared base server's `Shutdown` never reached
+  the tunnel. Clients kept opening streams until the 15 s drain deadline
+  force-closed them along with their in-flight streams. This was not a policy
+  bypass, but it broke the graceful-drain contract;
+  `TestH2InspectDrain_GracefulGoawayCompletesInflightAndRefusesNew` failed 10/10
+  on go1.27.3 and passed on go1.26.10. Inspected tunnels are now served through a
+  single `serveConn` wiring that picks `BaseConfig` per implementation. The pick
+  uses the same build constraint x/net uses, so both always agree. The wrapping
+  server gets a nil `BaseConfig` and serves through the base server it was
+  configured with. The original server keeps the base server, which is the only
+  place it reads `MaxHeaderBytes` from. Both toolchains now get the GOAWAY and
+  keep every limit. New tests pin the advertised `MAX_CONCURRENT_STREAMS`,
+  `MAX_FRAME_SIZE` and `MAX_HEADER_LIST_SIZE`, a `431` for an over-cap header
+  list, the per-tunnel context, and the GOAWAY re-fire for a tunnel that starts
+  after the first wave. The default build (go1.26.10) is unchanged in behavior.
+
+- **go-ldap v3.4.15 would have reclassified malformed-packet faults as "the directory answered".** v3.4.15 adds `ErrorMalformedPacket` (207) for decode
+  faults that v3.4.14 returned as plain errors, which `ldapUserBindIsUnreachable`
+  treats as unreachable. With the client-error ceiling still at 206, those faults
+  would have fallen outside the range: they would no longer arm the CHAOS-47
+  cooldown and would count as reachability evidence that clears it. The ceiling
+  now tracks `ErrorMalformedPacket`, so classification is unchanged across the
+  bump; `TestLDAPClientErrorCeil_TracksLibrary` caught the drift.
 
 - **A Control Plane gRPC listener fault terminated the whole appliance, and a
   listener that died after binding was silent and terminal (CHAOS-71).** The CP
@@ -373,6 +416,194 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   deterministically including under `-race`.
 
 ### Security
+
+- Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
+  not distrust compromised intermediate certificates. Culvert reaches it
+  through certificate verification (`x509.Certificate.Verify`, for example
+  the MCP acceptance PKI check). The `go.mod` toolchain line and both
+  Docker builder images move together; the `go` language minimum is
+  unchanged.
+- An inspected (TLS-decrypted) tunnel enforced policy on the CONNECT authority
+  but forwarded each inner request's own `Host` / `:authority` upstream verbatim,
+  and nothing compared the two (SEC-TUNHOST-1). A CONNECT is authorized **once**:
+  `handleTunnelInspect` derives `hostOnly` from the CONNECT line and everything
+  downstream is decided against it — `policyStore.Evaluate` ran on it, the
+  decryption profile resolved on it, the upstream TLS `ServerName` is it, and
+  every log row, scan verdict and CDR decision the tunnel produces is attributed
+  to it, because `runInspectExchange` threads `ex.host` and never `ex.req.Host`.
+
+  The decrypted stream, however, carries its own destination on every request.
+  `rq.Write` writes `req.Host` on the H1 leg and `upstreamCC.RoundTrip` sends it
+  as `:authority` on the H2 leg, so a client could open a tunnel to a destination
+  policy allowed and then ask that connection for a different one:
+
+      CONNECT allowed.example.com:443   → evaluated, allowed, MITM established
+        GET / Host: blocked.example.com → forwarded verbatim
+
+  The upstream connection is pinned to the CONNECT target's address, so this is
+  not SSRF — but any shared front end (a CDN, a cloud load balancer, any
+  multi-tenant vhost) routes by `Host`/`:authority`, so the response is the one
+  the **client** named, not the one policy allowed. Policy is consulted once, on
+  a host the client then declines to use, and the request log records the
+  authorized host for a retrieval of the unauthorized one, so the bypass is also
+  invisible to the operator reviewing traffic afterwards. Scan and CDR verdicts
+  are mis-keyed the same way. The H2 path's own comment had recorded the gap as a
+  pending refinement ("strict `:authority` pinning / 421 handling").
+
+  The inner host is now pinned to the CONNECT authority in `runInspectExchange`,
+  ahead of the round trip and of the header scrub — so an unauthorized
+  destination is never fetched, and the refusal does not depend on anything the
+  scrub rewrites. Both sides are reduced identically (port and IPv6 brackets
+  stripped, then IDNA-canonicalized), so the spellings the matchers already fold
+  to one destination still pass: case, a trailing dot, an explicit port, and a
+  U-label against the A-label the CONNECT carried. The pin anchors on the CONNECT
+  authority rather than the client's SNI deliberately: a client controls both its
+  SNI and its `Host`, so it can make them agree with each other and still name a
+  destination policy never saw — only the authorizing value is a safe anchor.
+  Fail-closed: a host that cannot be canonicalized on either side is refused
+  rather than compared loosely. Refusing cannot break a conforming client, since
+  the forged leaf carries a single SAN (`DNSNames` is exactly `[]string{host}`),
+  so HTTP/2 connection reuse for a second origin (RFC 9113 §9.1.1) is never
+  certificate-authorized; the client may open a tunnel for the host it actually
+  wants, which then receives its own policy decision. One gate serves both
+  protocols because `runInspectExchange` is the shared enforcement seam
+  (invariant C5).
+
+  **Scope, stated rather than implied:** the pin does not fire when the CONNECT
+  authority is an IP literal. A client that resolved the name itself legitimately
+  CONNECTs to an address and names the origin in SNI and `Host` (`curl
+  --resolve`, any client with its own resolver, and the shape this repository's
+  own inspect harness models by passing `target` and `serverName` separately to
+  `connectAndTLS`), so there is no name to compare and refusing would break
+  supported traffic. A deployment whose rules authorize by IP or CIDR therefore
+  still gets no name-level enforcement on the inner request, exactly as before.
+  Closing that means *evaluating* policy on the inner host rather than comparing
+  it — re-running the rulebase, the decryption profile and the attribution per
+  inner request — which is a policy-engine change, not a gate, and is the
+  recorded follow-up. This change closes the case that is both exploitable today
+  and decidable at this seam: a tunnel authorized for a **name**, reused for a
+  different name.
+
+  **Correction round — an absent inner authority is not harmless (Codex P1, PR
+  #1632).** The first revision treated an empty inner host as pinned, reasoning
+  that it names no competing destination and that an origin requiring a `Host`
+  would reject it anyway. The second half was the real error: it assumed the
+  ORIGIN's behaviour instead of enforcing here, which is the same fail-open
+  asymmetry this gate exists to remove. Measured against the tree rather than
+  argued — `runH1InspectLoop` reads inner requests with `http.ReadRequest`, NOT
+  through an `http.Server`, so the server's "missing required Host header" 400
+  never runs; `ReadRequest` accepts `"GET / HTTP/1.1\r\n\r\n"` and yields
+  `req.Host == ""`, and `Request.Write` then serializes a literal `Host: ` and
+  returns no error. A shared front end with a default or fallback virtual host
+  (an nginx `server_name _`, a CDN catch-all) answers such a request from that
+  vhost — a destination policy never evaluated, with the scan verdicts and the
+  log row still attributed to the CONNECT host. Empty inner hosts are now
+  refused, ahead of the IP-literal scope skip, because the default-vhost concern
+  does not depend on the tunnel target being a name. Substituting the authorized
+  authority was considered and rejected: it would have the gateway synthesize a
+  `Host` the client never sent. `TestInnerHostPin_EmptyInnerHostIsRefused` gates
+  it and states the mechanism rather than trusting the claim — it proves against
+  the real stdlib that the request is both accepted by the reader this path uses
+  and serialized with an empty `Host`, then asserts the refusal, so the branch
+  cannot be reverted by repeating the original reasoning.
+
+  **Correction round 2 — the comparison must not repair what the wire keeps
+  (Codex P1, PR #1632).** Square brackets are legal only around an IP literal,
+  but `hostutil.StripHostPort` ends in `strings.Trim(host, "[]")` — correct for
+  its own callers, which must accept the de-bracketed IPv6 shapes that reach
+  scan/bypass lookups — so it turned `Host: [allowed.example.com]` into the bare
+  authorized name. Measured, not argued: `http.ReadRequest` accepts that header
+  and keeps the brackets in `req.Host`, and `Request.Write` forwards those bytes
+  **verbatim**. So the pin saw a match for the authorized host and forwarded a
+  bracketed authority no vhost is configured for, letting a shared front end
+  answer from its default vhost — this gate's own bypass, reached *through* the
+  comparison rather than around it. The inner authority's bracket syntax is now
+  validated before anything is stripped: brackets must enclose a value that
+  parses as an IP, and a stray, unmatched or nested bracket is refused. The
+  check sits in this gate, not in `StripHostPort`, because that helper is a
+  shared seam the threat feed, DPI scanner, scan-exclusion matcher, autoexclude
+  cache and traffic redactor all read through. Only the inner side is checked:
+  `handleTunnelInspect` derives `hostOnly` through `net.SplitHostPort`, so a
+  bracketed CONNECT authority is already de-bracketed consistently for policy,
+  the dial and the upstream `ServerName`.
+
+  The sibling spellings were measured too, and are deliberately still accepted
+  because they are not this defect: a U-label is sent as the A-label by
+  `Request.Write` (`bücher.example.com` goes out as `xn--bcher-kva.example.com`),
+  so its forwarded bytes already match what was authorized; the `Host` field is
+  case-insensitive; and a trailing root dot is a valid authority for the same DNS
+  name. `TestInnerHostPin_BracketedDNSAuthorityIsRefused` gates the refusal and
+  pins the U-label control beside it, both asserted against the real stdlib
+  before the predicate is consulted, since the defect is exactly that the
+  comparison and the wire disagreed.
+
+  New counter `culvert_proxy_inner_host_mismatch_blocked_total` (always emitted,
+  so a flat zero means "no client has done this", never "the gate is off") and an
+  `INNER_HOST_MISMATCH` log line naming **both** hosts, since either alone says
+  nothing; both are client-influenced and go through `sanitizeLog` + `%q`
+  (CWE-117). Gates: the defect gate asserts the upstream was never *contacted*,
+  not merely that the exchange was blocked — a refusal taken after the round trip
+  would still have fetched the unauthorized resource — and was verified failing
+  against the verbatim pre-fix body. Controls pin that the authorized
+  destination still flows, that the client-resolved-address shape still flows on
+  both IPv4 and IPv6, that a self-consistent SNI/`Host` pair naming an
+  unauthorized destination is still refused (this fails CI if the pin is ever
+  "simplified" to compare against the SNI), and that `MatchFQDNNorm`'s
+  subdomain-inclusive semantics — correct for a policy rule, wrong here — are not
+  reused for the comparison. Plus the boundary table (case, trailing dot,
+  U-label/A-label, ports, IPv6 brackets, empty hosts, unnormalizable input), the
+  403 wire bytes on each protocol responder, and 400 concurrent refusals under
+  `-race`.
+- An admin session was any session the cookie was *named* after
+  (SEC-UISESS-1). `ps_session` (the proxy end-user cookie,
+  `setSessionCookie`) and `ps_ui_session` (the admin operator cookie,
+  `setUISessionCookie`) are signed with the same HMAC key and carry the same
+  `Session` payload, with no audience or purpose field between them — so the
+  cookie name was the only separation, and the caller picks the name.
+
+  Both fields that could have refused the replay declined instead.
+  `sessionRoleOrReject("")` resolves to `RoleAdmin`, deliberately, for
+  pre-RBAC sessions minted before the role field existed — and a proxy
+  session never sets `Role`, so every `ps_session` carried exactly the empty
+  string that branch promotes. The roster-existence backstop that would have
+  caught the unknown subject was gated on `sess.Provider == "local"`, and a
+  proxy IdP session carries the IdP profile id, so the check was skipped
+  rather than failed.
+
+  The result was reproduced end to end by minting through the real proxy
+  issuer and re-presenting the cookie value under the admin cookie name:
+  HTTP 200 with injected role `admin`. An ordinary proxy end user who
+  completed a normal captive-portal OIDC/SAML login with their own corporate
+  credentials — no forgery, no XSS, no MITM, no knowledge of the signing key
+  — was a control-plane admin, above every handler `requireRole` gate and
+  every C2 metadata role. The CP distributes one signing key to every DP, so
+  the token was admin on every node in the cluster. This contradicted
+  `docs/enterprise/IDENTITY-AND-ACCESS-DEPLOYMENT.md`, which states that
+  external IdPs authenticate proxy end users and "never issue an admin
+  session" (GAP-IAM-02).
+
+  The fix is the narrowest one available. `setUISessionCookie` is the only
+  minter of `ps_ui_session` and has always stamped `Provider "local"`, so
+  that value becomes the named constant `uiSessionProvider` — read by the
+  issuer and by `uiAuthMiddleware`, deliberately one constant so the two
+  cannot drift open — and a UI session naming any other provider is refused.
+  The roster check loses its provider guard, which is not a widening: it
+  already applied to every local session, and a non-local one is now refused
+  by the clause before it. Together they leave the empty-role compatibility
+  branch reachable only for a local session whose user is still on the
+  roster, which is the pre-RBAC single-admin deployment it was written for.
+  Nothing on the wire or on disk changes — admin cookies already carry
+  `Provider "local"` — so no operator session is invalidated. An explicit
+  `aud` claim would be the deeper fix and is recorded for follow-up; it would
+  refuse every cookie currently in flight.
+
+  Gates: a defect gate that mints through the production proxy issuer and
+  asserts 401, a class gate over foreign providers crossed with every role
+  value (including an explicitly elevated one, which a restored proxy-side
+  roster could carry), and three controls — the pre-RBAC empty-role local
+  session still resolves to admin, enrolled local roles pass through at their
+  exact role, and a local session for a deleted user is still refused, so the
+  fix did not trade one bypass for another.
 
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
@@ -1259,6 +1490,73 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
 
+- Two security-regression gates added for the memoized IDNA slow path
+  (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
+  and each verified failing in both against the specific defect it claims to
+  catch. No runtime behaviour changes; ported from the closed PR #1617.
+
+  `NormalizeHostStrict` is the fail-closed dispatch gate: `ok=false` means the
+  request is REFUSED, so a host that cannot be canonicalized never reaches FQDN,
+  blocklist or category matching un-normalized (RISK-013). The memo's slots are
+  shared by design — each tier is direct-mapped and a colliding host overwrites
+  the entry that was there — so the crossing that matters is a REJECTED host
+  meeting a resident ACCEPTED entry, which the existing collision test cannot
+  observe because it alternates two accepted hosts.
+  `TestIDNMemo_RejectionIsNeverUpgradedToAcceptance` pins that crossing in
+  both directions in the main tier, and in the long tier (which never retains a
+  rejection) on every round. Against a memo whose hit skips the full-key
+  re-verification, `xn--0.example.com` is answered as another host's A-label
+  with `ok=true` — a client-chosen unnormalizable authority admitted and
+  evaluated as a different destination than the one it names.
+
+  `TestIDNMemo_StoredKeyDoesNotAliasTheCallerBuffer` pins that the stored key is
+  a CLONE of the caller's string. The key arrives as a substring of whatever
+  buffer the caller holds — on the request path, net/http's header buffer — so
+  an entry that kept it would pin that whole backing array per slot while every
+  byte-counting test still reported a short key. The gate drops every
+  reference it holds to a 16 MiB buffer the probe host was sliced out of and
+  asks the collector what is still reachable: a few hundred bytes when the key
+  is cloned, ~16.8 MB against the un-cloned shape, for a 25-byte main-tier key
+  and a 505-byte long-tier key alike. The review is
+  `docs/engineering/security-reviews/2026-10-13-idna-memo-and-host-bounds-window.md`;
+  its single-tier "un-memoized band is deliberate" finding is superseded by the
+  long tier and its gate for that gap is intentionally not ported.
+### Performance
+
+- Category-group membership is now resolved by index instead of by walking
+  every group. `categoryGroupMatchesHostScratch` runs once per category-group
+  access rule per proxied request and prefers the rule's
+  `DestCategoryGroupID` — the authoritative, rename-safe link the admin API
+  stamps on every rule saved against an existing group — but
+  `MatchesCategoryByID` resolved that id by ranging the whole group map
+  comparing IDs, with the store's read lock held across the walk, because the
+  map is keyed by *name*. So the path production takes was O(number of groups)
+  while the denormalized-name fallback it supersedes was already an O(1)
+  probe, and the store is capped at 1000 groups.
+
+  Measured on a 4-core Xeon @2.10 GHz (medians of n=3, both arms in one
+  session), one resolve: **117.6 → 89.5 ns at 4 groups, 349.3 → 82.2 at 64,
+  1317 → 89.0 at 256, 5298 → 86.6 at 1000** — linear at ~5 ns/group before,
+  flat after. End to end through the policy scan with 20 category-group rules
+  and a categorized destination: **121 µs → 2.25 µs per request** at the
+  1000-group cap (53.8×). An *uncategorized* destination — clean traffic to a
+  host no tier classifies, and the common case — now short-circuits the whole
+  per-rule probe at the call site, because neither branch can match an empty
+  category: **125 µs → 395 ns** (317×). Verdicts are unchanged; the index is
+  derived state rebuilt wholesale at the one content-mutation chokepoint, and
+  a stale index degrades to "not resolved" rather than to a wrong group.
+
+  Also fixes a **data race** on the same path, reported by the race detector:
+  `MatchesCategory` resolved through `GetByName`, which releases the lock
+  before returning the live group, and then read that group's category set
+  with no lock held — while `Update`, `UpdateByID`, `Load`, `ReplaceAll` and
+  the rollback path all *reassign* that field under the write lock. Reachable
+  as proxy traffic evaluating an un-migrated category-group rule concurrent
+  with an admin edit of that group. The probe now happens inside the single
+  read-lock critical section, which also removes the old shape's second lock
+  round trip. Only deployments using category groups in policy rules are
+  affected; no configuration, API or metric surface changes.
+
 ### Changed
 
 - A panic in either of the release-dispatch plane's detached worker goroutines
@@ -1378,6 +1676,80 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- The per-IP connection limiter now does its whole job in ONE critical section
+  per call, and stores the counter by value. `Acquire` + a deferred `Release`
+  run on every proxied request (`handleRequest`, `socks5.go`), not once per TCP
+  connection. Sharding the limiter reduced contention between distinct clients
+  and left the per-request lock COUNT at three, because `Release` took the shard
+  lock twice: once to look the counter up and again to delete the entry after an
+  unlocked decrement returned zero. On a keep-alive connection with no second
+  request in flight — the ordinary shape — the count returns to zero on every
+  request, so every request paid an 8-byte allocation, a map insert, a map
+  delete, three lock acquisitions and two atomic read-modify-writes.
+
+  The profile named it. On the distinct-IP parallel benchmark at GOMAXPROCS=1,
+  mutex `Lock`+`Unlock` was 34% of all samples and `mapdelete_faststr` 28%, with
+  `Release` at 62% of cumulative time against `Acquire`'s 34% — the cheaper half
+  of the pair costing nearly twice as much, structurally. In the single-NAT-
+  egress case at four cores, mutex machinery was 64% of all samples, with
+  `procyieldAsm` and `futex` showing real parking. That case is an ordinary
+  enterprise deployment and the package header had recorded it, together with
+  the three lock acquisitions, as deliberately unfixed.
+
+  Storing the count as `map[string]int64` and collapsing both halves removes the
+  allocation, the pointer chase, the GC write barriers, the per-counter atomics,
+  one of `Release`'s two lock acquisitions, and `Acquire`'s increment-then-undo
+  dance on the reject path (it simply never commits the count — the same net
+  accounting with no window to guard). Measured with the pre-change shape frozen
+  in-tree as the `_Legacy` benchmark arms so both are timed in one run (4-core
+  Xeon @2.10GHz, Go 1.26.8, medians of n=6, ns/op per `Acquire`+`Release` pair):
+  single NAT egress **103.2 → 66.3 (−35.8%)** at one core and **267.6 → 199.6
+  (−25.4%)** at four; distinct IPs **105.7 → 70.0 (−33.8%)** and **108.3 → 85.6
+  (−21.0%)**; entry churn **99.8 → 67.4 (−32.5%)** and **105.9 → 68.0
+  (−35.8%)**; the reject path **62.6 → 29.6 (−52.7%)** and **245.1 → 101.3
+  (−58.7%)** — with **1 → 0 allocs/op** on the shapes that create an entry per
+  operation (distinct IPs and entry churn at both core counts, single NAT
+  egress at one core). The reject and retained-entry arms, and single NAT
+  egress at four cores, already report **0 allocs/op in both forms**: the entry
+  exists before the timed operation, so neither form allocates a counter for
+  it. End to end,
+  `BenchmarkPerfQual_ProxyHTTPForward` goes 177 → 176 allocs/op and `connlimit`
+  leaves the `alloc_objects` profile entirely.
+
+  One of the ten measured shapes regressed and is recorded rather than rounded
+  away: the retained-entry case (an IP with a second request already in flight,
+  so the count never returns to zero) is 58.3 → 60.7 ns at one core, **+4.2%**
+  with overlapping distributions at n=15, and parity at four cores — there the
+  old form did a lookup plus an atomic add through the pointer already in hand,
+  where this one does a lookup plus a `mapassign` in each half. It is bought
+  with the two shapes that dominate a real gateway: entry churn, and the reject
+  path an attacker drives, where a flood used to cost the limiter more per
+  refusal than per admission.
+
+  It is also a **fail-open fix**. `Release`'s second pass re-checked the
+  counter's *value* without re-checking its *identity*, while `Acquire`'s reject
+  path carried exactly that guard (`cur == ctr`) — the pattern was known and
+  applied in one of the two places that needed it. Release A reads the counter,
+  unlocks, decrements 1 → 0 and is descheduled; B acquires and releases,
+  deleting the entry; C then misses, allocates a fresh counter and takes it to 1
+  (a live, admitted connection); A re-locks, loads its stale pointer, sees 0,
+  and deletes C's entry. C's accounting is destroyed and the IP goes on to hold
+  `limit+1` concurrent connections — past a configured per-IP cap, the same
+  direction as the #503 bug the unconditional-accounting contract exists to
+  close (measured: 3 admitted against a cap of 2). Reproduced deterministically
+  by `TestRelease_LegacyTwoPhaseLosesALiveSlot`, which owns a verbatim legacy
+  copy with one injected pause point rather than racing for the interleaving.
+  Every behavioural test in the package keeps passing against the two-phase
+  shape, so the regression instruments are deliberately structural: an AST wall
+  requiring exactly one `sh.mu.Lock()` and zero per-counter atomics in each half
+  (with a not-vacuous control that rejects a verbatim pre-fix copy), and a
+  `testing.AllocsPerRun` gate across the churning, steady-state and reject
+  postures — the churn posture is load-bearing, since a gate measuring only the
+  retained entry reads zero against the defect too. Both were verified failing
+  against the reverted implementation. The admit/reject boundary, the
+  unconditional-accounting contract and the delete-when-last behaviour are
+  unchanged.
+
 - The request log's JSONL persistence gate no longer takes a process-wide
   mutex on every logged request. `reqlog.Add` runs once per logged request on
   the proxy request goroutine, and the `enqueue` it calls opened with an
@@ -1436,23 +1808,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from recomputing. The existing `FuzzNormalizeHostStrict` differential against
   the pre-optimization reference ran 598k executions with no divergence.
 
-  The key is a client-chosen authority, so the table is direct-mapped with 1024
-  fixed slots and a per-process random slot seed, and no entry retains a string
-  longer than the 253-byte DNS name maximum. That last bound is load-bearing
-  rather than decorative: `handleRequest`'s raw pre-cap admits a 1 KiB
-  authority and the 253-byte canonical refusal runs *after* `canonicalDestHost`
-  has normalized it, while the zero-option `idna.ToASCII` profile enforces no
-  length limit of its own, so an oversize A-label host would otherwise be
-  retained whole (~2.1 MB across a full table). Refusing to memoize one costs
-  nothing — no DNS server can resolve a longer name, and both dispatch gates
-  refuse it immediately, so it never reaches the fan-out the memo exists to
-  collapse. The table therefore cannot grow — 104 KB retained after 65 536
-  distinct IDN hosts, against a 554 KB absolute ceiling —
-  a collision costs a recomputation rather than a wrong answer, because every
-  hit re-verifies the full key, and an adversary who could force collisions
-  would obtain today's behaviour. Ordinary ASCII traffic is untouched: it
-  returns from the fast path above the memo and never reads or writes the
-  table, pinned by `TestIDNMemo_FastPathNeverTouchesMemo`.
+  The key is a client-chosen authority, so the table is direct-mapped with
+  fixed slots and a per-process random slot seed, and no entry retains a
+  canonical value longer than the 253-byte DNS name maximum. That value bound
+  is load-bearing rather than decorative: `handleRequest`'s raw pre-cap admits
+  a 1 KiB authority and the 253-byte canonical refusal runs *after*
+  `canonicalDestHost` has normalized it, while the zero-option `idna.ToASCII`
+  profile enforces no length limit of its own, so an oversize A-label host
+  would otherwise be retained whole (~2.1 MB across a full table). The table
+  therefore cannot grow — 103 KiB retained after 65 536 distinct IDN hosts,
+  against a 720 KiB absolute ceiling across both tiers — a collision costs a
+  recomputation rather than a wrong answer, because every hit re-verifies the
+  full key, and an adversary who could force collisions would obtain the
+  pre-memo behaviour. Ordinary ASCII traffic is untouched: it returns from the
+  fast path above the memo and never reads or writes the table, pinned by
+  `TestIDNMemo_FastPathNeverTouchesMemo`.
+
+  **Retention is bounded on two tiers, because one bound could not do both
+  jobs.** The first version measured the 253-byte bound on the KEY as the
+  client spelled it, on the stated reasoning that refusing such a host "costs
+  nothing" because "no DNS server can resolve a longer name, and both dispatch
+  gates refuse it immediately". Both halves were wrong, and the mistake was
+  reading a bound on the raw spelling as a bound on the name. IDNA *shrinks* a
+  U-label authority: `proxy_host_bounds.go`'s own derivation records the worst
+  legitimate case as **883 raw bytes collapsing to a 251-byte A-label**, which
+  is precisely why the raw pre-cap is 1 KiB and not 253. So a host whose raw
+  spelling exceeded the bound could canonicalize comfortably inside the DNS
+  limit, with every label inside the 63-byte A-label limit too — a resolvable,
+  ordinary internationalized destination — and **both dispatch gates accepted
+  it**. It was not refused; it walked the full ~10x fan-out with nothing
+  memoized, which is the asymmetry the memo exists to close. Measured per
+  normalization of one such accepted destination (eight U-labels of 20 CJK code
+  points, 499 raw bytes against 227 canonical): `idna.ToASCII` **5.32 µs and 18
+  allocations**, i.e. ~53 µs and 180 allocations per request across the
+  fan-out, against **71 ns and 0 allocations** for a memo hit. Such a key is
+  now retained in a separately bounded long tier — 128 slots, keys to 1024
+  bytes, values still to 253 — which adds ~165 KiB to the ceiling and leaves
+  the main tier's capacity untouched. The key bound is the request path's raw
+  pre-cap itself, not the 883-byte empirical maximum, so "every authority a
+  dispatch gate admits is memoizable" holds by construction rather than by a
+  measurement; the root gate asserts that relation between the two constants,
+  so raising the raw pre-cap fails there instead of re-opening the asymmetry
+  for the newly admitted band.
+  Per-request fan-out for that destination, both measured through the full
+  `NormalizeHostStrict` body: **~85–94 µs and 200 allocations before, ~27–29 µs
+  and 0 allocations after**. Verdicts are unchanged in both tiers — a host past *both*
+  key bounds is still normalized, just not retained.
+
+  Gates, both verified failing against the pre-fix bound:
+  `TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained` (proves the probe host
+  is DNS-valid and that both gate predicates admit it *before* asserting it is
+  retained, so the test cannot pass by accident) and the root
+  `TestHostutilLongRawULabelReachesTheMemo`, which calls the real
+  `rawAuthorityOversize` / `canonicalHostOversize` so the two bounds cannot
+  drift apart again. Plus `TestIDNMemo_LongTierHitIsAllocationFree`,
+  `TestIDNMemo_BeyondLongTierIsNormalizedButNotRetained` (outer boundary,
+  including one byte over), `TestIDNMemo_LongTierBoundedFootprint` and
+  `TestIDNMemo_LongTierConcurrentStress`;
+  `TestIDNMemo_StoredEntriesRespectTheBound` now asserts the invariant over
+  every live entry in both tiers against that tier's key bound.
+
+  **What this does not fix, stated plainly.** `strings.ToLower` runs
+  `strings.Map(unicode.ToLower, …)` for a non-ASCII input — a per-rune table
+  walk over the whole authority — and it sits in `NormalizeHostStrict` *ahead*
+  of both the fast path and the memo, so no tier can collapse it. At **2.84 µs
+  per call** it is ~28 µs per request across the fan-out, against ~50 ns for an
+  ASCII destination, and the client selects it with ~500 header bytes. That
+  residual asymmetry is left open deliberately: narrowing or hoisting the
+  lowering pass changes what canonicalization does to non-ASCII input, which is
+  the IDN-homograph contract `NormalizeHost` exists to enforce (RISK-013), and
+  that belongs to the differential fuzz harness and review rather than to a
+  performance patch.
 
 - The threat feed's full-URL check no longer re-parses a URL it was handed
   already parsed. `preDispatchBlocked` runs it on every forwarded plain-HTTP
@@ -1473,6 +1899,105 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- The operator contract (`GET /api/diagnostics`, `GET /api/health/explain`)
+  now carries an `admin_roster_durability` row (CHAOS-70 evidence): `warn`
+  when no `-ui-users-file` is configured, so admin account deletes, role
+  changes and password rotations revert on restart; when the configured file
+  failed to load at startup or is not a usable regular-file target (a
+  read-only check); when no write to the roster file has landed since
+  startup (*not verified yet*); and when admin-roster
+  changes were refused or login-time roster writes failed since process
+  start. Counts, the remedy and the degraded login-write state are shown to
+  admins only. Viewers and operators get a fixed message for "not durable" and
+  "a change was refused", and the row shows nothing for a degraded write
+  (SEC-DIAG-ROSTER-1). `GET /api/auth/users` (admin-only) adds
+  `adminRosterPersistFailures` / `adminRosterPersistDegraded`. They feed a new
+  Admin Users panel hint and are deliberately absent from `/api/stats`.
+- The `admin_roster_durability` row reports persistence only on evidence: a
+  roster save that landed in this process. Culvert does not write the roster
+  at startup, so after every restart the row reads `warn` with the distinct,
+  non-alarming *not verified yet* state ("the next admin account change
+  verifies that it persists"; viewers see a fixed message) until the first
+  admin account change lands, which turns it `ok`. That `ok` states evidence,
+  never capability: "the last admin roster save was written to disk and the
+  file is unchanged since" (viewers: "an admin roster file is configured; the
+  file on disk is the last one Culvert wrote, unchanged since"). It does not
+  claim that the roster "is persisting" or that the next save will be allowed.
+  No read-only check can authorise that: an SELinux `add_name`/`remove_name`
+  denial, AppArmor, an NFSv4 or server-side ACL, or a quota can refuse it
+  while `faccessat` passes. The live checks below are advisory: they report
+  what they detect, and passing them is no claim. A refused save is rolled
+  back, answers `500` and is counted, and the next read of the row reports it
+  in place of `ok`. A stat is not evidence: a
+  readable roster on a read-only mount, or one owned by another user in a
+  sticky directory, stats like a writable one. Hard problems found by the
+  row's one live probe take precedence over *not verified yet*: a configured
+  roster file that does not exist yet, a directory that no longer lets
+  Culvert create and replace files (`faccessat(W_OK|X_OK, AT_EACCESS)` and
+  `statfs`: a `chmod 0555`, a revoked ACL, a read-only remount), a roster no
+  save can replace (immutable or append-only, a bind-mounted file, or an
+  immutable or append-only directory; Linux, read-only
+  `fileutil.ReplacementBlocked`), and storage that does not answer within
+  2 s. After a landed save the row also warns when the roster file is
+  removed, replaced or edited outside Culvert (each landed save records the
+  size and SHA-256 of the bytes written), replaced by an identical copy owned
+  by another account where that makes the next save's rename be refused,
+  changed or replaced outside Culvert in any other way, or when the save's
+  directory could not be synced. A landed save is evidence only for the exact
+  file it wrote, unchanged since: on Linux and macOS it also records that
+  file's device, inode and `ctime` (fstat of the written file after the
+  rename), and any difference — a new inode, or a same-inode `touch`, `chmod`,
+  `chown`, ACL, extended attribute or label change — reports the new
+  `warn` *the roster file was changed or replaced outside Culvert since its
+  last save* (no action needed if intentional; the next admin account change
+  re-verifies). Deliberately, a `touch`, a `chmod` or an identical re-copy
+  now warns instead of reading `ok`. Changed contents, a refused-rename owner
+  change, a missing or immutable file and an unwritable directory take
+  precedence. Other Unix systems compare size, SHA-256 and owner; Windows
+  compares size and SHA-256 only. The probe runs on its own
+  goroutine, holds no roster lock, runs at most once at a time, is reused for
+  5 s, and is read once per diagnostics request (the viewer rendering reuses
+  it), so a stalled volume costs a request at most one 2 s wait and never
+  blocks admin changes or TOTP logins. `fileutil.AtomicWriteInfo` returns
+  the landed file's own `FileInfo` and whether its directory was synced;
+  `fileutil.AtomicWrite` is unchanged for its callers.
+- The `admin_roster_durability` row now picks its state from one ordered list,
+  and the admin and viewer renderings both use that list (Codex P2 4326470080).
+  Previously each renderer ranked the states in its own order. That let a
+  refused first save after a restart hide behind *not verified yet* ("No action
+  is needed now"). The order is:
+  1. setup incomplete
+  2. no roster file
+  3. storage not responding
+  4. refused saves
+  5. failed login-time writes (admin-only)
+  6. unusable target
+  7. missing target
+  8. replaced
+  9. owner changed
+  10. immutable
+  11. directory not writable
+  12. changed externally
+  13. directory not synced
+  14. not verified yet
+  15. ok
+
+  The admin remedy for a refusal also names the highest-ranked problem the live
+  checks see below it. The row now counts refused and failed writes from the
+  last save that landed (from startup before the first one), so a refusal stays
+  visible until a later save lands. The since-startup totals are still shown,
+  and the counters, metrics and Admin Users panel are unchanged. The identity
+  probe reports content, owner and inode changes as independent facts, and the
+  list ranks them.
+- A failed startup load of `ui_users.json` no longer pins the
+  `admin_roster_durability` row (Codex P2 4327431894). Before, the row kept
+  reporting "could not be loaded at startup" after a later save landed at the
+  same path, and it skipped the live probe. Now a landed save clears the load
+  error, under the same lock that records the save. Pointing at another path
+  resets it as before. The live probe now runs whether or not the load failed.
+- **Deferred:** the boot-time in-place rewrite of `ui_users.json` (which would
+  verify persistence at startup instead of at the first admin change) is
+  split out of this change into its own follow-up PR.
 - `GET /api/policy` now reports `persisted` (whether the access-rule
   rulebase is written to disk vs. in-memory only), and the Access Rules
   panel shows a red banner when it is false. Every rule mutation already
