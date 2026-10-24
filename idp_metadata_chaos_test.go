@@ -548,10 +548,16 @@ func TestChaos87_CachedBytesAreParsedByTheSameValidator(t *testing.T) {
 		}
 		// Same byte length so the index's length check cannot be what refuses
 		// it — the PARSER must.
-		orig, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		// gosec's taint analysis treats a name from os.ReadDir as attacker
+		// controlled, which is why both paths carry a suppression: `dir` is
+		// this test's own t.TempDir() and the name was enumerated from that
+		// same directory moments earlier, so no external input reaches either
+		// path, and tampering with exactly that file is this gate's purpose.
+		orig, err := os.ReadFile(filepath.Join(dir, e.Name())) // #nosec G703 -- name enumerated from this test's own t.TempDir()
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
+		// #nosec G703 -- same path, same reason as the read above
 		if err := os.WriteFile(filepath.Join(dir, e.Name()), []byte(strings.Repeat("Z", len(orig))), 0o600); err != nil {
 			t.Fatalf("tamper: %v", err)
 		}
@@ -3013,6 +3019,45 @@ func TestChaos87_StaleRevalidationAfterADisableLeavesNoEpisode(t *testing.T) {
 	}
 }
 
+// THE CONTROL for the gate above, and it closes a measured hole. The cheapest
+// wrong fix for that defect is to forget UNCONDITIONALLY on the non-adopting
+// branch, and with that mutation in place the entire suite still passed: every
+// gate above is satisfied by a revalidation that deletes the episode whether or
+// not the profile is still in service. But falling back to the same cached
+// document is the ORDINARY outcome on every watchdog tick while an IdP is down,
+// so an unconditional discard erases precisely the degradation signal this
+// subsystem exists to raise — a silent failure, and strictly worse than the
+// leaked episode it would be fixing. The discard must stay guarded, which is
+// only meaningful because the guard now asks document-source ownership
+// (TestChaos87_SameSourceRepublishKeepsTheEpisode).
+func TestChaos87_NonAdoptingRevalidationKeepsALiveEpisode(t *testing.T) {
+	chaos87Env(t)
+	idp := newChaos87IdP(t)
+
+	if err := idpRegistry.Upsert(chaos87Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	idp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos87Profile("corp", idp.URL())); err != nil {
+		t.Fatalf("upsert during the outage must publish from cache: %v", err)
+	}
+	if !idpRegistry.hasCacheServingProfile() {
+		t.Fatal("setup: the live provider must be serving from cache")
+	}
+	if !idpMetadataState().Failing {
+		t.Fatal("setup: the outage must have opened an episode")
+	}
+
+	// Nothing changes underneath: the profile is still enabled on this source,
+	// the IdP is still down, and the revalidation falls back to the same cache.
+	revalidateCacheServingProviders()
+
+	if !idpMetadataState().Failing {
+		t.Fatal("the profile is still in service and still degraded on this exact document, so its episode " +
+			"is a LIVE outage signal: discarding it here silences the alert on every watchdog tick")
+	}
+}
+
 // ── ROUND 13: a negative cache age is EXPIRED on the live-provider path too ───
 
 // ROUND 13 P2 (DEFECT GATE). idpmeta.Get already refuses a negative age — the
@@ -3499,6 +3544,17 @@ func chaos87AtomicCleanupVerdict(t *testing.T, src string) (ok bool, why string)
 	probe := chaos87FuncSource(t, src, "func (r *IdPRegistry) stillFetchesSourceLocked(")
 	if strings.Contains(probe, "r.mu.RLock()") {
 		return false, "stillFetchesSourceLocked must NOT acquire r.mu itself — the caller holds it across the act"
+	}
+	// ROUND 20: and it must not re-admit the generation comparison. Closing
+	// the race around this predicate did not make the predicate right — the
+	// harm this round-17 comment describes was reachable with NO race at all,
+	// because a republish that lands before the lock is taken leaves the
+	// current profile at a different pointer on the same source. See
+	// TestChaos87_SameSourceRepublishKeepsTheEpisode.
+	if strings.Contains(probe, "generation") {
+		return false, "stillFetchesSourceLocked must ask DOCUMENT-SOURCE ownership only — comparing the " +
+			"generation pointer deletes the episode of a newer provider that is legitimately degraded on " +
+			"the same source, resetting its degradation clock and dropping the alert latch"
 	}
 	// And the caller must delegate rather than act on a released answer.
 	caller := chaos87FuncSource(t, src, "func discardSupersededRecoveryEpisode(")

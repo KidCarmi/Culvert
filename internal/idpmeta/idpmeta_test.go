@@ -180,6 +180,7 @@ func TestGet_TruncatedDocumentIsRefused(t *testing.T) {
 	}
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) == ".doc" {
+			// #nosec G703 -- name enumerated from this test's own t.TempDir(); no external input reaches this path
 			if err := os.WriteFile(filepath.Join(dir, e.Name()), []byte("<md>"), 0o600); err != nil {
 				t.Fatalf("truncate: %v", err)
 			}
