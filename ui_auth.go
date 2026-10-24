@@ -275,13 +275,31 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// SEC-REVOKE-1: the revocation write requires a cookie whose HMAC actually
+	// VERIFIED. This route is on the public allowlist (isPublicUIAuthPath), and
+	// revokeSessionCookie does its own base64+JSON decode with no signature
+	// check — on the stated premise that the "HMAC [was] already verified by
+	// decodeSession", which was false on exactly this path because the error
+	// was discarded. A cookie shaped
+	// base64({"sub":"…","exp":9999999999}).garbage therefore let an
+	// unauthenticated caller insert an attacker-chosen key, with an
+	// attacker-chosen expiry, into an unbounded map that is persisted on every
+	// insert and gossiped to every node in the cluster.
+	//
+	// Verification is the whole gate, and deliberately not admissibility: a
+	// token this build REFUSES (a deleted user's, or one minted for the proxy
+	// plane) is still a token the appliance signed, and revoking it is right.
+	// What must not be revocable is a payload nobody signed.
+	//
+	// Clearing stays UNCONDITIONAL, and the answer stays 200: logout must
+	// always discard the browser's cookie, whatever it was carrying.
 	sess, _ := readUISessionCookie(r)
 	if sess != nil {
 		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
+		// Revoke the session token so it cannot be reused even if the cookie is
+		// replayed before it naturally expires.
+		revokeSessionCookie(uiSessionCookieName, r)
 	}
-	// Revoke the session token so it cannot be reused even if the cookie is
-	// replayed before it naturally expires.
-	revokeSessionCookie(uiSessionCookieName, r)
 	clearUISessionCookie(w, r)
 	jsonOK(w, map[string]any{"ok": true})
 }

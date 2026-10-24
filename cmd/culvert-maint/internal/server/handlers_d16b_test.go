@@ -404,7 +404,7 @@ func TestBackupCreate_EncryptRequiresPassphraseRef(t *testing.T) {
 func TestBackupCreate_UnencryptedRejectsPassphraseRef(t *testing.T) {
 	rig := startD16bRig(t)
 	defer rig.stop()
-	status, _ := rig.post(t, "/v1/backups", map[string]interface{}{
+	status, _ := rig.post(t, "/v1/backups", map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"filename":       "x.tar.gz",
 		"encrypt":        false,
 		"passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE",
@@ -432,7 +432,7 @@ func TestBackupCreate_InvalidPassphraseRefScheme(t *testing.T) {
 func TestBackupCreate_PassphraseEnvNotInAllowlist(t *testing.T) {
 	rig := startD16bRig(t)
 	defer rig.stop()
-	status, body := rig.post(t, "/v1/backups", map[string]interface{}{
+	status, body := rig.post(t, "/v1/backups", map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"filename":       "x.enc",
 		"encrypt":        true,
 		"passphrase_ref": "env:RANDOM_OPERATOR_VAR",
@@ -449,7 +449,7 @@ func TestBackupCreate_IdempotencyDedup(t *testing.T) {
 	defer rig.stop()
 	t.Setenv(runner.EnvCulvertBackupPassphrase, "p")
 
-	body := map[string]interface{}{
+	body := map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"filename":        "x.enc",
 		"encrypt":         true,
 		"passphrase_ref":  "env:CULVERT_BACKUP_PASSPHRASE",
@@ -485,7 +485,7 @@ func TestBackupCreate_DedupedRetryDoesNotResolvePassphrase(t *testing.T) {
 	defer rig.stop()
 	t.Setenv(runner.EnvCulvertBackupPassphrase, "first-call-secret")
 
-	body := map[string]interface{}{
+	body := map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"filename":        "x.enc",
 		"encrypt":         true,
 		"passphrase_ref":  "env:CULVERT_BACKUP_PASSPHRASE",
@@ -1101,7 +1101,7 @@ func TestStateChangingOpBlocksConcurrent(t *testing.T) {
 	// Make the first op linger in the runner so a second hits the
 	// lock. We do that by causing the fake's start to hang
 	// indefinitely until cancelled.
-	holdReq := map[string]interface{}{
+	holdReq := map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"filename":       "first.enc",
 		"encrypt":        true,
 		"passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE",
@@ -1116,7 +1116,7 @@ func TestStateChangingOpBlocksConcurrent(t *testing.T) {
 	// kick in) means the second op must contend for the lock.
 	var got409 bool
 	for i := 0; i < 30; i++ { // try a few times in case the goroutine hasn't begun
-		status2, _ := rig.post(t, "/v1/backups", map[string]interface{}{
+		status2, _ := rig.post(t, "/v1/backups", map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 			"filename":        "second.enc",
 			"encrypt":         true,
 			"passphrase_ref":  "env:CULVERT_BACKUP_PASSPHRASE",

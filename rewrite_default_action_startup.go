@@ -9,12 +9,18 @@ import "strings"
 // they're observable by the time the default-action log line is
 // emitted.
 
-// loadRewriteAndDefaultAction applies cfg. rulesLoaded is the current
-// count of policy rules (supplied by the shim via policyStore.List());
-// when cfg.DefaultAction is empty and no rules are configured the
-// loader defaults to "allow" (passthrough) with an advisory log,
-// otherwise to "deny" (zero-trust).
-func loadRewriteAndDefaultAction(cfg rewriteDefaultActionStartupConfig, rulesLoaded int) {
+// loadRewriteAndDefaultAction applies cfg. rulesConfigured is the size of the
+// rulebase the operator configured, supplied by the shim via
+// policyStore.ConfiguredRuleCount(); when cfg.DefaultAction is empty and no
+// rules are configured the loader defaults to "allow" (passthrough) with an
+// advisory log, otherwise to "deny" (zero-trust).
+//
+// SEC-POLICYDROP-1: "configured" deliberately includes the rules the policy
+// load gate REFUSED. A file that filtered down to nothing is still a configured
+// policy, and must not be read as an absent one — that would turn a fail-closed
+// rule refusal into a fail-open default. The shim owns that sum; this function
+// only consumes the count.
+func loadRewriteAndDefaultAction(cfg rewriteDefaultActionStartupConfig, rulesConfigured int) {
 	if len(cfg.Rules) > 0 {
 		// Published under the settings writer domain (uncontended at boot);
 		// YAML-seeded rules receive stable identities at publication, made
@@ -35,7 +41,7 @@ func loadRewriteAndDefaultAction(cfg rewriteDefaultActionStartupConfig, rulesLoa
 		}
 	}
 	if action == "" {
-		if rulesLoaded == 0 {
+		if rulesConfigured == 0 {
 			action = "allow"
 			logger.Printf("Policy: no rules configured; defaulting to Allow (passthrough). Add rules and set default_action: deny for Zero Trust.")
 		} else {

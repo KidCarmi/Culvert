@@ -389,9 +389,12 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	// serverConn registers into the graceful-shutdown state and receives a client
 	// GOAWAY on process shutdown. The server carries the same caps as before —
 	// MaxConcurrentStreams (primary per-connection bound + effective Rapid-Reset
-	// cap), IdleTimeout, WriteByteTimeout, MaxReadFrameSize, and BaseConfig's
-	// MaxHeaderBytes — moved onto the shared instance, not changed. Eager-init makes
-	// h2InspectSrv non-nil in production; the fallback covers direct-call tests.
+	// cap), IdleTimeout, WriteByteTimeout, MaxReadFrameSize, and the base server's
+	// MaxHeaderBytes — moved onto the shared instance, not changed. serveConn picks
+	// the BaseConfig wiring that keeps both GOAWAY and those caps on whichever x/net
+	// server implementation this build compiles (see proxy_tunnel_h2_drain.go).
+	// Eager-init makes h2InspectSrv non-nil in production; the fallback covers
+	// direct-call tests.
 	sh := h2InspectSrv
 	if sh == nil {
 		// A nil here in production would mean init ordering regressed — the tunnel
@@ -405,12 +408,7 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	// ServeConn runs each stream's handler in its own goroutine and blocks until
 	// the client connection is no longer readable (or a shutdown GOAWAY + stream
 	// completion, or the backstop force-close).
-	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
-	sh.srv.ServeConn(clientTLS, &http2.ServeConnOpts{
-		Context:    outer.Context(),
-		Handler:    handler,
-		BaseConfig: sh.base,
-	})
+	sh.serveConn(outer.Context(), clientTLS, handler)
 }
 
 // h2InspectStream handles one HTTP/2 stream: it reshapes the server-side request

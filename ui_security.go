@@ -188,16 +188,27 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			IPFilterMode       string   `json:"ipFilterMode"` // "allow"|"block"|""
-			IPAdd              string   `json:"ipAdd"`
-			IPRemove           string   `json:"ipRemove"`
-			RateLimitRPM       int      `json:"rateLimitRPM"`       // 0 = disable
+			IPFilterMode string `json:"ipFilterMode"` // "allow"|"block"|""
+			IPAdd        string `json:"ipAdd"`
+			IPRemove     string `json:"ipRemove"`
+			// A POINTER so an OMITTED field is distinguishable from an explicit
+			// 0 (SEC-SECPARTIAL-1). As a plain int it decoded to 0 when absent
+			// and `>= 0` was tautologically true, so every partial update
+			// DISABLED the rate limiter — see the guard below.
+			RateLimitRPM       *int     `json:"rateLimitRPM"`       // nil = unchanged, 0 = disable
 			IPList             []string `json:"ipList"`             // full replace
 			RateLimitExemptAdd string   `json:"rateLimitExemptAdd"` // IP or CIDR to exempt
 			RateLimitExemptDel string   `json:"rateLimitExemptDel"` // IP or CIDR to un-exempt
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Refused BEFORE any field is applied, so a rejected request leaves the
+		// whole security configuration untouched. The pre-fix `>= 0` guard
+		// silently IGNORED a negative value instead of refusing it.
+		if body.RateLimitRPM != nil && *body.RateLimitRPM < 0 {
+			http.Error(w, "rateLimitRPM must be >= 0 (0 disables the rate limiter)", http.StatusBadRequest)
 			return
 		}
 		if body.IPFilterMode != "" {
@@ -216,8 +227,19 @@ func apiSecurity(w http.ResponseWriter, r *http.Request) {
 		if body.IPRemove != "" {
 			ipf.Remove(body.IPRemove)
 		}
-		if body.RateLimitRPM >= 0 {
-			rl.Configure(body.RateLimitRPM, time.Minute)
+		// SEC-SECPARTIAL-1: only reconfigure when the caller actually SENT a
+		// limit. The pre-fix condition was `body.RateLimitRPM >= 0` on a plain
+		// int, which is true for every absent field — so this endpoint, whose
+		// own published contract declares it a "Partial update — supply only
+		// the fields to change" (api/openapi: SecurityUpdate, rateLimitRPM
+		// optional), set the limiter to 0 = DISABLED on any body that omitted
+		// it. Three of the shipped admin UI's own buttons send exactly such
+		// bodies ({ipAdd}, {ipRemove}, {ipFilterMode}), and adminSettingsSave +
+		// saveConfigVersion below then made the disablement durable. An
+		// explicit 0 still disables, which is what the panel's "disable" button
+		// sends.
+		if body.RateLimitRPM != nil {
+			rl.Configure(*body.RateLimitRPM, time.Minute)
 		}
 		if body.RateLimitExemptAdd != "" {
 			if err := rl.AddExemption(body.RateLimitExemptAdd); err != nil {
