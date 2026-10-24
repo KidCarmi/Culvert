@@ -69,7 +69,8 @@ func urlcatWritePrometheus(w *strings.Builder) {
 
 	// F-DISK-RECOVERY-1: an abandoned mid-write import is a process-lifetime
 	// latch (no further import runs until restart). The failure counter above
-	// counts it once and then stops moving, so it cannot carry "restart
+	// keeps rising after it — every refused round counts as a failure — so it
+	// looks like an ordinary retrying outage and cannot carry "restart
 	// required"; this gauge does. Emitted only when the feed is configured, so
 	// the series exists exactly where the paging rule (== 1) can mean something.
 	if globalUT1FeedSyncer != nil {

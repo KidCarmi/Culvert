@@ -1746,13 +1746,31 @@ func (c *Config) loadUIUsersFile(path string) error {
 // An unenrolled NON-EMPTY role is clamped to the LEAST privilege the roster can
 // express (RoleViewer) rather than dropped: dropping the record would delete an
 // account on a file the operator can still repair, while clamping keeps them
-// able to sign in and read, with no authority they were not already holding. An
-// EMPTY role is left exactly as it was — that is the documented pre-RBAC
-// compatibility value (a bare-array roster predating the role field), and
-// narrowing it here would lock legacy single-admin deployments out of their own
-// appliance.
+// able to sign in and read, with no authority they were not already holding.
+//
+// An EMPTY role is the pre-RBAC compatibility value (a bare-array roster
+// predating the role field, when every account was the admin) and is MIGRATED to
+// RoleAdmin here — once, at the door, so nothing downstream ever sees it. It used
+// to be passed through as "" on the stated grounds that narrowing it would lock
+// legacy admins out; but the session gate refuses a role-less session
+// (sessionRoleOrReject), so passing it through produced exactly that lockout: a
+// password that verified, a cookie minted with Role "", and a 401 on every request
+// after it (Workstream B pre-review F-B1). It also left such a roster with no
+// legacy c.user, so IsConfigured() could read false and reopen first-time setup.
+// The migrated role is persisted by the next ordinary roster save (persistedRole
+// stays empty — nothing was clamped); the loader does not write, because a boot
+// path that writes gains a failure mode and the migration is deterministic on
+// every load anyway.
 func loadedRosterRole(username string, role UIRole) UIRole {
-	if role == "" || roleEnrolled(role) {
+	if role == "" {
+		if logger != nil {
+			logger.Printf("UIUsers: user %q has no role in the persisted roster (pre-RBAC format) — "+
+				"migrated to %q, which is what a role-less account always meant. Review it in Security -> Admin Users.",
+				sanitizeLog(username), RoleAdmin)
+		}
+		return RoleAdmin
+	}
+	if roleEnrolled(role) {
 		return role
 	}
 	if logger != nil {

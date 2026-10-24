@@ -244,8 +244,12 @@ func TestRosterLoad_EnrolledAndLegacyRolesUnchanged(t *testing.T) {
 			if !ok {
 				t.Fatalf("VerifyUIUser refused a well-formed record")
 			}
-			if string(got) != role {
-				t.Fatalf("role %q was rewritten to %q", role, got)
+			want := UIRole(role)
+			if role == "" {
+				want = RoleAdmin // the pre-RBAC value is migrated at load (F-B1)
+			}
+			if got != want {
+				t.Fatalf("role %q loaded as %q, want %q", role, got, want)
 			}
 			if RosterRoleClampCount() != before {
 				t.Errorf("clamp counter moved on a well-formed role %q", role)
@@ -257,7 +261,7 @@ func TestRosterLoad_EnrolledAndLegacyRolesUnchanged(t *testing.T) {
 func TestLoadedRosterRole_Table(t *testing.T) {
 	for _, tc := range []struct{ in, want UIRole }{
 		{RoleViewer, RoleViewer}, {RoleOperator, RoleOperator}, {RoleAdmin, RoleAdmin},
-		{"", ""}, // pre-RBAC compat value, deliberately preserved
+		{"", RoleAdmin}, // pre-RBAC compat value: migrated to what it always meant (F-B1)
 		{"superuser", RoleViewer}, {RolePublic, RoleViewer}, {"Admin", RoleViewer},
 	} {
 		if got := loadedRosterRole("bob", tc.in); got != tc.want {

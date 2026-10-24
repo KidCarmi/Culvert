@@ -190,6 +190,9 @@ func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 	if c, ok := checkCategoryFeedDeferral(); ok {
 		return c
 	}
+	if c, ok := checkCategoryFeedUncertified(); ok {
+		return c
+	}
 	if h.Recovered {
 		return OperatorContractCheck{
 			Code:   "category_feed_db",
@@ -246,6 +249,37 @@ func checkCategoryFeedWriteAbandoned() (OperatorContractCheck, bool) {
 		Status:         diagWarn,
 		Message:        "community category import abandoned mid-write: " + cause + "; further imports are refused until this node restarts; " + coverage,
 		OperatorAction: "Check the data volume (free space, I/O errors, mount), then restart this node: the interrupted import is quarantined at the next start and the feed re-syncs automatically.",
+	}, true
+}
+
+// checkCategoryFeedUncertified reports a store left holding an INCOMPLETE
+// import by a failed one: BeginImport withdrew the completion record, BulkWrite
+// then failed partway (an I/O error that returned, rather than the stall the
+// abandoned row covers), or a boot's quarantine could not move the half-written
+// store aside. Lookups then answer from a partial, mixed set of categories until
+// an import completes, and the fall-through used to call that "loaded" (OK) —
+// Workstream B pre-review F-B2.
+//
+// It fires only after a FAILURE: an import still in progress, or a store whose
+// completion record predates this build and is about to be re-synced at start,
+// is uncertified too but has not failed, and warning on those would flap the row
+// on every ordinary sync. The failure counter is checked first so the live store
+// reads (ImportComplete, StoreEmpty) only run when something has already failed.
+func checkCategoryFeedUncertified() (OperatorContractCheck, bool) {
+	sy := globalUT1FeedSyncer
+	if sy == nil {
+		return OperatorContractCheck{}, false
+	}
+	h := sy.Health()
+	if h.ConsecutiveFailures == 0 || sy.ImportComplete() || sy.StoreEmpty() {
+		return OperatorContractCheck{}, false
+	}
+	return OperatorContractCheck{
+		Code:   "category_feed_db",
+		Status: diagWarn,
+		Message: fmt.Sprintf("community category store holds an incomplete import (the last %d import attempt(s) failed, last cause: %s) — community lookups may return a partial set of categories until an import completes; it is retried automatically",
+			h.ConsecutiveFailures, sanitizeLog(h.LastFailure)),
+		OperatorAction: "Check the data volume holding the community category store (free space, I/O errors) and outbound access to the feed; the import is retried automatically, and a restart re-syncs it from scratch.",
 	}, true
 }
 
