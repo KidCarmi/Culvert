@@ -1808,8 +1808,10 @@ func checkSyslogFeed() OperatorContractCheck {
 
 // checkCDR summarises Content-Disarm-and-Reconstruction state without
 // pinging the Sluice service or the ClamAV daemon. We use only the cached
-// config snapshot (cdrActiveConfig — RLock-protected) and the live pool
-// length (cdrPool.Len — RLock-protected).
+// config snapshot (cdrActiveConfig — RLock-protected), the live pool
+// length (cdrPool.Len — RLock-protected) and the non-reserving breaker
+// availability read (cdrAnyInstanceAvailable — it never takes a half-open
+// probe, so this row cannot strand the probe the next document needs).
 func checkCDR() OperatorContractCheck {
 	cfg := cdrActiveConfig()
 	if !cfg.Enabled {
@@ -1827,6 +1829,18 @@ func checkCDR() OperatorContractCheck {
 			Status:         diagFail,
 			Message:        "enabled-broken: CDR is enabled but no Sluice instance is connected",
 			OperatorAction: "Enrol at least one Sluice instance under CDR, or disable CDR if not in use.",
+		}
+	case !cdrAnyInstanceAvailable():
+		// Keyed on AVAILABILITY, not pool length: an enrolled instance whose
+		// breaker is open cannot scan anything, and that is the state the
+		// request path consults (runCDRStage, cdrUnavailableOutcome). Keying
+		// on length alone reported enabled-healthy while every inspected
+		// document was being handled per fail_mode unscanned.
+		return OperatorContractCheck{
+			Code:           "cdr",
+			Status:         diagFail,
+			Message:        "enabled-dark: CDR is enabled and instances are enrolled, but none can currently scan a document",
+			OperatorAction: "Check Sluice reachability and the per-instance circuit-breaker state under CDR → Instances. Until an instance recovers, documents are refused (fail_mode closed) or delivered unsanitized (fail_mode open).",
 		}
 	case cfg.FailMode == "" || cfg.DefaultProfile == "":
 		return OperatorContractCheck{

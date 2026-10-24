@@ -147,8 +147,9 @@ cdr:
   fail_mode: "open"       # A live Sanitize call that fails (unreachable mid-call / timeout / ERROR): "open" = deliver the
                           # original (CDR_ERROR request-log event) | "closed" = 403 block page. The cdr_unavailable
                           # alert fires only for transport/RPC failures, NOT for an ERROR result Sluice returns.
-                          # NOT consulted when there is no client to call (initial dial failed at startup, nothing
-                          # enrolled, every breaker open): files then pass through unsanitized in either mode.
+                          # Also applied when CDR is enabled but no instance can be called (initial dial failed at
+                          # startup, nothing enrolled, every breaker open): "open" passes the file through unsanitized,
+                          # "closed" refuses it with block reason cdr_unavailable (counted in culvert_cdr_fail_closed_total).
                           # Enabling CDR from the admin UI at runtime (first enable, or disable + re-enable) runs it
                           # with this and the other cdr values at their DEFAULTS, i.e. "open", until the next restart.
   default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
