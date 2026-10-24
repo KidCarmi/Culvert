@@ -100,10 +100,14 @@ func warnH2InspectFallbackOnce() {
 func newH2InspectServer() *h2InspectShared {
 	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 	srv := &http2.Server{
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
 		MaxConcurrentStreams: h2MaxConcurrentStreams,
-		IdleTimeout:          tunnelIdleTimeout,
-		WriteByteTimeout:     h2ConnWriteByteTimeout,
-		MaxReadFrameSize:     h2MaxReadFrameSize,
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
+		IdleTimeout: tunnelIdleTimeout, //nolint:staticcheck // SA1019 bridge, see lint:ignore above
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
+		WriteByteTimeout: h2ConnWriteByteTimeout, //nolint:staticcheck // SA1019 bridge, see lint:ignore above
+		//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
+		MaxReadFrameSize: h2MaxReadFrameSize, //nolint:staticcheck // SA1019 bridge, see lint:ignore above
 	}
 	base := &http.Server{MaxHeaderBytes: h2MaxHeaderBytes, ReadHeaderTimeout: h2ConnWriteByteTimeout}
 	// ConfigureServer sets srv.state and wires base.RegisterOnShutdown ->

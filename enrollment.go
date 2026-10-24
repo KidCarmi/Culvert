@@ -953,10 +953,9 @@ func (ca *clusterCA) loadFromPEM(certPEM, keyPEM []byte) error {
 	if !ok {
 		return fmt.Errorf("cluster CA cert public key is %T, expected *ecdsa.PublicKey", cert.PublicKey)
 	}
-	keyPub := &key.PublicKey
-	if certPub.Curve != keyPub.Curve ||
-		certPub.X.Cmp(keyPub.X) != 0 ||
-		certPub.Y.Cmp(keyPub.Y) != 0 {
+	// PublicKey.Equal compares the curve and the point, without reading the raw
+	// X/Y coordinates that Go 1.26 deprecated.
+	if !certPub.Equal(&key.PublicKey) {
 		return fmt.Errorf("cluster CA cert/key mismatch: public keys do not agree")
 	}
 
