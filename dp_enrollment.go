@@ -245,13 +245,23 @@ func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr,
 }
 
 // startDataPlane initialises and runs the Data Plane client.
+//
+// CHAOS-71: the role is CLAIMED through the cluster-role arbiter, never written
+// directly. When this node already holds the Control Plane role (its CP
+// listener supervisor claimed it first — at boot, or on a retried bind that
+// landed before Data-Plane wiring), the Data Plane is REFUSED and does not
+// start: an already-claimed role wins, and silently switching a live Control
+// Plane into a Data Plane — CP listener, heartbeat monitor and HA leadership
+// still running underneath — is the dangerous outcome. The refusal is logged,
+// latched, and reported FAIL by the `cluster_posture` diagnostics row.
 func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile string) {
-	clusterRole.role = "data-plane"
-	clusterRole.grpcAddr = addr
-	if nodeID == "" {
-		nodeID = clusterRole.nodeID
+	nodeID, err := claimDataPlaneRole(addr, nodeID)
+	if err != nil {
+		logErrorf("DataPlane: NOT starting the Data Plane client for %s: %v — this node keeps the role it "+
+			"already holds. Both Control Plane and Data Plane wiring are configured; remove one and restart "+
+			"(see the cluster_posture diagnostics row)", addr, err)
+		return
 	}
-	clusterRole.nodeID = nodeID
 
 	// D4: seed the fencing-epoch ratchet from disk BEFORE the first poll so a
 	// restart cannot reopen the epoch-0 window an epoch-0 zombie CP would exploit.

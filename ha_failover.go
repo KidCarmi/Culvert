@@ -87,6 +87,16 @@ func (h *HAState) leaseAutoPromote() bool {
 			time.Since(lastFence).Round(time.Second), haRepromoteCooldown)
 		return false
 	}
+	// CHAOS-71 (CodeRabbit review of #1556): never AUTO-promote a node whose
+	// own Control Plane listener is dark. A self-fenced ex-leader still runs
+	// its supervisor; promoting it while the listener is unavailable would
+	// re-acquire the lease only for leaseRenewOnce to withhold it again — a
+	// promote/fence flap that keeps the lease away from a healthy peer.
+	// PromoteManually (break-glass) is unaffected.
+	if reason, dark := haLeaseRenewWithheld(); dark {
+		logger.Printf("HA: auto-promotion refused — %q (manual promotion available)", sanitizeLog(reason))
+		return false
+	}
 	// Freshness (Finding 8): never auto-promote on long-stale (or never
 	// synced) state. An operator can still PromoteManually — that is the
 	// break-glass, and it logs the staleness instead.
@@ -190,6 +200,10 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 	unreachableDeadline := time.Now().Add(unreachableWait)
 	unreachable := 0
 	for {
+		if h.shuttingDown() {
+			logger.Printf("HA: process shutdown began — abandoning the leadership-resume lease acquire")
+			return false, false
+		}
 		outcome, st := h.resumeAcquireRound()
 		switch outcome {
 		case resumeGranted:
@@ -202,7 +216,9 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 				return false, false
 			}
 			logger.Printf("HA: waiting out our own ghost lease from the previous process (valid_for=%s)", st.ValidFor)
-			time.Sleep(ghostRetryWait(st.ValidFor))
+			if !h.sleepUnlessShutdown(ghostRetryWait(st.ValidFor)) {
+				return false, false // shutdown: the loop head logs and the resume aborts
+			}
 		default: // resumeUnknown, resumeRaceRetryable
 			if time.Now().After(unreachableDeadline) {
 				logger.Printf("HA: fencing backend still unreachable after %s — taking the leader role "+
@@ -215,7 +231,9 @@ func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) 
 				logger.Printf("HA: fencing backend unreachable during leader resume — retrying for up to %s "+
 					"before falling back to a read-only leader role", unreachableWait)
 			}
-			time.Sleep(retryBackoff)
+			if !h.sleepUnlessShutdown(retryBackoff) {
+				return false, false
+			}
 		}
 	}
 }

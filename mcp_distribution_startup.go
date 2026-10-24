@@ -136,9 +136,7 @@ func resolveMCPDPNodeID() string {
 	// HA standby's auto-promote goroutine is already running by the time this shim
 	// executes, and it mutates the struct under the write lock. Take the read lock
 	// rather than relying on which fields happen to be written today.
-	clusterRoleMu.RLock()
-	nodeID := clusterRole.nodeID
-	clusterRoleMu.RUnlock()
+	nodeID := clusterRoleSnapshot().nodeID
 	if nodeID != "" {
 		return nodeID
 	}
