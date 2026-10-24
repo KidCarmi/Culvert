@@ -278,13 +278,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   | RLock | 1926 ns | 3699 ns | 3996 ns | 0.48x — cores *subtracted* throughput |
   | read view | 1748 ns | 980 ns | 537 ns | 3.25x |
 
-  Re-measured against the `byID`-indexed store (go1.27.3, shared 4-vCPU
-  runner, so directional): `MatchesCategoryByID_HitParallel` at
-  `GOMAXPROCS=4` goes from ~105–113 ns to ~25–55 ns, and
-  `MatchesCategory_UnknownNameParallel` from ~82–92 ns to ~30–49 ns, while the
-  `GOMAXPROCS=1` figures stay level — an uncontended `RLock` is traded for an
-  atomic load plus an indirection. The win is the scaling, not the single-core
-  figure. Zero allocations on every path, before and after.
+  Re-measured against the `byID`-indexed store, which is the comparison that
+  describes what this change still buys: both arms on one box, one toolchain
+  (go1.27.3), medians of n=5, back to back — the base arm is `origin/main`
+  with this package's benchmark file copied in.
+
+  | benchmark, ns/op | main | +view | |
+  |---|---|---|---|
+  | `ByID_HitParallel` 8 groups, `GOMAXPROCS=1` | 64.1 | 47.2 | 1.4x |
+  | `ByID_HitParallel` 8 groups, **`GOMAXPROCS=4`** | **194.2** | **11.1** | **17.5x** |
+  | `ByID_HitParallel` 64 groups, `GOMAXPROCS=4` | 211.9 | 12.3 | 17.3x |
+  | `ByID_HitParallel` 256 groups, `GOMAXPROCS=4` | 154.6 | 13.1 | 11.8x |
+  | `MatchesCategory_NameParallel`, `GOMAXPROCS=4` | 124.0 | 16.0 | 7.8x |
+  | `MatchesCategory_UnknownNameParallel`, `GOMAXPROCS=4` | 108.5 | 10.9 | 9.9x |
+  | `MatchesCategoryByID_Hit` 256 groups, serial | 88.3 | 52.7 | 1.7x |
+
+  The row that matters is the shape, not the ratio: on the `byID`-indexed
+  store the parallel figures are **worse than its own single-core figures**
+  (64.1 → 194.2 ns at 8 groups, 82.5 → 211.9 at 64), because with the scan
+  gone the `RLock` is all that is left and it is the thing that does not
+  scale. Off the view the same op costs ~11–13 ns at four cores regardless of
+  group count. The serial gain is real but modest (1.4–1.7x on the ID leg:
+  the view resolves an ID in one probe where the locked path walks
+  `byID` → name key → group). `MatchesCategory_ByName`, main's own serial
+  single-probe benchmark, is ~1.0–1.3x — unchanged, as expected for a shape
+  with no contention to remove. Zero allocations on every path, before and
+  after.
 
   Two **ownership** corrections made the lock-free read safe. `Update`,
   `UpdateByID` and `Rename` now copy-on-write instead of editing the live
