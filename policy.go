@@ -2041,7 +2041,9 @@ func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) 
 	// Amortized O(1) per rule: the host→category fusion is resolved ONCE per
 	// scan (hostCatScratch) and each of its halves is itself indexed — the
 	// urlcat reverse index answers host→category in O(labels) map probes
-	// (urlcat.Store.LookupHost) and the group membership check is a set probe.
+	// (urlcat.Store.LookupHost), and the group resolution plus membership check
+	// are two map probes off catgroup's lock-free published view (catgroup
+	// readView), with no per-rule lock on the group store.
 	if catGroupSet && !categoryGroupMatchesHostScratch(rule, sc) {
 		return false
 	}

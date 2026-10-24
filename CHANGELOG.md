@@ -245,6 +245,86 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The per-request category-group match no longer takes a lock.**
+  `matchDestNorm` calls `categoryGroupMatchesHostScratch` once per rule
+  carrying a destination category group, inside the policy scan every proxied
+  request walks, and each call took an `s.mu.RLock`/`RUnlock` pair — two atomic
+  read-modify-writes on one shared word, so every request wrote the same cache
+  line once per category-group rule to read tables that in steady state never
+  change. (The ID leg's linear scan of every group was already retired by the
+  `byID` index; this change removes the lock from every leg.) That is the
+  throughput ceiling already found and fixed in `internal/threatfeed`,
+  `internal/urlcat`, `internal/connlimit`, the IP filter and `topHosts`;
+  `policy_category_bench_test.go` carried it as an **open** finding (91.9% of
+  samples in `GetByName`, 68.6% in its `RLock` atomic).
+
+  `MatchesCategoryByID`, `MatchesCategory`, `GetByName`, `GetByID` and
+  `Revision` now read an immutable `readView` published under `s.mu` by the
+  `bumpRevLocked` chokepoint: a `byName` map, a `byID` map projected through
+  the same fail-closed `groupByIDLocked` resolution the writers use, and the
+  `rev` memo counter, which travels **inside** the view so contents and change
+  signal are one publication and cannot be observed out of step (published
+  separately, a reader that loaded the bumped counter and then the
+  pre-publication contents would memoize stale contents under the new revision
+  — permanently stale, because the counter will not move again).
+
+  Measured on the PR's development box (medians of n=5, 4-core Xeon @2.80GHz,
+  go1.26.9, before the `byID` index landed), end to end,
+  `BenchmarkPolicyEvaluate_CategoryGroupRulesParallel` with 50 category-group
+  rules and an uncategorized destination:
+
+  | GOMAXPROCS | 1 | 2 | 4 | 1→4 throughput |
+  |---|---|---|---|---|
+  | RLock | 1926 ns | 3699 ns | 3996 ns | 0.48x — cores *subtracted* throughput |
+  | read view | 1748 ns | 980 ns | 537 ns | 3.25x |
+
+  Re-measured against the `byID`-indexed store, which is the comparison that
+  describes what this change still buys: both arms on one box, one toolchain
+  (go1.27.3), medians of n=5, back to back — the base arm is `origin/main`
+  with this package's benchmark file copied in.
+
+  | benchmark, ns/op | main | +view | |
+  |---|---|---|---|
+  | `ByID_HitParallel` 8 groups, `GOMAXPROCS=1` | 64.1 | 47.2 | 1.4x |
+  | `ByID_HitParallel` 8 groups, **`GOMAXPROCS=4`** | **194.2** | **11.1** | **17.5x** |
+  | `ByID_HitParallel` 64 groups, `GOMAXPROCS=4` | 211.9 | 12.3 | 17.3x |
+  | `ByID_HitParallel` 256 groups, `GOMAXPROCS=4` | 154.6 | 13.1 | 11.8x |
+  | `MatchesCategory_NameParallel`, `GOMAXPROCS=4` | 124.0 | 16.0 | 7.8x |
+  | `MatchesCategory_UnknownNameParallel`, `GOMAXPROCS=4` | 108.5 | 10.9 | 9.9x |
+  | `MatchesCategoryByID_Hit` 256 groups, serial | 88.3 | 52.7 | 1.7x |
+
+  The row that matters is the shape, not the ratio: on the `byID`-indexed
+  store the parallel figures are **worse than its own single-core figures**
+  (64.1 → 194.2 ns at 8 groups, 82.5 → 211.9 at 64), because with the scan
+  gone the `RLock` is all that is left and it is the thing that does not
+  scale. Off the view the same op costs ~11–13 ns at four cores regardless of
+  group count. The serial gain is real but modest (1.4–1.7x on the ID leg:
+  the view resolves an ID in one probe where the locked path walks
+  `byID` → name key → group). `MatchesCategory_ByName`, main's own serial
+  single-probe benchmark, is ~1.0–1.3x — unchanged, as expected for a shape
+  with no contention to remove. Zero allocations on every path, before and
+  after.
+
+  Two **ownership** corrections made the lock-free read safe. `Update`,
+  `UpdateByID` and `Rename` now copy-on-write instead of editing the live
+  `*Group`: `GetByName` hands that pointer out and its doc comment claimed
+  "catSet is immutable between mutations", but the mutators edited it in
+  place, so a caller reading `g.catSet` or `g.Name` raced the writer. And
+  `ReplaceAll` / `restoreSnapshot` now copy each `Group` rather than
+  publishing `&groups[i]`: aliasing the *caller's* backing array cannot honour
+  "a published Group is never mutated in place", and handing the same slice to
+  `ReplaceAll` twice wrote groups a reader was mid-probe on. One behavioural
+  consequence, deliberate: the caller's slice no longer has its IDs backfilled
+  in place — no call site reads them back, and `Save()` persists them from the
+  store.
+
+  The view contract is pinned three ways — behaviourally through every public
+  mutator including the `MutateDurable` rollback path, structurally by an AST
+  wall over the package (every group-tree writer publishes, directly or
+  through `bumpRevLocked`, which must itself call `publishLocked`) with a
+  pre-fix control and a writer inventory, and as a differential oracle against
+  a verbatim copy of the pre-fix linear scan.
+
 - The destination host is now canonicalized **once per policy scan** instead of
   once per category-scoped rule. `urlcat.Store.MatchesHost` /
   `MatchesHostAdmin` and `effectiveCategoryView.MatchesCategory` each opened
