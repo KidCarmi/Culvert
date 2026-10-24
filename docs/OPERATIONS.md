@@ -129,6 +129,12 @@ for example, `policy_loaded` is **informational** in `/ready`
 * **Side-effect-free**: reading it never opens files, dials sockets, or
   pings ClamAV. It is safe to poll.
 * Visible in the GUI under **Infrastructure → Diagnostics**.
+* **`pac_profile_degraded`.** `warn` row, present only while at least one
+  PAC profile (including `default`) was last served with compile warnings
+  (dropped rule, unresolvable pool reference, secure-mode conflict). It names
+  the profile IDs and stable issue codes, never the warning text. It reads the
+  in-memory state behind the PAC File page's degraded badge and clears when the
+  profile next serves cleanly (not on elapsed time, not on edit).
 * **What `storage_path` does and does not check.** The `storage_path`
   row reports the result of a **one-shot writability probe** that runs
   once at startup against the configured data directory. The probe
