@@ -640,7 +640,7 @@ func SaturationSkips() int64 { return yaraSaturationSkips.Load() }
 func yaraDegradedLogAllowed(last *atomic.Int64) bool {
 	now := time.Now().UnixNano()
 	prev := last.Load()
-	// CHAOS-71: MAGNITUDE, not sign — see internal/secscan degradedLogAllowed,
+	// CHAOS-84: MAGNITUDE, not sign — see internal/secscan degradedLogAllowed,
 	// the sibling gate for the other scanner producer. A backward clock step
 	// would otherwise suppress the degraded line for the whole step.
 	if prev != 0 && time.Duration(now-prev).Abs() < yaraDegradedLogInterval {

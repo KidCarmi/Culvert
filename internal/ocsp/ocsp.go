@@ -97,7 +97,7 @@ type Checker struct {
 // now, at most once per truncationLogEvery. A CAS keeps two concurrent
 // handshakes from both emitting.
 func (oc *Checker) allowTruncationLog(now time.Time) bool {
-	// CHAOS-71: the stamp is unix nanos, so the comparison is a wall-clock one
+	// CHAOS-84: the stamp is unix nanos, so the comparison is a wall-clock one
 	// and a BACKWARD clock step reads as "logged in the future", suppressing the
 	// notice for the duration of the step. An interval that cannot be measured
 	// counts as expired, so a capped responder stays reportable across a clock
@@ -108,8 +108,10 @@ func (oc *Checker) allowTruncationLog(now time.Time) bool {
 	// ordering artifact rather than a clock step. The gate therefore suppresses
 	// while the stamp is within one interval of now in EITHER direction, so a
 	// rollback costs at most one suppressed notice — the rate limit already
-	// allows that — and the two causes can never be confused. Same rule, same
-	// reasoning, as the roster gates in roster_persist_durability.go.
+	// allows that — and the two causes can never be confused. Same rule as the
+	// scanner, YARA, crash-throttle and Sluice call-error gates. (The stamp
+	// cannot simply move to a monotonic basis the way package main's roster
+	// gates did in CHAOS-83: this gate takes an injected wall-clock now.)
 	last := oc.lastTruncationLog.Load()
 	if d := now.Sub(time.Unix(0, last)); last != 0 && d.Abs() < truncationLogEvery {
 		return false

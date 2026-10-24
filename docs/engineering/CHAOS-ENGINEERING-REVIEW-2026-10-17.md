@@ -1,6 +1,6 @@
 # Chaos Engineering Review — 2026-10-17
 
-## CHAOS-71 — The wall clock steps backwards and four bounds stop expiring
+## CHAOS-84 — The wall clock steps backwards and four bounds stop expiring
 
 **Scope.** Every interval in the tree that is measured from a stamp held as a
 bare `int64` (unix nanos or millis) rather than a `time.Time`: the raw-tunnel
@@ -9,6 +9,19 @@ idle reaper (`proxy_tunnel.go`), the parent-proxy circuit breaker
 (`cdr_breaker.go`), the data-plane readiness grace (`readyz_dp_health.go`), and
 the two roster-durability log gates plus the OCSP responder-cap gate
 (`roster_persist_durability.go`, `internal/ocsp/ocsp.go`).
+
+> **Reconciled when main was brought in (id and scope).** First written as
+> `CHAOS-71`; renumbered in merge order to `CHAOS-84` (register §48), because
+> `CHAOS-71` had merged on main as the CP gRPC listener sweep. The shipped scope
+> is narrower than the analysis below: the tunnel idle reaper (CK-1), the DP
+> readiness grace (CK-4) and the roster log gates (half of CK-5) are fixed by
+> the sibling sweep `CHAOS-83` (#1644, monotonic stamps in `monotime.go`), whose
+> readiness contract (a future stamp leaves `cp_poll` at `ok`) contradicts the
+> "count it as expired" guard this sweep first shipped for CK-4; and the CDR
+> breaker (CK-3) was already moved onto a monotonic stamp on main. This change
+> therefore ships CK-2, the OCSP half of CK-5 and the five CK-9 gates. The
+> analysis of the withdrawn sites is kept because it is still the record of
+> the class; the register rows say which change closes each.
 
 **Origin.** Not a register row. A systematic sweep of the SIMULATE list's three
 clock faults — *clock skew*, *clock rollback*, *NTP failure* — which no previous
@@ -298,14 +311,14 @@ pair) with their own pre-fix results recorded there:
 
 | Gate | Pre-fix result |
 |---|---|
-| `TestChaos71_TunnelIdleReaperSurvivesABackwardClockStep` (original form) | FAIL — `idleCopyCounted never reaped a half-open tunnel after a backward clock step` (timed out at 3 s). **Superseded in §8b**: once the stamp moved to a monotonic basis a wall-clock step could no longer be injected into it at all, so this behavioural gate was replaced by `TestChaos71_TunnelActivityStampIsNotOnTheWallClock`, which proves the basis instead (pre-fix: `activity stamp = 1792278133265559320, want < 86400000000000`). |
-| `TestChaos71_CDRBreakerRecoversAfterABackwardClockStep` | FAIL — `breaker never left open after a backward clock step plus a full reset timeout` |
-| `TestChaos71_DPReadinessFailsWhenTheGraceCannotBeMeasured` | FAIL — `cp_poll status = "ok", want "fail"` |
-| `TestChaos71_RosterPersistWarningIsNotSuppressedByABackwardClockStep` | FAIL — `rosterPersistSuppress = 1, want 0` |
-| `TestChaos71_RosterNotDurableWarningIsNotSuppressedByABackwardClockStep` | FAIL — `rosterNotDurableSuppress = 1, want 0` |
-| `TestChaos71_BreakerHalfOpensAfterABackwardClockStep` (upstream) | FAIL — `breaker never left open after a backward clock step` (2 s budget) |
-| `TestChaos71_BreakerRecoveryIsBoundedFromTheStep` (upstream) | FAIL — `breaker never recovered` (5 s budget) |
-| `TestChaos71_TruncationLogIsNotSuppressedByABackwardClockStep` (ocsp) | FAIL — `allowTruncationLog suppressed the responder-cap notice after a backward clock step` |
+| `TestChaos84_TunnelIdleReaperSurvivesABackwardClockStep` (original form) | FAIL — `idleCopyCounted never reaped a half-open tunnel after a backward clock step` (timed out at 3 s). **Superseded in §8b**: once the stamp moved to a monotonic basis a wall-clock step could no longer be injected into it at all, so this behavioural gate was replaced by `TestChaos84_TunnelActivityStampIsNotOnTheWallClock`, which proves the basis instead (pre-fix: `activity stamp = 1792278133265559320, want < 86400000000000`). |
+| `TestChaos84_CDRBreakerRecoversAfterABackwardClockStep` | FAIL — `breaker never left open after a backward clock step plus a full reset timeout` |
+| `TestChaos84_DPReadinessFailsWhenTheGraceCannotBeMeasured` | FAIL — `cp_poll status = "ok", want "fail"` |
+| `TestChaos84_RosterPersistWarningIsNotSuppressedByABackwardClockStep` | FAIL — `rosterPersistSuppress = 1, want 0` |
+| `TestChaos84_RosterNotDurableWarningIsNotSuppressedByABackwardClockStep` | FAIL — `rosterNotDurableSuppress = 1, want 0` |
+| `TestChaos84_BreakerHalfOpensAfterABackwardClockStep` (upstream) | FAIL — `breaker never left open after a backward clock step` (2 s budget) |
+| `TestChaos84_BreakerRecoveryIsBoundedFromTheStep` (upstream) | FAIL — `breaker never recovered` (5 s budget) |
+| `TestChaos84_TruncationLogIsNotSuppressedByABackwardClockStep` (ocsp) | FAIL — `allowTruncationLog suppressed the responder-cap notice after a backward clock step` |
 
 **Fault injection.** A backward step of Δ is observationally identical to a
 stamp Δ in the FUTURE, because the stamp is written before the step and read
@@ -318,30 +331,30 @@ eventually happens.
 **CONTROLS** — a passing gate must not be able to mean the mechanism simply
 stopped firing. Seven, one per changed decision:
 
-- `TestChaos71_TunnelIdleReaperReapsAnIdleTunnel` — an ordinary hour-idle tunnel
+- `TestChaos84_TunnelIdleReaperReapsAnIdleTunnel` — an ordinary hour-idle tunnel
   is still reaped, i.e. the monotonic switch did not break the CHAOS-03
   guarantee this bound exists for.
-- `TestChaos71_TunnelIdleForIgnoresAWallClockEpochStamp` — a stamp on the wrong
+- `TestChaos84_TunnelIdleForIgnoresAWallClockEpochStamp` — a stamp on the wrong
   basis can never produce a REAPABLE idleness and tear down a live tunnel.
-- `TestChaos71_TunnelIdleReaperDoesNotReapAFreshTunnel` — the guard cannot
+- `TestChaos84_TunnelIdleReaperDoesNotReapAFreshTunnel` — the guard cannot
   become "always reap"; a current stamp survives a full window. (It also joins
   the relay goroutine before returning, so the package-global timeout is never
   read by a leaked goroutine — caught by `-race`.)
-- `TestChaos71_CDRBreakerStillHoldsOpenWithoutAClockStep` — still denies inside
+- `TestChaos84_CDRBreakerStillHoldsOpenWithoutAClockStep` — still denies inside
   `ResetTimeout`, still half-opens after it.
-- `TestChaos71_BreakerStillHoldsOpenForItsTimeout` (upstream) — still denies
+- `TestChaos84_BreakerStillHoldsOpenForItsTimeout` (upstream) — still denies
   well inside the timeout, and `OpenedAt()` still publishes a sane trip instant.
-- `TestChaos71_BreakerRecoveryIsBoundedFromTheStep` (upstream) — doubles as the
+- `TestChaos84_BreakerRecoveryIsBoundedFromTheStep` (upstream) — doubles as the
   control that the re-anchor is not an instant half-open: recovery must take at
   least a full timeout measured from the step, so the fix cannot degrade into a
   probe flood.
-- `TestChaos71_DPReadinessStillHonoursTheGraceWindow` — a just-happened
+- `TestChaos84_DPReadinessStillHonoursTheGraceWindow` — a just-happened
   transition is still inside the grace and still reports `ok`.
-- `TestChaos71_RosterRateGatesStillSuppressWithinTheInterval` — both gates still
+- `TestChaos84_RosterRateGatesStillSuppressWithinTheInterval` — both gates still
   rate-limit to one line per interval.
 
 **Counts.** 15 defect gates + 15 controls = **30 new gates**, in
-`chaos71_clock_rollback_test.go` (root, 19), `internal/upstream/clock_rollback_test.go` (3),
+`chaos84_clock_rollback_test.go` (root, 19 as first shipped; 6 after the reconciliation above), `internal/upstream/clock_rollback_test.go` (3),
 `internal/ocsp/clock_rollback_test.go` (2), `internal/secscan/clock_rollback_test.go` (3)
 and `internal/yara/clock_rollback_test.go` (3) — including the four added by the
 review round in §8b and the twelve added by §8c.
@@ -387,7 +400,7 @@ stamp moved to a **monotonic basis**, which closes CK-1a and CK-1b together
 because a wall-clock step cannot be represented in it at all. That is a smaller
 conceptual surface than the guard it replaces — the negative branch is gone —
 and it is available precisely here because the stamp is process-internal. The
-permanent proof is `TestChaos71_TunnelActivityStampIsNotOnTheWallClock`, which
+permanent proof is `TestChaos84_TunnelActivityStampIsNotOnTheWallClock`, which
 asserts the **basis** rather than a behaviour: a behavioural gate cannot step the
 host clock, so only the basis is checkable, and if anyone restores a wall stamp
 it fails immediately with the reason.
@@ -538,7 +551,7 @@ the API carried only post-job cleanup, so the first read of the situation was
 Running the same shard locally (`go test -race ./internal/...`) reproduced it:
 
 ```
---- FAIL: TestChaos71_BreakerRecoveryIsBoundedFromTheStep (0.30s)
+--- FAIL: TestChaos84_BreakerRecoveryIsBoundedFromTheStep (0.30s)
 ```
 
 **The defect was in the gate, not the fix.** `CircuitBreaker.openedAt` is a

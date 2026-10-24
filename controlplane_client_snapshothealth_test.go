@@ -20,6 +20,7 @@ import (
 // fetchAndApply full-snapshot path with a GetConfig response that isn't
 // valid JSON at all — the parse step of the outcome model.
 func TestFetchAndApply_MalformedFullSnapshotMarksRejected(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	resetConfigSnapshotApplyHealth(t)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
@@ -43,6 +44,7 @@ func TestFetchAndApply_MalformedFullSnapshotMarksRejected(t *testing.T) {
 // REAL fetchAndApply path with a structurally-valid-JSON but over-cap
 // snapshot — the validate step of the outcome model.
 func TestFetchAndApply_OverCapSnapshotMarksRejectedThroughRealPath(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	resetConfigSnapshotApplyHealth(t)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
@@ -106,6 +108,7 @@ func TestFetchAndApply_SuccessfulApplyRecoversThroughRealPath(t *testing.T) {
 // applyDeltaReply path with a delta reply whose Remainder is not valid
 // JSON — the parse step of the outcome model, delta side.
 func TestApplyDeltaReply_MalformedRemainderMarksRejected(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	resetConfigSnapshotApplyHealth(t)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)

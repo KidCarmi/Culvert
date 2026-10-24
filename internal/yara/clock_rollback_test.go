@@ -1,6 +1,6 @@
 package yara
 
-// CHAOS-71 / CK-9 — the YARA degraded-log gate across a backward clock step.
+// CHAOS-84 / CK-9 — the YARA degraded-log gate across a backward clock step.
 // Sibling of internal/secscan's degradedLogAllowed, with the same defect, the
 // same cause (the two-step `now - prev` form the first sweep's search missed)
 // and the same fix: compare the ABSOLUTE interval, so a backward step costs at
@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestChaos71_YARADegradedLogSurvivesABackwardClockStep(t *testing.T) {
+func TestChaos84_YARADegradedLogSurvivesABackwardClockStep(t *testing.T) {
 	var gate atomic.Int64
 	gate.Store(time.Now().Add(time.Hour).UnixNano())
 
@@ -22,8 +22,8 @@ func TestChaos71_YARADegradedLogSurvivesABackwardClockStep(t *testing.T) {
 	}
 }
 
-// TestChaos71_YARADegradedLogStillRateLimits is the CONTROL.
-func TestChaos71_YARADegradedLogStillRateLimits(t *testing.T) {
+// TestChaos84_YARADegradedLogStillRateLimits is the CONTROL.
+func TestChaos84_YARADegradedLogStillRateLimits(t *testing.T) {
 	var gate atomic.Int64
 	if !yaraDegradedLogAllowed(&gate) {
 		t.Fatal("first degraded line was suppressed")
@@ -33,9 +33,9 @@ func TestChaos71_YARADegradedLogStillRateLimits(t *testing.T) {
 	}
 }
 
-// TestChaos71_YARADegradedLogIgnoresAConcurrentClaimantsStamp is the CONTROL for
+// TestChaos84_YARADegradedLogIgnoresAConcurrentClaimantsStamp is the CONTROL for
 // the other side of the symmetric window.
-func TestChaos71_YARADegradedLogIgnoresAConcurrentClaimantsStamp(t *testing.T) {
+func TestChaos84_YARADegradedLogIgnoresAConcurrentClaimantsStamp(t *testing.T) {
 	var gate atomic.Int64
 	gate.Store(time.Now().Add(50 * time.Microsecond).UnixNano())
 	if yaraDegradedLogAllowed(&gate) {

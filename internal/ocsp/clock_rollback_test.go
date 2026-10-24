@@ -1,6 +1,6 @@
 package ocsp
 
-// CHAOS-71 — the responder-cap log gate across a backward wall-clock step.
+// CHAOS-84 — the responder-cap log gate across a backward wall-clock step.
 //
 // lastTruncationLog is a unix-nanos int64, so the interval test is a wall-clock
 // subtraction. A backward step makes it negative, which reads as "logged in the
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func TestChaos71_TruncationLogIsNotSuppressedByABackwardClockStep(t *testing.T) {
+func TestChaos84_TruncationLogIsNotSuppressedByABackwardClockStep(t *testing.T) {
 	oc := &Checker{}
 	now := time.Now()
 	// Stamped before a one-hour backward step, so it reads an hour ahead.
@@ -28,9 +28,9 @@ func TestChaos71_TruncationLogIsNotSuppressedByABackwardClockStep(t *testing.T) 
 	}
 }
 
-// TestChaos71_TruncationLogStillRateLimits is the CONTROL: with a sane clock the
+// TestChaos84_TruncationLogStillRateLimits is the CONTROL: with a sane clock the
 // gate still emits once per interval, not once per handshake.
-func TestChaos71_TruncationLogStillRateLimits(t *testing.T) {
+func TestChaos84_TruncationLogStillRateLimits(t *testing.T) {
 	oc := &Checker{}
 	now := time.Now()
 	if !oc.allowTruncationLog(now) {

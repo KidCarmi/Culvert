@@ -139,20 +139,8 @@ func appendDPHealthChecks(checks map[string]*readinessCheck) {
 		// window. The full posture is on the role-gated /api/diagnostics
 		// (dp_last_known_good_config) and in the log.
 		cp.Detail = "control plane connectivity is degraded — see server logs"
-		// CHAOS-71: the transition stamp is wall-clock unix nanos, so a BACKWARD
-		// clock step puts it in the future and time.Since goes negative — the
-		// grace window becomes UNEXPIRABLE and a node whose control-plane link is
-		// known dead keeps answering "ok" for the duration of the step, so a load
-		// balancer keeps routing production traffic to it on indefinitely stale
-		// config. An unmeasurable grace is therefore treated as EXPIRED, which is
-		// the fail-closed direction: the failing flag is already established, the
-		// probe has no live resource to protect (unlike the tunnel reaper and the
-		// two breakers, which re-anchor to avoid a mass reset), and leaving the
-		// rotation is the safe answer when the node cannot say how long it has
-		// been degraded. The read path stays side-effect-free — the stamp is not
-		// rewritten here.
 		since := dpCPPollFailingSince.Load()
-		if d := time.Since(time.Unix(0, since)); since != 0 && (d < 0 || d >= dpCPPollFailGrace) {
+		if since != 0 && time.Since(time.Unix(0, since)) >= dpCPPollFailGrace {
 			cp.Status = "fail"
 		}
 		// Otherwise: failing but inside the grace window (or a bare flag with no

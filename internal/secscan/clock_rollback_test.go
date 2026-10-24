@@ -1,6 +1,6 @@
 package secscan
 
-// CHAOS-71 / CK-9 — the scanner's degraded-log gate across a backward clock step.
+// CHAOS-84 / CK-9 — the scanner's degraded-log gate across a backward clock step.
 //
 // degradedLogAllowed compares two wall-clock nanos, so a backward step makes the
 // difference negative and a sign-based test suppresses for the whole step. The
@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func TestChaos71_DegradedLogSurvivesABackwardClockStep(t *testing.T) {
+func TestChaos84_DegradedLogSurvivesABackwardClockStep(t *testing.T) {
 	var gate atomic.Int64
 	// Stamped before a one-hour backward step, so it reads an hour ahead.
 	gate.Store(time.Now().Add(time.Hour).UnixNano())
@@ -28,9 +28,9 @@ func TestChaos71_DegradedLogSurvivesABackwardClockStep(t *testing.T) {
 	}
 }
 
-// TestChaos71_DegradedLogStillRateLimits is the CONTROL: one line per interval
+// TestChaos84_DegradedLogStillRateLimits is the CONTROL: one line per interval
 // on a sane clock.
-func TestChaos71_DegradedLogStillRateLimits(t *testing.T) {
+func TestChaos84_DegradedLogStillRateLimits(t *testing.T) {
 	var gate atomic.Int64
 	if !degradedLogAllowed(&gate) {
 		t.Fatal("first degraded line was suppressed")
@@ -40,9 +40,9 @@ func TestChaos71_DegradedLogStillRateLimits(t *testing.T) {
 	}
 }
 
-// TestChaos71_DegradedLogIgnoresAConcurrentClaimantsStamp is the CONTROL for the
+// TestChaos84_DegradedLogIgnoresAConcurrentClaimantsStamp is the CONTROL for the
 // other side of the symmetric window.
-func TestChaos71_DegradedLogIgnoresAConcurrentClaimantsStamp(t *testing.T) {
+func TestChaos84_DegradedLogIgnoresAConcurrentClaimantsStamp(t *testing.T) {
 	var gate atomic.Int64
 	gate.Store(time.Now().Add(50 * time.Microsecond).UnixNano())
 	if degradedLogAllowed(&gate) {

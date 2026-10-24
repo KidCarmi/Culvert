@@ -1,6 +1,6 @@
 package upstream
 
-// CHAOS-71 — the parent-proxy circuit breaker across a backward wall-clock step.
+// CHAOS-84 — the parent-proxy circuit breaker across a backward wall-clock step.
 //
 // openedAt is a UnixMilli int64, so `time.UnixMilli(...)` reconstructs a Time
 // with NO monotonic reading and `time.Since` on it is a wall-clock subtraction.
@@ -19,8 +19,8 @@ import (
 	"time"
 )
 
-// TestChaos71_BreakerHalfOpensAfterABackwardClockStep is the DEFECT gate.
-func TestChaos71_BreakerHalfOpensAfterABackwardClockStep(t *testing.T) {
+// TestChaos84_BreakerHalfOpensAfterABackwardClockStep is the DEFECT gate.
+func TestChaos84_BreakerHalfOpensAfterABackwardClockStep(t *testing.T) {
 	const timeout = 50 * time.Millisecond
 	cb := newCircuitBreaker(1, timeout)
 
@@ -52,9 +52,9 @@ func TestChaos71_BreakerHalfOpensAfterABackwardClockStep(t *testing.T) {
 	}
 }
 
-// TestChaos71_BreakerStillHoldsOpenForItsTimeout is the CONTROL that the guard
+// TestChaos84_BreakerStillHoldsOpenForItsTimeout is the CONTROL that the guard
 // did not turn the breaker into a pass-through.
-func TestChaos71_BreakerStillHoldsOpenForItsTimeout(t *testing.T) {
+func TestChaos84_BreakerStillHoldsOpenForItsTimeout(t *testing.T) {
 	cb := newCircuitBreaker(1, time.Hour)
 	cb.RecordFailure()
 	if cb.Allow() {
@@ -67,11 +67,11 @@ func TestChaos71_BreakerStillHoldsOpenForItsTimeout(t *testing.T) {
 	}
 }
 
-// TestChaos71_BreakerRecoveryIsBoundedFromTheStep pins the RECOVERY SHAPE: the
+// TestChaos84_BreakerRecoveryIsBoundedFromTheStep pins the RECOVERY SHAPE: the
 // guard re-anchors the trip instant to the stepped clock, so recovery takes one
 // reset timeout measured FROM the step — never zero (a probe flood) and never
 // unbounded (the defect).
-func TestChaos71_BreakerRecoveryIsBoundedFromTheStep(t *testing.T) {
+func TestChaos84_BreakerRecoveryIsBoundedFromTheStep(t *testing.T) {
 	const timeout = 300 * time.Millisecond
 	cb := newCircuitBreaker(1, timeout)
 	cb.RecordFailure()

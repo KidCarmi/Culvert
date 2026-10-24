@@ -825,7 +825,7 @@ var (
 func degradedLogAllowed(last *atomic.Int64) bool {
 	now := time.Now().UnixNano()
 	prev := last.Load()
-	// CHAOS-71: MAGNITUDE, not sign. A backward wall-clock step makes the
+	// CHAOS-84: MAGNITUDE, not sign. A backward wall-clock step makes the
 	// difference negative, and a sign-based test then suppresses the scanner's
 	// degraded line for the whole step — the operator's only notice that scans
 	// are saturating or being abandoned. The absolute interval bounds it to one

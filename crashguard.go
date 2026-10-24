@@ -164,7 +164,7 @@ func crashThrottleAllow(component string) bool {
 	crashThrottleMu.Lock()
 	defer crashThrottleMu.Unlock()
 	last, ok := crashThrottleLast[component]
-	// CHAOS-71: MAGNITUDE, not sign. now and last are wall-clock nanos, so a
+	// CHAOS-84: MAGNITUDE, not sign. now and last are wall-clock nanos, so a
 	// BACKWARD clock step makes the difference negative and a sign-based test
 	// keeps returning false for the whole step — recordCrash then returns before
 	// updating lastCrash or emitting the stack-bearing log and audit entry, so

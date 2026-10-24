@@ -77,7 +77,7 @@ func (cb *CircuitBreaker) Allow() bool {
 	case circuitOpen:
 		// Check if timeout has elapsed → transition to half-open.
 		//
-		// CHAOS-71: openedAt is a UnixMilli int64, so time.UnixMilli rebuilds a
+		// CHAOS-84: openedAt is a UnixMilli int64, so time.UnixMilli rebuilds a
 		// Time with no monotonic reading and time.Since on it is a WALL-CLOCK
 		// subtraction. A backward step (NTP correcting a wrong RTC, a resumed
 		// snapshot, an operator fixing the date) makes that difference negative
