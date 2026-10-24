@@ -1,0 +1,11 @@
+go run ./cmd/apibundle -spec api/openapi/openapi.yaml -check
+api artifacts up to date
+go test ./internal/apicontract/... -run 'TestReal|TestStyleLint' -count=1
+ok  	github.com/KidCarmi/Culvert/internal/apicontract	0.222s
+go test . -run 'TestOpenAPI_Gate1|TestOpenAPI_Gate2' -count=1
+ok  	github.com/KidCarmi/Culvert	0.917s
+go test . -run 'TestOpenAPI_Gate3' -count=1
+ok  	github.com/KidCarmi/Culvert	0.580s
+go test . -run 'TestConformance_' -count=1
+ok  	github.com/KidCarmi/Culvert	7.394s
+API contract verified.
