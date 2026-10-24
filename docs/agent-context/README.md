@@ -70,6 +70,8 @@ to this checkout, not to an unmerged branch.
   [internal/ocsp](../../internal/ocsp). Use the matching tests and
   [proxy/TLS history](history/proxy-tls-and-certificates.md), including raw attacker
   log bytes, hop-by-hop stripping, no-redirect forwarding and fail-open/closed boundaries.
+  Check [oversize-host refusal errata](errata.md#oversize-host-refusal-reporting):
+  the preserved destination-bounds block stops at its fifth review round.
   See also [transport/relay cost context](history/admission-and-connection-limits.md#claude-main-l238-l238).
 - Policy, GeoIP/DNS, category/blocklist/threat feeds: [policy.go](../../policy.go),
   [host/category composition](../../policy_hostcat.go), [geoip.go](../../geoip.go),
@@ -124,6 +126,24 @@ to this checkout, not to an unmerged branch.
   [cluster CA](../../cluster_ca_validity.go), [internal/halease](../../internal/halease),
   [cluster/HA history](history/cluster-and-ha.md). Config application also crosses
   the admission, auth, persistence and MCP contracts; follow those affected routes.
+- CP gRPC listener supervisor and health plane (CHAOS-71):
+  [cp_grpc_bind.go](../../cp_grpc_bind.go), [cp_grpc_activation.go](../../cp_grpc_activation.go),
+  [cp_grpc_health.go](../../cp_grpc_health.go), [runbook](../operator/cp-grpc-listener-recovery.md).
+  The boot path is non-fatal and retries; the admin/promote path stays
+  synchronous. Activation is asynchronous to boot, so `commitActivation` is the
+  ONE post-bind step: abort on stop/shutdown or an established non-CP role,
+  claim the role, merge the CP address list onto the latest committed snapshot
+  (`ConfigStore.UpdateCPAddresses`), roll back on a rejected publish, and only
+  then run `onActivated` behind the shutdown gate. Every write of the cluster
+  role / advertised gRPC address goes through
+  [cluster_role_arbiter.go](../../cluster_role_arbiter.go): an already-claimed
+  role wins, the second claimant is refused and latched (`cluster_posture` FAIL).
+  Reads go through `clusterRoleSnapshot()` only; once the CP is active the CP
+  address list is owned by `ConfigStore.UpdateCPAddressesFrom`.
+  `cpActivationMu` is taken
+  before `clusterRoleMu`, and nothing may call `CurrentConfigSnapshot` while
+  holding `clusterRoleMu`. A lease-mode leader whose listener is dark past 30 s
+  withholds lease renewal (`leaseRenewOnce`).
 - Release catalog signatures/trust/freshness, image pinning, installer/bootstrap,
   maintenance: [release_wiring.go](../../release_wiring.go),
   [maintenance module](../../cmd/culvert-maint),

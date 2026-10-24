@@ -204,7 +204,7 @@ func TestDataRollback_PassphraseRefForwardedAndValidated(t *testing.T) {
 	defer rig.stop()
 
 	// Malformed ref → 400 before runner.
-	status, _ := rig.postRollback(t, map[string]interface{}{
+	status, _ := rig.postRollback(t, map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"mode": "data", "filename": fn, "passphrase_ref": "not-an-env-ref",
 	})
 	if status != http.StatusBadRequest {
@@ -213,7 +213,7 @@ func TestDataRollback_PassphraseRefForwardedAndValidated(t *testing.T) {
 
 	// Valid ref → value forwarded to the cli --restore command env.
 	t.Setenv("CULVERT_BACKUP_PASSPHRASE", "s3cret")
-	opID := rig.rollbackOpID(t, map[string]interface{}{
+	opID := rig.rollbackOpID(t, map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"mode": "data", "filename": fn, "passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE",
 	})
 	rig.waitForOpFinished(t, opID)
