@@ -260,7 +260,10 @@ func cdrAnyInstanceAvailable() bool {
 // cdrPickPooledReserved is the proxy hot path's selector: the pool-aware
 // client with full per-instance state (profileCap, breaker, health) plus the
 // half-open reservation it holds.  Returns nil when no instance is available
-// — callers treat nil as "skip CDR" and apply fail_mode.  The caller must
+// — nil means the request CANNOT be scanned, so the caller must route it
+// through cdrUnavailableOutcome (cdr_proxy.go) rather than pass it: that is
+// where fail_mode is applied, and a bare pass there is the fail-closed bypass
+// cdr_fail_closed_unavailable_test.go pins.  On a non-nil pick the caller must
 // record an outcome or Release the reservation on every return path.
 func cdrPickPooledReserved() (*cdrPooledClient, cdrProbeReservation) {
 	return cdrPool.PickReserved()

@@ -885,3 +885,72 @@ func TestBenchGate_CategoryLookupConstantInTaxonomySize(t *testing.T) {
 			ratio, float64(largeN)/float64(smallN), maxRatio)
 	}
 }
+
+// TestBenchGate_PolicyEvalScheduleOverheadBounded locks in the evaluation-scoped
+// schedule memo (policy.go scheduleClock).
+//
+// TestBenchGate_PolicyEvalScheduledAllocs above pins the ALLOCATION half of the
+// schedule check. The regression this gate exists for allocates nothing, so that
+// gate cannot see it: resolving the rule's timezone per RULE instead of per
+// EVALUATION is pure CPU — a probe of the process-wide scheduleLocCache sync.Map
+// (interface-keyed, so runtime.nilinterhash → typehash → aeshashbody on every
+// probe) plus a fresh now.In(loc)/Weekday()/Hour()/Minute() split. Measured on a
+// 1 000-scheduled-rule scan that was 41% of the whole evaluation, and the
+// rulebase got none of it back: every one of those probes looked up the SAME
+// timezone the deployment configured.
+//
+// The gate is a RATIO against the identical scan with the schedules removed, so
+// it measures the schedule check's marginal cost rather than absolute speed and
+// stays meaningful on a shared runner. Measured ~2.1x with the memo (23.0 µs vs
+// 11.0 µs at 1 000 rules) against ~5.6x without it (69.9 µs vs 12.4 µs). The
+// 3.5x bound sits between those with room for a noisy runner.
+//
+// The pathological shape — consecutive rules in DIFFERENT zones, which evicts
+// the single-entry memo on every rule — is deliberately NOT gated here: it
+// degrades to the pre-memo cost by construction (and measured slightly better),
+// so gating it would pin a number the memo was never claimed to improve. See
+// BenchmarkPolicyEvaluate_ScheduledRulesMultiTimezone for that measurement.
+func TestBenchGate_PolicyEvalScheduleOverheadBounded(t *testing.T) {
+	const maxRatio = 3.5
+	const rules = 1000
+
+	measure := func(ps *PolicyStore) int64 {
+		// Warm the lazily-filled caches (tzdata memo, published snapshot) so the
+		// measurement sees steady state, then keep the faster of two rounds —
+		// the same scheduler-hiccup damping the taxonomy gate above uses.
+		for i := 0; i < 50; i++ {
+			_ = ps.Evaluate("203.0.113.7", "", "unauth", "target.example.com", nil)
+		}
+		best := int64(0)
+		for round := 0; round < 2; round++ {
+			ns := testing.Benchmark(func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					_ = ps.Evaluate("203.0.113.7", "", "unauth", "target.example.com", nil)
+				}
+			}).NsPerOp()
+			if best == 0 || ns < best {
+				best = ns
+			}
+		}
+		return best
+	}
+
+	plainNs := measure(buildPolicyStore(rules))
+	schedNs := measure(buildScheduledPolicyStore(rules))
+	if plainNs <= 0 {
+		t.Fatalf("unscheduled baseline measured %d ns/op — benchmark did not run", plainNs)
+	}
+
+	ratio := float64(schedNs) / float64(plainNs)
+	t.Logf("Evaluate rules=%d: %d ns/op scheduled vs %d ns/op unscheduled — ratio %.2fx (bound %.1fx)",
+		rules, schedNs, plainNs, ratio, maxRatio)
+	if ratio > maxRatio {
+		t.Errorf("REGRESSION: a %d-rule scheduled scan costs %.2fx the identical unscheduled scan, "+
+			"exceeding the %.1fx bound — the schedule check is resolving per RULE again instead of "+
+			"per EVALUATION. Either the Stage-2 scan stopped sharing one scheduleClock across the "+
+			"rulebase (policy.go evalAccessRules), or matchScheduleMemo stopped reading the timezone "+
+			"and clock fields through it. That cost is paid inside the request goroutine on every "+
+			"proxied request against a scheduled posture.",
+			rules, ratio, maxRatio)
+	}
+}

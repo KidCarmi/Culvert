@@ -400,7 +400,7 @@ func (f *feedFetcher) do(ctx context.Context, u *url.URL, expectPath, priorETag 
 			return nil, fmt.Errorf("%w: scheme/host constraint violated at dial: %q://%q", errFeedFetchSSRF,
 				strings.ReplaceAll(cur.Scheme, "\n", ""), strings.ReplaceAll(cur.Hostname(), "\n", ""))
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cur.String(), http.NoBody)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cur.String(), http.NoBody) // #nosec G704 -- pinned origin/path, each redirect revalidated, resolved-IP dial guard; TestF3b2_SSRFPrivateAddressRejected + TestF3b2_RedirectEscapeRejected (RISK-002).
 		if err != nil {
 			return nil, err
 		}
@@ -409,7 +409,7 @@ func (f *feedFetcher) do(ctx context.Context, u *url.URL, expectPath, priorETag 
 		if priorETag != "" {
 			req.Header.Set("If-None-Match", priorETag)
 		}
-		resp, err := f.client.Do(req)
+		resp, err := f.client.Do(req) // #nosec G704 -- same feed transport and per-hop checks; TestF3b2_DialsResolvedIPWithOfficialHostAndSNI (RISK-002).
 		if err != nil {
 			if isFeedFetchCanceled(err) {
 				return nil, err
