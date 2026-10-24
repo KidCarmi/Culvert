@@ -641,6 +641,10 @@ func armDriftFixture(t *testing.T, rt *canaryRuntime, capb rollout.Capability) (
 	resetInventory(t)
 	resetExecDeps(t)
 	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	// These tests admit the reviewed request FIRST and only then pull the rug, so the target must
+	// have been seen by its peer — admission refuses an unobserved one (round 13). Observed at the
+	// fixture's admission instant, before the approval pins the catalog revision.
+	observeSeededToolTrustPeerAt(t, sid, canaryRuntimeTestNow)
 	_, clkFn := liveFakeClock()
 	composeToolTrust(t, clkFn)
 	// READ-ONLY, because these tests admit the reviewed request through the real gate and only a
@@ -775,6 +779,7 @@ func TestAutoStop_MerelyUnauthorizedRequestDoesNotStopTheCanary(t *testing.T) {
 	resetInventory(t)
 	resetExecDeps(t)
 	_, _, sid, tool, fpHex := seedToolTrustInventory(t)
+	observeSeededToolTrustPeerAt(t, sid, canaryRuntimeTestNow) // refused for lack of AUTHORIZATION, never staleness
 	_, clkFn := liveFakeClock()
 	composeToolTrust(t, clkFn) // NO approval is ever requested or granted
 	if _, err := testBeginActivation(rt, capb, runtimeTestBudget(5), canaryRuntimeTestNow); err != nil {

@@ -90,6 +90,10 @@ func newReviewedRig(t *testing.T) *reviewedRig {
 	resetInventory(t)
 	resetExecDeps(t)
 	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	// Admission refuses a target no peer has been seen advertising (round 13), so a rig whose
+	// premise is "the reviewed target is admitted" must observe it — at the rig's admission
+	// instant, and before the approval pins the catalog revision.
+	observeSeededToolTrustPeerAt(t, sid, canaryRuntimeTestNow)
 	clk, clkFn := liveFakeClock()
 	composeToolTrust(t, clkFn)
 	requestAndApproveLive(t, sid, tool, fpHex, cat.Current().Revision())
@@ -197,6 +201,13 @@ func (r *reviewedRig) moveToF2(t *testing.T) string {
 	if fp2 == r.fp1 {
 		t.Fatal("premise: the republished tool must carry a DIFFERENT fingerprint")
 	}
+	// The peer is SEEN advertising F2, so a request decided against F2 is refused for what it is
+	// about — the reviewed snapshot — and never merely because a republish left the record
+	// unobserved (round 13: admission now refuses an unobserved target before anything else).
+	// Observing F2 cannot mask drift: the drift verdict is taken from the same capture BEFORE the
+	// freshness answer is consulted.
+	observePeerAdvertisingAt(t, r.sid, r.now,
+		`{"tools":[{"name":"`+r.tool+`","inputSchema":{"type":"object","properties":{"moved":{"type":"string"}}}}]}`, r.tool)
 	// The precheck itself must be blind to this, or the matrix would be proving the OLD mechanism.
 	if live := mcpLiveTrustPrecheck(ttTenant, r.sid, r.tool, fp2); live.DriftCode != "" {
 		t.Fatalf("premise: a request decided against F2 must show no precheck drift, got %q", live.DriftCode)
@@ -245,6 +256,9 @@ func TestReviewedBinding_C02_ExpiredApprovalOnTheReviewedTargetIsRequestScoped(t
 		t.Fatal("premise: the reviewed target must be admitted while the approval is alive")
 	}
 	expired := r.now.Add(48 * time.Hour) // past MaxInitialCanaryApprovalTTL
+	// Seen again AT the expired instant, so the approval is the only authority missing there;
+	// otherwise the refusal would be for staleness and this case would prove nothing about expiry.
+	observeSeededToolTrustPeerAt(t, r.sid, expired)
 	if r.request(r.fp1, expired) {
 		t.Fatal("an expired approval must not authorize live execution")
 	}
@@ -282,6 +296,7 @@ func TestReviewedBinding_C04_DriftAfterApprovalExpiryStillLatches(t *testing.T) 
 	expired := r.now.Add(48 * time.Hour)
 
 	// Establish that the approval really is gone: on the UNCHANGED target this is a plain denial.
+	observeSeededToolTrustPeerAt(t, r.sid, expired) // the premise must be refused for EXPIRY, not staleness
 	if r.request(r.fp1, expired) {
 		t.Fatal("premise: the approval must have expired")
 	}
@@ -365,6 +380,7 @@ func TestReviewedBinding_C06_NewActivationExplicitlyAgainstF2IsHealthy(t *testin
 func TestReviewedBinding_C07_RestartBetweenExpiryAndDriftStillDetects(t *testing.T) {
 	r := newReviewedRig(t)
 	expired := r.now.Add(48 * time.Hour)
+	observeSeededToolTrustPeerAt(t, r.sid, expired) // the premise must be refused for EXPIRY, not staleness
 	if r.request(r.fp1, expired) {
 		t.Fatal("premise: the approval must have expired")
 	}
@@ -795,6 +811,7 @@ func TestReviewedBinding_ScopeIndependentPathLatchesDriftWithoutAdmission(t *tes
 func TestReviewedBinding_ScopeIndependentPathSurvivesApprovalExpiry(t *testing.T) {
 	r := newReviewedRig(t)
 	expired := r.now.Add(48 * time.Hour)
+	observeSeededToolTrustPeerAt(t, r.sid, expired) // the premise must be refused for EXPIRY, not staleness
 	if r.request(r.fp1, expired) {
 		t.Fatal("premise: the approval must have expired")
 	}
@@ -908,6 +925,13 @@ func publishTwoToolInventory(t *testing.T, sid, reviewedTool, otherTool string) 
 		t.Fatalf("seed inventory: %v", err)
 	}
 	publishMCPInventory(mcpInvLoaded, "", reg, cat)
+	// A republish leaves every record unobserved, and the callers go on to require that the
+	// REVIEWED tool is still admitted (round 13). The peer is seen advertising both tools, so the
+	// sibling is refused for being unreviewed and never for being unobserved.
+	observePeerAdvertisingAt(t, sid, canaryRuntimeTestNow,
+		`{"tools":[{"name":"`+reviewedTool+`","inputSchema":{"type":"object"}},`+
+			`{"name":"`+otherTool+`","inputSchema":{"type":"object","properties":{"z":{"type":"string"}}}}]}`,
+		reviewedTool, otherTool)
 }
 
 // The generation rules are the same as every other latch on this runtime, and they are what stop a

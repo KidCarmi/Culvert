@@ -202,10 +202,10 @@ func TestAllowLoopbackForTest_FiltersAndRestores(t *testing.T) {
 // the guard. Every declared range must appear in exactly one family bucket, and
 // the two buckets together must account for all of them.
 func TestPrivateRanges_AllCompile(t *testing.T) {
-	total := len(privatePrefixes.v4) + len(privatePrefixes.v6)
+	total := len(liveGuardTable().v4) + len(liveGuardTable().v6)
 	if total != len(privateRanges) {
 		t.Fatalf("compiled %d prefixes (%d v4 + %d v6) from %d declared ranges — a range failed to parse and is NOT being enforced",
-			total, len(privatePrefixes.v4), len(privatePrefixes.v6), len(privateRanges))
+			total, len(liveGuardTable().v4), len(liveGuardTable().v6), len(privateRanges))
 	}
 	in := func(bucket []netip.Prefix, want netip.Prefix) bool {
 		for _, p := range bucket {
@@ -217,10 +217,10 @@ func TestPrivateRanges_AllCompile(t *testing.T) {
 	}
 	for _, r := range privateRanges {
 		want := netip.MustParsePrefix(r).Masked()
-		bucket, other := privatePrefixes.v6, privatePrefixes.v4
+		bucket, other := liveGuardTable().v6, liveGuardTable().v4
 		family := "v6"
 		if want.Addr().Is4() {
-			bucket, other, family = privatePrefixes.v4, privatePrefixes.v6, "v4"
+			bucket, other, family = liveGuardTable().v4, liveGuardTable().v6, "v4"
 		}
 		if !in(bucket, want) {
 			t.Errorf("range %q (%v) is missing from the %s bucket — it is NOT being enforced", r, want, family)
@@ -236,14 +236,14 @@ func TestPrivateRanges_AllCompile(t *testing.T) {
 // family, so consulting one bucket loses nothing. Asserted directly — every
 // prefix must reject every address of the other family.
 func TestGuardTable_FamilySplitCoversBothBuckets(t *testing.T) {
-	if len(privatePrefixes.v4) == 0 || len(privatePrefixes.v6) == 0 {
+	if len(liveGuardTable().v4) == 0 || len(liveGuardTable().v6) == 0 {
 		t.Fatal("expected both family buckets to be populated")
 	}
 	v4Samples := []string{"0.0.0.0", "10.0.0.1", "127.0.0.1", "203.0.113.9", "255.255.255.255"}
 	v6Samples := []string{"::", "::1", "fe80::1", "2001:db8::1", "ff02::1"}
 	for _, s := range v4Samples {
 		addr := netip.MustParseAddr(s)
-		for _, p := range privatePrefixes.v6 {
+		for _, p := range liveGuardTable().v6 {
 			if p.Contains(addr) {
 				t.Errorf("v6 prefix %v contains the IPv4 address %s — the family split would skip a real match", p, s)
 			}
@@ -251,7 +251,7 @@ func TestGuardTable_FamilySplitCoversBothBuckets(t *testing.T) {
 	}
 	for _, s := range v6Samples {
 		addr := netip.MustParseAddr(s)
-		for _, p := range privatePrefixes.v4 {
+		for _, p := range liveGuardTable().v4 {
 			if p.Contains(addr) {
 				t.Errorf("v4 prefix %v contains the IPv6 address %s — the family split would skip a real match", p, s)
 			}
