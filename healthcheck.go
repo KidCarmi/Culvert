@@ -643,13 +643,20 @@ func policyPosture() (action string, rules, constraining int) {
 	return action, rules, constraining
 }
 
-// ruleConstrainsTraffic mirrors applyPolicyDecision's switch (proxy.go): Drop,
-// Block_Page and Redirect stop or divert the request; Allow does so only
-// through a per-rule file profile, behind exactly the guard
-// FileProfileBlocked opens with. An action outside the four constants reaches
-// no branch there, so it constrains nothing here either.
+// ruleConstrainsTraffic mirrors applyPolicyDecision's dispatch (proxy.go),
+// which resolves the stored action through canonicalPolicyAction before it
+// switches: Drop, Block_Page and Redirect stop or divert the request; Allow
+// does so only through a per-rule file profile, behind exactly the guard
+// FileProfileBlocked opens with. An action this build cannot resolve is
+// BLOCKED there (SEC-POLICYACTION-1, fail closed), so it constrains traffic
+// here too; a case variant of a real action resolves to that action. Using the
+// same resolver is what keeps this report and the decision from disagreeing.
 func ruleConstrainsTraffic(r *PolicyRule) bool {
-	switch r.Action {
+	action, known := canonicalPolicyAction(r.Action)
+	if !known {
+		return true
+	}
+	switch action {
 	case ActionDrop, ActionBlockPage, ActionRedirect:
 		return true
 	case ActionAllow:

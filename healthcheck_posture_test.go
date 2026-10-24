@@ -38,7 +38,7 @@ func TestReadiness_SetupAndPostureRows(t *testing.T) {
 
 	// Strict callers gate on them.
 	rr := httptest.NewRecorder()
-	handleReady(rr, httptest.NewRequest("GET", "/ready?strict=1", http.NoBody))
+	handleReady(rr, httptest.NewRequestWithContext(t.Context(), "GET", "/ready?strict=1", http.NoBody))
 	if rr.Code != 503 {
 		t.Fatalf("strict readiness must fail before setup/enforcement, got %d", rr.Code)
 	}
@@ -107,11 +107,11 @@ func TestReadiness_PostureCountsOnlyRulesThatConstrainTraffic(t *testing.T) {
 	if c := posture(); c == nil || c.Status != "fail" || !strings.Contains(c.Detail, "passthrough") {
 		t.Fatalf("Allow-only rules under default-allow must be passthrough: %+v", c)
 	}
-	// An action string outside the four constants reaches no branch of the
-	// decision switch, so it blocks nothing.
-	policyStore.Add(PolicyRule{Name: "bogus-action", Action: "block", DestFQDN: "*"})
+	// An empty action resolves to Allow (canonicalPolicyAction), so it blocks
+	// nothing.
+	policyStore.Add(PolicyRule{Name: "empty-action", DestFQDN: "z.example"})
 	if c := posture(); c.Status != "fail" {
-		t.Fatalf("an unrecognised action must not count as enforcement: %+v", c)
+		t.Fatalf("an empty action resolves to Allow and must not count as enforcement: %+v", c)
 	}
 	// An Allow with file filtering but no profile cannot block (FileProfileBlocked's guard).
 	policyStore.Add(PolicyRule{Name: "allow-filter-no-profile", Action: ActionAllow, DestFQDN: "c.example", FileFiltering: true, FileProfile: FileProfileNone})
@@ -124,6 +124,11 @@ func TestReadiness_PostureCountsOnlyRulesThatConstrainTraffic(t *testing.T) {
 		{Name: "blockpage", Action: ActionBlockPage, DestFQDN: "e.example"},
 		{Name: "redirect", Action: ActionRedirect, DestFQDN: "f.example", RedirectURL: "https://intranet.example/"},
 		{Name: "allow-with-profile", Action: ActionAllow, DestFQDN: "g.example", FileFiltering: true, FileProfile: "Executables"},
+		// SEC-POLICYACTION-1: the dispatch resolves the stored action first. An
+		// action it cannot resolve is BLOCKED (fail closed), and a case variant
+		// of a real action is that action.
+		{Name: "unknown-action-blocks", Action: "block", DestFQDN: "h.example"},
+		{Name: "case-variant-drop", Action: "drop", DestFQDN: "i.example"},
 	} {
 		t.Run(r.Name, func(t *testing.T) {
 			snapshotPolicyStoreForTest(t)
@@ -135,7 +140,7 @@ func TestReadiness_PostureCountsOnlyRulesThatConstrainTraffic(t *testing.T) {
 	}
 	// /health keeps reporting ENABLED rules, not the constraining subset.
 	if h := computeHealth(); h.PolicyRules != 4 {
-		t.Fatalf("/health policy_rules = %d, want 4 enabled rules (allow-a, allow-b, bogus-action, allow-filter-no-profile)", h.PolicyRules)
+		t.Fatalf("/health policy_rules = %d, want 4 enabled rules (allow-a, allow-b, empty-action, allow-filter-no-profile)", h.PolicyRules)
 	}
 }
 

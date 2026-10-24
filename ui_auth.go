@@ -293,7 +293,13 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 	//
 	// Clearing stays UNCONDITIONAL, and the answer stays 200: logout must
 	// always discard the browser's cookie, whatever it was carrying.
-	sess, _ := readUISessionCookie(r)
+	//
+	// Hence verifyUISessionCookie (signature, expiry, revocation) and NOT
+	// readUISessionCookie, which additionally applies classifyUISession
+	// (SEC-UISESS-1 audience/roster/role). That admissibility gate is right
+	// for every AUTHORIZATION decision and wrong here: it would silently skip
+	// revoking exactly the signed tokens this comment says must be revocable.
+	sess, _ := verifyUISessionCookie(r)
 	if sess != nil {
 		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
 		// Revoke the session token so it cannot be reused even if the cookie is
