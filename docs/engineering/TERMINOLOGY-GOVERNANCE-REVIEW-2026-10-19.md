@@ -28,8 +28,9 @@ the 2026-10-15 report (96/100) and the 2026-09-24 lineage.
   distinguishes them. The abbreviated prefix was already reviewed (2026-08-21, 2026-09-11) and is a shipped
   metric contract referenced by runbooks (`docs/operator/category-store-recovery.md`). Renaming would break
   dashboards for no gain in meaning.
-- **"categorisation" (17 files) vs "categorization" (31 files)** in prose and HELP text. Spelling variant only, no
-  API, config or metric key depends on it; a sweep would be cosmetic.
+- **"categorisation" vs "categorization"** in prose and HELP text. At `266e684`, `git grep -il categorisation`
+  finds 16 tracked files and `git grep -il categorization` 17 (the wider stems `categoris` / `categoriz`: 24 vs 56
+  files). Spelling variant only; no API, config or metric key depends on it, so a sweep would be cosmetic.
 
 ## Priority summary
 
