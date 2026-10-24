@@ -602,46 +602,8 @@ func TestInnerHostPin_WireAgreesWithWhatWasPinned(t *testing.T) {
 	accepted := 0
 	for _, inner := range corpus {
 		t.Run(inner, func(t *testing.T) {
-			raw := "GET /x HTTP/1.1\r\nHost: " + inner + "\r\n\r\n"
-			req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
-			if err != nil {
-				// ReadRequest refused it, so it never reaches the pin at all.
-				return
-			}
-			// Production passes ex.req.Host — the value Request.Write will
-			// serialize — not the raw header bytes. Feed the pin the same thing.
-			if !innerHostPinnedToTunnel(req.Host, tunnel+":443") {
-				return
-			}
-			accepted++
-
-			var sb strings.Builder
-			if err := req.Write(&sb); err != nil {
-				t.Fatalf("pinned %q but Request.Write refused it: %v", req.Host, err)
-			}
-			wire, found := "", false
-			for _, line := range strings.Split(sb.String(), "\r\n") {
-				if after, cut := strings.CutPrefix(line, "Host: "); cut {
-					wire, found = after, true
-					break
-				}
-			}
-			if !found {
-				t.Fatalf("pinned %q but the serialized request carries no Host line", req.Host)
-			}
-			if wire == "" {
-				t.Fatalf("pinned %q but the wire carries an EMPTY authority — a shared front end "+
-					"would answer from its default vhost, the bypass this gate exists to close", req.Host)
-			}
-			got, gotOK := hostutil.NormalizeHostStrict(hostutil.StripHostPort(wire))
-			if !gotOK {
-				t.Fatalf("pinned %q but the wire authority %q does not normalize", req.Host, wire)
-			}
-			// ASCII case is not a difference: DNS labels and Host matching are
-			// case-insensitive, and NormalizeHostStrict has already folded both.
-			if got != wantHost {
-				t.Fatalf("pinned %q but the wire names %q (canonically %q), not the authorized %q — "+
-					"a destination policy never evaluated", req.Host, wire, got, wantHost)
+			if assertPinnedAuthorityReachesTheTunnel(t, inner, tunnel, wantHost) {
+				accepted++
 			}
 		})
 	}
@@ -649,4 +611,63 @@ func TestInnerHostPin_WireAgreesWithWhatWasPinned(t *testing.T) {
 	if accepted == 0 {
 		t.Fatal("no corpus entry was pinned — the oracle asserted nothing")
 	}
+}
+
+// assertPinnedAuthorityReachesTheTunnel drives one corpus entry of the oracle
+// above and reports whether the pin ACCEPTED it. When it did, the authority
+// net/http actually serializes must still canonicalize to tunnelHost; when it
+// did not, there is nothing to assert, because nothing is forwarded.
+//
+// Extracted from the loop body so the oracle stays inside the repository's
+// cognitive-complexity budget (gocognit, .golangci.yml) without weakening any
+// assertion.
+func assertPinnedAuthorityReachesTheTunnel(t *testing.T, inner, tunnelHost, wantHost string) (pinned bool) {
+	t.Helper()
+	raw := "GET /x HTTP/1.1\r\nHost: " + inner + "\r\n\r\n"
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		return false // ReadRequest refused it, so it never reaches the pin at all
+	}
+	// Production passes ex.req.Host — the value Request.Write will serialize —
+	// not the raw header bytes. Feed the pin the same thing.
+	if !innerHostPinnedToTunnel(req.Host, tunnelHost+":443") {
+		return false
+	}
+
+	var sb strings.Builder
+	if err := req.Write(&sb); err != nil {
+		t.Fatalf("pinned %q but Request.Write refused it: %v", req.Host, err)
+	}
+	wire, found := serializedHostHeader(sb.String())
+	if !found {
+		t.Fatalf("pinned %q but the serialized request carries no Host line", req.Host)
+	}
+	if wire == "" {
+		t.Fatalf("pinned %q but the wire carries an EMPTY authority — a shared front end "+
+			"would answer from its default vhost, the bypass this gate exists to close", req.Host)
+	}
+	got, gotOK := hostutil.NormalizeHostStrict(hostutil.StripHostPort(wire))
+	if !gotOK {
+		t.Fatalf("pinned %q but the wire authority %q does not normalize", req.Host, wire)
+	}
+	// ASCII case is not a difference: DNS labels and Host matching are
+	// case-insensitive, and NormalizeHostStrict has already folded both.
+	if got != wantHost {
+		t.Fatalf("pinned %q but the wire names %q (canonically %q), not the authorized %q — "+
+			"a destination policy never evaluated", req.Host, wire, got, wantHost)
+	}
+	return true
+}
+
+// serializedHostHeader returns the value of the Host header in a serialized
+// HTTP/1.1 request, and whether one was emitted at all. An invalid Host makes
+// Request.write emit "Host: " with an empty value rather than omit the line, so
+// the two cases are reported separately.
+func serializedHostHeader(serialized string) (value string, found bool) {
+	for _, line := range strings.Split(serialized, "\r\n") {
+		if after, cut := strings.CutPrefix(line, "Host: "); cut {
+			return after, true
+		}
+	}
+	return "", false
 }

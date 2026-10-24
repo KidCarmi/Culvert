@@ -51,7 +51,7 @@ import (
 // the access_cidr_lists row.
 func accessCIDRRowAt(t *testing.T, role UIRole) *OperatorContractCheck {
 	t.Helper()
-	r := roleCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody), role)
+	r := roleCtx(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/diagnostics", http.NoBody), role)
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
 	if w.Code != http.StatusOK {
