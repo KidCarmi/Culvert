@@ -552,6 +552,10 @@ func TestChaos87_CachedBytesAreParsedByTheSameValidator(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
+		// #nosec G703 -- dir is this test's own t.TempDir() (chaos87Env) and the
+		// name comes from os.ReadDir of that same directory, so no caller-supplied
+		// path reaches this write; gosec's taint analysis cannot see that the root
+		// is test-owned, and filepath.Base/Clean do not clear it.
 		if err := os.WriteFile(filepath.Join(dir, e.Name()), []byte(strings.Repeat("Z", len(orig))), 0o600); err != nil {
 			t.Fatalf("tamper: %v", err)
 		}
