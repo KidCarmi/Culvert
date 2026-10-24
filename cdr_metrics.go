@@ -34,7 +34,7 @@ var (
 	statCDROversizeSkipped int64 // Culvert-side oversize gate OR Sluice file_too_large
 	statCDRErrors          int64 // network / Sluice ERROR / transport fault
 	statCDRFailOpen        int64 // errors that fell open per cfg
-	statCDRFailClosed      int64 // errors that blocked per cfg
+	statCDRFailClosed      int64 // documents refused under fail_mode=closed: an engine error, or no instance available to scan at all
 	statCDRPanics          int64 // caught by the defer-recover in safeCDRSanitize
 
 	// Cache.
@@ -124,7 +124,7 @@ func cdrWriteOperationalMetrics(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cdr_fail_open_total Errors that passed the original file through per fail_mode=open\n")
 	w.WriteString("# TYPE culvert_cdr_fail_open_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_fail_open_total %d\n", atomic.LoadInt64(&statCDRFailOpen))
-	w.WriteString("\n# HELP culvert_cdr_fail_closed_total Errors that blocked the response per fail_mode=closed\n")
+	w.WriteString("\n# HELP culvert_cdr_fail_closed_total Responses refused under fail_mode=closed, whether the engine answered with an error or no instance was available to scan at all\n")
 	w.WriteString("# TYPE culvert_cdr_fail_closed_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_fail_closed_total %d\n", atomic.LoadInt64(&statCDRFailClosed))
 	w.WriteString("\n# HELP culvert_cdr_panics_total Panics caught by the CDR defer-recover (always fail-closed regardless of fail_mode)\n")
