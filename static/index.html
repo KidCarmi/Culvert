@@ -9110,7 +9110,7 @@ async function loadDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    const d = await api('/api/decryption/redaction');
+    const d = await api('/api/traffic/redaction');
     cb.checked = !!d.redact_hosts;
   } catch (e) { /* not permitted / unavailable — leave unchecked */ }
 }
@@ -9120,7 +9120,7 @@ async function toggleDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    await api('/api/decryption/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
+    await api('/api/traffic/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
     toast('Host/SNI redaction ' + (cb.checked ? 'enabled' : 'disabled'), 'success');
   } catch (e) {
     cb.checked = !cb.checked; // revert the optimistic flip
