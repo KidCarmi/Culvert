@@ -99,8 +99,8 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    > preparing a config ahead of turning CDR on later) and pass no CLI
    > override, config load succeeds silently. Turning CDR on afterwards via
    > the runtime sentinel or `-cdr-enabled` carries that unvalidated string
-   > straight into `CDRFailOpen()`, which treats anything other than the
-   > exact string `"closed"` as fail-**open** — so a typo intended to
+   > straight into `CDRFailOpen()`, which treats anything other than
+   > `"closed"` (case-insensitive, surrounding spaces ignored) as fail-**open** — so a typo intended to
    > enforce `closed` silently runs `open` instead, with no startup error
    > pointing at the mistake. `GET /api/cdr/config`'s `failMode`/`failOpen`
    > fields are the only way to catch this after the fact; check them
@@ -149,22 +149,24 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    > your first GUI enrollment so `loadCDR` re-resolves the full static
    > config with CDR already enabled.
    >
-   > **Booting with `-cdr-enabled`/`cdr.enabled: true` from the very first
-   > boot does NOT by itself avoid this**, and is not a substitute for the
-   > restart above, unless you also supply a complete CLI/YAML bootstrap
-   > (`-cdr-endpoint` AND `-cdr-server-fingerprint`, with no instance ever
-   > enrolled yet). `loadCDR` calls `initCDRClient(cdrCfg)` at boot, which
-   > for an empty registry delegates to `bootstrapPoolFromConfig`; that
-   > function returns an error immediately when `Endpoint` or
-   > `ServerFingerprint` is empty, and `initCDRClient` returns on that
-   > error **before** ever reaching the `cdrActiveCfg = cfg` assignment —
-   > `loadCDR` only logs it ("CDR: initial client dial failed, CDR
-   > effectively disabled"). So on the single most common fresh-install
-   > path — enable CDR, plan to enroll an instance through the GUI, no
-   > CLI/YAML endpoint/fingerprint configured — `cdrActiveCfg` stays at its
-   > zero value even with `cdr.enabled: true` from boot, identically to the
-   > disabled-boot case this callout opened with. The restart-after-enrollment
-   > step is the one reliable fix.
+   > **Booting with `-cdr-enabled`/`cdr.enabled: true` (or with the
+   > `cdr_enabled` sentinel already present) avoids this**, even when no
+   > instance is enrolled yet and no CLI/YAML endpoint/fingerprint is
+   > configured. `loadCDR` calls `initCDRClient(cdrCfg)` at boot with the
+   > full resolved config; when the pool build fails completely (empty
+   > registry and `bootstrapPoolFromConfig` refuses an empty `Endpoint` or
+   > `ServerFingerprint`, or every enrolled instance failed to dial),
+   > `initCDRClient` still publishes that config to `cdrActiveCfg` before
+   > returning the error. A later GUI enrollment then sees CDR already
+   > enabled, skips the auto-enable flip, and rebuilds the pool from your
+   > real `cdr.*` settings, so no restart is needed on this path. Two
+   > consequences: until the first instance is enrolled, the Diagnostics
+   > `cdr` row reads `enabled-broken`, and under `fail_mode: closed` every
+   > eligible inspected document is **refused** with block reason
+   > `cdr_unavailable` (see **Failure behavior** below). The boot log line
+   > `CDR: initial client dial failed, CDR effectively disabled` is
+   > misleading in that state: CDR is enabled with no instance to call,
+   > and `fail_mode` decides what happens to each document.
 
 > **Scan-engine gate.** Enrollment turns CDR on, but CDR only runs on a
 > response body that the SSL-inspection path has decided to buffer.
@@ -246,9 +248,9 @@ enable it.)
 
 ## Failure behavior
 
-**`fail_mode=closed` only protects a request that reaches a live Sluice RPC
-call — it does NOT protect a request when no client is available at all.**
-Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
+**`fail_mode` applies both when a live Sluice call fails and when there is
+no instance to call at all, but the two cases look different from the
+outside.** Two distinct gates exist:
 
 1. **No client to call.** `NewCDRClient` dials with `grpc.NewClient`, which is
    **non-blocking** (lazy connect) — a client is added to the pool whether or
@@ -256,28 +258,43 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    only logs on failure, it never removes the client. So an unreachable
    Sluice at boot does **not** leave the pool empty
    (`cdrAnyInstanceAvailable()` still reports an instance): the first
-   eligible requests DO reach a live RPC attempt (gate 2 below, which honors
-   `fail_mode`) and fail there, and only after enough consecutive failures
-   open that instance's breaker does this gate start applying. This gate is
-   reached only when the pool is genuinely empty — no instance was ever
-   enrolled/configured, every enrolled instance's certificate bundle failed
-   to load (so `buildCDRPoolFromRegistry` never added it — see **Multi-instance
-   pool** below), or CDR was toggled off (`shutdownCDRClient` empties the
-   pool) — or once every instance's circuit breaker is open. In any of those
-   cases the request **passes through unsanitized unconditionally**,
-   regardless of `fail_mode`. This path does not increment
-   `culvert_cdr_fail_open_total`/`_fail_closed_total` and emits no per-request
-   log line or request-log event — it is silent at the request level. The only way
-   to notice it is happening is the pool/health surfaces themselves:
-   `GET /api/cdr/health` and the per-instance `culvert_cdr_pool_*` series,
-   including `culvert_cdr_pool_breaker_state` (see **Multi-instance pool**
-   below). The aggregate `culvert_cdr_instance_healthy` is **not** enough on
-   its own: it is not reset when the pool becomes empty, so it can read `1`
-   with no client at all. A deployment relying on `closed` for a hard
-   security guarantee must monitor these and alert on both "no healthy
-   instance" and "no pool member series" as outage conditions —
-   `fail_mode=closed` alone will **not** block traffic during a total Sluice
-   outage.
+   eligible requests DO reach a live RPC attempt (gate 2 below) and fail
+   there, and only after enough consecutive failures open that instance's
+   breaker does this gate start applying. This gate is reached when CDR is
+   enabled and no pool member can take a document right now: no instance
+   was ever enrolled/configured, every enrolled instance's certificate
+   bundle failed to load (so `buildCDRPoolFromRegistry` never added it —
+   see **Multi-instance pool** below), or every instance's circuit breaker
+   is open (or half-open with its recovery probe already in flight).
+   `cdrUnavailableOutcome` (`cdr_proxy.go`) then applies `fail_mode`:
+
+   | `open` (default) | `closed` |
+   |---|---|
+   | The file passes through **unsanitized and silently**: no `culvert_cdr_fail_open_total` increment, no per-request log line, no request-log event | Delivery refused (block page) with block reason `cdr_unavailable`; `CDR_BLOCKED` request-log event + log line; `culvert_cdr_fail_closed_total` |
+
+   The block reason `cdr_unavailable` is distinct from the gRPC-status
+   reasons gate 2 records, so a refusal because there was no Sluice to ask
+   can be told apart from Sluice answering with an error. (It shares its
+   name with the `cdr_unavailable` **alert** event, which is a separate
+   signal: that alert fires for live transport/RPC failures in gate 2.)
+   Under `open` this gate is silent at the request level, so the only way
+   to notice it is the pool/health surfaces themselves: the Diagnostics
+   `cdr` row (`enabled-broken` for an empty pool, `enabled-dark` when
+   members are enrolled but none is available), `GET /api/cdr/health`, and
+   the per-instance `culvert_cdr_pool_*` series, including
+   `culvert_cdr_pool_breaker_state` (see **Multi-instance pool** below). The
+   aggregate `culvert_cdr_instance_healthy` is **not** enough on its own: it
+   is not reset when the pool becomes empty, so it can read `1` with no
+   client at all.
+
+   **A CDR that is not enabled is never fail-closed, whatever `fail_mode`
+   says.** The gate requires CDR to be enabled in the *active* config.
+   A runtime disable (`PUT /api/cdr/config` `{"enabled": false}`) and the
+   pool shutdown that `DELETE /api/cdr/instances` can trigger (see **API
+   reference** below) both go through `shutdownCDRClient()`, which empties
+   the pool **and** zeroes the active config, so afterwards every file
+   passes through unsanitized even on a deployment configured
+   `fail_mode: closed`, and Diagnostics reads `disabled`.
 2. **A live RPC call fails**, once a client was actually reached:
 
    | Outcome | `open` (default) | `closed` |
@@ -301,7 +318,7 @@ Two distinct gates exist, and only the second one consults `cdr.fail_mode`:
    that SMALLER cap regardless of profile, and a file below the documented
    `cdr.max_file_size_mb` ceiling is silently delivered unsanitized —
    including under `fail_mode=closed` (this is the client-side oversize
-   skip, gate 1 above, which `fail_mode` never governs). Neither
+   skip in the table above, which `fail_mode` never governs). Neither
    `GET /api/cdr/config` (it returns only the configured `maxFileSizeMB`,
    where 0 means the 50 MiB default) nor the `culvert_cdr_pool_*` metrics
    (health and breaker state only) expose the effective cap. The value
@@ -400,9 +417,11 @@ its own circuit breaker (closed → open after 5 consecutive failures → half-o
 after a 30s reset timeout → closed again after one successful probe). Live
 requests round-robin across instances whose breaker is closed; an instance
 with an open breaker is skipped. If every enrolled instance's breaker is
-open, the pool has no client to pick and the request passes through
-**unconditionally** — see the "no client to call" gate under **Failure
-behavior** above; this is *not* governed by `fail_mode`.
+open, the pool has no client to pick and the request takes the "no client to
+call" gate under **Failure behavior** above: passed through unsanitized and
+silently under `fail_mode: open`, refused with `cdr_unavailable` under
+`fail_mode: closed`. The Diagnostics `cdr` row reports this state as
+`enabled-dark`.
 
 Only the sanitize RPC path takes a half-open probe. `runCDRStage`'s
 "is any instance usable?" gate (`cdrAnyInstanceAvailable`) and every
@@ -450,7 +469,9 @@ runtime disable (`shutdownCDRClient`) or deleting the last instance leaves
 the poll's zero-member branch (`probeCDRHealth` → `clearCDRHealth`) clearing
 only the cached `Health` snapshot, so the gauge (and the `liveHealthy`
 field derived from it) can stay `1` indefinitely while no client exists and
-every file bypasses CDR, even under `fail_mode=closed`. Do not alert on
+every file bypasses CDR, even under `fail_mode=closed` (both paths run
+`shutdownCDRClient()`, which also zeroes the active config — see **Failure
+behavior** above). Do not alert on
 `instance_healthy` alone. Treat an empty pool as its own outage signal:
 the `culvert_cdr_pool_*{instance}` series disappear entirely when the pool
 is empty (alert on their absence, for example
@@ -659,7 +680,9 @@ event. Filter the events from **CDR → Recent CDR events** in the GUI.
 
 Prometheus metrics (`culvert_cdr_*`, all counters unless noted):
 `files_processed_total`, `threats_detected_total`, `errors_total`,
-`fail_open_total`, `fail_closed_total`, `panics_total`,
+`fail_open_total`, `fail_closed_total` (documents refused under
+`fail_mode: closed`, whether Sluice answered with an error or no instance was
+available to scan at all), `panics_total`,
 `oversize_skipped_total`, `cache_hits_total`, `cache_misses_total`,
 `cache_size` (gauge), `bytes_in_total`, `bytes_out_total`,
 `instance_healthy` (gauge, pool-wide aggregate — see **Multi-instance pool**
@@ -668,6 +691,15 @@ above), `queue_depth` (gauge, pool-wide aggregate). Per-instance (labeled
 0=closed/1=open/2=half_open), `pool_breaker_trips_total`. Labels are
 otherwise deliberately low-cardinality — no filename, destination host, or
 user identity — by contract with Sluice.
+
+The Diagnostics page's `cdr` row (`/api/diagnostics`, **Infrastructure →
+Diagnostics**) summarises the same state per node: `disabled`,
+`enabled-broken` (CDR enabled, no Sluice instance in the pool),
+`enabled-dark` (instances enrolled, none available to scan, so documents are
+handled per `fail_mode`), `enabled-degraded` (connected, but the active config
+has an empty fail mode or default profile — `cdr.fail_mode` or
+`cdr.default_profile` left unset, or the zero-valued config a runtime enable
+runs on, see **Enabling it**) and `enabled-healthy`.
 
 **`bytes_in_total` is currently inert — it reads zero on every node.** Its
 backing counter, `statCDRBytesIn`, is declared and exposed by
@@ -720,17 +752,18 @@ GET is viewer, PUT is admin):
 - **A runtime `PUT {"enabled": false}` doesn't stick if static config still
   enables CDR** — see the restart caveat under **Enabling it** above.
 - **An unreachable Sluice is NOT the same condition as "no client to call",
-  and only the latter bypasses `fail_mode=closed`.** `grpc.NewClient` dials
-  lazily, so an unreachable-at-boot (or unreachable-right-now) Sluice still
-  has a pooled client: the first several `Sanitize` calls actually attempt
-  the RPC, fail, and are correctly blocked by `fail_mode=closed` via
-  `cdrErrorOutcome` — traffic is NOT waved through from the first failure.
-  Unconditional silent pass-through begins only once the pool is genuinely
-  **empty** (never enrolled, cert load failed, explicitly shut down) or
-  **every breaker has opened** from repeated failures — see the "no client
-  to call" gate under **Failure behavior**. Monitor `/api/cdr/health` and
-  the per-instance breaker metrics, not `fail_mode`, to know whether CDR is
-  actually protecting traffic right now.
+  and under `fail_mode: open` only the latter is silent.** `grpc.NewClient`
+  dials lazily, so an unreachable-at-boot (or unreachable-right-now) Sluice
+  still has a pooled client: the first several `Sanitize` calls actually
+  attempt the RPC and fail through `cdrErrorOutcome` (counted in
+  `culvert_cdr_errors_total`; delivered with a `CDR_ERROR` event under
+  `open`, refused as `CDR_BLOCKED` under `closed`). Once the pool is genuinely **empty**
+  (never enrolled, cert load failed) or **every breaker has opened**, the
+  "no client to call" gate applies instead: `closed` still refuses
+  (`cdr_unavailable`), but `open` passes files through with no counter or
+  request-level log — see **Failure behavior**. Watch the Diagnostics `cdr`
+  row, `/api/cdr/health` and the per-instance breaker metrics, not
+  `fail_mode`, to know whether CDR is actually scanning traffic right now.
 - **A large download is only sanitized up to the shared scan window, not up
   to `cdr.max_file_size_mb`** — see the callout under **Failure behavior**.
   The untouched remainder past `security_scan.max_scan_mb` ships to the
