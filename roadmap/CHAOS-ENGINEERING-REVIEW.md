@@ -1363,6 +1363,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-20 | **There is no "revoke one federated subject" lever at all.** `RevokeUser` has exactly one caller — the LOCAL account-delete handler — so for an SSO subject the only options are cutting the whole federation (now effective, AU-2) or waiting out the session TTL. An operator responding to one compromised SSO account must therefore either terminate the federation for everyone or accept up to 8 h (7 d at a raised TTL) of continued access. | **NEW** (recorded, needs a product surface — a revocation primitive with no admin route is not a control) | M | `internal/session/session.go:155` `RevokeUser` (sole caller `ui_auth.go` user DELETE); no route in `uiRoutes`; see §50.7 |
 | AU-22 | **Re-enabling an IdP under the SAME id revives the sessions it minted.** AU-2's lever is pure derived state with no durable record that a cut happened, and §50.7 deliberately does not clear the cookie on refusal — so a cookie refused throughout the disabled window authenticates again, with the subject and groups asserted BEFORE the incident, as soon as the profile returns. Confirmed against the real resolver (live → disabled → re-enabled restores identity and groups). Reached by the ordinary incident sequence: disable a compromised IdP, investigate, re-enable within the 8 h default TTL. | **NEW** (recorded; runbook §4 corrected and the three workarounds named — keep it disabled past the TTL, re-create under a different id, or rotate the session signing key. The fix is a provider GENERATION stamped into the cookie at mint, which keeps all four §50.4 properties but changes the session AND profile schema with CP→DP and downgrade consequences — its own change. Agreement pinned by `TestChaos88_DocumentedResidual_SameIDRestoration`.) | M | `session_provider_bounds.go` `sessionProviderLive`; §50.6f; raised as P1 by Codex on PR #1564 |
 | AU-21 | **Deleting the LAST IdP profile on the CP reached no Data Plane node.** `idpRegistry.All()` returns a non-nil EMPTY slice for an empty registry; `ConfigSnapshot.IdPProfiles` carried `omitempty`, so the key never reached the wire; the DP decoded nil and `syncSnapshotIdPProfiles` skipped. The removed federation stayed stored, enabled and LIVE on every DP — AU-2's lever answered "enabled", its sessions kept their asserted groups for the full TTL, and NEW logins through it kept working; with `-idp-profiles-file` it survived restarts. All three DP intake paths (full snapshot, delta, last-known-good replay) share the one nil-skip. Removing a non-last profile always propagated, which is why it was invisible. **`TestConfigSurfaces_SnapshotWireWipe` exists for exactly this bug class and never looked: it iterates only `semNilSkipEmptyWipe` bindings, and the row was labelled `semValidatedSkip`.** | GAP → **CLOSED** (§50.6d: drop `omitempty`, relabel the row `semNilSkipEmptyWipe` + `WireWipeCapable`; the apply side was already nil-skip/empty-wipe, so no logic changed. `nil` still means ABSENT — redaction nils the field and a DP polls `GetConfig` before enrollment, so reading `null` as a clear would let an unauthenticated caller wipe every enrolling node's registry; pinned by two controls.) | **H** | `controlplane_snapshot.go` `IdPProfiles`, `config_surfaces.go` row `idp_profiles`, `syncSnapshotIdPProfiles`; tests `session_provider_cluster_test.go` (4) |
+| AU-23 | **A SAML-only deployment stopped reading its session cookies entirely when the provider went dark.** AU-2's fix keys arm 1 on `ProfileEnabled` (§50.6c: an unreachable IdP is degraded availability, not revocation) — but the gate ABOVE arm 1, `authRequired`, keys on `HasEnabledInteractiveProvider`, which is enabled AND **live**. With no local account, no legacy provider and no credential-capable profile, a CHAOS-87 staleness retirement darkens an ENABLED profile, `authRequired` goes false and the whole Stage-1 block is skipped: the session this appliance had decided to KEEP is never read. Measured `proceed=true identity="" groups=[]` — no revocation counter, no log, and identity/group-scoped ALLOW rules silently stop matching. Worse than the revocation §50.6c forbids, because a revocation is decided and counted and this is skipped. Every §50 gate missed it: `c72Setup` installs a local admin, which holds `credCapable` true. | GAP → **CLOSED** (§50.6g: a SECOND predicate, `HasEnabledInteractiveProfile` — enabled, not live — opens arm 1 only, via `sessionCapable`; arms 2 and 3 stay on `authRequired`, so the live-gated `ssoCapable` and the no-backend inert guard are untouched and no unfulfillable challenge or hot-path log becomes reachable. Both wrong fixes measured failing.) | **H** | `proxy.go` `sessionCapable`, `auth_idp.go` `HasEnabledInteractiveProfile`; tests `session_provider_availability_test.go` (4); raised as P2 by Codex on PR #1564 |
 | AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. **Understated: the WRONG-username branch is worse (AU-3a) and needs no valid username at all.** | GAP → **CLOSED** (CHAOS-57, §25: `internal/authcost` bounds concurrency globally + per client, fail-closed) | M → **C** | `store.go` `verifyAuthFrom`, `internal/authcost`, `auth_cost_health.go` |
 | AU-3a | The wrong-username branch runs an unconditional bcrypt against the dummy hash (RISK-008 timing equaliser), is reached BEFORE the result cache, and never populates it — so a flood of DISTINCT usernames is a guaranteed miss every time. Measured **79.6 ms of exclusive CPU per ~200-byte request (51,631x a cached auth)**; **66 req/s (~13 KB/s) consumed 100% of a 4-core box** and degraded other CPU work **15.6x**. Unauthenticated, remotely triggerable, and in the DEFAULT posture nothing stands in front of it — the connection limiter, rate limiter and IP filter all ship disabled. | GAP → **CLOSED** (CHAOS-57) | **C** | `store.go:521` (pre-fix), gates `TestChaos57_WrongUsernamePathIsGoverned`, `..._ConcurrentVerificationsAreBounded` |
 | AU-3c | The auth result cache evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic) | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
@@ -13927,6 +13928,80 @@ asserts the behaviour the runbook now describes, in the CHAOS-65 `ocspCoverage`
 shape: it pins the AGREEMENT between the claim and the code, not the gap. When
 generations land, that test fails, and whoever implements them updates the
 runbook in the same change instead of leaving a stale promise behind.
+
+### 50.6g The SAML-only deployment never read the cookie at all — the fix's own predicate disagreed with the gate above it (AU-23)
+
+§50.6c settled what "the provider is still there" means for arm 1:
+**stored and enabled**, not compiled. It did not check that the gate which
+decides whether arm 1 RUNS asks the same question. It does not.
+
+```go
+credCapable := hasCredentialCapableProvider()                 // local acct | legacy | enabled OIDC/LDAP profile
+ssoCapable  := idpRegistry.HasEnabledInteractiveProvider()    // enabled AND **LIVE**
+authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
+```
+
+`sessionProviderLive` asks `ProfileEnabled`. `ssoCapable` asks enabled AND
+live. In every deployment that has a local admin account the disagreement is
+invisible, because `credCapable` holds `authRequired` true on its own — and
+`c72Setup` installs one, deliberately, in every gate written for §50. Strip it
+and the deployment is **SAML-only**: no local account, no legacy provider, no
+credential-capable profile. `cfg.user` empty is not a hypothetical shape; arm 2
+names it ("when no user is set") and `authRequired` exists precisely so a
+no-backend deployment goes inert.
+
+In that deployment a CHAOS-87 staleness retirement darkens an ENABLED profile.
+Arm 1 would have KEPT its cookies — that is the §50.6c decision, and
+`TestChaos88_StaleExpiryRetirementDoesNotRevokeSessions` asserts it. But
+`ssoCapable` went false, `authRequired` went false, and the whole block was
+skipped, so **arm 1 never ran**. Measured: `proceed=true identity="" groups=[]`.
+
+That is worse than the revocation §50.6c forbids, and the difference is the
+whole reason this is a finding rather than a variant:
+
+- A revocation is *decided*. It increments `culvert_session_provider_revoked_total`,
+  it logs, and the operator can see it in the runbook's terms.
+- This was *skipped*. No counter, no log, and identity- and group-scoped ALLOW
+  rules silently stopped matching for every user of a federation the appliance
+  had decided to keep serving — the exact "found nothing wrong vs never
+  consulted" confusion CHAOS-65 named.
+
+**The fix is a second predicate, not a wider one.** `HasEnabledInteractiveProfile`
+is `HasEnabledInteractiveProvider` without the live gate, and the split is
+load-bearing in both directions. "Can this deployment start an SSO flow right
+now?" must stay live-gated — a captive redirect at a provider that failed to
+compile sends the user to a login that cannot answer, and the no-backend inert
+guard (`!credCapable && !ssoCapable`) depends on it. "Does this deployment
+federate identity at all?" must not be, because the cookies in flight were
+minted by that profile and arm 1 honours them on `Enabled`.
+
+So `sessionCapable := authRequired || HasEnabledInteractiveProfile()` opens the
+outer block, and arms 2 and 3 move onto `else if authRequired`. Wherever
+`authRequired` is true every branch is byte-identical to before. Where it is
+false, exactly one thing changes: the cookie is read. In particular a
+SAML-only dark deployment with NO cookie still falls through untouched — no
+407, no redirect, and no per-request `AUTH_NO_BACKEND_INERT` line added to the
+proxy hot path, which a one-word fix (`authRequired := ... || sessionCapable`)
+would have introduced.
+
+**Gates** (`session_provider_availability_test.go`):
+
+| Gate | Pins |
+|---|---|
+| `TestChaos88_DefectSAMLOnlyDarkProfileStillReadsItsSessions` | the finding; verified failing pre-fix with `identity=""` |
+| `TestChaos88_ControlSAMLOnlyRemovalStillRevokes` (delete, disable) | widening the predicate must not blunt the operator's lever |
+| `TestChaos88_ControlNoIdentityBackendStaysInert` | an appliance that federates nothing must not read the cookie at all — asserted on the refusal COUNTER, which is what separates the fix from opening arm 1 unconditionally |
+| `TestChaos88_ControlSAMLOnlyDarkWithoutACookieIsUnchanged` | no new challenge and no new hot-path log |
+
+Both wrong fixes were measured, not argued: live-gating the new probe fails the
+defect gate, and `sessionCapable := true` fails the inert control.
+
+**Found by Codex (P2) on PR #1564**, reading the interaction between the
+retirement this PR adds and a gate neither §50 nor §50.6c had re-read. The
+retirement is what makes the state reachable at RUNTIME — before it, an
+enabled-but-dark interactive profile only came from a compile failure at boot
+or at an admin write, so nothing darkened a healthy provider hours later
+without anyone touching it.
 
 ### 50.7 Deliberately NOT done
 

@@ -1260,6 +1260,40 @@ func (r *IdPRegistry) HasEnabledInteractiveProvider() bool {
 	return false
 }
 
+// HasEnabledInteractiveProfile reports whether any STORED, ENABLED profile is
+// of an interactive type — deliberately NOT gated on a live compiled instance,
+// which is the one and only difference from HasEnabledInteractiveProvider.
+//
+// The two are not interchangeable and the split is the point. "Can this
+// deployment start an SSO flow right now?" must be live-gated: redirecting a
+// browser at a provider that failed to compile sends the user to a login that
+// cannot answer. "Does this deployment federate identity at all?" must not be:
+// a profile whose provider is dark still MINTED the cookies in flight, and
+// sessionProviderLive honours those cookies on ProfileEnabled — enabled, not
+// live — so a predicate that decides whether to READ a cookie has to ask the
+// same question the predicate that decides whether to HONOUR it asks.
+//
+// resolveRequestAuth's `authRequired` is that reader. Keeping it on the
+// live-gated probe meant a staleness-ceiling retirement in a SAML-only
+// deployment (no local account, no legacy provider, no credential-capable
+// profile) closed the Stage-1 gate entirely, so arm 1 never ran and a session
+// this appliance had decided to KEEP silently stopped being an identity —
+// no revocation counter, no log line, and identity/group-scoped policy
+// quietly stopped matching. See
+// TestChaos88_DefectSAMLOnlyDarkProfileStillReadsItsSessions.
+//
+// Allocation-free, like its siblings: this runs on every proxied request.
+func (r *IdPRegistry) HasEnabledInteractiveProfile() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.Interactive() {
+			return true
+		}
+	}
+	return false
+}
+
 // HasEnabledCredentialProvider is the allocation-free boolean probe behind
 // hasCredentialCapableProvider's registry term (resolveRequestAuth's
 // credCapable, per request): at least one enabled profile of a

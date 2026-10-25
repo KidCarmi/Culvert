@@ -349,8 +349,33 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	credCapable := hasCredentialCapableProvider()
 	ssoCapable := idpRegistry.HasEnabledInteractiveProvider() // allocation-free probe, INTERACTIVE types only (ADR-0027) — an enabled LDAP profile must not advertise an SSO flow it can never fulfil
 	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
+	// sessionCapable is a SUPERSET of authRequired and opens arm 1 ONLY.
+	//
+	// The two probes behind it ask different questions on purpose:
+	// HasEnabledInteractiveProvider (ssoCapable) is enabled AND LIVE, because
+	// a captive redirect at a provider that failed to compile sends the user
+	// to a login that cannot answer. HasEnabledInteractiveProfile is ENABLED,
+	// full stop — which is the same question sessionProviderLive asks in arm 1
+	// below before it honours a cookie.
+	//
+	// Keeping the gate on the live-gated probe made the two disagree. In a
+	// SAML-only deployment (no local account, no legacy provider, no
+	// credential-capable profile) a CHAOS-87 staleness retirement darkens an
+	// ENABLED profile, so arm 1 would have KEPT its cookies — and never ran,
+	// because authRequired went false and skipped the whole block. The session
+	// was not revoked, it was never read: no revocation counter, no log line,
+	// and identity/group-scoped policy silently stopped matching (Codex P2 on
+	// #1564; TestChaos88_DefectSAMLOnlyDarkProfileStillReadsItsSessions).
+	//
+	// It opens arm 1 and NOTHING else. Arms 2 and 3 stay on authRequired, so a
+	// deployment that could not fulfil a challenge before still cannot be
+	// made to emit one — in particular the no-backend inert guard keeps its
+	// per-request AUTH_NO_BACKEND_INERT line off the proxy hot path in exactly
+	// the deployments that previously skipped the block entirely. Where
+	// authRequired is true, every branch below is byte-identical to before.
+	sessionCapable := authRequired || idpRegistry.HasEnabledInteractiveProfile()
 
-	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
+	if sessionCapable { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
 		sess, sessErr := readSessionCookie(r)
 		// CHAOS-88: a verified session is an identity only while the provider
@@ -374,7 +399,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 			}
 			authenticatedGroups = id.Groups
 			authenticatedSource = identityAuthSource(id, "local")
-		} else {
+		} else if authRequired {
 			// ── 2. Basic Auth header ──────────────────────────────────────────
 			// Credential validation runs ONLY when a credential-capable validator
 			// exists (credCapable — SAML-only does NOT count). Without one,
