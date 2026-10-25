@@ -281,11 +281,53 @@ type PolicyStore struct {
 	// false (the GUI warning stays up) until a later write succeeds. Only a
 	// successful SaveErr, or a later Load, clears it.
 	adoptUnsaved atomic.Bool
+	// loadDropped is the bounded record of rules the most recent Load
+	// rejected (policyRulePersistable). Read-only diagnostic state for the
+	// operator contract; it never feeds evaluation. Replaced wholesale on
+	// every successful Load (a parsed file, or the adoption of a missing one)
+	// so a clean reload clears it. Written under mu, together with the rules
+	// or path that Load publishes; read lock-free by Diagnostics.
+	loadDropped atomic.Pointer[policyLoadDropped]
 	// droppedOnLoad counts the rules the most recent SUCCESSFUL Load refused
 	// via the fail-closed gate (policyRulePersistable). It exists so a caller
 	// can tell a policy file that filtered down to nothing from a genuinely
 	// empty one; see ConfiguredRuleCount and SEC-POLICYDROP-1.
 	droppedOnLoad atomic.Int64
+}
+
+// policyLoadDropped records the rules a Load rejected without retaining the
+// whole set: total counts every rejected rule, names keeps at most
+// policyLoadDroppedMaxNames display names of at most
+// policyLoadDroppedMaxNameBytes each, so a large hand-edited file bounds both
+// the resident state and the viewer-readable Diagnostics row.
+type policyLoadDropped struct {
+	names []string
+	total int
+}
+
+const (
+	policyLoadDroppedMaxNames     = 5
+	policyLoadDroppedMaxNameBytes = 128
+)
+
+// add counts one rejected rule and keeps its name while there is room,
+// truncated on a rune boundary to the byte bound.
+func (d *policyLoadDropped) add(name string) {
+	d.total++
+	if len(d.names) >= policyLoadDroppedMaxNames {
+		return
+	}
+	if len(name) > policyLoadDroppedMaxNameBytes {
+		cut := 0
+		for i := range name {
+			if i > policyLoadDroppedMaxNameBytes {
+				break
+			}
+			cut = i
+		}
+		name = name[:cut] + "…"
+	}
+	d.names = append(d.names, name)
 }
 
 // DroppedOnLoad reports how many rules the most recent successful Load refused
@@ -422,6 +464,12 @@ func (ps *PolicyStore) Load(path string) error {
 			ps.mu.Lock()
 			ps.path = path
 			ps.adoptUnsaved.Store(true)
+			// The adopted file holds only the current (already filtered)
+			// rules, so nothing in it was rejected: clear any record left by
+			// an earlier Load of a different file. Published under ps.mu with
+			// the path, like the parsed-file branch below, so two concurrent
+			// Loads cannot leave one's record beside the other's state.
+			ps.loadDropped.Store(&policyLoadDropped{})
 			// SEC-POLICYDROP-1: this IS a successful load, so the refusal count
 			// must describe it. The branch keeps the current in-memory rules
 			// rather than replacing them, and nothing was refused in producing
@@ -458,7 +506,7 @@ func (ps *PolicyStore) Load(path string) error {
 	// only; the file is not rewritten here, so an offending line is inert and
 	// re-warned each load until removed.
 	kept := rules[:0]
-	dropped := 0
+	dropped := &policyLoadDropped{}
 	for _, r := range rules {
 		if ok, reason := policyRulePersistable(r); !ok {
 			name := ""
@@ -466,15 +514,15 @@ func (ps *PolicyStore) Load(path string) error {
 				name = r.Name
 			}
 			logWarnf("Policy: dropping rule %q on load — %s", sanitizeLog(name), sanitizeLog(reason))
-			dropped++
+			dropped.add(name)
 			continue
 		}
 		kept = append(kept, r)
 	}
 	rules = kept
-	if dropped > 0 {
+	if dropped.total > 0 {
 		logWarnf("Policy: %d of %d rule(s) in %s were refused by the load gate; the remaining %d are installed and the startup default action still treats this as a CONFIGURED policy (deny) rather than an empty one",
-			dropped, dropped+len(rules), sanitizeLog(path), len(rules))
+			dropped.total, dropped.total+len(rules), sanitizeLog(path), len(rules))
 	}
 	ps.mu.Lock()
 	// SEC-POLICYDROP-1: remember the refusals, and publish them WITH the rules
@@ -485,8 +533,12 @@ func (ps *PolicyStore) Load(path string) error {
 	// rules, and ConfiguredRuleCount would report zero for a policy that was
 	// entirely refused, which is the fail-OPEN direction (CodeRabbit, PR #1651).
 	// Stored unconditionally so a clean reload clears a previous file's count.
-	ps.droppedOnLoad.Store(int64(dropped))
+	ps.droppedOnLoad.Store(int64(dropped.total))
 	ps.path = path
+	// Published in the same critical section as ps.rules, so the record
+	// always describes the Load whose rules are live, even when two Loads
+	// race (the last one to take ps.mu wins both).
+	ps.loadDropped.Store(dropped)
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
 	for _, current := range ps.rules {
 		if validRuleID(current.ID) && current.counters != nil {
