@@ -34,7 +34,7 @@ func TestBackupCreate_BuildStagesFailureSurfacesOpID(t *testing.T) {
 	if err := os.Unsetenv(runner.EnvCulvertBackupPassphrase); err != nil {
 		t.Fatalf("Unsetenv: %v", err)
 	}
-	status, body := rig.post(t, "/v1/backups", map[string]interface{}{
+	status, body := rig.post(t, "/v1/backups", map[string]interface{}{ // #nosec G101 -- test fixture: passphrase_ref is an env-var reference, not a credential
 		"filename":        "x.enc",
 		"encrypt":         true,
 		"passphrase_ref":  "env:CULVERT_BACKUP_PASSPHRASE",

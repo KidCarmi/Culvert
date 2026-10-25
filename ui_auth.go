@@ -229,17 +229,30 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
-	sess, err := readUISessionCookie(r)
-	if err == nil && sess != nil {
-		// Same fail-closed resolution uiAuthMiddleware applies. Reporting a
-		// session whose role this build does not enroll as `role: admin` would
-		// have the console render the full admin surface for a principal every
-		// gated endpoint is about to refuse; treating it as not-logged-in is
-		// both honest and the safe direction.
-		if role, ok := sessionRoleOrReject(sess.Role); ok {
-			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
-			return
-		}
+	// The SAME admission decision uiAuthMiddleware applies, now by sharing it
+	// rather than by restating it (resolveUISession, SEC-UISESS-1). This
+	// endpoint is on the public allowlist, so the middleware never runs for it
+	// and this is the only gate on what it reports. Reporting more authority
+	// than the middleware will honour has the console render the full admin
+	// surface for a principal every gated endpoint is about to refuse with 401
+	// — dishonest, and the unsafe direction. A refused session is reported as
+	// logged out; it is not cleared here, because this is a status read and
+	// clearing stays the middleware's and logout's business.
+	//
+	// The REFUSED verdict returns before the Basic fallback below, because the
+	// middleware does the same: it answers 401 and never reaches its own Basic
+	// branch. Falling through here would report `loggedIn: true` for a request
+	// carrying a refused cookie AND valid Basic credentials — promising access
+	// that every gated route then denies, which is this endpoint's whole
+	// contract inverted one branch over from where it was first fixed.
+	// Only ABSENT (no cookie, or one that did not verify) leaves Basic a turn.
+	switch sess, role, verdict := resolveUISession(r); verdict {
+	case uiSessionValid:
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
+		return
+	case uiSessionRefused:
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": false})
+		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
@@ -261,6 +274,34 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// SEC-REVOKE-1: the revocation write requires a cookie whose HMAC actually
+	// VERIFIED. This route is on the public allowlist (isPublicUIAuthPath), and
+	// revokeSessionCookie does its own base64+JSON decode with no signature
+	// check — on the stated premise that the "HMAC [was] already verified by
+	// decodeSession", which was false on exactly this path because the error
+	// was discarded. A cookie shaped
+	// base64({"sub":"…","exp":9999999999}).garbage therefore let an
+	// unauthenticated caller insert an attacker-chosen key, with an
+	// attacker-chosen expiry, into an unbounded map that is persisted on every
+	// insert and gossiped to every node in the cluster.
+	//
+	// Verification is the whole gate, and deliberately not admissibility: a
+	// token this build REFUSES (a deleted user's, or one minted for the proxy
+	// plane) is still a token the appliance signed, and revoking it is right.
+	// What must not be revocable is a payload nobody signed.
+	//
+	// Clearing stays UNCONDITIONAL, and the answer stays 200: logout must
+	// always discard the browser's cookie, whatever it was carrying.
+	//
+	// The revocation itself is NOT gated on decodeSession, because that gate is
+	// stricter than "signed" in two ways that matter here. Decode also refuses
+	// a token that is already revoked, so a replayed logout could never repair
+	// a revocation save that failed the first time; and it refuses a deleted
+	// user's token, which the boundary above says IS revocable.
+	// revokeSessionCookie authenticates the cookie itself (MAC first, then
+	// expiry, never the revocation lookups), so an unsigned cookie still writes
+	// nothing. The audit entry keeps the stricter gate: it names a subject, so
+	// it records only a session that was live.
 	sess, _ := readUISessionCookie(r)
 	if sess != nil {
 		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
