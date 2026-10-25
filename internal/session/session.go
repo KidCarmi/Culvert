@@ -4,9 +4,12 @@
 //
 // The package owns: the signing key (with synchronized access — the key is
 // written at runtime by the cluster snapshot sync while the MAC path reads it
-// concurrently), token encode/decode (base64(json).HMAC), the revocation list
-// (token- and user-level, with lazy expiry eviction, gossip export/merge, and
-// optional disk persistence), the session TTL, and jti generation.
+// concurrently) and the pooled HMAC-SHA256 engine bound to it (Decode runs on
+// the proxy authentication hot path, so the verify step is allocation-free;
+// see the MAC engine section below), token encode/decode (base64(json).HMAC),
+// the revocation list (token- and user-level, with lazy expiry eviction,
+// gossip export/merge, and optional disk persistence), the session TTL, and
+// jti generation.
 //
 // package main keeps: the HTTP cookie helpers (they need isSecureRequest and
 // the Identity hub type), the startup wiring (env/config key priority — env
@@ -19,13 +22,16 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -52,7 +58,40 @@ var (
 // latent data race, fixed with this extraction).
 func SetSigningKey(key []byte) {
 	signingKeyMu.Lock()
-	signingKey = key
+	// Rebind the MAC engine in the SAME critical section, so two concurrent
+	// installs order identically for the key and for the pool of HMAC states
+	// that sign under it (see macEngines) — but only when the key actually
+	// CHANGED. applySnapshotSessionSecret reinstalls the CP-synced secret on
+	// every snapshot apply whether or not it moved, and an unconditional
+	// rebind would throw away the warm pool on each of those no-ops.
+	// Constant-time compare: both sides are server-owned secrets, so this is
+	// hygiene rather than a defended oracle, and it costs 32 bytes of work.
+	//
+	// The comparison is only MEANINGFUL because signingKey is a copy this
+	// package owns, which is why the copy below is on the rebind path rather
+	// than at the top of the function. Were signingKey the caller's slice, a
+	// caller that mutated the slice it had installed and then reinstalled it
+	// would hand this compare the same mutated bytes on BOTH sides: equal, so
+	// no rebind — and from then on SigningKey, and the CP snapshot export
+	// reading through it, would report the new key while the engine still
+	// signed with the old one. Cookies issued before that "rotation" would keep
+	// verifying and an exported key would disagree with local verification.
+	// Both halves were reproduced against the tree and are pinned by
+	// TestSetSigningKey_CopiesKeyOnInstall (CodeRabbit, PR #1657). Only the
+	// pooling makes this reachable at all: the per-call hmac.New form re-read
+	// signingKey on every MAC and could not drift.
+	//
+	// Copying here and not above also keeps the no-op reinstall allocation-free,
+	// which is the property TestBenchGate_UnchangedKeyKeepsPoolWarm measures.
+	if subtle.ConstantTimeCompare(key, signingKey) != 1 {
+		// make+copy, not append([]byte(nil), key...): appending no elements to
+		// a nil slice yields nil, which would turn an installed EMPTY key into
+		// an absent one and change what SigningKey reports.
+		installed := make([]byte, len(key))
+		copy(installed, key)
+		signingKey = installed
+		macEngines.Store(newMacEngine(installed))
+	}
 	signingKeyMu.Unlock()
 }
 
@@ -500,9 +539,9 @@ func Decode(raw string) (*Session, error) {
 	}
 	b64, sig := raw[:dot], raw[dot+1:]
 
-	// Constant-time MAC comparison.
-	expected := mac(b64)
-	if !hmac.Equal([]byte(sig), []byte(expected)) {
+	// Constant-time MAC comparison. macEqual is the allocation-free form of
+	// hmac.Equal([]byte(sig), []byte(mac(b64))) and decides identically.
+	if !macEqual(b64, sig) {
 		return nil, fmt.Errorf("session: invalid signature")
 	}
 
@@ -533,11 +572,135 @@ func Decode(raw string) (*Session, error) {
 // key. Exported for tests that hand-craft legacy-shaped tokens.
 func MAC(data string) string { return mac(data) }
 
+// ---------------------------------------------------------------------------
+// MAC engine — reusable HMAC-SHA256 state for the per-request verify path
+// ---------------------------------------------------------------------------
+//
+// Decode runs on the PROXY authentication hot path, not just the admin UI: the
+// signed session cookie is the first credential arm resolveRequestAuth tries,
+// so every authenticated proxied request verifies one MAC (proxy.go, arm 1 of
+// the adaptive-auth chain).
+//
+// Building the HMAC state, not hashing the 250-odd bytes of payload, dominated
+// that step. crypto/hmac.New costs five allocations — the HMAC struct, the ipad
+// and opad blocks, and an inner and an outer sha256.Digest — and the old form
+// paid them per request, plus a copy of the payload for Write, a digest for
+// Sum(nil), two for EncodeToString, and two more for the []byte conversions
+// hmac.Equal needed. Measured on this box (Go 1.26, linux/amd64, 4-core Xeon
+// @ 2.80GHz) with a representative cookie: mac alone 9 allocs / 896 B of the
+// 26 allocs / 1632 B that one Decode spent, and 2.38 µs of its 6.12 µs.
+//
+// HMAC state is explicitly reusable — Reset re-primes the inner hash with ipad
+// — so it is built ONCE per signing key and recycled through a pool, and the
+// digest is summed and encoded through inline buffers so the verify path can
+// compare bytes without ever materialising the expected signature as a string.
+// The hashing itself is untouched: same key, same two block compressions, same
+// base64url alphabet, byte-identical output.
+
+// macEncodedLen is base64.RawURLEncoding.EncodedLen(sha256.Size): the exact
+// wire length of the signature half of every session cookie.
+const macEncodedLen = 43
+
+// macScratchLen bounds the payload a pooled state copies into its inline
+// buffer instead of converting. A payload is base64(JSON) over a handful of
+// short identity fields; 512 bytes covers every token this package issues with
+// room for a large group list, and a longer one still verifies correctly, just
+// with one allocation. The buffer is an inline ARRAY rather than a grown slice
+// so a pooled state can never retain an oversized allocation — the failure
+// mode the hostutil IDNA memo hit.
+const macScratchLen = 512
+
+// macState is one reusable HMAC-SHA256 computation, pooled per signing key.
+type macState struct {
+	h     hash.Hash
+	msg   [macScratchLen]byte
+	sum   [sha256.Size]byte
+	coded [macEncodedLen]byte
+	given [macEncodedLen]byte
+}
+
+// compute writes the base64url HMAC-SHA256 of data into s.coded and returns
+// that slice. The result ALIASES s and is valid only until the state goes back
+// to its pool, so callers copy (or compare) before releasing it.
+func (s *macState) compute(data string) []byte {
+	s.h.Reset()
+	// hash.Hash.Write never reports an error; the blank assignment is the
+	// convention for that, not a suppressed failure.
+	if len(data) <= len(s.msg) {
+		n := copy(s.msg[:], data)
+		_, _ = s.h.Write(s.msg[:n])
+	} else {
+		_, _ = s.h.Write([]byte(data)) // oversized payload: one conversion
+	}
+	base64.RawURLEncoding.Encode(s.coded[:], s.h.Sum(s.sum[:0]))
+	return s.coded[:]
+}
+
+// macEngine binds one signing key to a pool of states primed with that key.
+type macEngine struct {
+	key  []byte
+	pool sync.Pool // *macState
+}
+
+func newMacEngine(key []byte) *macEngine {
+	// The engine owns a COPY. Every state it mints later must be primed with
+	// the same bytes as the ones already pooled, and the old per-call form
+	// re-read the key on every MAC, so without the copy a mutation after
+	// install would leave the pool holding two different keys at once.
+	// SetSigningKey now hands over a slice this package already owns, so this
+	// is belt-and-braces there — it keeps the invariant true for any future
+	// caller of newMacEngine rather than resting on the funnel's discipline.
+	e := &macEngine{key: append([]byte(nil), key...)}
+	e.pool.New = func() any { return &macState{h: hmac.New(sha256.New, e.key)} }
+	return e
+}
+
+// macEngines publishes the engine for the CURRENT signing key. Holding it
+// outside signingKeyMu is deliberate and load-bearing twice over: the verify
+// path reads the key binding with one atomic load instead of taking an RWMutex
+// per request, and a request still holding a state from a SUPERSEDED engine
+// returns it to THAT engine's pool — unreferenced the moment the straggler
+// lets go — so a state primed with the old key can never be handed to a caller
+// signing under the new one. The DP config-sync path replaces the key at
+// runtime while requests are in flight, which is exactly that race.
+//
+// The key is bound at install time rather than re-read per call, so both the
+// stored key and the engine are copies this package owns (see SetSigningKey and
+// newMacEngine) and SigningKey keeps handing readers theirs. No slice a caller
+// still holds backs the stored key or a live HMAC state, so the two can never
+// drift apart.
+var macEngines atomic.Pointer[macEngine]
+
+func init() { macEngines.Store(newMacEngine(nil)) }
+
+// mac returns the base64url HMAC-SHA256 of data under the current signing key.
+// Used by Encode (once per login) and by the exported MAC test helper; the
+// per-request verify path uses macEqual instead and allocates nothing.
 func mac(data string) string {
-	signingKeyMu.RLock()
-	key := signingKey
-	signingKeyMu.RUnlock()
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(data))
-	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+	e := macEngines.Load()
+	s := e.pool.Get().(*macState)
+	out := string(s.compute(data))
+	e.pool.Put(s)
+	return out
+}
+
+// macEqual reports whether sig is the base64url HMAC-SHA256 of data under the
+// current signing key, compared in constant time.
+//
+// Exactly equivalent to hmac.Equal([]byte(sig), []byte(mac(data))), including
+// the length-mismatch rejection: crypto/subtle.ConstantTimeCompare, which
+// hmac.Equal is, also decides unequal lengths before comparing any byte. The
+// equivalence is pinned by a differential test and a fuzz target against a
+// verbatim copy of the old form (session_mac_test.go).
+func macEqual(data, sig string) bool {
+	e := macEngines.Load()
+	s := e.pool.Get().(*macState)
+	want := s.compute(data)
+	ok := len(sig) == len(want)
+	if ok {
+		n := copy(s.given[:], sig)
+		ok = subtle.ConstantTimeCompare(s.given[:n], want) == 1
+	}
+	e.pool.Put(s)
+	return ok
 }
