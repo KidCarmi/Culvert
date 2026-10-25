@@ -16,7 +16,7 @@ import (
 )
 
 func TestInstallScript_SecretAlreadySet_EmptyValuesAreNotSet(t *testing.T) {
-	fn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	cases := []struct {
 		name    string
@@ -61,7 +61,7 @@ func TestInstallScript_SecretAlreadySet_EmptyValuesAreNotSet(t *testing.T) {
 // A large .env must not turn a successful early-exit match into a SIGPIPE
 // failure of the upstream reader under the installer's `set -o pipefail`.
 func TestInstallScript_SecretAlreadySet_LargeEnvUnderPipefail(t *testing.T) {
-	fn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 	envfile := filepath.Join(t.TempDir(), ".env")
 	content := "CULVERT_CA_PASSPHRASE=abcdef123456\n" + strings.Repeat("# filler line to exceed the pipe buffer\n", 1<<20)
 	if err := os.WriteFile(envfile, []byte(content), 0o600); err != nil {
