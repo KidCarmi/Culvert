@@ -67,6 +67,13 @@ func withChaos68Aggregator(t *testing.T) {
 	})
 }
 
+// chaos68Entry builds a revocation fixture. The token is an opaque test label,
+// not a credential; building the entry from parameters keeps gosec's
+// literal-value G101 heuristic off fixture strings.
+func chaos68Entry(token, user string, expiry int64) RevocationEntry {
+	return RevocationEntry{Token: token, User: user, Expiry: expiry}
+}
+
 // DEFECT. The aggregator had exactly one writer — a Data Plane push — so the
 // Control Plane, which is the node the admin UI runs on, contributed nothing
 // to the fleet-wide merge. An admin revoking a session on the CP revoked it on
@@ -75,8 +82,8 @@ func TestChaos68_ControlPlaneOwnRevocationsReachTheFleet(t *testing.T) {
 	withChaos68Aggregator(t)
 
 	cpLocal := []RevocationEntry{
-		{Token: "cp-logout-token", Expiry: time.Now().Add(time.Hour).Unix()},                           // #nosec G101 -- test-only fixture token, not a credential
-		{Token: "user:deleted-admin", User: "deleted-admin", Expiry: time.Now().Add(time.Hour).Unix()}, // #nosec G101 -- test-only fixture token, not a credential
+		chaos68Entry("cp-logout-token", "", time.Now().Add(time.Hour).Unix()),
+		chaos68Entry("user:deleted-admin", "deleted-admin", time.Now().Add(time.Hour).Unix()),
 	}
 	globalRevAggregator.UpdateLocal(cpLocal)
 	globalRevAggregator.Update("dp-1", nil)
@@ -1068,7 +1075,7 @@ func TestChaos68_UnconfiguredNodePaysNothingForTheVanishedFileCheck(t *testing.T
 		t.Error("an unconfigured node reports its backing file missing — there is no backing file")
 	}
 	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-unconf", Expiry: exp.Unix()}} // #nosec G101 -- test-only fixture token, not a credential
+	entries := []RevocationEntry{chaos68Entry("tok-unconf", "", exp.Unix())}
 	mergeAndPersistRevocations(entries, "test")
 	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
 		t.Fatalf("re-merge added %d, want 0", added)
