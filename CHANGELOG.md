@@ -2374,8 +2374,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   for other people.
 
   The three caches now share one policy, the one `internal/authstate` defines
-  and CHAOS-57 put in the local cache, reusing the same victim ordering so there
-  is a single definition of it in the tree: entries are attributed to a client
+  and CHAOS-57 put in the local cache, reusing `store.go`'s existing victim
+  ordering rather than adding a fourth copy of it (the tree holds two
+  definitions of that ordering, not one: `betterAuthCacheVictim` in `store.go`
+  and the identical `better` in `internal/authstate`; consolidating them is
+  recorded as follow-up, not done here): entries are attributed to a client
   fairness key and eviction takes the oldest entry of the client holding the
   most, so a flooding source evicts itself and a client holding one entry cannot
   be displaced until every other client is down to one too. An expired entry is

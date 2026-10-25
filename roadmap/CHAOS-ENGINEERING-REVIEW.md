@@ -12255,6 +12255,37 @@ guards is new.
   (N × 5,000 entries) is a sizing decision for an operator-configurable cap,
   not a defect, and `maxAuthCacheSize` is shared with `store.go` so changing it
   is a cross-cache decision.
+- **This is the THIRD implementation of one engine, and the triplication is
+  left standing.** `internal/authstate.Store[T]` (interactive-login callback
+  state), `store.go`'s `authCacheStore` (the local bcrypt cache, CHAOS-57) and
+  this sweep's `identityResultCache[T]` all carry per-client buckets, lazy
+  stale-position skipping from the front, amortised compaction keyed on total
+  slice length, and the same three-term victim ordering —
+  `betterAuthCacheVictim` (`store.go`) is byte-for-byte `better`
+  (`internal/authstate`). Codex raised the narrower form of this on PR #1633
+  (the engine and its white-box tests sit in `package main` against the
+  internal-owner rule in [AGENTS.md](../AGENTS.md)); the finding is correct and
+  the move is tractable — the file imports only `sync`, `sync/atomic` and
+  `time`, references just `maxAuthCacheSize` and `betterAuthCacheVictim` from
+  main, and nine of the seventeen gates are engine-only while eight are
+  integration. It is left for a follow-up because it changes no behaviour,
+  restructures an authentication hot path, and the new boundary needs its own
+  ADR and [package-isolation](PACKAGE-ISOLATION.md) record — a decision, not a
+  mechanical edit — and because consolidating the triplication reaches into
+  CHAOS-57's code.
+- **`internal/authstate` carries this sweep's findings (2) and (4) latently,
+  and that is why folding this cache into it would be wrong.** Its `Set`
+  removes and re-appends, and its `frontLocked`/`compactLocked` presence test
+  (`entries[k]` present && `rec.client == client`) cannot tell a stale bucket
+  position from the live one, because the NEW record answers "present" for
+  every historical position of the same key. So a re-`Set` key would both
+  survive compaction twice and present as its client's OLDEST entry. Neither
+  bites there: its keys are unguessable single-use state tokens that are never
+  re-`Set`. This cache's keys ARE re-`Set`, every TTL, on credential
+  re-verification — which is exactly how (2) and (4) were reachable here, and
+  what the per-record `pos` generation marker fixes. `authstate` has no
+  equivalent, so moving a re-`Set`-heavy workload into it would make both
+  reachable. Recorded rather than relied upon.
 - **`AU-3e`, the username-enumeration timing oracle, is untouched** and stays
   as CHAOS-57 recorded it: closing it means caching wrong-username negatives,
   a behaviour change to a security control that deserves its own review. This
