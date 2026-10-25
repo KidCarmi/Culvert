@@ -7,6 +7,69 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **Two merge-gate workflows reached their actions through MUTABLE tags, and a
+  repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
+  (designed to be a REQUIRED branch-protection check) and
+  `.github/workflows/api-contract.yml` referenced `actions/checkout@v7.0.1`,
+  `actions/setup-go@v7.0.0` and `actions/cache@v6` by tag while every one of the
+  hundred-plus other `uses:` refs under `.github/` is pinned to a 40-character
+  commit SHA with a `# vX.Y.Z` comment. A tag is a pointer its owner can move, so
+  the commit that actually ran inside those jobs was not the commit anyone
+  reviewed — and because those jobs *are* the gate, a moved tag could make a
+  blocking check report green without having gated anything. That is the same
+  failure shape `codeql_action_pin_test.go` exists for, where a mis-pinned SAST
+  action produced a job that looked like it ran and executed zero queries.
+
+  The convention was enforced per file, so these two drifted and kept drifting:
+  the dependency sweep that rewrote `actions/setup-go@v7` to `@v7.0.0` touched
+  those exact lines and left them mutable, because nothing failed. All six refs
+  are now SHA-pinned to the revisions already in use elsewhere in the tree, and
+  `workflow_action_pin_test.go` enforces the rule across every workflow and
+  composite action under `.github/` — so a new file, or a bump that rewrites a
+  ref, cannot reintroduce a mutable one silently.
+
+  The gate enumerates refs by **parsing the YAML**, not by scanning for
+  `^uses:`, because the line-based first revision had a hole of exactly the kind
+  it exists to catch: YAML also accepts `uses : x@v7`, `"uses": x@v7`,
+  `'uses': x@v7` and the flow mapping `- {uses: x@v7}`, all four of which
+  GitHub Actions honours and none of which that regex matched — while the
+  hundred-odd refs it did match kept its "scanned nothing" guard satisfied. A
+  mutable tag in any of those spellings would have run with the gate green.
+  `TestWorkflowActionRefEnumerationSeesEveryUsesKey` pins all four plus the
+  job-level reusable-workflow form, so a future simplification back to a regex
+  fails instead of silently un-seeing refs. A SHA pin's comment must also now
+  *name* the revision (`# v1.2.3`, or `# branch @ YYYY-MM-DD` as `ci.yml` pins
+  an action with no releases); the first revision accepted any `#`, so `# TODO`
+  passed a check whose own message promised it named a release.
+
+  Two further holes in the same gate, both measured: a repeated pin was checked
+  against the FIRST occurrence's line, so in a file with fourteen
+  `actions/checkout` steps — or the two `actions/setup-go` steps in
+  `pr-api-governance.yml` — a later pin with no comment inherited an earlier
+  one's `# v7.0.1` and passed; one ref is now emitted per matching source line.
+  And a `docker://` container action was skipped entirely, on the incorrect
+  grounds that registry digest rules covered it (they govern the release
+  catalog's images, not a workflow's `uses`), so `docker://alpine:latest` would
+  have satisfied every applicable check; it now needs an `@sha256:` digest, with
+  `TestWorkflowDockerDigestRuleBites` proving the rule on fixtures because
+  nothing in `.github/` uses the scheme yet.
+
+  `slsa-framework/slsa-github-generator` is a recorded exception with its reason:
+  the generator verifies its own provenance against the invoking tag and refuses
+  to run from a SHA, so pinning it would disable release provenance rather than
+  harden it. The exception is still constrained to an exact
+  `vMAJOR.MINOR.PATCH` release, never a moving major alias, and the test fails if
+  an exception stops being used — the allowlist is exact, not a dumping ground.
+  No runtime, policy or proxy behaviour changes; this is CI trust only.
+
+  The three `actions/checkout` steps in those two workflows also set
+  `persist-credentials: false` (CWE-522, CodeRabbit on this PR): each job runs
+  PR-authored code, which could otherwise read the run's `GITHUB_TOKEN` from
+  `.git/config`. Nothing in them needs the credential — the base-ref
+  `git fetch` reads a public repository.
+
 ### Changed
 
 - **The pinned Go toolchain moves from go1.26.10 to go1.27.3.** The `go.mod`
@@ -112,6 +175,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   list, the per-tunnel context, and the GOAWAY re-fire for a tunnel that starts
   after the first wave. The default build (go1.26.10) is unchanged in behavior.
 
+- **A bodyless `POST`/`PUT` was forwarded upstream re-framed as
+  `Transfer-Encoding: chunked` instead of the client's own `Content-Length: 0`.**
+  Both legs that serialize an outbound request wrapped the request body
+  unconditionally — `prepareHTTPForward` with a `MaxBytesReader` plus a
+  `countingReader`, and the SSL-inspected H1 inner loop with a
+  `stallDetectReadCloser`. `net/http` keys its no-body fast path on the
+  **identity** of `http.NoBody` (`Request.outgoingLength` returns 0 only for a
+  nil body or that sentinel, and reads `ContentLength == 0` on any other
+  non-nil body as "length unknown"), so wrapping the sentinel told
+  `newTransferWriter` the length was unknown. For methods that normally *do*
+  carry a body it does not probe — it chunks. A forward proxy re-framing a
+  request the client framed correctly is wrong on its own terms, and origins,
+  WAFs and CDNs do not all treat the two forms alike.
+
+  Both legs now leave the sentinel alone, so the origin sees the client's
+  framing. Pinned by `TestHandleHTTP_EmptyBodyPOSTKeepsContentLengthZero` on
+  the plain-HTTP leg and `TestInspectInnerLeg_EmptyBodyKeepsClientFraming`
+  through a real CONNECT / forged-leaf tunnel; reverting either guard alone
+  fails its own test. The cost half of the same root cause is under
+  **Performance**.
 - **go-ldap v3.4.15 would have reclassified malformed-packet faults as "the directory answered".** v3.4.15 adds `ErrorMalformedPacket` (207) for decode
   faults that v3.4.14 returned as plain errors, which `ldapUserBindIsUnreachable`
   treats as unreachable. With the client-error ceiling still at 206, those faults
@@ -352,6 +435,143 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   scheduled-to-unscheduled scan ratio at 3.5x (measured 2.19x; 4.63x with the
   memo un-shared); the existing allocation gate could not see this regression,
   because resolving per rule allocates nothing.
+- A **known-empty request body is no longer wrapped** on either leg that
+  serializes an outbound request, so `net/http` stops probing it. Wrapping the
+  `http.NoBody` sentinel reports the body length as unknown (see the companion
+  entry under **Fixed** for why), and for the methods that usually lack a body —
+  `GET`, `HEAD`, `DELETE`, `OPTIONS`, `PROPFIND`, `SEARCH` —
+  `transferWriter.shouldSendChunkedRequestBody` resolves that unknown with
+  `probeRequestBody`: a fresh **goroutine** reading one byte, a buffered
+  channel and a 200 ms `time.Timer`, with the request line blocked on that
+  channel round trip. Bodyless methods are most of proxied web traffic, and on
+  an inspecting gateway nearly every decrypted inner request takes the second
+  leg too, so this was paid on the majority of requests the product serves —
+  and it bought nothing: the probe's only conclusion was the emptiness the
+  sentinel had already stated.
+
+  Nothing is lost by skipping the wrappers. An empty body cannot exceed
+  `maxRequestBody`, its byte counter would stay at 0 — exactly what the
+  pre-existing nil branch contributes to `statBytesSent` — and a body with no
+  bytes has no trickle for the inspect loop's stall detector to catch, with
+  that loop's 60 s header read deadline still bounding a client that sends
+  nothing. Scope is the sentinel's identity only: every other body, `nil`
+  included, behaves as before.
+
+  Measured on go1.27.3 (the `go.mod` toolchain pin), linux/amd64, 4-core Xeon
+  @2.10GHz, medians of n=5, as *before* → **after** — the "before" arm being the
+  frozen pre-change wrapping kept in `proxy_emptybody_bench_test.go` so the
+  comparison stays reproducible in-tree:
+
+  | | allocs/op | B/op | ns/op |
+  |---|---|---|---|
+  | bodyless `GET` forward | 80 → **69** | 10 485 → **9 662** | loopback-bound |
+  | bodyless `POST` forward | 82 → **70** | 10 341 → **9 676** | loopback-bound |
+  | inspected inner-leg `Request.Write` | 13 → **6** | 665 → **248** | 3 734 → **1 088** |
+
+  The same benchmarks on go1.26.10 (the pin before the go1.27.3 bump) measured
+  the forward pair one allocation lower on **both** arms — 79 → 68 and 81 → 69 —
+  and the inner-leg pair identically. The absolute counts track the toolchain;
+  the saving does not move: **−11** allocations on a bodyless `GET`, **−12** on a
+  bodyless `POST`, **−7** on the inner leg, on both toolchains.
+
+  The inner-leg pair is the strongest evidence: it carries no network at all,
+  so its **~3.4× CPU** gap is the probe's channel round trip and nothing else,
+  reproduced in all five runs on both toolchains with no overlap. The forward pair's `ns/op` is
+  loopback- and scheduler-bound on a shared 4-vCPU runner and its medians
+  overlap across runs, so it is **not** quoted as a result; allocation counts
+  are deterministic, which is why `TestBenchGate_EmptyBodyForwardAllocs` and
+  `TestBenchGate_EmptyBodyInnerWriteAllocs` key on them and assert the
+  before/after relationship as well as an absolute bound.
+
+  End to end, `BenchmarkPerfQual_ProxyHTTPForward` goes from **176 to 165
+  allocs/op** and ~14 765 to ~13 895 B/op, identically at `rules=10/100/500`
+  and in every run of an A/B against the pre-change tree. Its `ns/op` and
+  `cpu-ns/op` move the same way (~−3%) but inside this runner's spread, so they
+  are reported as directional only.
+
+  The inspected **H2** leg is deliberately untouched: `x/net/http2`'s server
+  never hands out `http.NoBody` (`newWriterAndRequestNoBody` always installs a
+  `*requestBody`), so this guard cannot fire there and the analogous cost on
+  that path is not one Culvert's wrapper introduces.
+- **The per-request category-group match no longer takes a lock.**
+  `matchDestNorm` calls `categoryGroupMatchesHostScratch` once per rule
+  carrying a destination category group, inside the policy scan every proxied
+  request walks, and each call took an `s.mu.RLock`/`RUnlock` pair — two atomic
+  read-modify-writes on one shared word, so every request wrote the same cache
+  line once per category-group rule to read tables that in steady state never
+  change. (The ID leg's linear scan of every group was already retired by the
+  `byID` index; this change removes the lock from every leg.) That is the
+  throughput ceiling already found and fixed in `internal/threatfeed`,
+  `internal/urlcat`, `internal/connlimit`, the IP filter and `topHosts`;
+  `policy_category_bench_test.go` carried it as an **open** finding (91.9% of
+  samples in `GetByName`, 68.6% in its `RLock` atomic).
+
+  `MatchesCategoryByID`, `MatchesCategory`, `GetByName`, `GetByID` and
+  `Revision` now read an immutable `readView` published under `s.mu` by the
+  `bumpRevLocked` chokepoint: a `byName` map, a `byID` map projected through
+  the same fail-closed `groupByIDLocked` resolution the writers use, and the
+  `rev` memo counter, which travels **inside** the view so contents and change
+  signal are one publication and cannot be observed out of step (published
+  separately, a reader that loaded the bumped counter and then the
+  pre-publication contents would memoize stale contents under the new revision
+  — permanently stale, because the counter will not move again).
+
+  Measured on the PR's development box (medians of n=5, 4-core Xeon @2.80GHz,
+  go1.26.9, before the `byID` index landed), end to end,
+  `BenchmarkPolicyEvaluate_CategoryGroupRulesParallel` with 50 category-group
+  rules and an uncategorized destination:
+
+  | GOMAXPROCS | 1 | 2 | 4 | 1→4 throughput |
+  |---|---|---|---|---|
+  | RLock | 1926 ns | 3699 ns | 3996 ns | 0.48x — cores *subtracted* throughput |
+  | read view | 1748 ns | 980 ns | 537 ns | 3.25x |
+
+  Re-measured against the `byID`-indexed store, which is the comparison that
+  describes what this change still buys: both arms on one box, one toolchain
+  (go1.27.3), medians of n=5, back to back — the base arm is `origin/main`
+  with this package's benchmark file copied in.
+
+  | benchmark, ns/op | main | +view | |
+  |---|---|---|---|
+  | `ByID_HitParallel` 8 groups, `GOMAXPROCS=1` | 64.1 | 47.2 | 1.4x |
+  | `ByID_HitParallel` 8 groups, **`GOMAXPROCS=4`** | **194.2** | **11.1** | **17.5x** |
+  | `ByID_HitParallel` 64 groups, `GOMAXPROCS=4` | 211.9 | 12.3 | 17.3x |
+  | `ByID_HitParallel` 256 groups, `GOMAXPROCS=4` | 154.6 | 13.1 | 11.8x |
+  | `MatchesCategory_NameParallel`, `GOMAXPROCS=4` | 124.0 | 16.0 | 7.8x |
+  | `MatchesCategory_UnknownNameParallel`, `GOMAXPROCS=4` | 108.5 | 10.9 | 9.9x |
+  | `MatchesCategoryByID_Hit` 256 groups, serial | 88.3 | 52.7 | 1.7x |
+
+  The row that matters is the shape, not the ratio: on the `byID`-indexed
+  store the parallel figures are **worse than its own single-core figures**
+  (64.1 → 194.2 ns at 8 groups, 82.5 → 211.9 at 64), because with the scan
+  gone the `RLock` is all that is left and it is the thing that does not
+  scale. Off the view the same op costs ~11–13 ns at four cores regardless of
+  group count. The serial gain is real but modest (1.4–1.7x on the ID leg:
+  the view resolves an ID in one probe where the locked path walks
+  `byID` → name key → group). `MatchesCategory_ByName`, main's own serial
+  single-probe benchmark, is ~1.0–1.3x — unchanged, as expected for a shape
+  with no contention to remove. Zero allocations on every path, before and
+  after.
+
+  Two **ownership** corrections made the lock-free read safe. `Update`,
+  `UpdateByID` and `Rename` now copy-on-write instead of editing the live
+  `*Group`: `GetByName` hands that pointer out and its doc comment claimed
+  "catSet is immutable between mutations", but the mutators edited it in
+  place, so a caller reading `g.catSet` or `g.Name` raced the writer. And
+  `ReplaceAll` / `restoreSnapshot` now copy each `Group` rather than
+  publishing `&groups[i]`: aliasing the *caller's* backing array cannot honour
+  "a published Group is never mutated in place", and handing the same slice to
+  `ReplaceAll` twice wrote groups a reader was mid-probe on. One behavioural
+  consequence, deliberate: the caller's slice no longer has its IDs backfilled
+  in place — no call site reads them back, and `Save()` persists them from the
+  store.
+
+  The view contract is pinned three ways — behaviourally through every public
+  mutator including the `MutateDurable` rollback path, structurally by an AST
+  wall over the package (every group-tree writer publishes, directly or
+  through `bumpRevLocked`, which must itself call `publishLocked`) with a
+  pre-fix control and a writer inventory, and as a differential oracle against
+  a verbatim copy of the pre-fix linear scan.
 
 - The destination host is now canonicalized **once per policy scan** instead of
   once per category-scoped rule. `urlcat.Store.MatchesHost` /
@@ -600,6 +820,83 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   against the cheapest wrong fix (skip the store when the map is nil, which
   silences the panic while silently not enforcing the entry). `doc.go` and
   ADR-0039 are amended rather than left asserting the narrower contract.
+- OIDC credential/JWKS transports now dial the guarded destination directly:
+  an inherited forward proxy could bypass the resolved-IP SSRF guard. A
+  behavioral regression checks private destinations, DNS rebinding and
+  redirect targets with a public-proxy hook configured. OIDC no longer uses
+  environment proxies.
+  G704 is enforced with scoped exceptions, the expired OpenSSL exception is
+  removed, and CI records unfiltered findings and the actual image's package
+  and static-binary evidence (RISK-002/RISK-006).
+- The C2 route-metadata index resolved every wildcard admin route to the
+  **public `/` catch-all** (SEC-C2WILDCARD-1). `buildMetadataIndex` classified a
+  Go 1.22 `{name}` pattern as an *exact* path and stored it under its literal
+  pattern text, so a real request path — `/api/support/bundles/csb_…` — never
+  matched it, fell through the prefix list and landed on the SPA shell's entry,
+  which is `Public: true`, `RolePublic`. For all ten such routes (the
+  support-bundle download, sealed-export, delete, manifest and upload-consent
+  surfaces, plus `/api/support/recipients/{name}`) that silently disabled C2
+  role enforcement, the C4 role-divergence observation and the C2c audit-gap
+  check — and because `Lookup` still answered "found", `c2ShadowMissingMetaTotal`
+  never incremented, so nothing showed it in metrics either.
+
+  Not exploitable as it stood: every one of those handlers carries its own
+  handler-level `requireRole`, so what was lost is the second layer, not the
+  only one. The mux itself resolves these patterns correctly; only the mirror
+  did not. The index now keeps wildcard patterns in a segment-matched list,
+  tried after the exact map and before the prefix list, with ServeMux's own
+  semantics — literals byte-for-byte, `{name}` exactly one non-empty segment,
+  `{name...}` the trailing segments, most specific first. Exact lookups and the
+  catch-all fallback are unchanged, and the new matcher cannot over-claim:
+  `/api/support/bundles/` and a path with one segment too many are both
+  refused. `TestC2_MetadataIndex_ResolvesEveryRoute` passed vacuously because it
+  iterates the pattern literals; the new gates substitute a concrete value for
+  each `{…}` segment and were verified failing against the pre-fix index, where
+  10 of 10 routes resolve to `"/"` with `public=true`.
+
+  Resolution for a live request goes through the ESCAPED path. `*http.ServeMux`
+  matches on `EscapedPath()` and unescapes each segment on its own, so a `%2F`
+  stays inside one wildcard value — it routes
+  `/api/support/bundles/foo%2Fbar` to `{id}` with `id="foo/bar"`, while
+  `r.URL.Path` has already turned that into a second segment. Resolving from
+  the decoded path therefore reopened the same hole for one percent-encoded
+  character, which the built index confirmed by answering `("/", public=true)`
+  for all three affected shapes. Matching the raw escaped text would be wrong
+  in the other direction, because `appro%76e` really does reach the literal
+  `approve` route, so each segment is unescaped separately; a malformed escape
+  is left as-is, making the worst case a miss rather than a wrong route. The
+  decoded path still feeds the exact and prefix tiers unchanged.
+
+- Revoking a cluster **enrollment token** left no audit record
+  (SEC-ENROLLAUDIT-1). `DELETE /api/cluster/tokens` destroys cluster trust
+  material, yet it was the one mutation on that route with no `auditEvent`: the
+  POST that mints a token audits, node revocation audits, and the route
+  metadata claimed `"audit delegated"` for a method that had no delegate. With
+  `AuditExpected` false, C2c's runtime audit-gap check could not notice the
+  omission either, and `api/route-classification.yaml` agreed with the wrong
+  answer. An admin-session holder could therefore remove enrollment capability —
+  durably, the store is saved — with nothing recording who did it or when.
+  The handler now emits `enrollment.token_revoked` **after** the store has
+  persisted, so a record cannot claim a revocation that did not survive the
+  write; the metadata and the manifest declare it. `saveConfigVersion` is
+  deliberately still absent — enrollment tokens are outside the rollback
+  surface. The write-failure path is covered too: `DeleteToken()` runs before
+  `Save()`, so a failed store write leaves the token already gone from memory
+  — this node has stopped honouring it whatever the 500 says, and a later
+  successful save makes the deletion durable — which now records a distinct
+  `enrollment.token_revoke_unpersisted` event rather than nothing. The token is
+  not restored; putting live enrollment material back because a disk write
+  failed is the less safe direction, and the 500 already says to retry.
+  Gates include two negative controls (a 404 and a 400 must audit nothing),
+  assert on unique entry content rather than a length delta because the audit
+  ring is bounded, and mint a fresh token hash per invocation so a `-count=2`
+  run cannot satisfy the positive assertion from the previous run's entry.
+
+  Both findings were recorded as R2 and R4 in the 2026-10-17 review and are
+  closed here. Full analysis, plus a review of the 28 open pull requests —
+  including one that flips a fail-closed installer gate to fail-open and four
+  pairs of mutually incompatible remediations of the same defect — is in
+  `docs/engineering/security-reviews/2026-10-18-open-pr-fleet-and-metadata-audit-gaps.md`.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
@@ -1941,6 +2238,89 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   read-lock critical section, which also removes the old shape's second lock
   round trip. Only deployments using category groups in policy rules are
   affected; no configuration, API or metric surface changes.
+
+### Fixed
+
+- Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the
+  repository's durable-write chokepoint (CHAOS-85) — the same chokepoint the
+  SEC-SECRETWRITE-1 entry above adopted for key material. They hand-rolled
+  `os.WriteFile(tmp)` + `os.Rename`, which is atomic for a *reader* (no torn
+  file is ever visible) but is **not fsynced**, and — the serious half — is
+  invisible to the storage-health plane. `storageDegraded()`, the rate-limited
+  `storage_write_failed` alert, the degraded operator-contract row and the
+  Prometheus series are all driven by the observers `storage_health.go`
+  installs on `fileutil`, so a write that never calls `fileutil` cannot raise
+  any of them: on a full or read-only volume these writes failed **silently**
+  while the operator contract kept reporting healthy. Affected: the secure-upload
+  config (whose `Enabled`/`Origin` gate egress), the upload queue entry and its
+  sealed blob, the support-recipient registry, the debug-level elevation, and
+  the support-bundle approval state. This is the defect class
+  `audit_writefail_test.go` already pins for the audit JSONL (ST-8), in a domain
+  whose own sibling `support_telemetry_config.go` already used the chokepoint.
+
+  The durability half matters most at `writeBundleState`. `createSupportBundle`
+  deliberately writes the PENDING state **first**, before the tgz and the
+  manifest, because `readBundleState` grandfathers an **absent** state file to
+  READY — which is exactly what the download gate checks, so a bundle whose
+  manifest committed without its state would be downloadable with no admin
+  approval, exporting its INTERNAL sections without the mandatory redaction
+  preview. That ordering is correct and sufficient for a *process* crash, where
+  the page cache survives. It is not sufficient for power loss or a kernel
+  panic: with no fsync barrier, the relative durability of the state commit and
+  the manifest commit is a filesystem- and mount-option-dependent accident the
+  code never asserted. `AtomicWrite` supplies the barrier (fsync file, then
+  parent directory). The bundle commit sequence (tgz, redaction report, preview,
+  manifest) moves with it, since those are the artifacts the manifest commits.
+  `cdr_health.go` is deliberately unchanged: it documents why it needs a
+  predictable `.tmp` rendezvous and already fsyncs via
+  `fileutil.WriteFileExclusive`. Gates: a table-driven chokepoint test over all
+  six entry points (red before the change at 6/6) plus fault injection on the
+  approval-gate path asserting degradation, exactly one alert, and the inherited
+  base-name path-redaction contract (red before at 0 alerts).
+
+- A support durable write that LANDED was reported as a failure, so the HTTP
+  response and the audit trail could contradict the state on disk.
+  `fileutil.AtomicWrite` returns `ErrReplacedNotSynced` only *after* its rename
+  has succeeded — the target already carries the new bytes and every reader sees
+  them; what is unproven is narrower, the rename's durability across an
+  immediate crash. `apiSupportBundleApprove` returns 500 and returns *before*
+  its `auditEvent`, so a bundle could be READY and downloadable (the
+  mandatory-preview download gate reads exactly that landed file) while the
+  admin was told the approval failed and nothing recorded who authorized
+  exporting its INTERNAL sections. The same audit-after-save shape covers the
+  `support.upload.config` egress posture flip and the debug-level elevation, so
+  the fix sits at the writer: `durableSupportWrite` treats the sentinel as
+  committed for every support writer. The storage-health plane keeps the signal
+  — `AtomicWrite` notifies the write-failure observer on that branch before
+  returning, so the failure is still counted, logged, alerted as
+  `storage_write_failed` and reflected in `storageDegraded()`. This divergence
+  arrived with the chokepoint conversion above: the previous `os.WriteFile` +
+  `os.Rename` pair returned nil whenever the rename succeeded and so had no
+  error-after-landing case at all. Found by Codex review on PR #1658. Gates: the
+  unit contract with a negative control that a pre-rename ENOSPC is still an
+  error, plus the handler contract that a landed approval returns 204 and leaves
+  a `support.bundle.approve` entry; both verified failing against the unfixed
+  shape.
+
+- Every Data-Plane → Control-Plane poll failure was charged **twice**
+  (CHAOS-86): `backoff()` incremented `failCount` that `pollConfig`'s error path
+  had already incremented. Both of the function's documented contracts were
+  violated. The delay schedule, promised as "2s, 4s, 8s, … capped at 60s",
+  actually ran 4s, 16s, 60s — reaching the ceiling on the 3rd consecutive
+  failure instead of the 6th, so policy and blocklist convergence lagged by up
+  to 60s after a blip that had already cleared. And the failover guard
+  `if c.failCount < 3`, written under the comment "Only attempt failover after 3
+  consecutive failures", was already false on the **second** failure, so a ~10s
+  network blip or a rolling CP upgrade moved an entire data-plane fleet off a
+  healthy leader. `failCount` is owned by the caller and `backoff()` now only
+  reads it, which corrects the schedule and the threshold together and makes the
+  `backing off … (failure #N)` log line report the real streak rather than twice
+  it. A `max(failCount, 1)` clamp keeps the documented 2s floor on the one path
+  that reaches `backoff()` with a cleared streak — `failover()` zeroes it on
+  success and its immediate retry can then fail. Gates: the single-count
+  invariant, a success-resets control, the threshold (asserted on `activeIdx`,
+  since a successful failover resets the streak), and the floor; nothing
+  previously pinned either the schedule or the threshold.
 
 ### Changed
 

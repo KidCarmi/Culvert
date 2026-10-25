@@ -962,10 +962,21 @@ relayLoop:
 		// uploads still complete as long as bytes keep flowing. This is an
 		// H1-transport concern (per-conn deadline); the H2 path replaces it with
 		// per-stream context cancellation.
-		req.Body = &stallDetectReadCloser{
-			ReadCloser: req.Body,
-			conn:       clientTLS,
-			timeout:    sslInspectBodyStallTimeout,
+		// Skipped for a known-empty body (http.NoBody), for the same reason the
+		// plain-HTTP forward skips its counter — see requestBodyIsKnownEmpty.
+		// This leg serializes the inner request with rq.Write, which runs the
+		// SAME newTransferWriter framing decision as Transport.RoundTrip, so a
+		// wrapper here buys the probe goroutine (or the chunked re-framing) per
+		// inspected inner request — the dominant request class on an inspecting
+		// gateway. Nothing is lost: a body with no bytes has no trickle for the
+		// stall detector to catch, and a client that sends nothing at all is
+		// already bounded by the 60 s header read deadline set above.
+		if !requestBodyIsKnownEmpty(req.Body) {
+			req.Body = &stallDetectReadCloser{
+				ReadCloser: req.Body,
+				conn:       clientTLS,
+				timeout:    sslInspectBodyStallTimeout,
+			}
 		}
 
 		// Debug: log every inner request so admins can trace file-blocking decisions.

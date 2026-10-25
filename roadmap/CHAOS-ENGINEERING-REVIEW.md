@@ -95,6 +95,48 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-18 — `CHAOS-85` and `CHAOS-86` CLAIMED (placeholder, commit one).**
+Ids allocated in a committed line before any code was written, per the
+convention above. First claimed as `CHAOS-71`/`CHAOS-72` against `dec66e1`,
+where 70 was the highest merged id; **renumbered in merge order** to
+`CHAOS-85`/`CHAOS-86` when main was brought in, because `CHAOS-71` had merged
+as §44 (the CP gRPC listener), `72` is held by an open sweep (#1564), and
+76–84 were claimed by open branches at that time. Findings, risk matrix and verification are written
+up in [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md).
+
+- **`CHAOS-85` — the support domain's durable writes bypassed the
+  `fileutil.AtomicWrite` chokepoint.** Six hand-rolled `os.WriteFile(tmp)` +
+  `os.Rename` pairs: atomic for a reader, but not fsynced and **invisible to the
+  storage-health plane**, so a full or read-only volume failed them silently
+  while `storageDegraded()` and `storage_write_failed` reported healthy. Exactly
+  the **ST-8** shape this register already records for the audit JSONL, in a
+  domain whose own sibling (`support_telemetry_config.go`) already used the
+  chokepoint. The security-relevant instance is `writeBundleState`: the
+  mandatory-preview approval gate's state-first crash ordering had no durability
+  barrier, and an absent state file grandfathers to READY. Fixed, with a
+  table-driven chokepoint test over all six entry points plus a fault-injection
+  test on the gate path.
+- **`CHAOS-86` — the DP→CP retry charged every failure twice.** `backoff()`
+  incremented `failCount` that `pollConfig` had already incremented, so the
+  documented `2s, 4s, 8s … 60s` schedule actually ran `4s, 16s, 60s` and the
+  `failCount < 3` guard let **failover fire on the 2nd** consecutive failure,
+  against its own comment — a ~10s CP blip during a rolling upgrade moved a
+  whole DP fleet off a healthy leader. Neither the schedule nor the threshold
+  had a test; both now do.
+
+This sweep also leaves rows OPEN by attribution rather than fixing them, each
+with file:line evidence in the dated review: the **SOCKS5 pre-posture accept
+window** (`initSOCKS5` at `main.go:254` serves before `LoadAdminSettings`
+restores the GUI-persisted IP filter / rate limit / conn cap at `:255`, an
+asymmetry with the HTTP plane that CHAOS-66 noted only for its bind-fatality
+consequence); the open half of **CHAOS-18**, where the `config_unchanged`
+sentinel means the boot-time clobber of a CP-pushed default action never
+self-heals; zero-delay retry in `applyWithRetry`; dropped scheduler contexts in
+`threatfeed`/`feedsync` rounds; serial uncancellable alert-retry passes; and a
+needs-owner-decision note that two feed clients dial without
+`ssrf.SafeDialContext` — flagged rather than "fixed", because an on-prem feed
+mirror on a private address is a legitimate topology the guard would reject.
+
 **2026-10-16 — `CHAOS-83` CLAIMED (placeholder, commit one). Domain: elapsed-time
 measurement taken on the WALL clock on the data path and the readiness probe —
 the `time.Since(time.Unix(0, stamp))` idiom, where the stamp was written by
