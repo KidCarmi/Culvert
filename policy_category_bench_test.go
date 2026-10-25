@@ -124,12 +124,13 @@ func BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic(b *testing.B) {
 // not the category-GROUP one. matchesCategory reaches catStore.MatchesHostNorm /
 // MatchesHostAdminNorm once per category-scoped rule and nothing else
 // contended, so this benchmark isolates that cost.
-// BenchmarkPolicyEvaluate_CategoryGroupRulesParallel below adds
-// catgroup.Store.GetByName, whose own per-rule RLock dominates it — a profile
-// of that benchmark on a tree carrying the view puts 91.9% of samples in
-// GetByName with 68.6% in its RLock atomic, so it measures that ceiling rather
-// than this one. Read this benchmark for this change, and that one for the
-// catgroup finding it exposes.
+// BenchmarkPolicyEvaluate_CategoryGroupRulesParallel below also reaches
+// catgroup.Store.GetByName. That used to take a per-rule RLock which dominated
+// the measurement — a profile of that benchmark on a tree carrying the view put
+// 91.9% of samples in GetByName with 68.6% in its RLock atomic — so it measured
+// that ceiling rather than this one. The catgroup finding it exposed is fixed
+// (catgroup readView: both group matchers now read a lock-free published view),
+// and that benchmark is the end-to-end instrument for it.
 //
 //	go test -run '^$' -bench 'CategoryRulesParallel' -benchmem -cpu 1,2,4 .
 func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
@@ -147,9 +148,20 @@ func BenchmarkPolicyEvaluate_CategoryRulesParallel(b *testing.B) {
 }
 
 // BenchmarkPolicyEvaluate_CategoryGroupRulesParallel measures the same scan
-// under concurrency. The fusion takes catStore's RLock once per rule, so a
-// per-rule lookup also multiplies lock traffic by the rule count on every
-// core serving traffic.
+// under concurrency. A per-rule lookup multiplies whatever it touches by the
+// rule count on every core serving traffic, which is why this benchmark is the
+// end-to-end instrument for the catgroup read view. Measured here, 50
+// category-group rules, uncategorized destination, medians of n=5 on a 4-core
+// Xeon @2.80GHz, go1.26.9:
+//
+//	GOMAXPROCS │    1    │    2    │    4    │ 1→4 throughput
+//	RLock      │ 1926 ns │ 3699 ns │ 3996 ns │ 0.48x  (cores SUBTRACTED it)
+//	read view  │ 1748 ns │  980 ns │  537 ns │ 3.25x
+//
+// so 7.4x the throughput at four cores, and a curve that improves with core
+// count instead of degrading — the property that matters on the 16- and
+// 32-core hardware this appliance ships onto. Those figures are one machine on
+// one revision; re-measure rather than quoting them as a current result.
 func BenchmarkPolicyEvaluate_CategoryGroupRulesParallel(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
 	ps := buildCategoryGroupPolicyStore(50)

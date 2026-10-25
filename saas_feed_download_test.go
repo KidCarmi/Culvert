@@ -105,11 +105,12 @@ func TestF3b2_DialsResolvedIPWithOfficialHostAndSNI(t *testing.T) {
 	if _, err := fo.fetcher.fetchManifest(context.Background(), builtinSaaSFeedURL, ""); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if fo.dialedAddr != "127.0.0.1:443" {
-		t.Fatalf("dialed %q; want the resolved public IP", fo.dialedAddr)
+	dialedAddr, sniName := fo.observed()
+	if dialedAddr != "127.0.0.1:443" {
+		t.Fatalf("dialed %q; want the resolved public IP", dialedAddr)
 	}
-	if fo.sniName != saasFeedOfficialHost {
-		t.Fatalf("SNI %q; want %q", fo.sniName, saasFeedOfficialHost)
+	if sniName != saasFeedOfficialHost {
+		t.Fatalf("SNI %q; want %q", sniName, saasFeedOfficialHost)
 	}
 	if gotHost != saasFeedOfficialHost {
 		t.Fatalf("HTTP Host %q; want %q", gotHost, saasFeedOfficialHost)
