@@ -984,7 +984,9 @@ EOS
     SUPPORT_BUNDLE_ID="$(body <<<"$sb" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("bundle_id",""))' 2>/dev/null || true)"
     if [[ $sc == 200 && "$SUPPORT_BUNDLE_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
       sa="$(api POST "/api/support/bundles/$SUPPORT_BUNDLE_ID/approve" | tee "$EV/06d-support-approve.txt" | code)"
-      [[ $sa == 200 ]] && check 6d support-bundle pass "created $SUPPORT_BUNDLE_ID (case lab-persist) and approved: 200/200" \
+      # approve answers 204 No Content on success (run 40185226897 recorded it
+      # as a failure when this check wanted 200); any 2xx is success.
+      [[ $sa =~ ^2[0-9][0-9]$ ]] && check 6d support-bundle pass "created $SUPPORT_BUNDLE_ID (case lab-persist): 200, approved: $sa" \
         || check 6d support-bundle fail "approve http $sa"
     else SUPPORT_BUNDLE_ID=""; check 6d support-bundle fail "create http $sc"; fi
   fi

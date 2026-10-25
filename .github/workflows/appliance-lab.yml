@@ -1080,9 +1080,12 @@ jobs:
           # + a failure warning) unchanged from the 6248daf7 lineage, so the
           # frames prove the ~50s delayed-service interval still shows status
           # and an Esc hint rather than brand/dots alone.
-          - variant: candidate-4524311b
-            retained_run: "39338618373"
-            retained_sha256: "27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd"
+          # The ONE internal OVA built from frozen b9105086 (run 40185226897,
+          # artifact appliance-lab-ova-candidate-b9105086 id 12595618495). No
+          # rebuild: these frames are bound to the retained bytes.
+          - variant: candidate-b9105086
+            retained_run: "40185226897"
+            retained_sha256: "61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: KVM, lab directory, tools
