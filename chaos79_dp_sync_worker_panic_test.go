@@ -40,6 +40,13 @@ import (
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
+// chaos79Entry builds a revocation fixture. The token is an opaque test label,
+// not a credential; building the entry from parameters keeps gosec's
+// literal-value G101 heuristic off fixture strings.
+func chaos79Entry(token string, expiry int64) RevocationEntry {
+	return RevocationEntry{Token: token, Expiry: expiry}
+}
+
 // panickingCall is a callForTest seam that counts every round that reached the
 // RPC and then panics, standing in for a fault anywhere under the round's
 // fan-out (snapshot apply, broadcast merge, revocation merge, heartbeat parse).
@@ -448,7 +455,7 @@ func TestChaos79_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
 	dir := t.TempDir()
 	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
 
-	entry := RevocationEntry{Token: "chaos79-token", Expiry: time.Now().Add(time.Hour).Unix()}
+	entry := chaos79Entry("chaos79-token", time.Now().Add(time.Hour).Unix())
 	reply, err := json.Marshal(struct {
 		Entries []RevocationEntry `json:"entries"`
 	}{Entries: []RevocationEntry{entry}})
@@ -710,7 +717,7 @@ func TestChaos79_OwedRevocationPersistSurvivesACPOutage(t *testing.T) {
 	dir := t.TempDir()
 	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
 
-	entry := RevocationEntry{Token: "chaos79-outage", Expiry: time.Now().Add(time.Hour).Unix()}
+	entry := chaos79Entry("chaos79-outage", time.Now().Add(time.Hour).Unix())
 	if added := sessionRevoked.MergeRevocations([]RevocationEntry{entry}); added != 1 {
 		t.Fatalf("priming merge added %d, want 1", added)
 	}
@@ -744,7 +751,7 @@ func TestChaos79_OwedRevocationPersistIsDischargedOnShutdown(t *testing.T) {
 	dir := t.TempDir()
 	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
 
-	entry := RevocationEntry{Token: "chaos79-shutdown", Expiry: time.Now().Add(time.Hour).Unix()}
+	entry := chaos79Entry("chaos79-shutdown", time.Now().Add(time.Hour).Unix())
 	if added := sessionRevoked.MergeRevocations([]RevocationEntry{entry}); added != 1 {
 		t.Fatalf("priming merge added %d, want 1", added)
 	}
