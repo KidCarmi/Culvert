@@ -245,6 +245,16 @@ list; and five backup/restore findings including a never-required backup
 passphrase), each with evidence and each stating whether it was measured or
 reasoned.
 
+**2026-10-19 — `CHAOS-77` CLAIMED (placeholder, commit one). Domain: the PAC
+plane as a durability surface — what the client fleet is served after a PAC
+write that did not land, and after the wall clock moves backwards.** The
+`internal/pac` owner has **zero** mentions in this register across all 44
+preceding sections, while being the largest unswept domain in the tree
+(~4,956 production lines) and the only one whose output the entire client
+fleet fetches unauthenticated. `CHAOS-76` is held by the open credential-flood
+sweep (#1633), so this one is 77; claimed here before any code was written,
+per the governance note above. Findings and gates are written up in §52 below.
+
 **2026-10-09 — `CHAOS-73` CLAIMED (placeholder, commit one). Domain: the
 session-revocation plane — the public `/api/auth/logout` endpoint, the
 process-wide `internal/session` revocation list, and the cluster revocation
@@ -12285,3 +12295,407 @@ collapses wrong-passphrase and tamper into one opaque error with no oracle; the
 no-overwrite contract at the top of `runBackupWith` is preserved by both writers;
 and node-local key material is excluded on the pack side *and* refused on the
 restore side.
+
+---
+
+## 52. CHAOS-77 — The PAC plane as a durability surface: the artifact the fleet is served after a write that never landed
+
+**Date:** 2026-10-19 · **Domain:** PAC (proxy auto-config) — the persisted
+legacy PAC configuration store and the unauthenticated artifact endpoints;
+never previously swept · **Code:** `internal/pac/pac.go` (`Store.Set`,
+`Store.Load`, new `nextModTime`), `controlplane_snapshot.go` (the Data Plane's
+PAC-exclusions slice) · **Gates:**
+`internal/pac/store_durability_chaos_test.go`, `pac_durability_chaos_test.go`
+
+> **Id claimed in a committed placeholder row before any code was written**, per
+> the standing recommendation §0 reaches twice independently after ten
+> collisions. `CHAOS-76` is held by the open credential-flood sweep (#1633), so
+> this sweep took 77 and did not move.
+> First written as §45; **renumbered in merge order to §52** when main was
+> brought in, because `CHAOS-78` (#1675) had merged as §45 and §46–§51 were
+> held by other sweeps. The id `CHAOS-77` did not move.
+
+### Why this domain, and why now
+
+`internal/pac` had **zero mentions** across the 44 preceding sections while
+being the largest unswept owner in the tree (~4,956 production lines) and the
+only one whose output the entire client fleet fetches **unauthenticated**:
+`/proxy.pac` and `/pac/{id}.pac` are on the public-route allowlist by design,
+because Windows PAC clients cannot send credentials (`pac.go:272`). Whatever
+those endpoints emit is what every browser and WinHTTP client in the estate
+executes to decide *whether traffic reaches the gateway at all*. A PAC plane
+that fails open does not degrade the gateway — it removes it from the path.
+
+### Executive summary
+
+The legacy PAC store committed in the wrong order. `Store.Set`
+(`internal/pac/pac.go:118`) assigned `s.cfg`, advanced the 2F-A revision and
+stamped `modTime` **before** marshalling and calling `fileutil.AtomicWrite`, so
+a full volume, a read-only `/data`, an `EACCES` or an `EDQUOT` left the new
+configuration **live in memory and served to the fleet** while the disk kept the
+previous one.
+
+The sibling store in the same package states the contract this violates, in
+terms that leave no ambiguity. `ProfileStore.setLocked`
+(`internal/pac/profiles.go:334`) is
+
+> "the **persist-before-swap commit (2F-B, C1): the durable write is the commit
+> point.** Memory is replaced only after the file is durably written, so a
+> failed write leaves the in-memory (and therefore the cluster-synced) view
+> exactly where it was — never a torn 'memory says candidate, disk says
+> previous' state."
+
+Two stores, one package, the same endpoint family — `/pac/{id}.pac` is served
+from the compliant one and `/proxy.pac` from the other. The asymmetry is not a
+documented exception; `Store.Set`'s own comment discusses only *validation*
+tolerance, never ordering.
+
+Reproduced against `main` by pointing the store at a path whose parent is a
+regular file (ENOTDIR for every uid — the suite can run as root, and root
+bypasses mode bits). The admin `POST /api/pac-config` answered **500** and
+`GET /proxy.pac` then served, to any unauthenticated client:
+
+```
+HTTP 500  save error: atomic write …/pac_config.json: create temp: … not a directory
+GET /proxy.pac →  return "PROXY chaos77-never-persisted.example:3128";
+```
+
+The whole fleet repointed to an operator-chosen upstream that **no file
+records**, that **no audit entry mentions**, that **no config version
+captured**, and that **silently reverts on the next restart**.
+
+### The findings
+
+#### PAC-1 — swap-before-persist put an unpersisted PAC on the wire (H → CLOSED)
+
+`Store.Set` has four production callers, and the ordering was the only thing
+that decided their failure behaviour. Three of the four discard or merely log
+its error, which is deliberate — `Set` is the tolerant replay path for
+historical data — and therefore load-bearing on the ordering being right:
+
+| Caller | On a failed durable write, before the fix |
+|---|---|
+| `pac.go:107` — admin `POST /api/pac-config` | 500 to the operator; the change nevertheless **live on `/proxy.pac`**; handler returns before `auditEvent` (`:113`), `saveConfigVersion` (`:115`) and `publishCurrentConfigSnapshot` (`:120`) — so live, unaudited, uncaptured, and not republished to the cluster; reverts on restart |
+| `configversion.go:777` — config-version **rollback** (`_ =`) | memory rolls back, disk does not → the next restart silently rolls **forward** again: a rollback that un-does itself |
+| `controlplane_snapshot.go:1563` — the **Data Plane's** snapshot apply (logged) | see PAC-3 — the node converged onto exclusions that existed only in RAM, while reporting a healthy apply |
+| `ui_config.go:1388` — config import (`_ =`) | imported PAC live but not persisted; reverts on restart |
+
+The revision token moved too, so a retry with the token the client still held
+was refused **409 stale** for a mutation that never happened — against
+`pac_fence.go`'s stated rule that "a refusal mutates nothing, audits nothing
+and advances no config version."
+
+**Fixed** by making the durable write the commit point, exactly as the sibling
+store does: marshal and `AtomicWrite` first, then assign `s.cfg` and the stamp
+(`internal/pac/pac.go:118-150`). One reordering corrects all four callers at
+once — the API path now fails closed, the rollback stays rolled back, the
+import does not half-apply, and the DP defers instead of diverging.
+
+#### PAC-1c — the ordering's other side: a post-rename sync failure is a COMMIT (H → CLOSED)
+
+Found by Codex as a P1 on #1669, against this sweep's own first push, and it is
+the sharpest lesson in this section: **getting the ordering right is only half
+of it — the write outcome has to be classified correctly too.**
+
+`fileutil.AtomicWrite` has a distinguished failure, `ErrReplacedNotSynced`,
+returned when the parent-directory fsync or close fails *after* the rename.
+`internal/fileutil/fileutil.go:76-84` is explicit about what it means:
+
+> "the target file **already carries the new content** (visible to every reader,
+> and on the overwhelming majority of filesystems durable), but the
+> parent-directory sync failed... Callers running compensating rollbacks **must
+> NOT restore prior in-memory state** on this error — memory would then
+> contradict the visible file, and a restart would load the 'rolled back'
+> content anyway."
+
+The first cut of this fix returned on *any* error from the write, sentinel
+included. That produced the exact **inverse** of PAC-1: the running process kept
+serving the old PAC while the visible file carried the new one, the admin got a
+500 — and the next restart activated the fleet-wide routing change they had been
+told failed. Trading a divergence for its mirror image is not a fix.
+
+The sentinel is a settled house contract everywhere else in the tree, and this
+sweep had already *read* one of those handlers and cited it as sound in the
+scan recorded below without drawing the conclusion:
+`rosterChangeCommitted` (CHAOS-70's own predicate, and gated by
+`roster_persist_durability_chaos_test.go:330-337` — *"ErrReplacedNotSynced must
+count as committed: the content is already on disk"*),
+`policylearn.saveLocked`, `policy_draft.go:207`, `ui_security.go:608`,
+`ui_policy.go:687`, `mcp_canary_runtime.go:195`. The store was the only writer
+that did not follow it.
+
+**Fixed:** the sentinel falls through to the swap, so the commit that held is
+recorded in memory too; every other error still returns without committing. The
+sentinel is not re-reported to the caller, matching `policylearn.saveLocked`'s
+reasoning — three of the four callers discard the error, and the admin API turns
+any error into a 500, which would re-create PAC-1's "told it failed, but it is
+live" shape for a change that genuinely committed. Nothing is hidden: that
+branch has already fired the write-failure observer (CHAOS-45), so the
+durability degradation reaches the `storage_path` diagnostics row and the config
+rollback's `configPersistError` scope. The store takes no logger, per the
+owner-boundary rule in `conventions.md`.
+
+A `storeAtomicWrite` seam (mirroring `uiTLSAtomicWrite` in main) makes the
+outcome injectable, since a real filesystem cannot be made to fail only its
+parent-directory fsync.
+
+#### PAC-2 — a stamp that did not advance held If-Modified-Since clients on a superseded PAC (M–H → CLOSED)
+
+`modTime` is the `Last-Modified` source for the PAC endpoints
+(`pac.go:221` `writePACResponse`) and `pacNotModified` (`pac.go:251`) honours
+`If-Modified-Since` as "the date fallback for WinHTTP/WinINET clients" — by its
+own comment, precisely the clients that send **no** `If-None-Match`, i.e. most
+of a Windows estate. The comparison is `!modTime.Truncate(time.Second).After(t)`,
+so any stamp that fails to advance past what the client already cached answers
+**304** for a PAC that genuinely changed.
+
+`time.Now()` fails to advance in two situations, and only one of them is a fault:
+
+1. **Two commits inside one wall-clock second.** No fault required at all — a
+   typo corrected immediately, a scripted or API-driven batch, a config import,
+   a rollback. HTTP dates carry whole seconds and cannot distinguish them, so
+   the second change is invisible to IMS-only clients.
+2. **A wall clock that moved backwards** — an NTP step correction, a VM snapshot
+   restore, chrony `makestep` at boot. Every change is then invisible for as
+   long as the rollback was large.
+
+Both reproduce; the same-second case is the likelier one and needs no clock
+anomaly. **Fixed** by `nextModTime`: the stamp is the wall clock unless that
+would not be strictly newer at whole-second granularity, in which case it
+advances past the previous stamp's second. The stamp can therefore sit ahead of
+the wall clock while commits arrive faster than one per second, or until a
+backwards step is made up. That is the deliberate trade: a `Last-Modified` in
+the future costs one revalidation that the ETag then answers, whereas a stamp
+that does not advance costs correctness. The bump fires only on a **committing**
+write, so a failed save no longer invalidates every client's cache for a change
+that does not exist.
+
+**The advance must not be a pure function of the previous stamp**, and the first
+cut of this fix got that wrong — recorded here because the next person to touch
+`nextModTime` will be tempted by the same one-liner. `ArtifactCache` keys
+compiled artifacts on `ModTime` by **equality** (`internal/pac/cache.go`), so
+the stamp doubles as a cache key. A bare `prev.Add(time.Second)` is
+reproducible: two commits made from the same previous stamp inside one second
+mint the *same* key, and the cache answers the second with the first one's
+artifact — a stale PAC served from a perfectly healthy store. In production the
+stamp only ever moves backwards at `Load` (a fresh process, an empty cache), so
+this surfaced instead through the existing
+`TestConfigRollback_JunkPACEntriesStillApply`, whose helper restores `pacStore`
+but not the process-wide artifact cache. The advance therefore carries `now`'s
+sub-second component, keeping the stamp as unique as the `time.Now()` it
+replaces.
+
+#### PAC-3 — the Data Plane still ratchets past a PAC slice it did not apply (M, recorded, NOT fixed)
+
+`applyConfigSnapshot` logs this slice's error and continues. That is the
+deliberate per-slice degradation policy it shares with SSL bypass, URL
+categories, file profiles and DPI patterns, and which the **adjacent** PAC
+profiles slice implements by deferring ("PAC profiles not applied this sync
+(deferred)"). But `fetchAndApply` then proceeds to
+`persistDPLastGoodConfigSnapshot` (`controlplane_client.go:357`),
+`markConfigSnapshotApplyOK` (`:359`) and `c.lastVersion.Store(snap.Version)`
+(`:360`) — after which the `snap.Version <= lastVersion` short-circuit (`:338`)
+and the CP's `config_unchanged` reply suppress **every later poll** until a new
+config version is published. This is the same silent-suppression shape CHAOS-01
+recorded at `controlplane_snapshot.go:499`, reached through a different door.
+
+Before the fix the node was *divergent* (RAM ≠ disk) and reported green. After
+the fix it is *stale but consistent*, which is strictly better and matches the
+neighbouring slice — but convergence still waits for an unrelated config
+version bump, and the apply-health signal still reads OK. Making one slice's
+persistence failure fail the whole snapshot apply is a cross-domain degradation
+**policy** change, not a bug fix, so it is recorded here rather than taken
+unilaterally (see Suggested improvements). What this PR does change is the
+honesty of the only notice an operator gets: the log line now reads
+`PAC exclusions NOT applied this sync (deferred, previous list still live)`
+instead of a bare error, so the message matches the behaviour
+(`controlplane_snapshot.go:1552-1566`).
+
+### What already handles failure correctly, and why
+
+Recorded with the code path, per this register's standing requirement — several
+of these are why the findings above are *bounded* rather than catastrophic.
+
+- **The durable write itself is sound.** `fileutil.AtomicWrite` is temp create →
+  write → chmod → fsync → close → rename → parent-directory fsync, with `cleanup`
+  on every failure branch. A torn or partially written PAC file is therefore not
+  a failure mode of this domain, and recovery never depends on repairing one.
+- **The rollback's discarded error is already backstopped.** `storage_health.go:125`
+  registers `noteStorageWriteFailure` as the process-wide
+  `fileutil.SetWriteFailureObserver`, and the config-version apply wraps itself
+  in `beginStorageWriteScope` (`configversion.go:551`), returning a structured
+  `configPersistError` naming the files that failed. So even though
+  `applyPACFromBackup` writes `_ = pacStore.Set(…)`, the operator *is* told the
+  PAC file did not persist. This was verified and **deliberately left
+  unchanged**: adding a second error path there would duplicate a signal that
+  already works.
+- **The ETag was never exposed to PAC-2.** It is a strong validator computed
+  over the artifact bytes (`internal/pac/digest.go`, served at `pac.go:221`) and
+  is checked *first* (`pac.go:252`), so every client that sends `If-None-Match`
+  revalidates correctly no matter what the clock does. PAC-2 was only ever
+  reachable through the date fallback.
+- **The artifact cache is clock-fault-immune by construction.** `ArtifactCache`
+  keys on `ModTime` **equality**, never ordering (`internal/pac/cache.go`), so a
+  backwards clock cannot wedge it; host-fallback bodies (which embed the request
+  Host) are explicitly never cached; and `Profile` re-checks the store
+  generation after compiling and drops a compile that raced a mutation.
+- **The admin mutation is properly fenced.** Admin-only `requireRole`
+  (`pac.go:68`), with the 2F-A revision check and the `Set` decided as one
+  serialized decision under `pacConfigAPIMu` (`pac.go:92-98`) against the
+  authoritative store, so two admins echoing the same token cannot both pass.
+- **The DP refuses to ratchet on a rejected apply.** `fetchAndApply` validates
+  caps and runs `dpObserveEpoch` *before* any mutation, and on a rejected apply
+  persists no last-good and advances no version (`controlplane_client.go:349-356`),
+  with the comment "a partial/empty apply must not be recorded as the new good
+  state." PAC-1 was quietly defeating exactly that invariant from inside.
+- **No other owner in the tree had this shape.** Every `fileutil.AtomicWrite`
+  caller under `internal/` was scanned for a state assignment preceding its
+  durable write. The three other hits are all sound:
+  `policylearn.saveLocked` clears `e.dirty` only *after* a successful write and
+  deliberately treats `ErrReplacedNotSynced` as a held write (the durable domain
+  already carries the content, so reporting failure would fire compensating
+  rollbacks against a file a restart recovers correctly) — **the very rule this
+  sweep then failed to apply to its own fix; see PAC-1c**;
+  `scanner.Load` and `scanexcl.Save` assign a path and a local file struct
+  respectively, not serving state. So PAC-1 was an isolated deviation, not a
+  house pattern — which is also why the sibling store's comment could be cited
+  as the contract rather than argued for from first principles.
+- **Host taint on the fallback path is handled.** `servePACFile` character-
+  allowlists `r.Host` before it reaches the generated body, and the compiler
+  `%q`-quotes it; the response is `application/x-ns-proxy-autoconfig`, not HTML.
+
+### Risk matrix
+
+| Id | Failure | Likelihood | Impact | Status |
+|---|---|---|---|---|
+| PAC-1 | Full/read-only/quota-exhausted volume → unpersisted PAC served to the whole fleet, unaudited, uncaptured, reverting on restart | M — a degraded volume is the most frequently revisited fault class in this register (§13, §19, §31, §40) | **H** — fleet-wide routing change with no record | **CLOSED** |
+| PAC-1b | Config-version rollback that un-does itself on the next restart | L–M | **H** — a rollback is the break-glass path; it must be the one thing that holds | **CLOSED** |
+| PAC-1c | A post-rename parent-dir fsync failure reported as uncommitted → memory serves the old PAC, the visible file carries the new one, and the next restart activates it | L–M (needs the fsync to fail after a successful rename) | **H** — a fleet-wide routing change activating at restart that the admin was told had failed | **CLOSED** |
+| PAC-2 | IMS-only (WinHTTP/WinINET) clients hold a superseded PAC after two same-second commits | **M–H** (no fault needed) | M — stale bypass list or stale upstream until the next change | **CLOSED** |
+| PAC-2b | Same, after a backwards clock step | L | M–H — every change invisible for the size of the step | **CLOSED** |
+| PAC-3 | DP converges on paper (healthy apply, ratcheted version) with the PAC slice not applied | M | M — stale exclusions until an unrelated version bump | **Recorded** |
+
+### Recovery assessment
+
+- **Before:** recovery from PAC-1 was *accidental and silent*. A restart
+  "fixed" the divergence by discarding the live configuration — which is also
+  how an operator discovers it: the fleet's proxy routing changes with no
+  action, no audit entry and no config version to explain it. The rollback case
+  recovered in the wrong direction. Automatic recovery: none. Manual recovery:
+  only possible once the operator knows, which nothing told them.
+- **After:** deterministic. A failed write changes nothing, anywhere — the
+  serving view, the revision token and the stamp all stay put, and the operator
+  gets the error synchronously (500 on the API, `configPersistError` on the
+  rollback, a deferral line in the DP log). Fixing the volume and repeating the
+  mutation is the whole recovery path, and it is the same path for all four
+  callers.
+- **PAC-3 residual:** a DP whose PAC slice deferred needs a *new* config version
+  from the CP to converge; it will not self-heal on the current one.
+
+### Impact assessment
+
+- **Security.** PAC decides whether traffic reaches the gateway. A stale or
+  phantom exclusion list means traffic going **DIRECT**, bypassing every policy,
+  category, threat-feed and scanning control the product applies — the gateway
+  is not degraded, it is absent for those destinations. PAC-1 additionally let a
+  fleet-wide repoint to an operator-chosen upstream exist with no audit record,
+  defeating accountability for the single highest-leverage setting in the
+  product (which is why its POST is admin-only in the first place —
+  `docs/C15_UNKNOWN_AUDIT.md` §3.1).
+- **Operational.** The worst property was the *delayed* symptom: everything
+  looked recovered after the failed save, and the real behaviour change landed
+  at the next restart, decoupled from the action that caused it. That is the
+  hardest possible shape to diagnose.
+- **Data integrity.** No corruption risk (`AtomicWrite` is atomic); the defect
+  was divergence between the serving and durable views, plus a 2F-A token that
+  advanced without a commit.
+- **Monitoring visibility.** Partial before, and unchanged by this PR: the
+  durable-write failure *is* observable, via the global write-failure observer
+  and the `storage_path` diagnostics row. What was never observable is the
+  consequence — nothing reported "the PAC being served is not the PAC on disk",
+  and the DP's apply-health stayed green. The fix removes the divergence rather
+  than adding a detector for it, which is the right order; a detector is still
+  worth having (below).
+
+### Gates
+
+Each was confirmed red against `main` before the fix and green after
+(`go test -race -shuffle=on -count=2`):
+
+- `TestChaos77_FailedLegacyWriteLeavesTheServingConfigUnchanged` — the core
+  invariant: config, port, exclusions, revision, stamp and the **compiled
+  artifact** all unchanged after a failed write, with the error reported;
+- `TestChaos77_SuccessfulLegacyWriteStillCommits` — negative control: a healthy
+  write still commits, advances the revision by exactly one, and the durable and
+  serving views agree across a reload;
+- `TestChaos77_ModTimeNeverGoesBackwardsAcrossACommit` — the stamp advances past
+  a stamp already served, at whole-second granularity, for four consecutive
+  commits;
+- `TestChaos77_FailedWriteDoesNotStampModTimeForwardEither` — the bump does not
+  fire on a write that never landed;
+- `TestChaos77_AnAdvancedStampIsNeverAReusedArtifactCacheKey` — two commits from
+  the same previous stamp, driven through the real `ArtifactCache`, must not
+  serve the first one's artifact for the second (red against the reproducible
+  `prev.Add(time.Second)` form this sweep first shipped);
+- `TestChaos77_APostRenameSyncFailureCommitsInsteadOfDiverging` — the sentinel
+  commits: config, revision and stamp all advance, the compiled artifact names
+  the new proxy, and a reload agrees with the serving view (red against the
+  return-on-any-error form this sweep first pushed);
+- `TestChaos77_AnOrdinaryWriteFailureStillDoesNotCommit` — negative control: a
+  no-space error still commits nothing;
+- `TestChaos77_FailedPACSaveIsNotServedToTheFleet` — end to end through
+  `apiPACConfig` and `GET /proxy.pac`: 500 to the operator, the persisted proxy
+  still served, revision not advanced, and **no audit entry naming the phantom
+  host** (asserted on unique entry content, never a ring length delta);
+- `TestChaos77_SnapshotApplyDefersAnUnpersistablePAC` plus its control
+  `TestChaos77_HealthySnapshotApplyStillAppliesPAC` — the DP slice defers on a
+  failed write and still applies on a healthy one;
+- `TestChaos77_ClockRollbackCannotHoldTheFleetOnASupersededPAC` — table-driven
+  over both triggers (backwards clock, two commits in one second): an IMS-only
+  revalidation must **not** answer 304 after a change, and — the control that
+  stops the fix from simply disabling PAC caching — must still answer 304 when
+  nothing changed.
+
+### Suggested improvements (ranked, not taken here)
+
+1. **Fail the DP's snapshot apply on a PAC persistence failure**, or give the
+   apply-health signal a per-slice "deferred" state, so a node that did not
+   apply a slice cannot report a clean apply and ratchet past it (PAC-3). This
+   is a degradation-policy decision spanning five slices that share the
+   log-and-continue pattern; it wants an owner decision, not a drive-by.
+2. **A divergence detector for the PAC plane**: compare the served artifact's
+   source against the persisted file on the diagnostics path, so
+   "serving ≠ durable" is visible even if a future caller regresses the
+   ordering. Cheap, and it is the signal whose absence made PAC-1 silent.
+3. **Persist the `modTime` stamp**, so monotonicity survives a restart. In-process
+   monotonicity is closed; across a restart the stamp is re-derived from
+   `time.Now()` at `Load` (`internal/pac/pac.go:65`), so a restart *after* a
+   backwards clock step can still serve a stamp older than one a client cached.
+4. **Sweep the remaining never-swept owners** this review surfaced:
+   `sealbox`, `backupcrypt`, `hashcache`, `totp`, `sslbypass`, `blockpage`,
+   `fileblock`, `policylearn` and `plugin` have zero register mentions.
+
+### Residual risk
+
+- **PAC-3 as recorded above** — a deferred PAC slice on a Data Plane needs a new
+  config version to converge, and apply-health does not distinguish it.
+- **Cross-restart stamp monotonicity** (improvement 3): the narrow window where
+  a restart follows a backwards clock step can still 304 an IMS-only client.
+  Bounded by the step size and cleared by the next commit once the clock passes
+  the stamp; the ETag path is unaffected throughout.
+- **A future stamp can be served.** Two bounds, and they are different. From
+  same-second commits the lead is bounded by the mutation rate (PAC writes are
+  admin-rate) and is given back during any idle second. After a BACKWARDS clock
+  step the stamp stays ahead of the wall clock until the clock catches up to the
+  pre-step value, so the lead is bounded by the size of the step, not by the
+  mutation rate — the stamp follows the furthest-ahead clock the process has
+  seen. Accepted deliberately: a `Last-Modified` ahead of a client's clock costs
+  a revalidation the ETag answers, whereas a stamp that does not advance costs
+  correctness. Persisting the stamp (improvement 3) is what would bound it
+  across restarts as well.
+- **The other three PAC surfaces were not swept.** This sweep covers the legacy
+  config store and the serving path. `pacProfiles`, `pacLifecycle` and
+  `pacExceptions` have their own durability contracts (2F-B/2F-E) with their own
+  committed test suites, and the profiles store was read closely enough to
+  establish the C1 contract cited above, but their failure modes under a
+  degraded volume were not independently exercised here.
