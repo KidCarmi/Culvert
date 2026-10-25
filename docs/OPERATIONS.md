@@ -129,6 +129,12 @@ for example, `policy_loaded` is **informational** in `/ready`
 * **Side-effect-free**: reading it never opens files, dials sockets, or
   pings ClamAV. It is safe to poll.
 * Visible in the GUI under **Infrastructure → Diagnostics**.
+* **`pac_profile_degraded`.** `warn` row, present only while at least one
+  PAC profile (including `default`) was last served with compile warnings
+  (dropped rule, unresolvable pool reference, secure-mode conflict). It names
+  the profile IDs and stable issue codes, never the warning text. It reads the
+  in-memory state behind the PAC File page's degraded badge and clears when the
+  profile next serves cleanly (not on elapsed time, not on edit).
 * **What `storage_path` does and does not check.** The `storage_path`
   row reports the result of a **one-shot writability probe** that runs
   once at startup against the configured data directory. The probe
@@ -443,7 +449,7 @@ For routine releases:
 
 ## 6. CDR (Sluice) recovery
 
-The `cdr` check on the Diagnostics page surfaces three states beyond
+The `cdr` check on the Diagnostics page surfaces four states beyond
 `disabled`:
 
 * **`enabled-healthy`** — pool is connected, fail-mode and default
@@ -454,6 +460,10 @@ The `cdr` check on the Diagnostics page surfaces three states beyond
 * **`enabled-broken`** — CDR is enabled but no Sluice instance is
   connected. Either enrol an instance under CDR → Instances or disable
   CDR until you can.
+* **`enabled-dark`** — instances are enrolled but every one's circuit
+  breaker is open, so none can scan a document. Documents are handled
+  per `fail_mode` (refused with `cdr_unavailable` when closed, delivered
+  unsanitized when open) until an instance recovers.
 
 If Sluice is enrolled but reporting unhealthy:
 
@@ -466,6 +476,22 @@ If Sluice is enrolled but reporting unhealthy:
 4. As a temporary measure, set CDR fail-mode to `fail-open` to keep
    traffic flowing while you fix the engine; remember to revert once
    resolved.
+
+Under `fail-closed`, an unavailable engine is a refusal, not a bypass: while
+no instance is available — every circuit breaker open, or none enrolled — each
+document that reaches the unavailable-instance check is blocked with reason
+`cdr_unavailable`, counted in `culvert_cdr_fail_closed_total`, and logged as
+`CDR_BLOCKED`. That is the posture `fail-closed` asks for, and it is why step 4
+exists.
+
+Two documents do NOT reach that check, and `fail-closed` does not refuse them.
+A file over the configured or profile size cap is skipped as
+`SKIPPED_OVERSIZE` before the engine is consulted, and a file Sluice itself
+rejects as `file_too_large` is passed with a log — both are deliberately not
+fail-mode events (a file the engine cannot process at all is a different
+condition from an engine that is not there). Size-capped content is governed by
+the cap, not by fail-mode. A **disabled** CDR never blocks either, whatever
+fail-mode is left in the config.
 
 ---
 

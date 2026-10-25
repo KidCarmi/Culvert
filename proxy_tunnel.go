@@ -179,12 +179,18 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 // production never mutates it (configurability is a recorded deferral).
 var tunnelIdleTimeout = 1 * time.Hour
 
-// newTunnelActivityStamp returns the shared last-activity stamp (unix nanos)
-// for one tunnel's two relay directions, seeded to now so a tunnel that never
-// moves a byte is reaped one idle window after establishment.
+// newTunnelActivityStamp returns the shared last-activity stamp for one
+// tunnel's two relay directions, seeded to now so a tunnel that never moves a
+// byte is reaped one idle window after establishment.
+//
+// The stamp is MONOTONIC nanos (monoNanos), not unix nanos: it is only ever
+// turned back into an elapsed duration, and a wall-clock stamp made the reaper
+// miss its deadline by however far a backwards clock step went (CHAOS-83).
+// Nothing outside this file interprets the value as an absolute time — it is
+// written only by idleCopyCounted and read only by its deadline check.
 func newTunnelActivityStamp() *atomic.Int64 {
 	s := new(atomic.Int64)
-	s.Store(time.Now().UnixNano())
+	s.Store(monoNanos())
 	return s
 }
 
@@ -200,10 +206,17 @@ func newTunnelActivityStamp() *atomic.Int64 {
 // may be blocked in a deadline-less Write (receiver ACKs but never reads)
 // that only a close can unblock.
 //
-// Two deliberate mechanics:
+// Three deliberate mechanics:
 //   - Deadlines are armed AROUND io.CopyBuffer, not via a reader wrapper, so
 //     the ReaderFrom/WriterTo kernel-splice fast path on TCP↔TCP relays is
 //     preserved on the CONNECT-bypass hot path.
+//   - The staleness check measures on the MONOTONIC clock (monoSince over a
+//     monoNanos stamp), so a wall-clock step cannot move the deadline. The
+//     wall-clock form this replaced — time.Since(time.Unix(0, stamp)) — read
+//     NEGATIVE after a backwards step, which is never >= timeout, so the
+//     reaper silently stopped reaping for as long as the step went: exactly
+//     the idle, possibly half-open tunnels it exists to collect were the ones
+//     it then held, two sockets and two goroutines each (CHAOS-83).
 //   - The arm interval is HALF the idle window. The stamp is only refreshed
 //     when a copy call returns (a busy copy runs without returning), so an
 //     active direction refreshes the stamp every half-window at latest; the
@@ -223,11 +236,11 @@ func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atom
 		n, err := io.CopyBuffer(dst, src, *bp)
 		total += n
 		if n > 0 {
-			shared.Store(time.Now().UnixNano())
+			shared.Store(monoNanos())
 		}
 		var ne net.Error
 		if err != nil && errors.As(err, &ne) && ne.Timeout() {
-			if time.Since(time.Unix(0, shared.Load())) >= timeout {
+			if monoSince(shared.Load()) >= timeout {
 				logger.Printf("tunnel idle timeout: no bytes in either direction for %v, closing relay", timeout)
 				dst.Close()     //nolint:errcheck // teardown; peer relay unblocks on the close
 				srcConn.Close() //nolint:errcheck // teardown; peer relay unblocks on the close
@@ -949,10 +962,21 @@ relayLoop:
 		// uploads still complete as long as bytes keep flowing. This is an
 		// H1-transport concern (per-conn deadline); the H2 path replaces it with
 		// per-stream context cancellation.
-		req.Body = &stallDetectReadCloser{
-			ReadCloser: req.Body,
-			conn:       clientTLS,
-			timeout:    sslInspectBodyStallTimeout,
+		// Skipped for a known-empty body (http.NoBody), for the same reason the
+		// plain-HTTP forward skips its counter — see requestBodyIsKnownEmpty.
+		// This leg serializes the inner request with rq.Write, which runs the
+		// SAME newTransferWriter framing decision as Transport.RoundTrip, so a
+		// wrapper here buys the probe goroutine (or the chunked re-framing) per
+		// inspected inner request — the dominant request class on an inspecting
+		// gateway. Nothing is lost: a body with no bytes has no trickle for the
+		// stall detector to catch, and a client that sends nothing at all is
+		// already bounded by the 60 s header read deadline set above.
+		if !requestBodyIsKnownEmpty(req.Body) {
+			req.Body = &stallDetectReadCloser{
+				ReadCloser: req.Body,
+				conn:       clientTLS,
+				timeout:    sslInspectBodyStallTimeout,
+			}
 		}
 
 		// Debug: log every inner request so admins can trace file-blocking decisions.

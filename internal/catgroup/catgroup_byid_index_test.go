@@ -524,9 +524,13 @@ func TestByIDIndex_ControlBulkInstalledGroupsStillResolve(t *testing.T) {
 func TestByIDIndex_StaleIndexFailsClosedNotWrongGroup(t *testing.T) {
 	s, ids := seedGroups(t, 3)
 
-	// Point group 0's ID at group 1's name key.
+	// Point group 0's ID at group 1's name key, then publish it: the lock-free
+	// matchers read the readView, which publishLocked projects from byID
+	// through groupByIDLocked, so the recheck under test is the one that
+	// decides what the published view resolves.
 	s.mu.Lock()
 	s.byID[ids[0]] = "group-1"
+	s.publishLocked()
 	s.mu.Unlock()
 
 	m, resolved := s.MatchesCategoryByID(ids[0], "Category 1")
@@ -541,6 +545,7 @@ func TestByIDIndex_StaleIndexFailsClosedNotWrongGroup(t *testing.T) {
 	// An ID pointing at a key that no longer exists is the same verdict.
 	s.mu.Lock()
 	s.byID[ids[1]] = "vanished"
+	s.publishLocked()
 	s.mu.Unlock()
 	if _, resolved := s.MatchesCategoryByID(ids[1], "Category 1"); resolved {
 		t.Fatal("an index entry pointing at a missing key must not resolve")
