@@ -8674,20 +8674,37 @@ async function fetchStats() {
     // non-zero count means admin actions have already vanished for good.
     if ((s.auditLogWriteErrors || 0) > 0) {
       setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
-    } else if ((s.logWriteErrors || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
-    } else if ((s.processLogWriteErrors || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.processLogWriteErrors) + ' process-log lines lost');
-    } else if (logFallback.req || logFallback.audit) {
-      const which = logFallback.req && logFallback.audit ? 'Request+audit log'
-        : logFallback.req ? 'Request log' : 'Audit log';
-      setPosture('logging', 'warn', which + ' in-memory only (restart wipes)');
-    } else if ((s.logBackpressure || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.logBackpressure) + ' requests delayed by log I/O');
-    } else if ((s.processLogBackpressure || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.processLogBackpressure) + ' process-log lines delayed by log I/O');
     } else {
-      setPosture('logging', 'ok', 'Persisting');
+      // Every active warning is shown, in priority order, rather than the
+      // first one hiding the rest: several of these counters are
+      // process-lifetime, so a single precedence slot would let an old
+      // condition mask a new local failure indefinitely.
+      const warns = [];
+      if ((s.auditClusterPushDrops || 0) > 0) {
+        // CHAOS-61: this node's local audit file is fine, but a DP->CP push
+        // queue dropped entries while the Control Plane was unreachable, so the
+        // CENTRALIZED audit trail has a gap. Distinct remedy (restore the CP
+        // link, not disk space or local I/O), so it gets its own message.
+        warns.push(fmt(s.auditClusterPushDrops) + ' audit entries dropped syncing to Control Plane (centralized record incomplete)');
+      }
+      if ((s.auditClusterPushUnreportingNodes || 0) > 0) {
+        // A disconnected Data Plane cannot report its drops until it
+        // reconnects, and a pre-upgrade build never reports them, so a zero
+        // above is not proof of completeness.
+        const un = s.auditClusterPushUnreportingNodes;
+        warns.push(fmt(un) + ' Data Plane node' + (un === 1 ? '' : 's') + ' disconnected or not reporting audit drops (centralized audit completeness unknown)');
+      }
+      if ((s.logWriteErrors || 0) > 0) warns.push(fmt(s.logWriteErrors) + ' write errors');
+      if ((s.processLogWriteErrors || 0) > 0) warns.push(fmt(s.processLogWriteErrors) + ' process-log lines lost');
+      if (logFallback.req || logFallback.audit) {
+        const which = logFallback.req && logFallback.audit ? 'Request+audit log'
+          : logFallback.req ? 'Request log' : 'Audit log';
+        warns.push(which + ' in-memory only (restart wipes)');
+      }
+      if ((s.logBackpressure || 0) > 0) warns.push(fmt(s.logBackpressure) + ' requests delayed by log I/O');
+      if ((s.processLogBackpressure || 0) > 0) warns.push(fmt(s.processLogBackpressure) + ' process-log lines delayed by log I/O');
+      if (warns.length) setPosture('logging', 'warn', warns.join(' · '));
+      else setPosture('logging', 'ok', 'Persisting');
     }
     const c2b = document.getElementById('c2-shadow-banner');
     if (c2b) c2b.style.display = s.c2Mode === 'shadow' ? 'block' : 'none';
@@ -12649,6 +12666,13 @@ function setPosture(id, state, text) {
   const el = document.getElementById('po-' + id);
   if (!el) return;
   el.textContent = text;
+  // .posture-state clips with white-space:nowrap + ellipsis to keep the tile
+  // compact, which silently hides anything past the visible width — the
+  // Logging tile can now join several concurrent warnings with " · " and the
+  // combined string regularly overflows. The native title tooltip is the
+  // cheapest accessible way to read the full text without widening every
+  // tile or adding a detail view (CodeRabbit review, PR #1414).
+  el.title = text;
   el.classList.remove('skeleton');
   const item = el.closest('.posture-item');
   if (item) item.dataset.state = state;
