@@ -7,6 +7,69 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **Two merge-gate workflows reached their actions through MUTABLE tags, and a
+  repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
+  (designed to be a REQUIRED branch-protection check) and
+  `.github/workflows/api-contract.yml` referenced `actions/checkout@v7.0.1`,
+  `actions/setup-go@v7.0.0` and `actions/cache@v6` by tag while every one of the
+  hundred-plus other `uses:` refs under `.github/` is pinned to a 40-character
+  commit SHA with a `# vX.Y.Z` comment. A tag is a pointer its owner can move, so
+  the commit that actually ran inside those jobs was not the commit anyone
+  reviewed — and because those jobs *are* the gate, a moved tag could make a
+  blocking check report green without having gated anything. That is the same
+  failure shape `codeql_action_pin_test.go` exists for, where a mis-pinned SAST
+  action produced a job that looked like it ran and executed zero queries.
+
+  The convention was enforced per file, so these two drifted and kept drifting:
+  the dependency sweep that rewrote `actions/setup-go@v7` to `@v7.0.0` touched
+  those exact lines and left them mutable, because nothing failed. All six refs
+  are now SHA-pinned to the revisions already in use elsewhere in the tree, and
+  `workflow_action_pin_test.go` enforces the rule across every workflow and
+  composite action under `.github/` — so a new file, or a bump that rewrites a
+  ref, cannot reintroduce a mutable one silently.
+
+  The gate enumerates refs by **parsing the YAML**, not by scanning for
+  `^uses:`, because the line-based first revision had a hole of exactly the kind
+  it exists to catch: YAML also accepts `uses : x@v7`, `"uses": x@v7`,
+  `'uses': x@v7` and the flow mapping `- {uses: x@v7}`, all four of which
+  GitHub Actions honours and none of which that regex matched — while the
+  hundred-odd refs it did match kept its "scanned nothing" guard satisfied. A
+  mutable tag in any of those spellings would have run with the gate green.
+  `TestWorkflowActionRefEnumerationSeesEveryUsesKey` pins all four plus the
+  job-level reusable-workflow form, so a future simplification back to a regex
+  fails instead of silently un-seeing refs. A SHA pin's comment must also now
+  *name* the revision (`# v1.2.3`, or `# branch @ YYYY-MM-DD` as `ci.yml` pins
+  an action with no releases); the first revision accepted any `#`, so `# TODO`
+  passed a check whose own message promised it named a release.
+
+  Two further holes in the same gate, both measured: a repeated pin was checked
+  against the FIRST occurrence's line, so in a file with fourteen
+  `actions/checkout` steps — or the two `actions/setup-go` steps in
+  `pr-api-governance.yml` — a later pin with no comment inherited an earlier
+  one's `# v7.0.1` and passed; one ref is now emitted per matching source line.
+  And a `docker://` container action was skipped entirely, on the incorrect
+  grounds that registry digest rules covered it (they govern the release
+  catalog's images, not a workflow's `uses`), so `docker://alpine:latest` would
+  have satisfied every applicable check; it now needs an `@sha256:` digest, with
+  `TestWorkflowDockerDigestRuleBites` proving the rule on fixtures because
+  nothing in `.github/` uses the scheme yet.
+
+  `slsa-framework/slsa-github-generator` is a recorded exception with its reason:
+  the generator verifies its own provenance against the invoking tag and refuses
+  to run from a SHA, so pinning it would disable release provenance rather than
+  harden it. The exception is still constrained to an exact
+  `vMAJOR.MINOR.PATCH` release, never a moving major alias, and the test fails if
+  an exception stops being used — the allowlist is exact, not a dumping ground.
+  No runtime, policy or proxy behaviour changes; this is CI trust only.
+
+  The three `actions/checkout` steps in those two workflows also set
+  `persist-credentials: false` (CWE-522, CodeRabbit on this PR): each job runs
+  PR-authored code, which could otherwise read the run's `GITHUB_TOKEN` from
+  `.git/config`. Nothing in them needs the credential — the base-ref
+  `git fetch` reads a public repository.
+
 ### Changed
 
 - **The pinned Go toolchain moves from go1.26.10 to go1.27.3.** The `go.mod`
@@ -757,6 +820,83 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   against the cheapest wrong fix (skip the store when the map is nil, which
   silences the panic while silently not enforcing the entry). `doc.go` and
   ADR-0039 are amended rather than left asserting the narrower contract.
+- OIDC credential/JWKS transports now dial the guarded destination directly:
+  an inherited forward proxy could bypass the resolved-IP SSRF guard. A
+  behavioral regression checks private destinations, DNS rebinding and
+  redirect targets with a public-proxy hook configured. OIDC no longer uses
+  environment proxies.
+  G704 is enforced with scoped exceptions, the expired OpenSSL exception is
+  removed, and CI records unfiltered findings and the actual image's package
+  and static-binary evidence (RISK-002/RISK-006).
+- The C2 route-metadata index resolved every wildcard admin route to the
+  **public `/` catch-all** (SEC-C2WILDCARD-1). `buildMetadataIndex` classified a
+  Go 1.22 `{name}` pattern as an *exact* path and stored it under its literal
+  pattern text, so a real request path — `/api/support/bundles/csb_…` — never
+  matched it, fell through the prefix list and landed on the SPA shell's entry,
+  which is `Public: true`, `RolePublic`. For all ten such routes (the
+  support-bundle download, sealed-export, delete, manifest and upload-consent
+  surfaces, plus `/api/support/recipients/{name}`) that silently disabled C2
+  role enforcement, the C4 role-divergence observation and the C2c audit-gap
+  check — and because `Lookup` still answered "found", `c2ShadowMissingMetaTotal`
+  never incremented, so nothing showed it in metrics either.
+
+  Not exploitable as it stood: every one of those handlers carries its own
+  handler-level `requireRole`, so what was lost is the second layer, not the
+  only one. The mux itself resolves these patterns correctly; only the mirror
+  did not. The index now keeps wildcard patterns in a segment-matched list,
+  tried after the exact map and before the prefix list, with ServeMux's own
+  semantics — literals byte-for-byte, `{name}` exactly one non-empty segment,
+  `{name...}` the trailing segments, most specific first. Exact lookups and the
+  catch-all fallback are unchanged, and the new matcher cannot over-claim:
+  `/api/support/bundles/` and a path with one segment too many are both
+  refused. `TestC2_MetadataIndex_ResolvesEveryRoute` passed vacuously because it
+  iterates the pattern literals; the new gates substitute a concrete value for
+  each `{…}` segment and were verified failing against the pre-fix index, where
+  10 of 10 routes resolve to `"/"` with `public=true`.
+
+  Resolution for a live request goes through the ESCAPED path. `*http.ServeMux`
+  matches on `EscapedPath()` and unescapes each segment on its own, so a `%2F`
+  stays inside one wildcard value — it routes
+  `/api/support/bundles/foo%2Fbar` to `{id}` with `id="foo/bar"`, while
+  `r.URL.Path` has already turned that into a second segment. Resolving from
+  the decoded path therefore reopened the same hole for one percent-encoded
+  character, which the built index confirmed by answering `("/", public=true)`
+  for all three affected shapes. Matching the raw escaped text would be wrong
+  in the other direction, because `appro%76e` really does reach the literal
+  `approve` route, so each segment is unescaped separately; a malformed escape
+  is left as-is, making the worst case a miss rather than a wrong route. The
+  decoded path still feeds the exact and prefix tiers unchanged.
+
+- Revoking a cluster **enrollment token** left no audit record
+  (SEC-ENROLLAUDIT-1). `DELETE /api/cluster/tokens` destroys cluster trust
+  material, yet it was the one mutation on that route with no `auditEvent`: the
+  POST that mints a token audits, node revocation audits, and the route
+  metadata claimed `"audit delegated"` for a method that had no delegate. With
+  `AuditExpected` false, C2c's runtime audit-gap check could not notice the
+  omission either, and `api/route-classification.yaml` agreed with the wrong
+  answer. An admin-session holder could therefore remove enrollment capability —
+  durably, the store is saved — with nothing recording who did it or when.
+  The handler now emits `enrollment.token_revoked` **after** the store has
+  persisted, so a record cannot claim a revocation that did not survive the
+  write; the metadata and the manifest declare it. `saveConfigVersion` is
+  deliberately still absent — enrollment tokens are outside the rollback
+  surface. The write-failure path is covered too: `DeleteToken()` runs before
+  `Save()`, so a failed store write leaves the token already gone from memory
+  — this node has stopped honouring it whatever the 500 says, and a later
+  successful save makes the deletion durable — which now records a distinct
+  `enrollment.token_revoke_unpersisted` event rather than nothing. The token is
+  not restored; putting live enrollment material back because a disk write
+  failed is the less safe direction, and the 500 already says to retry.
+  Gates include two negative controls (a 404 and a 400 must audit nothing),
+  assert on unique entry content rather than a length delta because the audit
+  ring is bounded, and mint a fresh token hash per invocation so a `-count=2`
+  run cannot satisfy the positive assertion from the previous run's entry.
+
+  Both findings were recorded as R2 and R4 in the 2026-10-17 review and are
+  closed here. Full analysis, plus a review of the 28 open pull requests —
+  including one that flips a fail-closed installer gate to fail-open and four
+  pairs of mutually incompatible remediations of the same defect — is in
+  `docs/engineering/security-reviews/2026-10-18-open-pr-fleet-and-metadata-audit-gaps.md`.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
@@ -2181,6 +2321,36 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   invariant, a success-resets control, the threshold (asserted on `activeIdx`,
   since a successful failover resets the streak), and the floor; nothing
   previously pinned either the schedule or the threshold.
+- The parent-proxy circuit breaker and six operator signals stopped expiring
+  when the wall clock stepped **backwards** (CHAOS-84). Go's monotonic reading
+  protects an interval only while it stays inside a `time.Time`;
+  `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild one without it, so every
+  interval measured from a stamp held as a bare `int64` is a wall-clock
+  interval. An NTP correction after a wrong RTC, a resumed hypervisor snapshot
+  or an operator fixing the date made those intervals negative, so each
+  `elapsed >= limit` test stayed false until the clock caught up. Nothing
+  errored, nothing was counted, nothing was logged.
+
+  The parent-proxy breaker (`internal/upstream`) is the sharpest: it stayed
+  open, and since the pool falls back to **direct egress** when no parent is
+  eligible, one parent blip plus a clock correction left the appliance
+  egressing around the parent-proxy chain long after the parents recovered. It
+  now re-anchors its trip instant (published on `/api/diagnostics`, so it keeps
+  its wall-clock basis) and serves one fresh window measured from the step,
+  rather than probing at once at parents that may still be down. Five evidence
+  and log gates read a future stamp as "already logged" and suppressed their
+  notice for the whole step: the crash-evidence throttle (a backward step made
+  `recordCrash` return before writing the stack-bearing log and audit entry for
+  every subsequent same-component crash), the scanner and YARA degraded-log
+  gates, the Sluice call-error line, the fail-closed file-profile block warning
+  and the OCSP responder-cap notice. They now decide on the MAGNITUDE of the
+  interval rather than its sign, so a rollback costs at most one suppressed line
+  and a caller that loses a gate's compare-and-swap is not mistaken for a clock
+  step. The tunnel idle reaper, the DP readiness grace and the roster-durability
+  gates have the same defect and are fixed by CHAOS-83 (monotonic stamps); the
+  CDR breaker was already monotonic on main. No configuration, metric, alert or
+  persisted format changes, and behaviour with a sane clock is unchanged. See
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md`.
 
 ### Changed
 
