@@ -136,7 +136,7 @@ jobs:
           echo "shards=$(jq -c '[.shards[].index]' race-build/plan.json)" >> "$GITHUB_OUTPUT"
 
       - name: Upload the binary, inventory, universe and plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-race-build
           path: race-build/
@@ -208,7 +208,7 @@ jobs:
 
       - name: Upload shard evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-race-shard-${{ matrix.shard }}
           path: |
@@ -251,7 +251,7 @@ jobs:
 
       - name: Upload lane evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-race-lane
           path: ${{ runner.temp }}/race-lane/
@@ -290,7 +290,7 @@ jobs:
 
       - name: Upload universe evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-race-universe
           path: ${{ runner.temp }}/race-universe/
@@ -454,7 +454,7 @@ jobs:
         # Reached only when the verdict and every producer succeeded.
         # if-no-files-found:error keeps a vanished profile a FAILURE rather than
         # a silently absent artifact and a green gate.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.coverage-artifact }}
           path: coverage.out
@@ -463,7 +463,7 @@ jobs:
 
       - name: Upload verdict
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-race-verdict
           path: race-verdict/

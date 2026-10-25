@@ -2432,6 +2432,104 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   invariant, a success-resets control, the threshold (asserted on `activeIdx`,
   since a successful failover resets the streak), and the floor; nothing
   previously pinned either the schedule or the threshold.
+- The parent-proxy circuit breaker and six operator signals stopped expiring
+  when the wall clock stepped **backwards** (CHAOS-84). Go's monotonic reading
+  protects an interval only while it stays inside a `time.Time`;
+  `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild one without it, so every
+  interval measured from a stamp held as a bare `int64` is a wall-clock
+  interval. An NTP correction after a wrong RTC, a resumed hypervisor snapshot
+  or an operator fixing the date made those intervals negative, so each
+  `elapsed >= limit` test stayed false until the clock caught up. Nothing
+  errored, nothing was counted, nothing was logged.
+
+  The parent-proxy breaker (`internal/upstream`) is the sharpest: it stayed
+  open, and since the pool falls back to **direct egress** when no parent is
+  eligible, one parent blip plus a clock correction left the appliance
+  egressing around the parent-proxy chain long after the parents recovered. It
+  now re-anchors its trip instant (published on `/api/diagnostics`, so it keeps
+  its wall-clock basis) and serves one fresh window measured from the step,
+  rather than probing at once at parents that may still be down. Five evidence
+  and log gates read a future stamp as "already logged" and suppressed their
+  notice for the whole step: the crash-evidence throttle (a backward step made
+  `recordCrash` return before writing the stack-bearing log and audit entry for
+  every subsequent same-component crash), the scanner and YARA degraded-log
+  gates, the Sluice call-error line, the fail-closed file-profile block warning
+  and the OCSP responder-cap notice. They now decide on the MAGNITUDE of the
+  interval rather than its sign, so a rollback costs at most one suppressed line
+  and a caller that loses a gate's compare-and-swap is not mistaken for a clock
+  step. The tunnel idle reaper, the DP readiness grace and the roster-durability
+  gates have the same defect and are fixed by CHAOS-83 (monotonic stamps); the
+  CDR breaker was already monotonic on main. No configuration, metric, alert or
+  persisted format changes, and behaviour with a sane clock is unchanged. See
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md`.
+- **A shrinking Control Plane address list crashed the Data Plane, and a
+  de-listed but still-responsive CP kept serving it (CHAOS-91).** `activeIdx` is
+  an index *into* `c.addrs` naming the address the live connection holds, and
+  `updateDPAddresses` replaced that slice without re-resolving it.
+  `reconnectActive` indexes it directly and its `len == 0` guard does not cover
+  an index past a *non-empty* slice, so a shrinking list panicked with
+  `index out of range [1] with length 1` — and `reconnectActive` is the
+  certificate-renewal redial, which runs unattended on a healthy node. An HA
+  promotion's one-element list (the CHAOS-71 address-republish rider already on
+  main) is exactly that shrink. Fixed by re-resolving the active entry by
+  **address** rather than clamping the index, and by redialling when the active
+  address is no longer listed: `call` uses `c.conn`, so a de-listed CP that
+  still answered would otherwise keep serving this node indefinitely. (The
+  promotion deadlock and address republish this round also found were ported to
+  main as CHAOS-71 riders, #1556.)
+
+- **The Data Plane's backoff against its Control Plane was defeated three ways
+  (CHAOS-89).** Measured, not inferred:
+
+  The consecutive-failure streak was incremented twice per failed poll — once
+  by `pollConfig`, once again inside `backoff` — so the ladder documented as
+  `2s, 4s, 8s, …, 60s` was really **`4s, 16s, 60s`**: the ceiling on the third
+  failed poll instead of the sixth, and the documented "3 consecutive failures"
+  failover gate tripping on the **second**. The log line was wrong in the same
+  way, reporting "backing off 4s (failure #2)" for a node's *first* failed
+  poll, so an operator could not reconstruct the real cadence from it.
+  `backoff` no longer increments; the streak has exactly one writer.
+
+  Worse, `failover()` cleared the streak on a successful *dial*. A Control
+  Plane pair that answered TCP while failing `GetConfig` — overloaded, fenced
+  out, or timing out an oversized snapshot — therefore held every Data Plane on
+  the ladder's low rungs **indefinitely**: the streak never passed the failover
+  threshold, so no delay ever grew beyond the 30s poll ticker and the ladder
+  never engaged at all. `pollLoop` is ticker-driven and `backoff` sleeps inside
+  a tick, so the effect was not a faster poll rate — it was a Control Plane that
+  was already failing being polled at the full 30s cadence by every node
+  forever, with a fresh gRPC connection every other poll. Connectivity is not evidence that a Control
+  Plane is serving config; only a successful poll is. The failover gate is now
+  re-crossed every `dpFailoverAfterFailures` rather than tested once, so a
+  sustained outage still probes each configured address periodically without
+  redialling on every poll.
+
+  Neither the ladder nor any of the five Control-Plane-facing tickers was
+  jittered or phase-offset, so a fleet whose Control Plane went away — one
+  shared event — retried in lockstep and reconnected in a single instant. The
+  ladder is now jittered per attempt (±10%, matching `internal/feedsched`), and
+  a one-time per-loop phase offset, bounded by both the loop's own interval and
+  5s, staggers all five tickers. The cold-start poll is deliberately **not**
+  staggered: a node with no last-known-good snapshot enforces nothing until it
+  lands, so delaying it to smooth a one-time boot burst would trade a security
+  property for load. This closes the registered WK-13/HA-11 herd rows for the
+  cluster plane; they remain open for `internal/blocklistfeed` and
+  `internal/otlp`.
+
+- **An unbounded per-peer-IP map on the Control Plane (CHAOS-90).**
+  `unenrolledConfigPull.attempts`, which throttles pre-enrollment config pulls,
+  prunes a peer's timestamps only on that same peer's *next* pull, so an
+  address that pulled once and never returned left a permanent entry — one
+  request per source address was enough to grow it for the process lifetime, on
+  a port reachable by any routable peer. The structurally identical
+  `enrollRateLimit` has had a periodic sweep for exactly this, wired into the
+  shared security-limiter janitor, and its own comment names the hazard; the
+  fix had never been carried across. It is now, alongside its sibling. The
+  throttle's *decision* is unchanged — a sweep reclaims aged-out state and does
+  not re-admit an exhausted peer.
+
+  Round report, risk matrix and the backlog it opened are in
+  `roadmap/CHAOS-REVIEW-2026-10-13.md`.
 
 ### Changed
 
@@ -2551,6 +2649,68 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Performance
+
+- Session-cookie verification no longer builds HMAC state per request. The
+  signed cookie is the FIRST credential arm `resolveRequestAuth` tries, so
+  `session.Decode` runs on the proxy authentication hot path and not just the
+  admin UI — every authenticated proxied request verified one MAC. Building the
+  state, not hashing the ~250-byte payload, dominated that step:
+  `crypto/hmac.New` costs five allocations (the HMAC struct, the ipad and opad
+  blocks, an inner and an outer `sha256.Digest`), and the old form paid them per
+  request plus a payload copy for `Write`, a digest for `Sum(nil)`, two for
+  `EncodeToString`, and two more for the `[]byte` conversions `hmac.Equal`
+  needed — nine allocations in `mac` alone, each with a named owner under
+  `-memprofilerate=1`.
+
+  HMAC state is explicitly reusable (`Reset` re-primes the inner hash with
+  ipad), so it is now built ONCE per signing key and recycled through a pool
+  published atomically beside the key, and the digest is summed and
+  base64url-encoded through inline buffers so the verify path compares bytes
+  without ever materialising the expected signature as a string. The hashing is
+  untouched — same key, same two block compressions, same alphabet,
+  byte-identical output — and `SetSigningKey` remains the single install
+  funnel, now rebinding the engine only when the key actually CHANGED, because
+  `applySnapshotSessionSecret` reinstalls the CP-synced secret on every
+  snapshot apply whether or not it moved and an unconditional rebind would
+  discard the warm pool on each of those no-ops. Because the engine now caches
+  the key instead of re-reading it per MAC, `SetSigningKey` also stores a COPY:
+  holding the caller's slice would let a caller that mutated the slice it had
+  installed and then reinstalled it hand that comparison the same bytes on both
+  sides, skipping the rebind — after which cookies from before the rotation
+  would keep verifying and `SigningKey`, which feeds the Control Plane snapshot
+  export, would report a key local verification no longer used. The copy sits on
+  the rebind path, so the no-op reinstall stays allocation-free.
+
+  Measured on the development box (linux/amd64, 4-core Xeon @ 2.80GHz, medians
+  of 3 runs, each pair timed in the SAME run against a verbatim copy of the
+  replaced form) under the toolchain this branch now pins, go1.27.3: the verify
+  step 2 521 → 1 454 ns and 9 allocations / 896 B → ZERO; four-way parallel
+  1 061 → 367 ns; a whole `Decode` 6 563 → 3 879 ns, 15 → 6 allocations,
+  1 304 → 408 B; four-way parallel 2 565 → 1 290 ns.
+
+  The same measurement under go1.26.9, the pin when this work began, read
+  `Decode` 6 134 → 4 903 ns, 26 → 17 allocations, 1 648 → 752 B. Go 1.27 made
+  the `encoding/json` half of `Decode` dramatically cheaper on its own — 17
+  allocations to 6, none of it this change — while this change's own
+  contribution is IDENTICAL on both pins: nine allocations and 896 bytes of
+  HMAC construction. The relative timing win on `Decode` therefore GREW, from
+  −20% to −41%, because a fixed cost removed from a smaller total is a larger
+  share of it. The allocation gate's absolute bound was retightened 20 → 10
+  with that remeasurement, since a bound set against 17 would have let a
+  threefold regression pass once the measured value fell to 6.
+
+  What remains in `Decode` is the base64 payload decode and `encoding/json`'s
+  unmarshal into `Session`, deliberately left alone. The size of the timing win
+  depends on how expensive the runner's
+  allocator is relative to SHA-256, so the gate asserts the structural
+  property instead — the verify step builds no HMAC state, no digest and no
+  expected-signature string — and extends the zero bound to the reject path,
+  so an unauthenticated client cannot drive allocation by replaying garbage
+  cookies. Equivalence is pinned by a differential test (five key shapes x ten
+  payload shapes x ten signature shapes, plus an end-to-end `Decode` oracle)
+  and a fuzz target; the pooling-specific hazards — key rotation under
+  concurrent verification, no-op reinstall keeping the pool, a real rotation
+  swapping it, the engine owning its key copy — have their own tests.
 
 - The per-IP connection limiter now does its whole job in ONE critical section
   per call, and stores the counter by value. `Acquire` + a deferred `Release`
@@ -3109,6 +3269,58 @@ endpoints for credentialed parents.
   metric, or dashboard change.
 
 ### Fixed
+
+- Three decisions measured elapsed time on the **wall clock** and stopped firing
+  across a backwards clock step — an NTP correction of a drifted clock, a VM
+  suspend/resume, a container host's clock change, `hwclock` at boot. All three
+  stamped with `time.Now().UnixNano()` and read back with
+  `time.Since(time.Unix(0, stamp))`; `UnixNano()` discards the monotonic reading
+  and `time.Unix(0, n)` reconstructs a value that has none, so Go subtracts two
+  wall-clock values. A step backwards leaves the stamp in the *future* and the
+  elapsed duration goes **negative**, which satisfies neither `>= deadline` nor
+  `>= grace`, so each decision was suspended for however far the step went.
+
+  The **tunnel idle reaper** (1h window) stopped reaping, and the tunnels it
+  then held were precisely the idle, possibly half-open ones it exists to
+  collect — peer still ACKs, never sends, never FINs — at two sockets, two
+  goroutines and two pooled relay buffers each, on the CONNECT-bypass and
+  SOCKS5 paths alike. Under many simultaneous connections or long-lived tunnels
+  that is file-descriptor and memory exhaustion on the data plane; a step
+  *forwards* is the mirror image and tears down every long-lived tunnel at once.
+  The **data-plane readiness grace** (5min) stopped closing, so `/ready` kept
+  reporting `cp_poll: ok` while the control plane was genuinely unreachable and
+  the node's policy went stale. The default verdict is report-only on that row,
+  so there the loss is the signal itself; on a strict probe (`/ready?strict=1`),
+  which does gate on the row, the suppressed `fail` also kept the node's verdict
+  `ready` and so held it in the load-balancer rotation. And both **roster durability-degraded log gates** latched
+  suppressed (a negative age is always under the interval), silencing the only
+  operator-visible signal that admin roster writes are not surviving a restart
+  while the suppressed counter climbed where nobody reads it.
+
+  Sorting the affected and unaffected sites by how they *store* the stamp makes
+  the cause exact: every site that was wrong holds it in an `atomic.Int64`,
+  which cannot hold a `time.Time` and so forces the `UnixNano()` conversion that
+  drops the monotonic reading. `atomic.Int64` remains the right choice at all of
+  them — a lock-free stamp shared between two relay goroutines, or read on a
+  probe path — so the fix is one shared primitive (`monoNanos`/`monoSince`) that
+  makes that representation safe by construction rather than four local patches.
+  The HA self-fence deadline was already correct and explicitly so, because it
+  keeps a `time.Time` field, which retains its monotonic reading for free.
+
+  Deliberately *not* implemented as `internal/admission`'s negative-age guard:
+  there a bad stamp must fail toward the local decision, but here "expired"
+  tears a tunnel down or flips a readiness row to fail, so "negative means expired"
+  would reap live tunnels and flap every node's probe on any backwards step,
+  including the sub-second NTP corrections that are routine. A negative control
+  pins that choice. Absolute-time decisions are untouched: session and IdP token
+  expiry, certificate validity and log-timestamp rendering are civil instants
+  and stay on the wall clock. Gates: 9, four verified failing against the
+  pre-fix tree, including an AST guard over all 385 package-main sources that
+  bans the `time.Unix(0, nanos)` elapsed idiom while leaving the legitimate
+  `time.Unix(seconds, 0)` absolute uses alone. `internal/ocsp` has the same
+  defect in a log gate, recorded as register row CA-21 rather than widening this
+  change into another package. Review:
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §47 (CHAOS-83).
 
 - A leaf-certificate sign already in flight could outlive the CA it was started
   against. Replacing the root CA (`InitCA`, `ImportBundle`, `LoadCustomCA`, and
