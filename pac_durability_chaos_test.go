@@ -155,15 +155,18 @@ func TestChaos77_FailedPACSaveIsNotServedToTheFleet(t *testing.T) {
 // existed only in RAM, reported green, and silently reverted on restart with
 // no further snapshot able to correct it. The slice must defer, like its
 // neighbour, so memory and disk cannot disagree.
+//
+// The gate drives applySnapshotClusterRuntime, the slice group that holds the
+// PAC-exclusions apply, rather than the whole applyConfigSnapshot. The full
+// apply also replaces the shared blocklist, the admission owners and the
+// external-auth settings for every slice this snapshot leaves empty, which a
+// test would then have to restore one global at a time; this group touches
+// nothing but the PAC stores for a snapshot carrying only PACExclusions.
 func TestChaos77_SnapshotApplyDefersAnUnpersistablePAC(t *testing.T) {
 	const keep = "persisted.corp.example"
-	// applyConfigSnapshot mutates the admission owners (ipf, rl) IN PLACE
-	// (RISK-030), so every root test that reaches it must bind fresh owners or
-	// leak a cleared filter / zeroed limiter into the next test.
-	bindFreshAdmissionOwners(t)
 	chaos77PinPACStore(t, PACConfig{ProxyHost: "dp.corp.example", ProxyPort: 8080, Exclusions: []string{keep}})
 
-	applyConfigSnapshot(ConfigSnapshot{
+	applySnapshotClusterRuntime(ConfigSnapshot{
 		Version:       1,
 		PACExclusions: []string{"chaos77-ram-only.example"},
 	})
@@ -179,7 +182,6 @@ func TestChaos77_SnapshotApplyDefersAnUnpersistablePAC(t *testing.T) {
 // the gate above: the deferral must come from the write failing, not from the
 // PAC slice having been disconnected.
 func TestChaos77_HealthySnapshotApplyStillAppliesPAC(t *testing.T) {
-	bindFreshAdmissionOwners(t) // RISK-030, as above
 	prev := pacStore.Snapshot()
 	t.Cleanup(func() { pacStore.Restore(prev) })
 	pacStore.Restore(pac.State{
@@ -187,7 +189,7 @@ func TestChaos77_HealthySnapshotApplyStillAppliesPAC(t *testing.T) {
 		Path: filepath.Join(t.TempDir(), "pac_config.json"),
 	})
 
-	applyConfigSnapshot(ConfigSnapshot{
+	applySnapshotClusterRuntime(ConfigSnapshot{
 		Version:       2,
 		PACExclusions: []string{"fresh.example"},
 	})
