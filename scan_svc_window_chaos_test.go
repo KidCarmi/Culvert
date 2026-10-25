@@ -210,3 +210,45 @@ func getHealth(t *testing.T, addr string) map[string]any {
 	}
 	return out
 }
+
+// TestScanSvc_HealthPublishesTheEnforcedWindow pins the invariant the /health
+// field exists for: the number an operator compares against the caller's limit
+// must be the window handleScan actually ENFORCES.
+//
+// The two diverge exactly when no engine has a limit configured.
+// maxScanBufferBytes() maxes over the two engines and is 0 when neither sets
+// one; scanSvcWindow() then applies the 5 MiB floor that refuseTruncatedScan
+// enforces. /health published the unfloored value until cc17cd0, so a
+// default-configured sidecar advertised a 0-byte window while refusing bodies
+// past 5 MiB — the field's whole purpose, inverted, and the one number an
+// operator would act on.
+//
+// The window tests above cannot catch this: withScanWindow sets BOTH engines to
+// the same limit, so the two functions agree and the divergence is invisible.
+// That is why this gate constructs the zero-value case instead, and asserts its
+// own premise so it cannot quietly become vacuous if the floor moves.
+func TestScanSvc_HealthPublishesTheEnforcedWindow(t *testing.T) {
+	origDPI, origSec := dpiScanner, globalSecScanner
+	t.Cleanup(func() {
+		dpiScanner = origDPI
+		globalSecScanner = origSec
+	})
+	dpiScanner = &ContentScanner{}        // zero value → MaxBytes() == 0
+	globalSecScanner = &SecurityScanner{} // zero value → MaxBytes() == 0
+
+	raw, enforced := maxScanBufferBytes(), scanSvcWindow()
+	if raw == enforced {
+		t.Fatalf("premise broken: this gate needs the unfloored window (%d) and the enforced one (%d) to differ", raw, enforced)
+	}
+
+	addr := startScanSvc(t)
+	got, ok := getHealth(t, addr)["scan_window_bytes"].(float64)
+	if !ok {
+		t.Fatal("health does not publish scan_window_bytes")
+	}
+	if int64(got) != enforced {
+		t.Errorf("health scan_window_bytes = %d, want the ENFORCED window %d (not the unfloored %d): "+
+			"an operator comparing this against the caller's limit would read the wrong number",
+			int64(got), enforced, raw)
+	}
+}
