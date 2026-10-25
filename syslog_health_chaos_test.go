@@ -4050,3 +4050,173 @@ func TestChaos81_FoldingReadsOneCumulativeValue(t *testing.T) {
 		t.Fatal("control: the health plane no longer calls Stats() anywhere, so the walk above proves nothing")
 	}
 }
+
+// ── The live counters are captured under the retirement lock ────────────────
+//
+// syslogFeedState used to capture `described` and the retired totals under
+// syslogHealth.mu, release it, and only then read the Writer's own counters.
+// A disable landing in that window retires and SEALS the captured Writer and
+// folds its finals into a retiredDrops this snapshot has already copied; a
+// request still holding the old handle then charges its loss to BOTH the
+// Writer's live counters and the process-lifetime lateDrops counter, and the
+// snapshot added each of them. One lost event was reported as Drops=2, and the
+// next snapshot reversed it to Drops=1 off the smaller sealed finals — the
+// exported counter DECREASING, which is the single thing it may not do
+// (Codex P2, PR #1494).
+//
+// The claim that fix replaces was mine, and it was wrong in an instructive
+// way: "the engine only charges to LateDrops once the owner has RETIRED the
+// Writer, so the two can never overlap". True of a STATE, false of an INSTANT
+// — the Writer need not be retired when it is captured, only by the time it
+// is read.
+//
+// Reproduced deterministically through the real syslogFeedState by landing the
+// whole transition in the clock seam it calls after unlocking. That is also
+// this gate's LIMIT, and the reason the structural wall below exists: the
+// injection point is fixed, so a re-introduction that reads the counters
+// anywhere between the unlock and that seam is equally broken and this gate
+// passes it. Measured — moving the capture to the line after Unlock passes
+// here and fails the wall.
+func TestChaos81_ADisableBetweenCaptureAndReadCountsTheLossOnce(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
+	syslog.ResetLateDropsForTest()
+	t.Cleanup(syslog.ResetLateDropsForTest)
+
+	sw, err := newSyslogWriter("udp", "127.0.0.1:65533", "rfc3164")
+	if err != nil {
+		t.Fatalf("building the writer: %v", err)
+	}
+	setSyslogHandle(sw)
+	noteSyslogWriterInstalled(sw, "udp://127.0.0.1:65533")
+
+	fired := false
+	setSyslogHealthNowForTest(func() time.Time {
+		if !fired {
+			fired = true
+			// Retires + seals the captured writer, folds its finals and
+			// clears syslogHealth.writer.
+			disableActiveSyslog()
+			// A request that still holds the old handle loses an event. The
+			// engine charges it to lateDrops AND to the writer's own counters.
+			sw.WriteAudit(map[string]string{"evt": "policy.change"})
+		}
+		return time.Now()
+	})
+	t.Cleanup(func() { setSyslogHealthNowForTest(nil) })
+
+	first := syslogFeedState()
+	setSyslogHealthNowForTest(nil)
+	second := syslogFeedState()
+
+	if late := syslogLateDrops(); late != 1 {
+		t.Fatalf("precondition: want exactly 1 late drop, got %d — the window did not produce the post-seal loss, so this gate proves nothing", late)
+	}
+	// The loss lands strictly AFTER the first snapshot's capture instant, so
+	// 0 then 1 is the correct sequence: each snapshot describes ONE instant,
+	// and the counter only rises.
+	if second.Drops < first.Drops {
+		t.Errorf("culvert_syslog_drops_total decreased across the retirement, %d -> %d", first.Drops, second.Drops)
+	}
+	if first.Drops > 1 {
+		t.Errorf("one lost event counted %d times in a single snapshot: the live counters and lateDrops both hold it", first.Drops)
+	}
+	if second.Drops != 1 {
+		t.Errorf("the lost event must be reported exactly once; second.Drops = %d", second.Drops)
+	}
+}
+
+// TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock is the
+// STRUCTURAL wall for the capture above, and it is the gate that actually
+// pins the property.
+//
+// The defect is a PLACEMENT: the read must happen before syslogHealth.mu is
+// released, because that is the lock every retirement holds — it marks the
+// Writer, seals it, folds its finals and clears syslogHealth.writer in one
+// critical section, so a non-nil writer captured under it is provably not yet
+// retired and none of its losses can be in lateDrops. Behavioural coverage
+// cannot pin a placement: the window the injection seam reaches is itself
+// what moves.
+//
+// The live-term CONTROL is not duplicated here. The cheapest way to pass the
+// behavioural gate above is to stop counting the installed Writer's drops at
+// all, and TestChaos81_DropsReachMetricsAndHealthz already fails that: it
+// kills a collector under a live feed and requires the losses to reach
+// /metrics and /healthz.
+func TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock(t *testing.T) {
+	const healthFile = "syslog_health.go"
+	fset, fd := syslogFuncDecl(t, healthFile, "syslogFeedState")
+	if fd == nil {
+		t.Fatal("syslogFeedState is gone; this wall names a function that no longer exists")
+	}
+
+	var unlockAt token.Pos
+	reads := map[string]token.Pos{}
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && sel.Sel.Name == "Unlock" && !unlockAt.IsValid() {
+			unlockAt = call.Pos()
+		}
+		if ok && sel.Sel.Name == "Stats" {
+			if _, seen := reads["the writer's own counters"]; !seen {
+				reads["the writer's own counters"] = call.Pos()
+			}
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "syslogLateDrops" {
+			if _, seen := reads["syslogLateDrops()"]; !seen {
+				reads["syslogLateDrops()"] = call.Pos()
+			}
+		}
+		return true
+	})
+
+	// CONTROL: the matcher must SEE both the lock release and a counter read,
+	// or a broken AST walk passes forever.
+	if !unlockAt.IsValid() {
+		t.Fatal("control: no Unlock() found in syslogFeedState, so the ordering below proves nothing")
+	}
+	if len(reads) == 0 {
+		t.Fatal("control: no counter read found in syslogFeedState, so the ordering below proves nothing")
+	}
+
+	for _, want := range []string{"the writer's own counters", "syslogLateDrops()"} {
+		at, ok := reads[want]
+		if !ok {
+			t.Errorf("syslogFeedState no longer reads %s; it must, under the lock, or the snapshot's terms come from different instants", want)
+			continue
+		}
+		if at > unlockAt {
+			t.Errorf("syslogFeedState reads %s at %s, AFTER releasing syslogHealth.mu at %s\n\t"+
+				"a retirement landing in that window seals the captured writer and charges its next loss to "+
+				"BOTH its live counters and lateDrops, so the snapshot counts one lost event twice and the "+
+				"next snapshot reverses it off the smaller sealed finals (Codex P2, PR #1494)",
+				want, fset.Position(at), fset.Position(unlockAt))
+		}
+	}
+
+	// The second half of the same rule: the consumer must use what its caller
+	// captured and never re-read the writer.
+	_, live := syslogFuncDecl(t, healthFile, "applyLiveWriterStats")
+	if live == nil {
+		t.Fatal("applyLiveWriterStats is gone; this wall names a function that no longer exists")
+	}
+	ast.Inspect(live.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stats" || sel.Sel.Name == "CumulativeStats") {
+			t.Errorf("applyLiveWriterStats calls %s() at %s\n\t"+
+				"it must fold the counters its caller captured under syslogHealth.mu; a second read here is "+
+				"outside that lock and reintroduces the double count",
+				sel.Sel.Name, fset.Position(call.Pos()))
+		}
+		return true
+	})
+}

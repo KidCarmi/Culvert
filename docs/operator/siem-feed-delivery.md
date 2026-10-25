@@ -407,6 +407,14 @@ collector's losses are carried by that collector until its queue has drained
 and its final totals are published, and anything recorded after that point is
 counted for the process instead. Each loss appears exactly once.
 
+Builds before CHAOS-81 round 19 need a second caveat on the same series, with
+a different trigger: **disabling forwarding while a scrape was in flight.** The
+snapshot captured the serving collector and the process-lifetime totals under
+one lock and read that collector's own counters afterwards, so a disable landing
+in between left one lost event counted twice — reported as `2` and reversed to
+`1` on the next scrape. If you are reading this series across a *disable* on an
+older build, a single-point spike followed by a drop is that, not two events.
+
 Builds before CHAOS-81 round 18 need one more caveat, in the other direction. A
 retiring collector carries *two* totals — its live counters, which keep moving
 after its drain has finished, and the final snapshot that drain publishes — and

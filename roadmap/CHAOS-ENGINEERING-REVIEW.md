@@ -13943,3 +13943,122 @@ changing it would widen this PR past what the findings asked for. The runbook
 now says explicitly that the row, not the message, is the accurate statement. If
 a later round touches that response, the message should become a claim about the
 write rather than about the collector.
+
+### Round 19 — the third reader, and a claim that was true of a state and false of an instant
+
+One P2, and it is round 18(b) arriving at the reader I had explicitly argued was
+safe.
+
+Round 18(b) fixed the two **folding** consumers to take a retired Writer's
+cumulative totals as one value. `syslogFeedState` has a third reader of a
+Writer's counters — the **installed** one — and it kept `sw.Stats()`, with this
+comment of mine beside it:
+
+> The engine only charges a loss to LateDrops once the owner has RETIRED the
+> Writer, so the two can never overlap.
+
+That sentence is true of a **state** and false of an **instant.** The Writer
+does not have to be retired when it is captured, only by the time it is read,
+and `syslogFeedState` captures under `syslogHealth.mu`, releases it, and reads
+the counters afterwards. A disable landing in that window:
+
+1. retires and seals the captured Writer and folds its finals into a
+   `retiredDrops` this snapshot has **already copied** (so the fold is not the
+   problem);
+2. leaves a request holding the old handle, whose next loss
+   `chargeTerminalDrop` charges to `lateDrops` **and** to the Writer's own live
+   counters — correctly, because those two are read by different consumers;
+3. and this snapshot adds **both**.
+
+Reproduced deterministically through the real `syslogFeedState`, no goroutine
+racing: the whole transition is landed inside the clock seam the function calls
+after unlocking. One lost event, `lateDrops == 1`:
+
+```
+lateDrops=1 first.Drops=2 second.Drops=1
+```
+
+`Drops=2` for one event, then `Drops=1` off the smaller sealed finals — the
+exported counter DECREASING, which is the one thing it may not do, reached for
+the third time in this sweep by a third route.
+
+**The fix removes the window rather than detecting it.** The Writer's counters,
+`syslogLateDrops()` and `syslogSkippedNoWriter` are now read under the same
+`syslogHealth.mu` acquisition as the retired totals, and `applyLiveWriterStats`
+folds what its caller captured instead of re-reading. That lock is the one every
+retirement holds — a retirement marks the Writer, seals it, folds its finals and
+clears `syslogHealth.writer` in one critical section — so a non-nil `described`
+captured under it is provably **not yet retired**, and none of its losses can be
+in `lateDrops`. The terms cannot describe the same loss twice because they all
+describe one instant.
+
+Reading the counters under that lock is only safe because of round 18's lock
+sweep: `Stats()` is pure atomic loads and takes no Writer lock, which is exactly
+the property the no-lock wall on `CumulativeStats` pins. The two rounds are one
+rule from opposite ends.
+
+The counters stay **live** rather than sealed, and that is still deliberate: the
+installed Writer's totals are folded nowhere else, so switching to its seal
+would move its losses into the "lost to an earlier target" bucket while it is
+still the current one. The episode fields need the same thing for a different
+reason — a Writer can be sealed while still installed, and the degradation
+predicate has to keep seeing it fail.
+
+#### Round 19 — the gate that could not pin its own defect
+
+Worth recording in full, because the first gate looked sufficient and was not.
+
+The behavioural gate reproduces the defect through the production function and
+fails against the pre-fix file on both consequences (counted twice; total
+decreased). Then the obvious mutation — move the capture from before the unlock
+to the line **after** it, which is still broken — **passed it.** The injection
+point is `syslogHealthNow()`, called some lines after the unlock, so a read
+placed between the two is never seen by the seam the gate drives.
+
+> **A behavioural gate on an interleaving pins the window it was written
+> against. When the fix is a PLACEMENT, the window's own boundary is what
+> moves, so the placement needs a structural wall.**
+
+So the property is walled structurally as well: in `syslogFeedState` the
+Writer's counters and `syslogLateDrops()` must both be read at a position
+**before** the `Unlock()` call, and `applyLiveWriterStats` may not call
+`Stats()` or `CumulativeStats()` at all. Measured: the wall fails on both
+placement mutations (capture after the unlock; a re-read inside the consumer)
+and on the pre-fix file, naming the file and line of each.
+
+The live-term control is **not** duplicated. The cheapest way to pass the
+behavioural gate is to stop counting the installed Writer's drops at all, and
+that mutation fails `TestChaos81_DropsReachMetricsAndHealthz`, which kills a
+collector under a live feed and requires the losses to reach `/metrics` and
+`/healthz`. Verified by applying it rather than asserted: the control goes red
+(`/healthz carries no syslogDrops field`) while the new gate stays green. Naming
+an existing control beats writing a second one, but only once you have run the
+mutation that proves it is the control.
+
+#### Round 19 — on the branch moving underneath this sweep
+
+`main` landed CHAOS-78 (#1675) while this branch was green and idle, converting
+the same package-main syslog handle to an `atomic.Pointer` under different
+names. Another session reconciled it in `c0329c07`: main's
+`globalSyslogHandle` / `syslogHandle` / `setSyslogHandle` won, this branch's
+CHAOS-81 delta stayed on top, and the chaos register renumbered §45 → §53.
+
+Recorded because the reconciliation is the risk, not the rename. Two
+concurrency designs for the same window now coexist: this branch's `sendMu`
+and main's `inFlight` registration with `Close`'s bounded `waitForSenders`.
+They compose — `Close` takes `sendMu`, stores `closed`, **releases it**, and
+only then spins in a bounded `waitForSenders`, so there is no wait under the
+lock, and round 18(b)'s cycle cannot re-form through a lock-free
+`CumulativeStats`. Checked on the merged head rather than assumed, together
+with all six round-18 gates and the round-18 contracts in the source.
+
+#### Round 19 — process, carried from round 18
+
+Round 17 recorded the rule *a review round lands as one push*, and round 18
+broke it twice: `d256201` and `d23efe8` each landed over an in-flight run,
+producing four red required checks on superseded heads whose workflow runs all
+read `cancelled` and whose upstream jobs had not run a single test. The second
+push was weighed and accepted — it changed no `.go` file, so the cancelled race
+shards re-ran against byte-identical sources — and the first was not. Held out
+of its own commit for exactly the reason it records, and carried here on the
+first push that changes files anyway.

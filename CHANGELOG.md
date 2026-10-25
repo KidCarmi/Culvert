@@ -87,6 +87,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- `culvert_syslog_drops_total` could count one lost event twice, then go
+  backwards, when forwarding was disabled while a scrape was in flight. The
+  snapshot captured the serving collector and the process-lifetime totals under
+  one lock, released it, and only then read that collector's own counters. A
+  disable landing in between retires and seals the captured collector, so a
+  request still holding it charges its loss to both the collector's counters and
+  the process-lifetime late-drop total — and the snapshot added each of them.
+  One lost event was reported as `2`, which the next scrape reversed to `1`, so
+  `rate()` on the series that measures compliance loss saw a counter reset. The
+  collector's counters are now read under the same lock as the totals beside
+  them — the lock every retirement holds — so a snapshot's terms all describe
+  one instant.
+
 - **The syslog/SIEM writer handle was published without synchronization, so a
   "disable forwarding" click could abort an in-flight proxy request, and every
   runtime retarget leaked a delivery goroutine and its collector socket

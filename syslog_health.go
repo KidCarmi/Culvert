@@ -1080,6 +1080,45 @@ func syslogFeedIsUDP(described *syslogWriter, caveatTarget string) bool {
 // Evaluated on every read, never latched (the ca_health.go Usable() discipline)
 // — so recovery needs no clearing path and a wedged feed keeps telling the
 // truth without anything having to run.
+//
+// # Everything it reports comes from ONE generation
+//
+// The record, the retired totals, the installed Writer's own counters,
+// syslogLateDrops() and syslogSkippedNoWriter are all captured under a single
+// syslogHealth.mu acquisition. That is the lock every retirement holds — a
+// retirement marks the Writer, seals it, folds its finals into retiredDrops
+// and clears syslogHealth.writer in one critical section — and capturing
+// under it is what makes the terms of the sum describe one instant.
+//
+// Two defects, both reached by splitting that read, are why this is spelled
+// out (both Codex P2, PR #1494):
+//
+//   - The Writer was RE-LOADED here instead of taken from the record. A
+//     re-point between the capture and the load retires the displaced
+//     Writer's finals into a retiredDrops already copied, so its whole
+//     generation vanishes from the sum and culvert_syslog_drops_total
+//     DECREASES for that scrape — which Prometheus reads as a counter reset.
+//     `described` and syslogHandle() are the same Writer in steady state,
+//     because publication and health installation are one serialized
+//     transition (P2-2); using the captured one makes the snapshot consistent
+//     by construction rather than by timing, and it matches snap.writer,
+//     which the degradation commit half compares against the live record.
+//   - The Writer's counters were read AFTER the unlock. A disable landing in
+//     that window retires and seals the captured Writer, and a request still
+//     holding it charges its next loss to BOTH the Writer's live counters and
+//     lateDrops — so the snapshot added each of them and reported one lost
+//     event as Drops=2, which the next snapshot reversed to Drops=1 off the
+//     smaller sealed finals. The comment this replaces claimed the two "can
+//     never overlap"; that is true of a STATE and false of an INSTANT, since
+//     the Writer need not be retired when captured, only by the time it is
+//     read. Walled by
+//     TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock, because a
+//     behavioural gate on this interleaving pins only the window it was
+//     written against.
+//
+// Reading the counters under the lock is safe only because Stats() takes no
+// Writer lock — pure atomic loads. See CumulativeStats on why nothing here may
+// take one: the engine's delivery observer needs syslogHealth.mu itself.
 func syslogFeedState() syslogFeedSnapshot {
 	syslogHealth.mu.Lock()
 	// The ONLY read of the retired totals, so the ONLY settle point: a
@@ -1100,6 +1139,16 @@ func syslogFeedState() syslogFeedSnapshot {
 	retiredDelivered := syslogHealth.retiredDelivered
 	retiredDrops := syslogHealth.retiredDrops
 	retiredPanics := syslogHealth.retiredPanics
+	// Captured here, NOT after the unlock: see "Everything it reports comes
+	// from ONE generation" above. A non-nil `described` captured under this
+	// lock is provably not yet retired, so none of its losses can also be in
+	// lateDrops.
+	var liveStats syslogStats
+	if described != nil {
+		liveStats = described.Stats()
+	}
+	lateDrops := syslogLateDrops()
+	skippedNoWriter := syslogSkippedNoWriter.Load()
 	syslogHealth.mu.Unlock()
 
 	// The caveat describes the transport the operator ASKED for when nothing
@@ -1132,31 +1181,16 @@ func syslogFeedState() syslogFeedSnapshot {
 	// defect the counter exists to close, committed inside its own fix, and
 	// is why TestChaos81_LateDropsReachTheExportedTotal drives /metrics and
 	// /healthz rather than the counter (Codex P2, PR #1494).
-	snap.Drops = retiredDrops + syslogSkippedNoWriter.Load() + syslogLateDrops()
+	snap.Drops = retiredDrops + skippedNoWriter + lateDrops
 	snap.Panics = retiredPanics
 	// The writer the RECORD describes, captured above under the same lock as
-	// the retired totals — never a fresh syslogHandle() load.
-	//
-	// Re-loading here reads a writer that may belong to a LATER generation
-	// than the totals beside it: a re-point landing between the capture and
-	// the load retires the displaced writer's finals into a `retiredDrops` we
-	// have already copied, so its whole generation vanishes from the sum and
-	// `culvert_syslog_drops_total` DECREASES for that scrape — which
-	// Prometheus reads as a counter reset and which is precisely the defect
-	// P2-4 exists to prevent, re-entering through a reader that does not
-	// participate in syslogPublishMu (Codex P2, PR #1494).
-	//
-	// `described` and `syslogHandle()` are the same writer in steady state,
-	// because publication and health installation are one serialized
-	// transition (P2-2); using the captured one makes the snapshot
-	// internally consistent by construction rather than by timing, and it
-	// matches `snap.writer`, which the degradation commit half compares
-	// against the live record.
+	// the retired totals — never a fresh syslogHandle() load. See the doc
+	// comment for the scrape that decreased when this was re-loaded.
 	sw := described
 	if !configured || sw == nil {
 		return finishUnmetSyslogIntent(snap, now, intentAt)
 	}
-	return finishUnmetSyslogIntent(applyLiveWriterStats(snap, sw, now, installedAt), now, intentAt)
+	return finishUnmetSyslogIntent(applyLiveWriterStats(snap, liveStats, now, installedAt), now, intentAt)
 }
 
 // applyLiveWriterStats folds the CURRENT Writer's own counters and episode
@@ -1169,14 +1203,20 @@ func syslogFeedState() syslogFeedSnapshot {
 // its caller assembles the history that outlives any one Writer. Carrying a
 // predecessor's episode state forward would report a healthy replacement as
 // broken from its first byte.
-func applyLiveWriterStats(snap syslogFeedSnapshot, sw *syslogWriter, now, installedAt time.Time) syslogFeedSnapshot {
-	// The INSTALLED Writer's cumulative counters are read live and are not
-	// folded anywhere else, so nothing here may switch to its sealed
-	// snapshot: that would move its losses into the "lost to an earlier
-	// target" bucket while it is still the current one. The engine only
-	// charges a loss to LateDrops once the owner has RETIRED the Writer, so
-	// the two can never overlap.
-	st := sw.Stats()
+func applyLiveWriterStats(snap syslogFeedSnapshot, st syslogStats, now, installedAt time.Time) syslogFeedSnapshot {
+	// `st` arrives already captured, under the lock that serialises
+	// retirement, and this function must NOT re-read the Writer. Taking a
+	// second read here is what let one lost event be counted twice: see the
+	// capture in syslogFeedState.
+	//
+	// It is also still the LIVE counters rather than the sealed finals, and
+	// deliberately so: the installed Writer's cumulative totals are folded
+	// nowhere else, and switching to its seal would move its losses into the
+	// "lost to an earlier target" bucket while it is still the current one.
+	// The episode fields below have the same requirement for a different
+	// reason — a Writer can be sealed while still installed (a drain that
+	// exits under a published handle), and the degradation predicate has to
+	// keep seeing it fail.
 	snap.Delivered += st.Delivered
 	snap.Drops += st.Drops
 	snap.Panics += st.Panics
