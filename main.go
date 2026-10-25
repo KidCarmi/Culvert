@@ -1454,13 +1454,15 @@ func initUpstreamPool(fc *FileConfig) {
 	loadUpstreamPool(resolveUpstreamPoolStartupConfig(fc), appLifecycleCtx)
 }
 
+// clusterCADir returns the directory the cluster CA lives in: beside the
+// cluster state file.
+func clusterCADir(clusterDBPath string) string {
+	return filepath.Dir(clusterDBPath)
+}
+
 // initClusterCA initialises the cluster CA for node enrollment.
 func initClusterCA(clusterDBPath string) {
-	caDir := "."
-	if idx := strings.LastIndex(clusterDBPath, "/"); idx >= 0 {
-		caDir = clusterDBPath[:idx]
-	}
-	if err := globalClusterCA.InitOrLoad(caDir); err != nil {
+	if err := globalClusterCA.InitOrLoad(clusterCADir(clusterDBPath)); err != nil {
 		logger.Printf("ClusterCA: init error: %v — enrollment disabled", err)
 	}
 }
