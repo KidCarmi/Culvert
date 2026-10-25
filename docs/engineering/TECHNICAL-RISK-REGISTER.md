@@ -172,6 +172,28 @@
   `TestService_EndpointRebindingUsesNewClient` tests endpoint selection, not safety
   of arbitrary endpoint destinations. G704 now blocks new unannotated sites in
   standalone gosec and golangci; root race runs the behavioral tests.
+  Four IdP-metadata sites were added by the CHAOS-87/88 fetch split
+  (`fetchSAMLMetadataOverNetwork`, `fetchOIDCDiscoveryOverNetwork`: the
+  `http.NewRequestWithContext` and `Client.Do` of each). The taint is REAL —
+  `POST /api/idp/oidc/discover` carries an admin-supplied issuer, and a SAML
+  profile's `metadata_url` is operator configuration — so these are annotated,
+  not denied. The control is two-layer and lives IN the fetching function:
+  shape regexp + `url.Parse` + scheme check + `isPrivateHostContext` refuse a
+  host that resolves private NOW, and `ssrfSafeDialContext` refuses one that
+  resolves public there and private at connect time (DNS rebinding), redirects
+  included. Evidence: `TestChaos87_SAMLMetadataURLShapeBarrier`,
+  `TestChaos87_OIDCDiscoveryURLShapeBarrier`,
+  `TestChaos87_MetadataPreflightsAreBoundedByTheRequestBudget` and the AST wall
+  `TestWall_IdPMetadataFetchersCarryTheRequestForgeryBarrier`. Residual: an
+  operator who can write a profile can still direct the appliance at any PUBLIC
+  URL; that is the feature, and it is bounded by admin RBAC plus the
+  audit-then-`saveConfigVersion` record of the write. Note for future triage —
+  gosec's SSRF analyzer declares an EMPTY sanitizer set (`analyzers/ssrf.go`),
+  so no amount of in-function validation clears G704 and an at-site annotation
+  is the only disposition the scanner accepts. The pre-split fetchers were not
+  flagged; WHY the analyzer's taint reached the new shape and not the old one
+  was not established and is not claimed here, so do not treat the earlier
+  silence as evidence that the old shape had a stronger control.
 - **Remaining gap:** other cloned transports with a guarded dialer and inherited
   proxy must be reviewed individually. This fix establishes no universal SSRF
   claim for SAML, LDAP, alerts, feeds, release catalogs or the forward proxy.

@@ -440,14 +440,14 @@ func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
 			DialContext: ssrfSafeDialContext,
 		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), http.NoBody) // #nosec G704 -- admin/operator-supplied metadata URL; the taint is real and is guarded IN THIS FUNCTION (samlMetadataURLShape + url.Parse + scheme check + isPrivateHostContext) and at connect time by ssrfSafeDialContext; gosec's SSRF analyzer models NO sanitizers, so an annotation is the only disposition. TestChaos87_SAMLMetadataURLShapeBarrier + TestWall_IdPMetadataFetchersCarryTheRequestForgeryBarrier (RISK-002).
 	if err != nil {
 		return nil, fmt.Errorf("metadata request: %w", err)
 	}
 	// Every failure below is CLASSIFIED for resolveIdPDocument's
 	// stale-if-error rule: transport and 5xx may be answered from the
 	// last-known-good cache, a 4xx/other status may not.
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- same guarded request on the ssrfSafeDialContext transport, redirects included; TestChaos87_SAMLMetadataURLShapeBarrier (RISK-002).
 	if err != nil {
 		return nil, idpFetchUnavailable(fmt.Errorf("fetch: %w", err))
 	}
