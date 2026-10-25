@@ -62,7 +62,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	// Syslog forwarding (syslog.go + ui_config.go:648).
 	oldSyslogConfigured := syslogConfigured
 	oldSyslogConfiguredAddr := syslogConfiguredAddr
-	oldGlobalSyslog := activeSyslog()
+	oldGlobalSyslog := syslogHandle()
 
 	// Configured-path readback for GET /api/stats (ui_config.go).
 	oldAuditLogConfiguredPath := auditLogConfiguredPath
@@ -81,7 +81,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 
 	syslogConfigured = ""
 	syslogConfiguredAddr = ""
-	setActiveSyslog(nil)
+	setSyslogHandle(nil)
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
 	auditLogConfiguredPath = ""
@@ -90,7 +90,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	t.Cleanup(func() {
 		// Close handles + stop goroutines the test opened on the
 		// fresh instances before restoring originals.
-		if sw := activeSyslog(); sw != nil {
+		if sw := syslogHandle(); sw != nil {
 			_ = sw.Close()
 		}
 		// The writer POINTER is restored below, but the health record is not
@@ -111,7 +111,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		_ = audit.Close() // close any handle the test-under-test opened
 		syslogConfigured = oldSyslogConfigured
 		syslogConfiguredAddr = oldSyslogConfiguredAddr
-		setActiveSyslog(oldGlobalSyslog)
+		setSyslogHandle(oldGlobalSyslog)
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
 		auditLogConfiguredPath = oldAuditLogConfiguredPath
@@ -211,8 +211,8 @@ func TestLoadObservability_EmptyConfigIsNoOp(t *testing.T) {
 	if syslogConfigured != "" {
 		t.Errorf("syslogConfigured = %q; want empty", syslogConfigured)
 	}
-	if sw := activeSyslog(); sw != nil {
-		t.Errorf("activeSyslog() = %v; want nil", sw)
+	if sw := syslogHandle(); sw != nil {
+		t.Errorf("syslogHandle() = %v; want nil", sw)
 	}
 	if globalOTLP.Enabled() {
 		t.Errorf("globalOTLP.Enabled() = true; want false")
@@ -325,8 +325,8 @@ func TestLoadObservability_SyslogUnreachableLogged(t *testing.T) {
 	if syslogConfigured != "" {
 		t.Errorf("syslogConfigured = %q; want empty after unreachable syslog", syslogConfigured)
 	}
-	if sw := activeSyslog(); sw != nil {
-		t.Errorf("activeSyslog() = %v; want nil after failed dial", sw)
+	if sw := syslogHandle(); sw != nil {
+		t.Errorf("syslogHandle() = %v; want nil after failed dial", sw)
 	}
 	// Intent must be recorded even though the connect failed, so
 	// checkSyslogFeed can surface the silently-down feed (vs "not configured").
@@ -358,8 +358,8 @@ func TestLoadObservability_SyslogSuccessSetsConfigured(t *testing.T) {
 	if syslogConfigured != cfgAddr {
 		t.Errorf("syslogConfigured = %q; want %q", syslogConfigured, cfgAddr)
 	}
-	if activeSyslog() == nil {
-		t.Error("activeSyslog() == nil after successful InitSyslog")
+	if syslogHandle() == nil {
+		t.Error("syslogHandle() == nil after successful InitSyslog")
 	}
 }
 

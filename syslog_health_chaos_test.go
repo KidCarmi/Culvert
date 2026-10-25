@@ -173,7 +173,7 @@ func armSyslogFeed(t *testing.T, addr string) {
 	syslogConfigured = addr
 
 	// CLOSE the writer this gate installed. snapshotObservabilityGlobals
-	// restores the POINTER (setActiveSyslog(old)) and nothing closes what it
+	// restores the POINTER (setSyslogHandle(old)) and nothing closes what it
 	// displaces, so without this every gate leaves a live drain goroutine
 	// behind — and the ones whose collector the gate then kills sit in the
 	// engine's 5 s reconnect loop re-dialling a dead address for the rest of
@@ -187,7 +187,7 @@ func armSyslogFeed(t *testing.T, addr string) {
 	// Cleanups run LIFO and this one is registered after the snapshot's, so it
 	// runs BEFORE the pointer is restored — the writer being closed is always
 	// the one this call installed, never a predecessor the suite still needs.
-	if installed := activeSyslog(); installed != nil {
+	if installed := syslogHandle(); installed != nil {
 		t.Cleanup(func() { _ = installed.Close() })
 	}
 }
@@ -206,13 +206,13 @@ func waitForDrops(t *testing.T, n uint64) {
 	t.Helper()
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
-		if activeSyslog().Stats().Drops >= n {
+		if syslogHandle().Stats().Drops >= n {
 			return
 		}
-		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
+		syslogHandle().WriteAudit(map[string]string{"evt": "policy.change"})
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("writer recorded %d drops; want >= %d (stats: %+v)", activeSyslog().Stats().Drops, n, activeSyslog().Stats())
+	t.Fatalf("writer recorded %d drops; want >= %d (stats: %+v)", syslogHandle().Stats().Drops, n, syslogHandle().Stats())
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ func TestChaos81_ContractRowSeesARuntimeCollectorOutage(t *testing.T) {
 	row := checkSyslogFeed()
 	if row.Status != diagFail {
 		t.Fatalf("syslog_feed = %v (%q) with a dead collector and %d drops; want fail — the pre-CHAOS-81 row reported \"forwarding is active\" here",
-			row.Status, row.Message, activeSyslog().Stats().Drops)
+			row.Status, row.Message, syslogHandle().Stats().Drops)
 	}
 	if strings.Contains(row.Message, "is active") {
 		t.Errorf("row still claims the feed is active: %q", row.Message)
@@ -389,19 +389,19 @@ func TestChaos81_RecoveryRequiresADeliveredEvent(t *testing.T) {
 	// that has already gone away can leave Delivered at 1. Waiting for
 	// "Delivered > 0" would then observe that stale success and conclude the
 	// feed recovered without a single byte having reached anything.
-	beforeDelivered := activeSyslog().Stats().Delivered
+	beforeDelivered := syslogHandle().Stats().Delivered
 
 	revived := startSyslogCollectorOn(t, col.addr)
 	defer revived.stop()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
-		if activeSyslog().Stats().Delivered > beforeDelivered {
+		syslogHandle().WriteAudit(map[string]string{"evt": "policy.change"})
+		if syslogHandle().Stats().Delivered > beforeDelivered {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if activeSyslog().Stats().Delivered <= beforeDelivered {
+	if syslogHandle().Stats().Delivered <= beforeDelivered {
 		t.Skip("collector could not be revived on the same port in this environment")
 	}
 	setSyslogHealthNowForTest(func() time.Time { return base.Add(24*time.Hour + time.Second) })
@@ -471,13 +471,13 @@ func TestChaos81_ProbeReportsTheRealOutcome(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
 
-	if outcome, detail := syslogDeliveryProbe(activeSyslog()); outcome != "delivered" {
+	if outcome, detail := syslogDeliveryProbe(syslogHandle()); outcome != "delivered" {
 		t.Errorf("healthy probe outcome = %q (%s); want \"delivered\"", outcome, detail)
 	}
 
 	col.stop()
 	waitForDrops(t, 1)
-	outcome, detail := syslogDeliveryProbe(activeSyslog())
+	outcome, detail := syslogDeliveryProbe(syslogHandle())
 	if outcome == "delivered" || outcome == "sent" {
 		t.Errorf("probe reported %q against a dead collector (%s) — the pre-CHAOS-81 endpoint answered ok:true here", outcome, detail)
 	}
@@ -559,7 +559,7 @@ func TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic(t *testing.T
 					return
 				default:
 				}
-				if sw := activeSyslog(); sw != nil {
+				if sw := syslogHandle(); sw != nil {
 					sw.WriteRequest(map[string]string{"host": "example.com"})
 					sw.WriteAudit(map[string]string{"evt": "policy.change"})
 				}
@@ -613,10 +613,10 @@ func TestChaos81_HealthyFeedStillReportsActive(t *testing.T) {
 	armSyslogFeed(t, "tcp://"+col.addr)
 
 	for i := 0; i < 20; i++ {
-		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
+		syslogHandle().WriteAudit(map[string]string{"evt": "policy.change"})
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && activeSyslog().Stats().Delivered == 0 {
+	for time.Now().Before(deadline) && syslogHandle().Stats().Delivered == 0 {
 		time.Sleep(20 * time.Millisecond)
 	}
 
@@ -704,7 +704,7 @@ func TestChaos81_ReplacedWriterDoesNotCorruptTheSuccessorsState(t *testing.T) {
 	// it: its flush window expires and it charges drops on its own counters.
 	first.stop()
 	for i := 0; i < 50; i++ {
-		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
+		syslogHandle().WriteAudit(map[string]string{"evt": "policy.change"})
 	}
 	// Captured BEFORE the re-point. How many of those 50 lines have already
 	// been charged as drops depends on when the queue fills, so the assertion
@@ -806,7 +806,7 @@ func TestChaos81_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
 	armSyslogFeed(t, "tcp://"+col.addr)
 
 	// Produce a real, historical loss, then let the feed recover.
-	sw := activeSyslog()
+	sw := syslogHandle()
 	sw.SetDeliveryObserver(nil) // isolate: this test is about the predicate
 	restore := syslog.SetNowForTest(nil)
 	defer restore()
@@ -826,15 +826,15 @@ func TestChaos81_AHealedBlipDoesNotDegradeAnIdleFeed(t *testing.T) {
 	defer revived.stop()
 
 	deadline := time.Now().Add(20 * time.Second)
-	base := activeSyslog().Stats().Delivered
+	base := syslogHandle().Stats().Delivered
 	for time.Now().Before(deadline) {
-		activeSyslog().WriteAudit(map[string]string{"evt": "policy.change"})
-		if activeSyslog().Stats().Delivered > base {
+		syslogHandle().WriteAudit(map[string]string{"evt": "policy.change"})
+		if syslogHandle().Stats().Delivered > base {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	st := activeSyslog().Stats()
+	st := syslogHandle().Stats()
 	if st.Delivered <= base {
 		t.Skip("collector could not be revived on the same port in this environment")
 	}
@@ -931,7 +931,7 @@ func TestChaos81_BackgroundServicesStartsTheHealthWatchdog(t *testing.T) {
 func TestChaos81_ProbeTracksItsOwnMessageNotTheWriterTotals(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
-	sw := activeSyslog()
+	sw := syslogHandle()
 
 	// Healthy: the probe's own line is delivered.
 	ack, queued := sw.WriteProbe("probe-1")
@@ -1011,7 +1011,7 @@ func waitDelivered(t *testing.T, sw *syslogWriter, base uint64, within time.Dura
 func TestChaos81_IdleFeedDoesNotPageOnItsFirstFreshDrop(t *testing.T) {
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
-	sw := activeSyslog()
+	sw := syslogHandle()
 	sw.SetDeliveryObserver(nil) // isolate: this test is about the predicate
 
 	sw.WriteAudit(map[string]string{"evt": "policy.change"})
@@ -1052,14 +1052,14 @@ func TestChaos81_LateWriteOnADisplacedWriterReachesItsSuccessor(t *testing.T) {
 	second := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+first.addr)
 
-	stale := activeSyslog() // loaded "just before the swap"
+	stale := syslogHandle() // loaded "just before the swap"
 	syslogConfiguredAddr = "tcp://" + second.addr
 	if err := InitSyslog("tcp://"+second.addr, "rfc3164"); err != nil {
 		t.Fatalf("re-point: %v", err)
 	}
 	syslogConfigured = "tcp://" + second.addr
 	_ = stale.Close() // make the race deterministic: the stale handle is closed
-	live := activeSyslog()
+	live := syslogHandle()
 	if live == stale {
 		t.Fatal("precondition: re-point did not install a new writer")
 	}
@@ -1103,7 +1103,7 @@ func TestChaos81_RowNeverClaimsDeliveryItCannotShow(t *testing.T) {
 	armSyslogFeed(t, "tcp://"+col.addr)
 	col.stop()
 
-	sw := activeSyslog()
+	sw := syslogHandle()
 	if err := sw.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -1172,19 +1172,19 @@ func TestChaos81_OverlappingRePointsLeaveRecordDescribingTheActiveWriter(t *test
 		syslogHealth.mu.Lock()
 		rec := syslogHealth.writer
 		syslogHealth.mu.Unlock()
-		if live := activeSyslog(); rec != live {
+		if live := syslogHandle(); rec != live {
 			t.Fatalf("round %d: health record describes a displaced writer, not the active one", round)
 		}
 	}
 	t.Cleanup(func() {
-		if sw := activeSyslog(); sw != nil {
+		if sw := syslogHandle(); sw != nil {
 			_ = sw.Close()
 		}
 	})
 	disableActiveSyslog()
 	syslogHealth.mu.Lock()
 	defer syslogHealth.mu.Unlock()
-	if activeSyslog() != nil || syslogHealth.writer != nil || syslogHealth.configured {
+	if syslogHandle() != nil || syslogHealth.writer != nil || syslogHealth.configured {
 		t.Fatal("disable did not clear the writer and the record together")
 	}
 }
@@ -1214,7 +1214,7 @@ func TestChaos81_ConfiguredButNeverConnectedIsExportedAsDown(t *testing.T) {
 	// Exactly what loadObservability does when the dial fails: intent is
 	// recorded, no Writer is published.
 	noteSyslogFailedDial("tcp://collector.invalid:601")
-	if activeSyslog() != nil {
+	if syslogHandle() != nil {
 		t.Fatal("fixture published a writer; this gate is about the case where none exists")
 	}
 
@@ -1395,7 +1395,7 @@ func TestChaos81_RePointDoesNotResetTheLossHistory(t *testing.T) {
 		t.Fatalf("re-point: %v", err)
 	}
 	t.Cleanup(func() {
-		if sw := activeSyslog(); sw != nil {
+		if sw := syslogHandle(); sw != nil {
 			_ = sw.Close()
 		}
 	})
@@ -1433,7 +1433,7 @@ func TestChaos81_RePointDoesNotResetTheLossHistory(t *testing.T) {
 // Two defects, one cause — the handler had its own idea of where the numbers
 // come from:
 //
-//   - `drops`/`panics` were read straight off `activeSyslog()`, so a runtime
+//   - `drops`/`panics` were read straight off `syslogHandle()`, so a runtime
 //     re-point reset them here while `/metrics` and the adjacent `delivered`
 //     field kept the process-lifetime totals. Reloading the admin UI erased
 //     the loss history at exactly the moment an operator re-points to
@@ -1462,7 +1462,7 @@ func TestChaos81_AdminAPIAnswersFromTheDeliverySnapshot(t *testing.T) {
 		}
 		syslogConfigured = "tcp://" + healthy.addr
 		t.Cleanup(func() {
-			if sw := activeSyslog(); sw != nil {
+			if sw := syslogHandle(); sw != nil {
 				_ = sw.Close()
 			}
 		})
@@ -1539,7 +1539,7 @@ func readSyslogAdminAPI(t *testing.T) map[string]any {
 // P1-F made a configured-but-never-connected collector VISIBLE
 // (`culvert_syslog_up 0`, a degraded row). It did not make the loss
 // COUNTABLE: with no Writer installed, both fan-outs in store.go skip at
-// `if sw := activeSyslog(); sw != nil` and charge the skipped event to
+// `if sw := syslogHandle(); sw != nil` and charge the skipped event to
 // nothing, so `culvert_syslog_drops_total` read 0 and `/healthz` carried no
 // `syslogDrops` throughout the worst outage the plane can report. An operator
 // asking "how much did I lose?" was answered "nothing" while the answer was
@@ -1696,7 +1696,7 @@ func TestChaos81_HealthzReportsTheLossMetricsReports(t *testing.T) {
 //
 // This section has had to record "walling the function is not walling the
 // path" three times already. The skip happens at
-// `if sw := activeSyslog(); sw != nil` inside store.go's two fan-outs, so a
+// `if sw := syslogHandle(); sw != nil` inside store.go's two fan-outs, so a
 // gate that calls noteSyslogEventSkipped directly proves the counter works
 // and says nothing about whether either fan-out reaches it — which is exactly
 // where the defect lived.
@@ -1707,9 +1707,9 @@ func TestChaos81_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
 	t.Cleanup(resetSyslogHealthForTest)
 
 	// An operator asked for a collector; the dial failed, so no Writer exists.
-	setActiveSyslog(nil)
+	setSyslogHandle(nil)
 	noteSyslogFailedDial("tcp://siem.invalid:514")
-	if activeSyslog() != nil {
+	if syslogHandle() != nil {
 		t.Fatal("precondition: want no active writer")
 	}
 
@@ -1726,7 +1726,7 @@ func TestChaos81_TheRealFanOutChargesEventsLostToAnUnmetIntent(t *testing.T) {
 	got := syslogFeedState().Drops
 	if got != before+2 {
 		t.Errorf("Drops = %d after one audit event and one request-log entry found no writer; want %d.\n"+
-			"Both fan-outs in store.go skip silently at `if sw := activeSyslog(); sw != nil`, so the "+
+			"Both fan-outs in store.go skip silently at `if sw := syslogHandle(); sw != nil`, so the "+
 			"compliance-loss series reads clean while every event is being lost.", got, before+2)
 	}
 }
@@ -1741,7 +1741,7 @@ func TestChaos81_FailedToConnectRowNamesTheLoss(t *testing.T) {
 	resetSyslogHealthForTest()
 	t.Cleanup(resetSyslogHealthForTest)
 
-	setActiveSyslog(nil)
+	setSyslogHandle(nil)
 	syslogConfigured = ""
 	syslogConfiguredAddr = "tcp://siem.invalid:514"
 	noteSyslogFailedDial(syslogConfiguredAddr)
@@ -1765,7 +1765,7 @@ func TestChaos81_FailedToConnectRowNamesTheLoss(t *testing.T) {
 
 // TestChaos81_SnapshotReadsTheWriterItCaptured pins that syslogFeedState reads
 // its Writer stats from the generation it captured under the lock, never from
-// a fresh activeSyslog() load.
+// a fresh syslogHandle() load.
 //
 // The record's retired totals and the writer it describes are copied together
 // under syslogHealth.mu. Re-loading the active writer AFTER releasing that lock
@@ -1786,8 +1786,8 @@ func TestChaos81_SnapshotReadsTheWriterItCaptured(t *testing.T) {
 		t.Fatalf("read syslog_health.go: %v", err)
 	}
 	body := syslogFuncBody(t, string(src), "func syslogFeedState() syslogFeedSnapshot {")
-	if strings.Contains(body, "activeSyslog()") {
-		t.Error("syslogFeedState loads activeSyslog() after releasing syslogHealth.mu — " +
+	if strings.Contains(body, "syslogHandle()") {
+		t.Error("syslogFeedState loads syslogHandle() after releasing syslogHealth.mu — " +
 			"a re-point in that window pairs a NEW writer's counters with retired totals that " +
 			"already absorbed the OLD one, so the process-lifetime totals lose a whole generation " +
 			"and culvert_syslog_drops_total goes backwards")
@@ -1802,10 +1802,10 @@ func TestChaos81_SnapshotReadsTheWriterItCaptured(t *testing.T) {
 	if !strings.Contains(body, "retiredDrops") {
 		t.Fatal("control: the extracted body is not syslogFeedState's, so the scan proves nothing")
 	}
-	// Control: activeSyslog() is still used elsewhere in the file — the rule is
+	// Control: syslogHandle() is still used elsewhere in the file — the rule is
 	// about THIS reader, not a ban on the accessor.
-	if !strings.Contains(string(src), "activeSyslog()") {
-		t.Error("control: activeSyslog() vanished from the file entirely, which is not the fix")
+	if !strings.Contains(string(src), "syslogHandle()") {
+		t.Error("control: syslogHandle() vanished from the file entirely, which is not the fix")
 	}
 }
 
@@ -2065,7 +2065,7 @@ func TestChaos81_DisabledFeedDoesNotInheritAnInFlightDegradation(t *testing.T) {
 // use to CONFIRM connectivity was the one that could contradict it.
 func TestChaos81_ProbeClassifiesTransportFromTheWriterThatServedIt(t *testing.T) {
 	armSyslogFeed(t, "udp://127.0.0.1:65533")
-	sw := activeSyslog()
+	sw := syslogHandle()
 	if sw == nil {
 		t.Fatal("precondition: no writer was installed")
 	}
@@ -2090,7 +2090,7 @@ func TestChaos81_ProbeClassifiesTransportFromTheWriterThatServedIt(t *testing.T)
 	// the only affirmative delivery evidence this endpoint can give.
 	col := startSyslogCollector(t)
 	armSyslogFeed(t, "tcp://"+col.addr)
-	tcpWriter := activeSyslog()
+	tcpWriter := syslogHandle()
 	if tcpWriter == nil {
 		t.Fatal("control precondition: no TCP writer was installed")
 	}
@@ -2226,7 +2226,7 @@ func TestChaos81_TransportClaimHasOneSource(t *testing.T) {
 			addr = fmt.Sprintf(addr, col.addr)
 		}
 		armSyslogFeed(t, addr)
-		sw := activeSyslog()
+		sw := syslogHandle()
 		if sw == nil {
 			t.Fatalf("%s: no writer installed", addr)
 		}
@@ -2291,7 +2291,7 @@ func TestChaos81_ConfigMetadataIsPublishedWithTheWriter(t *testing.T) {
 
 	agree := func(stage string) {
 		t.Helper()
-		live := activeSyslog() != nil
+		live := syslogHandle() != nil
 		named := syslogConfigured != ""
 		if live != named {
 			t.Errorf("%s: a writer is %v but syslogConfigured is %q — every config surface and "+
@@ -2471,7 +2471,7 @@ func TestChaos81_LateDropsReachTheExportedTotal(t *testing.T) {
 	// CONTROL: an ordinary delivery must move none of them. The cheapest way
 	// to pass the assertions above is to add a constant.
 	mid := syslogFeedState().Drops
-	if sw := activeSyslog(); sw != nil {
+	if sw := syslogHandle(); sw != nil {
 		_, _ = sw.Write([]byte("ordinary line")) //nolint:errcheck // control: an ordinary delivery
 	}
 	if got := syslogFeedState().Drops; got != mid {
@@ -2615,7 +2615,7 @@ func TestChaos81_DisablingAFeedExportsEveryLossItRecorded(t *testing.T) {
 		resetSyslogHealthForTest()
 		c := startSyslogCollector(t)
 		armSyslogFeed(t, "tcp://"+c.addr)
-		sw := activeSyslog()
+		sw := syslogHandle()
 		if sw == nil {
 			t.Fatal("no writer was installed")
 		}
@@ -2931,7 +2931,7 @@ var syslogWriterOnlyReader = struct{ fn, file string }{"persistLogEntry", "store
 // STRUCTURAL wall for Codex P2-17.
 //
 // syslogConfiguredTargets() released syslogPublishMu before the caller loaded
-// activeSyslog(), so a reader that needed both got a pair from two different
+// syslogHandle(), so a reader that needed both got a pair from two different
 // generations: a disable in between yielded the old address beside no writer,
 // and a re-point yielded target A beside writer B. snapshotAdminEndpoints
 // PERSISTS that pair, so the mismatch outlived the process — a restart could
@@ -2967,7 +2967,7 @@ func syslogFuncDecl(t *testing.T, file, fn string) (*token.FileSet, *ast.FuncDec
 	return fset, nil
 }
 
-// activeSyslogCallSites returns the positions of every activeSyslog() call in
+// activeSyslogCallSites returns the positions of every syslogHandle() call in
 // fd.
 func activeSyslogCallSites(fset *token.FileSet, fd *ast.FuncDecl) []string {
 	var at []string
@@ -2976,7 +2976,7 @@ func activeSyslogCallSites(fset *token.FileSet, fd *ast.FuncDecl) []string {
 		if !ok {
 			return true
 		}
-		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "activeSyslog" {
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "syslogHandle" {
 			at = append(at, fset.Position(call.Pos()).String())
 		}
 		return true
@@ -2993,7 +2993,7 @@ func TestChaos81_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 		}
 		checked++
 		for _, at := range activeSyslogCallSites(fset, fd) {
-			t.Errorf("%s: %s calls activeSyslog() at %s\n\t"+
+			t.Errorf("%s: %s calls syslogHandle() at %s\n\t"+
 				"the writer must come from syslogConfiguredSnapshot() or from syslogFeedState()'s "+
 				"captured writer, in the same critical section as the target it is reported or "+
 				"persisted beside; a separate load belongs to a different generation "+
@@ -3011,7 +3011,7 @@ func TestChaos81_ConfigMetadataReadersTakeTheWriterFromTheSnapshot(t *testing.T)
 		t.Fatalf("control: %s is gone; the wall above proves nothing", syslogWriterOnlyReader.fn)
 	}
 	if len(activeSyslogCallSites(fset, probe)) == 0 {
-		t.Fatal("control: the walk cannot find a known activeSyslog() call, so the wall above proves nothing")
+		t.Fatal("control: the walk cannot find a known syslogHandle() call, so the wall above proves nothing")
 	}
 }
 
@@ -3430,7 +3430,7 @@ func TestChaos81_PendingDialIsNeitherDegradedNorPaged(t *testing.T) {
 	// dial. noteSyslogDialResolved is deliberately NOT called — that is the
 	// state the process is in while InitSyslog is blocked in connect().
 	noteSyslogIntent("tcp://collector.example:601")
-	if activeSyslog() != nil {
+	if syslogHandle() != nil {
 		t.Fatal("fixture published a writer; this gate is about the window before one exists")
 	}
 
@@ -3549,7 +3549,7 @@ func TestChaos81_SuccessfulDialResolvesThePendingIntent(t *testing.T) {
 		t.Fatalf("InitSyslog(%q): %v", addr, err)
 	}
 	t.Cleanup(func() {
-		if installed := activeSyslog(); installed != nil {
+		if installed := syslogHandle(); installed != nil {
 			_ = installed.Close() //nolint:errcheck // releasing the writer this gate installed
 		}
 	})
@@ -3728,7 +3728,7 @@ func TestChaos81_TheSyslogAPIReadsOneGeneration(t *testing.T) {
 		if !ok {
 			return true
 		}
-		if id.Name == "syslogConfiguredSnapshot" || id.Name == "activeSyslog" {
+		if id.Name == "syslogConfiguredSnapshot" || id.Name == "syslogHandle" {
 			offenders = append(offenders, id.Name+" at "+fset.Position(call.Pos()).String())
 		}
 		return true
@@ -3743,7 +3743,7 @@ func TestChaos81_TheSyslogAPIReadsOneGeneration(t *testing.T) {
 		t.Fatalf("control: %s is gone; the wall above proves nothing", syslogWriterOnlyReader.fn)
 	}
 	if len(activeSyslogCallSites(fsetP, probe)) == 0 {
-		t.Fatalf("control: the AST walk found no activeSyslog() call in %s, so it would pass this wall however apiSyslogConfig were written", syslogWriterOnlyReader.fn)
+		t.Fatalf("control: the AST walk found no syslogHandle() call in %s, so it would pass this wall however apiSyslogConfig were written", syslogWriterOnlyReader.fn)
 	}
 }
 

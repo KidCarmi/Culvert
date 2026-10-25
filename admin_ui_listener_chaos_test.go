@@ -73,6 +73,27 @@ func newTestAdminServer() *http.Server {
 	return &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 }
 
+// startTestAdminUI runs serveAdminUIWithRetry for the life of the test. The
+// cleanup closes stop AND the server, then waits for the goroutine to return:
+// stop is only observed between attempts, so a listener that has bound would
+// otherwise keep serving — and logging through the global logger — into
+// whichever test runs next (a -race failure in an unrelated logger swap).
+func startTestAdminUI(t *testing.T, port int, certFile, keyFile string) {
+	t.Helper()
+	srv := newTestAdminServer()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serveAdminUIWithRetry(srv, port, certFile, keyFile, stop)
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		_ = srv.Close()
+		<-done
+	})
+}
+
 // captureAdminUIAlerts swaps the alert seam so a test observes transitions
 // synchronously rather than racing the process-global alert sink.
 func captureAdminUIAlerts(t *testing.T) *[]string {
@@ -156,9 +177,7 @@ func TestChaos57_OccupiedPortDoesNotKillTheProcess(t *testing.T) {
 	defer release()
 
 	noteAdminUIConfigured(port)
-	stop := make(chan struct{})
-	defer close(stop)
-	go serveAdminUIWithRetry(newTestAdminServer(), port, "", "", stop)
+	startTestAdminUI(t, port, "", "")
 
 	waitForAdminUI(t, 5*time.Second, "a recorded bind failure", func() bool {
 		return adminUIListenerState().Total > 0
@@ -205,9 +224,7 @@ func TestChaos57_UnreadableCertificateDoesNotKillTheProcess(t *testing.T) {
 	release() // free the port: the ONLY fault here is the certificate
 
 	noteAdminUIConfigured(port)
-	stop := make(chan struct{})
-	defer close(stop)
-	go serveAdminUIWithRetry(newTestAdminServer(), port, certPath, keyPath, stop)
+	startTestAdminUI(t, port, certPath, keyPath)
 
 	waitForAdminUI(t, 5*time.Second, "a recorded certificate failure", func() bool {
 		return adminUIListenerState().Total > 0
@@ -229,9 +246,7 @@ func TestChaos57_ListenerRebindsWhenThePortFrees(t *testing.T) {
 
 	port, release := occupyPort(t)
 	noteAdminUIConfigured(port)
-	stop := make(chan struct{})
-	defer close(stop)
-	go serveAdminUIWithRetry(newTestAdminServer(), port, "", "", stop)
+	startTestAdminUI(t, port, "", "")
 
 	waitForAdminUI(t, 5*time.Second, "a recorded bind failure", func() bool {
 		return adminUIListenerState().Total > 0
@@ -288,9 +303,7 @@ func TestChaos57_CertificateRotationSelfHeals(t *testing.T) {
 	port, release := occupyPort(t)
 	release()
 	noteAdminUIConfigured(port)
-	stop := make(chan struct{})
-	defer close(stop)
-	go serveAdminUIWithRetry(newTestAdminServer(), port, certPath, keyPath, stop)
+	startTestAdminUI(t, port, certPath, keyPath)
 
 	waitForAdminUI(t, 5*time.Second, "the certificate failure to be recorded", func() bool {
 		return adminUIListenerState().Total > 0
@@ -702,9 +715,7 @@ func TestChaos57_HealthyPathIsUnchanged(t *testing.T) {
 	release()
 
 	noteAdminUIConfigured(port)
-	stop := make(chan struct{})
-	defer close(stop)
-	go serveAdminUIWithRetry(newTestAdminServer(), port, "", "", stop)
+	startTestAdminUI(t, port, "", "")
 
 	waitForAdminUI(t, 5*time.Second, "the listener to bind", func() bool {
 		return adminUIListenerState().Serving

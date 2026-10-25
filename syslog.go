@@ -15,7 +15,7 @@ import (
 )
 
 // syslogWriter is the package-main alias for the relocated engine so existing
-// unqualified references (the globalSyslog declaration, the coverage test's
+// unqualified references (the globalSyslogHandle declaration, the coverage test's
 // constructor) stay unchanged.
 type syslogWriter = syslog.Writer
 
@@ -42,33 +42,61 @@ func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
 	return sw, nil
 }
 
-// globalSyslog holds the active syslog writer; nil when syslog is not
-// configured. Read through activeSyslog, written through setActiveSyslog —
-// never touched directly.
+// globalSyslogHandle holds the active syslog writer; nil when syslog is not
+// configured. It is an atomic.Pointer, not a plain variable, for two reasons
+// that the plain variable got wrong (CHAOS-78, closing §42 OBS-1).
 //
-// It is an atomic.Pointer because this handle is MUTATED AT RUNTIME by the
-// admin plane (POST /api/syslog re-points or disables forwarding) while it is
-// READ ON THE REQUEST PATH: store.go's recordRequest fan-out reaches
-// `WriteRequest` for every proxied request and the audit fan-out reaches
-// `WriteAudit` for every admin action, and the diagnostics row, the /metrics
-// scrape and the /healthz probe read it from their own handler goroutines.
-// As a bare `*syslogWriter` that was an unsynchronised concurrent
-// read/write of a pointer, confirmed under `-race` against the real
-// `apiSyslogConfig` and `recordRequest` shapes. Nothing in the suite happened
-// to exercise both at once, which is the only reason it had not been reported.
+// It is WRITTEN at runtime from the admin handler goroutine (InitSyslog below,
+// via the apiSyslogConfig POST; the disable branch stores nil) and READ on the
+// proxy request path at every request-log record (store.go's persistLogEntry
+// chokepoint) and on the audit SIEM hook (store.go's audit.SetSIEM closure).
+// As a plain variable the nil check and the dereference were two separate
+// unsynchronized loads of the same global, so a request goroutine could pass
+// the check and then dereference the nil the disable branch had just stored —
+// a data race whose crash the proxy crash guard contains per request, but
+// which still aborts an in-flight request or tunnel over a routine
+// "disable SIEM forwarding" click.
 //
-// A pointer swap is all that is required: the Writer it points at is already
-// internally synchronised, and every reader wants the generation that was live
-// when it looked. Callers therefore load ONCE into a local and use that —
-// `activeSyslog() != nil` followed by a second `activeSyslog()` call is a
-// check-then-act against a handle the admin plane can clear in between.
-var globalSyslog atomic.Pointer[syslogWriter]
+// The second reason is the one a nil guard would NOT have fixed. The engine
+// sets its queue in startAsync, AFTER the struct literal (internal/syslog), and
+// treats a nil queue as "deliver synchronously" — a path that holds the
+// writer's mutex across three serialized network ops (write, dial, write),
+// which deliverLine's own comment puts at ~15 s worst case. A plain
+// pointer write carries no release edge, so on a weakly ordered target (this
+// appliance ships linux/arm64) a request goroutine could observe a non-nil
+// writer whose queue was still zero, fall into that synchronous path, and pay
+// ~15 s on the data path with every other logging caller queued behind it —
+// precisely the proxy-wide stall the async design and the engine's own
+// TestAsync_WedgedCollectorNeverBlocksCaller exist to prevent, reached not
+// through the engine but through the pointer holding it.
+//
+// atomic.Pointer's Store/Load is the release/acquire edge that closes both, and
+// it is what this codebase already does for every other hot-path-read,
+// runtime-reconfigured global: globalLogStore (logstore.go), logSink
+// (logger.go), obs.sink (internal/obs) and the syslog engine's own
+// panicObserver. The pointer holding the engine was the one left plain.
+//
+// Access it through syslogHandle/setSyslogHandle, never directly: a caller that
+// needs both a nil check and a method call must hold ONE loaded value in a
+// local, which is what those helpers make the natural thing to write.
+// TestChaos78_Wall_SyslogHandleIsAtomic pins the declaration.
+var globalSyslogHandle atomic.Pointer[syslogWriter]
 
-// activeSyslog returns the live writer, or nil when forwarding is off.
-func activeSyslog() *syslogWriter { return globalSyslog.Load() }
+// syslogHandle loads the active syslog writer, or nil when forwarding is off.
+//
+// Read it ONCE into a local and use that local for both the nil test and every
+// subsequent call. Two syslogHandle() calls in one expression are two separate
+// loads and reintroduce exactly the window this type exists to close.
+func syslogHandle() *syslogWriter { return globalSyslogHandle.Load() }
 
-// setActiveSyslog publishes a writer (or nil to disable forwarding).
-func setActiveSyslog(sw *syslogWriter) { globalSyslog.Store(sw) }
+// setSyslogHandle publishes sw as the active writer and returns the writer it
+// displaced, or nil if there was none. The caller owns closing the returned
+// writer: the engine's drainLoop exits ONLY via Close, so a displaced writer
+// that is never closed leaks its delivery goroutine and its collector socket
+// for the life of the process (CHAOS-78).
+func setSyslogHandle(sw *syslogWriter) (displaced *syslogWriter) {
+	return globalSyslogHandle.Swap(sw)
+}
 
 // syslogPublishMu makes "publish the active writer" and "install the health
 // record that describes it" ONE transition. They used to be two steps, so two
@@ -79,8 +107,6 @@ func setActiveSyslog(sw *syslogWriter) { globalSyslog.Store(sw) }
 // Only the publication is serialized; the dial happens before the lock.
 var syslogPublishMu sync.Mutex
 
-// disableActiveSyslog clears the active writer and the health record as one
-// serialized transition, releasing the writer it displaced.
 // syslogLateDrops is the engine's process-lifetime count of losses charged to
 // a Writer whose totals had already been retired — see internal/syslog's
 // lateDrops. Wrapped here so the health plane has one local name for the
@@ -105,7 +131,7 @@ func syslogLateDrops() uint64 { return syslog.LateDrops() }
 //
 // A caller that needs more than one of these must take them from here. Pairing
 // a target from a config-metadata read with a separately-loaded
-// activeSyslog() is a read that does not participate in the publication
+// syslogHandle() is a read that does not participate in the publication
 // transition: a disable landing between the two yields the old address beside
 // no writer (so an omnibus settings save persists a target the operator has
 // just switched off, and the next restart re-enables it), and a re-point
@@ -116,7 +142,7 @@ func syslogLateDrops() uint64 { return syslog.LateDrops() }
 func syslogConfiguredSnapshot() (connected, intended string, sw *syslogWriter) {
 	syslogPublishMu.Lock()
 	defer syslogPublishMu.Unlock()
-	return syslogConfigured, syslogConfiguredAddr, globalSyslog.Load()
+	return syslogConfigured, syslogConfiguredAddr, globalSyslogHandle.Load()
 }
 
 // noteSyslogConfiguredIntent records the target an operator asked for, before
@@ -128,9 +154,11 @@ func noteSyslogConfiguredIntent(addr string) {
 	syslogPublishMu.Unlock()
 }
 
+// disableActiveSyslog clears the active writer and the health record as one
+// serialized transition, releasing the writer it displaced.
 func disableActiveSyslog() {
 	syslogPublishMu.Lock()
-	old := globalSyslog.Swap(nil)
+	old := setSyslogHandle(nil)
 	noteSyslogForwardingDisabled()
 	// The config metadata is part of the SAME transition as the writer.
 	// It used to be cleared by the admin handler after this call returned,
@@ -178,7 +206,7 @@ func InitSyslog(addr, syslogFmt string) error {
 	// swap makes "publish the new one and hand me exactly the one I displaced"
 	// a single step, so every displaced writer is released exactly once.
 	syslogPublishMu.Lock()
-	releaseReplacedSyslogWriter(globalSyslog.Swap(sw), sw)
+	releaseReplacedSyslogWriter(setSyslogHandle(sw), sw)
 	noteSyslogWriterInstalled(sw, addr)
 	// Published with the writer, not by the caller afterwards — see
 	// disableActiveSyslog for the interleaving that made the two disagree.
@@ -195,9 +223,9 @@ func InitSyslog(addr, syslogFmt string) error {
 // releaseReplacedSyslogWriter closes the Writer that InitSyslog is about to
 // replace (CHAOS-81).
 //
-// Overwriting globalSyslog used to be the whole handover, which stranded the
-// old Writer's drain goroutine parked forever on a queue nobody can reach any
-// more, holding its collector socket OPEN. Measured against the pre-fix tree:
+// Overwriting the published handle used to be the whole handover, which
+// stranded the old Writer's drain goroutine parked forever on a queue nobody
+// can reach any more, holding its collector socket OPEN. Measured against the pre-fix tree:
 // +1 goroutine and +1 file descriptor per re-init, with the connection to the
 // abandoned collector still ESTABLISHED (no EOF at the far end) — a phantom
 // session that many SIEMs count against a per-source connection licence.

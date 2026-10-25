@@ -1597,7 +1597,25 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		// M5: recent role-transition history (promotions + self-fences), newest
 		// first. Raw facts for the HA panel; empty when nothing has transitioned.
 		resp["failover_events"] = globalHAFailoverRing.Load().list()
-		if status.Enabled && status.Role == "leader" {
+		// SEC-HATOKEN-1 — deploy_cmd embeds the live HA join token, so it is
+		// ADMIN material even though the panel itself is viewer-readable.
+		//
+		// That token is the SOLE credential for the HASync RPC
+		// (controlplane_server.go: VerifyToken is the only gate, and the CP
+		// listener uses tls.VerifyClientCertIfGiven so no client certificate is
+		// required). HASync answers with the exported cluster state, the full
+		// published ConfigSnapshot, and the cluster CA PRIVATE KEY — wrapped
+		// under PBKDF2 of that same token, i.e. under a secret the caller now
+		// holds. With the cluster CA key an attacker can mint node certificates
+		// the CP trusts and enroll as a data plane. The command string also
+		// discloses the gRPC address and the CP TLS cert/key/CA paths.
+		//
+		// So a read-only viewer could escalate to cluster-trust compromise. The
+		// field is suppressed per ROLE rather than by raising the route's
+		// MinRole, which would drop the HA panel for operators and viewers
+		// altogether (a GUI-parity regression). The POST path's own deploy_cmd
+		// is already behind requireRole(RoleAdmin) and is unchanged.
+		if status.Enabled && status.Role == "leader" && uiRole(r).HasRole(RoleAdmin) {
 			resp["deploy_cmd"] = haDeployCommand()
 		}
 		if status.Enabled && status.Role == "standby" {

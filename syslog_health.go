@@ -6,8 +6,8 @@ package main
 // # Why this file exists
 //
 // `internal/syslog` carries the customer's SECURITY RECORD off the box: every
-// `auditEvent` (store.go `globalSyslog.WriteAudit`) and every request-log entry
-// (`globalSyslog.WriteRequest`). For a great many enterprises the SIEM is the
+// `auditEvent` (store.go audit hook, `WriteAudit`) and every request-log entry
+// (`WriteRequest`). For a great many enterprises the SIEM is the
 // record of RECORD — the local JSONL file is rotated at 50 MB with one archive
 // and is never collected — so a collector that stops receiving is a hole in the
 // compliance trail, not a monitoring inconvenience. That is the CWE-778 /
@@ -251,7 +251,7 @@ type syslogHealthRecord struct {
 	retiring []retiringSyslogWriter
 	// writer is the Writer this record describes. Publication of the active
 	// writer and installation of this record are one serialized transition
-	// (syslogPublishMu), so writer == activeSyslog() whenever neither is
+	// (syslogPublishMu), so writer == syslogHandle() whenever neither is
 	// mid-update.
 	writer *syslogWriter
 
@@ -515,7 +515,7 @@ func settleRetiredSyslogWritersLocked() {
 // Without it the compliance-loss series this file exists to publish reads ZERO
 // throughout the worst outage it can report. P1-F made that state visible
 // (`culvert_syslog_up 0`, a degraded row), but every event lost to it was
-// skipped at `if sw := activeSyslog(); sw != nil` in store.go and charged to
+// skipped at `if sw := syslogHandle(); sw != nil` in store.go and charged to
 // nothing: `culvert_syslog_drops_total` stayed 0, `/healthz` carried no
 // `syslogDrops`, and an operator asking "how much did I lose?" was answered
 // "nothing" while the answer was "everything" (Codex P2, PR #1494).
@@ -1135,7 +1135,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	snap.Drops = retiredDrops + syslogSkippedNoWriter.Load() + syslogLateDrops()
 	snap.Panics = retiredPanics
 	// The writer the RECORD describes, captured above under the same lock as
-	// the retired totals — never a fresh activeSyslog() load.
+	// the retired totals — never a fresh syslogHandle() load.
 	//
 	// Re-loading here reads a writer that may belong to a LATER generation
 	// than the totals beside it: a re-point landing between the capture and
@@ -1146,7 +1146,7 @@ func syslogFeedState() syslogFeedSnapshot {
 	// P2-4 exists to prevent, re-entering through a reader that does not
 	// participate in syslogPublishMu (Codex P2, PR #1494).
 	//
-	// `described` and `activeSyslog()` are the same writer in steady state,
+	// `described` and `syslogHandle()` are the same writer in steady state,
 	// because publication and health installation are one serialized
 	// transition (P2-2); using the captured one makes the snapshot
 	// internally consistent by construction rather than by timing, and it

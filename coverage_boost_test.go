@@ -519,9 +519,9 @@ func TestApiLogs_SourceFile(t *testing.T) {
 // ── Syslog test endpoint (ui.go) ────────────────────────────────────────────
 
 func TestAPISyslogTest_NotConfigured(t *testing.T) {
-	oldSyslog := activeSyslog()
-	setActiveSyslog(nil)
-	defer func() { setActiveSyslog(oldSyslog) }()
+	oldSyslog := syslogHandle()
+	setSyslogHandle(nil)
+	defer setSyslogHandle(oldSyslog)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/syslog/test", nil)
 	w := httptest.NewRecorder()

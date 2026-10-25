@@ -579,7 +579,8 @@
           "source": "docs/agent-context/README.md",
           "section": "proxy-policy-and-scanning"
         }
-      ]
+      ],
+      "errata": "docs/agent-context/errata.md#oversize-host-refusal-reporting"
     },
     {
       "id": "claude-main-L199-L199",

@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -123,6 +124,16 @@ type Writer struct {
 	// or delivered to — the collector the operator has just replaced. That
 	// keeps the loss accounting on the LIVE writer every health surface reads.
 	successor atomic.Pointer[Writer]
+
+	// inFlight counts senders between registering and finishing their enqueue.
+	// Close waits for it to reach zero BEFORE telling drainLoop to stop, which
+	// is what stops a sender that already passed the closed check from
+	// enqueueing into a queue whose drain goroutine has since exited. Without
+	// it such a line is neither delivered nor counted in Drops — silent loss,
+	// invisible on every surface (CHAOS-78, Codex round 1).
+	// sendMu (above) now provides the same exclusion; the registration is
+	// kept so Close's bounded waitForSenders still observes every sender.
+	inFlight atomic.Int64
 }
 
 // DialTimeout bounds the ONE blocking step in NewWriter: the connect. It is
@@ -379,6 +390,11 @@ const queueCap = 2048
 // queueCap × writeTimeout against a wedged collector.
 const flushTimeout = 1 * time.Second
 
+// senderDrainTimeout bounds Close's wait for in-flight senders to finish
+// enqueueing (see waitForSenders). Senders in that window do CPU work and a
+// non-blocking send only, so this is a safety bound and not an expected cost.
+const senderDrainTimeout = 1 * time.Second
+
 // closeWait bounds how long Close waits for the drain goroutine to finish its
 // flush. Generous enough for the flush window plus one in-flight write; a
 // fully wedged collector cycle can outlast it, in which case Close returns and
@@ -562,6 +578,16 @@ func (s *Writer) send(pri int, msg string) {
 func (s *Writer) tryEnqueue(item queuedLine) enqueueResult {
 	s.sendMu.RLock()
 	defer s.sendMu.RUnlock()
+	// Register BEFORE reading closed, and hold the registration across the
+	// enqueue (CHAOS-78). sendMu above is what makes the check-and-enqueue
+	// atomic with Close; the registration is what Close's waitForSenders
+	// reads. Close stores closed, then waits for inFlight to drain, then
+	// closes stop — so a sender visible to that wait either loses the race and
+	// is refused below (its caller hands the line off or counts it), or wins
+	// it and has its line already on the queue when drainLoop is told to
+	// flush. Either way the line is accounted for.
+	s.inFlight.Add(1)
+	defer s.inFlight.Add(-1)
 	if s.closed.Load() {
 		return enqClosed
 	}
@@ -1377,12 +1403,33 @@ func (s *Writer) Close() error {
 	s.sendMu.Lock()
 	s.closed.Store(true)
 	s.sendMu.Unlock()
+	s.waitForSenders()
 	s.closeOnce.Do(func() { close(s.stop) })
 	select {
 	case <-s.done:
 	case <-time.After(closeWait):
 	}
 	return nil
+}
+
+// waitForSenders blocks until no sender sits between its registration and its
+// enqueue, so closing stop cannot strand a line on an abandoned queue. closed
+// is already true when this runs, so no NEW sender can reach the enqueue; the
+// ones being waited for do only CPU work (formatMsg) and a non-blocking select,
+// never a syscall, so this settles in microseconds.
+//
+// It is nonetheless bounded: a wait that cannot finish must not be able to hang
+// shutdown. On expiry the pre-CHAOS-78 behavior resumes for whatever is still
+// in flight, which is a line that may go unaccounted — strictly better than
+// hanging, and recorded as the residual.
+func (s *Writer) waitForSenders() {
+	deadline := time.Now().Add(senderDrainTimeout)
+	for s.inFlight.Load() > 0 {
+		if time.Now().After(deadline) {
+			return
+		}
+		runtime.Gosched()
+	}
 }
 
 // Format returns the syslog message format ("rfc3164" or "rfc5424").

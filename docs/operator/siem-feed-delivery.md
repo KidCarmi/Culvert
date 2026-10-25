@@ -506,6 +506,10 @@ swap so two concurrent re-points cannot both displace the same writer. There is
 no operator-visible behaviour change; re-pointing the collector under load is
 simply safe now where before it was undefined.
 
+The pointer conversion itself also landed independently as CHAOS-78
+(`roadmap/CHAOS-ENGINEERING-REVIEW.md` §45), which merged first; the tree uses
+its `globalSyslogHandle` / `syslogHandle` / `setSyslogHandle` names.
+
 ---
 
 ## Related
@@ -515,4 +519,4 @@ simply safe now where before it was undefined.
 - `roadmap/CHAOS-ENGINEERING-REVIEW.md` §13 (ST-8, local audit write loss) and
   §30 (CHAOS-61, DP→CP audit push drops) — the other two members of this
   compliance-record family
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §45 — the CHAOS-81 write-up
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53 — the CHAOS-81 write-up
