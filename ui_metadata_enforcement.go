@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -161,8 +162,110 @@ func c2CounterSnapshot() c2Counters {
 // It mirrors *http.ServeMux's longest-prefix match semantics so the
 // C2 middleware sees the same route dispatch decision as the mux.
 type metadataIndex struct {
-	exact  map[string]uiRouteMetadata // exact path → metadata
-	prefix []uiRouteMetadata          // sorted by len(Path) DESC for longest match
+	exact    map[string]uiRouteMetadata // exact path → metadata
+	wildcard []wildcardRoute            // Go 1.22 "{name}" patterns, most specific first
+	prefix   []uiRouteMetadata          // sorted by len(Path) DESC for longest match
+}
+
+// wildcardRoute is one uiRoutes entry whose ServeMux pattern carries a
+// "{name}" segment, pre-split so Lookup compares segments instead of
+// re-splitting the pattern on every request.
+//
+// SEC-C2WILDCARD-1. Before this existed, a pattern such as
+// "/api/support/bundles/{id}" was stored in the EXACT map, where the
+// literal "{id}" can never equal the "csb_…" a real request carries. The
+// lookup therefore missed, fell through the prefix list and resolved to the
+// "/" catch-all — whose entry is Public: true, RolePublic. For all ten
+// wildcard routes (the support-bundle download, sealed-export, delete,
+// manifest and TAC upload-consent surfaces, plus
+// "/api/support/recipients/{name}") that silently disabled C2 role
+// enforcement, the C4 role-divergence observation and the C2c audit-gap
+// check — and because Lookup still answered true, c2ShadowMissingMetaTotal
+// never incremented, so the drift was invisible in metrics too.
+//
+// Not exploitable as it stood: every one of those handlers carries its own
+// handler-level requireRole, so what was lost is the second layer, not the
+// only one. The mux itself resolves these patterns correctly (they are
+// registered with Go 1.22 wildcards in ui_support.go); it was only this
+// mirror that did not.
+type wildcardRoute struct {
+	meta uiRouteMetadata
+	segs []string // pattern segments; a "{…}" segment matches any one segment
+}
+
+// patternSegments splits a ServeMux pattern or request path into segments,
+// dropping the empty leading one. "/a/b" → ["a","b"].
+func patternSegments(p string) []string {
+	return strings.Split(strings.TrimPrefix(p, "/"), "/")
+}
+
+// isWildcardSegment reports whether a pattern segment is a "{name}"
+// placeholder. The trailing-match form "{name...}" is included: it is matched
+// as a prefix below, the way ServeMux matches it.
+func isWildcardSegment(s string) bool {
+	return len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}'
+}
+
+// requestSegments splits a request path into the segments *http.ServeMux
+// matches against: the ESCAPED path, split on "/", with each segment
+// unescaped ON ITS OWN.
+//
+// Doing it in that order is the whole point, and both halves are load-bearing
+// (verified against go1.26.9's mux):
+//
+//   - Splitting the DECODED r.URL.Path is wrong, because %2F has already
+//     become a "/" there. The mux routes "/api/support/bundles/foo%2Fbar" to
+//     "/api/support/bundles/{id}" with id="foo/bar", while the decoded path
+//     reads as five segments and matched nothing here — falling through to
+//     the public "/" catch-all, which is exactly the SEC-C2WILDCARD-1 hole
+//     this index exists to close (Codex P2 + CodeRabbit, PR #1656).
+//   - Matching the RAW escaped text is also wrong, in the other direction: the
+//     mux unescapes each segment before comparing it to a literal, so
+//     ".../csb_abc/appro%76e" really does reach the "{id}/approve" route. A
+//     raw comparison would miss it and fall back to "/" — the same loss, via
+//     the opposite mistake.
+//
+// A segment whose escaping is malformed is left as-is rather than dropped:
+// the worst case is a miss, never a wrong route.
+func requestSegments(escapedPath string) []string {
+	segs := strings.Split(strings.TrimPrefix(escapedPath, "/"), "/")
+	for i, seg := range segs {
+		if !strings.Contains(seg, "%") {
+			continue
+		}
+		if unescaped, err := url.PathUnescape(seg); err == nil {
+			segs[i] = unescaped
+		}
+	}
+	return segs
+}
+
+// matches reports whether the already-split request segments belong to this
+// wildcard pattern, using the same semantics as *http.ServeMux: a "{name}"
+// placeholder matches exactly one NON-EMPTY segment, "{name...}" matches one
+// or more trailing segments, and every literal segment must match
+// byte-for-byte.
+func (w wildcardRoute) matches(got []string) bool {
+	for i, seg := range w.segs {
+		if isWildcardSegment(seg) && strings.HasSuffix(seg, "...}") {
+			// Trailing multi-segment wildcard: everything left must be
+			// non-empty, and it is the last pattern segment by construction.
+			return i < len(got) && got[i] != ""
+		}
+		if i >= len(got) {
+			return false
+		}
+		if isWildcardSegment(seg) {
+			if got[i] == "" {
+				return false // "{id}" does not match an empty segment
+			}
+			continue
+		}
+		if got[i] != seg {
+			return false
+		}
+	}
+	return len(got) == len(w.segs)
 }
 
 // buildMetadataIndex constructs the index from the global uiRoutes.
@@ -176,10 +279,17 @@ type metadataIndex struct {
 // catch-all fallback on every other unmatched path). The prefix list
 // is sorted by len(Path) DESC, so "/" is always tried LAST and never
 // shadows a more-specific prefix.
+//
+// A pattern carrying a "{name}" segment goes to the wildcard list instead of
+// the exact map — see wildcardRoute for what storing it as an exact literal
+// cost. It is still registered in the exact map as well, so a request for the
+// literal pattern text resolves to its own route rather than to the
+// catch-all.
 func buildMetadataIndex() *metadataIndex {
 	idx := &metadataIndex{
-		exact:  make(map[string]uiRouteMetadata, len(uiRoutes)),
-		prefix: make([]uiRouteMetadata, 0, 8),
+		exact:    make(map[string]uiRouteMetadata, len(uiRoutes)),
+		wildcard: make([]wildcardRoute, 0, 16),
+		prefix:   make([]uiRouteMetadata, 0, 8),
 	}
 	for _, r := range uiRoutes {
 		switch {
@@ -187,27 +297,79 @@ func buildMetadataIndex() *metadataIndex {
 			// Catch-all — register in BOTH maps.
 			idx.exact[r.Path] = r
 			idx.prefix = append(idx.prefix, r)
+		case strings.Contains(r.Path, "{"):
+			idx.exact[r.Path] = r
+			idx.wildcard = append(idx.wildcard, wildcardRoute{meta: r, segs: patternSegments(r.Path)})
 		case strings.HasSuffix(r.Path, "/"):
 			idx.prefix = append(idx.prefix, r)
 		default:
 			idx.exact[r.Path] = r
 		}
 	}
+	// Most specific first: more segments, then more LITERAL segments, then
+	// the longer pattern. Two patterns of the same shape can never both match
+	// one path (their literals would have to be identical), so the order only
+	// has to be deterministic, not clever.
+	sort.Slice(idx.wildcard, func(i, j int) bool {
+		a, b := idx.wildcard[i], idx.wildcard[j]
+		if len(a.segs) != len(b.segs) {
+			return len(a.segs) > len(b.segs)
+		}
+		if la, lb := literalSegCount(a.segs), literalSegCount(b.segs); la != lb {
+			return la > lb
+		}
+		return a.meta.Path > b.meta.Path
+	})
 	sort.Slice(idx.prefix, func(i, j int) bool {
 		return len(idx.prefix[i].Path) > len(idx.prefix[j].Path)
 	})
 	return idx
 }
 
+// literalSegCount counts the non-placeholder segments of a split pattern.
+func literalSegCount(segs []string) int {
+	n := 0
+	for _, s := range segs {
+		if !isWildcardSegment(s) {
+			n++
+		}
+	}
+	return n
+}
+
 // Lookup returns the uiRouteMetadata that owns path. It mirrors
-// *http.ServeMux's resolution: try exact match first, then the longest
-// trailing-slash prefix.
+// *http.ServeMux's resolution: exact match first, then the most specific
+// "{name}" pattern, then the longest trailing-slash prefix.
 //
 // Returns (zero, false) for unknown paths. Callers MUST NOT block the
 // request on a miss — see c2EvaluateAndLog.
+//
+// This form splits path itself, which is right for a caller holding a plain
+// path (a pattern literal, a test case, a recorded decision). A caller
+// resolving a LIVE request must use LookupEscaped instead, so an encoded
+// slash is matched the way the mux matches it.
 func (idx *metadataIndex) Lookup(path string) (uiRouteMetadata, bool) {
+	return idx.lookup(path, patternSegments(path))
+}
+
+// LookupEscaped resolves a live request from the same input *http.ServeMux
+// uses: r.URL.EscapedPath() for segment matching, with the decoded r.URL.Path
+// kept for the exact and prefix tiers so their existing behaviour is
+// untouched. See requestSegments for why the escaped form is required.
+func (idx *metadataIndex) LookupEscaped(escapedPath, decodedPath string) (uiRouteMetadata, bool) {
+	return idx.lookup(decodedPath, requestSegments(escapedPath))
+}
+
+// lookup is the shared resolution order. path feeds the exact and prefix
+// tiers; segs feeds the wildcard tier.
+func (idx *metadataIndex) lookup(path string, segs []string) (uiRouteMetadata, bool) {
 	if m, ok := idx.exact[path]; ok {
 		return m, true
+	}
+	for _, w := range idx.wildcard {
+		if w.matches(segs) {
+			return w.meta, true
+		}
 	}
 	for _, m := range idx.prefix {
 		if strings.HasPrefix(path, m.Path) {
@@ -276,7 +438,7 @@ type c2Decision struct {
 func c2Evaluate(r *http.Request, idx *metadataIndex) c2Decision {
 	d := c2Decision{Path: r.URL.Path, Method: r.Method, SessionRole: uiRole(r)}
 
-	meta, found := idx.Lookup(r.URL.Path)
+	meta, found := idx.LookupEscaped(r.URL.EscapedPath(), r.URL.Path)
 	if !found {
 		d.Reason = "no metadata entry"
 		return d

@@ -106,25 +106,21 @@ func uploadQueuePath(bundleID string) string {
 	return filepath.Join(uploadQueueDir(), bundleID+".json")
 }
 
-// saveUploadQueueEntryLocked atomically persists one entry at 0600. Caller holds
-// uploadQueueMu. The bundle id is validated against supportBundleIDRe so the
-// filename can never traverse.
+// saveUploadQueueEntryLocked durably persists one entry at 0600 through the
+// fileutil.AtomicWrite chokepoint. Caller holds uploadQueueMu. The bundle id is
+// validated against supportBundleIDRe so the filename can never traverse.
 func saveUploadQueueEntryLocked(e uploadQueueEntry) error {
 	if !supportBundleIDRe.MatchString(e.BundleID) {
 		return errors.New("invalid bundle id")
 	}
-	if err := os.MkdirAll(uploadQueueDir(), 0o700); err != nil {
+	if err := mkdirDurableSupport(uploadQueueDir(), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := uploadQueuePath(e.BundleID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, uploadQueuePath(e.BundleID))
+	return durableSupportWrite(uploadQueuePath(e.BundleID), b)
 }
 
 // loadUploadQueueEntryLocked reads one entry. Absent/corrupt ⇒ (zero, false).
