@@ -734,7 +734,7 @@ func initSession(s *startupState) {
 // observability_startup.go + observability_startup_config.go; this is
 // a thin shim that resolves the slice config and hands it to the
 // loader. No carry to startupState — the file handles stay on their
-// owning packages' state (globalSyslog, internal/audit, internal/reqlog)
+// owning packages' state (globalSyslogHandle, internal/audit, internal/reqlog)
 // and continue to be released by the existing syslog-close / audit-log-
 // close / request-log-close shutdown hooks.
 func initObservability(s *startupState) {
@@ -928,11 +928,20 @@ func initSSLBypassAndDPI(s *startupState) {
 
 // initRewriteAndDefaultAction is the PR3 expansion shim: resolve the
 // header-rewrite + default-policy-action slice and apply it. Passes
-// the current policy-rule count so the loader can derive the zero-
+// the CONFIGURED policy-rule count so the loader can derive the zero-
 // trust-vs-passthrough default when fc.DefaultAction is unset.
+//
+// SEC-POLICYDROP-1: the count is policyStore.ConfiguredRuleCount() — installed
+// rules PLUS the rules Load refused — not len(policyStore.List()). A policy
+// file whose every rule the fail-closed load gate refuses installs nothing, and
+// an installed count of zero would tell the loader "no policy configured",
+// selecting passthrough Allow and newly admitting the unmatched traffic the
+// nonempty-rule Deny default had refused. Ordering matters here: initPolicy
+// (and therefore policyStore.Load) runs earlier in the init block, so the
+// refusal count is already final by the time this shim reads it.
 func initRewriteAndDefaultAction(s *startupState) {
 	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
-	loadRewriteAndDefaultAction(cfg, len(policyStore.List()))
+	loadRewriteAndDefaultAction(cfg, policyStore.ConfiguredRuleCount())
 }
 
 // initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.

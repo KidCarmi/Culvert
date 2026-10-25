@@ -486,7 +486,7 @@ func TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent(t *testing.
 // Config.IdentityCacheEvictions keeps a NARROWER meaning than the exported
 // metric: it reports only the legacy single provider on Config, and must not
 // claim the local bcrypt cache's count (that reports through
-// AuthCacheEvictions). After §45.9 (5) moved the metric to a process-owned
+// AuthCacheEvictions). After §54.9 (5) moved the metric to a process-owned
 // total, this is the only gate holding that accessor's contract, so it is
 // deliberately kept rather than folded into the metric gate.
 //

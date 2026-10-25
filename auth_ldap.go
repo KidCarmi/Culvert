@@ -113,8 +113,8 @@ var errLDAPAccountRejected = errors.New("ldap: directory rejected the account (n
 // the wire are all below it, so the range is the reliable "did the directory
 // answer at all?" discriminator.
 const (
-	ldapClientErrorFloor = ldap.ErrorNetwork       // 200
-	ldapClientErrorCeil  = ldap.ErrorEmptyPassword // 206
+	ldapClientErrorFloor = ldap.ErrorNetwork         // 200
+	ldapClientErrorCeil  = ldap.ErrorMalformedPacket // 207
 )
 
 // ldapUserBindIsUnreachable reports whether a step-2 user-bind error means the
@@ -127,7 +127,7 @@ const (
 //
 //   - Not an *ldap.Error at all (context cancellation, a raw net error) ⇒
 //     unreachable. Fail safe: an unclassifiable fault is treated as the backend's.
-//   - A go-ldap client-space code (200–206, incl. ErrorNetwork) ⇒ unreachable.
+//   - A go-ldap client-space code (200–207, incl. ErrorNetwork) ⇒ unreachable.
 //     Nothing came back from the server.
 //   - LDAPResultBusy (51) / LDAPResultUnavailable (52) ⇒ unreachable. The server
 //     answered, but only to say it cannot serve — the exact analogue of the

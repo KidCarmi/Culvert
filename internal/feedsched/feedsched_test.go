@@ -37,10 +37,14 @@ func (c *fakeClock) record(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// NewTimer records the delay and publishes the timer in ONE critical section:
+// waitDelay polls the delay count and fire then reads c.timer, so a gap between
+// the two writes let fire observe a recorded delay with no timer yet ("no timer
+// created yet" under -race scheduling).
 func (c *fakeClock) NewTimer(d time.Duration) Timer {
-	c.record(d)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.delays = append(c.delays, d)
 	c.timer = &fakeTimer{ch: make(chan time.Time), clock: c}
 	return c.timer
 }

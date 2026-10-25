@@ -26,22 +26,25 @@ import (
 // NEVER gate — it is attacker-provokable per account). The reachable/unreachable
 // split for go-ldap's own client-side faults keys on the contiguous constant
 // block [ldapClientErrorFloor, ldapClientErrorCeil] == [ErrorNetwork,
-// ErrorEmptyPassword] == [200, 206]. TestLDAPUserBindIsUnreachable_ClientSpaceBoundaries
+// ErrorMalformedPacket] == [200, 207]. TestLDAPUserBindIsUnreachable_ClientSpaceBoundaries
 // pins the CURRENT edges, but nothing catches go-ldap EXTENDING that block: a
 // new Error* constant at 207 would fall OUTSIDE the range and be misclassified
 // as "server answered" — so a genuine transport/client fault would (a) fail to
 // arm the cooldown and (b) be read as positive reachability that clears an
-// already-armed one. This guard fires on exactly that library change.
+// already-armed one. This guard fires on exactly that library change; it did
+// so for go-ldap v3.4.15, which added ErrorMalformedPacket (207) for decode
+// faults that v3.4.14 returned as plain (non-*ldap.Error, hence unreachable)
+// errors — raising the ceiling keeps their classification unchanged.
 func TestLDAPClientErrorCeil_TracksLibrary(t *testing.T) {
 	// Our ceiling must be the library's current top client-error constant.
-	if ldapClientErrorCeil != ldap.ErrorEmptyPassword {
-		t.Fatalf("ldapClientErrorCeil = %d, want ldap.ErrorEmptyPassword = %d — sync the constant",
-			ldapClientErrorCeil, ldap.ErrorEmptyPassword)
+	if ldapClientErrorCeil != ldap.ErrorMalformedPacket {
+		t.Fatalf("ldapClientErrorCeil = %d, want ldap.ErrorMalformedPacket = %d — sync the constant",
+			ldapClientErrorCeil, ldap.ErrorMalformedPacket)
 	}
 	if ldapClientErrorFloor != ldap.ErrorNetwork {
 		t.Fatalf("ldapClientErrorFloor = %d, want ldap.ErrorNetwork = %d", ldapClientErrorFloor, ldap.ErrorNetwork)
 	}
-	// The go-ldap client-error block (Error* constants) is contiguous and 206
+	// The go-ldap client-error block (Error* constants) is contiguous and 207
 	// is its top; every code in [floor, ceil] is a defined client fault…
 	for code := uint16(ldapClientErrorFloor); code <= ldapClientErrorCeil; code++ {
 		if _, ok := ldap.LDAPResultCodeMap[code]; !ok {
