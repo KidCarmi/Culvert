@@ -349,7 +349,13 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
 	}
 	for user, exp := range r.users {
-		if now.After(exp) {
+		// SEC-REVEXP-1: the SAME oracle as the token loop above, and for the
+		// same reason — this loop persists and gossips too, so a raw
+		// now.After(exp) deleted a deleted ACCOUNT's revocation from disk and
+		// from every peer during the wall-clock second numbered Exp, while
+		// Decode still accepted that account's cookies. Fixing the token loop
+		// did not fix its twin (AU-52's standing rule).
+		if revocationExpired(now, exp) {
 			delete(r.users, user)
 			continue
 		}

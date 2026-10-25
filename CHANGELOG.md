@@ -9,6 +9,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A deleted account's revocation was erased from disk and from every peer
+  during the final second its cookies were still honoured.**
+  `ExportRevocations` walks two maps, and SEC-REVEXP-1's shared expiry oracle
+  reached only the first. The username-keyed loop eleven lines below it kept a
+  raw `now.After(exp)`, under a comment explaining why the token loop above
+  needed the oracle. Every user expiry is a whole second
+  (`MergeRevocations` stores `time.Unix(e.Expiry, 0)`) while `time.Now()`
+  carries a sub-second remainder, so for the whole wall-clock second numbered
+  `Exp` that test was already true while `Decode` still accepted cookies
+  carrying it.
+
+  This loop is not an observability read — it is the body of the export behind
+  `SaveRevocations`, the DP→CP sync push, the Control Plane aggregator and the
+  HA bundle sent to the standby. So during that second the account revocation
+  was deleted from memory, from the revocations file and from every node, while
+  the deleted account's sessions authenticated. The record was destroyed rather
+  than ignored, which is why no later sweep could repair it.
+
+  The coverage hole was exact: `ExportDropsOnlyWhatDecodeRejects` drives
+  `rl.Revoke`, which only ever writes the token map, and
+  `UserRevocationHonoursTheSameOracle` asserts `IsUserRevoked` — the read path,
+  not the export. Both loops now share one eviction test, and it is `Decode`'s
+  acceptance test. Strictly fail-closed, in the same direction as the original
+  fix: an entry can only be retained fractionally longer, never dropped
+  sooner, and retention stays capped by the TTL that set the expiry.
+
+  Gate: `RevocationExpiry_UserExportDropsOnlyWhatDecodeRejects`, keyed on the
+  `User` field because that is what makes an entry an account revocation on the
+  wire. Verified RED against the restored `now.After(exp)`, and the two
+  pre-existing gates verified GREEN against that same mutation — which is what
+  establishes the hole was real rather than the new gate a duplicate.
+
 - **Two merge-gate workflows reached their actions through MUTABLE tags, and a
   repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
   (designed to be a REQUIRED branch-protection check) and
@@ -1399,8 +1431,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the `exp` claim this appliance signs into a cookie. The change can only
   retain an entry longer — by under one second — and never drop one sooner, so
   it cannot resurrect a session, refuse a legitimate logout, or unbound the
-  list. Applied at all four sites that decided the question: `IsRevoked`,
-  `IsUserRevoked`, `ExportRevocations` and `MergeRevocations`.
+  list. Applied at every site that decided the question: `IsRevoked`,
+  `IsUserRevoked`, `MergeRevocations` and **both** loops of
+  `ExportRevocations`, which walks the token map and the username-keyed map
+  separately. The first pass routed only the token loop through the oracle and
+  left the account loop on the raw predicate; that omission and its gate are
+  the entry immediately below.
 
   Gates: 9 new tests in `internal/session/revocation_expiry_test.go` — **7
   regression gates**, each measured to fail against the pre-fix predicate and

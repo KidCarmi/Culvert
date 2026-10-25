@@ -301,6 +301,50 @@ func TestRevocationExpiry_UserRevocationHonoursTheSameOracle(t *testing.T) {
 	})
 }
 
+// TestRevocationExpiry_UserExportDropsOnlyWhatDecodeRejects is the missing
+// half of ExportDropsOnlyWhatDecodeRejects, and the gate that would have
+// caught AU-62.
+//
+// ExportRevocations walks TWO maps. The token loop took the shared oracle when
+// SEC-REVEXP-1 landed; the username-keyed loop kept a raw now.After(exp), and
+// nothing covered it: ExportDropsOnlyWhatDecodeRejects drives `rl.Revoke`,
+// which only ever writes r.tokens, and UserRevocationHonoursTheSameOracle
+// asserts IsUserRevoked — the READ path — not the export.
+//
+// The consequence was worse than the token case it mirrors. This loop both
+// persists (SaveRevocations) and gossips (the DP→CP push), so during the
+// wall-clock second numbered Exp a deleted ACCOUNT's revocation was deleted
+// from this map, from the on-disk file and from every peer, while Decode still
+// accepted cookies carrying that Exp. The record was destroyed, not merely
+// ignored, so no later sweep could repair it.
+func TestRevocationExpiry_UserExportDropsOnlyWhatDecodeRejects(t *testing.T) {
+	rl := NewRevocationList()
+
+	observeWithinSecond(t, func(sec int64) string {
+		rl.mu.Lock()
+		rl.users["inside"] = time.Unix(sec, 0)
+		rl.users["past"] = time.Unix(sec-60, 0)
+		rl.mu.Unlock()
+
+		// Keyed on the User field, which is what makes these entries account
+		// revocations on the wire; the prefixed Token is the compatibility
+		// form for a node predating CHAOS-68.
+		got := map[string]bool{}
+		for _, e := range rl.ExportRevocations() {
+			if e.User != "" {
+				got[e.User] = true
+			}
+		}
+		if !got["inside"] {
+			return "export dropped a USER revocation inside its final second — a deleted account's revocation vanishes from disk and from every peer while Decode still accepts its cookies"
+		}
+		if got["past"] {
+			return "export retained a user revocation a minute past its expiry"
+		}
+		return ""
+	})
+}
+
 // ─── Concurrency ────────────────────────────────────────────────────────────
 
 // TestRevocationExpiry_ConcurrentReadersAndWriters runs the predicate under
