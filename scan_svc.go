@@ -264,7 +264,7 @@ func (ss *ScanService) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // headers are already sent; an encode failure here is a client-side write the caller cannot be told about
 		"status":            "ok",
 		"requests":          atomic.LoadInt64(&statScanSvcRequests),
 		"oversize_refused":  atomic.LoadInt64(&statScanSvcOversize),
