@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/KidCarmi/Culvert/internal/fileblock"
@@ -295,11 +296,20 @@ func TestChaos92_DefectPathIsDeliverableAtOneMiBOverTheWire(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c, err := net.Dial("tcp", srv.Listener.Addr().String())
+	// (&net.Dialer{}).DialContext, not net.Dial: the noctx linter in
+	// .golangci.yml rejects uncontextual I/O, and this is the idiom the sibling
+	// wire test cited above (bootstrap_host_injection_test.go) already uses.
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	// A deadline so a server that never answers fails this gate outright rather
+	// than hanging until the package timeout — t.Context() cancels at test end
+	// but does not interrupt a blocking Read already in flight on the conn.
+	if err := c.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	// Raw `'`: a sub-delim (RFC 3986 §2.2), so no percent-encoding is needed
 	// and one wire byte buys one retained byte — then five, after escaping.
 	target := chaos92Path(1024*1024, "'")
