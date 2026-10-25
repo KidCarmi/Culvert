@@ -111,6 +111,16 @@ import (
 //   - **No `sanitizeLog` removal.** The clamp runs INSIDE the argument, before
 //     `sanitizeLog`, so the scan and its possible 1 MiB copy are bounded too.
 //     The CWE-117 barrier is unchanged.
+//   - **No clamp at the five block-page CALL SITES**, only in the wrapper. The
+//     call sites still evaluate `r.Host + r.URL.Path`, so one transient copy of
+//     the path is allocated before the wrapper clamps it. That is deliberate:
+//     clamping at the call site too would compose a value already carrying a
+//     marker, which the wrapper's own (necessarily larger) bound could then
+//     clamp a SECOND time — a double marker and a double count, for one
+//     transient allocation of the same order as the request buffer net/http
+//     already holds and frees. What mattered is removed: the escaping
+//     multiplier and the log write. Stated so it is not mistaken for an
+//     oversight.
 // ---------------------------------------------------------------------------
 
 // maxRetainedRequestPath bounds a client-supplied request path at the point a

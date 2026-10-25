@@ -12936,6 +12936,14 @@ measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and six
 - **One net/http-bounded copy of the path remains** in the request object, as it
   does for any header. Bounding it is `MaxHeaderBytes`, which is the product
   decision above.
+- **The five block-page call sites still evaluate `r.Host + r.URL.Path`**, so a
+  second transient copy is allocated before the wrapper clamps it. Deliberate,
+  not an oversight: clamping at the call site as well would compose a value that
+  already carries a marker, which the wrapper's necessarily larger bound could
+  clamp a second time — a double marker and a double count, traded for one
+  transient allocation of the same order as the request buffer net/http already
+  holds. The escaping multiplier and the log write, which are what made this a
+  HIGH, are gone either way.
 - **The ring is bounded in ENTRIES, not bytes** (the 2026-10-13 round's X-3).
   This sweep removes the unbounded per-entry URI that made the entry bound
   meaningless for the `LogFullURI` case; the byte-budget question for the ring

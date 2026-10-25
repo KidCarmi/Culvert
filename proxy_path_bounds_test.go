@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -86,6 +87,36 @@ func chaos92Request(t *testing.T, path string) (*httptest.ResponseRecorder, *byt
 	w := httptest.NewRecorder()
 	handleRequest(w, r)
 	return w, logBuf
+}
+
+// chaos92PackageSources returns the package's non-test .go files, read through
+// ABSOLUTE paths anchored to the package source dir. A CWD-relative
+// filepath.Glob/os.ReadFile here would be the exact hazard
+// TestTestFileReadsAreCWDIndependent (static_read_wall_test.go) walls off: a
+// concurrent os.Chdir makes the scan read the wrong tree and the gate flakes.
+func chaos92PackageSources(t *testing.T) map[string]string {
+	t.Helper()
+	dir := pkgSourceDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		out[name] = string(b)
+	}
+	if len(out) == 0 {
+		t.Fatal("found no package sources — the anchor is wrong and the gates below are vacuous")
+	}
+	return out
 }
 
 // ───────────────────────── DEFECT GATES ─────────────────────────
@@ -199,10 +230,6 @@ func TestChaos92_DefectPolicyProfileFileBlockIsBounded(t *testing.T) {
 // sanitizes a URL path to clamp it FIRST — clamping after sanitizeLog would
 // bound the retained bytes but still pay the 1 MiB scan and copy.
 func TestChaos92_DefectEveryRetainingSinkGoesThroughTheClamp(t *testing.T) {
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
 	// A log site that sanitizes a URL path must clamp it INSIDE the
 	// sanitizeLog argument, so the scan and its possible 1 MiB copy are bounded
 	// too — clamping afterwards would bound the retained bytes and still pay
@@ -210,24 +237,18 @@ func TestChaos92_DefectEveryRetainingSinkGoesThroughTheClamp(t *testing.T) {
 	wrapped := regexp.MustCompile(`sanitizeLog\(boundRetainedPath\([^()]*\bURL\.Path\)\)`)
 	var bad []string
 	checked := 0
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(f) // #nosec G304 -- package's own source, test-only
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i, line := range strings.Split(string(src), "\n") {
+	for name, src := range chaos92PackageSources(t) {
+		for i, line := range strings.Split(src, "\n") {
 			if !strings.Contains(line, "sanitizeLog(") || !strings.Contains(line, "URL.Path") {
 				continue
 			}
 			checked++
 			if !wrapped.MatchString(line) {
-				bad = append(bad, fmt.Sprintf("%s:%d: a URL path is sanitized without boundRetainedPath — the retained bytes are client-chosen", f, i+1))
+				bad = append(bad, fmt.Sprintf("%s:%d: a URL path is sanitized without boundRetainedPath — the retained bytes are client-chosen", name, i+1))
 			}
 		}
 	}
+	sort.Strings(bad)
 	if checked == 0 {
 		t.Fatal("found no sanitizeLog site carrying a URL path at all — the pattern drifted and this gate is now vacuous")
 	}
@@ -241,34 +262,23 @@ func TestChaos92_DefectEveryRetainingSinkGoesThroughTheClamp(t *testing.T) {
 // only through the clamping wrapper, so a sixth block-page call site cannot
 // bypass the bound by construction rather than by review.
 func TestChaos92_DefectBlockPageClampIsTheChokepointNotTheCallSites(t *testing.T) {
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	callers := map[string]int{}
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(f) // #nosec G304 -- package's own source, test-only
-		if err != nil {
-			t.Fatal(err)
-		}
-		callers[f] = strings.Count(string(src), "blockpage.Serve(")
-	}
-	for f, n := range callers {
-		if n > 0 && f != "blockpage_vars.go" {
-			t.Errorf("%s calls blockpage.Serve directly (%d time(s)) — it must go through serveBlockPage, which is where the CHAOS-92 clamp lives", f, n)
+	const chokepoint = "blockpage_vars.go"
+	sources := chaos92PackageSources(t)
+	var stray []string
+	for name, src := range sources {
+		n := strings.Count(src, "blockpage.Serve(")
+		if n > 0 && name != chokepoint {
+			stray = append(stray, fmt.Sprintf("%s calls blockpage.Serve directly (%d time(s))", name, n))
 		}
 	}
-	if callers["blockpage_vars.go"] != 1 {
-		t.Fatalf("blockpage_vars.go has %d blockpage.Serve calls, want exactly 1 — the chokepoint moved and this gate is stale", callers["blockpage_vars.go"])
+	sort.Strings(stray)
+	if len(stray) > 0 {
+		t.Errorf("block-page sinks bypass the clamp:\n%s\nEvery caller must go through serveBlockPage, which is where the CHAOS-92 clamp lives", strings.Join(stray, "\n"))
 	}
-	src, err := os.ReadFile("blockpage_vars.go")
-	if err != nil {
-		t.Fatal(err)
+	if n := strings.Count(sources[chokepoint], "blockpage.Serve("); n != 1 {
+		t.Fatalf("%s has %d blockpage.Serve calls, want exactly 1 — the chokepoint moved and this gate is stale", chokepoint, n)
 	}
-	if !strings.Contains(string(src), "boundRetainedBlockPageURL(url)") {
+	if !strings.Contains(sources[chokepoint], "boundRetainedBlockPageURL(url)") {
 		t.Error("serveBlockPage does not clamp its url argument — every block-page sink is unbounded")
 	}
 }
