@@ -151,6 +151,8 @@ var (
 	// all observe the same expired stamp and all emit, which would make a
 	// mitigation for a log-volume problem into one (CHAOS-70 round 1 P2). The
 	// cumulative count rides every line, so the magnitude is never suppressed.
+	// The stamp is MONOTONIC (monoNanos, CHAOS-83): process-local, never
+	// persisted, so a wall-clock step in either direction cannot latch it.
 	sessionProviderLogGate atomic.Int64
 )
 
@@ -172,16 +174,16 @@ func sessionProviderRevokedCount() int64 { return sessionProviderRevokedTotal.Lo
 func noteSessionProviderRevoked(provider, subject, clientIP string) {
 	total := sessionProviderRevokedTotal.Add(1)
 
-	now := timeNowSessionProvider()
+	// CHAOS-83: measured on the MONOTONIC clock. On the wall clock a backwards
+	// step left the stamp in the future and needed its own re-arm branch; a
+	// monotonic elapsed time is correct across a step in either direction, so
+	// neither a latched gate nor a negative-age branch is possible.
+	now := monoNanos()
 	last := sessionProviderLogGate.Load()
-	// A clock rollback (last in the future) re-arms rather than silencing the
-	// line until wall-clock catches up — CHAOS-61's verdict that a negative
-	// age is STALE, not fresh.
-	if last != 0 && now.Sub(time.Unix(0, last)) < sessionProviderLogInterval &&
-		!time.Unix(0, last).After(now) {
+	if last != 0 && time.Duration(now-last) < sessionProviderLogInterval {
 		return
 	}
-	if !sessionProviderLogGate.CompareAndSwap(last, now.UnixNano()) {
+	if !sessionProviderLogGate.CompareAndSwap(last, now) {
 		return // another request claimed this window
 	}
 	logger.Printf("AUTH_SESSION_PROVIDER_REVOKED client=%s provider=%q identity=%q total=%d: "+
@@ -189,12 +191,6 @@ func noteSessionProviderRevoked(provider, subject, clientIP string) {
 		"the request is treated as unauthenticated and re-challenged",
 		sanitizeLog(clientIP), sanitizeLog(provider), sanitizeLog(subject), total)
 }
-
-// timeNowSessionProvider is the clock seam. A health/rate surface must be a
-// pure function of recorded state and an INJECTED clock — mixing a real clock
-// into a gate whose tests drive synthetic stamps is what made CHAOS-66's
-// determinism gate fail on a loaded runner and nowhere else.
-var timeNowSessionProvider = time.Now
 
 // resetSessionProviderBoundsForTest clears the process-global counter and rate
 // gate. A leaked gate suppresses the line for every later test in the package.

@@ -367,10 +367,8 @@ func TestChaos88_WallSessionCookieMintersAreEnumerated(t *testing.T) {
 // structurally below instead.
 func TestChaos88_ControlLogIsSuppressedButTheCountNeverIs(t *testing.T) {
 	c72Setup(t, "deleted")
-	frozen := time.Now()
-	prev := timeNowSessionProvider
-	timeNowSessionProvider = func() time.Time { return frozen }
-	t.Cleanup(func() { timeNowSessionProvider = prev })
+	frozen := monoNanos()
+	swapMonoNanos(t, func() int64 { return frozen })
 
 	for i := 0; i < 50; i++ {
 		noteSessionProviderRevoked("corp", "alice", "192.0.2.10")
@@ -380,25 +378,30 @@ func TestChaos88_ControlLogIsSuppressedButTheCountNeverIs(t *testing.T) {
 	}
 }
 
-// A clock rollback must RE-ARM the gate rather than silence the line until
-// wall-clock catches up (CHAOS-61: a negative age is STALE, not fresh).
-func TestChaos88_LogGateReArmsOnClockRollback(t *testing.T) {
+// The gate is measured on the MONOTONIC clock (CHAOS-83): it stays suppressed
+// within the interval and re-arms once the interval has elapsed. The wall-clock
+// version needed a rollback branch because a backwards step left the stamp in
+// the future; a monotonic stamp cannot be, so the gate here is the interval
+// itself, and monotime_chaos_test.go's source wall forbids the wall idiom.
+func TestChaos88_LogGateReArmsAfterTheMonotonicInterval(t *testing.T) {
 	c72Setup(t, "deleted")
-	now := time.Now()
-	prev := timeNowSessionProvider
-	timeNowSessionProvider = func() time.Time { return now }
-	t.Cleanup(func() { timeNowSessionProvider = prev })
+	now := monoNanos()
+	swapMonoNanos(t, func() int64 { return now })
 
 	noteSessionProviderRevoked("corp", "alice", "192.0.2.10")
 	armed := sessionProviderLogGate.Load()
 	if armed == 0 {
 		t.Fatal("first refusal did not arm the log gate")
 	}
-	// Roll the clock back an hour: the stored stamp is now in the future.
-	now = now.Add(-time.Hour)
+	now += int64(sessionProviderLogInterval) - 1
+	noteSessionProviderRevoked("corp", "alice", "192.0.2.10")
+	if got := sessionProviderLogGate.Load(); got != armed {
+		t.Fatal("the gate re-armed inside its interval; the line is no longer rate-limited")
+	}
+	now += 1
 	noteSessionProviderRevoked("corp", "alice", "192.0.2.10")
 	if got := sessionProviderLogGate.Load(); got == armed {
-		t.Fatal("a clock rollback left the gate latched at a future stamp")
+		t.Fatal("the gate stayed latched after its interval elapsed")
 	}
 }
 
