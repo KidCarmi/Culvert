@@ -308,6 +308,30 @@ func loadAndMaybeDecrypt(path, backupPassphrase string) ([]byte, error) {
 		return nil, fmt.Errorf("restore: read tarball: %w", err)
 	}
 	if !isEncryptedBackupBlob(blob) {
+		// An operator who supplied a passphrase is restoring from an encrypted
+		// archive; a PLAINTEXT blob at that path is an encryption downgrade,
+		// and until now it was accepted with the passphrase never examined
+		// (CHAOS-82 / BKP-1). That is the whole substitution attack: anyone who
+		// can write into the /backup volume replaces the archive with a
+		// hand-built unencrypted tarball carrying their own ui_users.json, and
+		// no other guard fires — the manifest is self-referential, so every
+		// content check still passes, and the restore installs an
+		// attacker-authored admin roster.
+		//
+		// The format carries no other provenance binding, so refusing the
+		// downgrade is the only available control. It is symmetric with the
+		// KDF-iteration downgrade backupcrypt already refuses at the header
+		// level: a weaker envelope than the operator asked for is not opened.
+		//
+		// This does not fire on the legitimate plaintext restore. The remedy is
+		// to supply no passphrase, which is what the maintenance agent already
+		// does for an unencrypted archive (ComposeRestoreDryRun resolves an
+		// empty passphrase, and the unencrypted backup/list templates suppress
+		// the variable outright with an explicit unset).
+		if backupPassphrase != "" {
+			return nil, fmt.Errorf("restore: %s is set but the archive at %q is NOT encrypted; refusing the encryption downgrade (a substituted plaintext archive would install its own admin roster). To restore an unencrypted archive, run the restore with %s unset",
+				backupPassphraseEnv, filepath.Base(path), backupPassphraseEnv)
+		}
 		return blob, nil
 	}
 	if backupPassphrase == "" {

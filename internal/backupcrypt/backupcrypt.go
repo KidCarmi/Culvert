@@ -67,7 +67,17 @@ const (
 	encSaltLen      = 16
 	encNonceLen     = 12
 	encMinIters     = 100_000 // refuse weakened headers
-	encTagLen       = 16
+	// encMaxIters bounds the work an ARCHIVE-DECLARED iteration count can ask
+	// for (CHAOS-82 / BKP-6a). The floor above refuses a weakened header, but
+	// there was no ceiling, so a declared 0xFFFFFFFF bought ~40 minutes of
+	// single-core PBKDF2 before the AAD binding failed the open anyway — the
+	// cost is paid by whoever points the restore CLI at the blob, not by the
+	// attacker. 10M is ~16x the 600k this version writes, so a future
+	// deliberate increase still opens, while the header can no longer name a
+	// number whose only effect is burning CPU. Checked beside the floor, in
+	// parseEncHeader, which runs before any key derivation.
+	encMaxIters = 10_000_000
+	encTagLen   = 16
 )
 
 // ErrDecryptOpaque is the single error surfaced for wrong-passphrase AND
@@ -128,7 +138,7 @@ func EncryptBlob(plaintext []byte, passphrase string) ([]byte, error) {
 // DecryptBlob parses the header, derives the key, and opens the ciphertext
 // using the header as AAD. Returns plaintext or ErrDecryptOpaque on any
 // wrong-key or authentication failure. Header-level validation errors (bad
-// magic, version, ids, length, iter floor) are returned as their own non-opaque
+// magic, version, ids, length, iter floor/ceiling) are returned as their own non-opaque
 // errors because they cannot leak passphrase information.
 func DecryptBlob(blob []byte, passphrase string) ([]byte, error) {
 	hdr, ciphertext, err := parseEncHeader(blob)
@@ -178,9 +188,10 @@ func buildEncHeader(salt, nonce []byte, iters uint32) []byte {
 	return hdr
 }
 
-// parseEncHeader validates the magic / version / KDF id / cipher id / iter
-// floor and returns (header, ciphertext, error). Header-level errors are
-// non-opaque (they cannot leak passphrase information).
+// parseEncHeader validates the magic / version / KDF id / cipher id and the
+// iter floor AND ceiling, and returns (header, ciphertext, error).
+// Header-level errors are non-opaque (they cannot leak passphrase
+// information).
 func parseEncHeader(blob []byte) (hdr, ciphertext []byte, err error) {
 	if len(blob) < HdrLen {
 		return nil, nil, fmt.Errorf("backup decrypt: blob too short for header (%d < %d)", len(blob), HdrLen)
@@ -197,6 +208,9 @@ func parseEncHeader(blob []byte) (hdr, ciphertext []byte, err error) {
 	iters := int(binary.BigEndian.Uint32(blob[10:14]))
 	if iters < encMinIters {
 		return nil, nil, fmt.Errorf("backup decrypt: KDF iterations %d below minimum %d", iters, encMinIters)
+	}
+	if iters > encMaxIters {
+		return nil, nil, fmt.Errorf("backup decrypt: KDF iterations %d above maximum %d", iters, encMaxIters)
 	}
 	if blob[30] != encCipherAESGCM {
 		return nil, nil, fmt.Errorf("backup decrypt: unsupported cipher id %d", blob[30])
