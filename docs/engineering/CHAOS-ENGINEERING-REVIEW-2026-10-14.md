@@ -417,6 +417,21 @@ which is a different question from whether the fix is right.**
   operator contract changing when a node leaves the load-balancer pool, so it
   belongs in its own change with its own fail-closed analysis, not bundled into
   a containment diff. Tracked alongside the CHAOS-80 ordering fix.
+- **The snapshot-apply fixture wall guards one axis of four.**
+  `snapshot_apply_fixture_test.go` fails the build for any test reaching the
+  apply path without `bindFreshAdmissionOwners`, but the apply also replaces the
+  shared blocklist's feed entries (and `Save()`s them), overwrites
+  `proxyExternalBaseURL` / `trustForwardedHeaders`, and persists DP last-good —
+  none of which the wall checks. The balance gate here passed the wall while
+  clobbering all three (§9). Each axis has an established per-test idiom
+  (`restoreBlAndIPF`, a `SetProxyBaseURL` save/restore,
+  `withDPLastGoodConfigTestGlobals`), which is exactly the "per-file vigilance"
+  the fixture's own comment rejects — and the helper that closed this one,
+  `chaos79IsolateSnapshotApply`, is the third of them. Folding them into the one fixture and
+  widening the wall's predicate is the in-pattern fix; it is left out here
+  because that fixture is called by every apply-path test in the root package,
+  so changing what it isolates can change what those tests observe, and that
+  needs its own pass rather than a ride on a containment diff.
 
 ---
 
@@ -513,3 +528,49 @@ guard looks like defensive hygiene and reads like the presence contract beside
 it. It is neither: it is a load-bearing guard against a store that provably does
 not exist yet, 27 lines of `main()` away — and the init slice whose order it
 violates documents that order as its contract, in capital letters.
+
+### The gate that had to drive a real apply leaked real state (Codex P1, third pass)
+
+**The rewrite that made a gate falsifiable is what made it unsafe, and the repo
+had already built a wall for one axis of exactly this class.** The balance gate
+originally drove the mutating paths through `guardedConfigRound`, which consumes
+the marker at the end of every round — so it absorbed the imbalance it was
+testing and passed with a bracket's `end` deleted. The fix was to call
+`fetchAndApply` / `applyDeltaReply` directly, where nothing consumes. That is
+correct, and it is also what turned the gate into a **real** apply of a
+zero-valued snapshot against shared root state.
+
+A zero snapshot is not a quiet fixture. It is an instruction to set every slice
+it carries to nothing:
+
+| Shared state | What the zero snapshot did | Observed in the probe |
+|---|---|---|
+| `bl` feed entries | `ReplaceFeedEntries(nil)` then `Save()` | seeded 1 entry → `feedLen=0`, and persisted |
+| `proxyExternalBaseURL` | `SetProxyBaseURL("")` | `"https://proxy.seeded.example"` → `""` |
+| `trustForwardedHeaders` | `= snap.TrustForwardedHeaders` | `true` → `false` |
+| DP last-good | `persistDPLastGoodConfigSnapshot` | `SavedVersion` 999 → **4242** |
+
+Under `-shuffle` the first row turns a later *"this host is blocked"* assertion
+into a false ALLOW, and the second blanks the public origin every SAML SP
+metadata and OIDC redirect URI is built from. Measured both ways: with the
+isolation all four seeded values survive the gate; without it all four are
+clobbered.
+
+The sharp part is the wall. `snapshot_apply_fixture_test.go` exists *because* of
+this class — its comment records a prior Codex review (PR #1635): *"one fixture
+did it right, the next did not; the class needs one helper and a wall, not
+per-file vigilance."* The wall is an AST fixpoint that fails the build for any
+test reaching the apply path without binding fresh admission owners, and this
+gate passed it, because the wall guards **one** axis. The apply mutates at least
+four. **A wall proves only the property it encodes, and its existence makes the
+unguarded axes easier to miss, not harder** — the green check reads as "apply
+state is isolated" when it means "ipf and rl are isolated." The gate is now isolated by
+`chaos79IsolateSnapshotApply`, which binds a fresh `blocklist.New()` — a store
+with no path, so the apply's `bl.Save()` is a no-op rather than a write that a
+feed-entry restore would undo in memory only. Extending the shared fixture and
+the wall to all four axes is recorded in §7 as a follow-up rather than done
+here, because it changes a fixture every apply-path test in the root package
+calls.
+
+Which is the same shape a fourth time: right about the mechanism, too narrow
+about where the mechanism applies.
