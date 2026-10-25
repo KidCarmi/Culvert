@@ -46,7 +46,7 @@ docker compose up -d          # a working proxy + admin UI, no config required
 | **Distributed** | gRPC Control Plane / Data Plane with mTLS, config-snapshot sync, node groups, per-group bandwidth/QoS, config versioning, rolling upgrades, optional etcd fencing lease for HA |
 | **Supply chain** | Signed release catalog (Ed25519 + Sigstore keyless), digest-pinned image dispatch, SLSA L3 provenance, Cosign-signed artifacts |
 
-See the interactive **[architecture overview](docs/architecture.md)** and the **[Admin UI / Control Plane reference](CLAUDE.md#admin-ui--control-plane)** for detail.
+See the interactive **[architecture overview](docs/architecture.md)** and the **[Admin UI / Control Plane reference](docs/agent-context/domains/admin-control-plane.md)** for detail.
 
 ---
 
@@ -177,7 +177,7 @@ Core        -port 8080  -ui-port 9090  -socks5-port 0  -config <file>
 TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
 Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
 Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
-Logging     -logfile  -log-max-mb 50  -request-log-max-mb 100  -audit-log  -syslog
+Logging     -logfile  -log-max-mb 50  -request-log <file>  -request-log-max-mb 100  -audit-log  -syslog
 Metrics     -metrics-token  -rate-limit-rpm  -otlp-endpoint <url>
 Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
@@ -195,6 +195,9 @@ Less common flags (the full list is `culvert -h`). Unless noted, a non-empty / n
 | `-scan-svc-listen :8484` | Run as the scan-microservice sidecar on this address (the client side is `-scan-svc-url`). `/scan` inspects bodies only with ClamAV (`-clamav-addr` / `security_scan.clamav_addr`) or loaded YARA rules (`-yara-rules-dir`) on the sidecar process itself; configured DPI patterns apply separately to text content types. `security_scan.enabled` or a threat-feed DB alone does not scan bodies (threat feeds check URLs and domains only): `/health` still reports ok and `/scan` answers clean for every body. |
 | `-list-backups -backup-dir /backup` | Print every regular file in `-backup-dir` (absolute path, default `/backup`) as a JSON array and exit. Entries are not filtered or validated as Culvert backups (directories and symlinks are skipped; `encrypted` is a magic-byte probe only), so keep the directory free of unrelated files. |
 | `-cdr-enabled`, `-cdr-endpoint`, `-cdr-certs-dir`, `-cdr-default-profile`, `-cdr-timeout-sec`, `-cdr-max-file-size-mb` | Sluice CDR client: enable, gRPC endpoint, bootstrap mTLS bundle directory (`ca.pem`, `client.pem`, `client.key`; read only while no instance is enrolled; UI enrollment writes `<data-dir>/integrations/sluice/<name>` instead), fallback profile (`default`), per-file deadline (>=30 s, default 35) and per-file size cap (default 50 MiB; larger files are not rejected: they skip sanitization and pass through unmodified, whatever the fail mode). `-cdr-enabled` can only turn CDR on; it cannot disable a config that enables it. |
+| `-cdr-fail-mode open\|closed`, `-cdr-default-mode`, `-cdr-server-fingerprint` | Sluice CDR client: behaviour when a Sluice call fails (default `open` passes the original file through; `closed` blocks it; when no Sluice instance is available at all, for example after a failed initial dial, CDR is skipped and the file passes through in either mode), mode sent when no policy rule applies (`ENFORCE` default, `REPORT_ONLY`, `BYPASS_WITH_REPORT`) and the pinned SHA-256 of Sluice's server certificate (64 hex chars, optional `sha256:` prefix and `:` separators). An invalid `-cdr-fail-mode` or `-cdr-server-fingerprint` aborts startup; an unrecognized `-cdr-default-mode` is treated as `ENFORCE`. YAML: `cdr.fail_mode`, `cdr.default_mode`, `cdr.server_fingerprint`; config load validates these only when `cdr.enabled: true` is in the file, so a disabled block turned on later by `-cdr-enabled` or the admin UI is not re-checked (a bad fail mode then acts as `open`, a bad mode as `ENFORCE`, a bad fingerprint fails the Sluice dial and leaves CDR off). |
+| `-ui-san host,ip,...` | Extra SANs for the self-signed admin-UI certificate. Unlike other flags it does not override YAML: the values are **merged** with `proxy.ui_sans`. A non-empty SAN list saved in `admin_settings.json` (admin UI settings) replaces both at startup. Only used for the auto-generated certificate: ignored with `-ui-no-tls` (plain HTTP) or when both `-tls-cert` and `-tls-key` are supplied; with TLS on and only one of the pair supplied, the self-signed certificate is used. |
+| `-support-bundle <path>` | One-shot, headless recovery command: writes a redacted support bundle containing only the always-on (L0) sections (currently product, health, readiness, crash and support metrics; crash holds the most recent recovered panic, if any) to `<path>` (a new file is created with mode `0600`; an existing file is overwritten and keeps its mode), prints its bundle ID, section counts and SHA-256, and exits without starting any listener. For the full bundle use the admin UI; see [support-bundles-and-diagnostics](docs/operator/support-bundles-and-diagnostics.md). |
 
 > In the shipped Docker image, persistence paths such as `/data/ca.bundle` and `/data/ui_users.json` are supplied by the compose command line, not by binary flag defaults.
 
@@ -384,7 +387,7 @@ Development phases, production-readiness items, and the engineering governance m
 
 1. Fork and branch (`git checkout -b feature/my-feature`)
 2. `go test -race ./...`
-3. Keep the admin-API route-metadata and config-surface parity tests green (see [`CLAUDE.md`](CLAUDE.md))
+3. Keep the admin-API route-metadata and config-surface parity tests green (see [current conventions](docs/agent-context/conventions.md))
 4. Open a PR - the full CI pipeline (CodeQL, security gate, golangci-lint) runs automatically
 
 ---
