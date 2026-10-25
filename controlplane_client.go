@@ -133,7 +133,7 @@ const dpFailoverAfterFailures = 3
 //     happened to draw neighbouring stable offsets would stay in phase through
 //     exactly the outage the jitter exists for.
 func (c *DataPlaneClient) backoff(ctx context.Context) {
-	delay := c.jitterDelay(dpBackoffDelay(c.failCount))
+	delay := c.jitterDelay(controlPlaneBackoffDelay(c.failCount))
 	logger.Printf("DataPlane: backing off %s (failure #%d)", delay, c.failCount)
 	t := time.NewTimer(delay)
 	defer t.Stop()
@@ -143,14 +143,17 @@ func (c *DataPlaneClient) backoff(ctx context.Context) {
 	}
 }
 
-// dpBackoffDelay is the un-jittered retry ladder for a given consecutive-failure
-// streak: 2s, 4s, 8s, 16s, 32s, then dpBackoffCeiling. Pure, so the contract is
-// asserted directly instead of being inferred from a log line or a stopwatch.
+// controlPlaneBackoffDelay is the un-jittered retry ladder for a given
+// consecutive-failure streak: 2s, 4s, 8s, 16s, 32s, then dpBackoffCeiling from
+// the 6th failure on. Pure, so the contract is asserted directly instead of
+// being inferred from a log line or a stopwatch: backoff() observes its delay
+// only through a select that a cancelled context short-circuits (CodeRabbit,
+// PR #1658).
 //
 // A streak of 0 cannot happen on this path (the caller increments before
 // backing off) but is clamped to the first rung rather than returning 1s, so a
-// future caller cannot accidentally shorten the floor.
-func dpBackoffDelay(failures int) time.Duration {
+// future caller cannot accidentally shorten the documented 2s floor.
+func controlPlaneBackoffDelay(failures int) time.Duration {
 	if failures < 1 {
 		failures = 1
 	}
@@ -454,6 +457,13 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 		raw, err = c.call(ctx, methodGetConfig, reqBody)
 		if err != nil {
 			dpMarkCPPollFailing()
+			// Not charged separately: the streak counts failed POLLS, and this
+			// retry is part of the poll that already charged it above.
+			// failover() keeps the streak (CHAOS-89), so the gate re-crosses
+			// after dpFailoverAfterFailures more failed polls, whichever CP they
+			// hit. (#1658 charged the retry while failover() still zeroed the
+			// streak; with the reset gone, that extra charge would advance the
+			// streak twice per failover poll and fail over every two polls.)
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
 			return nil, false

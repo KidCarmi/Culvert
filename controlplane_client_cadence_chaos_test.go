@@ -75,14 +75,14 @@ func TestChaos89_BackoffLadderIsTheDocumentedOne(t *testing.T) {
 	}
 	for i, w := range want {
 		streak := i + 1
-		if got := dpBackoffDelay(streak); got != w {
-			t.Errorf("dpBackoffDelay(%d) = %s, want %s — the retry ladder no longer matches the contract backoff() documents", streak, got, w)
+		if got := controlPlaneBackoffDelay(streak); got != w {
+			t.Errorf("controlPlaneBackoffDelay(%d) = %s, want %s — the retry ladder no longer matches the contract backoff() documents", streak, got, w)
 		}
 	}
-	if got := dpBackoffDelay(0); got != 2*time.Second {
-		t.Errorf("dpBackoffDelay(0) = %s, want the first rung 2s (clamped, never a shorter floor)", got)
+	if got := controlPlaneBackoffDelay(0); got != 2*time.Second {
+		t.Errorf("controlPlaneBackoffDelay(0) = %s, want the first rung 2s (clamped, never a shorter floor)", got)
 	}
-	if dpBackoffDelay(1<<20) != dpBackoffCeiling {
+	if controlPlaneBackoffDelay(1<<20) != dpBackoffCeiling {
 		t.Error("an enormous streak must clamp to the ceiling, not overflow the shift")
 	}
 }
@@ -158,7 +158,7 @@ func TestChaos89_SustainedOutageConvergesOnTheCeiling(t *testing.T) {
 			prevIdx = c.activeIdx
 		}
 	}
-	if got := dpBackoffDelay(c.failCount); got != dpBackoffCeiling {
+	if got := controlPlaneBackoffDelay(c.failCount); got != dpBackoffCeiling {
 		t.Errorf("after %d failed polls the retry delay is %s, want the %s ceiling", polls, got, dpBackoffCeiling)
 	}
 	// Both CPs stay under observation, but at the gate's cadence rather than
