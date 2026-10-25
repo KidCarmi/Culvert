@@ -102,6 +102,24 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-25 — `CHAOS-92` CLAIMED (placeholder, commit one). Domain: the
+client-supplied request PATH on the unauthenticated data path — the last
+unbounded client-chosen string sitting in front of sinks that retain it.** Id
+claimed in this committed row before any code was written, per the convention
+above. `CHAOS-86` is the highest id merged on `main`; 68, 72, 76, 79/80, 81, 87
+and 88 are claimed by sweeps still open when this one started (68 = PR #1437,
+72 = #1564, 76 = #1633, 79/80 = #1626, 81 = #1494, 87 = #1485, 88 = #1711) and
+89–91 are held by [the 2026-10-13 round](CHAOS-REVIEW-2026-10-13.md), so this
+sweep took 92 and will not move.
+
+Scope is the registered-and-unfixed **X-1** row of that round (itself an
+instantiation of **PX-22**): `SEC-REQID-1`
+([request_tracing_bounds.go](../request_tracing_bounds.go)) bounded the client's
+tracing headers and `CHAOS-69` bounded the client's authority, but nothing
+bounds `r.URL.Path`, which reaches the process log, a buffered HTML response
+body and the policy decision lines on a stock install. Findings, measurements
+and gates are written up in §53 below.
+
 **2026-10-23 — `CHAOS-82` sweep (the backup plane: archive publication mode and
 the restore-side encryption trust boundary). Id claimed in this placeholder row
 as commit one**, before any code, per the convention above. `CHAOS-75` is the
