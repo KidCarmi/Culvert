@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -392,6 +393,54 @@ func TestLoadFileConfig_DeprecatedRateLimitKeyStillWorks(t *testing.T) {
 	if fc.Security.RateLimit != 45 {
 		t.Errorf("RateLimit = %d, want deprecated rate_limit value 45", fc.Security.RateLimit)
 	}
+}
+
+// TestDeprecatedRateLimitNotice_GoesThroughApplicationLogger pins that the
+// rate_limit deprecation notice is written through the application logger
+// (so it honours the configured destination and JSON format, including on a
+// SIGHUP reload), only for a config that uses the deprecated key alone, and
+// that a nil logger (startup, before setupLogger) is a no-op, not a panic.
+func TestDeprecatedRateLimitNotice_GoesThroughApplicationLogger(t *testing.T) {
+	origLogger := logger
+	t.Cleanup(func() { logger = origLogger })
+
+	load := func(t *testing.T, body string) *FileConfig {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fc, err := loadFileConfig(path)
+		if err != nil {
+			t.Fatalf("loadFileConfig: %v", err)
+		}
+		return fc
+	}
+	const notice = `config: "rate_limit" is deprecated, use "rate_limit_rpm" instead`
+
+	cases := []struct {
+		name, body string
+		want       bool
+	}{
+		{"deprecated key only", "security:\n  rate_limit: 45\n", true},
+		{"canonical key only", "security:\n  rate_limit_rpm: 45\n", false},
+		{"both keys, canonical wins", "security:\n  rate_limit: 45\n  rate_limit_rpm: 0\n", false},
+		{"deprecated key zero", "security:\n  rate_limit: 0\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := load(t, tc.body)
+			var buf bytes.Buffer
+			logger = log.New(&buf, "", 0)
+			fc.logDeprecatedRateLimitKey()
+			if got := strings.Contains(buf.String(), notice); got != tc.want {
+				t.Errorf("notice logged = %v, want %v (log: %q)", got, tc.want, buf.String())
+			}
+		})
+	}
+
+	logger = nil
+	load(t, "security:\n  rate_limit: 45\n").logDeprecatedRateLimitKey() // must not panic
 }
 
 // TestLoadFileConfig_ExplicitZeroRateLimitRPMDisables is the PR #1504 review

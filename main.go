@@ -737,6 +737,8 @@ func initLogger(s *startupState) {
 	// Route internal/* package logs (obs facade) into the same logger. Published
 	// once here at startup, before any traffic is served (ADR-0003 seam).
 	obs.SetSink(func(line string) { logger.Print(line) })
+	// Config was parsed before the logger existed; report deprecated keys now.
+	s.fc.logDeprecatedRateLimitKey()
 }
 
 // initLifecycleContext creates the app-wide lifecycle context.
@@ -1259,6 +1261,7 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 			logger.Printf("Config reload error: %v — keeping current config", err)
 			return
 		}
+		reloaded.logDeprecatedRateLimitKey()
 		applyHotReload(reloaded)
 		logger.Println("Config reloaded successfully")
 	})

@@ -531,16 +531,35 @@ func loadFileConfig(path string) (*FileConfig, error) {
 // Precedence is decided by pointer presence (nil vs. non-nil), not by
 // whether the decoded value is nonzero — the same reasoning
 // reconcileDeprecatedDPIKeys applies to dpi_patterns via slice presence. The
-// deprecated key still works, unchanged, when the canonical key is absent,
-// and logs a one-line startup notice so operators can migrate on their own
-// schedule. Downstream code keeps reading fc.Security.RateLimit unchanged —
-// this is the single reconciliation point.
+// deprecated key still works, unchanged, when the canonical key is absent;
+// logDeprecatedRateLimitKey reports that case so operators can migrate on
+// their own schedule. Downstream code keeps reading fc.Security.RateLimit
+// unchanged — this is the single reconciliation point.
 func (fc *FileConfig) reconcileDeprecatedRateLimitKey() {
 	if fc.Security.RateLimitRPM != nil {
 		fc.Security.RateLimit = *fc.Security.RateLimitRPM
-	} else if fc.Security.RateLimit != 0 {
-		fmt.Printf("[Culvert] config: %q is deprecated, use %q instead\n", "rate_limit", "rate_limit_rpm")
 	}
+}
+
+// usesDeprecatedRateLimitKey reports whether this (already reconciled)
+// config takes its rate limit from the deprecated rate_limit key alone.
+// Reconciliation leaves both fields untouched in exactly that case, so the
+// answer is derivable afterwards and needs no extra state on FileConfig.
+func (fc *FileConfig) usesDeprecatedRateLimitKey() bool {
+	return fc.Security.RateLimitRPM == nil && fc.Security.RateLimit != 0
+}
+
+// logDeprecatedRateLimitKey writes the rate_limit deprecation notice through
+// the application logger. It is NOT emitted from loadFileConfig: at startup
+// that runs before setupLogger (logger is still nil), and on SIGHUP a direct
+// stdout write would bypass the configured log destination and JSON format.
+// Callers invoke it once the logger exists — initLogger at startup, the
+// SIGHUP reload callback after a successful re-parse.
+func (fc *FileConfig) logDeprecatedRateLimitKey() {
+	if logger == nil || fc == nil || !fc.usesDeprecatedRateLimitKey() {
+		return
+	}
+	logger.Printf("config: %q is deprecated, use %q instead", "rate_limit", "rate_limit_rpm")
 }
 
 // reconcileDeprecatedDPIKeys resolves the canonical dpi_file/dpi_patterns
