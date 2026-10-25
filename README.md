@@ -41,7 +41,7 @@ docker compose up -d          # a working proxy + admin UI, no config required
 | **TLS inspection** | Opt-in MITM with on-the-fly ECDSA P-256 leaf certs, per-host bypass, bounded leaf cache (10k entries / 1h TTL) |
 | **Policy** | Priority-ordered, first-match rules across 8 condition types; default-deny (Zero Trust); Allow / Drop / Block Page / Redirect actions; per-rule TLS inspect-or-bypass |
 | **Identity** | Local (bcrypt), OIDC (Auth-Code + PKCE), SAML 2.0, LDAP/AD; multi-IdP with email-domain routing; TOTP 2FA; admin RBAC (admin/operator/viewer) |
-| **Content security** | ClamAV antivirus, pure-Go YARA engine, URLhaus + OpenPhish threat feeds, regex DPI on decrypted responses, file-type blocking, domain blocklists, UT1 URL categories, CDR |
+| **Content security** | ClamAV antivirus, pure-Go YARA engine, URLhaus + OpenPhish threat feeds, regex DPI on decrypted responses, file-type blocking, domain blocklists, UT1 URL categories, [CDR](docs/operator/cdr-content-disarm-reconstruction.md) (Content Disarm & Reconstruction via the Sluice sidecar) |
 | **Observability** | Prometheus metrics, live SSE dashboard, structured JSON logs, syslog forwarding (RFC 3164/5424), signed webhook alerts, tamper-evident audit trail |
 | **Distributed** | gRPC Control Plane / Data Plane with mTLS, config-snapshot sync, node groups, per-group bandwidth/QoS, config versioning, rolling upgrades, optional etcd fencing lease for HA |
 | **Supply chain** | Signed release catalog (Ed25519 + Sigstore keyless), digest-pinned image dispatch, SLSA L3 provenance, Cosign-signed artifacts |
