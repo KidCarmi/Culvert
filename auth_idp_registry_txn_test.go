@@ -145,16 +145,22 @@ func TestIdPRegistryTxn_APIMutationsReport500AndAuditNothing(t *testing.T) {
 	reg, liveBefore := seedWritableLDAPRegistry(t)
 	setRegistryPath(t, reg, brokenRegistryPath(t))
 	baseline := time.Now().UnixMilli()
+	// Names unique to THIS test, so the audit check below matches only entries
+	// these calls could have produced. The audit ring is shared and other tests
+	// mutate IdP profiles successfully: ui_auth_ldap_api_test.go renames
+	// "ldap-nopreflight" to "Renamed", and under -shuffle that entry can land
+	// in the same millisecond as baseline, which a time filter alone admits.
+	const renamed, created = "Renamed (txn 500 gate)", "Another AD (txn 500 gate)"
 
 	// PUT update → 500, old provider authoritative.
 	w := httptest.NewRecorder()
-	apiIdPItem(w, jsonReq(http.MethodPut, "/api/idp/ldap-live", ldapProfileBodyForPut("Renamed", nil)), "ldap-live")
+	apiIdPItem(w, jsonReq(http.MethodPut, "/api/idp/ldap-live", ldapProfileBodyForPut(renamed, nil)), "ldap-live")
 	assertStatus(t, w, http.StatusInternalServerError)
 	assertOldStateAuthoritative(t, reg, liveBefore, 1)
 
 	// POST create → 500.
 	w = httptest.NewRecorder()
-	apiIdPList(w, jsonReq(http.MethodPost, "/api/idp", ldapProfileBodyForPut("Another AD", nil)))
+	apiIdPList(w, jsonReq(http.MethodPost, "/api/idp", ldapProfileBodyForPut(created, nil)))
 	assertStatus(t, w, http.StatusInternalServerError)
 
 	// DELETE → 500 (NOT 404 — the profile exists; the appliance failed).
@@ -164,12 +170,18 @@ func TestIdPRegistryTxn_APIMutationsReport500AndAuditNothing(t *testing.T) {
 	assertStatus(t, w, http.StatusInternalServerError)
 	assertOldStateAuthoritative(t, reg, liveBefore, 1)
 
-	// No successful-mutation audit entry was emitted for any failed call.
+	// No successful-mutation audit entry was emitted for any failed call. An
+	// entry is this test's if it names one of the calls above: the update and
+	// the create carry their unique profile name as Detail, and the delete
+	// targets "ldap-live" (no other test deletes it through the audited
+	// handler).
 	for _, e := range auditGet() {
 		if e.TS < baseline {
 			continue
 		}
-		if e.Action == "idp.create" || e.Action == "idp.update" || e.Action == "idp.delete" {
+		ours := ((e.Action == "idp.update" || e.Action == "idp.create") && (e.Detail == renamed || e.Detail == created)) ||
+			(e.Action == "idp.delete" && e.Object == "ldap-live")
+		if ours {
 			t.Fatalf("failed mutation emitted a success audit entry: %+v", e)
 		}
 	}

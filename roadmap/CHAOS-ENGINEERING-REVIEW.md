@@ -8,6 +8,13 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**Later rounds:** the 2026-10-13 round is recorded separately in
+[CHAOS-REVIEW-2026-10-13.md](CHAOS-REVIEW-2026-10-13.md) — CHAOS-89 (the DP→CP
+backoff ladder), CHAOS-90 (the unbounded unenrolled-pull map) and CHAOS-91 (the
+DP's stale active-address index), plus a 29-item backlog. Its promotion
+self-deadlock and address-republish findings merged on main as CHAOS-71 riders
+(§44.8). Rows below that it changes are annotated inline.
+
 This document is a standing register. It records where Culvert already survives failure safely
 (and *why*, by code path) and where it does not. The one code change shipped alongside the original
 review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);
@@ -95,6 +102,22 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-23 — `CHAOS-82` sweep (the backup plane: archive publication mode and
+the restore-side encryption trust boundary). Id claimed in this placeholder row
+as commit one**, before any code, per the convention above. `CHAOS-75` is the
+highest MERGED id; 76–81 are claimed by sweeps still open when this one started
+(76 = PR #1633, 77 = #1669, 78 = #1675, 79/80 = #1626, 81 = #1494), so this
+sweep took 82 and will not move.
+
+Scope is the §42 backup rows recorded and not fixed by the CHAOS-74 sweep:
+**BKP-1** (a plaintext archive is accepted although a passphrase is configured,
+so anyone who can write into `/backup` installs an attacker-authored admin
+roster), **BKP-2** (the unencrypted archive is published world-readable although
+it aggregates `cluster-ca.key`, `ui_users.json` and `idp_profiles.json`),
+**BKP-4** (that same writer publishes through a fixed, symlink-following
+`<out>.tmp` the encrypted writer deliberately abandoned) and **BKP-6a** (the
+archive-declared PBKDF2 iteration count is floor-checked but has no ceiling).
+**BKP-3** and **BKP-5** are deliberately left; see §51 for the reasoning.
 **2026-10-18 — `CHAOS-85` and `CHAOS-86` CLAIMED (placeholder, commit one).**
 Ids allocated in a committed line before any code was written, per the
 convention above. First claimed as `CHAOS-71`/`CHAOS-72` against `dec66e1`,
@@ -136,6 +159,25 @@ self-heals; zero-delay retry in `applyWithRetry`; dropped scheduler contexts in
 needs-owner-decision note that two feed clients dial without
 `ssrf.SafeDialContext` — flagged rather than "fixed", because an on-prem feed
 mirror on a private address is a legitimate topology the guard would reject.
+
+**2026-10-16 — `CHAOS-83` CLAIMED (placeholder, commit one). Domain: elapsed-time
+measurement taken on the WALL clock on the data path and the readiness probe —
+the `time.Since(time.Unix(0, stamp))` idiom, where the stamp was written by
+`time.Now().UnixNano()` and the monotonic reading was therefore discarded on
+both sides. `internal/admission` already treats this exact hazard as a
+contract (`FreshCount`, engine.go: "A NEGATIVE age (the clock moved back
+between the stamp and this read) is stale, not fresh", and
+`internal/admission/AGENTS.md` lists "future stamps" as a standing review
+control); the sweep asks where else the idiom appears WITHOUT that reasoning
+applied. Claimed as `CHAOS-71` / §41 after reading merged `main`: 67 and 68
+remain allocated to other open sweeps (§§37–38 reserved), 69 and 70 are
+merged. Renumbered in merge order to `CHAOS-83` / §47 when main was brought
+in again: `CHAOS-71` had merged as §44 (the CP gRPC listener) with §41–§43
+taken by `CHAOS-74`/`CHAOS-75`, 76–82 were claimed by open branches, and §45/§46
+are claimed by open sweeps. Findings and gates are written up in §47 below.** This row is
+committed before any code is written — the remedy the header above reaches
+independently after ten collisions, and which §35, §39 and §40 each applied
+first.
 
 **2026-10-11 — `CHAOS-75` sweep (the release-dispatch plane's detached executor
 goroutines). Id claimed in a committed placeholder row as commit one**, per the
@@ -1296,7 +1338,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-12 | Alert **dedup bookkeeping**: unbounded map on an attacker-controlled key space (key embeds the requested host, same input `topHosts` is capped for), rescanned `O(n)` under a process-wide mutex on every dispatch (230,603 ns/op at the flood steady state, growing). Dedup runs *before* the semaphore and the retry queue, so neither bounds it. | GAP → **CLOSED** (CHAOS-27, 4096 cap + amortised prune + eviction counter) | **H** | was: `internal/alerts/store.go` `dedupSuppressed`; see §15 |
 | WK-11 | SSE slow client: non-blocking `select … default → close+evict`, 256-client cap, runs off the request path. | ✓ | — | `internal/sse/sse.go:66-78,46` |
 | WK-12 | YARA compile failure loads remaining rules (never disables engine); regex timeout + saturation cap with admin-selectable fail-closed/open posture + alerts. Residual: abandoned regex goroutines are counted but never cancelled (memory held until they finish). | ✓ (+leak caveat) | L/M | `internal/yara/yara.go:98-130,584-602,540` |
-| WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s |
+| WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP → **PARTIALLY CLOSED**. The two legacy feed tickers closed as WK-13b (CHAOS-59, `internal/feedsched`). The cluster plane closed as **CHAOS-89c** (2026-10-13): per-attempt jitter on the DP→CP backoff ladder and a one-time per-loop phase offset on all five CP-facing tickers. **Still open** for `internal/blocklistfeed` (never migrated to `internal/feedsched`; a failed sync also waits a full interval — row R-3 of the 2026-10-13 round) and `internal/otlp` (row R-5). | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s; `controlplane_client.go` (CHAOS-89c) |
 | WK-15 | **ClamAV's queue wait had its own 5 s deadline, which preempted the orchestrator's 10 s one and INVERTED its posture.** Exceeding the inner limit returned an ordinary error → classified as an engine fault → fail-OPEN, while the outer limit fails CLOSED. Five concurrent scans on a HEALTHY daemon therefore admitted content unscanned, reported as a daemon error. Attacker-inducible, no privilege. | GAP → **CLOSED** (CHAOS-52: `ScanContext` charges the queue wait to the caller's budget; `ErrQueueFull` keeps saturation distinguishable from a fault; `culvert_clam_saturated_total`) | **H** | was: `internal/clamav/clamav.go` `Scan` 5 s `time.After`; now `ScanContext` + `internal/secscan` `recordClamFailure` — see §20 |
 | WK-16 | **`ScanBody` stopped WAITING without stopping the WORK.** The abandoned scan goroutine held a ClamAV slot (1 of 4) and a copy of the body until the client's own 30 s timeout — 3x the budget that had already given up on it — unbounded in count and invisible in every surface. Four abandoned scans occupy every slot, pushing live requests onto WK-15's fail-open path: the failure sustains itself under load. Measured 30.006 s against a 150 ms deadline. | GAP → **CLOSED** (CHAOS-52: the budget is a context; cancellation reaches the dial, the conn deadline and a close-watcher; `culvert_scan_inflight`) | **H** | was: `internal/secscan/secscan.go` `ScanBody` `time.After`; now `context.WithTimeout` + `clamav.effectiveDeadline`/`watchCancel` — see §20 |
 | WK-17 | **The fail-closed scan-timeout refusal was cached with the CONTENT TTL** (1 h default), so seconds of scanner slowness blocked that exact object node-wide, for every user, for an hour after recovery — manual cache flush the only recourse. The ClamAV-error branch two lines above already refuses to cache for exactly this reason. | GAP → **CLOSED** (CHAOS-52: `hashcache.SetTTL` + `scanTimeoutCooldown` 30 s) | M | was: `internal/secscan/secscan.go` `ScanBody` timeout arm; now `SetTTL` — see §20 |
@@ -9186,6 +9228,13 @@ values, and they are CLK-1, CLK-2 and CLK-3.
 
 ### BKP-1 — an encrypted-backup passphrase is never *required*
 
+**CLOSED** (CHAOS-82; §51). The row below records what the CHAOS-74 sweep
+observed and is kept as written, per this file's convention of preserving a
+finding's own words beside its closure marker (cf. WK-20/WK-21). **was:** a
+plaintext blob returned before the passphrase was examined; **now:** it is
+refused when a passphrase is configured. Gate:
+`TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet`, with two negative controls.
+
 `loadAndMaybeDecrypt` (`restore.go:305-311`) chooses the envelope by magic-byte
 sniff and consults the passphrase **only** in the encrypted branch, so a
 plaintext archive is accepted with the passphrase never examined, and
@@ -9201,6 +9250,10 @@ level. No test covers passphrase-set-plus-plaintext-archive.
 
 ### BKP-2 — the unencrypted backup archive is written world-readable
 
+**CLOSED** (CHAOS-82; §51); row kept as written. **was:** `os.Create`, measured
+0644 under the ordinary 022 umask; **now:** the descriptor is chmodded to 0600.
+Gate: `TestChaos82_PublishedArchiveIsOwnerOnly`.
+
 `backup.go:425` uses `os.Create` (0666 before umask, so typically 0644) with no
 `Chmod` anywhere in the file, while the encrypted writer goes through
 `atomicWriteFile(..., 0o600)` whose `Chmod` makes the mode umask-independent.
@@ -9214,6 +9267,8 @@ path.
 
 ### BKP-3 — archive memory is not actually bounded
 
+**OPEN** (reasoning recorded in §51.5; risk row R22).
+
 The decompression-bomb guard checks declared entry sizes
 (`restore.go:365-371`) but `restore.go:306` slurps the whole archive with an
 unbounded `os.ReadFile` (≈3× file size peak for the encrypted envelope), and
@@ -9226,6 +9281,14 @@ one-shot at `:198`, so that path has no `GOMEMLIMIT` backstop. Availability only
 
 ### BKP-4 — the unencrypted writer still uses a fixed `<out>.tmp`
 
+**CLOSED** (CHAOS-82; §51); row kept as written, and it UNDERSTATED the
+exposure — a planted symlink received the whole archive and the CLI reported
+success. **was:** a fixed, symlink-following `<out>.tmp`; **now:**
+`os.CreateTemp` on a short fixed prefix. Gates:
+`TestChaos82_PlantedSymlinkAtFixedTmpIsNotFollowed`,
+`TestChaos82_StaleTmpAtFixedPathIsUntouched`,
+`TestChaos82_TempNameDoesNotInheritBasenameLength`.
+
 `backup.go:424-425` uses `outPath + ".tmp"` with `os.Create` — no `O_EXCL`, and
 it follows symlinks. The encrypted path deliberately abandoned this pattern and
 pins the abandonment with two tests (`TestBackupEncrypt_NoFixedTmpFile`,
@@ -9236,6 +9299,9 @@ interleave, after which the CLI prints success over a corrupt archive. Two-line
 switch to `atomicWriteFile`.
 
 ### BKP-5 — `modeFull` silently deletes live artifacts absent from the archive
+
+**OPEN** — the sharpest remaining row in this domain; it needs an
+operator-contract decision, recorded in §51.5 (risk row R21).
 
 `stageArtifacts` pass 2 skips every path for which `mode.fromTarball` is true,
 and for `modeFull` that is unconditional (`restore.go:170-172`), so any live
@@ -9251,6 +9317,13 @@ should enumerate what a commit will delete, in the shape
 `--accept-dp-reenrollment` already establishes.
 
 ### BKP-6 / BKP-7 — recorded, lower severity
+
+**BKP-6a CLOSED, BKP-6b and BKP-7 OPEN** (CHAOS-82; §51); row kept as written.
+Only the iteration-ceiling half shipped. **was:** a floor with no ceiling,
+measured >280 s of PBKDF2 burn on a declared `0xFFFFFFFF`; **now:**
+`encMaxIters`, checked before key derivation. Gate:
+`TestChaos82_ItersAboveCeilingRejectedNonOpaque`. The `enqueueRetry` producer-side
+fsync (described below) and BKP-7 are NOT addressed by this sweep.
 
 No ceiling on the archive-declared PBKDF2 iteration count (`backupcrypt.go:197`
 enforces only a floor, so a declared `0xFFFFFFFF` is ~40 minutes of
@@ -11141,3 +11214,775 @@ SIEM-2's reordering remains unexhibited rather than disproven (§45.3). The fix
 removes the race that would permit it, so the residual is only that the *cost*
 of the pre-fix bug on arm64 is an upper bound from reading `deliverLine`, not a
 measurement.
+
+---
+
+## 47. CHAOS-83 — Elapsed time measured on the wall clock, and the storage type that caused it
+
+**Date:** 2026-10-16 · **Domain:** Proxy data path / readiness probe /
+durability observability (the clock-skew, clock-rollback and NTP-failure
+domain — the least-covered entry in this register: one prior mention of NTP) ·
+**Code:** `monotime.go` (new), `proxy_tunnel.go` (`newTunnelActivityStamp`,
+`idleCopyCounted`), `readyz_dp_health.go` (`dpCPPollFailingSince`,
+`appendDPHealthChecks`), `roster_persist_durability.go` (both log gates) ·
+**Register rows:** PX-26 (CLOSED), HA-20 (CLOSED), ST-13 (CLOSED), CA-21 (OPEN) ·
+**Gates:** `monotime_chaos_test.go` (10 — the roster gate was added when the overlapping sweep #1650 handed this sweep the roster row)
+
+### Executive summary
+
+Three production decisions measured elapsed time with this idiom:
+
+```go
+stamp := time.Now().UnixNano()   // writes the stamp
+elapsed := time.Since(time.Unix(0, stamp))   // reads it back
+```
+
+`UnixNano()` **discards** the monotonic reading, and `time.Unix(0, n)`
+reconstructs a value that has none, so `Sub` falls back to **wall-clock**
+subtraction — Go subtracts monotonic readings only when *both* operands carry
+one. A backwards clock step (an NTP correction of a long-drifted clock, a VM
+suspend/resume, a container host's clock change, `hwclock` at boot, a manual
+`date`) therefore leaves the stamp in the **future**, and `elapsed` goes
+**negative** — which satisfies neither `elapsed >= deadline` nor
+`elapsed >= grace`. Each decision simply stops firing, for as long as the step
+went:
+
+- **the tunnel idle reaper** (`proxy_tunnel.go`, 1h window) stops reaping. It is
+  the only thing that collects a half-open tunnel — peer still ACKs, never sends,
+  never FINs — and each one it holds costs two sockets, two goroutines and two
+  pooled relay buffers. The tunnels it then holds are *precisely* the idle ones
+  it exists to collect, and the CONNECT-bypass and SOCKS5 paths
+  (`socks5.go:587`) both depend on it. Under the connection pressure this
+  register's brief names — thousands of simultaneous connections, long-lived
+  tunnels, a mass reconnect storm — that is FD and memory exhaustion on the data
+  plane. The forward-step direction is the mirror image: every long-lived tunnel
+  in the fleet is torn down at once on its next deadline pop.
+- **the DP readiness grace window** (`readyz_dp_health.go`, 5min) stops closing.
+  `cp_poll` keeps reporting `ok` while the control plane is genuinely
+  unreachable and the node's policy goes stale — with the probe asserting it is
+  fine. This is the fail-**open** direction of a probe whose whole job is to
+  make a sustained CP outage visible. Be precise about the blast radius: the
+  DEFAULT `/ready` verdict is report-only on this row (200/ready either way —
+  `TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow` pins that, and it
+  is a deliberate contract so a CP outage cannot eject the whole DP fleet from a
+  default-configured LB), so what the suppressed row costs there is the SIGNAL.
+  On a **strict** probe (`/ready?strict=1`), which does gate on the row
+  (`TestHandleReady_StrictGatesFailRows`: 503/not_ready), the suppressed `fail`
+  also keeps the verdict `ready` and so holds the node in the load-balancer
+  rotation.
+- **the roster durability-degraded log gate** (`roster_persist_durability.go`)
+  stops opening. A negative age is always `< interval`, so the gate latches into
+  its suppressed branch and the one operator-visible line saying admin roster
+  writes are **not surviving a restart** — §40's entire subject — goes unsaid,
+  while `rosterPersistSuppress` keeps counting where nobody reads it.
+
+### The finding is the storage type, not the carelessness
+
+This codebase already knows this contract, and states it, in the place where it
+matters most. `ha_lease.go:232` — the HA fencing lease's self-fence deadline,
+where getting it wrong means **split brain** — carries the comment:
+
+> `time.Since` over the monotonic clock keeps this immune to wall-clock jumps
+
+and it is correct, because `h.leaseConfirmedAt` is a **`time.Time` struct
+field**: a `time.Time` retains its monotonic reading, so `time.Since` over it is
+monotonic *for free*, and the author had to do nothing but not convert it.
+`internal/halease` is correct for a second, independent reason — the etcd
+backend, not the caller's wall clock, is the lease-time authority (ADR-0005
+Finding 3). `internal/mcp/rollout/evidence.go`'s `elapsed()` is correct too: an
+injected `now` plus a `d < 0` clamp over a genuinely absolute persisted
+soak-start. And `internal/admission`'s `clusterCountStore.FreshCount` is
+correct, with the hazard spelled out explicitly —
+
+> A NEGATIVE age (the clock moved back between the stamp and this read) is
+> stale, not fresh. `age >= maxAge` alone reads a future stamp as brand new and
+> would honour the broadcast for however far back the clock went
+
+— and `internal/admission/AGENTS.md` lists "future stamps" as a standing review
+control.
+
+So the contract was understood, written down, commented and reviewed. Sort the
+sites by how they **store** the stamp and the pattern is exact:
+
+| stamp storage | sites | monotonic? |
+|---|---|---|
+| `time.Time` struct field | `ha_lease.go` (self-fence) | correct **for free** |
+| injected `now` + absolute instant | `internal/mcp/rollout`, `internal/ocsp` (arg) | correct by clamp (rollout) |
+| `atomic.Int64` | `internal/admission` | correct, by an **explicit** negative-age guard |
+| `atomic.Int64` | `proxy_tunnel.go`, `readyz_dp_health.go`, `roster_persist_durability.go` ×2, `internal/ocsp` | **wrong** |
+
+Every site that got it wrong stores its stamp in an `atomic.Int64`, and every
+`atomic.Int64` site is either wrong or carries a hand-written guard. That is not
+a coincidence and it is not inattention: `atomic.Int64` is the *right* choice at
+all five sites — a lock-free stamp shared between two relay goroutines, or read
+on a probe path, is exactly what it is for, and `conventions.md` explicitly
+forbids replacing a proven lock-free hot path with a generic `RWMutex`. But
+`atomic.Int64` cannot hold a `time.Time`, so it **forces** a conversion through
+`UnixNano()` — and that conversion is the precise point at which the monotonic
+reading is silently dropped. The type system does not notice, the linters do not
+notice, and the resulting code reads exactly like the correct version.
+
+**The defect is therefore a property of the representation, not of the author.**
+That is why this sweep's fix is a shared primitive rather than four local
+patches: `monoNanos()` makes the `atomic.Int64` representation safe by
+construction, so the next lock-free stamp is correct by default instead of
+correct only if its author reasons about NTP.
+
+### Why monotonic, and NOT admission's negative-age guard
+
+Copying `FreshCount`'s `age < 0 ⇒ stale` into these three callers would have been
+the obvious move and it would have been **wrong**. Admission's guard is right for
+admission: a bad stamp there must fail toward the local decision, so reading a
+future stamp as stale is fail-closed.
+
+At these sites "expired" does not mean *fall back* — it means **tear something
+down**, or **flip a readiness row to fail**. `negative ⇒ expired` would reap live tunnels
+and flap `cp_poll` on every node in the fleet on *any* backwards step, including
+the sub-second NTP corrections that are entirely routine. Measuring on the
+monotonic clock removes the choice: the elapsed time is simply correct across a
+step in either direction, and no caller needs a negative branch at all.
+`monotime_chaos_test.go` pins that decision as a **negative control** — a future
+stamp must leave `cp_poll` at `ok`, not flip it to `fail`.
+
+### A sentinel the domain change would have broken
+
+`0` is the "never stamped" sentinel at every one of these call sites
+(`since != 0`, `last != 0`), and the readiness probe has a *tested* contract that
+a bare failing flag with no transition stamp stays `ok`. On the wall clock that
+sentinel was unreachable for free: `0` is 1970. In a process-relative domain `0`
+is the process's own first nanosecond — a legitimate stamp that would read as "no
+stamp" and suppress the transition it had just recorded. `monoNanos` is therefore
+defined to return **strictly positive** stamps (elapsed + 1; `monoSince`
+subtracts two stamps so the offset cancels and no caller sees it), and
+`TestChaos83_MonoNanosIsNeverZero` pins it. This was found by the probe gate
+failing, not by inspection.
+
+### Risk matrix
+
+| Row | Finding | Likelihood | Impact | Status |
+|---|---|---|---|---|
+| **PX-26** | Tunnel idle reaper measured its 1h deadline on the wall clock, so a backwards step suspended reaping of exactly the idle/half-open tunnels it exists to collect — two sockets, two goroutines and two pooled buffers each, on the CONNECT-bypass and SOCKS5 paths | Medium (any NTP step-back, VM suspend/resume, host clock correction; routine in virtualised fleets) | **High** — FD/goroutine/memory exhaustion on the data plane under connection pressure; forward steps tear down every long-lived tunnel at once | **CLOSED** |
+| **HA-20** | DP `cp_poll` readiness grace measured on the wall clock, so a backwards step kept the row at `ok` while the control plane was unreachable | Medium (same producers; needs a step larger than the 5min grace to fully mask) | **High** — fail-**open** readiness: the outage signal is lost on the default (report-only) probe, and on a strict probe (`/ready?strict=1`) the suppressed `fail` also holds the node in the LB rotation serving policy it cannot refresh | **CLOSED** |
+| **ST-13** | Roster durability-degraded log gate measured on the wall clock; a negative age is always `< interval`, latching the gate suppressed | Medium | Medium — the only operator-visible signal that admin roster writes are not surviving a restart (§40's subject) goes unsaid while the suppressed counter climbs unread | **CLOSED** |
+| **CA-21** | `internal/ocsp`'s `allowTruncationLog` has the identical defect over an `atomic.Int64` nanos stamp | Medium | Low — a log gate with no enforcement consequence | **OPEN — deferred, see residual risk**; the overlapping sweep `CHAOS-84` (#1650) closes it with a package-local magnitude gate |
+| — | HA self-fence deadline (`ha_lease.go:232`), `internal/halease` lease authority, `internal/admission` `FreshCount`, `internal/mcp/rollout` `elapsed()` | — | — | **Already correct** — see the storage-type table above for why |
+
+### Verification
+
+`monotime_chaos_test.go` carries 9 gates. Four of them were confirmed to **fail
+against the pre-fix tree** (the production change was reverted and the suite
+re-run), which is the only evidence that a gate is a defect gate rather than a
+tautology:
+
+- `TestChaos83_TunnelActivityStampIsMonotonicDomain` and
+  `..._CPPollFailingSinceIsMonotonicDomain` — the stamp must land in the
+  monotonic domain, not near `time.Now().UnixNano()`.
+- `TestChaos83_CPPollGraceFlipsOnMonotonicElapsedOnly` — the grace window closes
+  on monotonic elapsed, and a future stamp does **not** flip the row (the
+  negative control above).
+- `TestChaos83_NoWallClockElapsedIdiomInPackageMain` — an AST guard over all 385
+  package-main sources banning the `time.Unix(0, stamp)` elapsed idiom. The ban
+  is deliberately narrow: `time.Unix(0, nanos)` is only ever an elapsed stamp,
+  while `time.Unix(seconds, 0)` is a genuine absolute instant (a wire-carried
+  token expiry in `controlplane.go:257` and `session.go:118`, an IdP token expiry
+  in `auth_oidc.go:450`, a timestamp formatted for display) and stays legal. It
+  ships with a verbatim pre-fix/legitimate control source and asserts it flags
+  exactly the two pre-fix shapes — so the guard cannot silently match nothing.
+
+The remaining gates pin the foundations: `monoEpoch` must carry a monotonic
+reading (if it is ever round-tripped through a value that strips it, every
+measurement silently degrades back to the wall clock and every gate above keeps
+passing), `monoSince` is never negative for a prior stamp, `monoNanos` is never
+zero, and the behavioural end — a silent tunnel is reaped once the *monotonic*
+elapsed passes the idle window, driven by a virtual clock running 100× real time.
+
+> **The behavioural test's first draft was wrong in an instructive way.** It
+> advanced a frozen fake clock by one step before the first read-deadline pop.
+> The relay refreshes the activity stamp whenever a copy returns bytes, so the
+> refresh captured the already-advanced value and the tunnel then looked freshly
+> active *forever* — the test timed out against correct code. A one-step clock
+> cannot model this path; the clock has to **run**, which is also the honest
+> model of the thing being tested.
+
+Checks run: `go vet ./...`, `go mod tidy -diff`, `CGO_ENABLED=0` amd64 build and
+`GOOS=linux GOARCH=arm64` cross-build, `go test -race` over the 73 tests in the
+touched areas (tunnel idle/drain, readyz DP, roster durability, SOCKS5), the
+shuffled double determinism run on the root package, and
+`docs/agent-context/check.py`. **`golangci-lint` could not run in this
+environment** and is recorded as blocked, not passed: the available v2.5.0 binary
+is built with go1.24 and `go/types` panics on this tree's go1.26 sources
+(`package requires newer Go version go1.26`), and `go install ...@v2.5.0`
+re-execs the linter module's own pinned toolchain, so a go1.26-built binary could
+not be produced here. CI's `go install` under the pinned compiler is unaffected.
+`gofmt` is clean on every changed file and `go vet` passes.
+
+### Residual risk / deliberately left
+
+- **`internal/ocsp`'s `allowTruncationLog` is the same defect, unfixed**
+  (`internal/ocsp/ocsp.go:101`): `now.Sub(time.Unix(0, last))` over an
+  `atomic.Int64` nanos stamp, so a backwards step latches the responder-cap
+  notice into its suppressed branch. Left open as **CA-21** rather than fixed
+  here: it is a log gate with no enforcement consequence, and the fix belongs to
+  that package — it takes an injected `now time.Time`, so it needs either a
+  package-local monotonic source or admission's negative-age guard, not package
+  main's `monoNanos`. Widening this sweep into an internal package to change a
+  log interval is not proportionate.
+- **The AST guard covers package main only.** Internal packages are not scanned;
+  extending it needs a per-package decision about absolute-vs-elapsed stamps,
+  which is the same judgement CA-21 defers.
+- **Monotonic readings do not advance while the machine is suspended** on some
+  platforms, so `monoNanos` measures elapsed *running* time. For an idle-teardown
+  deadline and a probe grace window — both of which bound how long this process
+  holds something or hides something — running time is the intended quantity, not
+  civil time. A tunnel idle across a host suspend is reaped one window after the
+  host resumes, which is the desired behaviour and a strict improvement on the
+  pre-fix code, where the suspend's clock correction *delayed* the reap.
+- **Nothing here changes an absolute-time decision.** Session and IdP token
+  expiry, certificate validity and the OCSP `nextUpdate` horizon are wire- or
+  disk-carried civil instants and must stay on the wall clock; a token that
+  outlives its `exp` because the local clock rolled back is an inherent property
+  of a signed bearer token, not a defect this sweep could fix. `store_logclock.go`
+  is likewise correct: it memoises the render of an absolute wall-clock second.
+- **`RevokeUser`'s non-persistence was re-derived independently** during this
+  sweep (the `users` map is neither persisted by `SaveRevocations` nor gossiped by
+  `ExportRevocations`, and `ui_middleware.go:271`'s per-request `UIUserExists`
+  check is what currently backstops it). It is already recorded as **AU-19** and
+  is not re-opened here.
+
+---
+
+## 48. CHAOS-84 — The wall clock steps backwards and four recovery bounds stop expiring
+
+**Date:** 2026-10-17 · **Domain:** cross-cutting (data plane / upstream plane /
+readiness / persistence signals) — a property of a REPRESENTATION, not of a
+domain, which is why forty sections of domain sweeps did not surface it ·
+**Code:** `internal/upstream/upstream.go`, `internal/ocsp/ocsp.go`,
+`crashguard.go`, `internal/secscan/secscan.go`, `internal/yara/yara.go`,
+`cdr_proxy.go`, `policy.go` ·
+**Full write-up:** [docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md)
+
+> **Id and scope, reconciled when main was brought in.** Claimed as `CHAOS-71`
+> / §41 on its branch; renumbered in merge order to **`CHAOS-84` / §48**, because
+> `CHAOS-71` merged as §44 (the CP gRPC listener), §41–§43 are `CHAOS-74`/`75`,
+> 76–83 are claimed by open branches and §45–§47 by open sweeps. The scope also
+> narrowed. This sweep and the sibling sweep `CHAOS-83` (§47, #1644) both fixed
+> the tunnel idle reaper (CK-1), the DP readiness grace (CK-4) and the two
+> roster log gates (CK-5) — with contradictory contracts on the readiness row
+> (this sweep failed `cp_poll` on a future stamp; `CHAOS-83` pins that a
+> future stamp leaves it `ok`). Those three sites are owned by `CHAOS-83`, whose
+> monotonic stamps cannot go negative at all, so this sweep's alternative fixes
+> and gates for them were withdrawn rather than merged twice. CK-3 (the CDR
+> breaker) was already closed on main, which moved its reset comparison onto a
+> monotonic stamp (`openedMono`). The rows below keep the original analysis and
+> say which change closes each.
+
+### Executive summary
+
+Go's monotonic clock protects an interval only while it stays inside a
+`time.Time`. `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild a `time.Time`
+with **no** monotonic reading, so every interval measured from a stamp held as a
+bare `int64` is a WALL-CLOCK interval. A backward step — an NTP correction after
+a wrong RTC, a resumed hypervisor snapshot, an operator fixing the date — makes
+that interval negative, so every `elapsed >= limit` test is false and a bound
+whose job is to END a degraded state never fires again until the clock catches
+up. Nothing errors, nothing is counted, nothing is logged.
+
+**Twenty-two** such comparisons exist. **Eight were already guarded**
+(`internal/scanner` `budgetRemaining`, `internal/admission` `engine.go`,
+`internal/mcp/canary` `windowOpenLocked` ×2, `internal/mcp/rollout` `elapsed`,
+`store.go` `advanceLocked`, `proxy_host_bounds.go`, `request_tracing_bounds.go`)
+— the rule was adopted, written into a comment and shipped. **Twelve were not:**
+seven recovery bounds or sole operator signals (CK-1…CK-5) and five evidence/log
+gates (CK-9) that this sweep's first inventory MISSED and a second review round
+surfaced.
+
+### Register rows
+
+- **CK-1 (P1, CLOSED by `CHAOS-83` §47 — both step directions)** — `idleCopyCounted` is the ONLY
+  bound on a half-open CONNECT tunnel, and its staleness verdict was wall-clock. The read deadline is
+  monotonic (netpoll converts against `runtimeNano`), so after a step the loop
+  keeps waking exactly on schedule — it is the *verdict* that is lost, not the
+  wake-up, and every pop re-arms forever. Per dead tunnel: two goroutines, two
+  FDs, a pooled relay buffer and the connlimit slot, held for the whole step. A
+  half-open peer is the normal outcome of a NAT timeout or a packet-loss
+  blackhole, so the leak needs no attacker — only a clock correction while
+  tunnels are open. The FORWARD direction was the other half, and the first
+  write-up wrongly called it immune: a tunnel that is quiet but ALIVE (idle SSH,
+  a long-poll) moves no bytes, so nothing refreshes its stamp, and a forward step
+  — the same dead-RTC appliance boot seen from the other side, where NTP jumps
+  the clock forward, possibly by years — tears it down at the next deadline pop.
+  Closed by moving the stamp to a MONOTONIC basis (`relayEpoch`,
+  `relayMonoNanos`), which is strictly stronger than guarding a wall-clock one:
+  a step cannot be represented in the stamp, so there is no negative case left to
+  decide. Available here, and not for the breakers, because the stamp is
+  process-internal — all five holders pass it straight to `idleCopyCounted` and
+  nothing publishes it. (This sweep's own `relayEpoch` version of that fix was
+  withdrawn on reconciliation; `CHAOS-83`'s `monoNanos` is the same basis.)
+- **CK-2 (P1, CLOSED)** — `internal/upstream` `CircuitBreaker.Allow` held
+  `openedAt` as `UnixMilli`; a step pinned every tripped breaker OPEN. This is
+  the security row, because `Pool.Next` falls back to **direct egress** when
+  nothing is eligible (the deliberate PX-2 / CHAOS-11 posture): one parent blip
+  plus a clock correction leaves the appliance egressing AROUND the enterprise
+  parent-proxy chain for the duration of the step, long after the parents
+  recovered. The fallback alert fires once and then tells the truth forever; what
+  never happened was the recovery it waits for.
+- **CK-3 (P2, CLOSED on main — monotonic `openedMono`)** — the same shape on `cdr_breaker.go`, so content disarm
+  stayed unavailable after the Sluice came back.
+- **CK-4 (P1, CLOSED by `CHAOS-83` §47 — monotonic stamp)** — `readyz_dp_health.go`'s `cp_poll` grace became
+  UNEXPIRABLE: a DP node whose control-plane link is known dead kept answering
+  `ok` on `/ready`, so a load balancer kept routing production traffic to it on
+  indefinitely stale configuration.
+- **CK-5 (P2, CLOSED — roster half by `CHAOS-83` §47, OCSP half here)** — the two roster-durability log gates (CHAOS-70's only
+  notice that a credential/roster mutation did not reach the volume) and the OCSP
+  responder-cap gate read a future stamp as *"already logged"*, converting a
+  visible degradation into a silent one for the duration of the step.
+
+**Posture, and the asymmetry that is the finding's substance.** "An unmeasurable
+interval must never count as INFINITE" fixes all five, but what it counts as
+instead depends on what the bound protects. CK-1 goes further and leaves the wall
+clock altogether (monotonic basis), which it can because its stamp is private;
+CK-2/CK-3 cannot, because `OpenedAt()` publishes their trip instant on
+`/api/diagnostics`. Those two govern a live dependency, so they **re-anchor**
+(CAS, so a concurrent writer's fresher stamp survives) and serve one fresh window
+measured from the step — treating a step as
+"expired" would reap every quiet tunnel on the appliance and fire every breaker's
+probe at parents that may still be down, a mass reset caused by the mitigation.
+CK-4/CK-5 only report, have no live resource to protect and an
+already-established failing state, so they count it **expired** — fail-closed for
+the probe, and audible for the log gates. Recovery is automatic everywhere,
+bounded by one window of the bound in question, never by the step size; no state
+latches and no restart is needed. **No new metric and no new alert** — every one
+of these faults already lands on a series that means it; what was missing was the
+recovery, not the signal.
+
+**Review round (CodeRabbit, PR #1650) — two Minor findings, both real.** (1) The
+forward half of CK-1 was documented as immune and was not, which is what moved
+CK-1 to a monotonic basis; (2) the CK-5 guard mistook its own staleness for a
+rollback — a caller that LOSES the CAS re-reads a stamp the winner stored from a
+later sample, so the negative interval was an ORDERING artifact, and the guard
+emitted a duplicate line and moved the stamp backwards, reintroducing the
+amplification the CAS was added to prevent. The proposed fix (re-sample after the
+Load) was measured INSUFFICIENT — the winner's sample may still be later — so the
+gates now discriminate on MAGNITUDE, not sign: suppress while the stamp is within
+one interval of now in EITHER direction. A rollback therefore costs at most one
+suppressed line instead of silencing the warning for the whole step. The OCSP
+half of (2) was NOT a live defect (no CAS loop; a lost CAS suppresses) and took
+the same rule only for uniformity. **The general lesson: a guard on the SIGN of
+an interval guards the wrong thing — a negative interval means the two readings
+are out of order, which concurrency produces with no clock involved. Compare
+against the quantity's natural scale, or leave the wall clock entirely.**
+
+**Second review round (Codex, P2) — see CK-9 above. Its lesson is about method:
+an inventory is only as exhaustive as the shapes its search can express.** This
+sweep said "seventeen comparisons" as if it had counted a closed set, when it had
+counted the matches of three regexes. The honest claim names the shape searched
+for and admits what it cannot reach. It is also the strongest argument for CK-7:
+a convention applied by hand across twenty-two sites was wrong at five of them,
+and what caught it was a different reader, not a check.
+
+- **CK-9 (P2, CLOSED) — the inventory was not exhaustive, and the SEARCH was
+  why.** Codex rejected §1's exhaustiveness claim and named `crashguard.go:167`,
+  `internal/secscan/secscan.go:828` and `internal/yara/yara.go:643`. Correct on
+  all three, and the cause was the search: the first sweep grepped for the
+  subtraction sitting syntactically beside the time call (`UnixNano() -`,
+  `time.Since(time.Unix(`), which cannot match the far more common two-step form
+  `now := time.Now().UnixNano()` … `now - prev`. Re-sweeping the generalised
+  shape found Codex's three plus **two more it had not named**: `cdr_proxy.go`
+  (Sluice call-error log) and `policy.go` (file-profile unresolved-block
+  warning). `policy.go` compares against a bare literal in Unix SECONDS, so even
+  the generalised `int64(<duration>)` search missed it — it took enumerating
+  every file that seeds an int64 from a time call. **`crashguard.go` is the
+  sharpest member of the whole sweep:** after one crash and a backward step,
+  `recordCrash` returns before updating `lastCrash` and before emitting the
+  stack-bearing log and audit entry, for every subsequent same-component crash —
+  and crash evidence is the one record an operator cannot reconstruct. All five
+  take the symmetric-window rule (absolute interval), four via
+  `time.Duration(d).Abs()` and `policy.go` by explicit negation.
+
+**Gates.** As first shipped, 15 defect + 15 control = 30, all fifteen defect
+gates verified FAILING against the pre-fix tree. After the reconciliation above
+this change carries 8 defect + 9 control = 17: the tunnel, readiness, roster and
+CDR-breaker gates left with their fixes (`CHAOS-83`'s `monotime_chaos_test.go`
+and main's `cdr_breaker_monotonic_test.go` gate those sites). Fault injection is deterministic and needs no host
+clock: a backward step of Δ is observationally identical to a stamp Δ in the
+FUTURE, because the stamp is written before the step and read after it. The
+breaker gates with an injectable clock additionally pin the recovery INTERVAL, so
+the fix cannot degrade into an instant probe flood.
+
+### Deliberately left, and recorded
+
+- **CK-6 — nothing detects or reports the step itself.** Each bound now recovers
+  locally, but no subsystem emits "the wall clock moved backwards by an hour" —
+  the single line that would have made all five diagnosable at once. A
+  process-wide monotonic-vs-wall drift detector is the right home for it and
+  needs its own threshold and alert design; larger than this fault.
+- **CK-7 — nothing structural stops the next bound repeating this.** A lint rule
+  or AST wall over `time.Unix(` / `time.UnixMilli(` inside a comparison would,
+  but the honest version has to tell a recovery bound from a log gate, because
+  the correct guard differs between them. Not built here.
+- **CK-8 — the MCP canary RATE window is the same class, left in place.**
+  `internal/mcp/canary` `budget_enforce.go` rolls its per-minute window on an
+  unguarded `now.UnixNano()-e.rateWindowStart >= budgetRateWindow`, in `Reserve`
+  and in the matching read, while the *activation* window two functions away
+  guards it explicitly. A step pins the window, `rateCount` never resets, and a
+  capped canary denies every reserve for the duration. Left because the direction
+  is **fail-closed** (it stalls rather than over-executes, which is that
+  boundary's posture) and because `Reserve` carries its own reviewed invariants —
+  a monotonic total, and an explicit "do NOT mutate here, this is a read"
+  contract on the twin — so re-anchoring it is a change to a security budget, not
+  a chaos remediation. Fix shape recorded for an owner: re-anchor
+  `rateWindowStart` without resetting `rateCount`, which holds the deny for one
+  more window and then rolls over normally.
+- **Cross-node clock skew is not this sweep.** `internal/halease` delegates lease
+  expiry to etcd, which decides it server-side, so the leader lease is not exposed
+  to a local step; gossiped freshness was closed separately and `internal/admission`
+  `engine.go` already guards `age < 0`. This sweep stayed on single-node steps.
+- **NTP failure as such is not a fault here.** A clock that never corrects is a
+  clock that never steps, which is the benign case for every bound above. The
+  fault is the correction, not its absence.
+
+### The flaky gate this sweep shipped and then fixed
+
+`Race · non-root packages` went red, and the first reading was "red on a
+superseded head". That was wrong. Reproducing the shard locally showed
+`TestChaos84_BreakerRecoveryIsBoundedFromTheStep` failing: `openedAt` is a
+`UnixMilli` stamp, so truncation moves the re-anchor instant down by up to 1ms
+and recovery lands that much before the nominal timeout (measured worst case over
+40 `-race` runs: −791µs). The GATE was stricter than the resolution of the clock
+it read. Fixed by tolerating exactly the stamp resolution — the property under
+test, a full timeout versus an instant half-open, is 0ms versus ~300ms and cannot
+be masked by 1ms. **Two rules out of it: a timing gate must be no stricter than
+the resolution of the clock it reads; and "red on a superseded head" is not a
+diagnosis when the check ran against code still in the PR — reproduce it, because
+the local shard is the authority, not the head SHA.**
+
+### The process lesson
+
+**A rule that lives in a comment is not a rule the tree follows.** The backward-step
+guard had been derived, argued and shipped eight times, once with the reasoning
+written out in full. What never happened was anyone asking where else the same
+subtraction appears — and the answer was the four places where the interval was
+not a log window or a scan budget but the recovery bound for a degraded state.
+
+The second half is about which faults get swept. Forty sections have gone domain
+by domain. A wall-clock step is not a domain; it is a property of a
+REPRESENTATION that cuts across all of them, and it produced one P1 in the data
+plane, one in the upstream plane and one in the readiness plane, in code three
+different sweeps had already visited for other reasons. Sweeping by domain cannot
+find that class. The question that finds it is *"what does this measurement
+depend on, and what happens when that dependency moves?"* — asked of the whole
+tree at once.
+
+> **The rule this sweep produces:** an interval measured from a stamp that has
+> left a `time.Time` is a WALL-CLOCK interval, and a wall-clock interval can go
+> negative. An unmeasurable interval must never count as INFINITE. Where the
+> bound protects a live resource, re-anchor and serve one fresh window; where it
+> only reports, count it as expired.
+
+---
+
+## 51. CHAOS-82 — The backup plane: who may read the archive, and what the restore will accept
+
+**Id claim.** `CHAOS-82` was claimed in a committed placeholder row as commit
+one (see the dated row in the header), before any code. `CHAOS-75` was the
+highest MERGED id; 76–81 were claimed by sweeps still open when this one
+started (76 = PR #1633, 77 = #1669, 78 = #1675, 79/80 = #1626, 81 = #1494).
+First written as §45; **renumbered in merge order to §51** when main was
+brought in, because `CHAOS-78` (#1675) had merged as §45 and §46–§50 were held
+by other sweeps. The id `CHAOS-82` did not move.
+
+**Origin.** Rows **BKP-1**, **BKP-2**, **BKP-4** and **BKP-6** of §42 — the
+backup findings the CHAOS-74 sweep measured, recorded, and deliberately did not
+fix. Nothing in this sweep is a new discovery of a failure *mode*; what is new
+is that each row now has a fix and a gate that fails without it. The §42 text
+was accurate in every particular, which is worth saying plainly: the value here
+was in the recording, not the re-finding.
+
+---
+
+### 51.1 Executive summary
+
+**The backup plane protected the archive's contents and then published it
+world-readable, and the restore protected the archive's integrity and then
+accepted one that was never encrypted.**
+
+Four defects, all on the two paths that matter — who can read a backup, and
+what a restore will install. Three are security defects and one is a cheap
+availability defect. None needed a new failure mode to be invented; all four
+were sitting in §42 with file and line.
+
+**BKP-2 — the archive was published 0644.** `writeBackupTarball` used
+`os.Create` (0666 before umask) with no `Chmod` anywhere in the file, while the
+encrypted writer went through `atomicWriteFile(..., 0o600)`. Measured by
+restoring the pre-fix writer under this sweep's own gate: **mode 0644**. The
+archive aggregates files that are individually 0600 and contains
+`cluster-ca.key` — the fleet's MITM-capable CA key — plus `ui_users.json`
+(password hashes, TOTP secrets) and `idp_profiles.json` (OIDC client secrets,
+LDAP bind credentials). Any local account or co-mounted container with read
+access to `/backup` obtained all of it. The whole fix is one `Chmod`.
+
+**BKP-4 — and it published through a predictable, symlink-following path.**
+The same writer used a fixed `outPath + ".tmp"` with `os.Create`: no `O_EXCL`,
+and it follows symlinks. This is the finding that measured worse than its §42
+description. With the pre-fix writer restored, a symlink planted at
+`<out>.tmp` ahead of the run **received the entire archive** — 687 bytes
+landing on a canary file outside the output directory — and `runBackup`
+returned success. That is not a corruption risk, it is an exfiltration
+primitive for the cluster CA key, available to anyone who can create one
+directory entry in `/backup`. `os.Create` also truncates, so a stale file at
+that path was silently destroyed, and two concurrent backups to one `outPath`
+opened the same inode and interleaved, after which the CLI printed success over
+a corrupt archive. The encrypted writer had already abandoned this pattern and
+pinned the abandonment with two tests; this path kept it.
+
+**BKP-1 — a plaintext archive was accepted although a passphrase was set.**
+`loadAndMaybeDecrypt` chose the envelope by magic-byte sniff and consulted the
+passphrase **only** in the encrypted branch, so a plaintext blob returned
+before the passphrase was ever examined. The substitution is the whole attack:
+anyone who can write into `/backup` replaces the archive with a hand-built
+unencrypted tarball carrying their own `ui_users.json`, and no other guard
+fires — the manifest is self-referential, so every content check still passes.
+The restore installs an attacker-authored admin roster. The format carries no
+other provenance binding, so refusing the downgrade is the only available
+control, and it is symmetric with the KDF-iteration downgrade `backupcrypt`
+already refuses at the header level.
+
+**BKP-6a — the archive declared how much CPU the restore would spend.**
+`parseEncHeader` enforced an iteration *floor* and no ceiling, and `DecryptBlob`
+fed the header's count straight to `pbkdf2.Key`. §42 estimated ~40 minutes for
+a declared `0xFFFFFFFF`. Measured here by removing the new ceiling: the open
+**did not complete in 280 seconds** and the test harness killed it, against an
+instant refusal with the ceiling in place. Four attacker-controlled header
+bytes, and the blob could never have authenticated anyway.
+
+---
+
+### 51.2 A result worth separating from the fixes: one of the gates was vacuous
+
+The first version of the BKP-4 gate asserted that no `<out>.tmp` is left in the
+output directory after a successful backup — mirroring
+`TestBackupEncrypt_NoFixedTmpFile`, which pins exactly that for the writer that
+had already been fixed. Mutation-tested against the restored `os.Create`
+version, **it passed**. It had to: the pre-fix writer *renamed* its fixed temp
+file onto `outPath`, so a successful run left no litter either. The assertion
+was true before and after the fix and discriminated nothing.
+
+This is recorded rather than quietly corrected because the mirrored test is a
+trap: copying a gate from a sibling writer carries over its *shape* without its
+*discriminating power*, and the sibling's version is not vacuous only because
+`atomicWriteFile` never had a fixed name to leave behind. Two gates that do
+discriminate were added — a planted symlink must not be followed (the security
+property, and the one that exposed the exfiltration measurement above) and a
+stale file at the fixed path must survive untouched (`os.Create` truncates it).
+The litter assertion was kept, with its own limitation written into the test, as
+a guard against a writer that abandons temp files.
+
+Every other gate in this sweep was mutation-tested the same way, and each fails
+with its fix reverted. That is the only evidence that distinguishes a gate from
+a comment.
+
+**A third instance of the same family, found in review rather than by me.** The
+BKP-1 change also had to update `TestBackupEncrypt_TamperedMagic`, whose
+assertion this sweep first widened to accept *either* the new downgrade refusal
+*or* the old `gunzip`/`tarball` error — reasoning that the gunzip path was still
+reachable. It is, but not in that test, which supplies a passphrase: there the
+downgrade refusal fires deterministically (measured 5/5). The widened assertion
+was therefore dead slack, and CodeRabbit established the consequence precisely —
+with the BKP-1 guard deleted, the test still passed, because it accepted exactly
+the `gunzip: gzip: invalid header` the unguarded path produces. A test covering
+a security control that stays green when that control is removed.
+
+It is now a two-case table pinning the whole partition — passphrase set ⇒
+downgrade refusal, passphrase unset ⇒ gunzip — and mutation-testing the guard
+away fails the first case with that exact gunzip error. Nothing else covered
+this path: the dedicated `TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet`
+pins a genuinely plaintext archive, not a tampered encrypted one.
+
+**Three defects in this sweep were of one kind, and none was in the production
+change.** A gate copied from a sibling writer that kept its shape and lost its
+discriminating power (§51.2); a fix copied from the hardened chokepoint that
+inherited its length coupling (§51.4b); and an assertion widened "to be safe"
+that admitted the very failure it guarded. All three passed self-review because
+each looked like deference to existing, careful code. Worth stating as the
+sweep's finding about its own method, not buried as three nits: *checks that
+pass are not evidence; only checks that fail when the fix is removed are.*
+
+---
+
+### 51.3 What shipped
+
+* **`backup.go`** — `writeBackupTarball` publishes through `os.CreateTemp` (a
+  random name under `O_EXCL`, so a planted symlink is never opened and two
+  concurrent backups cannot share an inode) and chmods the descriptor to
+  `0o600` before writing. Streaming is preserved: the encrypted writer builds
+  the whole archive in a `bytes.Buffer` because it must seal it, and there was
+  no reason to adopt that memory profile on the path that does not. The
+  existing fsync → rename → parent-dir-fsync publication is unchanged.
+* **`restore.go`** — `loadAndMaybeDecrypt` refuses a plaintext blob when a
+  passphrase is configured, naming the archive, the condition and the remedy.
+  It does **not** fire on the legitimate plaintext restore, which supplies no
+  passphrase — which is already what the maintenance agent does
+  (`ComposeRestoreDryRun` resolves an empty passphrase for an unencrypted
+  archive, and the unencrypted backup/list templates suppress the variable with
+  an explicit unset), so the shipped restore flow is unaffected.
+* **`internal/backupcrypt`** — `encMaxIters = 10_000_000` beside the existing
+  floor, checked in `parseEncHeader` before any key derivation. ~16× the 600k
+  this version writes, so a future deliberate increase still opens. The
+  rejection is non-opaque like the floor: it cannot leak passphrase
+  information, and an operator needs to know what was wrong.
+
+**A secondary effect, deliberately kept.** The BKP-1 refusal also changes the
+tampered-magic path: an encrypted archive whose magic has been broken now fails
+with an explicit downgrade refusal instead of falling through to an opaque
+`gunzip: invalid header`. Same fail-closed outcome, a message that names the
+actual condition. `TestBackupEncrypt_TamperedMagic` asserted the old message and
+was updated to accept either, with the reasoning in the test. The gunzip path is
+still what a tampered blob reaches when no passphrase is supplied; that case is
+unchanged.
+
+---
+
+### 51.4 Gates
+
+In `backup_chaos82_test.go` (root) and
+`internal/backupcrypt/iterceiling_chaos82_test.go`:
+
+| Gate | Pins | Fails without the fix as |
+|---|---|---|
+| `TestChaos82_PublishedArchiveIsOwnerOnly` | both writers publish 0600 | `mode = 0644` |
+| `TestChaos82_PlantedSymlinkAtFixedTmpIsNotFollowed` | the archive is not written through a planted link | canary overwritten with 687 archive bytes |
+| `TestChaos82_StaleTmpAtFixedPathIsUntouched` | `os.Create`'s truncation of the fixed path | stale file consumed |
+| `TestChaos82_TempNameDoesNotInheritBasenameLength` | the temp name is not derived from the destination basename (the fix's own regression, §51.4b) | `create output: … file name too long` at a 247-byte basename |
+| `TestChaos82_UnencryptedWriterLeavesNoFixedTmp` | no temp litter | *(vacuous — see §51.2)* |
+| `TestChaos82_PlaintextArchiveRefusedWhenPassphraseSet` | the BKP-1 downgrade | plaintext archive accepted |
+| `TestChaos82_PlaintextArchiveStillAcceptedWithoutPassphrase` | negative control: the legitimate plaintext restore | — |
+| `TestChaos82_EncryptedArchiveStillRestores` | negative control: encrypted restore unaffected | — |
+| `TestChaos82_ItersAboveCeilingRejectedNonOpaque` | the BKP-6a ceiling, non-opaque | open does not finish in 280 s |
+| `TestChaos82_ShippedItersStillOpen` | the ceiling cannot be set below the shipped `KDFIters` | — |
+
+The two negative controls are load-bearing, not decoration: the BKP-1 refusal
+is only correct if it fires on the downgrade and nowhere else, and a refusal
+that also caught the no-passphrase restore would break the maintenance agent's
+restore flow in a way no gate on the positive case would notice.
+
+---
+
+### 51.4b The fix's own regression, and the pattern it was copied from
+
+The first version of the BKP-4 fix derived the temp-file pattern from the
+destination, `os.CreateTemp(dir, filepath.Base(outPath)+".tmp.*")` — copied
+verbatim from `fileutil.AtomicWrite`'s `writeSyncedTemp`, on the reasoning that
+matching the chokepoint was the conservative choice. It was not. `CreateTemp`
+replaces `*` with ~10 random digits, so a derived pattern couples the temp
+name's length to the destination's, and **measured: a 247-byte basename failed
+`ENAMETOOLONG` under the derived pattern and succeeded under the old fixed
+`.tmp` suffix** (both fail past ~251; both succeed at 207). The fix therefore
+broke a case the defect it replaced had handled.
+
+That range is reachable through the product's own supported path, not only a
+hand-run CLI: the maintenance agent's `validateBackupFilename` admits
+`[a-zA-Z0-9._-]{1,255}`, so the agent accepts a backup filename this writer then
+could not publish. The failure is clean — nothing is written and the CLI reports
+the error — which is why it rates Minor rather than higher, but it is a
+regression this sweep introduced and not a style point.
+
+The pattern is now a short fixed prefix, `.culvert-backup-*`. Nothing looks the
+temp file up by name (it is renamed or removed on every branch), so deriving it
+bought nothing; and because `validateBackupFilename` rejects a leading dot, the
+prefix additionally cannot collide with a validated backup name. Gate:
+`TestChaos82_TempNameDoesNotInheritBasenameLength`, mutation-tested against the
+derived pattern.
+
+**Found by CodeRabbit on PR #1690, labelled Minor.** Recorded at length because
+the label understated it and the provenance is the lesson: the bug arrived *by
+copying the hardened chokepoint*, which is normally the right instinct here and
+is exactly why it passed self-review. §51.2 is the same shape one level up — a
+gate copied from a sibling writer that carried the shape without the substance.
+Two of this sweep's own defects came from imitating neighbouring code rather
+than from writing something new.
+
+**`fileutil.AtomicWrite` has the same coupling, and it is NOT fixed here.**
+`writeSyncedTemp` still derives its pattern from the destination basename, so
+every durable write in the product — roughly fifty call sites, including the
+ENCRYPTED backup path via `atomicWriteFile` — carries the same coupling today,
+pre-existing rather than introduced by this sweep. Scope note, so the row is not
+read as more than it is: the coupling is established by reading
+`writeSyncedTemp`, while the 241–251 byte window was measured against THIS
+writer only. The encrypted path's own threshold was not measured end-to-end
+through `atomicWriteFile`, and no number is claimed for it. Left for its own
+change: it is the shared chokepoint, the blast radius is every persisted store,
+and widening this PR to touch it is precisely what the verification rules warn
+against. Recorded as risk row R23.
+
+---
+
+### 51.5 Deliberately left, recorded rather than silently skipped
+
+* **BKP-3 (unbounded archive memory).** `restore.go` slurps the whole archive
+  with an unbounded `os.ReadFile` and caps no entry *count*, and
+  `initMemoryBackstop()` runs after the restore one-shot so that path has no
+  `GOMEMLIMIT` backstop. Availability only, pre-mutation, and the remedy is the
+  repository's own `io.LimitReader`-plus-explicit-refusal pattern. Left out to
+  keep this PR to the archive-publication and accept-decision boundary; it
+  wants the entry-count cap and the backstop ordering decided together.
+* **BKP-5 (`modeFull` silently deletes live artifacts absent from the
+  archive).** The sharpest remaining row in the domain: `policy.json` and
+  `admin_settings.json` are Tier-2 *optional*, so an archive from a fresh
+  install legitimately contains neither, and restoring it onto a configured
+  appliance drops both — and `admin_settings.json` is where `default_action`
+  persists, whose empty-plus-zero-rules combination resolves to passthrough.
+  The gateway goes from enforcing to fully permissive, silently. Not fixed here
+  because the fix is a *plan* change — enumerating what a commit will delete,
+  in the shape `--accept-dp-reenrollment` already establishes — which is an
+  operator-contract and CLI-surface decision, not a thing to invent inside a
+  sweep. This is the CHAOS-75/WK-22 precedent: record the reasoning, leave the
+  owner decision.
+* **A umask-independence gate for BKP-2.** The `Chmod` is precisely what makes
+  the 0600 independent of the process umask, and the natural gate flips
+  `syscall.Umask` the way `internal/fileutil`'s
+  `TestWriteFileExclusive_ModeIsIndependentOfUmask` does. It was written, and
+  then removed: it would have been the **first** `syscall.Umask` test in the
+  root package, whose ~982 test files share process-global state and run
+  shuffled, repeated and parallel, and whose suite contains other file-mode
+  assertions. Trading a real intermittent failure across the largest package in
+  the repository for a property the default-umask gate already discriminates
+  (0644 vs 0600) is a bad trade. Recorded so the absence is a decision rather
+  than an oversight. Note for a future sweep: `fileutil`'s own umask gate
+  covers `WriteFileExclusive`, **not** `AtomicWrite`, whose 0600 is asserted
+  only at the default umask — so the encrypted path's umask-independence is
+  likewise ungated today, and a subprocess-isolated gate in `fileutil` would
+  cover both writers at once without touching root's process state.
+
+---
+
+### 51.6 Residual risk
+
+| # | Risk | Likelihood | Impact | Status |
+|---|---|---|---|---|
+| R17 | BKP-2 an archive carrying `cluster-ca.key`, password hashes and IdP secrets is readable by any local account with `/backup` read access | High (default umask; measured 0644) | High (fleet MITM capability) | **CLOSED** (CHAOS-82) |
+| R18 | BKP-4 a symlink planted at the predictable temp path redirects the whole archive, and the CLI reports success | Low-Medium (needs one directory entry in `/backup` ahead of the run) | High (exfiltration of the CA key; measured end-to-end) | **CLOSED** (CHAOS-82) |
+| R19 | BKP-1 a substituted plaintext archive installs an attacker-authored admin roster on restore | Low-Medium (needs write access to `/backup`) | Critical (admin takeover of the appliance) | **CLOSED** (CHAOS-82) |
+| R20 | BKP-6a an archive-declared iteration count spends unbounded restore CPU before failing authentication | Low (restore CLI only, one-shot) | Low-Medium (measured >280 s; DoS on the recovery path) | **CLOSED** (CHAOS-82) |
+| R21 | BKP-5 `modeFull` silently drops `admin_settings.json`, taking the gateway from enforcing to passthrough | Medium (a fresh-install archive restored onto a configured node) | High (silent total policy bypass) | **OPEN** — owner decision, §51.5 |
+| R22 | BKP-3 restore memory is unbounded in archive size and entry count, with no `GOMEMLIMIT` backstop on that path | Low-Medium | Low (availability only, pre-mutation) | **OPEN** — §51.5 |
+| R23 | `fileutil.AtomicWrite` derives its temp name from the destination basename, so a long-but-legal name couples every durable write to that length — the encrypted backup path included | Low (needs a long basename; the ~241–251 byte window is measured for the backup writer, not for `AtomicWrite` itself) | Low-Medium (clean failure, but it is the chokepoint for ~50 stores) | **OPEN** — pre-existing, §51.4b |
+
+The pre-existing finding that dominates this domain's DR picture is unchanged
+and not re-litigated: the restore commit cannot succeed in the shipped
+docker-compose topology because step 6 renames `/data`, a mount point (`EBUSY`),
+which `restore_mountpoint_test.go` already characterises. The failure is clean.
+
+**Already resilient in this domain, and the code that provides it** —
+re-confirmed at this revision rather than restated from §42: restore validates
+fully in memory before the first byte is written (`runRestoreCommit`), stages
+into a fresh exclusive directory and publishes by rename, so a mid-restore
+ENOSPC leaves `/data` untouched; `fileutil.AtomicWrite` is temp → chmod → fsync
+→ rename → parent fsync with cleanup on every branch, and distinguishes a
+post-rename fsync failure so it cannot be mistaken for "nothing was written";
+`checkInterruptedRestore` refuses to boot into an empty `/data` when a `.bak`
+sibling proves a killed commit, and prints both recovery commands; `backupcrypt`
+binds its header as AAD so an iteration downgrade cannot authenticate, and
+collapses wrong-passphrase and tamper into one opaque error with no oracle; the
+no-overwrite contract at the top of `runBackupWith` is preserved by both writers;
+and node-local key material is excluded on the pack side *and* refused on the
+restore side.
