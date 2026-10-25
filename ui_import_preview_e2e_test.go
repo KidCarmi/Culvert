@@ -34,9 +34,14 @@ func TestUIE2E_ImportPreview_CancelLeavesStateUntouched(t *testing.T) {
 
 	// A replace-mode backup that WOULD wipe the seeded rule and install a new one.
 	backupPath := filepath.Join(t.TempDir(), "backup.json")
+	// The per-rule action is Block_Page, not "deny": the four actions this build
+	// dispatches are Allow, Drop, Block_Page and Redirect, and SEC-POLICYACTION-1
+	// now refuses to install a rule carrying anything else (it used to fall out
+	// of applyPolicyDecision's switch and silently ALLOW). "defaultAction" below
+	// is a different field — the global default, which does take allow/deny.
 	backup := `{"version":1,"exportedAt":"2026-02-02T00:00:00Z",` +
 		`"defaultAction":"deny",` +
-		`"policyRules":[{"name":"imported-e2e","action":"deny"}]}`
+		`"policyRules":[{"name":"imported-e2e","action":"Block_Page"}]}`
 	if err := os.WriteFile(backupPath, []byte(backup), 0o600); err != nil {
 		t.Fatalf("write backup fixture: %v", err)
 	}

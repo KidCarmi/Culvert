@@ -617,11 +617,7 @@ func writeBundleState(id string, st supportBundleStateFile) error {
 	if err != nil {
 		return err
 	}
-	tmp := supportBundleStatePath(id) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, supportBundleStatePath(id))
+	return durableSupportWrite(supportBundleStatePath(id), b)
 }
 
 // apiSupportBundleApprove marks a PENDING bundle READY for download after an admin
@@ -793,7 +789,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 		return nil, err
 	}
 	dir := filepath.Join(supportBundlesDir(), res.BundleID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirDurableSupport(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir bundle dir: %w", err)
 	}
 	// Any failure past this point must not strand a partial bundle dir (SPEC §6
@@ -813,7 +809,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err := writeBundleState(res.BundleID, supportBundleStateFile{State: bundleStatePending, CreatedAt: res.Manifest.CreatedAt, CaseID: caseID}); err != nil {
 		return nil, fmt.Errorf("write state: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "bundle.csb.tgz"), res.TarGz, 0o600); err != nil {
+	if err := durableSupportWrite(filepath.Join(dir, "bundle.csb.tgz"), res.TarGz); err != nil {
 		return nil, fmt.Errorf("write bundle: %w", err)
 	}
 	manifestJSON, err := json.MarshalIndent(res.Manifest, "", "  ")
@@ -828,7 +824,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err != nil {
 		return nil, fmt.Errorf("marshal report: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, support.RedactionReportName), reportJSON, 0o600); err != nil {
+	if err := durableSupportWrite(filepath.Join(dir, support.RedactionReportName), reportJSON); err != nil {
 		return nil, fmt.Errorf("write report: %w", err)
 	}
 	// redaction-preview.json is the SERVER-SIDE consent preview: a bounded sample
@@ -840,17 +836,15 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err != nil {
 		return nil, fmt.Errorf("marshal preview: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, support.RedactionPreviewName), previewJSON, 0o600); err != nil {
+	if err := durableSupportWrite(filepath.Join(dir, support.RedactionPreviewName), previewJSON); err != nil {
 		return nil, fmt.Errorf("write preview: %w", err)
 	}
 	// manifest.json is the list/commit marker (listSupportBundles keys on it), so
-	// write it atomically via tmp+rename — a torn write can never present a
-	// half-manifest as a listable bundle.
-	tmp := filepath.Join(dir, "manifest.json.tmp")
-	if err := os.WriteFile(tmp, manifestJSON, 0o600); err != nil {
-		return nil, fmt.Errorf("write manifest: %w", err)
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, "manifest.json")); err != nil {
+	// it is written through fileutil.AtomicWrite LAST: a torn write can never
+	// present a half-manifest as a listable bundle, and the fsync of this file
+	// and its parent directory is the barrier that makes the state-first ordering
+	// above survive power loss, not merely a process crash.
+	if err := durableSupportWrite(filepath.Join(dir, "manifest.json"), manifestJSON); err != nil {
 		return nil, fmt.Errorf("commit manifest: %w", err)
 	}
 	pruneSupportBundles(supportRetentionKeepVal())

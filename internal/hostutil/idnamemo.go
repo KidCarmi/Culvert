@@ -300,12 +300,21 @@ func normalizeHostStrictMemo(host string) (norm string, ok bool) {
 	// The VALUE bound, enforced for both tiers. maxMemoHostLen is the DNS name
 	// maximum, so a canonical form longer than it is refused by the dispatch
 	// gates (canonicalHostOversize) and retaining it would buy nothing while
-	// loosening the ceiling. A main-tier input can in principle grow past the
-	// bound through punycode encoding, and a long-tier input reaches here
-	// precisely because its raw form is longer — so for the long tier this is
-	// the live check, not a defensive one. Either way the ceiling holds by
-	// construction, and TestIDNMemo_StoredEntriesRespectTheBound asserts the
-	// invariant over every live entry in both tiers rather than over this branch.
+	// loosening the ceiling. A long-tier input reaches here precisely because
+	// its raw form is longer, and a main-tier input CAN grow past the bound
+	// through punycode encoding — so for both tiers this is a live check, not
+	// a defensive one. Punycode shrinks a dense non-ASCII script (a 252-byte
+	// CJK host is 98 bytes as an A-label), but the ACE overhead is per LABEL,
+	// and the worst case is the opposite shape: one non-ASCII rune in each of
+	// many short labels. "é.é.é…" at 251 bytes normalizes to 671 and
+	// "aé.aé.aé…" at 251 bytes to 629 (measured), up to ~2.7x the bound, and
+	// the HTTP raw pre-cap (1 KiB) admits both with room to spare. Without this
+	// check the main tier alone retains ~969 KB against its ~554 KB ceiling.
+	// TestIDNMemo_PunycodeExpansionIsNotRetained and
+	// TestIDNMemo_ExpansionCannotBreachTheCeiling gate the main-tier expansion
+	// (verified failing with this branch deleted), and
+	// TestIDNMemo_StoredEntriesRespectTheBound asserts the invariant over every
+	// live entry in both tiers rather than over this branch.
 	if len(norm) > maxMemoHostLen {
 		return norm, ok
 	}
