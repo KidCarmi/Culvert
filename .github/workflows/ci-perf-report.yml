@@ -91,7 +91,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
@@ -113,7 +113,7 @@ jobs:
           echo "ARTIFACT_SUFFIX=${RUN_ID}-$(jq -r .run.attempt out/report.json)" >> "$GITHUB_ENV"
 
       - name: Upload the report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-run-report-${{ env.ARTIFACT_SUFFIX }}
           path: |
@@ -124,7 +124,7 @@ jobs:
 
       - name: Upload the timing-refresh candidate (review only; never committed)
         if: hashFiles('out/timing-candidate/qa-root-shard-timings.json') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: timing-refresh-candidate-${{ env.ARTIFACT_SUFFIX }}
           path: out/timing-candidate/
@@ -161,7 +161,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
@@ -174,7 +174,7 @@ jobs:
 
       - name: Upload the trend report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-trend-report-${{ github.run_id }}
           path: trend/

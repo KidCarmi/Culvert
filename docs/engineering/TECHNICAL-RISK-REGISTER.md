@@ -13,9 +13,9 @@
 | ID | Sev | Status | Title | Evidence |
 |---|---|---|---|---|
 | RISK-001 | HIGH | ✅ CLOSED | Multi-CP HA split-brain (no quorum/fencing) | ADR-0004 safe defaults + ADR-0005 S0–S5 SHIPPED (2026-07-03): etcd fencing lease — Acquire-gated promotion, self-fence, epoch-fenced write sinks, safe auto-failover, GUI/compose/runbook. Legacy (no etcd) keeps the safe-manual posture. **HV** |
-| RISK-002 | HIGH | ✅ CLOSED | OIDC introspection path missing SSRF dial guard | fixed `auth_oidc.go:95` (2026-06-28) |
+| RISK-002 | HIGH | MITIGATING | OIDC destination guard: inherited proxy bypass fixed; other transports need review | `newOIDCTransport`, boundary regression (2026-10-03) |
 | RISK-003 | HIGH | ✅ CLOSED | Webhook HMAC secret persisted cleartext on disk | `alerts.go`, `alerts_secret.go` |
-| RISK-006 | MEDIUM | ✅ CLOSED | Gate config blind spots: `--ignore-unfixed` + `HIGH,CRITICAL` only (masks unfixed/medium) | advisory unmasked report + trivy-native `exp:` dates (2026-07-04) |
+| RISK-006 | MEDIUM | MITIGATING | Scanner exclusions and gate filters leave unproven assumptions | dated inventory + unfiltered source/image reports (2026-10-03) |
 | RISK-014 | MEDIUM | ✅ CLOSED | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | per-module govulncheck in both lanes (2026-07-04) |
 | RISK-015 | LOW | OPEN | Single-scanner gate; detection-source divergence (Dependabot 5 vs Trivy DB 3) | trivy run vs Dependabot count, 2026-06-28 |
 | RISK-016 | LOW ↓ | MITIGATING | ~~Scanners `@latest`~~ all pinned (tree-verified 2026-07-04); residual: CodeQL non-blocking | gosec v2.27.1 / govulncheck v1.5.0 / go-licenses v1.6.0 / trivy v0.69.3 / Obituary SHA-pinned |
@@ -41,6 +41,7 @@
 | RISK-028 | MEDIUM | OPEN | Culvert is pinned to a superseded MCP protocol generation | `internal/mcp/protocol/version.go` supports `2025-11-25` / `2025-06-18` and rejects `2026-07-28`, which was released as the FINAL MCP specification on that date (the code comment still described the May 2026 RC; corrected 2026-08-24). Rejection is now a dated, deliberate decision — `2026-07-28` is a stateless redesign that removes the substrate for session-identity binding, lifecycle admission and the session cap. As SDKs default to it, clients and registered upstream servers that cannot fall back become unreachable. Migration architecture + the blocking ADR: `docs/design/mcp/PROTOCOL-MIGRATION-2026-07-28.md`. |
 | RISK-029 | MEDIUM | ✅ CLOSED | A password change silently de-enrolled the account's TOTP second factor (and reset the OTP replay counter) | `Config.SetUIUser` / `Config.SetAuth` replaced the whole `uiAdminUser` record on every credential write, dropping `totpSecret`/`backupCodes`/`totpLastCounter` — durably, unaudited, with no proof of possession of the authenticator. Reachable from `POST /api/auth/change-password` (viewer-and-up, self), `POST /api/auth/users` (admin, any account) and `POST /api/settings/auth`. `ClearTOTP`, the intended de-enrolment primitive, had NO production call site, so the only removal in the tree was an unintended consequence of struct replacement. Closed 2026-09-18 by `newUIAdminUserPreservingTOTP` (`store.go`), the single constructor every credential write now goes through; `--reset-password` keeps its break-glass clear, now explicit and announced. Correction round (Codex, PR #1429): the replay counter belongs to the SECRET, so `ClearTOTP` now clears `totpLastCounter` and `SetTOTPSecret` resets it when the secret CHANGES (conditionally — re-issuing backup codes for the same secret must keep it, or the fix reopens the replay window it protects). It had been zeroed only as a side effect of the record replacement this change removes, so without it a de-enrolled account could not re-enrol until wall-clock time passed a counter from the lost device. Gates: `auth_totp_preservation_test.go` (17, each defect gate RED against the pre-fix tree, plus two mutation proofs and a structural wall). Review: `security-reviews/2026-09-18-admin-second-factor-preservation-window.md` |
 | RISK-030 | LOW | OPEN | Unsynchronised publication of the IP filter can transiently disable it (fail-OPEN). `applySnapshotAdmission` publishes a freshly built filter by reassigning the package-global pointer (`controlplane_snapshot.go:873`, `ipf = newIPF`) while the request path reads that global unsynchronised (`proxy.go:1477`, `socks5.go:430`). `publishView`'s `view.Store` is a RELEASE store — it stops prior writes sinking below it, but does NOT stop the subsequent plain pointer store being hoisted above it, so on a weakly-ordered architecture (arm64, which Culvert builds, signs and QEMU-qualifies) a reader can observe the new pointer while `view` is still nil. `loadView` then returns `emptyIPFilterView`, mode resolves `""`, and `Allowed` returns `true` for EVERY address — a single-request bypass of ingress admission on both the HTTP and SOCKS5 paths, recurring at every CP config sync on every DP node. The fail-open verdict is unreachable on amd64 (TSO preserves store order), but the underlying data race is not: **confirmed 2026-10-16 by `-race` on amd64** (historical evidence from an uncommitted scratch test, `TestRISK030_SnapshotIPFilterSwapRacesRequestPath`, run with `go test -race` against `dec66e1`: `WARNING: DATA RACE`, the read in `ipf.Allowed` against the write at `controlplane_snapshot.go:873`). LOW because it is not attacker-schedulable and auth/default-deny/rate-limiting remain downstream; impact escalates to HIGH where the allowlist IS the primary control (`defaultAuthOutcome = Exempt`, cf. RISK-021). CWE-362 → CWE-636, OWASP A01:2021. **Pre-existing, NOT a regression** — the admission-extraction window only re-spelled the line (`&IPFilter{single: …}` → `newIPFilter()`). `rl` is unaffected (never reassigned; mutated in place via `Configure`/`ReplaceExemptions`), and `controlplane_snapshot.go:873` is the ONLY pointer swap in the tree. | Found 2026-10-09 by scheduled regression review. **Fix (required, specified, not yet landed):** remove the pointer write rather than guard it — add an in-place `IPFilter.ReplaceAll(mode, entries)` holding `mu` across the mode set, entry rebuild and a SINGLE `publishView`, mirroring the precedent in the same function where `bl = newBL` was replaced by `bl.ReplaceFeedEntries`. Zero hot-path change (`Allowed` and its benchgates untouched), preserves the one-pass/one-publish bulk-load property against the 2,000,000-entry `maxSnapIPList` cap, and covers both the full and delta CP→DP paths. Gates: a structural wall AST-walking `controlplane_snapshot.go` for any assignment to `ipf` (with a not-vacuous check), a single-publish assertion via the existing `publishHook`, a no-intermediate-allow-all observer, fail-closed corrupt-mode and empty-allowlist boundary tests, and a concurrent reader/writer gate. **The concurrency gate MUST run under `-race`.** The pre-fix amd64 run observed zero fail-open admissions and failed only through the race detector, so without `-race` it would pass the defective pointer swap. Reproduction (historical, not runnable from this tree): the test is a scratch file that is NOT committed, so the bare command matches no test and passes vacuously. Its full source and re-run steps are in Appendix A of the review: save it as `risk030_race_scratch_test.go` at the repo root, run `go test -race -count=1 -run TestRISK030_SnapshotIPFilterSwapRacesRequestPath .` on `dec66e1`, and expect `DATA RACE`. The committed regression test belongs with the RISK-030 fix PR, now in progress on branch `claude/risk030-ipf-atomic`; it must install test-local `ipf` and `rl` instances before applying snapshots and restore both original pointers in `t.Cleanup` (the scratch test's cleanup is not reusable after the in-place fix). Only the functional fail-open assertion inside it may also run without `-race`. The race gate and the structural wall are both RED against the pre-fix tree on amd64, so the fix is required and is not deferred for verifiability. It is not in the review commit only because that commit is docs-only (one concern per change). The earlier statement that the defect was unobservable on amd64 was wrong. Review: `security-reviews/2026-10-09-admission-engine-extraction-window.md` §3–§4 |
+| RISK-031 | MEDIUM | ✅ CLOSED | Instance-owned admission state let the enforcing limiter and the gossip-fed limiter diverge, degrading fleet-wide rate limiting to per-node with NO operator signal | ADR-0038/0039 moved the distributed remote-count/enable/freshness state from process globals onto each `RateLimiter` and exported the constructors, so the limiter `proxy.go`/`socks5.go` enforce with and the one `DataPlaneClient.Run` feeds became two objects that must be the same object — correct at the time of review, but positionally, with nothing structural holding them together. A split owner is never armed, so `AllowAuto` dispatches to local-only `Allow` and a client consumes the full limit on EVERY node (N× its fleet-wide budget). It is also INVISIBLE, and correctly so: CHAOS-61's deliberate "an un-armed node is never stale" rule (the Codex PR #1346 fix) plus the `Armed` gate on `/metrics` means the stale gauge, broadcast age, episode counter and transition log are ABSENT rather than alarming, and `/api/cluster/rate-limits` reads `enabled:false` — indistinguishable from a standalone node. Measured: `Armed=false Stale=false Episodes=0`, 10th request admitted against 10 remote counts. Detection was rejected as the control (it would re-open the un-armed rule and pin every standalone proxy at "degraded"); closed 2026-10-08 by structural walls in `admission_owner_wall_test.go` — `Run` must start the gossip loop on `rl`, and every `rl.Allow*` on the request path must be `AllowAuto` — each carrying its own negative controls, with 3 mutation proofs verified RED. The pre-existing wiring was NOT defective; the gate was missing. **Two review rounds (Codex P2 + CodeRabbit):** the walls first compared the limiter identifier's NAME, not its BINDING, so a local `rl := newRateLimiter()` shadowing the package-level handle passed — reproduced GREEN against the shipped wall — and the fix for the caller still left the callee free to reassign its own `limiter` parameter. The contract is now two syntactic hops (caller passes package-level `rl`; the gossip loop keeps its parameter) plus the request path's own binding, each with negative controls and five mutations verified failing. This is CHAOS-69 round 5's name-vs-assignment lesson recurring. Round 3 (Codex P2) closed the gap both earlier rounds left by construction — they reason inside `Run` and the handlers, leaving the package HANDLE unguarded, so a `rl = newRateLimiter()` anywhere else in production splits the owner after `Run` captured the pointer (reproduced: all owner walls passed); that invariant, which ADR-0038 had only recorded, is now enforced by `TestRISK030_Wall_NoProductionReassignmentOfAdmissionHandles` (`controlplane_snapshot_ipf_race_test.go`, landed on main with RISK-030), which flags every assignment to `ipf` or `rl` in package main's non-test files; this PR's narrower `rl`-only wall (`admission_owner_reassign_wall_test.go`) was deleted when main was merged in, as its own merge disposition required. Round 4 (Codex P2) was in the RECORD, not the wall: the review's residual section claimed, under "Confirmed by probe", that `(&RateLimiter{}).Allow(...)` panics on a zero value — it does not, because `Allow` short-circuits on `!enabled` before reaching the uninitialised shard maps, and only a `Configure`d limiter can get there. An overstated residual invites hardening a request path against a fault it cannot have, and it contradicted `internal/admission/AGENTS.md`, which had it right. Corrected to the measured matrix and PINNED by `TestZeroValueResidual_DocumentMatchesTheEngine` (`internal/admission/zero_value_doc_test.go`), which parses the table out of the review and drives every row against the engine — a row it cannot run FAILS rather than skipping; 4 mutations verified RED plus two controls. Across all four rounds the shape is one defect: each artifact proved less than it claimed — the caller's binding, then the callee's, then the handle both name, then the document reporting on all three. Bounded follow-up, recorded not closed: the request-path wall is file-scoped rather than handler-scoped. Round 5 (Codex P2 x2) found the wall could ACCEPT the regression it prevents: `assignsPackageHandle` computed one per-function `local` flag and skipped the whole function, so a helper writing the global beside an unrelated inner shadow of the same name reported nothing — shadowing is now resolved PER ASSIGNMENT (visible in an enclosing scope AND lexically before the write; closures do not shadow), with Codex's repro plus five scope controls, verified RED against the pre-fix predicate. The same round found every on-disk parse in the owner walls CWD-relative — the defect round 4's own commit had just fixed one file over — reproduced by running the compiled root test binary from /tmp (two walls failed with `open proxy.go: no such file or directory`); all now anchored via `pkgSourcePath()`. Across five rounds the cause is ONE: a binding reasoned about at the wrong granularity — spelling, then the callee, then the shared handle, then the document, then the predicate's own scope resolution — each fix correct at its level and blind to the next. **ID:** first drafted as RISK-030 alongside a different finding (unsynchronised IP-filter publication) that merged first under that number; renumbered RISK-031 on bringing main in, per merge-order allocation. Review: `security-reviews/2026-10-08-admission-package-isolation-window.md` |
 
 ---
 
@@ -140,7 +141,46 @@
   cannot form in lease mode; legacy-mode CL-4 facts stay pinned for legacy deployments.
 - **Owner:** shipped · **Closed:** 2026-07-03 (ADR-0005 S5).
 
-## RISK-002 — OIDC introspection missing SSRF guard · HIGH · ✅ CLOSED 2026-06-28
+## RISK-002 — OIDC destination guard · HIGH · MITIGATING
+- **Audit 2026-10-03:** the historical dial-guard fix was incomplete. Both legacy
+  introspection and flow/JWKS clients cloned `http.DefaultTransport`, inheriting
+  `ProxyFromEnvironment`. A public forward proxy passed the IP guard while
+  receiving a request for a private destination. Caller-supplied tokens drive
+  requests to configured/discovered endpoints; redirects cross another boundary.
+  "Admin-controlled" does not protect against compromised discovery, redirects or
+  an operator's incorrect URL.
+- **Fix:** `newOIDCTransport` disables the inherited proxy and installs the
+  resolved-IP dial guard. OIDC requires direct reachability to public endpoints;
+  environment proxies are no longer used. Private IdPs remain blocked by the
+  existing policy. Discovery already uses a transport without a proxy.
+- **Evidence:** `TestOIDCTransport_SSRFBoundary` uses real HTTP transport/redirect
+  handling and the real `ssrf.Control`, replacing only network connections with
+  `net.Pipe`. It exercises legacy introspection, flow introspection and JWKS refresh directly,
+  refusing loopback, RFC1918, metadata, IPv6, mapped IPv6 and a rebind to private IP,
+  including redirects through a public-proxy hook; each public endpoint succeeds.
+  Removing `Proxy=nil` made all 18 private cases and three redirect cases fail;
+  restored control passed twice under race/shuffle. Flow constructor/discovery
+  wiring is reviewed separately; this fixture does not claim TLS-discovery coverage.
+- **G704 dispositions:** six OIDC sites are protected by this control, subject to
+  RISK-009 (TLS verification opt-out and legacy HTTP remain residual risks; warning
+  logs are observability, not prevention). Two signed-feed download sites reuse
+  per-hop origin/path validation and resolved-IP dialing: `TestF3b2_SSRFPrivateAddressRejected`,
+  `TestF3b2_RedirectEscapeRejected`, `TestF3b2_DialsResolvedIPWithOfficialHostAndSNI`.
+  Two release-agent sites are **accepted risk**, not SSRF-protected: UDS is preferred,
+  but configured private/local HTTP(S) endpoints intentionally remain reachable;
+  environment proxy/redirect semantics of that override need review. Existing
+  `TestService_EndpointRebindingUsesNewClient` tests endpoint selection, not safety
+  of arbitrary endpoint destinations. G704 now blocks new unannotated sites in
+  standalone gosec and golangci; root race runs the behavioral tests.
+- **Remaining gap:** other cloned transports with a guarded dialer and inherited
+  proxy must be reviewed individually. This fix establishes no universal SSRF
+  claim for SAML, LDAP, alerts, feeds, release catalogs or the forward proxy.
+  No new exception hides this unresolved review.
+- **Owner:** @KidCarmi (repository default CODEOWNER; confirm security DRI).
+  **Review:** 2026-11-03. Detailed inventory and exact CI paths:
+  [2026-10-03 audit](security-reviews/2026-10-03-suppression-evidence.md).
+
+### Historical RISK-002 closure (2026-06-28; superseded assumptions)
 - **Was (HV):** `NewOIDCAuth` (`auth_oidc.go`) cloned the introspection transport with **no**
   `DialContext = ssrfSafeDialContext`, unlike the sibling `auth_oidc_flow.go:300`. The
   admin-configured introspection URL is reached on every token-validating request → per-request SSRF
@@ -176,7 +216,41 @@
     cleartext migrated on save. Webhook HMAC delivery tests still green (signing unaffected).
     Build/vet/lint/`-race`/determinism all green. **Complexity S — closed as recommended.**
 
-## RISK-006 — Trivy gate config blind spots · MEDIUM · ✅ CLOSED 2026-07-04
+<a id="security-suppression-evidence"></a>
+
+## RISK-006 — Trivy gate config blind spots · MEDIUM · MITIGATING (2026-10-03 audit)
+- **Audit 2026-10-03:** removed the expired `CVE-2026-14456` entry rather than
+  renewing it. The exact baseline linux/amd64 candidate image contains Alpine
+  `libcrypto3`/`libssl3` **3.5.9-r0**, beyond OpenSSL's **3.5.8** fix boundary.
+  This is remediation evidence for that image, independent of static-linking
+  and server reachability claims. No exception remains active.
+- **Executable evidence:** final PR image inspection records commit, image ID,
+  installed apk database, executable inventory and actual Go build metadata;
+  `assert-static-binary.sh` refuses missing CGO=0 metadata or ELF interpreter/
+  dynamic segments for BOTH proxy and bundled maintenance agent. Main/tag
+  candidate qualification applies it to the exact digest for linux/amd64 and
+  linux/arm64. Real ELF tests and promotion tests enforce rejection. It proves
+  linkage of those bytes only; packaged dynamic executables, host OS, systemd
+  services and external QUIC servers are separate scopes.
+- **Policy visibility:** preserve blocking HIGH/CRITICAL + ignore-unfixed scans.
+  Full-severity/unfixed/suppressed reports now cover the same PR image and both
+  candidate platforms. PR gosec JSON includes global exclusions AND inline sites
+  (`-nosec -no-fail`), with scan completeness checked separately (including equality of the reported
+  finding count and the retained findings array). Metadata/expiry
+  validation requires an owner, classification, exact scope and evidence anchor
+  in this register. Metadata checks do not establish security.
+- **Remaining exclusions:** root G104/G302/G304/G703 and maintenance G104/G302/G304
+  remain under investigation. G304/G703 findings include HTTP upload/restore and
+  support paths; the historical "operator-config paths" rationale is not adequate.
+  Maintenance G703 now runs: its sole finding already has a scoped ULID annotation
+  and `TestOperationsEndpoint_RejectsInvalidOpID`; that does not prove StateDir
+  cannot contain hostile symlinks. G704 globals retired after triage of all ten
+  root findings (RISK-002), not simply because the scanner now passes.
+- **Owner:** @KidCarmi (default CODEOWNER; confirm security DRI). **Review:** 2026-11-03.
+  [Inventory, vendor sources, artifact digests and unresolved claims](security-reviews/2026-10-03-suppression-evidence.md)
+  are supporting evidence; this register remains the decision authority.
+
+### Historical RISK-006 closure (superseded; retain as provenance)
 - **Fix (as recommended):** (1) the blocking gate keeps `--ignore-unfixed` (un-actionable noise is a
   real cost), and a new **non-blocking full-severity pass** (no `--ignore-unfixed`, no severity
   filter, `--show-suppressed` so `.trivyignore`'d findings appear WITH suppression status — trivy
@@ -190,7 +264,7 @@
 - **Update 2026-07-11:** the updater module was removed (DEBT-008/RISK-ACC-1 CLOSED), so those two
   `docker/docker` masks were retired and `.trivyignore` is now empty. The `exp:`-date mechanism and
   the full-severity non-blocking pass remain the pattern for any future suppression.
-- **Update 2026-08-30 — one suppression is ACTIVE again; recorded here so the register, not just the
+- **Historical update 2026-08-30 — one suppression was active again; recorded here so the register, not just the
   file, carries it.** `.trivyignore` holds `CVE-2026-14456 exp:2026-09-15` (HIGH; OpenSSL QUIC-server
   unbounded-memory DoS in Alpine's `libcrypto3`/`libssl3`). The base image `alpine:3.24` ships
   `3.5.7-r0` and the fix is `3.5.8-r0`; 3.24 is the newest Alpine release, and the runtime stage
@@ -247,6 +321,18 @@
   step. **Complexity XS.**
 
 ## RISK-015 — Single-scanner gate; detection-source divergence · LOW · OPEN
+- **Audit update 2026-10-03:** the unchanged frontend app/generator dependency
+  trees fail their existing HIGH npm audit gate on `GHSA-ch52-4w7c-c8xp`
+  (`http-cache-semantics`, through license-checker-rseidelsohn → arborist/pacote/
+  sigstore; 11 downstream HIGH reports), plus moderate `ip-address` advisories.
+  [PR #1537's canonical verification](https://github.com/KidCarmi/Culvert/actions/runs/37144895951/job/111266729218)
+  is the concrete report. These are advisory leads requiring separate upstream
+  and reachability triage, not a confirmed application runtime exploit. Tooling
+  dependencies still form a build trust boundary. All four app/generator
+  manifests/lockfiles are byte-identical to baseline `3fcc07e7`.
+  No suppression, threshold reduction or forced downgrade was added. Keep the
+  gate blocking; owner @KidCarmi (default CODEOWNER, confirm security DRI), review
+  2026-11-03. Dependency/toolchain remediation is separate from suppression evidence.
 - **Current state:** Dependabot (GitHub Advisory DB) reports **5** docker/docker alerts; Trivy (its
   own DB) reports **3** of them; the Go vuln DB (govulncheck) is a third source. The blocking gate
   relies on Trivy's DB for dependency-graph coverage. The three sources demonstrably disagree on
