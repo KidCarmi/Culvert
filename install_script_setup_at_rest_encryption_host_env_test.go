@@ -49,7 +49,7 @@ func runSetupAtRestEncryptionWithHostEnv(t *testing.T, dir, envSetup string) (ou
 	t.Helper()
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
-	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 	validateFn := extractShellFunction(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	stubs := `

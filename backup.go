@@ -415,17 +415,62 @@ func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestF
 	return nil
 }
 
+// createArchiveTemp creates the temp file writeBackupTarball streams the
+// archive into, owner-only and at a name an attacker cannot predict
+// (CHAOS-82 / BKP-2 + BKP-4).
+//
+// Both properties replace an `os.Create(outPath + ".tmp")` that had neither.
+// The fixed name was a symlink target that could be planted ahead of the run —
+// os.Create follows links, so the archive, which carries cluster-ca.key, landed
+// wherever the link pointed and the CLI still reported success — and it was a
+// shared inode for two concurrent backups to one outPath, which interleaved
+// into a corrupt archive. os.CreateTemp is O_EXCL on a random name, so neither
+// is reachable, and it truncates nothing that was already there.
+//
+// The explicit Chmod is what makes 0600 independent of the process umask:
+// os.CreateTemp's own 0600 is still filtered through it. Without it the archive
+// published 0666-before-umask (typically 0644) while aggregating files that are
+// individually 0600 — cluster-ca.key (fleet MITM capability), ui_users.json
+// (password hashes, TOTP secrets) and idp_profiles.json (OIDC client secrets,
+// LDAP bind credentials). fileutil.AtomicWrite chmods for the same reason,
+// which is how the encrypted writer already got both properties.
+//
+// The temp PATTERN is a short fixed prefix and is deliberately NOT derived from
+// outPath, which is what the first version of this fix did (copying
+// fileutil.AtomicWrite's `filepath.Base(path)+".tmp.*"`). Deriving it couples
+// the temp name's length to the destination's: CreateTemp replaces `*` with
+// ~10 random digits, so a basename in roughly the 241–251 byte range produced a
+// name past NAME_MAX and the backup failed ENAMETOOLONG where the old fixed
+// ".tmp" suffix had fit. That range is reachable through the product's own
+// supported path — the maintenance agent's validateBackupFilename admits
+// `[a-zA-Z0-9._-]{1,255}`. Nothing looks this file up by name (it is renamed or
+// removed on every branch), so the association bought nothing. The leading dot
+// additionally cannot collide with a validated backup name, since that
+// validator rejects a leading dot.
+func createArchiveTemp(outPath string) (*os.File, error) {
+	f, err := os.CreateTemp(filepath.Dir(outPath), ".culvert-backup-*")
+	if err != nil {
+		return nil, fmt.Errorf("backup: create output: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name()) // #nosec G104 -- best-effort cleanup
+		return nil, fmt.Errorf("backup: chmod output: %w", err)
+	}
+	return f, nil
+}
+
 // design — defer-stacks would re-order Close calls and obscure the failure
 // path. Splitting into smaller helpers would push the gz/tw/out lifetimes
 // across function boundaries, complicating reasoning about partial state.
 //
 //nolint:funlen // Cleanup-on-error is repeated per close site (tw, gz, out) by
 func writeBackupTarball(outPath string, manifestBytes []byte, packed []packedFile) error {
-	tmpPath := outPath + ".tmp"
-	out, err := os.Create(tmpPath) // #nosec G304 -- operator-controlled path
+	out, err := createArchiveTemp(outPath)
 	if err != nil {
-		return fmt.Errorf("backup: create output: %w", err)
+		return err
 	}
+	tmpPath := out.Name()
 	cleanup := func() { _ = os.Remove(tmpPath) }
 
 	gz := gzip.NewWriter(out)

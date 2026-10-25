@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
 
@@ -177,8 +179,17 @@ func innerHostPinnedToTunnel(innerHost, tunnelHost string) bool {
 	if !innerAuthorityBracketsValid(innerHost) {
 		// Brackets that do not enclose an IP literal: a malformed authority the
 		// comparison would repair but the wire would not. See the function.
+		// Checked on the RAW value, before the canonicalization below, which
+		// de-brackets and would hide it.
 		return false
 	}
+	wireHost, wireOK := innerAuthorityAsSent(innerHost)
+	if !wireOK {
+		return false
+	}
+	// Compare the bytes the upstream will RECEIVE, not the bytes the client
+	// sent. See innerAuthorityAsSent.
+	innerHost = wireHost
 	tunnelBare := hostutil.StripHostPort(tunnelHost)
 	if net.ParseIP(tunnelBare) != nil {
 		// CONNECT by address: the proxy holds no name for this destination, so
@@ -194,6 +205,73 @@ func innerHostPinnedToTunnel(innerHost, tunnelHost string) bool {
 		return false
 	}
 	return inner == tunnel
+}
+
+// innerAuthorityAsSent reduces a client-supplied inner authority to the bytes
+// the UPSTREAM will actually receive, or reports that the request will carry no
+// usable authority at all (SEC-TUNHOST-2).
+//
+// It closes the generalization of the bracket defect above. That defect was
+// "the pin compares a REPAIRED value while the origin receives an UNREPAIRED
+// one"; the repair that mattered there was hostutil.StripHostPort's bracket
+// trim, and two further repairs do the same thing:
+//
+//   - THE PORT IS NEVER VALIDATED. StripHostPort ends in net.SplitHostPort,
+//     which splits on the last colon and accepts any byte after it. So
+//     "allowed.example.com:0/x", "allowed.example.com:443?x" and
+//     "allowed.example.com:@blocked.example.com" all reduce to the authorized
+//     host and PINNED. The wire does not agree: Request.write runs
+//     httpguts.ValidHostHeader on the raw value, finds the '/', '?' or '@',
+//     and — because Request.Write passes usingProxy=false — ZEROES the host
+//     and emits a literal "Host: " (net/http/request.go, go1.27; go.dev/issue
+//     /61431 replaced the older truncate-at-'/' behaviour with this). That is
+//     byte-for-byte the state the empty-inner-host branch above refuses, and
+//     for the same reason: a shared front end answers an authority-less
+//     HTTP/1.1 request from its default or fallback vhost, a destination
+//     policy never evaluated, while the log row, scan verdicts and CDR
+//     decisions still name the CONNECT host. The gate was reached THROUGH the
+//     comparison instead of around it.
+//
+//   - IDNA CASE IS NOT PRESERVED THROUGH PUNYCODE. The comment below claimed a
+//     U-label inner host is safe because "Request.Write converts it to the
+//     A-label on the wire, so the forwarded bytes already match what the pin
+//     authorized". That holds only for an already-lowercase U-label.
+//     hostutil.NormalizeHostStrict lowercases BEFORE idna.ToASCII, while
+//     httpguts.PunycodeHostPort does not, and Punycode encodes case in its
+//     payload — so for tunnel "xn--bcher-kva.example.com", an inner
+//     "BÜCHER.example.com" pinned while the wire carried
+//     "xn--BCHER-2pa.example.com", and "Bücher.example.com" pinned while the
+//     wire carried "xn--Bcher-kva.example.com". Different A-labels, i.e. names
+//     policy never evaluated. (Measured, go1.27.3.)
+//
+// Both are fixed by one rule rather than by enumerating shapes: canonicalize
+// through the SAME helpers net/http and the HTTP/2 header encoder use, and
+// refuse anything they would not forward verbatim. The pin then cannot drift
+// from the wire, because it is reading the wire's own definition — which is
+// also why this does not hand-roll a port or character check. A shape neither
+// stdlib path will send is a shape this gate must refuse, whatever it looks
+// like.
+//
+// It deliberately does NOT widen the accepted set: every spelling the existing
+// equivalence table pins (a trailing root dot, a lowercase U-label, "host:443"
+// against "host", a bracketed IPv6 literal, an IP-literal tunnel) survives
+// unchanged, because net/http sends all of them verbatim.
+func innerAuthorityAsSent(authority string) (string, bool) {
+	// PunycodeHostPort is what Request.write and the h2 encoder apply first; it
+	// A-labels any U-label and leaves an ASCII authority (and an IPv6 literal's
+	// brackets) alone.
+	canon, err := httpguts.PunycodeHostPort(authority)
+	if err != nil {
+		return "", false
+	}
+	// ValidHostHeader is the same predicate whose failure makes Request.write
+	// drop the authority entirely and makes the h2 encoder fail the request.
+	// An empty result is refused by the caller's empty-inner-host branch, but
+	// check it here too so this function's contract stands on its own.
+	if canon == "" || !httpguts.ValidHostHeader(canon) {
+		return "", false
+	}
+	return canon, true
 }
 
 // innerAuthorityBracketsValid reports whether any square brackets in a
@@ -228,12 +306,19 @@ func innerHostPinnedToTunnel(innerHost, tunnelHost string) bool {
 // The sibling spellings the probe covered are deliberately NOT refused here,
 // because they are not this defect:
 //
-//   - A U-label inner host is safe: Request.Write converts it to the A-label on
-//     the wire (measured — "bücher.example.com" is sent as
+//   - A LOWERCASE U-label inner host is safe: Request.Write converts it to the
+//     A-label on the wire (measured — "bücher.example.com" is sent as
 //     "xn--bcher-kva.example.com"), so the forwarded bytes already match what
-//     the pin authorized.
-//   - Case is safe: the Host field is case-insensitive, so an origin cannot
-//     route on it differently.
+//     the pin authorized. This bullet read "a U-label inner host" without the
+//     qualifier and was WRONG for a mixed-case one, because punycode carries
+//     case in its payload: "BÜCHER.example.com" is sent as
+//     "xn--BCHER-2pa.example.com", a different label from the authorized
+//     "xn--bcher-kva.example.com". innerAuthorityAsSent now refuses that, and
+//     carries the measurement (SEC-TUNHOST-2).
+//   - Case is safe for an ASCII authority: the Host field is case-insensitive,
+//     so an origin cannot route on it differently. That is about ASCII case
+//     only — it is not an argument about the U-label case above, which changes
+//     the punycode payload rather than the case of a label.
 //   - A trailing root dot is a VALID authority for the same DNS name and is
 //     treated as equivalent by the origin stacks that matter, so refusing it
 //     would reject conforming clients. It is the one accepted spelling whose
