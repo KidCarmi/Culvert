@@ -135,7 +135,15 @@ func idpmetaStaleMaxAgeString() string {
 // caller rather than recorded here because a fetch is not a publication: only
 // the site that PUBLISHES the provider built from this document may record it as
 // the served generation (Codex review round 14 — see idpNotePublishedGeneration).
-func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc []byte, fetchErr error, validate func([]byte) error, expiry func([]byte) time.Time) ([]byte, time.Time, error) {
+//
+// gen is the profile's cache retirement epoch, taken by the caller BEFORE it
+// dialled the IdP (idpmeta.Store.Generation). A fetched document is recorded
+// only if no committed deletion retired the profile's documents while the fetch
+// was in flight (register row IDP-18): otherwise a late fetch would write the
+// deleted generation's metadata back, and a profile recreated under the same id
+// and source during an outage would compile from it. Taking the epoch here,
+// after the network call, could not see a deletion that landed during it.
+func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, gen idpmeta.Generation, doc []byte, fetchErr error, validate func([]byte) error, expiry func([]byte) time.Time) ([]byte, time.Time, error) {
 	store := idpMetadataStore()
 
 	if fetchErr == nil && len(doc) > 0 && validate != nil {
@@ -144,7 +152,14 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, doc 
 		}
 	}
 	if fetchErr == nil && len(doc) > 0 {
-		if putErr := store.Put(profileID, kind, source, doc); putErr != nil {
+		if putErr := store.PutIfCurrent(profileID, kind, source, doc, gen); errors.Is(putErr, idpmeta.ErrRetired) {
+			// The profile was deleted while this fetch was on the wire. The
+			// document is still returned — the publication site refuses a
+			// deleted profile on its own — but it must not re-enter the cache
+			// the committed deletion just emptied (IDP-18).
+			logger.Printf("IdP[%q]: fetched metadata not cached: the profile was deleted while the fetch was in flight",
+				sanitizeLog(profileID))
+		} else if putErr != nil {
 			// Not fatal — see (2) above. Rate-limiting is unnecessary: this
 			// line is emitted only on a SUCCESSFUL fetch, which is bounded by
 			// the compile rate, and a persistently failing write is already

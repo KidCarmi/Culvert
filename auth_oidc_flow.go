@@ -232,9 +232,12 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 	//
 	// Do not narrow this validator again. A gate that admits what the compile
 	// rejects is a cache-poisoning path, not an optimisation.
+	// The retirement epoch is taken BEFORE the fetch so a deletion committed
+	// while it is on the wire can refuse its cache write (IDP-18).
+	gen := idpMetadataStore().Generation(profileID)
 	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
 	var parsed *oidcDiscoveryDoc
-	_, cachedAt, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, fetched, fetchErr, func(b []byte) error {
+	_, cachedAt, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, gen, fetched, fetchErr, func(b []byte) error {
 		doc, vErr := parseAndValidateOIDCDiscovery(profileID, b)
 		if vErr != nil {
 			return vErr

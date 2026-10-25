@@ -271,8 +271,11 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (ed *saml.Entit
 		if err := validateSAMLMetadataURL(cfg.MetadataURL); err != nil {
 			return nil, time.Time{}, time.Time{}, err
 		}
+		// The retirement epoch is taken BEFORE the fetch so a deletion
+		// committed while it is on the wire can refuse its cache write (IDP-18).
+		gen := idpMetadataStore().Generation(profileID)
 		fetched, fetchErr := fetchSAMLMetadataOverNetwork(cfg.MetadataURL)
-		doc, docCachedAt, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, fetched, fetchErr,
+		doc, docCachedAt, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, gen, fetched, fetchErr,
 			validateSAMLMetadataDocument, samlMetadataValidUntil)
 		if err != nil {
 			return nil, time.Time{}, time.Time{}, err

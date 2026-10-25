@@ -17,6 +17,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -1683,7 +1684,7 @@ func TestChaos87_UnusableCachedDocumentIsNotReportedAsServed(t *testing.T) {
 	fetchErr := idpFetchUnavailable(fmt.Errorf("dial tcp: no such host"))
 	reject := func([]byte) error { return fmt.Errorf("cannot parse") }
 
-	got, _, err := resolveIdPDocument("corrupt", idpmeta.KindOIDCDiscovery, src, nil, fetchErr, reject, nil)
+	got, _, err := resolveIdPDocument("corrupt", idpmeta.KindOIDCDiscovery, src, store.Generation("corrupt"), nil, fetchErr, reject, nil)
 	if err == nil {
 		t.Fatal("a cached document the caller cannot use is not a fallback — " +
 			"resolveIdPDocument must return the fetch error")
@@ -1713,7 +1714,7 @@ func TestChaos87_UsableCachedDocumentIsStillServedStale(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	got, _, err := resolveIdPDocument("good", idpmeta.KindOIDCDiscovery, src, nil,
+	got, _, err := resolveIdPDocument("good", idpmeta.KindOIDCDiscovery, src, store.Generation("good"), nil,
 		idpFetchUnavailable(fmt.Errorf("dial tcp: no such host")), func([]byte) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("a usable cached document must still be served: %v", err)
@@ -4355,5 +4356,84 @@ func chaos87WaitForLoop(t *testing.T, done <-chan struct{}, cancel context.Cance
 	case <-time.After(30 * time.Second):
 		cancel()
 		t.Fatal("the recovery loop did not finish")
+	}
+}
+
+// IDP-18 (Codex review round 21). A fetch already on the wire when a deletion
+// commits must not write the deleted generation's document back afterwards.
+// Without the retirement fence the committed Forget is undone by the late Put,
+// and recreating the same id and source while the IdP is down then compiles
+// from the DELETED profile's signing material for up to StaleMaxAge.
+func TestChaos87_LateFetchCannotUndoACommittedDelete(t *testing.T) {
+	store := chaos87Env(t)
+	corp := newChaos87IdP(t)
+	if err := idpRegistry.Upsert(chaos87Profile("corp", corp.URL())); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, _, err := store.Get("corp", idpmeta.KindSAMLMetadata, corp.URL()); err != nil {
+		t.Fatalf("setup: the live profile's document is not cached: %v", err)
+	}
+
+	hitsBefore := corp.hits.Load()
+	release := corp.holdRequests()
+	defer release()
+	done := make(chan error, 1)
+	go func() {
+		_, err := compileIdPProfile(chaos87Profile("corp", corp.URL()))
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for corp.hits.Load() == hitsBefore {
+		if time.Now().After(deadline) {
+			release()
+			<-done
+			t.Fatal("the compile never reached the IdP")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := idpRegistry.Delete("corp"); err != nil {
+		release()
+		<-done
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := store.Get("corp", idpmeta.KindSAMLMetadata, corp.URL()); !errors.Is(err, idpmeta.ErrNoEntry) {
+		release()
+		<-done
+		t.Fatalf("the committed delete did not retire the document (Get = %v)", err)
+	}
+	release() // the IdP is UP: the in-flight fetch succeeds after the delete
+	if err := <-done; err != nil {
+		t.Fatalf("the in-flight compile failed: %v", err)
+	}
+	if _, _, err := store.Get("corp", idpmeta.KindSAMLMetadata, corp.URL()); !errors.Is(err, idpmeta.ErrNoEntry) {
+		t.Fatalf("a fetch that straddled the delete wrote the deleted generation's document back (Get = %v)", err)
+	}
+	corp.down.Store(true)
+	if err := idpRegistry.Upsert(chaos87Profile("corp", corp.URL())); err == nil {
+		t.Fatal("a profile recreated during an outage compiled from the DELETED profile's cached metadata")
+	}
+}
+
+// IDP-18 CONTROL. The fence must not become a tombstone: a profile recreated
+// after the delete, with the IdP up, caches its own document and can then ride
+// out an outage from it exactly like any other profile.
+func TestChaos87_RecreateAfterDeleteStillCaches(t *testing.T) {
+	store := chaos87Env(t)
+	corp := newChaos87IdP(t)
+	if err := idpRegistry.Upsert(chaos87Profile("corp", corp.URL())); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := idpRegistry.Delete("corp"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := idpRegistry.Upsert(chaos87Profile("corp", corp.URL())); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if _, _, err := store.Get("corp", idpmeta.KindSAMLMetadata, corp.URL()); err != nil {
+		t.Fatalf("the recreated profile's own fetch was not cached: %v", err)
+	}
+	corp.down.Store(true)
+	if _, err := compileIdPProfile(chaos87Profile("corp", corp.URL())); err != nil {
+		t.Fatalf("the recreated profile cannot ride out an outage from its own document: %v", err)
 	}
 }

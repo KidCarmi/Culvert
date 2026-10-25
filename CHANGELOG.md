@@ -2295,7 +2295,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   during the outage is adopted within minutes of recovery. None of this revokes
   sessions: the profile stays enabled and stored throughout, and a provider
   serving a freshly fetched document is never retired however old the cached
-  copy beside it is. See `docs/operator/idp-metadata-availability.md`.
+  copy beside it is. Deleting a profile discards its cached documents, and a
+  metadata fetch still in flight when the deletion is saved can no longer write
+  the deleted profile's document back, so a profile recreated under the same id
+  and source during an outage cannot compile from the deleted profile's signing
+  material. See `docs/operator/idp-metadata-availability.md`.
 ### Fixed
 
 - Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the

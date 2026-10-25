@@ -3,6 +3,7 @@ package idpmeta
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -809,5 +810,89 @@ func TestForget_IsScopedToTheProfile(t *testing.T) {
 	}
 	if doc, _, err := s.Get("live", KindSAMLMetadata, "https://live.example/md"); err != nil || string(doc) != "LIVE" {
 		t.Fatalf("an empty profile id must retire nothing: %q err=%v", doc, err)
+	}
+}
+
+// TestPutIfCurrent_RefusesAWriteThatStraddlesAForget closes register row IDP-18.
+// A fetch takes its Generation before dialling; a committed deletion Forgets
+// the profile while that fetch is on the wire; the late write must be refused,
+// or the deleted generation's document is back in the cache for a recreated
+// profile to be served during an outage.
+func TestPutIfCurrent_RefusesAWriteThatStraddlesAForget(t *testing.T) {
+	s := newTestStore(t)
+	const src = "https://idp.example/md"
+	if err := s.Put("corp", KindSAMLMetadata, src, []byte("<old/>")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	gen := s.Generation("corp") // the in-flight fetch's token
+	if err := s.Forget("corp"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if err := s.PutIfCurrent("corp", KindSAMLMetadata, src, []byte("<late/>"), gen); !errors.Is(err, ErrRetired) {
+		t.Fatalf("PutIfCurrent after Forget = %v, want ErrRetired", err)
+	}
+	if _, _, err := s.Get("corp", KindSAMLMetadata, src); !errors.Is(err, ErrNoEntry) {
+		t.Fatalf("Get after a refused late write = %v, want ErrNoEntry: the retirement was undone", err)
+	}
+	if n := s.Len(); n != 0 {
+		t.Fatalf("store holds %d entries after a refused write, want 0", n)
+	}
+}
+
+// TestPutIfCurrent_FencesTheFirstFetchToo: Forget must advance the epoch even
+// when nothing is cached yet, or a brand-new profile deleted during its very
+// first fetch has that fetch create the entry afterwards.
+func TestPutIfCurrent_FencesTheFirstFetchToo(t *testing.T) {
+	s := newTestStore(t)
+	gen := s.Generation("fresh")
+	if err := s.Forget("fresh"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if err := s.PutIfCurrent("fresh", KindOIDCDiscovery, "https://issuer.example", []byte(`{}`), gen); !errors.Is(err, ErrRetired) {
+		t.Fatalf("PutIfCurrent = %v, want ErrRetired for a Forget with nothing cached", err)
+	}
+}
+
+// TestPutIfCurrent_ARecreateStillCaches is a CONTROL. The cheapest way to pass
+// the fence is a tombstone that refuses every later write for the id, which
+// leaves a legitimately recreated profile with no fallback until a restart. A
+// Generation taken AFTER the Forget belongs to the new profile and must write.
+func TestPutIfCurrent_ARecreateStillCaches(t *testing.T) {
+	s := newTestStore(t)
+	const src = "https://idp.example/md"
+	if err := s.Forget("corp"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if err := s.PutIfCurrent("corp", KindSAMLMetadata, src, []byte("<new/>"), s.Generation("corp")); err != nil {
+		t.Fatalf("a recreated profile's own fetch was refused: %v", err)
+	}
+	if got, _, err := s.Get("corp", KindSAMLMetadata, src); err != nil || string(got) != "<new/>" {
+		t.Fatalf("Get = %q, %v; want the recreated profile's document", got, err)
+	}
+}
+
+// TestPutIfCurrent_AnUnrelatedDeleteDoesNotFence is a CONTROL: a store-wide
+// counter would also pass the fence gate, and would silently drop every
+// in-flight refresh on the appliance whenever any profile is deleted.
+func TestPutIfCurrent_AnUnrelatedDeleteDoesNotFence(t *testing.T) {
+	s := newTestStore(t)
+	gen := s.Generation("corp")
+	if err := s.Forget("other"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if err := s.PutIfCurrent("corp", KindSAMLMetadata, "src", []byte("<md/>"), gen); err != nil {
+		t.Fatalf("deleting another profile fenced this write: %v", err)
+	}
+}
+
+// TestPutIfCurrent_RefusesAForeignGeneration: a token taken from a different
+// store says nothing about this store's retirements, so it must not write.
+func TestPutIfCurrent_RefusesAForeignGeneration(t *testing.T) {
+	a, b := newTestStore(t), newTestStore(t)
+	if err := b.PutIfCurrent("corp", KindSAMLMetadata, "src", []byte("<md/>"), a.Generation("corp")); !errors.Is(err, ErrRetired) {
+		t.Fatalf("PutIfCurrent with another store's Generation = %v, want ErrRetired", err)
+	}
+	if err := b.PutIfCurrent("corp", KindSAMLMetadata, "src", nil, b.Generation("corp")); err == nil {
+		t.Fatal("PutIfCurrent accepted an empty document")
 	}
 }

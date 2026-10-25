@@ -110,6 +110,32 @@ const (
 // fetch failure before this package existed.
 var ErrNoEntry = errors.New("idpmeta: no usable cached document")
 
+// ErrRetired means PutIfCurrent refused a document because the profile's
+// cached documents were retired (Forget) after the caller took its Generation:
+// the fetch that produced the document belongs to a generation of the profile
+// that a committed deletion has already ended. It is not a storage fault, and
+// the caller's fetch is otherwise unaffected.
+var ErrRetired = errors.New("idpmeta: profile documents retired since this fetch began")
+
+// Generation is a profile's retirement epoch as observed by one fetch. A caller
+// takes it with Store.Generation BEFORE dialling the IdP and hands it to
+// PutIfCurrent with the document that fetch produced.
+//
+// It exists for register row IDP-18 (Codex review, round 21): Forget runs at a
+// deletion's COMMIT, but a recovery or revalidation fetch that was already on
+// the wire for the deleted profile could finish afterwards and Put its document
+// back, undoing the committed retirement. Recreating the same id and source
+// during an outage then compiled from the deleted generation's signing
+// material. Forget now advances the epoch, so such a late Put is refused.
+//
+// The epoch is PASSED IN rather than looked up from the registry because Upsert
+// holds the registry lock across the compile that reaches Put (IDP-10/IDP-11):
+// the store must never call out to ask whether a profile is still live.
+type Generation struct {
+	store *Store
+	epoch uint64
+}
+
 // Kind distinguishes the two document types so one profile that somehow
 // carries both cannot have them collide on disk.
 type Kind string
@@ -156,11 +182,28 @@ type Store struct {
 	entries map[string]*entry
 	loaded  bool
 	now     func() time.Time
+	// retired holds each profile's retirement epoch, advanced by Forget. It is
+	// in memory only: a fetch cannot survive a restart, so no Generation taken
+	// before one can ever be presented after it. One counter per distinct
+	// profile id ever forgotten in this process, i.e. bounded by deletions.
+	retired map[string]uint64
 }
 
 // New returns a Store rooted at dir. An empty dir yields an inert store.
 func New(dir string) *Store {
-	return &Store{dir: dir, entries: map[string]*entry{}, now: time.Now}
+	return &Store{dir: dir, entries: map[string]*entry{}, now: time.Now, retired: map[string]uint64{}}
+}
+
+// Generation returns profileID's current retirement epoch. Take it BEFORE the
+// fetch whose result will be offered to PutIfCurrent: a token taken after the
+// network call cannot detect a Forget that ran while the fetch was in flight.
+func (s *Store) Generation(profileID string) Generation {
+	if s == nil {
+		return Generation{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Generation{store: s, epoch: s.retired[profileID]}
 }
 
 // SetClockForTest injects a clock. Test-only.
@@ -334,18 +377,56 @@ func (s *Store) Get(profileID string, kind Kind, source string) (doc []byte, age
 // source). A failure to persist is returned but is never fatal to the caller:
 // the fetch it came from already succeeded, so the only cost is that a FUTURE
 // outage has no fallback.
+//
+// Put does not consult the profile's retirement epoch. A document produced by a
+// network fetch must be recorded through PutIfCurrent instead, so a fetch that
+// straddles a committed deletion cannot write the deleted generation back.
 func (s *Store) Put(profileID string, kind Kind, source string, doc []byte) error {
 	if s == nil {
 		return nil
 	}
+	if err := checkPutDoc(doc); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.putLocked(profileID, kind, source, doc)
+}
+
+// PutIfCurrent is Put for a document a fetch produced: it records doc only if
+// profileID has not been retired (Forget) since gen was taken, and otherwise
+// returns ErrRetired and writes nothing. The check and the write happen under
+// one hold of the store lock, so a Forget cannot land between them.
+//
+// A Generation taken from a different Store (the store was swapped while the
+// fetch was in flight) is refused the same way: the epoch it carries says
+// nothing about this store's retirements.
+func (s *Store) PutIfCurrent(profileID string, kind Kind, source string, doc []byte, gen Generation) error {
+	if s == nil {
+		return nil
+	}
+	if err := checkPutDoc(doc); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if gen.store != s || gen.epoch != s.retired[profileID] {
+		return ErrRetired
+	}
+	return s.putLocked(profileID, kind, source, doc)
+}
+
+func checkPutDoc(doc []byte) error {
 	if len(doc) == 0 {
 		return fmt.Errorf("idpmeta: refusing to cache an empty document")
 	}
 	if len(doc) > MaxDocumentBytes {
 		return fmt.Errorf("idpmeta: document is %d bytes, over the %d cap", len(doc), MaxDocumentBytes)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) putLocked(profileID string, kind Kind, source string, doc []byte) error {
 	if s.dir == "" {
 		return nil // inert store
 	}
@@ -460,6 +541,14 @@ func (s *Store) Forget(profileID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Advance the epoch FIRST and unconditionally — even on an inert store and
+	// even when nothing is cached yet — so a fetch already in flight for this
+	// profile (possibly its very first, which would create the entry) cannot
+	// write the retired generation back afterwards (IDP-18).
+	if s.retired == nil {
+		s.retired = map[string]uint64{}
+	}
+	s.retired[profileID]++
 	if s.dir == "" {
 		return nil // inert store
 	}
