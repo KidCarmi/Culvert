@@ -37,32 +37,18 @@ env:
   # Superseded candidate (historical; does not boot under BIOS, #1528 §3f).
   # Its guest-content fingerprint stays the comparison reference.
   ORIGINAL_OVA_SHA256: e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4
-  # Candidate 8d3ca1c7's image (Deep gate run 39287948530, version
-  # v1.0.268-candidate.g8d3ca1c75c4e). 8d3ca1c7 = a2b52abc (the prior candidate)
-  # + the SSO bare-provider vs sso-ip:<provider> source-contract fix + the
-  # boot-progress failed-unit-name fix + origin/main merged in (CHAOS-71 CP-gRPC
-  # listener recovery, CHAOS-74 catdb runtime memory-fault containment,
-  # release-dispatch panic containment, SECBASIC roster-leak test fix) + the
-  # corrected Docker fixable-HIGH attribution doc + removal of a redundant
-  # positional socks5 bind-order test superseded by the behavioral CHAOS-66
-  # test. It carries every badger/ristretto F-DISK-1 fix and the 1.5.4 sidecar.
-  # obtain-image.sh falls back to the lab-preserved copy
-  # (lab-source-image-39336581431) if the deep-gate artifact has expired.
-  SOURCE_IMAGE_RUN_ID: "39336581431"
-  SOURCE_IMAGE_TAR_SHA256: eb9e1d40dfe0a0acb027f1ad775fbb8ee58478cc9080bc4c3626e921abf30c81
-  # The source those image bytes were built from; the F-DISK job builds its
-  # maintenance agent from here so no lab-branch binary stands in for it. This
-  # is the PR #1528 HEAD commit 4524311b (F-DISK-RECOVERY-1 head c54e61a3 with
-  # origin/main merged in so the branch is up to date with base), the commit the
-  # deep-gate image's VERSION stamp names (v1.0.269-candidate.g4524311ba974) and
-  # the commit build-ova.sh's candidate-source guard requires: build-ova checks
-  # the image VERSION stamp (.github/scripts/pr-candidate-version.sh, head-sha
-  # based) AND that --candidate-source == the provisioning checkout's HEAD, so
-  # both must be the head. Because the branch is up to date with base, GitHub's
-  # refs/pull/1528/merge resolves to the head itself, so the image was built
-  # from 4524311b directly (stamp g4524311b) — no merge-tree-equivalence
-  # argument needed; provisioning + the agent built from the head match it.
-  SOURCE_IMAGE_SHA: 4524311ba9743abcf9df05e9955e2842eb48168c
+  # Owner Option B internal candidate: the #1705 Deep gate image of frozen
+  # source b9105086 (tree b6b80fc5; run 40133521510, built on synthetic merge
+  # 76856bd8 whose tree IS b6b80fc5; VERSION v1.0.327-candidate.gb910508629e9).
+  # The F-DISK legs load these bytes (tar sha256 verified) and derive the
+  # manifest/config digests from the tar itself.
+  SOURCE_IMAGE_RUN_ID: "40133521510"
+  SOURCE_IMAGE_TAR_SHA256: 1db620abbf4fe34424749e64a4e8b96861a945a201583ab386d47926cd7ec7fb
+  # The source those image bytes were built from (BOM freeze-b9105086): the
+  # F-DISK job builds its fallback agent from here, and build-ova.sh's
+  # candidate-source guard requires the provisioning checkout to be this head
+  # (the image VERSION stamp names it).
+  SOURCE_IMAGE_SHA: b910508629e9d80352067bc8ec608753ddf0924e
 
 jobs:
   guest-boot:
@@ -113,47 +99,24 @@ jobs:
           # 1.5.4 engine, and [fp2-isolated] re-runs the F-P2 reproduction
           # against the baked 1.5.4 sidecar (must deliver 0, where the 1.4.6
           # sidecar delivered > 0).
-          - variant: candidate-4524311b
+          # Owner Option B internal candidate (decisions 6387402372 + 6389524853;
+          # ASTRA SOURCE-INTEGRATION PASS 2026-10-24 21:55Z): frozen source
+          # b9105086 / tree b6b80fc5. Image: its #1705 Deep gate artifact (run
+          # 40133521510, built on synthetic merge 76856bd8 whose tree IS
+          # b6b80fc5; VERSION v1.0.327-candidate.gb910508629e9, the stamp
+          # build-ova.sh's candidate-source guard checks). ONE build. Image
+          # identity = the linux/amd64 MANIFEST digest (index.json
+          # manifests[0].digest), not the config blob 75dd735c…. The ClamAV
+          # sidecar must reproduce the F-P2-tested image byte for byte.
+          - variant: candidate-b9105086
             provisioning: source
-            # The F-DISK-RECOVERY-1 candidate: PR HEAD commit 4524311b (binary
-            # VERSION stamp v1.0.269-candidate.g4524311ba974), the commit the
-            # deep-gate image (run 39336581431) was version-stamped from and the
-            # commit build-ova.sh's candidate-source guard requires (it checks
-            # the VERSION stamp AND source==provisioning-checkout, both the
-            # head). Because the branch is up to date with base main, GitHub's
-            # refs/pull/1528/merge resolves to the head itself, so the image was
-            # built from 4524311b directly (stamp g4524311b) and the agent built
-            # here from the head matches the image's source — no merge-tree-
-            # equivalence argument needed. 4524311b = c54e61a3 (the F-DISK-
-            # RECOVERY-1 fix) + origin/main merged in (clean; HA/cluster files
-            # only, F-DISK fix byte-identical). c54e61a3 = 8d3ca1c7 (the prior
-            # candidate) + the F-DISK-RECOVERY-1 cross-subsystem fix: a durable
-            # import-pending intent written before any risky badger write
-            # (internal/storeguard/importguard.go, internal/catdb BeginImport/
-            # CompleteImport), interrupted-import quarantine+rebuild on the next
-            # open (storeguard recoverBeforeOpen least-severe third case,
-            # TriggerInterruptedImport), and a feedsync BulkWrite watchdog that
-            # surfaces a contained/stalled mid-write as a sync failure without
-            # waiting for BulkWrite to return. It carries every prior badger/
-            # ristretto F-DISK-1 fix and the 1.5.4 sidecar. BUILDS a fresh OVA
-            # and runs the FULL qualify; the recovery leg (disk=dm, 3 reboots on
-            # the no-latency `fast` profile) exercises the bounded operator
-            # status-json probe under real reboots, and its per-sample evidence
-            # (R-*-operator-probe.jsonl) is the rule-4 transport-vs-not-ready
-            # split. Guest-content fingerprint differs from the e24eb542
-            # reference by the changed binaries (recorded warning, not a gate).
-            source_sha: "4524311ba9743abcf9df05e9955e2842eb48168c"
-            image_run: "39336581431"
-            image_tar_sha256: "eb9e1d40dfe0a0acb027f1ad775fbb8ee58478cc9080bc4c3626e921abf30c81"
-            # The running appliance's image identity is the linux/amd64
-            # MANIFEST digest (index.json manifests[0].digest), which the
-            # deep-gate's containerd image store also uses as the OVA's own
-            # index digest (same digest class the harness reads as the running
-            # .Id, derived by resolve-lab-pins.sh from the tar's index.json).
-            # NOT the OCI config BLOB digest sha256:fc622ce0…, a different
-            # field — the distinction the 8d3ca1c7 pin recorded (its config
-            # blob was d6dfa590…).
-            expect_image_id: "sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a"
+            source_sha: "b910508629e9d80352067bc8ec608753ddf0924e"
+            image_run: "40133521510"
+            image_tar_sha256: "1db620abbf4fe34424749e64a4e8b96861a945a201583ab386d47926cd7ec7fb"
+            expect_image_id: "sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c"
+            source_date_epoch: "1792855424"
+            expect_sidecar_id: "sha256:4c365e4047f948e909bfda5a7d5bf06408f2fab68e59fc513c71681ccec65ebc"
+            expect_sidecar_archive_sha256: "ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059"
             disk: dm
             recovery_profiles: "fast:0:0:60"
             recovery_reboots: "3"
@@ -339,7 +302,11 @@ jobs:
           sudo git config --global --add safe.directory "$src"
           # sudo resets PATH (secure_path): pass setup-go's compiler through;
           # GOTOOLCHAIN=local so a mismatch fails instead of downloading another.
-          sudo -E env PATH="$PATH" GOTOOLCHAIN=local LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
+          # SOURCE_DATE_EPOCH: build-ova.sh would otherwise take it from THIS
+          # checkout's commit time, and the sidecar's image ID would differ
+          # from the F-P2-tested one (matrix.source_date_epoch, when set).
+          sde=(); [ -n "${{ matrix.source_date_epoch }}" ] && sde=(SOURCE_DATE_EPOCH="${{ matrix.source_date_epoch }}")
+          sudo -E env PATH="$PATH" GOTOOLCHAIN=local LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg "${sde[@]}" \
             "$src/appliance/build/build-ova.sh" \
               --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
               --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" "${drift[@]}" \
@@ -347,6 +314,38 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
           cat "$LAB_ROOT/ova/"*.ova.sha256
           rm -f "$LAB_ROOT/in/culvert-image.tar"
+      # Identity gate (BOM freeze-b9105086): STOP before any boot when the baked
+      # app image, sidecar image or sidecar archive is not the frozen/tested one.
+      - name: "Identity: baked app + ClamAV sidecar bytes are the frozen/tested ones"
+        if: matrix.retained_run == '' && matrix.expect_sidecar_id != ''
+        env:
+          WANT_APP: ${{ matrix.expect_image_id }}
+          WANT_SC: ${{ matrix.expect_sidecar_id }}
+          WANT_SC_TAR: ${{ matrix.expect_sidecar_archive_sha256 }}
+        run: |
+          set -euo pipefail
+          ov="$LAB_ROOT/build/overlay/var/lib/culvert-appliance"
+          sudo test -s "$ov/build-info.json" || { echo "::error::no build-info.json under $ov"; exit 1; }
+          sudo cat "$ov/build-info.json" > "$LAB_ROOT/ova/build-info.json"
+          sudo sha256sum "$ov/images/clamav.tar.gz" | cut -d' ' -f1 > "$LAB_ROOT/ova/clamav-archive.sha256"
+          python3 -I - "$LAB_ROOT/ova/build-info.json" "$LAB_ROOT/ova/clamav-archive.sha256" <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os, sys
+          bi = json.load(open(sys.argv[1])); disk = open(sys.argv[2]).read().strip()
+          app = bi.get("application", {})
+          got = {"app_index_digest": app.get("index_digest"),
+                 "clamav_sidecar_image_id": app.get("clamav_sidecar_image_id"),
+                 "clamav_baked_tar_sha256": app.get("clamav_baked_tar_sha256"),
+                 "clamav_archive_on_disk": disk}
+          want = {"app_index_digest": os.environ["WANT_APP"],
+                  "clamav_sidecar_image_id": os.environ["WANT_SC"],
+                  "clamav_baked_tar_sha256": os.environ["WANT_SC_TAR"],
+                  "clamav_archive_on_disk": os.environ["WANT_SC_TAR"]}
+          print(json.dumps({"got": got, "want": want}, indent=1))
+          bad = [k for k in want if got[k] != want[k]]
+          if bad:
+              print("::error::identity mismatch, stopping before any boot: " + ", ".join(bad)); sys.exit(1)
+          print("identity OK")
+          EOF
       - name: "Diagnostic (after a failed build): what the builder's own daemon holds"
         # Runs only AFTER the build failed, so it cannot influence it.
         if: failure()
@@ -402,6 +401,8 @@ jobs:
           path: |
             ${{ env.LAB_ROOT }}/ova/*.ova
             ${{ env.LAB_ROOT }}/ova/*.ova.sha256
+            ${{ env.LAB_ROOT }}/ova/build-info.json
+            ${{ env.LAB_ROOT }}/ova/clamav-archive.sha256
             ${{ env.LAB_ROOT }}/ova/build-info.json
           retention-days: 14
           compression-level: 0

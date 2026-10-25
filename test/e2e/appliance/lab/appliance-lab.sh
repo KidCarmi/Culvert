@@ -970,6 +970,24 @@ EOS
     else signed_update_rollback; fi
   fi
   # Step 7 — OS update + reboot, kernel BEFORE → AFTER.
+  # Step 6d — support durability (main a27cffb2: support_durable_write.go). An
+  # admin-created bundle bound to a case, then approved: both writes go through
+  # the durable chokepoint and step 8 must list the same id as ready after the
+  # reboot. Also the C2 wildcard route: /api/support/bundles/{id}/approve.
+  # It runs AFTER the 6b restore on purpose: support/ is operational data a
+  # full restore drops (state-and-key-custody-matrix.md §3), so this measures
+  # reboot persistence, not restore scope.
+  if gate 6d support-bundle; then
+    local sb sc sa
+    sb="$(api POST '/api/support/bundles?case=lab-persist' | tee "$EV/06d-support-create.txt")"
+    sc="$(code <<<"$sb")"
+    SUPPORT_BUNDLE_ID="$(body <<<"$sb" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("bundle_id",""))' 2>/dev/null || true)"
+    if [[ $sc == 200 && "$SUPPORT_BUNDLE_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      sa="$(api POST "/api/support/bundles/$SUPPORT_BUNDLE_ID/approve" | tee "$EV/06d-support-approve.txt" | code)"
+      [[ $sa == 200 ]] && check 6d support-bundle pass "created $SUPPORT_BUNDLE_ID (case lab-persist) and approved: 200/200" \
+        || check 6d support-bundle fail "approve http $sa"
+    else SUPPORT_BUNDLE_ID=""; check 6d support-bundle fail "create http $sc"; fi
+  fi
   if gate 7 os-update; then
     gpriv > "$EV/07-check-before.txt" 2>&1 <<<'culvert-os-update check' || true
     local rc=0; groot 'culvert-os-update os' 2700 > "$EV/07-os-update.txt" 2>&1 || rc=$?
@@ -1027,6 +1045,27 @@ EOS
     [[ $c == 200 ]] && check 8 ready pass "/ready 200" || check 8 ready fail "/ready $c"
     api GET /api/ca-cert | body | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 > "$EV/08-ca-fingerprint.txt" || true
     [[ -s "$EV/08-ca-fingerprint.txt" ]] && cmp -s "$EV/05-ca-fingerprint.txt" "$EV/08-ca-fingerprint.txt" && check 8 ca-identity pass "unchanged $(cat "$EV/08-ca-fingerprint.txt")" || check 8 ca-identity fail "before=$(cat "$EV/05-ca-fingerprint.txt" 2>/dev/null) after=$(cat "$EV/08-ca-fingerprint.txt" 2>/dev/null)"
+    # The SSL-inspection CA is encrypted at rest under the first-boot
+    # CULVERT_CA_PASSPHRASE (main's blank/quoted/CR fix keeps an empty value
+    # from counting as set): the bundle must open with the PSCA envelope magic,
+    # never a PEM header. Only the 4 magic bytes and a PEM yes/no leave the guest.
+    gpriv > "$EV/08-ca-at-rest.txt" 2>&1 <<'EOS' || true
+echo "magic=$(docker exec culvert head -c 4 /data/ca.bundle 2>/dev/null | tr -dc 'A-Z')"
+docker exec culvert grep -c 'BEGIN .*PRIVATE KEY' /data/ca.bundle >/dev/null 2>&1 && echo pem-private-key=present || echo pem-private-key=absent
+v="$(sed -n 's/^CULVERT_CA_PASSPHRASE=//p' /srv/culvert/.env | tail -1 | tr -d '\r')"; [ -n "$v" ] && echo env-passphrase=nonempty || echo env-passphrase=EMPTY
+EOS
+    grep -qx 'magic=PSCA' "$EV/08-ca-at-rest.txt" && grep -qx 'pem-private-key=absent' "$EV/08-ca-at-rest.txt" && grep -qx 'env-passphrase=nonempty' "$EV/08-ca-at-rest.txt" \
+      && check 8 ca-encrypted-at-rest pass "/data/ca.bundle starts PSCA, no PEM private key, .env CULVERT_CA_PASSPHRASE non-empty" \
+      || check 8 ca-encrypted-at-rest fail "$(tr '\n' ' ' < "$EV/08-ca-at-rest.txt")"
+    if [[ -n "${SUPPORT_BUNDLE_ID:-}" ]]; then
+      api GET '/api/support/bundles?case=lab-persist' | body > "$EV/08-support-bundles.json" || true
+      if python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); b=d if isinstance(d,list) else d.get("bundles",[])
+m=[e for e in b if isinstance(e,dict) and e.get("bundle_id")==sys.argv[2]]
+sys.exit(0 if len(m)==1 and m[0].get("state")=="ready" and m[0].get("case_id")=="lab-persist" else 1)' "$EV/08-support-bundles.json" "$SUPPORT_BUNDLE_ID" 2>/dev/null; then
+        check 8 support-persisted pass "$SUPPORT_BUNDLE_ID listed after the reboot: state=ready, case=lab-persist"
+      else check 8 support-persisted fail "$(head -c 300 "$EV/08-support-bundles.json")"; fi
+    else check 8 support-persisted not-run "no support bundle was created in step 5d"; fi
     lookups > "$EV/08-lookups-after.txt"
     cmp -s "$EV/05b-lookups-before.txt" "$EV/08-lookups-after.txt" && check 8 category-data pass "category lookups identical before/after reboot" || check 8 category-data fail "$(diff "$EV/05b-lookups-before.txt" "$EV/08-lookups-after.txt" | tr '\n' ' ' | head -c 300)"
     api GET /api/backups > "$EV/08-backups.txt" || true
