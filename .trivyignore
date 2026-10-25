@@ -3,20 +3,19 @@
 # Keep this file present (workflows pass `--ignorefile .trivyignore`); add new
 # suppressions here with a dated `exp:` and a rationale. Each entry must be
 # time-boxed so a suppression cannot silently outlive the condition it accepts.
+# Fast Gate and the main/tag Security gate validate metadata and expiry.
+# Required comment block immediately before each entry (no blank line):
+# exception-owner: @responsible-owner
+# exception-claim: false-positive|not-affected|protected-by-control|accepted-risk|under-investigation
+# exception-scope: exact artifact/component/platform affected
+# exception-evidence: docs/engineering/TECHNICAL-RISK-REGISTER.md#evidence-anchor
+# The register records the claim, tests/CI, residual risk and approval; metadata
+# alone is not evidence. Expiry is 00:00 UTC on the named date.
 #
 # Historical note: the former entries masked docker/docker SDK CVEs reachable
 # only through the legacy culvert-updater sidecar module (RISK-ACC-1 / DEBT-008).
 # That module was removed, so nothing imports docker/docker and those masks are
 # gone.
 
-# CVE-2026-14456 (HIGH) — openssl: DoS via unbounded memory growth in the QUIC
-# server, in Alpine's libcrypto3/libssl3. Base image alpine:3.24 ships 3.5.7-r0;
-# fixed in 3.5.8-r0. alpine:3.24 is already the newest Alpine release (3.25/3.26
-# do not exist yet) and the runtime stage already runs `apk upgrade --no-cache`,
-# so there is no base-image bump available — the fix arrives only when Alpine
-# publishes 3.5.8-r0 to the 3.24 apk repo, at which point `apk upgrade` remediates
-# the actual package and this entry becomes a no-op. Not-exploitable rationale:
-# the culvert binary is a static CGO_ENABLED=0 Go build and does not link Alpine's
-# libssl, and the appliance runs no OpenSSL QUIC server. Time-boxed risk-acceptance
-# (owner-approved) to unblock the Deep gate until the package publishes.
-CVE-2026-14456 exp:2026-09-15
+# CVE-2026-14456 expired 2026-09-15; removed rather than renewed. Vendor
+# advisory/package evidence and exact artifact limits are recorded in RISK-006.

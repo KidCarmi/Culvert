@@ -628,6 +628,10 @@ var rosterRowExceptions = map[string]rosterClass{
 		Reason: "the inventory checkOversizeConfiguredUsernames renders; every consumer is classified"},
 	"hasCredentialCapableProvider": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
 		"existence probe; renders no name, role, count or second-factor posture"},
+	"currentKillSwitchBackend": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
+		"existence probe, folded with the provider checks into a three-state backend enum (none, " +
+		"not loaded, live) for the auth_exempt_kill_switch row; renders no name, role, count or " +
+		"second-factor posture"},
 	// buildOperatorContract reads the roster facts ONCE per contract and
 	// renders both rows from them (Codex P2 4320228851 on PR #1601), so the
 	// classified producers are rosterDurabilityFacts' own methods.
