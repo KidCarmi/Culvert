@@ -1,0 +1,3 @@
+magic=PSCA
+pem-private-key=absent
+env-passphrase=nonempty

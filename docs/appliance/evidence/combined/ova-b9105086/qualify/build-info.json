@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "appliance": {
+    "name": "culvert-appliance",
+    "version": "1.0.327-candidate.gb910508629e9",
+    "arch": "x86_64",
+    "ova": "culvert-appliance-1.0.327-candidate.gb910508629e9-ubuntu-24.04.ova",
+    "product": "Culvert Secure Web Gateway appliance (CANDIDATE \u2014 qualification build, not for production)"
+  },
+  "source": {
+    "git_commit": "b910508629e9d80352067bc8ec608753ddf0924e",
+    "git_dirty": false,
+    "source_date_epoch": 1792855424,
+    "build_timestamp": "2026-10-24T15:23:44Z",
+    "build_wallclock": "2026-10-25T10:36:26Z",
+    "install_sh_sha256": "d5f3cff0b16394b87497ac0b906f76eedf190a14f78f3fe9643eeaad27a69f6a"
+  },
+  "console": {
+    "source_git_commit": "b910508629e9d80352067bc8ec608753ddf0924e",
+    "source_git_dirty": false,
+    "go_compiler": "go1.27.3",
+    "binary_sha256": "cc282d099f6351bf6446687dc432ef508d5e855f2218e6f89c00dc1b0677b6d8",
+    "target": "linux/amd64",
+    "cgo_enabled": false,
+    "origin": "built from this provisioning checkout; separate from the application image"
+  },
+  "guest_os": {
+    "id": "ubuntu-24.04",
+    "name": "Ubuntu 24.04 LTS",
+    "codename": "noble",
+    "base_image_url": "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img",
+    "base_image_sha256": "6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2",
+    "base_image_serial": "20260926",
+    "base_image_gpg": "verified (using RSA key D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81)",
+    "standard_support_until": "2029-04-30",
+    "esm_support_until": "2034-04-30",
+    "package_sources": [
+      "https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img (preinstalled)",
+      "https://download.docker.com/linux/ubuntu noble stable (key 9DC858229FC7DD38854AE2D88D81803C0EBFCD88)"
+    ]
+  },
+  "host_components_pinned": {
+    "docker-ce": "5:29.9.0-1~ubuntu.24.04~noble",
+    "docker-ce-cli": "5:29.9.0-1~ubuntu.24.04~noble",
+    "containerd.io": "2.4.1-2~ubuntu.24.04~noble",
+    "docker-compose-plugin": "5.6.1-1~ubuntu.24.04~noble",
+    "culvert-maint (from image deploy bundle)": "v1.0.327-candidate.gb910508629e9"
+  },
+  "application": {
+    "image": "culvert/candidate",
+    "tag": "sha-b910508629e9",
+    "index_digest": "sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c",
+    "amd64_digest": "sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c",
+    "app_version_file": "v1.0.327-candidate.gb910508629e9",
+    "cosign": "not applicable \u2014 CANDIDATE build from an unsigned CI artifact; provenance = image tar sha256:1db620abbf4fe34424749e64a4e8b96861a945a201583ab386d47926cd7ec7fb, source b910508629e9d80352067bc8ec608753ddf0924e, CI run 40133521510",
+    "baked_tar_sha256": "a3fabc3828ad026349bd7b86f2cb094fe15bae5fb28e15b80b8ace431115e486",
+    "clamav_image": "docker.io/clamav/clamav",
+    "clamav_tag": "1.5",
+    "clamav_index_digest": "sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6",
+    "clamav_amd64_digest": "sha256:705e0723f02fc13bf6e5e8a8e13a8c44420acf5e7ed06dfa2197081da00c7a73",
+    "clamav_baked_tar_sha256": "ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059",
+    "clamav_sidecar_ref": "culvert/clamav:1.5.4-culvert.3",
+    "clamav_sidecar_image_id": "sha256:4c365e4047f948e909bfda5a7d5bf06408f2fab68e59fc513c71681ccec65ebc",
+    "clamav_sidecar_pcre2": "pcre2-10.49-r0"
+  },
+  "virtual_hardware": {
+    "vcpus": 2,
+    "memory_mb": 4096,
+    "disk_gb": 40,
+    "hw_version": "vmx-13",
+    "nic": "E1000 x1",
+    "disk_format": "vmdk streamOptimized (thin)"
+  },
+  "build_tools": {
+    "qemu-img": "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)",
+    "libguestfs": "virt-customize 1.52.0",
+    "docker": "29.6.2",
+    "containerd": "v2.4.2",
+    "cosign_image": "ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00",
+    "build_host": "Ubuntu 24.04.5 LTS",
+    "kvm": "yes"
+  },
+  "candidate": {
+    "candidate": true,
+    "not_for_production": true,
+    "image_source_git_commit": "b910508629e9d80352067bc8ec608753ddf0924e",
+    "provisioning_git_commit": "b910508629e9d80352067bc8ec608753ddf0924e",
+    "provisioning_drift": false,
+    "image_tar_sha256": "1db620abbf4fe34424749e64a4e8b96861a945a201583ab386d47926cd7ec7fb",
+    "ci_run_id": "40133521510",
+    "image_signature": "none (unsigned CI artifact; release signature verification is not bypassed, it is inapplicable)",
+    "agent_trust": "culvert-firstboot exports CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 because the manifest carries CANDIDATE_BUILD=1 (candidate-scoped; a release OVA never sets it)"
+  }
+}

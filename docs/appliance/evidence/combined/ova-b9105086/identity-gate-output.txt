@@ -1,0 +1,15 @@
+ "got": {
+  "app_index_digest": "sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c",
+  "clamav_sidecar_image_id": "sha256:4c365e4047f948e909bfda5a7d5bf06408f2fab68e59fc513c71681ccec65ebc",
+  "clamav_baked_tar_sha256": "ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059",
+  "clamav_archive_on_disk": "ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059"
+ },
+ "want": {
+  "app_index_digest": "sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c",
+  "clamav_sidecar_image_id": "sha256:4c365e4047f948e909bfda5a7d5bf06408f2fab68e59fc513c71681ccec65ebc",
+  "clamav_baked_tar_sha256": "ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059",
+  "clamav_archive_on_disk": "ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059"
+ }
+}
+identity OK
+##[group]Run set -euo pipefail

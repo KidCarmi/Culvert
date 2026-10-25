@@ -1,0 +1,30 @@
+{"run":"20261025T113738Z","step":"P","check":"tools","result":"pass","detail":"qemu, qemu-img, ssh, curl, python3, openssl, iso tool present"}
+{"run":"20261025T113738Z","step":"P","check":"memory","result":"pass","detail":"14619 MiB available (need 6144)"}
+{"run":"20261025T113738Z","step":"P","check":"disk","result":"pass","detail":"83 GiB free at //culvert-lab/console (need 15: OVA + VMDK + base + overlay growth)"}
+{"run":"20261025T113738Z","step":"P","check":"accel","result":"pass","detail":"accel=kvm (kvm usable: yes)"}
+{"run":"20261025T113738Z","step":"V","check":"ova-sha256","result":"pass","detail":"culvert-appliance-1.0.327-candidate.gb910508629e9-ubuntu-24.04.ova sha256 61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a (= the pinned candidate)"}
+{"run":"20261025T113738Z","step":"V","check":"ova-manifest","result":"pass","detail":"every file digest in the OVA's .mf verified"}
+{"run":"20261025T113738Z","step":"V1","check":"console-topology","result":"info","detail":"ttyS0 -W- (EC Np a) 4:64;tty1 -WU (E p ) 4:1; printk=3 4 1 7"}
+{"run":"20261025T113738Z","step":"V1","check":"tty1-after-first-boot","result":"pass","detail":"tty1 (25 80) holds only the console UI"}
+{"run":"20261025T113738Z","step":"V1","check":"tty1-text-mode","result":"pass","detail":"tty1 KD_TEXT; 1 kdmode-tty1 0 (0=text 1=graphics)"}
+{"run":"20261025T113738Z","step":"V1","check":"splash-on-display","result":"pass","detail":"plymouth-start Result=success (has-display rc=0)"}
+{"run":"20261025T113738Z","step":"V1","check":"getty-tty-reset","result":"info","detail":"TTYReset=yes TTYVHangup=yes open-rc=0 seconds=0.00 (V1-ttyreset.txt)"}
+{"run":"20261025T113738Z","step":"V2","check":"tty1-after-reboot-with-failures","result":"pass","detail":"tty1 (25 80) holds only the console UI"}
+{"run":"20261025T113738Z","step":"V2","check":"tty1-text-mode","result":"pass","detail":"tty1 KD_TEXT; 1 kdmode-tty1 0 (0=text 1=graphics)"}
+{"run":"20261025T113738Z","step":"V2","check":"splash-before-esc","result":"pass","detail":"title on tty1 before the first Esc: ok (pre=11 mid=15 post=40 mid_status_max=3)"}
+{"run":"20261025T113738Z","step":"V2","check":"esc-shows-boot-messages","result":"pass","detail":"after the first Esc, with the splash still running, tty1 shows the boot messages, not the title: ok (pre=11 mid=15 post=40 mid_status_max=3; V2-vcs-probe.txt)"}
+{"run":"20261025T113738Z","step":"V2","check":"esc-one-way","result":"pass","detail":"after the second Esc the splash title does not come back while Plymouth runs: ok (pre=11 mid=15 post=40 mid_status_max=3)"}
+{"run":"20261025T113738Z","step":"V2","check":"splash-healthy-control","result":"pass","detail":"clean first boot: the live splash displayed 'Starting system services' and NO failure warning (OCR; V1-splash-ocr.txt)"}
+{"run":"20261025T113738Z","step":"V2","check":"splash-names-failed-unit","result":"pass","detail":"the LIVE splash displayed a failed-unit warning while a unit was failed (OCR of [116.03,124.03) s; V2-splash-ocr.txt): Service failed: lab-console-fail.service - Esc or Alt+F"}
+{"run":"20261025T113738Z","step":"V3","check":"tty1-after-postboot-writes","result":"pass","detail":"tty1 (25 80) holds only the console UI"}
+{"run":"20261025T113738Z","step":"V4","check":"tty1-after-clean-reboot","result":"pass","detail":"tty1 (25 80) holds only the console UI"}
+{"run":"20261025T113738Z","step":"V4","check":"tty1-text-mode","result":"pass","detail":"tty1 KD_TEXT; 1 kdmode-tty1 0 (0=text 1=graphics)"}
+{"run":"20261025T113738Z","step":"V4","check":"vt-probe","result":"info","detail":"120 samples; 1 kdmode-tty1 0 (0=text 1=graphics); first: LAB-PROBE up=3.80 fg=1 kdmode=0 plymouth=up; last: LAB-PROBE up=36.33 fg=1 kdmode=0 plymouth=down"}
+{"run":"20261025T113738Z","step":"V4","check":"no-graphics-after-splash","result":"pass","detail":"119 samples after plymouth exited, all kdmode=0"}
+{"run":"20261025T113738Z","step":"V4","check":"splash-graphics-window","result":"info","detail":"0 samples (x0.25 s) in graphics mode while plymouth was up"}
+{"run":"20261025T113738Z","step":"V4","check":"console-build-identity","result":"pass","detail":"the guest's console banner and tty1 Build line name 1.0.327-candidate.gb910508629e9, the version of the booted OVA 61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a"}
+{"run":"20261025T113738Z","step":"V","check":"frames","result":"info","detail":"153 distinct frames, 17 events (V-frames/, V*-*.png contact sheets)"}
+{"run":"20261025T113738Z","step":"V5","check":"no-splash-without-display","result":"pass","detail":"plymouth-start Result=exec-condition (has-display rc=1)"}
+{"run":"20261025T113738Z","step":"V5","check":"serial-only-boot","result":"pass","detail":"serial carries the kernel log (536 lines), systemd status and a login prompt"}
+{"run":"20261025T113738Z","step":"V5","check":"serial-shutdown","result":"pass","detail":"serial carries 79 systemd stop lines and the kernel's power-down line"}
+{"run":"20261025T113738Z","step":"C","check":"guest-reachable","result":"info","detail":"guest not reachable at collect time; console log only"}
