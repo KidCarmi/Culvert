@@ -14035,6 +14035,32 @@ collector under a live feed and requires the losses to reach `/metrics` and
 an existing control beats writing a second one, but only once you have run the
 mutation that proves it is the control.
 
+#### Round 19 — the lint gate caught what my pre-push check did not
+
+The wall above landed at cognitive complexity **32** against `gocognit`'s 30,
+and `Gate · golangci-lint` said so within a minute of the push. The miss is
+worth recording precisely: before pushing I checked `funlen` and `cyclop` for
+the production function and `funlen` for the test file, read the `_test.go`
+exclusion list — `funlen`, `dupl`, `cyclop` — and did not notice that
+**`gocognit` is not on it.** Test files are held to the full bar for that one.
+
+> **An exclusion list is a claim about the linters it names, not about "tests
+> are exempt". Read which ones.**
+
+Fixed by extracting three flat helpers (`syslogCallNamed`,
+`syslogFirstCallPos`, `syslogForbidCounterReads`) so the wall reads as four
+assertions rather than two nested AST walks. Measured with the tool rather
+than estimated: `gocognit` now puts the wall below 20 and the file's worst
+function at 23.
+
+The same pass tightened a control that was wrong in a quiet way. The first
+draft fatally failed with *"control: no Stats() call found in
+syslogFeedState"* on the pre-fix file — which is the DEFECT, not a broken
+matcher, so the wall would have reported its most important case as a
+self-test failure. The control now covers only the lock release, where a
+broken walk really does return NoPos for everything, and the required reads
+report their own absence in the terms of the defect.
+
 #### Round 19 — on the branch moving underneath this sweep
 
 `main` landed CHAOS-78 (#1675) while this branch was green and idle, converting

@@ -4145,6 +4145,46 @@ func TestChaos81_ADisableBetweenCaptureAndReadCountsTheLossOnce(t *testing.T) {
 // all, and TestChaos81_DropsReachMetricsAndHealthz already fails that: it
 // kills a collector under a live feed and requires the losses to reach
 // /metrics and /healthz.
+// syslogCallNamed reports whether call is a call to the named function,
+// either as a bare identifier (`f()`) or as a selector (`x.f()`).
+func syslogCallNamed(call *ast.CallExpr, name string) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel.Sel.Name == name
+	}
+	if id, ok := call.Fun.(*ast.Ident); ok {
+		return id.Name == name
+	}
+	return false
+}
+
+// syslogFirstCallPos returns the position of the first call to name inside fd,
+// or token.NoPos.
+func syslogFirstCallPos(fd *ast.FuncDecl, name string) token.Pos {
+	var at token.Pos
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || at.IsValid() || !syslogCallNamed(call, name) {
+			return true
+		}
+		at = call.Pos()
+		return true
+	})
+	return at
+}
+
+// syslogForbidCounterReads fails if fd calls any of names.
+func syslogForbidCounterReads(t *testing.T, fset *token.FileSet, fd *ast.FuncDecl, what string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if at := syslogFirstCallPos(fd, name); at.IsValid() {
+			t.Errorf("%s calls %s() at %s\n\t"+
+				"it must fold the counters its caller captured under syslogHealth.mu; a second read here is "+
+				"outside that lock and reintroduces the double count (Codex P2, PR #1494)",
+				what, name, fset.Position(at))
+		}
+	}
+}
+
 func TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock(t *testing.T) {
 	const healthFile = "syslog_health.go"
 	fset, fd := syslogFuncDecl(t, healthFile, "syslogFeedState")
@@ -4152,43 +4192,22 @@ func TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock(t *testing.T) 
 		t.Fatal("syslogFeedState is gone; this wall names a function that no longer exists")
 	}
 
-	var unlockAt token.Pos
-	reads := map[string]token.Pos{}
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && sel.Sel.Name == "Unlock" && !unlockAt.IsValid() {
-			unlockAt = call.Pos()
-		}
-		if ok && sel.Sel.Name == "Stats" {
-			if _, seen := reads["the writer's own counters"]; !seen {
-				reads["the writer's own counters"] = call.Pos()
-			}
-		}
-		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "syslogLateDrops" {
-			if _, seen := reads["syslogLateDrops()"]; !seen {
-				reads["syslogLateDrops()"] = call.Pos()
-			}
-		}
-		return true
-	})
-
-	// CONTROL: the matcher must SEE both the lock release and a counter read,
-	// or a broken AST walk passes forever.
+	unlockAt := syslogFirstCallPos(fd, "Unlock")
+	// CONTROL: the matcher must SEE the lock release, or a broken AST walk
+	// returns NoPos for everything and this wall passes forever. The required
+	// reads below are not a control — their absence IS the defect, and they
+	// report it in those terms.
 	if !unlockAt.IsValid() {
 		t.Fatal("control: no Unlock() found in syslogFeedState, so the ordering below proves nothing")
 	}
-	if len(reads) == 0 {
-		t.Fatal("control: no counter read found in syslogFeedState, so the ordering below proves nothing")
-	}
 
-	for _, want := range []string{"the writer's own counters", "syslogLateDrops()"} {
-		at, ok := reads[want]
-		if !ok {
-			t.Errorf("syslogFeedState no longer reads %s; it must, under the lock, or the snapshot's terms come from different instants", want)
+	for name, what := range map[string]string{
+		"Stats":           "the writer's own counters",
+		"syslogLateDrops": "syslogLateDrops()",
+	} {
+		at := syslogFirstCallPos(fd, name)
+		if !at.IsValid() {
+			t.Errorf("syslogFeedState no longer reads %s; it must, under the lock, or the snapshot's terms come from different instants", what)
 			continue
 		}
 		if at > unlockAt {
@@ -4196,7 +4215,7 @@ func TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock(t *testing.T) 
 				"a retirement landing in that window seals the captured writer and charges its next loss to "+
 				"BOTH its live counters and lateDrops, so the snapshot counts one lost event twice and the "+
 				"next snapshot reverses it off the smaller sealed finals (Codex P2, PR #1494)",
-				want, fset.Position(at), fset.Position(unlockAt))
+				what, fset.Position(at), fset.Position(unlockAt))
 		}
 	}
 
@@ -4206,17 +4225,5 @@ func TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock(t *testing.T) 
 	if live == nil {
 		t.Fatal("applyLiveWriterStats is gone; this wall names a function that no longer exists")
 	}
-	ast.Inspect(live.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Stats" || sel.Sel.Name == "CumulativeStats") {
-			t.Errorf("applyLiveWriterStats calls %s() at %s\n\t"+
-				"it must fold the counters its caller captured under syslogHealth.mu; a second read here is "+
-				"outside that lock and reintroduces the double count",
-				sel.Sel.Name, fset.Position(call.Pos()))
-		}
-		return true
-	})
+	syslogForbidCounterReads(t, fset, live, "applyLiveWriterStats", "Stats", "CumulativeStats")
 }
