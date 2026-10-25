@@ -24,7 +24,9 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		}
 	}
 	if len(allowList) > 0 {
-		if err := SetUIAllowedCIDRs(allowList); err != nil {
+		err := SetUIAllowedCIDRs(allowList)
+		noteAccessCIDRResult(accessCIDRUIAllow, err)
+		if err != nil {
 			logger.Printf("UIGuard: invalid IP/CIDR (%v) — allowing all IPs", err)
 		} else {
 			logger.Printf("UIGuard: admin panel restricted to %v", allowList)
@@ -42,7 +44,9 @@ func loadUIAccessPolicy(cfg uiAccessPolicyStartupConfig) error {
 		}
 	}
 	if len(trustedProxies) > 0 {
-		if err := SetTrustedProxyCIDRs(trustedProxies); err != nil {
+		err := SetTrustedProxyCIDRs(trustedProxies)
+		noteAccessCIDRResult(accessCIDRTrustedProxy, err)
+		if err != nil {
 			logger.Printf("TrustedProxy: invalid IP/CIDR (%v) — X-Forwarded-For will NOT be trusted", err)
 		} else {
 			logger.Printf("TrustedProxy: admin-UI client-IP trusts X-Forwarded-For from %v", ListTrustedProxyCIDRs())

@@ -7,6 +7,69 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **Two merge-gate workflows reached their actions through MUTABLE tags, and a
+  repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
+  (designed to be a REQUIRED branch-protection check) and
+  `.github/workflows/api-contract.yml` referenced `actions/checkout@v7.0.1`,
+  `actions/setup-go@v7.0.0` and `actions/cache@v6` by tag while every one of the
+  hundred-plus other `uses:` refs under `.github/` is pinned to a 40-character
+  commit SHA with a `# vX.Y.Z` comment. A tag is a pointer its owner can move, so
+  the commit that actually ran inside those jobs was not the commit anyone
+  reviewed — and because those jobs *are* the gate, a moved tag could make a
+  blocking check report green without having gated anything. That is the same
+  failure shape `codeql_action_pin_test.go` exists for, where a mis-pinned SAST
+  action produced a job that looked like it ran and executed zero queries.
+
+  The convention was enforced per file, so these two drifted and kept drifting:
+  the dependency sweep that rewrote `actions/setup-go@v7` to `@v7.0.0` touched
+  those exact lines and left them mutable, because nothing failed. All six refs
+  are now SHA-pinned to the revisions already in use elsewhere in the tree, and
+  `workflow_action_pin_test.go` enforces the rule across every workflow and
+  composite action under `.github/` — so a new file, or a bump that rewrites a
+  ref, cannot reintroduce a mutable one silently.
+
+  The gate enumerates refs by **parsing the YAML**, not by scanning for
+  `^uses:`, because the line-based first revision had a hole of exactly the kind
+  it exists to catch: YAML also accepts `uses : x@v7`, `"uses": x@v7`,
+  `'uses': x@v7` and the flow mapping `- {uses: x@v7}`, all four of which
+  GitHub Actions honours and none of which that regex matched — while the
+  hundred-odd refs it did match kept its "scanned nothing" guard satisfied. A
+  mutable tag in any of those spellings would have run with the gate green.
+  `TestWorkflowActionRefEnumerationSeesEveryUsesKey` pins all four plus the
+  job-level reusable-workflow form, so a future simplification back to a regex
+  fails instead of silently un-seeing refs. A SHA pin's comment must also now
+  *name* the revision (`# v1.2.3`, or `# branch @ YYYY-MM-DD` as `ci.yml` pins
+  an action with no releases); the first revision accepted any `#`, so `# TODO`
+  passed a check whose own message promised it named a release.
+
+  Two further holes in the same gate, both measured: a repeated pin was checked
+  against the FIRST occurrence's line, so in a file with fourteen
+  `actions/checkout` steps — or the two `actions/setup-go` steps in
+  `pr-api-governance.yml` — a later pin with no comment inherited an earlier
+  one's `# v7.0.1` and passed; one ref is now emitted per matching source line.
+  And a `docker://` container action was skipped entirely, on the incorrect
+  grounds that registry digest rules covered it (they govern the release
+  catalog's images, not a workflow's `uses`), so `docker://alpine:latest` would
+  have satisfied every applicable check; it now needs an `@sha256:` digest, with
+  `TestWorkflowDockerDigestRuleBites` proving the rule on fixtures because
+  nothing in `.github/` uses the scheme yet.
+
+  `slsa-framework/slsa-github-generator` is a recorded exception with its reason:
+  the generator verifies its own provenance against the invoking tag and refuses
+  to run from a SHA, so pinning it would disable release provenance rather than
+  harden it. The exception is still constrained to an exact
+  `vMAJOR.MINOR.PATCH` release, never a moving major alias, and the test fails if
+  an exception stops being used — the allowlist is exact, not a dumping ground.
+  No runtime, policy or proxy behaviour changes; this is CI trust only.
+
+  The three `actions/checkout` steps in those two workflows also set
+  `persist-credentials: false` (CWE-522, CodeRabbit on this PR): each job runs
+  PR-authored code, which could otherwise read the run's `GITHUB_TOKEN` from
+  `.git/config`. Nothing in them needs the credential — the base-ref
+  `git fetch` reads a public repository.
+
 ### Changed
 
 - **The pinned Go toolchain moves from go1.26.10 to go1.27.3.** The `go.mod`
@@ -67,10 +130,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   never have authenticated.
 
   Every gate was mutation-tested against its reverted fix. Two backup-plane
-  rows stay open with their reasoning recorded (§45.5): unbounded restore
+  rows stay open with their reasoning recorded (§51.5): unbounded restore
   memory, and `modeFull` silently dropping live artifacts absent from the
   archive — the latter needs an operator-contract decision because
   `admin_settings.json` is where `default_action` persists.
+- **The syslog/SIEM writer handle was published without synchronization, so a
+  "disable forwarding" click could abort an in-flight proxy request, and every
+  runtime retarget leaked a delivery goroutine and its collector socket
+  (CHAOS-78).** `globalSyslog` was a plain `*syslogWriter`: written at runtime
+  from the admin handler goroutine (`InitSyslog` via `POST /api/syslog`; the
+  disable branch stored `nil`) and read unsynchronized on the proxy request
+  path at `persistLogEntry` — the chokepoint every request-log record flows
+  through — and on the audit SIEM hook.
+
+  The nil check and the dereference were two separate unsynchronized loads, so
+  a request goroutine could pass the check and then dereference the `nil` the
+  disable branch had just stored. Measured: 14 reported data races under
+  `-race` between `persistLogEntry` and `InitSyslog`. The proxy crash guard
+  contains the panic per request, so the cost is a dead request or tunnel and a
+  crash record, not a dead appliance.
+
+  The subtler half is the one a nil guard would **not** have fixed. The engine
+  sets its queue in `startAsync` *after* the struct literal and treats a zero
+  queue as "deliver synchronously" — a path that holds the writer mutex across
+  three serialized network ops, which the engine's own comment puts at ~15 s
+  worst case (`writeTimeout` + dial + `writeTimeout`). A plain pointer write
+  carries no
+  release edge, so on a weakly ordered target (the appliance ships
+  `linux/arm64`) a request goroutine could observe a non-nil writer whose queue
+  was still zero, take that path, and pay ~15 s on the data path with every
+  other logging caller queued behind it — exactly the proxy-wide stall the
+  async design exists to prevent, reached through the pointer rather than the
+  engine.
+
+  The handle is now an `atomic.Pointer[syslogWriter]` read once into a local at
+  every site, which supplies both the single load and the release edge. This is
+  the pattern the codebase already uses for every other hot-path-read,
+  runtime-reconfigured global (`globalLogStore`, `logSink`, `obs.sink`, and the
+  syslog engine's own `panicObserver`); the pointer holding the engine was the
+  one left plain.
+
+  Separately, `InitSyslog` published over the previous writer without closing
+  it, and the engine's `drainLoop` exits **only** via `Close` — so each runtime
+  SIEM retarget stranded one delivery goroutine and one collector socket for
+  the life of the process (measured: 8 retargets, 8 leaked, 7 still live after
+  a disable). `InitSyslog` now closes the writer it displaces. The enable
+  branch also dereferenced the global twice more with no nil guard at all, so a
+  second admin's concurrent disable nil-panicked the admin handler; the format
+  now resolves from one load.
+
+  Closing that leak opened a narrower hole, which review caught: `send` read
+  `closed` and only *then* enqueued, while `Close` closed `stop` and let
+  `drainLoop` exit — so a sender preempted between its check and its enqueue
+  could put a line on a queue whose drain goroutine had already returned.
+  `Close` never closes the channel, so the send succeeds and the line is
+  **neither delivered nor counted in `Drops`** — silent loss, in audit records.
+  The leak had been masking it: a leaked `drainLoop` keeps running, so that same
+  line was delivered. `Close` now stores `closed`, waits for in-flight senders,
+  and only then closes `stop`, so every line is either delivered or counted
+  provided the sender clears within the bound; the wait is bounded so it can
+  never hang shutdown, and that bound is the one path that can still lose a
+  line. Measured: against the pre-fix ordering the conservation test fails 6
+  runs in 10, typically losing exactly one line (`delivered 2091 + dropped 5273
+  = 7364; want exactly 7365 sent`), and the `Close`-waits-for-a-sender ordering
+  is ~108 µs pre-fix against a required 150 ms.
+
+  Closes `OBS-1` of the chaos register's §42, which nominated it as the
+  recommended first follow-up. Gated by a `-race` reconfigure-versus-request
+  test, a goroutine-leak test counting delivery goroutines by stack, an AST
+  wall (the handle stays an `atomic.Pointer`, only `syslog.go` names it, and
+  no caller may write `syslogHandle().Method()`), and a compile-time type
+  assertion. Full write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §45.
 
 - **Built with Go 1.27, the shutdown drain sent no GOAWAY to inspected HTTP/2
   tunnels.** Under `go1.27 && !http2legacy`, x/net v0.61 compiles a different
@@ -92,6 +222,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   list, the per-tunnel context, and the GOAWAY re-fire for a tunnel that starts
   after the first wave. The default build (go1.26.10) is unchanged in behavior.
 
+- **A bodyless `POST`/`PUT` was forwarded upstream re-framed as
+  `Transfer-Encoding: chunked` instead of the client's own `Content-Length: 0`.**
+  Both legs that serialize an outbound request wrapped the request body
+  unconditionally — `prepareHTTPForward` with a `MaxBytesReader` plus a
+  `countingReader`, and the SSL-inspected H1 inner loop with a
+  `stallDetectReadCloser`. `net/http` keys its no-body fast path on the
+  **identity** of `http.NoBody` (`Request.outgoingLength` returns 0 only for a
+  nil body or that sentinel, and reads `ContentLength == 0` on any other
+  non-nil body as "length unknown"), so wrapping the sentinel told
+  `newTransferWriter` the length was unknown. For methods that normally *do*
+  carry a body it does not probe — it chunks. A forward proxy re-framing a
+  request the client framed correctly is wrong on its own terms, and origins,
+  WAFs and CDNs do not all treat the two forms alike.
+
+  Both legs now leave the sentinel alone, so the origin sees the client's
+  framing. Pinned by `TestHandleHTTP_EmptyBodyPOSTKeepsContentLengthZero` on
+  the plain-HTTP leg and `TestInspectInnerLeg_EmptyBodyKeepsClientFraming`
+  through a real CONNECT / forged-leaf tunnel; reverting either guard alone
+  fails its own test. The cost half of the same root cause is under
+  **Performance**.
 - **go-ldap v3.4.15 would have reclassified malformed-packet faults as "the directory answered".** v3.4.15 adds `ErrorMalformedPacket` (207) for decode
   faults that v3.4.14 returned as plain errors, which `ldapUserBindIsUnreachable`
   treats as unreachable. With the client-error ceiling still at 206, those faults
@@ -293,6 +443,183 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- A scheduled rule's **timezone is now resolved once per policy evaluation**
+  instead of once per rule. Both halves of the per-rule work depend only on
+  `(instant, timezone)` and never on the rule, yet `matchScheduleAt` redid both
+  for every scheduled rule of every proxied request:
+
+  - `scheduleLocationResolved` keeps tzdata off the hot path, but its
+    process-wide `sync.Map` is **interface-keyed**, so each probe pays
+    `runtime.nilinterhash` → `typehash` → `aeshashbody`. On a 1 000-scheduled-rule
+    rulebase that probe alone measured **38.7%** of the evaluation
+    (`scheduleLocationResolved` 41.0% cumulative) — a thousand identical
+    lookups of the single timezone the deployment had configured.
+  - `now.In(loc)`, `Weekday()`, `Hour()` and `Minute()` each re-split the
+    absolute seconds: a further **~25%** of the same scan.
+
+  `evalAccessRules` now shares one evaluation-scoped `scheduleClock` across the
+  rulebase, the same lazy pointer-passed idiom `clientSource` and
+  `hostCatScratch` already use — it stays on the caller's stack, is never
+  retained, and a rulebase with no scheduled rule still reads no clock at all.
+  The memo holds **one** entry keyed on the timezone string, which is the shape
+  real postures have (one configured zone, or empty for UTC); a rulebase that
+  alternates zones rule-by-rule simply re-derives, i.e. degrades to the
+  pre-change cost and measured no worse (60.5 µs vs 69.9 µs at 1 000 rules).
+
+  Measured with benchstat (n=6, 4-core Xeon @2.10GHz, go1.26.9):
+  **10 rules 887.7 ns → 401.8 ns (-54.7%)**, **100 rules 7.289 µs → 2.525 µs
+  (-65.4%)**, **1 000 rules 69.92 µs → 23.02 µs (-67.1%)**. Isolated, the
+  per-rule schedule check went from ~66 ns to ~15.2 ns (**-77%**). Allocations
+  stay at **0/op** — the zero-allocation scan contract is unchanged — and an
+  unscheduled rulebase is untouched.
+
+  `scheduleDayMatch` and `scheduleTimeMatch` split into shared cores taking the
+  already-derived weekday and minutes-of-day, and `matchScheduleAt` became a
+  one-shot use of the memo. There is therefore exactly **one** schedule-matching
+  code path, so the Stage-1 auth gate, CDR policy and the policy simulator keep
+  their behavior by construction rather than through a parallel implementation
+  that could drift. `TestBenchGate_PolicyEvalScheduleOverheadBounded` gates the
+  scheduled-to-unscheduled scan ratio at 3.5x (measured 2.19x; 4.63x with the
+  memo un-shared); the existing allocation gate could not see this regression,
+  because resolving per rule allocates nothing.
+- A **known-empty request body is no longer wrapped** on either leg that
+  serializes an outbound request, so `net/http` stops probing it. Wrapping the
+  `http.NoBody` sentinel reports the body length as unknown (see the companion
+  entry under **Fixed** for why), and for the methods that usually lack a body —
+  `GET`, `HEAD`, `DELETE`, `OPTIONS`, `PROPFIND`, `SEARCH` —
+  `transferWriter.shouldSendChunkedRequestBody` resolves that unknown with
+  `probeRequestBody`: a fresh **goroutine** reading one byte, a buffered
+  channel and a 200 ms `time.Timer`, with the request line blocked on that
+  channel round trip. Bodyless methods are most of proxied web traffic, and on
+  an inspecting gateway nearly every decrypted inner request takes the second
+  leg too, so this was paid on the majority of requests the product serves —
+  and it bought nothing: the probe's only conclusion was the emptiness the
+  sentinel had already stated.
+
+  Nothing is lost by skipping the wrappers. An empty body cannot exceed
+  `maxRequestBody`, its byte counter would stay at 0 — exactly what the
+  pre-existing nil branch contributes to `statBytesSent` — and a body with no
+  bytes has no trickle for the inspect loop's stall detector to catch, with
+  that loop's 60 s header read deadline still bounding a client that sends
+  nothing. Scope is the sentinel's identity only: every other body, `nil`
+  included, behaves as before.
+
+  Measured on go1.27.3 (the `go.mod` toolchain pin), linux/amd64, 4-core Xeon
+  @2.10GHz, medians of n=5, as *before* → **after** — the "before" arm being the
+  frozen pre-change wrapping kept in `proxy_emptybody_bench_test.go` so the
+  comparison stays reproducible in-tree:
+
+  | | allocs/op | B/op | ns/op |
+  |---|---|---|---|
+  | bodyless `GET` forward | 80 → **69** | 10 485 → **9 662** | loopback-bound |
+  | bodyless `POST` forward | 82 → **70** | 10 341 → **9 676** | loopback-bound |
+  | inspected inner-leg `Request.Write` | 13 → **6** | 665 → **248** | 3 734 → **1 088** |
+
+  The same benchmarks on go1.26.10 (the pin before the go1.27.3 bump) measured
+  the forward pair one allocation lower on **both** arms — 79 → 68 and 81 → 69 —
+  and the inner-leg pair identically. The absolute counts track the toolchain;
+  the saving does not move: **−11** allocations on a bodyless `GET`, **−12** on a
+  bodyless `POST`, **−7** on the inner leg, on both toolchains.
+
+  The inner-leg pair is the strongest evidence: it carries no network at all,
+  so its **~3.4× CPU** gap is the probe's channel round trip and nothing else,
+  reproduced in all five runs on both toolchains with no overlap. The forward pair's `ns/op` is
+  loopback- and scheduler-bound on a shared 4-vCPU runner and its medians
+  overlap across runs, so it is **not** quoted as a result; allocation counts
+  are deterministic, which is why `TestBenchGate_EmptyBodyForwardAllocs` and
+  `TestBenchGate_EmptyBodyInnerWriteAllocs` key on them and assert the
+  before/after relationship as well as an absolute bound.
+
+  End to end, `BenchmarkPerfQual_ProxyHTTPForward` goes from **176 to 165
+  allocs/op** and ~14 765 to ~13 895 B/op, identically at `rules=10/100/500`
+  and in every run of an A/B against the pre-change tree. Its `ns/op` and
+  `cpu-ns/op` move the same way (~−3%) but inside this runner's spread, so they
+  are reported as directional only.
+
+  The inspected **H2** leg is deliberately untouched: `x/net/http2`'s server
+  never hands out `http.NoBody` (`newWriterAndRequestNoBody` always installs a
+  `*requestBody`), so this guard cannot fire there and the analogous cost on
+  that path is not one Culvert's wrapper introduces.
+- **The per-request category-group match no longer takes a lock.**
+  `matchDestNorm` calls `categoryGroupMatchesHostScratch` once per rule
+  carrying a destination category group, inside the policy scan every proxied
+  request walks, and each call took an `s.mu.RLock`/`RUnlock` pair — two atomic
+  read-modify-writes on one shared word, so every request wrote the same cache
+  line once per category-group rule to read tables that in steady state never
+  change. (The ID leg's linear scan of every group was already retired by the
+  `byID` index; this change removes the lock from every leg.) That is the
+  throughput ceiling already found and fixed in `internal/threatfeed`,
+  `internal/urlcat`, `internal/connlimit`, the IP filter and `topHosts`;
+  `policy_category_bench_test.go` carried it as an **open** finding (91.9% of
+  samples in `GetByName`, 68.6% in its `RLock` atomic).
+
+  `MatchesCategoryByID`, `MatchesCategory`, `GetByName`, `GetByID` and
+  `Revision` now read an immutable `readView` published under `s.mu` by the
+  `bumpRevLocked` chokepoint: a `byName` map, a `byID` map projected through
+  the same fail-closed `groupByIDLocked` resolution the writers use, and the
+  `rev` memo counter, which travels **inside** the view so contents and change
+  signal are one publication and cannot be observed out of step (published
+  separately, a reader that loaded the bumped counter and then the
+  pre-publication contents would memoize stale contents under the new revision
+  — permanently stale, because the counter will not move again).
+
+  Measured on the PR's development box (medians of n=5, 4-core Xeon @2.80GHz,
+  go1.26.9, before the `byID` index landed), end to end,
+  `BenchmarkPolicyEvaluate_CategoryGroupRulesParallel` with 50 category-group
+  rules and an uncategorized destination:
+
+  | GOMAXPROCS | 1 | 2 | 4 | 1→4 throughput |
+  |---|---|---|---|---|
+  | RLock | 1926 ns | 3699 ns | 3996 ns | 0.48x — cores *subtracted* throughput |
+  | read view | 1748 ns | 980 ns | 537 ns | 3.25x |
+
+  Re-measured against the `byID`-indexed store, which is the comparison that
+  describes what this change still buys: both arms on one box, one toolchain
+  (go1.27.3), medians of n=5, back to back — the base arm is `origin/main`
+  with this package's benchmark file copied in.
+
+  | benchmark, ns/op | main | +view | |
+  |---|---|---|---|
+  | `ByID_HitParallel` 8 groups, `GOMAXPROCS=1` | 64.1 | 47.2 | 1.4x |
+  | `ByID_HitParallel` 8 groups, **`GOMAXPROCS=4`** | **194.2** | **11.1** | **17.5x** |
+  | `ByID_HitParallel` 64 groups, `GOMAXPROCS=4` | 211.9 | 12.3 | 17.3x |
+  | `ByID_HitParallel` 256 groups, `GOMAXPROCS=4` | 154.6 | 13.1 | 11.8x |
+  | `MatchesCategory_NameParallel`, `GOMAXPROCS=4` | 124.0 | 16.0 | 7.8x |
+  | `MatchesCategory_UnknownNameParallel`, `GOMAXPROCS=4` | 108.5 | 10.9 | 9.9x |
+  | `MatchesCategoryByID_Hit` 256 groups, serial | 88.3 | 52.7 | 1.7x |
+
+  The row that matters is the shape, not the ratio: on the `byID`-indexed
+  store the parallel figures are **worse than its own single-core figures**
+  (64.1 → 194.2 ns at 8 groups, 82.5 → 211.9 at 64), because with the scan
+  gone the `RLock` is all that is left and it is the thing that does not
+  scale. Off the view the same op costs ~11–13 ns at four cores regardless of
+  group count. The serial gain is real but modest (1.4–1.7x on the ID leg:
+  the view resolves an ID in one probe where the locked path walks
+  `byID` → name key → group). `MatchesCategory_ByName`, main's own serial
+  single-probe benchmark, is ~1.0–1.3x — unchanged, as expected for a shape
+  with no contention to remove. Zero allocations on every path, before and
+  after.
+
+  Two **ownership** corrections made the lock-free read safe. `Update`,
+  `UpdateByID` and `Rename` now copy-on-write instead of editing the live
+  `*Group`: `GetByName` hands that pointer out and its doc comment claimed
+  "catSet is immutable between mutations", but the mutators edited it in
+  place, so a caller reading `g.catSet` or `g.Name` raced the writer. And
+  `ReplaceAll` / `restoreSnapshot` now copy each `Group` rather than
+  publishing `&groups[i]`: aliasing the *caller's* backing array cannot honour
+  "a published Group is never mutated in place", and handing the same slice to
+  `ReplaceAll` twice wrote groups a reader was mid-probe on. One behavioural
+  consequence, deliberate: the caller's slice no longer has its IDs backfilled
+  in place — no call site reads them back, and `Save()` persists them from the
+  store.
+
+  The view contract is pinned three ways — behaviourally through every public
+  mutator including the `MutateDurable` rollback path, structurally by an AST
+  wall over the package (every group-tree writer publishes, directly or
+  through `bumpRevLocked`, which must itself call `publishLocked`) with a
+  pre-fix control and a writer inventory, and as a differential oracle against
+  a verbatim copy of the pre-fix linear scan.
+
 - The destination host is now canonicalized **once per policy scan** instead of
   once per category-scoped rule. `urlcat.Store.MatchesHost` /
   `MatchesHostAdmin` and `effectiveCategoryView.MatchesCategory` each opened
@@ -465,6 +792,158 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- The IDNA memo's value bound (`len(norm) > maxMemoHostLen`, 253 bytes) had no
+  gate on its main-tier axis: an in-limit host that **expands** past the bound
+  through punycode encoding. The long tier's oversize cases exercise the same
+  branch, but nothing pinned that a host arriving inside the limit cannot be
+  retained once encoded, so a tier-specific rewrite of the check could drop it
+  silently; measured with the main-tier check removed, the table retains
+  **969 KB against its 554 KB ceiling**, holding a 668-byte canonical form in a
+  slot. The guard itself is present and correct, so no release was affected and
+  no behavior changes here. The ACE overhead (`xn--`, the delimiter, the
+  encoded deltas) is paid per **label**, so while a dense script compresses — a
+  252-byte CJK host measures 98 bytes as an A-label — one non-ASCII rune in
+  each of many short labels expands instead: `é.é.é…` at 251 bytes normalizes
+  to 671 and `aé.aé.aé…` at 251 bytes to 629, up to ~2.7x the bound, from
+  ordinary authorities well inside the 1 KiB HTTP raw pre-cap.
+  `TestIDNMemo_PunycodeExpansionIsNotRetained` (per-shape retention, with both
+  preconditions asserted so a future `x/net` encoding change fails loudly
+  rather than passing vacuously) and `TestIDNMemo_ExpansionCannotBreachTheCeiling`
+  (the bound under a stream of nothing but expanding hosts) now gate it, and
+  `TestIDNMemo_StoredEntriesRespectTheBound`'s corpus carries the expanding
+  shapes, which it previously reached for only through CJK. Verdicts were
+  never at issue — an expanding host is still normalized, just not retained.
+- `fileutil.AtomicWrite`'s new post-rename `fstat` duplicate was created
+  without `syscall.ForkLock`, so the descriptor was briefly inheritable
+  (CWE-403). `holdInode` ran `syscall.Dup` and then `syscall.CloseOnExec` as
+  two separate calls; `dup(2)` cannot set `FD_CLOEXEC` itself, so between them
+  the duplicate was an ordinary inheritable descriptor. A `fork`+`exec` started
+  in that window by any goroutine would hand the child a **read** descriptor of
+  the file the write is landing — and `AtomicWrite` is the single chokepoint for
+  every durable write in the appliance, the admin roster, data-plane and cluster
+  CA key-at-rest material and enrollment receipts among them.
+
+  No shipped `culvert` binary execs a subprocess, so this was latent rather
+  than reachable; the duplicate is new on every durable write regardless, and
+  the exposure would turn on whenever a future caller does exec. The dup and
+  the flag now run inside `syscall.ForkLock.RLock`, the pattern the `syscall`
+  package documents for descriptor-creating code: `forkExec` takes that lock
+  for writing, so no exec can begin in the window. The failure path releases
+  the lock (holding it would wedge every later exec in the process).
+  Pinned by `TestHoldInode_DuplicateIsCloseOnExec` and
+  `TestHoldInode_ReleasesForkLockWhenTheDupFails`.
+- Defensive zero-value hardening of the admission engine. No production crash
+  is reachable today: every production `IPFilter`/`RateLimiter` (including the
+  one `applySnapshotAdmission` builds before `AddAll`) comes from
+  `NewIPFilter`/`NewRateLimiter`, and no non-test code constructs a bare value.
+  The ADR-0039 admission extraction nevertheless left the zero value of both
+  front-door gates usable only under a documented PRECONDITION, with nothing
+  enforcing it.
+  Three map writes panicked on a nil map — `IPFilter.addLocked`,
+  `RateLimiter.Allow` and `RateLimiter.AllowClusterAware` — while
+  `addExemptionLocked` in the same file already lazily initialized, so the
+  package was internally inconsistent about an invariant it already asserts for
+  the exemption path (`TestRLExemptView_BareLiteralLimiterIsSafe`: a bare
+  limiter "must still accept a first mutation").
+
+  Measured against the tree: a bare `IPFilter{}` panics on `Add` and on
+  `AddAll`, and a bare `RateLimiter{}` that has been `Configure`d panics on
+  `Allow`. The extraction makes that trap easier to reach rather than harder —
+  both types now carry only unexported fields, so the complete literal package
+  main used to write (`&IPFilter{single: map[string]bool{}}`) no longer compiles
+  outside the package and `&IPFilter{}`, the silently broken shape, is the only
+  literal form left. A future caller that wrote it would have panicked on its
+  first `Add`/`AddAll`, or on the request path once a bare limiter was
+  `Configure`d.
+
+  The precondition is replaced by a guarantee using the idiom already present
+  in `addExemptionLocked`. This is an availability hardening, not a policy
+  change: the nil checks sit in the cold miss branch (a nil map reads as a
+  miss), so the steady-state hot path pays nothing, the allocation benchgates
+  still measure zero, and no allow/deny verdict moves — a bare instance is
+  differentially pinned equal to a constructed one across every mode and probe.
+  Gates: 5 in `internal/admission/bare_literal_safety_test.go`, each verified
+  failing against the reintroduced pre-fix shape and four of them additionally
+  against the cheapest wrong fix (skip the store when the map is nil, which
+  silences the panic while silently not enforcing the entry). `doc.go` and
+  ADR-0039 are amended rather than left asserting the narrower contract.
+- OIDC credential/JWKS transports now dial the guarded destination directly:
+  an inherited forward proxy could bypass the resolved-IP SSRF guard. A
+  behavioral regression checks private destinations, DNS rebinding and
+  redirect targets with a public-proxy hook configured. OIDC no longer uses
+  environment proxies.
+  G704 is enforced with scoped exceptions, the expired OpenSSL exception is
+  removed, and CI records unfiltered findings and the actual image's package
+  and static-binary evidence (RISK-002/RISK-006).
+- The C2 route-metadata index resolved every wildcard admin route to the
+  **public `/` catch-all** (SEC-C2WILDCARD-1). `buildMetadataIndex` classified a
+  Go 1.22 `{name}` pattern as an *exact* path and stored it under its literal
+  pattern text, so a real request path — `/api/support/bundles/csb_…` — never
+  matched it, fell through the prefix list and landed on the SPA shell's entry,
+  which is `Public: true`, `RolePublic`. For all ten such routes (the
+  support-bundle download, sealed-export, delete, manifest and upload-consent
+  surfaces, plus `/api/support/recipients/{name}`) that silently disabled C2
+  role enforcement, the C4 role-divergence observation and the C2c audit-gap
+  check — and because `Lookup` still answered "found", `c2ShadowMissingMetaTotal`
+  never incremented, so nothing showed it in metrics either.
+
+  Not exploitable as it stood: every one of those handlers carries its own
+  handler-level `requireRole`, so what was lost is the second layer, not the
+  only one. The mux itself resolves these patterns correctly; only the mirror
+  did not. The index now keeps wildcard patterns in a segment-matched list,
+  tried after the exact map and before the prefix list, with ServeMux's own
+  semantics — literals byte-for-byte, `{name}` exactly one non-empty segment,
+  `{name...}` the trailing segments, most specific first. Exact lookups and the
+  catch-all fallback are unchanged, and the new matcher cannot over-claim:
+  `/api/support/bundles/` and a path with one segment too many are both
+  refused. `TestC2_MetadataIndex_ResolvesEveryRoute` passed vacuously because it
+  iterates the pattern literals; the new gates substitute a concrete value for
+  each `{…}` segment and were verified failing against the pre-fix index, where
+  10 of 10 routes resolve to `"/"` with `public=true`.
+
+  Resolution for a live request goes through the ESCAPED path. `*http.ServeMux`
+  matches on `EscapedPath()` and unescapes each segment on its own, so a `%2F`
+  stays inside one wildcard value — it routes
+  `/api/support/bundles/foo%2Fbar` to `{id}` with `id="foo/bar"`, while
+  `r.URL.Path` has already turned that into a second segment. Resolving from
+  the decoded path therefore reopened the same hole for one percent-encoded
+  character, which the built index confirmed by answering `("/", public=true)`
+  for all three affected shapes. Matching the raw escaped text would be wrong
+  in the other direction, because `appro%76e` really does reach the literal
+  `approve` route, so each segment is unescaped separately; a malformed escape
+  is left as-is, making the worst case a miss rather than a wrong route. The
+  decoded path still feeds the exact and prefix tiers unchanged.
+
+- Revoking a cluster **enrollment token** left no audit record
+  (SEC-ENROLLAUDIT-1). `DELETE /api/cluster/tokens` destroys cluster trust
+  material, yet it was the one mutation on that route with no `auditEvent`: the
+  POST that mints a token audits, node revocation audits, and the route
+  metadata claimed `"audit delegated"` for a method that had no delegate. With
+  `AuditExpected` false, C2c's runtime audit-gap check could not notice the
+  omission either, and `api/route-classification.yaml` agreed with the wrong
+  answer. An admin-session holder could therefore remove enrollment capability —
+  durably, the store is saved — with nothing recording who did it or when.
+  The handler now emits `enrollment.token_revoked` **after** the store has
+  persisted, so a record cannot claim a revocation that did not survive the
+  write; the metadata and the manifest declare it. `saveConfigVersion` is
+  deliberately still absent — enrollment tokens are outside the rollback
+  surface. The write-failure path is covered too: `DeleteToken()` runs before
+  `Save()`, so a failed store write leaves the token already gone from memory
+  — this node has stopped honouring it whatever the 500 says, and a later
+  successful save makes the deletion durable — which now records a distinct
+  `enrollment.token_revoke_unpersisted` event rather than nothing. The token is
+  not restored; putting live enrollment material back because a disk write
+  failed is the less safe direction, and the 500 already says to retry.
+  Gates include two negative controls (a 404 and a 400 must audit nothing),
+  assert on unique entry content rather than a length delta because the audit
+  ring is bounded, and mint a fresh token hash per invocation so a `-count=2`
+  run cannot satisfy the positive assertion from the previous run's entry.
+
+  Both findings were recorded as R2 and R4 in the 2026-10-17 review and are
+  closed here. Full analysis, plus a review of the 28 open pull requests —
+  including one that flips a fail-closed installer gate to fail-open and four
+  pairs of mutually incompatible remediations of the same defect — is in
+  `docs/engineering/security-reviews/2026-10-18-open-pr-fleet-and-metadata-audit-gaps.md`.
 - Built with Go 1.26.10 (was 1.26.9) for GO-2026-6809: `crypto/x509` did
   not distrust compromised intermediate certificates. Culvert reaches it
   through certificate verification (`x509.Certificate.Verify`, for example
@@ -652,6 +1131,73 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   session still resolves to admin, enrolled local roles pass through at their
   exact role, and a local session for a deleted user is still refused, so the
   fix did not trade one bypass for another.
+
+- **`cdr.fail_mode: closed` was not enforced when CDR was unavailable — the
+  one case it exists for.** `cdrErrorOutcome` has always applied the setting
+  to a Sluice that *answers* with an error, but the unavailable path — every
+  instance's circuit breaker open, or no instance enrolled — returned an
+  unconditional `cdrPassSkipped("SKIPPED")` from both the proxy-side liveness
+  gate (`runCDRStage`) and the picker inside `safeCDRSanitize`, and
+  `runCDRStage` forwards a pass. So a fail-CLOSED deployment delivered every
+  document **unsanitized** for as long as no instance was available, while
+  `/api/cdr/*` and the startup banner still reported CDR enabled and
+  fail-closed. The in-code contract said otherwise at both sites ("the
+  caller's fail_mode then decides", "callers treat nil as skip CDR and apply
+  fail_mode"), and so did the runbook — `docs/OPERATIONS.md` §6 tells an
+  operator to switch to fail-open "to keep traffic flowing while you fix the
+  engine", advice that was a no-op because fail-closed already kept it
+  flowing.
+
+  The gap was reachable, not merely theoretical: the breaker opens after
+  `FailureThreshold` consecutive failures (default 5) and stays open for
+  `ResetTimeout` (default 30 s), so anything able to make Sluice fail that
+  often — a crafted document class that errors the engine, resource pressure,
+  a network fault — opened a 30 s window in which nothing was scanned, and
+  could hold it open by repeating, with only one probe per window getting
+  through. The refused documents themselves were still blocked, so the
+  attacker's own failing requests did not reveal the open window.
+
+  Both sites now route through `cdrUnavailableOutcome`, which applies
+  `fail_mode`: fail-closed refuses the document with reason `cdr_unavailable`
+  through the same emission as a verdict-driven block (extracted as
+  `cdrEmitStageBlock`, so the two cannot drift), counts it in
+  `culvert_cdr_fail_closed_total`, and leaves the breaker untouched — the
+  refusal takes no reservation, so it cannot strand a half-open probe
+  (CHAOS-72). A **disabled** CDR never blocks, whatever `fail_mode` says: an
+  empty pool is also what "off" looks like to the picker. Fail-OPEN
+  deployments — the default, and any explicit `fail_mode: open` — are
+  unchanged down to the counters the skip path does not touch.
+
+  A second way to lose the posture was closed with it (Codex #1668 P1):
+  `initCDRClient` returned its "every instance failed to dial / none enrolled"
+  error **before** publishing the config it was applying, so `cdrActiveCfg`
+  stayed at its zero value. An appliance configured enabled + fail-closed that
+  booted while Sluice was unreachable therefore read ITSELF as disabled and
+  forwarded every document unsanitized — the same hole, reached by the most
+  ordinary route to it, since `initCDRInfrastructure` logs the init error and
+  carries on by design. The failure path now publishes the config before
+  returning the error, which also stops `checkCDR` reporting a broken appliance
+  as `"disabled"`/OK instead of `enabled-broken`, and stops the two recovery
+  re-inits (`propagateServerRotation`, the RenewCert poller — both calling
+  `initCDRClient(cdrActiveConfig())`) being handed a disabled config that
+  shut CDR down until restart rather than retrying. Breaker seeding is
+  unaffected: nothing is constructed after that publish.
+
+  `cdr_fail_closed_unavailable_test.go` pins both halves: every `fail_mode`
+  spelling `CDRFailOpen` folds (`CLOSED`, `Closed`, padded), the two
+  disabled-CDR negative controls, a healthy instance under fail-closed still
+  returning its verdict, the `runCDRStage` gate blocking the tunnel and
+  writing one block page, the fail-open gate forwarding the original bytes
+  with no counter movement, and 24 concurrent refusals under `-race` that
+  leave the breaker open with no stale probe. The cold-start pair
+  (`TestCDRUnavailable_FailClosedSurvivesPoolInitFailure` and its fail-open
+  negative control) drives the real `initCDRClient` failure and was confirmed
+  to fail against the un-fixed `cdrstore.go` before it passed against the
+  fixed one.
+  The Diagnostics `cdr` row now keys on availability as well as pool size:
+  enrolled instances whose breakers are all open report FAIL `enabled-dark`
+  instead of `enabled-healthy` (ported from #1421, CHAOS-67), read without
+  reserving a half-open probe.
 
 - The CDR circuit breaker could strand itself in half-open for the whole
   process lifetime, silently disabling content sanitization (CHAOS-72).
@@ -968,6 +1514,141 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (`TestRISK030_*`, RED under `-race` against the previous code),
   `TestIPFilterReplace_*` and the `Replace` republish case in the IPFilter
   mutator inventory.
+
+- A read-only **viewer** could read the HA join token and from it obtain the
+  **cluster CA private key** (SEC-HATOKEN-1). `GET /api/cluster/ha` is gated at
+  `RoleViewer` — correctly, it is a dashboard — and on a leader it
+  unconditionally included `deploy_cmd`, which interpolates the live
+  `--ha-token` plus the gRPC address and the CP TLS cert/key/CA paths. That
+  token is the *sole* credential for the `HASync` RPC (`VerifyToken` is the only
+  gate, and the CP listener uses `tls.VerifyClientCertIfGiven`, so no client
+  certificate is required), and `HASync` answers with the exported cluster
+  state, the full published `ConfigSnapshot`, and the cluster CA private key
+  wrapped under PBKDF2 of *that same token*. With that key an attacker mints
+  node certificates the Control Plane trusts and enrolls as a data plane. The
+  field is now suppressed per role rather than by raising the route's `MinRole`,
+  which would have removed the HA panel from operators and viewers.
+
+  The admin UI needed the same fix on its own side: the HA panel's
+  `<pre id="ha-deploy-cmd">` was only ever *assigned* when a response carried
+  `deploy_cmd` and never cleared, so in a single tab an admin who opened the
+  Cluster panel and logged out left the join token in the DOM — and in the
+  click-to-copy handler — for whoever signed in next. Three guards now close it:
+  the render path clears on an absent field, `applySession` clears on any
+  non-admin session, and the write re-checks the current role — `loadHA` is
+  async, so an admin response still in flight could otherwise resolve after the
+  session changed and write the token back into the DOM that had just been
+  cleared.
+
+- Host-header case variation evaded every country-scoped **deny** rule
+  (SEC-GEOHOST-1). `geoHostKey` stripped a port and nothing else — no
+  lowercasing, no IDNA, no trailing-dot trim — while `matchDestNorm` hands the
+  country branch the raw host; its comment claiming country checks "normalize
+  internally" was false, and every other destination matcher (blocklist, urlcat,
+  policy FQDN) already normalized. Each spelling was a distinct host→IP cache
+  key and the warm is off the request path, so every first request missed, the
+  rule did not match, and evaluation fell through to a lower-priority allow. A
+  19-character hostname has ~2^15 spellings, so the supply of misses is
+  unlimited, and DNS is case-insensitive so the connection still reached the
+  blocked destination. `geoHostKey` now returns `hostutil.NormalizeHost`, which
+  is the chokepoint all four call sites share, closing case, trailing-dot and
+  IDN U-label variance at once while passing IP literals through verbatim.
+
+- A matched rule carrying an **action this build does not dispatch** was
+  ALLOWED, and shadowed every deny rule beneath it (SEC-POLICYACTION-1).
+  `applyPolicyDecision`'s `switch match.Action` had no `default:`, so an
+  unrecognized action fell through to the trailing `return "OK", false`: the
+  request proceeded, no decision was recorded, and because the scan is
+  first-match-wins, no lower-priority rule was consulted. One such action on a
+  priority-1 `destFqdn: "*"` rule disabled the whole rulebase under it. `Action`
+  was validated only on the API ingress path, so `PolicyStore.Load` (the
+  operator-managed policy file) and `PolicyStore.ReplaceAll` (the CP→DP snapshot
+  apply and replace-mode import) installed one verbatim — reachable from a
+  mixed-version cluster, a restored backup or a renamed action without any hand
+  editing. Now fail-closed on both sides: `applyPolicyDecision` resolves the
+  action through `canonicalPolicyAction` and blocks when it cannot, and
+  `policyRulePersistable` refuses to install such a rule — both halves, because
+  blocking at dispatch *without* dropping at install would turn a rule that
+  previously allowed into one that blocks and shadows everything beneath it.
+
+  `canonicalPolicyAction` is deliberately tolerant in two ways, neither ever
+  more permissive than the pre-fix fall-through: **case is folded**, because
+  policy files carry lowercase spellings and pre-fix `"allow"` was allowed (it
+  still is, while `"drop"` and `"block_page"` now block where they previously
+  allowed); and **unset is not unrecognized** — an empty action resolves to
+  `Allow`, exactly what the fall-through did, so no deployment's traffic changes
+  direction. The hole being closed is the version-skew case, which is never
+  empty. The API ingress validator keeps its exact-spelling contract, because
+  ingress refuses sloppy input at the door while this decides what to do with
+  data already on disk. The sibling gate in the same engine already behaves this
+  way: `IPFilter.Allowed` denies all traffic on an unrecognized mode.
+
+- A policy file the load gate refused **in full** read downstream as "no policy
+  configured" and flipped the startup default action to passthrough
+  (SEC-POLICYDROP-1). With `proxy.default_action` unset, the derivation in
+  `loadRewriteAndDefaultAction` selects `allow` for an empty rulebase and `deny`
+  for a non-empty one — and the shim fed it `len(policyStore.List())`, the
+  **installed** count. Because `PolicyStore.Load` drops the rules its
+  fail-closed gate refuses, and `initPolicy` runs before
+  `initRewriteAndDefaultAction`, a file whose every rule was refused installed
+  nothing, counted zero, and turned the gateway into an open forward proxy on
+  restart. The composition is the defect: a gate refusing one fail-open *rule*
+  produced a fail-open *default*. Fixing SEC-POLICYACTION-1 made it reachable
+  from the most plausible shape of all — a hand-written or downgraded-binary
+  policy with one consistently wrong action spelling — so for that
+  configuration the fail-closed fix alone would have admitted strictly more
+  traffic than the defect it closed. The older `SubjectMatch` and invalid-auth
+  refusals could empty a rulebase the same way.
+
+  `PolicyStore.ConfiguredRuleCount()` now reports installed **plus** refused
+  (banked per load by `droppedOnLoad`, cleared by a clean reload, untouched by a
+  load that failed to read or parse), and the shim passes it. `Load` also emits
+  one aggregate warning when it refused anything, since the per-rule warnings
+  said what was dropped but not what it meant for the posture. The loader's own
+  logic is unchanged — it was always correct for the question it was asked, and
+  only the question changed — and an explicit `default_action` still wins in
+  both directions. Rejecting the load outright was considered and not taken:
+  `initPolicy` escalates a `Load` error to `logFatalf`, so one unrecognized
+  action in an operator's file would become a boot failure, which is an
+  availability decision for the product owner rather than a regression fix.
+
+- An **unauthenticated** `POST /api/auth/logout` wrote attacker-chosen,
+  **unsigned** entries into the persisted and cluster-gossiped revocation list
+  (SEC-REVOKE-1). `apiAuthLogout` discarded `decodeSession`'s error
+  (`sess, _ :=`) and then called `revokeSessionCookie` unconditionally — and
+  that function does its own base64+JSON decode with no signature check, on the
+  stated premise that the "HMAC [was] already verified by decodeSession", which
+  was false on exactly this path. The route is on the public allowlist, so a
+  cookie of the shape `base64({"sub":"…","exp":9999999999}).garbage` inserted a
+  permanent entry (the expiry is attacker-chosen and eviction is lazy-on-expiry)
+  into an unbounded map. `SaveRevocations` then rewrote the whole revocations
+  file on every request — O(n) per insert over a set the caller is growing — and
+  the cluster revocation sync gossiped the entries to every node, which merged
+  and persisted them. The admin server sets no `MaxHeaderBytes`, and the 1 MiB
+  `MaxBytesReader` bounds the body rather than the `Cookie` header, so each of
+  the 60 requests/min/IP the API limiter allows could carry ~1 MiB of
+  permanently retained key. The revocation write now requires a cookie whose
+  HMAC actually **verified** — and deliberately not an *admissible* session: a
+  token this build refuses (a deleted user's, or one minted for the proxy plane)
+  is still a token the appliance signed, and revoking it is right. A signed
+  token can only revoke itself, and whoever holds it could already use it. What
+  must not be revocable is a payload nobody signed. Clearing the cookie stays
+  unconditional and the answer stays 200, so a browser holding a junk cookie can
+  still get rid of it and the endpoint is not an oracle.
+
+- A **partial** `POST /api/security` silently disabled the per-IP rate limiter
+  and persisted the change (SEC-SECPARTIAL-1). `rateLimitRPM` was a plain `int`
+  guarded by `if body.RateLimitRPM >= 0`; an absent JSON field decodes to `0`
+  and `0 >= 0` is always true, so every body omitting it called
+  `rl.Configure(0, …)` = disabled, after which `adminSettingsSave` and
+  `saveConfigVersion` made it durable. The endpoint's own published contract
+  declares the body a "Partial update — supply only the fields to change" with
+  `rateLimitRPM` optional, every other field honoured that, and three of the
+  shipped admin UI's buttons send exactly such bodies (`{ipAdd}`, `{ipRemove}`,
+  `{ipFilterMode}`) — so adding one IP to the IP filter turned off proxy rate
+  limiting. The field is now a `*int`, so absence means unchanged and an
+  explicit `0` still disables; a negative value is refused with 400 **before**
+  any field is applied, where it was previously ignored in silence.
 
 - Node-local key material was written with `os.WriteFile` on a predictable
   path, which follows a planted symlink and inherits a planted file's mode
@@ -1604,6 +2285,187 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   read-lock critical section, which also removes the old shape's second lock
   round trip. Only deployments using category groups in policy rules are
   affected; no configuration, API or metric surface changes.
+
+### Fixed
+
+- Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the
+  repository's durable-write chokepoint (CHAOS-85) — the same chokepoint the
+  SEC-SECRETWRITE-1 entry above adopted for key material. They hand-rolled
+  `os.WriteFile(tmp)` + `os.Rename`, which is atomic for a *reader* (no torn
+  file is ever visible) but is **not fsynced**, and — the serious half — is
+  invisible to the storage-health plane. `storageDegraded()`, the rate-limited
+  `storage_write_failed` alert, the degraded operator-contract row and the
+  Prometheus series are all driven by the observers `storage_health.go`
+  installs on `fileutil`, so a write that never calls `fileutil` cannot raise
+  any of them: on a full or read-only volume these writes failed **silently**
+  while the operator contract kept reporting healthy. Affected: the secure-upload
+  config (whose `Enabled`/`Origin` gate egress), the upload queue entry and its
+  sealed blob, the support-recipient registry, the debug-level elevation, and
+  the support-bundle approval state. This is the defect class
+  `audit_writefail_test.go` already pins for the audit JSONL (ST-8), in a domain
+  whose own sibling `support_telemetry_config.go` already used the chokepoint.
+
+  The durability half matters most at `writeBundleState`. `createSupportBundle`
+  deliberately writes the PENDING state **first**, before the tgz and the
+  manifest, because `readBundleState` grandfathers an **absent** state file to
+  READY — which is exactly what the download gate checks, so a bundle whose
+  manifest committed without its state would be downloadable with no admin
+  approval, exporting its INTERNAL sections without the mandatory redaction
+  preview. That ordering is correct and sufficient for a *process* crash, where
+  the page cache survives. It is not sufficient for power loss or a kernel
+  panic: with no fsync barrier, the relative durability of the state commit and
+  the manifest commit is a filesystem- and mount-option-dependent accident the
+  code never asserted. `AtomicWrite` supplies the barrier (fsync file, then
+  parent directory). The bundle commit sequence (tgz, redaction report, preview,
+  manifest) moves with it, since those are the artifacts the manifest commits.
+  `cdr_health.go` is deliberately unchanged: it documents why it needs a
+  predictable `.tmp` rendezvous and already fsyncs via
+  `fileutil.WriteFileExclusive`. Gates: a table-driven chokepoint test over all
+  six entry points (red before the change at 6/6) plus fault injection on the
+  approval-gate path asserting degradation, exactly one alert, and the inherited
+  base-name path-redaction contract (red before at 0 alerts).
+
+- A support durable write that LANDED was reported as a failure, so the HTTP
+  response and the audit trail could contradict the state on disk.
+  `fileutil.AtomicWrite` returns `ErrReplacedNotSynced` only *after* its rename
+  has succeeded — the target already carries the new bytes and every reader sees
+  them; what is unproven is narrower, the rename's durability across an
+  immediate crash. `apiSupportBundleApprove` returns 500 and returns *before*
+  its `auditEvent`, so a bundle could be READY and downloadable (the
+  mandatory-preview download gate reads exactly that landed file) while the
+  admin was told the approval failed and nothing recorded who authorized
+  exporting its INTERNAL sections. The same audit-after-save shape covers the
+  `support.upload.config` egress posture flip and the debug-level elevation, so
+  the fix sits at the writer: `durableSupportWrite` treats the sentinel as
+  committed for every support writer. The storage-health plane keeps the signal
+  — `AtomicWrite` notifies the write-failure observer on that branch before
+  returning, so the failure is still counted, logged, alerted as
+  `storage_write_failed` and reflected in `storageDegraded()`. This divergence
+  arrived with the chokepoint conversion above: the previous `os.WriteFile` +
+  `os.Rename` pair returned nil whenever the rename succeeded and so had no
+  error-after-landing case at all. Found by Codex review on PR #1658. Gates: the
+  unit contract with a negative control that a pre-rename ENOSPC is still an
+  error, plus the handler contract that a landed approval returns 204 and leaves
+  a `support.bundle.approve` entry; both verified failing against the unfixed
+  shape.
+
+- Every Data-Plane → Control-Plane poll failure was charged **twice**
+  (CHAOS-86): `backoff()` incremented `failCount` that `pollConfig`'s error path
+  had already incremented. Both of the function's documented contracts were
+  violated. The delay schedule, promised as "2s, 4s, 8s, … capped at 60s",
+  actually ran 4s, 16s, 60s — reaching the ceiling on the 3rd consecutive
+  failure instead of the 6th, so policy and blocklist convergence lagged by up
+  to 60s after a blip that had already cleared. And the failover guard
+  `if c.failCount < 3`, written under the comment "Only attempt failover after 3
+  consecutive failures", was already false on the **second** failure, so a ~10s
+  network blip or a rolling CP upgrade moved an entire data-plane fleet off a
+  healthy leader. `failCount` is owned by the caller and `backoff()` now only
+  reads it, which corrects the schedule and the threshold together and makes the
+  `backing off … (failure #N)` log line report the real streak rather than twice
+  it. A `max(failCount, 1)` clamp keeps the documented 2s floor on the one path
+  that reaches `backoff()` with a cleared streak — `failover()` zeroes it on
+  success and its immediate retry can then fail. Gates: the single-count
+  invariant, a success-resets control, the threshold (asserted on `activeIdx`,
+  since a successful failover resets the streak), and the floor; nothing
+  previously pinned either the schedule or the threshold.
+- The parent-proxy circuit breaker and six operator signals stopped expiring
+  when the wall clock stepped **backwards** (CHAOS-84). Go's monotonic reading
+  protects an interval only while it stays inside a `time.Time`;
+  `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild one without it, so every
+  interval measured from a stamp held as a bare `int64` is a wall-clock
+  interval. An NTP correction after a wrong RTC, a resumed hypervisor snapshot
+  or an operator fixing the date made those intervals negative, so each
+  `elapsed >= limit` test stayed false until the clock caught up. Nothing
+  errored, nothing was counted, nothing was logged.
+
+  The parent-proxy breaker (`internal/upstream`) is the sharpest: it stayed
+  open, and since the pool falls back to **direct egress** when no parent is
+  eligible, one parent blip plus a clock correction left the appliance
+  egressing around the parent-proxy chain long after the parents recovered. It
+  now re-anchors its trip instant (published on `/api/diagnostics`, so it keeps
+  its wall-clock basis) and serves one fresh window measured from the step,
+  rather than probing at once at parents that may still be down. Five evidence
+  and log gates read a future stamp as "already logged" and suppressed their
+  notice for the whole step: the crash-evidence throttle (a backward step made
+  `recordCrash` return before writing the stack-bearing log and audit entry for
+  every subsequent same-component crash), the scanner and YARA degraded-log
+  gates, the Sluice call-error line, the fail-closed file-profile block warning
+  and the OCSP responder-cap notice. They now decide on the MAGNITUDE of the
+  interval rather than its sign, so a rollback costs at most one suppressed line
+  and a caller that loses a gate's compare-and-swap is not mistaken for a clock
+  step. The tunnel idle reaper, the DP readiness grace and the roster-durability
+  gates have the same defect and are fixed by CHAOS-83 (monotonic stamps); the
+  CDR breaker was already monotonic on main. No configuration, metric, alert or
+  persisted format changes, and behaviour with a sane clock is unchanged. See
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md`.
+- **A shrinking Control Plane address list crashed the Data Plane, and a
+  de-listed but still-responsive CP kept serving it (CHAOS-91).** `activeIdx` is
+  an index *into* `c.addrs` naming the address the live connection holds, and
+  `updateDPAddresses` replaced that slice without re-resolving it.
+  `reconnectActive` indexes it directly and its `len == 0` guard does not cover
+  an index past a *non-empty* slice, so a shrinking list panicked with
+  `index out of range [1] with length 1` — and `reconnectActive` is the
+  certificate-renewal redial, which runs unattended on a healthy node. An HA
+  promotion's one-element list (the CHAOS-71 address-republish rider already on
+  main) is exactly that shrink. Fixed by re-resolving the active entry by
+  **address** rather than clamping the index, and by redialling when the active
+  address is no longer listed: `call` uses `c.conn`, so a de-listed CP that
+  still answered would otherwise keep serving this node indefinitely. (The
+  promotion deadlock and address republish this round also found were ported to
+  main as CHAOS-71 riders, #1556.)
+
+- **The Data Plane's backoff against its Control Plane was defeated three ways
+  (CHAOS-89).** Measured, not inferred:
+
+  The consecutive-failure streak was incremented twice per failed poll — once
+  by `pollConfig`, once again inside `backoff` — so the ladder documented as
+  `2s, 4s, 8s, …, 60s` was really **`4s, 16s, 60s`**: the ceiling on the third
+  failed poll instead of the sixth, and the documented "3 consecutive failures"
+  failover gate tripping on the **second**. The log line was wrong in the same
+  way, reporting "backing off 4s (failure #2)" for a node's *first* failed
+  poll, so an operator could not reconstruct the real cadence from it.
+  `backoff` no longer increments; the streak has exactly one writer.
+
+  Worse, `failover()` cleared the streak on a successful *dial*. A Control
+  Plane pair that answered TCP while failing `GetConfig` — overloaded, fenced
+  out, or timing out an oversized snapshot — therefore held every Data Plane on
+  the ladder's low rungs **indefinitely**: the streak never passed the failover
+  threshold, so no delay ever grew beyond the 30s poll ticker and the ladder
+  never engaged at all. `pollLoop` is ticker-driven and `backoff` sleeps inside
+  a tick, so the effect was not a faster poll rate — it was a Control Plane that
+  was already failing being polled at the full 30s cadence by every node
+  forever, with a fresh gRPC connection every other poll. Connectivity is not evidence that a Control
+  Plane is serving config; only a successful poll is. The failover gate is now
+  re-crossed every `dpFailoverAfterFailures` rather than tested once, so a
+  sustained outage still probes each configured address periodically without
+  redialling on every poll.
+
+  Neither the ladder nor any of the five Control-Plane-facing tickers was
+  jittered or phase-offset, so a fleet whose Control Plane went away — one
+  shared event — retried in lockstep and reconnected in a single instant. The
+  ladder is now jittered per attempt (±10%, matching `internal/feedsched`), and
+  a one-time per-loop phase offset, bounded by both the loop's own interval and
+  5s, staggers all five tickers. The cold-start poll is deliberately **not**
+  staggered: a node with no last-known-good snapshot enforces nothing until it
+  lands, so delaying it to smooth a one-time boot burst would trade a security
+  property for load. This closes the registered WK-13/HA-11 herd rows for the
+  cluster plane; they remain open for `internal/blocklistfeed` and
+  `internal/otlp`.
+
+- **An unbounded per-peer-IP map on the Control Plane (CHAOS-90).**
+  `unenrolledConfigPull.attempts`, which throttles pre-enrollment config pulls,
+  prunes a peer's timestamps only on that same peer's *next* pull, so an
+  address that pulled once and never returned left a permanent entry — one
+  request per source address was enough to grow it for the process lifetime, on
+  a port reachable by any routable peer. The structurally identical
+  `enrollRateLimit` has had a periodic sweep for exactly this, wired into the
+  shared security-limiter janitor, and its own comment names the hazard; the
+  fix had never been carried across. It is now, alongside its sibling. The
+  throttle's *decision* is unchanged — a sweep reclaims aged-out state and does
+  not re-admit an exhausted peer.
+
+  Round report, risk matrix and the backlog it opened are in
+  `roadmap/CHAOS-REVIEW-2026-10-13.md`.
 
 ### Changed
 
@@ -2281,6 +3143,58 @@ endpoints for credentialed parents.
   metric, or dashboard change.
 
 ### Fixed
+
+- Three decisions measured elapsed time on the **wall clock** and stopped firing
+  across a backwards clock step — an NTP correction of a drifted clock, a VM
+  suspend/resume, a container host's clock change, `hwclock` at boot. All three
+  stamped with `time.Now().UnixNano()` and read back with
+  `time.Since(time.Unix(0, stamp))`; `UnixNano()` discards the monotonic reading
+  and `time.Unix(0, n)` reconstructs a value that has none, so Go subtracts two
+  wall-clock values. A step backwards leaves the stamp in the *future* and the
+  elapsed duration goes **negative**, which satisfies neither `>= deadline` nor
+  `>= grace`, so each decision was suspended for however far the step went.
+
+  The **tunnel idle reaper** (1h window) stopped reaping, and the tunnels it
+  then held were precisely the idle, possibly half-open ones it exists to
+  collect — peer still ACKs, never sends, never FINs — at two sockets, two
+  goroutines and two pooled relay buffers each, on the CONNECT-bypass and
+  SOCKS5 paths alike. Under many simultaneous connections or long-lived tunnels
+  that is file-descriptor and memory exhaustion on the data plane; a step
+  *forwards* is the mirror image and tears down every long-lived tunnel at once.
+  The **data-plane readiness grace** (5min) stopped closing, so `/ready` kept
+  reporting `cp_poll: ok` while the control plane was genuinely unreachable and
+  the node's policy went stale. The default verdict is report-only on that row,
+  so there the loss is the signal itself; on a strict probe (`/ready?strict=1`),
+  which does gate on the row, the suppressed `fail` also kept the node's verdict
+  `ready` and so held it in the load-balancer rotation. And both **roster durability-degraded log gates** latched
+  suppressed (a negative age is always under the interval), silencing the only
+  operator-visible signal that admin roster writes are not surviving a restart
+  while the suppressed counter climbed where nobody reads it.
+
+  Sorting the affected and unaffected sites by how they *store* the stamp makes
+  the cause exact: every site that was wrong holds it in an `atomic.Int64`,
+  which cannot hold a `time.Time` and so forces the `UnixNano()` conversion that
+  drops the monotonic reading. `atomic.Int64` remains the right choice at all of
+  them — a lock-free stamp shared between two relay goroutines, or read on a
+  probe path — so the fix is one shared primitive (`monoNanos`/`monoSince`) that
+  makes that representation safe by construction rather than four local patches.
+  The HA self-fence deadline was already correct and explicitly so, because it
+  keeps a `time.Time` field, which retains its monotonic reading for free.
+
+  Deliberately *not* implemented as `internal/admission`'s negative-age guard:
+  there a bad stamp must fail toward the local decision, but here "expired"
+  tears a tunnel down or flips a readiness row to fail, so "negative means expired"
+  would reap live tunnels and flap every node's probe on any backwards step,
+  including the sub-second NTP corrections that are routine. A negative control
+  pins that choice. Absolute-time decisions are untouched: session and IdP token
+  expiry, certificate validity and log-timestamp rendering are civil instants
+  and stay on the wall clock. Gates: 9, four verified failing against the
+  pre-fix tree, including an AST guard over all 385 package-main sources that
+  bans the `time.Unix(0, nanos)` elapsed idiom while leaving the legitimate
+  `time.Unix(seconds, 0)` absolute uses alone. `internal/ocsp` has the same
+  defect in a log gate, recorded as register row CA-21 rather than widening this
+  change into another package. Review:
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §47 (CHAOS-83).
 
 - A leaf-certificate sign already in flight could outlive the CA it was started
   against. Replacing the root CA (`InitCA`, `ImportBundle`, `LoadCustomCA`, and

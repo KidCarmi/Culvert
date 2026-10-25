@@ -342,6 +342,140 @@ func TestIDNMemo_OversizeHostsAreNotRetained(t *testing.T) {
 	}
 }
 
+// expandingIDNHost builds the host shape that maximizes punycode EXPANSION:
+// unit repeated as dot-separated labels, up to maxMemoHostLen bytes total.
+//
+// The ACE overhead ("xn--" + the "-" delimiter + the encoded deltas) is paid
+// per LABEL, so the worst case is many SHORT labels each carrying one non-ASCII
+// rune — the opposite of the dense-script shape, where one label amortizes the
+// overhead across many runes and the A-label comes out shorter than the input.
+// prefix makes the host distinct without changing the shape.
+func expandingIDNHost(prefix, unit string) string {
+	var b strings.Builder
+	b.WriteString(prefix)
+	for b.Len()+len(unit)+1 <= maxMemoHostLen {
+		if b.Len() > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(unit)
+	}
+	return b.String()
+}
+
+// TestIDNMemo_PunycodeExpansionIsNotRetained is the MAIN-TIER gate for the
+// value bound — the len(norm) check in normalizeHostStrictMemo.
+//
+// A host can breach the ceiling from either side: by arriving oversize (gated
+// by TestIDNMemo_OversizeHostsAreNotRetained after CodeRabbit found that bound
+// did not hold; its long-tier cases also reach the len(norm) check), or by
+// arriving within the limit and EXPANDING past it through punycode. The second
+// axis is the main tier's, and it had no gate of its own: a rewrite that kept
+// the value bound for the long tier only would have passed every other test
+// here. Measured with the main-tier check removed, the table retains 969 KB
+// against its 554 KB main-tier ceiling, with a 668-byte norm in a slot — the
+// same class of breach, and the same magnitude, as the oversize one.
+//
+// The gap was in the corpus, not the intent:
+// TestIDNMemo_StoredEntriesRespectTheBound deliberately feeds "inputs whose
+// punycode form is longer than their ASCII byte count suggests", but reaches
+// for CJK, which COMPRESSES (a 252-byte CJK host measures 98 bytes as an
+// A-label). Expansion needs one non-ASCII rune in each of many short labels.
+//
+// Each case must therefore be in-limit on the way in (so its key selects the
+// main tier and the len(norm) check is the only thing standing between the
+// host and a slot) and over the limit on the way out. Both preconditions are asserted,
+// so the test fails loudly if a future x/net changes the encoding rather than
+// passing vacuously.
+func TestIDNMemo_PunycodeExpansionIsNotRetained(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		unit string
+	}{
+		// Shortest possible label: one non-ASCII rune, so the per-label ACE
+		// overhead is amortized over nothing. 251 bytes in, 671 out.
+		{"BareRunePerLabel", "é"},
+		// One ASCII byte alongside it — the shape a real IDN label resembles.
+		{"RunePlusASCII", "aé"},
+		// Longer labels: less expansion per label, still over the bound.
+		{"RunePlusTwoASCII", "aaé"},
+		// A non-Latin rune, to show the shape and not the script is what matters.
+		{"CyrillicPerLabel", "д"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			normMemoResetForTest()
+			host := expandingIDNHost("", c.unit)
+			lowered := strings.ToLower(strings.TrimSuffix(host, "."))
+
+			// Precondition 1: in-limit on the way in, so the key selects the
+			// main tier and the long tier's handling cannot be what is tested.
+			if len(lowered) > maxMemoHostLen {
+				t.Fatalf("probe host is %d bytes, over the %d-byte limit — it "+
+					"would key the long tier and this case proves nothing",
+					len(lowered), maxMemoHostLen)
+			}
+			wantNorm, wantOK := normalizeHostStrictUncached(lowered)
+			// Precondition 2: it must actually expand past the bound, or this
+			// is not the branch under test.
+			if !wantOK {
+				t.Fatalf("probe host does not normalize (ok=false); the case proves nothing")
+			}
+			if len(wantNorm) <= maxMemoHostLen {
+				t.Fatalf("probe host normalizes to %d bytes, within the %d-byte bound — "+
+					"this case no longer exercises the len(norm) branch (did the "+
+					"x/net encoding change?)", len(wantNorm), maxMemoHostLen)
+			}
+
+			// The verdict is unchanged: this is about RETENTION only. An
+			// expanding host is still normalized, on every call.
+			for round := 0; round < 3; round++ {
+				gotNorm, gotOK := NormalizeHostStrict(host)
+				if gotNorm != wantNorm || gotOK != wantOK {
+					t.Fatalf("round %d: got (%q…, %v), uncached (%q…, %v)",
+						round, truncForLog(gotNorm), gotOK, truncForLog(wantNorm), wantOK)
+				}
+			}
+			if n := normMemoOccupied(); n != 0 {
+				t.Errorf("REGRESSION: %d slot(s) filled by a %d-byte host whose canonical "+
+					"form is %d bytes — an entry may never carry a string longer than %d, "+
+					"or the footprint ceiling does not hold",
+					n, len(lowered), len(wantNorm), maxMemoHostLen)
+			}
+		})
+	}
+}
+
+// TestIDNMemo_ExpansionCannotBreachTheCeiling is the memory half of the gate
+// above: not "one such host is refused a slot" but "a client sending nothing
+// BUT such hosts cannot push the table past its ceiling". It is the
+// TestIDNMemo_BoundedFootprint argument run against the expanding shape, which
+// is the shape that actually threatens the bound — distinct hosts there are
+// bounded by the slot count, but retained BYTES are bounded only by the
+// per-entry length check.
+func TestIDNMemo_ExpansionCannotBreachTheCeiling(t *testing.T) {
+	normMemoResetForTest()
+	const distinct = normMemoSlots * 8
+	for i := 0; i < distinct; i++ {
+		NormalizeHostStrict(expandingIDNHost(fmt.Sprintf("%d", i), "é"))
+	}
+	// Every expanding host keys the main tier, so the long tier must stay
+	// empty and the bound is the main tier's share of normMemoCeilingBytes:
+	// every main slot filled with two maximum-length DNS names, plus the slot
+	// pointers of both tiers that normMemoRetainedBytes always counts.
+	if _, long := normMemoOccupiedByTier(); long != 0 {
+		t.Fatalf("%d long-tier slot(s) filled by in-limit hosts — the expanding "+
+			"shape no longer exercises the main tier", long)
+	}
+	ceiling := (len(normMemo)+len(normMemoLong))*8 + normMemoSlots*(40+2*maxMemoHostLen)
+	retained := normMemoRetainedBytes()
+	if retained > ceiling {
+		t.Fatalf("REGRESSION: memo retains %d B after %d distinct expanding IDN hosts, "+
+			"ceiling %d B — the len(norm) check is what holds this bound",
+			retained, distinct, ceiling)
+	}
+	t.Logf("after %d distinct expanding IDN hosts: %d/%d slots, %d B retained (ceiling %d B)",
+		distinct, normMemoOccupied(), normMemoSlots, retained, ceiling)
+}
+
 // truncForLog keeps a failure message from dumping a kilobyte-long host.
 func truncForLog(s string) string {
 	if len(s) > 40 {
@@ -367,6 +501,14 @@ func TestIDNMemo_StoredEntriesRespectTheBound(t *testing.T) {
 		strings.Repeat("日", 84)+".example.com",
 		"xn--."+strings.Repeat("b", 990)+".com",
 		strings.Repeat("xn--fsq.", 120)+"com",
+		// The two CJK rows above were meant to be the "longer punycode form
+		// than the byte count suggests" cases, but a dense script COMPRESSES:
+		// both normalize well inside the bound. Expansion needs one non-ASCII
+		// rune per short label, so the real cases go in here — otherwise this
+		// invariant holds vacuously on the main tier's expansion axis.
+		expandingIDNHost("", "é"),
+		expandingIDNHost("", "aé"),
+		expandingIDNHost("", "д"),
 	)
 	for i := 0; i < 64; i++ {
 		corpus = append(corpus, fmt.Sprintf("bücher%d.example.com", i))

@@ -180,6 +180,48 @@ func TestCheckKeyAtRest_DisabledWithInvalidEnvKEKWarns(t *testing.T) {
 	}
 }
 
+// TestCheckKeyAtRest_UnrecognizedToggleWarns: a typo'd toggle value is treated
+// as disabled by the runtime; diagnostics must say so (names only, no values).
+func TestCheckKeyAtRest_UnrecognizedToggleWarns(t *testing.T) {
+	t.Setenv(clusterCAEncryptEnvVar, "enabled-secretish")
+	t.Setenv(dpNodeKeyEncryptEnvVar, "")
+	t.Setenv(cdrClientKeyEncryptEnvVar, "OFF")
+	t.Setenv(envKEKName, "")
+
+	c := checkKeyAtRest()
+	if c.Status != diagWarn {
+		t.Fatalf("status = %q, want warn", c.Status)
+	}
+	if !strings.Contains(c.Message, clusterCAEncryptEnvVar) || strings.Contains(c.Message, dpNodeKeyEncryptEnvVar) ||
+		strings.Contains(c.Message, cdrClientKeyEncryptEnvVar) || strings.Contains(c.Message, "secretish") {
+		t.Fatalf("message must name only the bad variable, never its value: %q", c.Message)
+	}
+	if clusterCAKeyEncryptionEnabled() {
+		t.Fatal("runtime behaviour changed: unrecognised value must remain disabled")
+	}
+}
+
+// TestCheckKeyAtRest_UnrecognizedToggleKeepsKEKAction: with an invalid
+// CULVERT_KEK as well as a typo'd toggle, the combined warning keeps the KEK
+// repair step, so fixing only the toggle does not hide the KEK failure.
+func TestCheckKeyAtRest_UnrecognizedToggleKeepsKEKAction(t *testing.T) {
+	t.Setenv(clusterCAEncryptEnvVar, "enabled")
+	t.Setenv(dpNodeKeyEncryptEnvVar, "")
+	t.Setenv(cdrClientKeyEncryptEnvVar, "")
+	t.Setenv(envKEKName, "not-valid-hex-kek")
+
+	c := checkKeyAtRest()
+	if c.Status != diagWarn {
+		t.Fatalf("status = %q, want warn", c.Status)
+	}
+	if !strings.Contains(c.OperatorAction, "CULVERT_KEK") || !strings.Contains(c.OperatorAction, "1/true/yes/on") {
+		t.Fatalf("operator action must carry both the KEK and the toggle repair: %q", c.OperatorAction)
+	}
+	if strings.Contains(c.Message, "not-valid-hex-kek") || strings.Contains(c.OperatorAction, "not-valid-hex-kek") {
+		t.Fatal("invalid KEK value leaked into diagnostics")
+	}
+}
+
 // TestCheckKeyAtRest_InOperatorContract: the check is wired into the aggregated
 // operator contract returned by /api/diagnostics.
 func TestCheckKeyAtRest_InOperatorContract(t *testing.T) {

@@ -84,7 +84,7 @@ func TestChaos82_PublishedArchiveIsOwnerOnly(t *testing.T) {
 			// whose tests share process state and run shuffled and parallel;
 			// the explicit Chmod that provides that property is the same
 			// construction fileutil.AtomicWrite uses on the encrypted path.
-			// See §45 for why that gate was deliberately not added here.
+			// See §51 for why that gate was deliberately not added here.
 		})
 	}
 }
