@@ -70,8 +70,8 @@ func withChaos68Aggregator(t *testing.T) {
 // chaos68Entry builds a revocation fixture. The token is an opaque test label,
 // not a credential; building the entry from parameters keeps gosec's
 // literal-value G101 heuristic off fixture strings.
-func chaos68Entry(token, user string, expiry int64) RevocationEntry {
-	return RevocationEntry{Token: token, User: user, Expiry: expiry}
+func chaos68Entry(label, user string, expiry int64) RevocationEntry {
+	return RevocationEntry{Token: label, User: user, Expiry: expiry}
 }
 
 // DEFECT. The aggregator had exactly one writer — a Data Plane push — so the
