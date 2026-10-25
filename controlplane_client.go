@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -77,45 +78,128 @@ type DataPlaneClient struct {
 	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
 	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	// pendingAddrs is a CP address list whose redial failed (CHAOS-91), held
+	// for retryPendingAddresses. Guarded by mu.
+	pendingAddrs []string
+	// jitter decorrelates this node's retry delays from the rest of the fleet
+	// (CHAOS-89). Assigned once by NewDataPlaneClient and never mutated, so the
+	// loop goroutines that read it need no synchronisation. A nil value — every
+	// struct-literal client in the tests — means "no jitter", which is exactly
+	// what a cadence assertion wants: see jitterDelay.
+	jitter func(time.Duration) time.Duration
 }
 
-// backoff sleeps for an exponentially increasing duration after consecutive
-// Control Plane failures: 2s, 4s, 8s, … capped at 60s.
+// dpBackoffCeiling caps the post-failure retry delay. A DP that cannot reach
+// its CP keeps the last-known-good snapshot it is already enforcing, so the
+// cost of a longer retry delay is convergence latency, not an outage — and the
+// benefit is that N data planes do not hold a struggling control plane down.
+const dpBackoffCeiling = 60 * time.Second
+
+// dpFailoverAfterFailures is how many CONSECUTIVE failed config polls must
+// accumulate before the client redials a peer CP.
 //
-// failCount is owned by the CALLER. Every call site is inside pollConfig's
-// error path, which has already charged this failure (`c.failCount++`), so
-// incrementing here too double-counted every failure: the delay schedule ran
-// 4s, 16s, 60s (ceiling on the 3rd failure instead of the 6th) and the
-// `failCount < 3` failover guard below tripped on the SECOND consecutive
-// failure, contradicting its own "only after 3 consecutive failures" contract
-// and churning a whole DP fleet off a healthy CP after one transient blip.
+// The threshold is re-crossed every dpFailoverAfterFailures failures rather
+// than tested once, so a sustained outage probes each configured CP
+// periodically (a CP can come back on an address the client is not currently
+// pinned to) while the backoff ladder below keeps growing toward the ceiling.
+// Testing `failCount < 3` once instead would make EVERY failed poll past the
+// third redial, turning a dead CP pair into permanent connection churn.
+const dpFailoverAfterFailures = 3
+
+// backoff sleeps for an exponentially increasing, jittered duration after
+// consecutive Control Plane failures: 2s, 4s, 8s, … capped at dpBackoffCeiling.
+//
+// CHAOS-89 — two corrections to the original implementation, both of which the
+// empirical ladder disproved rather than inspection:
+//
+//  1. It no longer increments failCount. It used to, on top of the increment
+//     its only caller (pollConfig) had already applied, so the streak advanced
+//     by TWO per failed poll: the ladder a fleet actually ran was 4s, 16s, 60s
+//     — the documented 60s ceiling reached on the THIRD failed poll instead of
+//     the sixth, and the "3 consecutive failures" failover gate tripping on the
+//     SECOND. The streak now has exactly one writer.
+//
+//  2. The delay is jittered. A control plane is a shared dependency, and the
+//     event that makes every data plane start backing off is usually the single
+//     event of the CP going away — a restart, a rolling upgrade, a node reboot.
+//     An unjittered ladder is deterministic in the failure count alone, so a
+//     fleet that failed together retries together forever and then reconnects
+//     in one instant when the CP returns, each node asking for a config
+//     snapshot that can legitimately reach tens of MiB (see the deadline model
+//     below). Jitter is applied PER ATTEMPT, not drawn once per node as
+//     internal/feedsched does: feedsched spreads a steady-state cadence, where
+//     a stable offset is both sufficient and reproducible, whereas this spreads
+//     a thundering herd triggered by one shared instant, and two nodes that
+//     happened to draw neighbouring stable offsets would stay in phase through
+//     exactly the outage the jitter exists for.
 func (c *DataPlaneClient) backoff(ctx context.Context) {
-	delay := controlPlaneBackoffDelay(c.failCount)
+	delay := c.jitterDelay(controlPlaneBackoffDelay(c.failCount))
 	logger.Printf("DataPlane: backing off %s (failure #%d)", delay, c.failCount)
+	t := time.NewTimer(delay)
+	defer t.Stop()
 	select {
-	case <-time.After(delay):
+	case <-t.C:
 	case <-ctx.Done():
 	}
 }
 
-// controlPlaneBackoffDelay maps a consecutive-failure streak to its wait:
-// 2s, 4s, 8s, 16s, 32s, then the 60s ceiling from the 6th failure on.
+// controlPlaneBackoffDelay is the un-jittered retry ladder for a given
+// consecutive-failure streak: 2s, 4s, 8s, 16s, 32s, then dpBackoffCeiling from
+// the 6th failure on. Pure, so the contract is asserted directly instead of
+// being inferred from a log line or a stopwatch: backoff() observes its delay
+// only through a select that a cancelled context short-circuits (CodeRabbit,
+// PR #1658).
 //
-// Split out of backoff() so the schedule is assertable without waiting out a
-// real timer — backoff() observes its delay only through a select that a
-// cancelled context short-circuits, so a test driving backoff() directly can
-// confirm the streak bookkeeping but NOT the delay, and would still pass if the
-// curve regressed. Raised by CodeRabbit on PR #1658.
-//
-// max(…,1) keeps the documented 2s FLOOR even when the caller's streak is 0,
-// which is the state failover() leaves behind when it switches CP and its
-// immediate retry then fails.
-func controlPlaneBackoffDelay(failCount int) time.Duration {
-	delay := time.Duration(1<<min(max(failCount, 1), 6)) * time.Second // 2s…64s
-	if delay > 60*time.Second {
-		delay = 60 * time.Second
+// A streak of 0 cannot happen on this path (the caller increments before
+// backing off) but is clamped to the first rung rather than returning 1s, so a
+// future caller cannot accidentally shorten the documented 2s floor.
+func controlPlaneBackoffDelay(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
 	}
-	return delay
+	d := time.Duration(1<<min(failures, 6)) * time.Second // 2s…64s
+	if d > dpBackoffCeiling {
+		return dpBackoffCeiling
+	}
+	return d
+}
+
+// dpRetryJitterFrac is the ±fraction applied to every retry delay, matching
+// internal/feedsched's DefaultJitterFrac so the two cadence planes are tuned
+// alike. It is deliberately modest: the point is to decorrelate a fleet, not to
+// reshape the ladder, and a wide spread on the 2s rung would start eating into
+// the convergence latency the ladder exists to bound.
+const dpRetryJitterFrac = 0.10
+
+// dpRetryJitter returns the per-attempt jitter function installed on every
+// production client. See backoff for why this is drawn per attempt rather than
+// once per node as internal/feedsched.StableJitter does.
+func dpRetryJitter(frac float64) func(time.Duration) time.Duration {
+	if frac <= 0 {
+		return func(d time.Duration) time.Duration { return d }
+	}
+	return func(d time.Duration) time.Duration {
+		if d <= 0 {
+			return d
+		}
+		off := (rand.Float64()*2 - 1) * frac // #nosec G404 -- fleet spread, not crypto
+		j := d + time.Duration(float64(d)*off)
+		if j <= 0 {
+			return d
+		}
+		return j
+	}
+}
+
+// jitterDelay applies the client's fleet-decorrelation jitter, falling back to
+// the exact delay when no jitter function is installed. The fallback is load
+// bearing for the tests: a struct-literal DataPlaneClient asserts the ladder
+// itself, and a randomised delay would make that assertion a range check.
+func (c *DataPlaneClient) jitterDelay(d time.Duration) time.Duration {
+	if c.jitter == nil {
+		return d
+	}
+	return c.jitter(d)
 }
 
 func (c *DataPlaneClient) resetBackoff() {
@@ -138,6 +222,7 @@ func NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile string) (*DataPl
 		certFile: certFile,
 		keyFile:  keyFile,
 		caFile:   caFile,
+		jitter:   dpRetryJitter(dpRetryJitterFrac),
 	}
 
 	// Connect to the first reachable CP.
@@ -207,6 +292,16 @@ func (c *DataPlaneClient) reconnectActive() error {
 
 // failover tries the next CP address in the list. Returns true if a new
 // connection was established, false if all addresses have been tried.
+//
+// CHAOS-89: a successful redial deliberately does NOT clear failCount. It used
+// to, and that single assignment defeated the entire backoff ladder on every
+// HA deployment: a reachable-but-not-serving CP pair (overloaded, fenced out,
+// or timing out an oversized snapshot) answers the TCP/TLS dial while failing
+// GetConfig, so each failover reset the streak to zero, the streak re-crossed
+// the threshold two polls later, and the client flapped between CPs every few
+// seconds FOREVER — never reaching even the second rung, let alone the 60s
+// ceiling. Connectivity to a CP is not evidence that the CP is serving config;
+// only a successful poll is, and that is what resetBackoff marks.
 func (c *DataPlaneClient) failover() bool {
 	if len(c.addrs) <= 1 {
 		return false
@@ -223,10 +318,73 @@ func (c *DataPlaneClient) failover() bool {
 			continue
 		}
 		c.activeIdx = nextIdx
-		c.failCount = 0
 		return true
 	}
 	return false
+}
+
+// dpStartupStaggerMax caps the one-time phase offset applied before each
+// CP-facing ticker starts (CHAOS-89).
+//
+// Five seconds is chosen against the ONE deadline a stagger can actually
+// endanger: heartbeatTimeout (enrollment.go) marks a node disconnected after
+// 90s of silence, and the heartbeat rides metricsLoop at 2× the 30s poll
+// interval, so the slack is 30s. A ≤5s offset spends at most a sixth of that
+// and cannot, on its own or combined with one slow round, make a healthy node
+// look disconnected — while still converting a fleet-wide instantaneous burst
+// into a smooth rate.
+const dpStartupStaggerMax = 5 * time.Second
+
+// staggerLoopStart waits a one-time random phase offset before a CP-facing
+// ticker starts, and reports false when ctx was cancelled during the wait (the
+// caller must then run its own teardown and return).
+//
+// Why a phase offset and not per-tick jitter: time.Ticker's period is fixed
+// from the moment it is created, so the fleet's spread is decided entirely by
+// WHEN each node's ticker starts. Offsetting the start therefore breaks
+// lockstep permanently, for the whole process lifetime, at the cost of one
+// sub-interval delay and with every existing cadence semantic — including
+// Ticker's tick-coalescing when a round runs long — left exactly as it was.
+// Rewriting the five loops onto resettable timers would spread the fleet no
+// better and would change that coalescing behaviour as a side effect.
+//
+// The offset is drawn PER LOOP rather than once per node, so the five loops of
+// a single data plane also stop firing as one burst against the CP.
+func staggerLoopStart(ctx context.Context, interval time.Duration) bool {
+	d := dpStaggerDelay(interval)
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// dpStaggerDelay is the phase-offset source. It exists as a variable only so a
+// test can install a KNOWN offset: the ordering contract "the cold-start poll is
+// never staggered" cannot otherwise be asserted, because a real offset is drawn
+// from [0, 5s) and a test that merely waits 5s for the first poll passes whether
+// the fetch runs before the wait or after it (CodeRabbit review of PR #1618).
+// Same test-seam precedent as callForTest above and the logger global.
+//
+// Production never reassigns it; a test that does must restore it only after
+// joining the loop goroutine it affected.
+var dpStaggerDelay = dpStartupStagger
+
+// dpStartupStagger draws the phase offset: uniform over [0, interval) and
+// never more than dpStartupStaggerMax, so a sub-second loop is staggered
+// within its own period instead of being delayed past it.
+func dpStartupStagger(interval time.Duration) time.Duration {
+	span := min(interval, dpStartupStaggerMax)
+	if span <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(span))) // #nosec G404 -- fleet spread, not crypto
 }
 
 // Run starts background loops for config sync, metrics, and cluster gossip.
@@ -239,10 +397,17 @@ func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 }
 
 func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) {
+	// Fetch immediately on start — deliberately NOT staggered. A node with no
+	// last-known-good snapshot enforces nothing until this lands, so delaying
+	// it to smooth a one-time boot burst would trade a security property for
+	// load. The stagger below spreads every SUBSEQUENT poll, which is the
+	// sustained herd; the cold-start burst is recorded as residual risk.
+	c.fetchAndApply(ctx)
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	// Fetch immediately on start.
-	c.fetchAndApply(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -274,9 +439,12 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 		dpMarkCPPollFailing()
 		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
-		// Only attempt failover after 3 consecutive failures with a peer to
-		// fail over to; otherwise back off and retry the same CP next tick.
-		if c.failCount < 3 || len(c.addrs) <= 1 {
+		// Only attempt failover every dpFailoverAfterFailures consecutive
+		// failures, and only with a peer to fail over to; otherwise back off
+		// and retry the same CP next tick. The modulo (rather than `<`) is what
+		// keeps a sustained outage probing both CPs periodically WITHOUT
+		// redialling on every single failed poll — see dpFailoverAfterFailures.
+		if c.failCount%dpFailoverAfterFailures != 0 || len(c.addrs) <= 1 {
 			c.backoff(ctx)
 			return nil, false
 		}
@@ -289,13 +457,13 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 		raw, err = c.call(ctx, methodGetConfig, reqBody)
 		if err != nil {
 			dpMarkCPPollFailing()
-			// Charge this failure too. failover() zeroed the streak for the NEW
-			// CP, and backoff() only reads it, so without this the retry's
-			// failure went uncounted and the new CP got a fourth failed request
-			// before the next failover instead of a third. The old
-			// double-charging backoff() happened to cover this path; removing
-			// that increment exposed it. Raised by CodeRabbit on PR #1658.
-			c.failCount++
+			// Not charged separately: the streak counts failed POLLS, and this
+			// retry is part of the poll that already charged it above.
+			// failover() keeps the streak (CHAOS-89), so the gate re-crosses
+			// after dpFailoverAfterFailures more failed polls, whichever CP they
+			// hit. (#1658 charged the retry while failover() still zeroed the
+			// streak; with the reset gone, that extra charge would advance the
+			// streak twice per failover poll and fail over every two polls.)
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
 			return nil, false
@@ -307,6 +475,12 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 }
 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	// CHAOS-91: a CP address list deferred by a failed redial is retried at the
+	// top of EVERY cycle — before the delta fast path, which returns early on
+	// every "unchanged" reply and would otherwise starve the retry (Codex P2 on
+	// #1618) — so it is not lost once lastVersion has advanced past the
+	// snapshot that carried it.
+	c.retryPendingAddresses()
 	// T3 P1: when we already hold a version, try the incremental blocklist delta
 	// first. tryDeltaSync returns true when it fully handled this cycle (nothing
 	// changed, or the delta applied and verified); false falls through to the
@@ -576,6 +750,9 @@ func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
 }
 
 func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duration) {
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -605,12 +782,19 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 // Control Plane. Only sends data when the rate limiter is enabled and there
 // are IPs exceeding the hot threshold (>50% of limit).
 func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time.Duration, limiter *RateLimiter) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	// Enable cluster-aware rate limiting now that we're connected to CP.
+	// Enable cluster-aware rate limiting now that we're connected to CP. This
+	// is local arming, not an RPC, so it stays un-staggered.
 	limiter.SetClusterEnabled(true)
 	logger.Printf("DataPlane: distributed rate limiting enabled (gossip every %s)", interval)
+	// A cancellation during the stagger must still disarm, exactly as the
+	// ctx.Done() branch below does.
+	if !staggerLoopStart(ctx, interval) {
+		limiter.SetClusterEnabled(false)
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -658,9 +842,12 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 // revocationSyncLoop syncs session revocation entries with the CP every few
 // seconds, enabling cluster-wide session invalidation on logout.
 func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.Duration) {
+	logger.Printf("DataPlane: distributed session revocation enabled (sync every %s)", interval)
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	logger.Printf("DataPlane: distributed session revocation enabled (sync every %s)", interval)
 
 	for {
 		select {
@@ -700,9 +887,12 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 
 // auditPushLoop forwards local audit events to the CP for centralized logging.
 func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Duration) {
+	logger.Printf("DataPlane: centralized audit log enabled (push every %s)", interval)
+	if !staggerLoopStart(ctx, interval) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	logger.Printf("DataPlane: centralized audit log enabled (push every %s)", interval)
 
 	for {
 		select {
@@ -826,13 +1016,108 @@ func updateDPAddresses(addrs []string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Only update if the addresses actually changed.
-	if slicesEqual(c.addrs, addrs) {
+	c.pendingAddrs = nil // a newer list supersedes any deferred one
+	if !c.applyAddressesLocked(addrs) {
+		// Deferred, not dropped: fetchAndApply has already persisted this
+		// snapshot and will advance lastVersion, so an unchanged CP never
+		// re-sends the list. retryPendingAddresses re-applies it before each
+		// config poll until the redial succeeds (Codex P2 on #1618).
+		c.pendingAddrs = append([]string(nil), addrs...)
+	}
+}
+
+// retryPendingAddresses re-applies an address list whose redial failed.
+// Called at the start of every config poll, so a list deferred by a transient
+// dial failure (for example a certificate renewal caught between writing the
+// cert and the key) converges within one poll interval of the dial working
+// again, instead of waiting for the next config version.
+func (c *DataPlaneClient) retryPendingAddresses() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pendingAddrs == nil {
 		return
 	}
+	addrs := c.pendingAddrs
+	c.pendingAddrs = nil
+	if !c.applyAddressesLocked(addrs) {
+		c.pendingAddrs = addrs
+	}
+}
+
+// applyAddressesLocked installs addrs as the CP address list and reports
+// whether it did. It reports false only when the active address was dropped
+// and the redial to the new list failed; the caller decides whether to retry.
+// The caller must hold c.mu.
+func (c *DataPlaneClient) applyAddressesLocked(addrs []string) bool {
+	// Only update if the addresses actually changed.
+	if slicesEqual(c.addrs, addrs) {
+		return true
+	}
 	old := c.addrs
+	// CHAOS-91 (found while fixing CHAOS-71 address-republish rider): activeIdx is an index INTO
+	// c.addrs naming the address c.conn is connected to, so replacing the slice
+	// without re-resolving it leaves a stale index. A shrinking list then makes
+	// reconnectActive's `c.addrs[c.activeIdx]` panic — its len==0 guard does not
+	// cover an index past a non-empty slice — and reconnectActive is the
+	// certificate-renewal redial (CHAOS-12), so the crash lands on a path that
+	// runs unattended on a healthy node.
+	//
+	// Reachable before this fix and newly easy to reach: a DP configured with
+	// two CP addresses sits at activeIdx=1 after one failover, and an HA
+	// promotion published a ONE-element list (CHAOS-71 address-republish rider), which is exactly the
+	// shrink that panics.
+	//
+	// Re-resolve by ADDRESS, not by clamping the index: clamping would silently
+	// re-point activeIdx at a different CP than the one c.conn actually holds.
+	active := ""
+	if c.activeIdx >= 0 && c.activeIdx < len(old) {
+		active = old[c.activeIdx]
+	}
+	nextIdx, activeListed := 0, false
+	for i := range addrs {
+		if addrs[i] == active {
+			nextIdx, activeListed = i, true
+			break
+		}
+	}
+
+	// The active address is no longer a member, so REDIAL (CodeRabbit review of
+	// PR #1618). Re-pointing activeIdx alone is not enough and the first version
+	// of this fix got that wrong: `call` invokes over c.conn, not over
+	// c.addrs[c.activeIdx], so the index and the connection are independent, and
+	// nothing else redials on a list change — reconnectActive runs only for a
+	// certificate renewal, and failover only off a failure streak.
+	//
+	// Leaving c.conn alone is therefore not merely untidy. A de-listed CP that is
+	// still RESPONSIVE — the ordinary shape right after an HA promotion, where
+	// the old leader is up but no longer authoritative — keeps answering this
+	// node's polls, so every poll SUCCEEDS, resetBackoff clears the streak, the
+	// failover gate is never reached, and the data plane applies a demoted CP's
+	// configuration indefinitely. With the fencing lease unset (the default until
+	// S5 wires it) the snapshot carries epoch 0, so the DP-side ratchet does not
+	// reject it either.
+	//
+	// A failed redial keeps BOTH the old list and the old connection, rather than
+	// adopting a list this node cannot reach; the caller holds the new list as
+	// pending and retries it before the next poll, so the update is deferred,
+	// not lost.
+	if !activeListed && c.conn != nil {
+		if err := c.connect(addrs[0]); err != nil {
+			logger.Printf("DataPlane: CP address list dropped the active address %q but redial to %q failed, keeping the current list and connection and retrying before the next poll: %q",
+				sanitizeLog(active), sanitizeLog(addrs[0]), sanitizeLog(err.Error()))
+			return false
+		}
+	}
 	c.addrs = addrs
-	logger.Printf("DataPlane: CP address list updated: %v -> %v", old, addrs)
+	c.activeIdx = nextIdx
+	// Both lists are peer-supplied — addrs arrives verbatim in the CP's config
+	// snapshot — so they are untrusted log values under the CWE-117 rule in
+	// docs/agent-context/conventions.md: format, then sanitize with the barrier
+	// CodeQL recognises, and print with %q. The pre-fix line logged both with a
+	// bare %v.
+	logger.Printf("DataPlane: CP address list updated: %q -> %q (active %q at index %d)",
+		sanitizeLog(fmt.Sprint(old)), sanitizeLog(fmt.Sprint(addrs)), sanitizeLog(active), c.activeIdx)
+	return true
 }
 
 func slicesEqual(a, b []string) bool {

@@ -2351,6 +2351,74 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   CDR breaker was already monotonic on main. No configuration, metric, alert or
   persisted format changes, and behaviour with a sane clock is unchanged. See
   `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md`.
+- **A shrinking Control Plane address list crashed the Data Plane, and a
+  de-listed but still-responsive CP kept serving it (CHAOS-91).** `activeIdx` is
+  an index *into* `c.addrs` naming the address the live connection holds, and
+  `updateDPAddresses` replaced that slice without re-resolving it.
+  `reconnectActive` indexes it directly and its `len == 0` guard does not cover
+  an index past a *non-empty* slice, so a shrinking list panicked with
+  `index out of range [1] with length 1` — and `reconnectActive` is the
+  certificate-renewal redial, which runs unattended on a healthy node. An HA
+  promotion's one-element list (the CHAOS-71 address-republish rider already on
+  main) is exactly that shrink. Fixed by re-resolving the active entry by
+  **address** rather than clamping the index, and by redialling when the active
+  address is no longer listed: `call` uses `c.conn`, so a de-listed CP that
+  still answered would otherwise keep serving this node indefinitely. (The
+  promotion deadlock and address republish this round also found were ported to
+  main as CHAOS-71 riders, #1556.)
+
+- **The Data Plane's backoff against its Control Plane was defeated three ways
+  (CHAOS-89).** Measured, not inferred:
+
+  The consecutive-failure streak was incremented twice per failed poll — once
+  by `pollConfig`, once again inside `backoff` — so the ladder documented as
+  `2s, 4s, 8s, …, 60s` was really **`4s, 16s, 60s`**: the ceiling on the third
+  failed poll instead of the sixth, and the documented "3 consecutive failures"
+  failover gate tripping on the **second**. The log line was wrong in the same
+  way, reporting "backing off 4s (failure #2)" for a node's *first* failed
+  poll, so an operator could not reconstruct the real cadence from it.
+  `backoff` no longer increments; the streak has exactly one writer.
+
+  Worse, `failover()` cleared the streak on a successful *dial*. A Control
+  Plane pair that answered TCP while failing `GetConfig` — overloaded, fenced
+  out, or timing out an oversized snapshot — therefore held every Data Plane on
+  the ladder's low rungs **indefinitely**: the streak never passed the failover
+  threshold, so no delay ever grew beyond the 30s poll ticker and the ladder
+  never engaged at all. `pollLoop` is ticker-driven and `backoff` sleeps inside
+  a tick, so the effect was not a faster poll rate — it was a Control Plane that
+  was already failing being polled at the full 30s cadence by every node
+  forever, with a fresh gRPC connection every other poll. Connectivity is not evidence that a Control
+  Plane is serving config; only a successful poll is. The failover gate is now
+  re-crossed every `dpFailoverAfterFailures` rather than tested once, so a
+  sustained outage still probes each configured address periodically without
+  redialling on every poll.
+
+  Neither the ladder nor any of the five Control-Plane-facing tickers was
+  jittered or phase-offset, so a fleet whose Control Plane went away — one
+  shared event — retried in lockstep and reconnected in a single instant. The
+  ladder is now jittered per attempt (±10%, matching `internal/feedsched`), and
+  a one-time per-loop phase offset, bounded by both the loop's own interval and
+  5s, staggers all five tickers. The cold-start poll is deliberately **not**
+  staggered: a node with no last-known-good snapshot enforces nothing until it
+  lands, so delaying it to smooth a one-time boot burst would trade a security
+  property for load. This closes the registered WK-13/HA-11 herd rows for the
+  cluster plane; they remain open for `internal/blocklistfeed` and
+  `internal/otlp`.
+
+- **An unbounded per-peer-IP map on the Control Plane (CHAOS-90).**
+  `unenrolledConfigPull.attempts`, which throttles pre-enrollment config pulls,
+  prunes a peer's timestamps only on that same peer's *next* pull, so an
+  address that pulled once and never returned left a permanent entry — one
+  request per source address was enough to grow it for the process lifetime, on
+  a port reachable by any routable peer. The structurally identical
+  `enrollRateLimit` has had a periodic sweep for exactly this, wired into the
+  shared security-limiter janitor, and its own comment names the hazard; the
+  fix had never been carried across. It is now, alongside its sibling. The
+  throttle's *decision* is unchanged — a sweep reclaims aged-out state and does
+  not re-admit an exhausted peer.
+
+  Round report, risk matrix and the backlog it opened are in
+  `roadmap/CHAOS-REVIEW-2026-10-13.md`.
 
 ### Changed
 
