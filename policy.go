@@ -2293,7 +2293,15 @@ func noteFileProfileUnresolvedBlock(id, name string) {
 	atomic.AddInt64(&statFileProfileUnresolvedBlocked, 1)
 	now := time.Now().Unix()
 	last := atomic.LoadInt64(&fileProfileUnresolvedLastLog)
-	if now-last >= 300 && atomic.CompareAndSwapInt64(&fileProfileUnresolvedLastLog, last, now) {
+	// CHAOS-84: MAGNITUDE, not sign. These are Unix SECONDS (not nanos, so no
+	// Duration conversion), and a backward clock step would otherwise suppress
+	// this line for the whole step — the only notice that a rule is blocking
+	// file-bearing transactions because its profile does not resolve.
+	elapsed := now - last
+	if elapsed < 0 {
+		elapsed = -elapsed
+	}
+	if elapsed >= 300 && atomic.CompareAndSwapInt64(&fileProfileUnresolvedLastLog, last, now) {
 		logger.Printf("WARN Policy: file profile id=%q (cached name %q) is referenced by a rule but does not resolve — file-bearing transactions on that rule are BLOCKED (fail-closed) until the profile store is restored or the rule is re-pointed (%d blocked since boot)",
 			sanitizeLog(id), sanitizeLog(name), atomic.LoadInt64(&statFileProfileUnresolvedBlocked))
 	}
