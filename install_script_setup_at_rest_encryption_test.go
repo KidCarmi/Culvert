@@ -139,7 +139,7 @@ func TestInstallScript_SetupAtRestEncryption_AcceptsStrongPassphrase(t *testing.
 func TestInstallScript_SetupAtRestEncryption_FreshDeployWithPriorLogPassphraseStillEncryptsCA(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
-	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
@@ -201,7 +201,7 @@ is_fresh_deployment() { return 0; }
 func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseIsPersisted(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
-	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
@@ -250,7 +250,7 @@ export CULVERT_CA_PASSPHRASE='` + hostCAPass + `'
 func TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphraseSkipsCA(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
-	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
@@ -300,7 +300,7 @@ export CULVERT_LOG_PASSPHRASE='` + unsafeLogPass + `'
 func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseWithEmbeddedNewlineRejected(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
-	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 	validateFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	dir := t.TempDir()
@@ -362,7 +362,7 @@ export CULVERT_CA_PASSPHRASE=$'abcdefgh\nijklmnop'
 func TestInstallScript_SetupAtRestEncryption_ReuseForCAMatchesPersistedLogPassphrase(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
-	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
