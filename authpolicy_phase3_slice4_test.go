@@ -90,8 +90,8 @@ func TestP3S4_Browser_RedirectsForOIDCAndSAML(t *testing.T) {
 		if w.Code != http.StatusFound {
 			t.Fatalf("%s: browser SSO must 302, got %d", typ, w.Code)
 		}
-		if loc := w.Header().Get("Location"); !strings.Contains(loc, "/auth/corp") {
-			t.Errorf("%s: redirect to the provider login URL expected, got %q", typ, loc)
+		if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "https://culvert-ui.test/auth/select?") || !strings.Contains(loc, "providers=corp") {
+			t.Errorf("%s: redirect to the UI-host sign-in page scoped to corp expected, got %q", typ, loc)
 		}
 		if ssoCount() != start+1 {
 			t.Errorf("%s: SSO metric must increment on redirect", typ)
@@ -140,8 +140,10 @@ func TestP3S4_ProviderRefs_DirectToOne(t *testing.T) {
 		t.Fatalf("single providerRef must direct-redirect (302), got %d", w.Code)
 	}
 	loc := w.Header().Get("Location")
-	if strings.Contains(loc, "/auth/select") || !strings.Contains(loc, "/auth/corp-b") {
-		t.Errorf("single providerRef must redirect directly to that provider, got %q", loc)
+	// The sign-in page continues straight to a single eligible provider; the
+	// proxy only scopes it (it never mints IdP login state itself).
+	if !strings.Contains(loc, "/auth/select") || !strings.Contains(loc, "providers=corp-b") || strings.Contains(loc, "corp-a") {
+		t.Errorf("single providerRef must scope the sign-in page to that provider, got %q", loc)
 	}
 }
 
@@ -212,15 +214,16 @@ func TestP3S4_DeniedRequestAllocatesNoSSOState(t *testing.T) {
 		t.Errorf("denied non-browser request must not allocate SSO state: CaptiveLoginURL called %d times", n)
 	}
 
-	// Browser → 302, and CaptiveLoginURL is called exactly once (legitimate).
+	// Browser → 302 to the UI-host sign-in page, and STILL no login state:
+	// the proxy never mints it (only /auth/select does, bound to the browser).
 	ssoCaptiveCalls.Store(0)
 	w = httptest.NewRecorder()
 	handleRequest(w, browserReq(host))
 	if w.Code != http.StatusFound {
 		t.Fatalf("browser SSO must 302, got %d", w.Code)
 	}
-	if n := ssoCaptiveCalls.Load(); n != 1 {
-		t.Errorf("browser redirect must generate the login URL once, got %d", n)
+	if n := ssoCaptiveCalls.Load(); n != 0 {
+		t.Errorf("the proxy must not mint login state on the destination host: CaptiveLoginURL called %d times", n)
 	}
 }
 

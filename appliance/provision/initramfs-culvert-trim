@@ -1,0 +1,30 @@
+#!/bin/sh
+# Culvert appliance: keep the initramfs to what a local-disk VM boot needs.
+#
+# The HWE kernel's linux-modules package ships every module, and initramfs-
+# tools' MODULES=most copies every network driver into the initramfs (for
+# network-root boot). That grew the initramfs from 37 MB (GA 6.8, whose
+# virtual flavour shipped ~1,000 modules) to 57 MB, and GRUB reads it through
+# the firmware disk interface at boot: on ESXi-like storage latency each
+# reboot took ~19 s longer (QEMU lab, 12 ms read latency).
+#
+# The appliance boots from its own virtual disk and never from the network,
+# so the initramfs needs storage, block, filesystem and console drivers only.
+# Removed here: NIC drivers, RDMA, Thunderbolt, USB Type-C and SD/MMC host
+# drivers. The real root's /lib/modules still carries all of them; only the
+# early-boot copy goes. Runs from /etc/initramfs-tools/hooks, i.e. after the
+# packaged hooks and before mkinitramfs runs depmod, so the module index of
+# the initramfs stays consistent, and again on every kernel update.
+# build-ova.sh refuses an image whose initramfs lacks a storage driver a
+# supported hypervisor presents.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+set -e
+# shellcheck disable=SC2154 # DESTDIR and version are exported by mkinitramfs to every hook
+for root in "${DESTDIR}/usr/lib/modules/${version}" "${DESTDIR}/lib/modules/${version}"; do
+  [ -d "$root/kernel" ] || continue
+  for d in drivers/net drivers/infiniband drivers/thunderbolt drivers/usb/typec drivers/mmc; do
+    rm -rf "${root}/kernel/${d}"
+  done
+done

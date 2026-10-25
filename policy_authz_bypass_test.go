@@ -121,6 +121,74 @@ func TestAuthzBypass_AuthSourceNotForgeable(t *testing.T) {
 	}
 }
 
+// TestAuthzBypass_SSOIPSurrogateSourceClass resolves the bare-provider vs
+// "sso-ip:<provider>" contract (F-SSO-SCOPE-1). An IP-bound sign-in is a
+// DISTINCT source class: its wire source is "sso-ip:" + the provider's own
+// direct source (e.g. "sso-ip:oidc:okta"). The contract, with NO wildcard and
+// NO weakened authorization:
+//   - a surrogate source NEVER satisfies a rule scoped to the direct provider,
+//     and a direct login NEVER satisfies a rule scoped to the surrogate;
+//   - within the surrogate class the inner provider uses the same bare<->scheme
+//     alias a direct source gets, so an operator can scope to "sso-ip:okta" and
+//     match "sso-ip:oidc:okta", while cross-scheme (oidc vs saml) still refuses.
+func TestAuthzBypass_SSOIPSurrogateSourceClass(t *testing.T) {
+	const surrogate = "sso-ip:oidc:okta" // the runtime value proxy.go builds
+
+	// A rule scoped to the SURROGATE class.
+	surRule := PolicyRule{Priority: 1, Name: "ip-bound-okta", DestFQDN: "*", AuthSource: "sso-ip:oidc:okta", Action: ActionAllow}
+	for src, want := range map[string]bool{
+		"sso-ip:oidc:okta": true,  // exact
+		"sso-ip:okta":      true,  // inner bare alias — but see symmetry below (this is the ACTUAL side)
+		"sso-ip:saml:okta": false, // cross-scheme inner must NOT authorize
+		"sso-ip:oidc:evil": false, // different inner provider
+		"oidc:okta":        false, // DIRECT login must NOT satisfy a surrogate rule
+		"okta":             false, // bare direct must NOT satisfy a surrogate rule
+		"unauth":           false,
+		"exempt":           false,
+	} {
+		got := evalMatch(surRule, "203.0.113.1", "u", src, "site.example", nil) != nil
+		if got != want {
+			t.Errorf("surrogate rule %q vs source %q matched=%v, want %v", surRule.AuthSource, src, got, want)
+		}
+	}
+
+	// An operator-friendly surrogate rule with a BARE inner provider must match
+	// the scheme-qualified runtime surrogate (the inner bare<->scheme alias), and
+	// must still refuse a direct login and a cross-scheme surrogate.
+	bareSurRule := PolicyRule{Priority: 1, Name: "ip-bound-okta-bare", DestFQDN: "*", AuthSource: "sso-ip:okta", Action: ActionAllow}
+	for src, want := range map[string]bool{
+		surrogate:          true,  // "sso-ip:oidc:okta" — scheme-qualified runtime value
+		"sso-ip:okta":      true,  // exact
+		"sso-ip:saml:okta": true,  // bare inner is scheme-agnostic within the class (same provider)
+		"sso-ip:evil":      false, // different provider
+		"oidc:okta":        false, // DIRECT must NOT satisfy a surrogate rule
+		"okta":             false,
+	} {
+		got := evalMatch(bareSurRule, "203.0.113.1", "u", src, "site.example", nil) != nil
+		if got != want {
+			t.Errorf("bare-inner surrogate rule %q vs source %q matched=%v, want %v", bareSurRule.AuthSource, src, got, want)
+		}
+	}
+
+	// The MIRROR direction: a DIRECT provider rule must never be satisfied by the
+	// surrogate source. This is the core "address-inferred identity is not a
+	// provider login" property.
+	for _, direct := range []string{"oidc:okta", "okta", "saml:okta", "local"} {
+		dr := PolicyRule{Priority: 1, Name: "direct-" + direct, DestFQDN: "*", AuthSource: direct, Action: ActionAllow}
+		if evalMatch(dr, "203.0.113.1", "u", surrogate, "site.example", nil) != nil {
+			t.Errorf("BYPASS: surrogate source %q matched a DIRECT rule AuthSource=%q", surrogate, direct)
+		}
+	}
+
+	// A bare "sso-ip:" scope that names no provider matches nothing (fail closed).
+	emptyScope := PolicyRule{Priority: 1, Name: "ip-bound-empty", DestFQDN: "*", AuthSource: "sso-ip:", Action: ActionAllow}
+	for _, src := range []string{surrogate, "sso-ip:", "sso-ip:okta", "oidc:okta"} {
+		if evalMatch(emptyScope, "203.0.113.1", "u", src, "site.example", nil) != nil {
+			t.Errorf("BYPASS: provider-less surrogate scope %q matched source %q", emptyScope.AuthSource, src)
+		}
+	}
+}
+
 // TestAuthzBypass_SourceCIDRNotForgeable proves CIDR source matching is exact
 // and a malformed client IP cannot match (fail-closed, no panic).
 func TestAuthzBypass_SourceCIDRNotForgeable(t *testing.T) {

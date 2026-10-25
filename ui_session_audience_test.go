@@ -175,25 +175,36 @@ func TestSECUISESS1_ForeignProviderUISessionRefused(t *testing.T) {
 	}
 }
 
-// TestSECUISESS1_LocalEmptyRoleCompatSurvives is the CONTROL that keeps the fix
-// narrow. The pre-RBAC compatibility case — a session minted before the Role
-// field existed, by the admin plane, for a roster member — must still resolve
-// to admin. Refusing it would pass the defect gate above while locking legacy
-// single-admin deployments out mid-session, which is the exact trade
-// sessionRoleOrReject's comment refuses to make.
-func TestSECUISESS1_LocalEmptyRoleCompatSurvives(t *testing.T) {
+// TestSECUISESS1_EmptyRoleIsRefused pins how the pre-RBAC compatibility case
+// resolved when this gate met #1528's admin-session audience.
+//
+// main kept a role-less local session as RoleAdmin so pre-RBAC single-admin
+// deployments were not logged out mid-session. #1528 requires every admin
+// session to carry uiSessionAudience, which no pre-upgrade cookie carries, so
+// those sessions are already refused once at upgrade (one re-login) whatever
+// the empty-role rule says. A role-less session that DOES carry the audience
+// cannot be minted by this build, whose only issuer always stamps a role, so
+// promoting it to admin protects no real session and the refusal costs none.
+//
+// Both shapes are a verified cookie that must not authorize: 401, no handler.
+func TestSECUISESS1_EmptyRoleIsRefused(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
 
-	code, role, reached := driveUISessionMiddleware(t, &Session{
-		Sub: "bob", Provider: "local", Role: "",
-		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
-	})
-	if !reached || code != http.StatusOK {
-		t.Fatalf("legacy local role-less session refused: status=%d reached=%v", code, reached)
-	}
-	if role != RoleAdmin {
-		t.Fatalf("legacy local role-less session resolved to %q, want %q", role, RoleAdmin)
+	for _, tc := range []struct {
+		name string
+		sess *Session
+	}{
+		{"pre-upgrade cookie, no audience", &Session{Sub: "bob", Provider: "local", Role: ""}},
+		{"role-less cookie with the admin audience", &Session{Sub: "bob", Provider: "local", Audience: uiSessionAudience, Role: ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.sess.Exp, tc.sess.Jti = time.Now().Add(time.Hour).Unix(), newSessionJti()
+			code, role, reached := driveUISessionMiddleware(t, tc.sess)
+			if reached || code != http.StatusUnauthorized {
+				t.Fatalf("role-less session: status=%d reached=%v role=%q, want 401 unreached", code, reached, role)
+			}
+		})
 	}
 }
 
@@ -205,8 +216,9 @@ func TestSECUISESS1_LocalEnrolledRolesPassThrough(t *testing.T) {
 
 	for _, want := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
 		t.Run(string(want), func(t *testing.T) {
+			seedRosterRole(t, "bob", want)
 			code, got, reached := driveUISessionMiddleware(t, &Session{
-				Sub: "bob", Provider: "local", Role: string(want),
+				Sub: "bob", Provider: "local", Audience: uiSessionAudience, Role: string(want),
 				Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 			})
 			if !reached || code != http.StatusOK {
@@ -303,7 +315,7 @@ func TestSECUISESS1_StatusRefusesDeletedUser(t *testing.T) {
 	configuredCfg(t)
 
 	body := statusFor(t, &Session{
-		Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+		Sub: "deleted-admin", Provider: "local", Audience: uiSessionAudience, Role: string(RoleAdmin),
 		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 	})
 	if body["loggedIn"] != false {
@@ -324,14 +336,14 @@ func TestSECUISESS1_StatusReportsLocalSessions(t *testing.T) {
 		role string
 		want UIRole
 	}{
-		{"pre-RBAC empty role", "", RoleAdmin},
 		{"viewer", string(RoleViewer), RoleViewer},
 		{"operator", string(RoleOperator), RoleOperator},
 		{"admin", string(RoleAdmin), RoleAdmin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			seedRosterRole(t, "bob", tc.want)
 			body := statusFor(t, &Session{
-				Sub: "bob", Provider: "local", Role: tc.role,
+				Sub: "bob", Provider: "local", Audience: uiSessionAudience, Role: tc.role,
 				Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 			})
 			if body["loggedIn"] != true {
@@ -383,7 +395,7 @@ func TestSECUISESS1_StatusRefusedCookieDoesNotFallBackToBasic(t *testing.T) {
 			Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 		}},
 		{"deleted local user", &Session{
-			Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+			Sub: "deleted-admin", Provider: "local", Audience: uiSessionAudience, Role: string(RoleAdmin),
 			Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 		}},
 	} {
@@ -471,7 +483,7 @@ func TestSECUISESS1_LocalSessionForDeletedUserRefused(t *testing.T) {
 	configuredCfg(t)
 
 	code, got, reached := driveUISessionMiddleware(t, &Session{
-		Sub: "deleted-admin", Provider: "local", Role: string(RoleAdmin),
+		Sub: "deleted-admin", Provider: "local", Audience: uiSessionAudience, Role: string(RoleAdmin),
 		Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
 	})
 	if reached {
@@ -502,11 +514,11 @@ func TestSECUISESS1_SSERevalidationSharesTheAdmissionDecision(t *testing.T) {
 	}{
 		{"foreign provider, roster member", &Session{Sub: "bob", Provider: "oidc-corp", Exp: exp}, false},
 		{"foreign provider, admin role", &Session{Sub: "bob", Provider: "saml-okta", Role: string(RoleAdmin), Exp: exp}, false},
-		{"local, role not enrolled", &Session{Sub: "bob", Provider: uiSessionProvider, Role: "superuser", Exp: exp}, false},
-		{"local, deleted user", &Session{Sub: "gone", Provider: uiSessionProvider, Role: string(RoleViewer), Exp: exp}, false},
+		{"local, role not enrolled", &Session{Sub: "bob", Provider: uiSessionProvider, Audience: uiSessionAudience, Role: "superuser", Exp: exp}, false},
+		{"local, deleted user", &Session{Sub: "gone", Provider: uiSessionProvider, Audience: uiSessionAudience, Role: string(RoleViewer), Exp: exp}, false},
 		// CONTROLS: the sessions the gate admits keep their stream.
-		{"local, enrolled role", &Session{Sub: "bob", Provider: uiSessionProvider, Role: string(RoleViewer), Exp: exp}, true},
-		{"local, pre-RBAC empty role", &Session{Sub: "bob", Provider: uiSessionProvider, Exp: exp}, true},
+		{"local, enrolled role", &Session{Sub: "bob", Provider: uiSessionProvider, Audience: uiSessionAudience, Role: string(RoleViewer), Exp: exp}, true},
+		{"local, role-less (see TestSECUISESS1_EmptyRoleIsRefused)", &Session{Sub: "bob", Provider: uiSessionProvider, Audience: uiSessionAudience, Exp: exp}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.sess.Jti = newSessionJti()
@@ -520,5 +532,15 @@ func TestSECUISESS1_SSERevalidationSharesTheAdmissionDecision(t *testing.T) {
 				t.Errorf("sseAuthStillValid = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// seedRosterRole sets name's roster role. classifyUISession caps a session at
+// the CURRENT roster role (#1528), so a test that wants a session to resolve to
+// role must give the roster member that role too.
+func seedRosterRole(t *testing.T, name string, role UIRole) {
+	t.Helper()
+	if err := cfg.SetUIUser(name, "Sup3rSecret!x", role); err != nil {
+		t.Fatalf("seed roster role %q: %v", role, err)
 	}
 }

@@ -1,0 +1,256 @@
+{
+  "kind": "Go console observation hardening overlay validation; not full appliance qualification",
+  "implementation": "Go",
+  "compiler": "go1.26.8",
+  "tested_at_utc": "2026-10-04T06:27:43Z",
+  "base_ova_sha256": "e85e364081fd13833eb53ea04a365cea4a771911f7edb3e41e6cb6dda401c300",
+  "base_provisioning_sha": "25d0aa83884ec66fe82e82f83d0f9e83b5a85353",
+  "base_image_source_sha": "78e1bc566e80055f893de41befbbad190ac4dfec",
+  "provisioning_drift": true,
+  "runtime_overlay": true,
+  "overlay_sha256": {
+    "command.test": "8f21f253f1c5b29ffd3e6a93cf8e7d89f448d12def68d1c246b93dab4abbaef8",
+    "console.test": "6fa420fc99f106496209fa6bdc53f93895a2bd323c24e5bfb7e3c99682a0bc14",
+    "culvert-console": "11250a95485d310a025901b62cd9d3ef7362dcf20910b7e7e669878ac8400c10",
+    "getty-override.conf": "35810fefb598b901103ea840335ed4f32264d7cdfd4760efffd340c6e8329eda",
+    "install-lib.sh": "6b5b869bef23a9147eb453d51f9bb8f9edef34be4766852768f4eab856e764a4",
+    "install.sh": "82b5e4008913373f91e3fcb7f669ccbc0f2d1794dfc1e8b1abd8cb470271db66",
+    "install_test.sh": "ba41e687c9ecf2fb5d21deecff9ee26380cefc2a112bf0697cd484923a71d865",
+    "profile.sh": "2c1d0dcd0c535341972102440d688dce6877e82f7d744563c4a671d9380fade7"
+  },
+  "hypervisor": "ESXi 8.0.1 build-21813344",
+  "vm": "culvert-esxi-2055759f5f04",
+  "vcpu": 2,
+  "memory_mib": 4096,
+  "disk_gib": 40,
+  "results": {
+    "ubuntu_go_tests": "PASS (both packages shuffled twice on final bundle)",
+    "installer_twice": "PASS",
+    "incorrect_console_password": "PASS",
+    "pam_login_to_admin_menu": "PASS",
+    "logout_to_public_menu": "PASS",
+    "docker_stopped_console_active": "PASS",
+    "reboot_within_harness_150_seconds": "FAIL: no new boot identity received within deadline",
+    "real_reboot_menu_automatic": "RECOVERED: public getty console active in subsequent bounded observation",
+    "machine_identity_retained": "NOT VERIFIED: prior machine ID was not retained when the reboot helper failed",
+    "installed_hashes_after_reboot": "PASS",
+    "full_appliance_qualification": "BLOCKED",
+    "four_public_views_live_buffer": "PASS",
+    "failed_firstboot_display": "NOT EXERCISED: observed phase waiting",
+    "mismatched_terminal_rejected": "PASS"
+  },
+  "after_reboot_snapshot": {
+    "hostname": "culvert-esxi-2055759f5f04",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.167/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-04T06:27:43Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.167"
+    ],
+    "management_urls": [
+      "https://192.168.1.167:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "0",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "success",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "waiting",
+    "reason": "FIRSTBOOT_NOT_RUNNING",
+    "message": "Provisioning is incomplete and is not running.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "lifecycle_results": {
+    "installer_fault_injection": "PASS",
+    "recovery_shell_terminal_restored": "PASS",
+    "journal_correlated_uid": "PASS",
+    "journal_excludes_output_canary": "PASS",
+    "getty_cleanup_policy": "PASS"
+  },
+  "cleanup": {
+    "owned_vm": "deleted",
+    "independent_matching_vm_inventory": 0,
+    "private_run_files": "removed",
+    "persistent_operator_credential": "retained"
+  },
+  "views_snapshot": {
+    "hostname": "culvert-esxi-2055759f5f04",
+    "interfaces": [
+      {
+        "name": "ens32",
+        "link": "UP",
+        "addresses": [
+          "192.168.1.167/24"
+        ]
+      }
+    ],
+    "ipv6_gateway": "unknown",
+    "gateway": "192.168.1.1 (ens32)",
+    "dns": [
+      "192.168.1.1"
+    ],
+    "setup_status": "unknown",
+    "management_available": false,
+    "schema_version": 1,
+    "observed_at": "2026-10-04T06:28:00Z",
+    "version": "dev-candidate.78e1bc566e80",
+    "candidate": true,
+    "addresses": [
+      "192.168.1.167"
+    ],
+    "management_urls": [
+      "https://192.168.1.167:9090"
+    ],
+    "network": "address_assigned",
+    "firstboot": {
+      "ActiveState": "inactive",
+      "ExecMainStatus": "0",
+      "LoadState": "loaded",
+      "NRestarts": "0",
+      "Result": "success",
+      "SubState": "dead"
+    },
+    "steps": [
+      {
+        "id": "ovf",
+        "label": "Network configuration",
+        "state": "recorded"
+      },
+      {
+        "id": "console",
+        "label": "Console access",
+        "state": "recorded"
+      },
+      {
+        "id": "images",
+        "label": "Application images",
+        "state": "recorded"
+      },
+      {
+        "id": "install",
+        "label": "Service installation",
+        "state": "not_recorded"
+      },
+      {
+        "id": "agent",
+        "label": "Maintenance agent",
+        "state": "not_recorded"
+      },
+      {
+        "id": "complete",
+        "label": "Provisioning complete",
+        "state": "not_recorded"
+      }
+    ],
+    "phase": "waiting",
+    "reason": "FIRSTBOOT_NOT_RUNNING",
+    "message": "Provisioning is incomplete and is not running.",
+    "application_responding": false,
+    "administrator_enrolled": false,
+    "traffic_verified": false
+  },
+  "source_commit": "6f40e5b488ca5488b23b3704d24bf1c5080f740d",
+  "ci": {
+    "url": "https://github.com/KidCarmi/Culvert/actions/runs/37182487320",
+    "conclusion": "PASS",
+    "race_tests": "both packages shuffled twice",
+    "fuzz_executions": 204040,
+    "vet": "PASS",
+    "static_build_and_compiler": "PASS",
+    "root_installer_fault_tests": "PASS",
+    "degraded_cli": "PASS",
+    "repository_lint": "0 issues (golangci-lint v2.5.0)"
+  },
+  "systemd_fixture": {
+    "completed_oneshot": "PASS: active/exited, Result=success, ExecMainStatus=0",
+    "condition_skipped_oneshot": "PASS: inactive/dead, Result=success, ExecMainStatus=0, ConditionResult=no",
+    "scope": "Isolated temporary unit; actual firstboot unit and markers were not changed",
+    "cleanup": "temporary unit and marker removed; systemd daemon reloaded"
+  },
+  "new_regressions": [
+    "Real curl reads the hostile local configuration in the control, but all three production HTTP probe argument lists ignore it.",
+    "Oversized subprocess output is rejected, including a valid JSON/status prefix followed by excess data; exactly bounded output remains accepted.",
+    "Completion markers cannot hide missing unit fields, restarting/stopping states, unsuccessful results or nonzero exit status.",
+    "Condition-skipped completed oneshot can still become ready when all other readiness checks pass.",
+    "Completion, running/unknown/unloaded state, uncertain markers, lost identity or cancellation between reset-failed and start prevent start dispatch.",
+    "Stopping provisioning renders STOPPING rather than STARTING."
+  ],
+  "validation_history": [
+    "Initial cold-boot lookup exceeded the helper 60-second IP wait; VMware Tools had not reported an address. No console installation had occurred.",
+    "The first SSH readiness attempt timed out. The temporary helper was changed to use bounded SSH startup retries.",
+    "Native tests passed before the first privileged install attempt, which was refused because the key-only sudo policy was not yet installed. Systemd showed Docker starting and cloud-final/firstboot queued. Installation resumed only after normal firstboot installed the policy; no permissions were bypassed.",
+    "A pre-final-bundle authentication attempt reached the authenticated menu but its remote stty read failed. That helper did not retain stderr, so its cause is unconfirmed. Final validation used observed console handoff states and a journal interval scoped to the current attempt; the complete authentication/shell/journal check passed.",
+    "Final-bundle reboot exceeded the original helper 150-second recovery deadline. A later bounded read-only recovery check found the automatic public console active and verified installed hashes. The timeout remains FAIL; later recovery is not relabeled a deadline pass.",
+    "The interrupted reboot helper did not persist its pre-reboot machine ID, so machine-ID continuity is not claimed for this run. No second reboot was performed merely to replace the failed attempt."
+  ],
+  "limitations": [
+    "Development console overlay on the recorded older baseline OVA; no integrated new OVA or full appliance qualification.",
+    "Reboot/access latency exceeded the test budget; root cause is not established and no boot-time SLA is claimed.",
+    "Existing incomplete ClamAV payload remains in this baseline. Opus separately reported maintenance-reboot defect F-OSU-REBOOT-1 on c5551a18; this older-overlay run does not validate its proposed fix.",
+    "External proxy/browser reachability, network-change rollback, durable journal retention, external PAM/logind child-session policy and completed security review remain release work.",
+    "Retry observations do not make observation plus systemd dispatch atomic; firstboot owns serialization and idempotency.",
+    "VMware screenshot captures are not used as full visual proof; live terminal buffers are checked.",
+    "Console password existed only in this disposable guest; it is not retained in this report."
+  ],
+  "validation_log_sha256": {
+    "install": "b6cd89512ccb9453029cb2479c8b1f5b4205cf4ae8f4471c1584981203f72fab",
+    "systemd": "871ee4b09d0e01ad09c28dac7e0cfdb7cbd6d7f5f088cad3abbf5f470515e2a8",
+    "auth": "0f9b372c1ed1677b86609232afcdd8787eafff632e93c7e033e013b5154956ba",
+    "reboot": "3ca43a429156adf5888e2387bc933061bf0f4476278321dc0fe256f6be3b5b92"
+  }
+}

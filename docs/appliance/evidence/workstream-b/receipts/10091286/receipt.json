@@ -1,0 +1,87 @@
+{
+  "commit": "100912869a3c077709fc11808a6e9a83413b7303",
+  "tree": "07e585b6b9299d813ac5134f165d201ec49b8ced",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.26.10 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "go build ./...",
+      "exit": 0,
+      "seconds": 2.744,
+      "log": "1.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 2,
+      "command": "go vet ./...",
+      "exit": 0,
+      "seconds": 7.222,
+      "log": "2.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 3,
+      "command": "go test -count=1 -race -shuffle=on -run 'TestFB1_|TestFB2_|TestLoadedRosterRole|TestRosterLoad|SECRBAC|SECUISESS|CategoryFeed|CatFeed|APIURLCatFeedStatus' .",
+      "exit": 0,
+      "seconds": 136.382,
+      "log": "3.log",
+      "log_sha256": "96ea7c9a140c979949ac77b6a173e163eecb25823580d968b05f67271a7d30d1",
+      "log_bytes": 41
+    },
+    {
+      "n": 4,
+      "command": "go test -count=1 -race -shuffle=on ./internal/feedsync/ ./internal/catdb/ ./internal/storeguard/",
+      "exit": 0,
+      "seconds": 87.11,
+      "log": "4.log",
+      "log_sha256": "841e212d2bcdf5b2eafb0a39f83ba25c7422dd091d11a76138e5a9efdfe5ee47",
+      "log_bytes": 174
+    },
+    {
+      "n": 5,
+      "command": "go test -count=1 .",
+      "exit": 0,
+      "seconds": 416.892,
+      "log": "5.log",
+      "log_sha256": "c44b3aea8173777322f4a467d6d1f950cbee2914f68df2e70ce427ec5f702e7c",
+      "log_bytes": 42
+    },
+    {
+      "n": 6,
+      "command": "make api-verify",
+      "exit": 0,
+      "seconds": 18.906,
+      "log": "6.log",
+      "log_sha256": "e083457c5f224faa2e57dff4c64df23962d26bacdbda310e5a56740cf51460cb",
+      "log_bytes": 513
+    },
+    {
+      "n": 7,
+      "command": "~/go/bin/golangci-lint run --new-from-rev 0fb4daf9 --timeout 15m . ./internal/feedsync/",
+      "exit": 0,
+      "seconds": 2.55,
+      "log": "7.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    }
+  ],
+  "all_exit_zero": true
+}

@@ -165,6 +165,10 @@ func startD16bRig(t *testing.T) *d16bTestRig {
 			// boundedBuffer; write directly.
 			if isListBackupsArgv(cmd.Args) {
 				_, _ = cmd.Stdout.Write([]byte(`[{"filename":"a.tar.gz","path":"/backup/a.tar.gz","size_bytes":123,"modified_at":"2026-05-04T00:00:00Z","encrypted":false}]`))
+				// What the real cli writes to stderr: compose progress
+				// interleaved with the --list-backups timing line.
+				_, _ = fmt.Fprintf(cmd.Stderr, " Container x Creating\n%s start_unix_ns=%d enumerate_us=1234 entries=1 ok=true\n",
+					listTimingMarker, time.Now().UnixNano())
 			}
 			return nil
 		},

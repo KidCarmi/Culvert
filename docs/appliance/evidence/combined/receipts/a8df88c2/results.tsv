@@ -1,0 +1,9 @@
+1	0	1792864891.711698681	1792864891.948734294	export GOTOOLCHAIN=go1.27.3 && go version && git rev-parse 039295bc986697b5221f01015b58b01f63ff4c1b && git merge-base --is-ancestor 039295bc986697b5221f01015b58b01f63ff4c1b HEAD && for c in 0fb4daf9 1e50cf9c 41e2e86f 783f7142 0e190a94; do git merge-base --is-ancestor $c HEAD && echo "ancestor $c"; done && git diff --stat 0e190a94 HEAD | tail -1
+2	0	1792864891.950411944	1792864989.476813416	export GOTOOLCHAIN=go1.27.3 && go build ./... && go vet ./...
+3	0	1792864989.479068285	1792865364.685732602	export GOTOOLCHAIN=go1.27.3 && go test -race -count=2 -shuffle=on -run 'EmptyBody|NoBody|CDR|Cdr|HTTPForward|SSLInspect|Inspect|StallDetect|MCPDistribution|ComposeUX|Diagnostics|OperatorContract|Readiness_Posture|AccessCIDR|SECUISESS|SECREVOKE1|ScanAVUnavailable|AVUnavailable' .
+4	0	1792865364.687982399	1792865367.983833334	export GOTOOLCHAIN=go1.27.3 && go test -race -count=2 -shuffle=on ./internal/admission/
+5	0	1792865367.986025658	1792865563.587695954	export GOTOOLCHAIN=go1.27.3 && go test -tags benchgate -run 'TestBenchGate_' -count=1 . ./internal/admission
+6	0	1792865563.589579353	1792866032.533494934	export GOTOOLCHAIN=go1.27.3 && go test -count=1 ./...
+7	0	1792866032.536031881	1792866299.989996689	export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --new-from-rev 039295bc986697b5221f01015b58b01f63ff4c1b --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...
+8	0	1792866299.992456086	1792866315.669303773	PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH make api-verify
+9	0	1792866315.670911513	1792866315.822565148	~/go/bin/gitleaks detect --no-banner --redact --log-opts=0e190a94..HEAD

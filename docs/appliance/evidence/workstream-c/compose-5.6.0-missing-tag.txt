@@ -1,0 +1,10 @@
+# 2026-10-23T19:59:04Z dockerd 29.6.2 compose 5.6.0 (40343e21ca777173)
+A-plain-tag-present                rc=0   build_calls=0 session_calls=0 pull_calls=0 clamav=running(EXPECTED) proxy=running tag=EXPECTED volume=marker-A-plain
+B-plain-running-tag-missing        rc=1   build_calls=0 session_calls=5 pull_calls=0 clamav=running(EXPECTED) proxy=running tag=absent volume=marker-B-plain
+C-plain-stopped-tag-missing        rc=1   build_calls=0 session_calls=5 pull_calls=0 clamav=exited(EXPECTED) proxy=exited tag=absent volume=marker-C-plain
+D-plain-removed-image-gone         rc=1   build_calls=0 session_calls=5 pull_calls=0 clamav=absent(absent) proxy=absent tag=absent volume=unreadable
+A-nobuild-tag-present              rc=0   build_calls=0 session_calls=0 pull_calls=0 clamav=running(EXPECTED) proxy=running tag=EXPECTED volume=marker-A-nobuild
+B-nobuild-running-tag-missing      rc=1   build_calls=0 session_calls=0 pull_calls=0 clamav=running(EXPECTED) proxy=running tag=absent volume=marker-B-nobuild
+C-nobuild-stopped-tag-missing      rc=1   build_calls=0 session_calls=0 pull_calls=0 clamav=exited(EXPECTED) proxy=exited tag=absent volume=marker-C-nobuild
+D-nobuild-removed-image-gone       rc=1   build_calls=0 session_calls=0 pull_calls=0 clamav=absent(absent) proxy=absent tag=absent volume=unreadable
+done

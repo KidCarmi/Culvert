@@ -1,0 +1,141 @@
+{
+  "commit": "783f71421049a348def8d7a847ce21aff5daeeb4",
+  "tree": "f020bf65711121dd87466b280d6d8c473f3e2f3f",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.26.10 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "go build ./...",
+      "exit": 0,
+      "seconds": 92.497,
+      "log": "1.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 2,
+      "command": "go vet ./...",
+      "exit": 0,
+      "seconds": 18.362,
+      "log": "2.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 3,
+      "command": "go test -count=1 -race -shuffle=on -run 'TestFB1_|TestFB2_|TestLoadedRosterRole|TestRosterLoad|SECRBAC|SECUISESS|CategoryFeed|CatFeed|APIURLCatFeedStatus' .",
+      "exit": 0,
+      "seconds": 200.506,
+      "log": "3.log",
+      "log_sha256": "632d40cd829d7936a0476ef062c3eb7f95f09fb8f3decac2266cbc26de13dd6f",
+      "log_bytes": 41
+    },
+    {
+      "n": 4,
+      "command": "go test -count=1 -race -shuffle=on ./internal/feedsync/ ./internal/catdb/ ./internal/storeguard/",
+      "exit": 0,
+      "seconds": 112.346,
+      "log": "4.log",
+      "log_sha256": "5eb169f51959986da890633d8980a13431f145e4623ff55c744894e5689890e1",
+      "log_bytes": 176
+    },
+    {
+      "n": 5,
+      "command": "go test -count=1 -run 'Install|Deploy|Appliance|Maint|OSUpdate|ClamAV' .",
+      "exit": 0,
+      "seconds": 53.648,
+      "log": "5.log",
+      "log_sha256": "0be86525873024a59716e910c75d4b64ad8785512f74a7ce8e61b13edf052ca8",
+      "log_bytes": 41
+    },
+    {
+      "n": 6,
+      "command": "go test -count=1 ./...",
+      "exit": 0,
+      "seconds": 455.203,
+      "log": "6.log",
+      "log_sha256": "8fcd82d2191614c866caeaf71891766fa5c6b48b8ada7244a7e2f1ce2f5dd228",
+      "log_bytes": 7380
+    },
+    {
+      "n": 7,
+      "command": "cd cmd/culvert-maint && go vet ./... && go test -count=1 -race ./...",
+      "exit": 0,
+      "seconds": 70.832,
+      "log": "7.log",
+      "log_sha256": "b8ffd4529b5c99c2fd91e551cb31ba7b6d01ed46e38365901e578806ebc2102d",
+      "log_bytes": 449
+    },
+    {
+      "n": 8,
+      "command": "make api-verify",
+      "exit": 0,
+      "seconds": 18.877,
+      "log": "8.log",
+      "log_sha256": "1d25106363f3bb498f71b0db494649e42eead15ee8f38507a0c0adb87169cb94",
+      "log_bytes": 513
+    },
+    {
+      "n": 9,
+      "command": "~/go/bin/golangci-lint run --new-from-rev 0fb4daf9 --timeout 15m . ./internal/feedsync/",
+      "exit": 0,
+      "seconds": 303.698,
+      "log": "9.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 10,
+      "command": "cd cmd/culvert-maint && ~/go/bin/golangci-lint run --new-from-rev 0fb4daf9 --timeout 15m ./...",
+      "exit": 0,
+      "seconds": 21.587,
+      "log": "10.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 11,
+      "command": "shellcheck -S warning appliance/provision/culvert-clamav-image appliance/os-maintenance/culvert-os-update packaging/culvert-maint/install.sh",
+      "exit": 0,
+      "seconds": 1.486,
+      "log": "11.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 12,
+      "command": "bash appliance/os-maintenance/power_test.sh",
+      "exit": 0,
+      "seconds": 4.617,
+      "log": "12.log",
+      "log_sha256": "dcd6fe4000db9231109894c894186c6b6bf4b1f3ba8a040f7bce8823ce80debc",
+      "log_bytes": 71
+    },
+    {
+      "n": 13,
+      "command": "~/go/bin/gitleaks detect --no-banner --redact --log-opts=0fb4daf9..HEAD",
+      "exit": 0,
+      "seconds": 1.6,
+      "log": "13.log",
+      "log_sha256": "79d25ee5c642daacc4540dcd328b535c7aa8986ee9b9ed7104f885488cdddada",
+      "log_bytes": 188
+    }
+  ],
+  "all_exit_zero": true
+}

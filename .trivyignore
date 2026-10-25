@@ -17,5 +17,7 @@
 # That module was removed, so nothing imports docker/docker and those masks are
 # gone.
 
-# CVE-2026-14456 expired 2026-09-15; removed rather than renewed. Vendor
-# advisory/package evidence and exact artifact limits are recorded in RISK-006.
+# CVE-2026-14456 (openssl QUIC server DoS) expired 2026-09-15; removed rather
+# than renewed. The image ships libcrypto3/libssl3 3.5.9-r0 (exact-byte SBOM of
+# the 7e53720d image). Vendor advisory/package evidence and exact artifact
+# limits are recorded in RISK-006.

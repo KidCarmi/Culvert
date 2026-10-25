@@ -62,7 +62,7 @@ Env knobs:
   CULVERT_MAINT_BUNDLE         cosign Sigstore bundle (*.sigstore.json) for
                                verifying a local binary
   CULVERT_MAINT_CERT_IDENTITY  override the expected cosign cert identity
-  CULVERT_MAINT_COSIGN_IMAGE   pinned cosign image (default ghcr.io/sigstore/cosign/cosign:v3.0.6;
+  CULVERT_MAINT_COSIGN_IMAGE   cosign image override (default v3.0.6 pinned by multiarch digest;
                                MUST be cosign v3.x to read the new-format bundle —
                                operators who pinned a v2.x DIGEST must re-pin to v3)
   CULVERT_MAINT_SKIP_VERIFY=1  trust a hand-supplied LOCAL binary without
@@ -234,13 +234,13 @@ trap cleanup EXIT
 # trusted with $CULVERT_MAINT_SKIP_VERIFY=1.
 
 CERT_OIDC_ISSUER=${CULVERT_MAINT_CERT_OIDC_ISSUER:-https://token.actions.githubusercontent.com}
-# The cosign verifier image IS the root of trust for the download path. A bare
-# tag is mutable; high-assurance / air-gapped operators should override this
-# with a digest-pinned ref (ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:<digest>).
+# The cosign verifier image IS the root of trust for the download path. Pin the
+# official GHCR multi-platform index so a moved tag cannot replace the verifier.
+# Explicit operator overrides remain available for private/offline registries.
 # MUST be cosign v3.x: the release signs with cosign 3.x new-format Sigstore
 # bundles, which a v2.x verifier cannot parse — operators who pinned a v2.x
 # digest must re-pin to v3.0.6.
-COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6}
+COSIGN_IMAGE=${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00}
 GH_REPO=${CULVERT_MAINT_GITHUB_REPO:-KidCarmi/Culvert}
 
 # Map host arch → release asset arch (matches ci.yml's linux-only legs).
@@ -439,6 +439,15 @@ reject_unsafe "compose_file" "$COMPOSE_FILE"
 # chars, and distinct from compose_file. Empty ⇒ single-`-f` recreate; the
 # {compose_override_path} sudoers line is DELETED (see the render step below).
 COMPOSE_OVERRIDE_FILE=$(extract_toml_string compose_override_file)
+
+# compose_no_build (appliance hosts): the agent's compose.up carries --no-build
+# and the sudoers render keeps ONLY the --no-build forms (Pass 3 below).
+COMPOSE_NO_BUILD=$(extract_toml_string compose_no_build)
+case "$COMPOSE_NO_BUILD" in
+    "" | false) COMPOSE_NO_BUILD=false ;;
+    true) ;;
+    *) die "compose_no_build must be true or false, got '$COMPOSE_NO_BUILD'" ;;
+esac
 if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
     case "$COMPOSE_OVERRIDE_FILE" in
         "." | "..")   die "compose_override_file must not be '.' or '..', got '$COMPOSE_OVERRIDE_FILE'" ;;
@@ -542,6 +551,18 @@ else
 fi
 rm -f "$RENDERED_SUDOERS_TMP"
 
+# Pass 3 — keep exactly one compose.up family. A no-build host deletes the
+# plain `up -d` lines (it must not be able to run an `up` that can build); every
+# other host deletes the `--no-build` lines (unchanged surface for quick-start).
+# Both programs anchor on the full line ending, so neither touches the other.
+RENDERED_SUDOERS_TMP="$RENDERED_SUDOERS.pass3"
+if [ "$COMPOSE_NO_BUILD" = true ]; then
+    sed '/^culvert-maint .* up -d$/d' "$RENDERED_SUDOERS" > "$RENDERED_SUDOERS_TMP"
+else
+    sed '/^culvert-maint .* up -d --no-build$/d' "$RENDERED_SUDOERS" > "$RENDERED_SUDOERS_TMP"
+fi
+mv "$RENDERED_SUDOERS_TMP" "$RENDERED_SUDOERS"
+
 # Refuse to install a sudoers file with any leftover placeholder.
 if grep -qE '\{compose_path\}|\{compose_file\}|\{compose_project_dir\}|\{compose_override_path\}|\{proxy_repo\}' "$RENDERED_SUDOERS"; then
     warn "rendered sudoers file still contains placeholders:"
@@ -557,7 +578,7 @@ if ! visudo -c -f "$RENDERED_SUDOERS" >/dev/null; then
 fi
 
 install -m 0440 -o root -g root "$RENDERED_SUDOERS" "$SUDOERS_DEST"
-log "rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH)"
+log "rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH, compose_no_build=$COMPOSE_NO_BUILD)"
 
 # Re-validate in place; roll back if the installed copy is somehow invalid.
 if ! visudo -c -f "$SUDOERS_DEST" >/dev/null; then

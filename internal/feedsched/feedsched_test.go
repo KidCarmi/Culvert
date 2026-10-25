@@ -37,10 +37,14 @@ func (c *fakeClock) record(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// NewTimer records the delay and installs the timer under ONE lock: a test
+// that saw the delay recorded (waitDelay) must also find the timer (fire). Two
+// separate critical sections let fire() run in the gap and find no timer —
+// it failed the race gate once in CI (#1528 Fast gate, run 37708385213).
 func (c *fakeClock) NewTimer(d time.Duration) Timer {
-	c.record(d)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.delays = append(c.delays, d)
 	c.timer = &fakeTimer{ch: make(chan time.Time), clock: c}
 	return c.timer
 }

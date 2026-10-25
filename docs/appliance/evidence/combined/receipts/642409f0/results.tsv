@@ -1,0 +1,6 @@
+1	0	1792858531.573169733	1792858531.591151072	export GOTOOLCHAIN=go1.27.3 && go version && git diff --stat ff6b22be HEAD
+2	0	1792858531.592987939	1792858561.864602235	export GOTOOLCHAIN=go1.27.3 && go build ./... && go vet ./internal/storeguard/ ./internal/catdb/ ./internal/logstore/ .
+3	0	1792858561.866845608	1792858562.158158491	export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --max-issues-per-linter=0 --max-same-issues=0 --enable-only cyclop,gocognit,funlen ./internal/storeguard/
+4	0	1792858562.160138477	1792858844.727708122	export GOTOOLCHAIN=go1.27.3 && ~/go/bin/golangci-lint run --new-from-rev c319d2a5 --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...
+5	0	1792858844.729529418	1792859046.033996268	export GOTOOLCHAIN=go1.27.3 && go test -race -count=2 -shuffle=on ./internal/storeguard/ ./internal/catdb/ ./internal/logstore/ ./internal/feedsync/
+6	0	1792859046.035775911	1792859128.309776024	export GOTOOLCHAIN=go1.27.3 && go test -race -count=1 -shuffle=on -run 'CatFeed|CategoryFeed|FB2_|StoreGuard|Storeguard|Logstore|LogStore|RequestHistory|Chaos50|Chaos62' .

@@ -1,0 +1,137 @@
+package applianceconsole
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+)
+
+// RetryAllowed is shared by the authenticated menu and privileged executor.
+func RetryAllowed(s Snapshot) bool {
+	state := s.Firstboot["ActiveState"]
+	if s.Firstboot["LoadState"] != "loaded" || (state != "failed" && state != "inactive") {
+		return false
+	}
+	for _, step := range s.Steps {
+		if step.ID == "complete" {
+			return step.State == "not_recorded"
+		}
+	}
+	return false
+}
+
+// ActionDependencies are supplied by the authenticated terminal process.
+// Run and Confirm are synchronous: they exclusively own terminal input while
+// called, and must finish before the caller redraws or starts another action.
+type ActionDependencies struct {
+	Authorized func() bool
+	Collect    func(context.Context) Snapshot
+	Run        func([]string) error
+	Confirm    func(string) (string, error)
+	Out        io.Writer
+}
+
+// Actions owns recovery policy, not terminal I/O, process lifetime or sudo rules.
+type Actions struct {
+	deps ActionDependencies
+}
+
+// NewActions copies dependencies once; no recovery action runs at construction.
+func NewActions(deps ActionDependencies) Actions {
+	return Actions{deps: deps}
+}
+
+// Apply checks the effective identity before dispatching any fixed command.
+func (a Actions) Apply(ctx context.Context, choice string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !a.deps.Authorized() {
+		return errors.New("sign in as culvert before using recovery actions")
+	}
+	const bin = "/opt/culvert-appliance/bin/"
+	switch choice {
+	case "1":
+		if err := a.run(ctx, []string{bin + "culvert-net", "show"}); err != nil {
+			return fmt.Errorf("show network: %w", err)
+		}
+		_, err := fmt.Fprintln(a.deps.Out, "\nUse the recovery shell to change network settings with culvert-net.")
+		return err
+	case "2":
+		return a.run(ctx, []string{"/usr/bin/sudo", "--", bin + "culvert-status"})
+	case "4":
+		return a.retry(ctx)
+	case "5":
+		return a.power(ctx)
+	case "6":
+		if _, err := fmt.Fprintln(a.deps.Out, "Recovery shell. Type exit to return to the menu."); err != nil {
+			return fmt.Errorf("display shell instructions: %w", err)
+		}
+		return a.run(ctx, []string{"/bin/bash", "--noprofile", "--norc"})
+	case "7":
+		return a.run(ctx, []string{"/usr/bin/sudo", "--", bin + "culvert-console", "--host=network"})
+	case "8":
+		// sudo re-asks the operator's password: the reveal needs a fresh
+		// local authentication, not only the console session.
+		return a.run(ctx, []string{"/usr/bin/sudo", "-k", "--", bin + "culvert-console", "--host=recovery-secrets"})
+	default:
+		return errors.New("unknown recovery action")
+	}
+}
+
+// run fences every dispatch, including the second step of a retry. The process
+// adapter must also use this same context when starting and waiting for a child.
+func (a Actions) run(ctx context.Context, args []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !a.deps.Authorized() {
+		return errors.New("authenticated identity no longer available")
+	}
+	return a.deps.Run(args)
+}
+
+func (a Actions) retry(ctx context.Context) error {
+	if !RetryAllowed(a.deps.Collect(ctx)) {
+		return errors.New("retry refused: provisioning is running, complete, or unknown")
+	}
+	answer, err := a.deps.Confirm("Type RETRY to resume incomplete provisioning: ")
+	if err != nil {
+		return fmt.Errorf("confirm retry: %w", err)
+	}
+	if answer != "RETRY" {
+		return nil
+	}
+	if !RetryAllowed(a.deps.Collect(ctx)) {
+		return errors.New("state changed; no retry dispatched")
+	}
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=retry-reset"}); err != nil {
+		return fmt.Errorf("clear failed provisioning: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !RetryAllowed(a.deps.Collect(ctx)) {
+		return errors.New("state changed after clearing failure; provisioning was not started by this console")
+	}
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=retry-start"}); err != nil {
+		return fmt.Errorf("start provisioning: %w", err)
+	}
+	return nil
+}
+
+func (a Actions) power(ctx context.Context) error {
+	answer, err := a.deps.Confirm("Type REBOOT or POWEROFF (anything else cancels): ")
+	if err != nil {
+		return fmt.Errorf("confirm power action: %w", err)
+	}
+	if answer != "REBOOT" && answer != "POWEROFF" {
+		return nil
+	}
+	if err := a.run(ctx, []string{"/usr/bin/sudo", "--", "/opt/culvert-appliance/bin/culvert-console", "--host=" + strings.ToLower(answer)}); err != nil {
+		return fmt.Errorf("request power action: %w", err)
+	}
+	return nil
+}

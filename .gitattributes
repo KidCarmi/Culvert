@@ -5,3 +5,6 @@ frontend/dist/** linguist-generated=true
 frontend/src/api/types.gen.ts linguist-generated=true
 frontend/package-lock.json linguist-generated=true
 frontend/tools/openapi-gen/package-lock.json linguist-generated=true
+# rekor-tiles ships its own .gitattributes (an upstream file, kept byte-exact),
+# so its audited bytes are protected from autocrlf here instead.
+/third_party/rekor-tiles/** -text

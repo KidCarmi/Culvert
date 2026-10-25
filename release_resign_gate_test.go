@@ -49,30 +49,65 @@ type resignSource struct {
 // buildResignSpecFromVerified implements SEC-F1's verify-before-read: it
 // verifies the source bundle dir against trust (signature + structure, no
 // freshness — expiry-tolerant by design), asserts the version binding, and
-// reconstructs the SINGLE-entry generator spec with generated_at slid to
+// reconstructs the generator spec (the released entry plus any carried
+// predecessors, byte-identical) with generated_at slid to
 // resignNow and everything else carried from the verified bytes.
 func buildResignSpecFromVerified(src string, trust TrustStore, version, resignNow string) (*resignSource, error) {
 	// (1) VERIFY FIRST. Nothing below runs on unverified bytes.
-	if _, err := LoadVerifiedCatalog(&dirCatalogSource{dir: src}, trust); err != nil {
+	cat, err := LoadVerifiedCatalog(&dirCatalogSource{dir: src}, trust)
+	if err != nil {
 		return nil, fmt.Errorf("resign source bundle failed verification (SEC-F1 refuses to sign it): %w", err)
 	}
-	// (2) The bytes are now signature-verified (index) and hash-bound to it
-	// (manifests) — parse them for the facts the spec needs.
-	idxRaw, err := os.ReadFile(filepath.Join(src, "index.json")) // #nosec G304 -- CI-provided bundle dir
-	if err != nil {
-		return nil, err
+	if cat.proof == nil {
+		return nil, fmt.Errorf("resign source bundle carries no signature evidence (SEC-F1)")
 	}
+	// (2) The bytes are now signature-verified (index) and hash-bound to it
+	// (manifests) — parse them for the facts the spec needs. Every byte is
+	// taken from the verified snapshot, never re-read from disk.
+	idxRaw := bytes.Clone(cat.proof.index)
 	var idx catalogIndexFile
 	if err := json.Unmarshal(idxRaw, &idx); err != nil {
 		return nil, fmt.Errorf("verified index unparsable: %w", err)
 	}
-	if len(idx.Releases) != 1 {
-		return nil, fmt.Errorf("resign supports exactly one release entry, source has %d (fail closed)", len(idx.Releases))
+	if len(idx.Releases) == 0 {
+		return nil, fmt.Errorf("resign source has no release entries (fail closed)")
 	}
-	ref := idx.Releases[0].ManifestRef
-	manRaw, err := os.ReadFile(filepath.Join(src, "manifests", filepath.Base(ref))) // #nosec G304 -- ref is hash-bound to the verified index
-	if err != nil {
-		return nil, err
+	// The generated entry is the one the dispatch version names; every other
+	// entry is a carried predecessor (release_lineage.go) and is re-emitted
+	// byte-identical. A catalog naming the version twice, or none, is refused.
+	targetID := ""
+	for id := range cat.byReleaseID {
+		if cat.byReleaseID[id].VersionID == version {
+			if targetID != "" {
+				return nil, fmt.Errorf("resign source names version %q twice (fail closed)", version)
+			}
+			targetID = id
+		}
+	}
+	if version == "" || targetID == "" {
+		return nil, fmt.Errorf("version binding failed: dispatch tag version %q is not a release in the verified bundle (SEC-F1)", version)
+	}
+	for ch, rid := range idx.Channels {
+		if rid != targetID {
+			return nil, fmt.Errorf("resign source channel %q points at %q, not the released %q (fail closed)", ch, rid, targetID)
+		}
+	}
+	manifests := map[string][]byte{}
+	var manRaw []byte
+	var carried []carriedRelease
+	for _, e := range idx.Releases {
+		raw := cat.proof.manifests[e.ReleaseID]
+		if len(raw) == 0 {
+			return nil, fmt.Errorf("no verified manifest bytes for %q", e.ReleaseID)
+		}
+		manifests[filepath.Base(e.ManifestRef)] = bytes.Clone(raw)
+		if e.ReleaseID == targetID {
+			manRaw = raw
+			continue
+		}
+		rel := cat.byReleaseID[e.ReleaseID]
+		carried = append(carried, carriedRelease{ReleaseID: e.ReleaseID, VersionID: rel.VersionID,
+			Repo: rel.Repo, ListDigest: rel.ListDigest, Manifest: bytes.Clone(raw)})
 	}
 	var man struct {
 		ReleaseID string `json:"release_id"`
@@ -94,7 +129,7 @@ func buildResignSpecFromVerified(src string, trust TrustStore, version, resignNo
 	// (3) Version binding: the dispatch tag must name the release this verified
 	// bundle actually describes — an attacker cannot point the resign at a
 	// bundle for a different (e.g. older, weaker) release.
-	if version == "" || man.VersionID != version {
+	if man.VersionID != version || man.ReleaseID != targetID {
 		return nil, fmt.Errorf("version binding failed: dispatch tag version %q != verified bundle version %q (SEC-F1)", version, man.VersionID)
 	}
 	// Channels for this entry from the verified index's channel map.
@@ -120,6 +155,7 @@ func buildResignSpecFromVerified(src string, trust TrustStore, version, resignNo
 			Notes:          man.Notes,
 			Channels:       channels,
 		}},
+		Carried: carried,
 	}
 	// Fresh window: expires_at = resignNow + 180d, derived by the SAME tested
 	// helper the release path uses.
@@ -132,7 +168,6 @@ func buildResignSpecFromVerified(src string, trust TrustStore, version, resignNo
 	if spec.GeneratedAt, err = normalizeUTC(resignNow); err != nil {
 		return nil, fmt.Errorf("resign now: %w", err)
 	}
-	manifests := map[string][]byte{filepath.Base(ref): manRaw}
 	return &resignSource{
 		spec:          spec,
 		srcIndexRaw:   idxRaw,
@@ -340,5 +375,42 @@ func TestResignGate_InvariantsHold(t *testing.T) {
 	}
 	if !bytes.Equal(bundle.Index, bundle2.Index) {
 		t.Fatal("resign generation is not deterministic")
+	}
+}
+
+// A catalog that carries verified predecessors (release_lineage.go) re-signs
+// with every carried manifest byte-identical and the index unchanged apart from
+// generated_at/expires_at; the version binding still names only the released
+// entry — a carried predecessor's version is refused, so the weekly re-sign can
+// never be pointed at an older release inside a newer catalog.
+func TestResignGate_CarriedPredecessorsStayByteIdentical(t *testing.T) {
+	s := newLineageSigner(t)
+	var srcs []lineageSource
+	for _, v := range []string{"1.0.250", "1.0.251"} {
+		srcs = append(srcs, lineageSource{Dir: publishSingle(t, s, v, nil)})
+	}
+	carried, err := collectVerifiedPredecessors(srcs, s.trust(t), lineageRepo, "1.0.250", "1.0.252", []string{"1.0.250", "1.0.251"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := publishSingle(t, s, "1.0.252", carried)
+
+	rs, err := buildResignSpecFromVerified(dir, s.trust(t), "1.0.252", "2026-12-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("multi-entry verified source must build: %v", err)
+	}
+	if len(rs.spec.Entries) != 1 || len(rs.spec.Carried) != 2 || len(rs.srcManifests) != 3 {
+		t.Fatalf("entries=%d carried=%d manifests=%d; want 1/2/3", len(rs.spec.Entries), len(rs.spec.Carried), len(rs.srcManifests))
+	}
+	bundle, err := generateReleaseCatalog(rs.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertResignInvariants(t, rs, bundle)
+
+	for _, v := range []string{"1.0.250", "1.0.251", "1.0.253"} {
+		if _, err := buildResignSpecFromVerified(dir, s.trust(t), v, "2026-12-01T00:00:00Z"); err == nil {
+			t.Fatalf("version binding violated: re-sign accepted %s against the 1.0.252 catalog", v)
+		}
 	}
 }

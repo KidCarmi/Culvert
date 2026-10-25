@@ -1,0 +1,14 @@
+# Culvert appliance: the DRM device nodes are root-only.
+#
+# vmwgfx (the VMware SVGA display driver the ESXi console uses) carries open
+# HIGH CVEs reached through DRM ioctls (CVE-2026-80700: a crafted atomic commit
+# on a configured CRTC; CVE-2026-80702: resource release/unbind). The driver
+# cannot be denied without losing the console, so the prerequisite is removed
+# instead: nothing on the appliance draws through DRM except plymouth, which
+# runs as root, and the appliance console renders on a text VT. Ubuntu's
+# default gives card* to group video (0660) and renderD* to group render, and
+# logind's uaccess tag grants a local console session an ACL on them. This
+# rule makes every DRM node root:root 0600 and drops the uaccess tag, so no
+# unprivileged user — and no container, which gets no /dev/dri anyway — can
+# open one. It sorts before 73-seat-late.rules, where uaccess is applied.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*|renderD[0-9]*|controlD[0-9]*", GROUP="root", MODE="0600", TAG-="uaccess"

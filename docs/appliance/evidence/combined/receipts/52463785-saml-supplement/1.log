@@ -1,0 +1,2 @@
+Python 3.11.15
+{"functional_delta": "gofuzz_build_constraint_only", "test_data_delta": "go1.27_flate_redirect_query_string_goldens", "test_data_files": 8, "upstream_files_verified": 235}

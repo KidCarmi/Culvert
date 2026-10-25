@@ -51,6 +51,19 @@ type Config struct {
 	// survives an agent-driven recreate. Empty ⇒ single-file recreate.
 	ComposeOverrideFile string
 
+	// ComposeNoBuild makes the proxy-recreate `docker compose up` pass
+	// --no-build. Appliance hosts set it: their ClamAV sidecar is a scanned,
+	// baked image, and a missing tag must never be rebuilt from source,
+	// because a rebuild produces new, unscanned bytes. Quick-start hosts leave
+	// it false and keep Compose's build fallback.
+	ComposeNoBuild bool
+
+	// LocalOnlyImages are images that must already be present locally on a
+	// ComposeNoBuild host. An image change is refused before anything is
+	// mutated when one is explicitly absent, or — for an entry carrying an
+	// image ID — when its tag names any other image.
+	LocalOnlyImages []LocalImage
+
 	// UDS path. Default "/run/culvert-maint/culvert-maint.sock" (under the
 	// systemd RuntimeDirectory the service user owns). Mode is fixed at
 	// 0660 regardless of config.
@@ -58,6 +71,11 @@ type Config struct {
 
 	// State directory root. Default "/var/lib/culvert-maint".
 	StateDir string
+
+	// DockerRoot is the Docker daemon's data root (images, containerd
+	// content, container state). The upgrade preflight measures its free
+	// space before a pull. Default "/var/lib/docker".
+	DockerRoot string
 
 	// Privilege model. Default PrivilegeSudoers.
 	PrivilegeMode PrivilegeMode
@@ -94,7 +112,20 @@ type Config struct {
 	// at the sudo boundary (P1.4). A pinned upgrade/rollback ref must be
 	// `<ProxyRepo>@sha256:<64hex>`. Default "ghcr.io/kidcarmi/culvert".
 	// MUST describe the same repository as ImageAllowlist.
-	ProxyRepo string
+	ProxyRepo          string
+	ReleaseCatalogRepo string
+	ReleaseTrustRoot   string
+	ReleaseTrustKeys   string
+
+	// ReconcileOnStartup enables the crash-recovery startup reconciler
+	// (RISK-022 PR-E): at boot every interrupted journal record is classified
+	// against Docker truth, a durable verdict is written, and ONLY verdicts
+	// that mutate nothing are auto-resolved (safe-boundary no-op; adopt of a
+	// target that is already live AND healthy). Everything else stays visible
+	// on /v1/status (attention_required) for the explicit
+	// POST /v1/reconcile/{op_id} endpoint. Default true. false ⇒ mark-only
+	// (records are listed but never classified or touched at boot).
+	ReconcileOnStartup bool
 
 	// AllowPeers is the closed list of UID-or-username tokens permitted
 	// to connect to the agent's UDS. The agent refuses to start with
@@ -130,8 +161,11 @@ type rawConfig struct {
 	ComposeProjectDir   string   `toml:"compose_project_dir"`
 	ComposeFile         string   `toml:"compose_file"`
 	ComposeOverrideFile string   `toml:"compose_override_file"`
+	ComposeNoBuild      bool     `toml:"compose_no_build"`
+	LocalOnlyImages     []string `toml:"local_only_images"`
 	SocketPath          string   `toml:"socket_path"`
 	StateDir            string   `toml:"state_dir"`
+	DockerRoot          string   `toml:"docker_root"`
 	PrivilegeMode       string   `toml:"privilege_mode"`
 	HealthBaseURL       string   `toml:"health_base_url"`
 	HealthPath          string   `toml:"health_path"`
@@ -142,6 +176,10 @@ type rawConfig struct {
 	AllowedBackupDir    string   `toml:"allowed_backup_dir"`
 	ImageAllowlist      string   `toml:"image_allowlist"`
 	ProxyRepo           string   `toml:"proxy_repo"`
+	ReleaseCatalogRepo  string   `toml:"release_catalog_repo"`
+	ReleaseTrustRoot    string   `toml:"release_trust_root"`
+	ReleaseTrustKeys    string   `toml:"release_trust_keys"`
+	ReconcileOnStartup  *bool    `toml:"reconcile_on_startup"`
 	AllowPeers          []string `toml:"allow_peers"`
 }
 
@@ -149,6 +187,7 @@ const (
 	defaultComposeFile      = "docker-compose.yml"
 	defaultSocketPath       = "/run/culvert-maint/culvert-maint.sock"
 	defaultStateDir         = "/var/lib/culvert-maint"
+	defaultDockerRoot       = "/var/lib/docker"
 	defaultPrivilegeMode    = string(PrivilegeSudoers)
 	defaultHealthBaseURL    = "http://127.0.0.1:8080"
 	defaultHealthPath       = "/health"
@@ -256,6 +295,13 @@ func validate(raw *rawConfig) (*Config, error) {
 		cfg.ComposeOverrideFile = of
 	}
 
+	cfg.ComposeNoBuild = raw.ComposeNoBuild
+	imgs, err := validateLocalOnlyImages(raw.LocalOnlyImages, raw.ComposeNoBuild)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LocalOnlyImages = imgs
+
 	// socket_path — default /run/culvert-maint/culvert-maint.sock. Must be absolute.
 	sp := raw.SocketPath
 	if sp == "" {
@@ -275,6 +321,16 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: state_dir must be absolute: %q", sd)
 	}
 	cfg.StateDir = filepath.Clean(sd)
+
+	// docker_root — default /var/lib/docker. Must be absolute.
+	dr := raw.DockerRoot
+	if dr == "" {
+		dr = defaultDockerRoot
+	}
+	if !filepath.IsAbs(dr) {
+		return nil, fmt.Errorf("config: docker_root must be absolute: %q", dr)
+	}
+	cfg.DockerRoot = filepath.Clean(dr)
 
 	// privilege_mode — default sudoers. Closed enum.
 	pm := raw.PrivilegeMode
@@ -405,6 +461,21 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: proxy_repo has an invalid repository shape: %q", pr)
 	}
 	cfg.ProxyRepo = pr
+	cfg.ReleaseCatalogRepo = strings.TrimSpace(raw.ReleaseCatalogRepo)
+	if cfg.ReleaseCatalogRepo == "" {
+		cfg.ReleaseCatalogRepo = defaultProxyRepo
+	}
+	cfg.ReleaseTrustRoot = strings.TrimSpace(raw.ReleaseTrustRoot)
+	cfg.ReleaseTrustKeys = strings.TrimSpace(raw.ReleaseTrustKeys)
+	for _, trustPath := range []string{cfg.ReleaseTrustRoot, cfg.ReleaseTrustKeys} {
+		if trustPath != "" && !filepath.IsAbs(trustPath) {
+			return nil, fmt.Errorf("config: release trust paths must be absolute")
+		}
+	}
+
+	// reconcile_on_startup — default true (classify + auto-resolve only the
+	// non-mutating verdicts). Absent key ⇒ default; an explicit false ⇒ mark-only.
+	cfg.ReconcileOnStartup = raw.ReconcileOnStartup == nil || *raw.ReconcileOnStartup
 
 	// allow_peers — required, no default. Validated only as non-empty
 	// shape here; the resolution to a concrete UID set happens in
@@ -444,4 +515,51 @@ func validateHealthPath(name, supplied, def string) (string, error) {
 		}
 	}
 	return v, nil
+}
+
+// LocalImage is one local_only_images entry: a local repo:tag and, when the
+// entry is written "repo:tag=sha256:<64 hex>", the image ID the tag must name.
+// Presence alone proves nothing about which bytes a tag names, so an entry
+// with an ID makes the preflight refuse a tag that resolves to anything else.
+type LocalImage struct {
+	Ref string
+	ID  string // "" ⇒ presence-only (an entry without "=sha256:…")
+}
+
+// localImageIDRE is a Docker image ID (the content address of the image config).
+var localImageIDRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// localImageRefRE is a local repo:tag reference. local_only_images entries flow
+// into a sudo argv token (docker image inspect), so they are held to this shape.
+var localImageRefRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,199}:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
+
+// maxLocalOnlyImages bounds the preflight: each entry is one inspect.
+const maxLocalOnlyImages = 8
+
+// validateLocalOnlyImages checks local_only_images. The list only has meaning
+// on a compose_no_build host (elsewhere Compose can still build a missing
+// image), so setting it without compose_no_build is refused rather than
+// silently ignored.
+func validateLocalOnlyImages(refs []string, noBuild bool) ([]LocalImage, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if !noBuild {
+		return nil, errors.New("config: local_only_images requires compose_no_build = true")
+	}
+	if len(refs) > maxLocalOnlyImages {
+		return nil, fmt.Errorf("config: local_only_images allows at most %d entries, got %d", maxLocalOnlyImages, len(refs))
+	}
+	out := make([]LocalImage, 0, len(refs))
+	for _, r := range refs {
+		ref, id, hasID := strings.Cut(strings.TrimSpace(r), "=")
+		if !localImageRefRE.MatchString(ref) {
+			return nil, fmt.Errorf("config: local_only_images entry must be a local repo:tag reference, got %q", r)
+		}
+		if hasID && !localImageIDRE.MatchString(id) {
+			return nil, fmt.Errorf("config: local_only_images entry %q: the image ID after '=' must be sha256:<64 hex>", r)
+		}
+		out = append(out, LocalImage{Ref: ref, ID: id})
+	}
+	return out, nil
 }

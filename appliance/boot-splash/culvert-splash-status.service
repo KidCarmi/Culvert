@@ -1,0 +1,22 @@
+[Unit]
+Description=Culvert: keep the boot-console status line and key hint visible until the menu
+Documentation=file:///opt/culvert-appliance/boot-splash/culvert-splash-status
+DefaultDependencies=no
+After=plymouth-start.service
+# Started before the splash ends; the loop exits by itself when Plymouth quits.
+Before=sysinit.target plymouth-quit.service plymouth-quit-wait.service getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=simple
+# No splash on a display-less machine (serial-only): skip, not fail.
+ExecCondition=/opt/culvert-appliance/bin/culvert-has-display
+ExecStart=/opt/culvert-appliance/bin/culvert-splash-status
+# The loop ends on its own when Plymouth quits; bound a forced stop so this
+# never holds up shutdown (TimeoutStopSec applies only if systemd stops it).
+TimeoutStopSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target

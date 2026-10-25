@@ -1,0 +1,42 @@
+{
+  "commit": "524637857f6aa56df20d938b814da55dfc8f9465",
+  "tree": "db36a9a86cf7956d19f9838f5f30508e5d213026",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "python3 --version && PYTHONDONTWRITEBYTECODE=1 python3 appliance/artifact-audit/verify_saml_patch.py",
+      "exit": 0,
+      "seconds": 0.061,
+      "log": "1.log",
+      "log_sha256": "5eb4fc5e74c70be68a0effc1767d7583e3f1bdf8891671340d93c943d3fd36ba",
+      "log_bytes": 187
+    },
+    {
+      "n": 2,
+      "command": "cd appliance/artifact-audit && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_saml_patch",
+      "exit": 0,
+      "seconds": 0.358,
+      "log": "2.log",
+      "log_sha256": "cc9e00feac161439a9deb176eab4cd308e353ac7bd996e37aac05f586ca170af",
+      "log_bytes": 908
+    }
+  ],
+  "all_exit_zero": true
+}

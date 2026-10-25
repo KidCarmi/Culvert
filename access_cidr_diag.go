@@ -1,10 +1,10 @@
 package main
 
 // access_cidr_diag.go — Diagnostics row for rejected admin-access network
-// lists. A malformed UI allowlist or trusted-proxy entry at startup/settings
-// load is only logged, and the previous (usually empty) set stays in force:
-// an empty UI allowlist admits every client and an empty trusted-proxy set
-// ignores X-Forwarded-For. This surfaces what the node already knew; it
+// lists. A malformed trusted-proxy entry at startup/settings load is only
+// logged, and the previous (usually empty) set stays in force: an empty
+// trusted-proxy set ignores X-Forwarded-For. A malformed UI allowlist REFUSES
+// the admin UI (fail closed, ui_access_policy.go); the row says so. This surfaces what the node already knew; it
 // changes no parsing, enforcement or fallback behavior.
 
 import (
@@ -51,7 +51,13 @@ func checkAccessCIDRLists() OperatorContractCheck {
 	// whole list before swapping), so the consequence is described from the
 	// list actually in force, not assumed from the rejection.
 	msg := ""
-	if uiBad {
+	if uiBad && uiAccessPolicyRefused() {
+		// The appliance line fails CLOSED on a rejected UI allowlist
+		// (refuseLoadedUIAccessPolicy): no previous list is in force, the
+		// admin UI is refused to everyone. Describing the stale list here
+		// would tell the operator the UI is open when it is locked.
+		msg += "Admin UI IP allowlist was rejected (" + ui + "); the admin UI is refused to every client until a valid list is saved or local recovery is performed. "
+	} else if uiBad {
 		msg += "Admin UI IP allowlist was rejected (" + ui + "); the previous list stays in force"
 		if n := len(ListUIAllowedCIDRs()); n == 0 {
 			msg += ", which is empty, so the admin UI accepts every client IP. "

@@ -18,9 +18,12 @@
 package catdb
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 
@@ -33,6 +36,11 @@ import (
 // All exported methods are safe for concurrent use.
 type CommunityDB struct {
 	db *badger.DB
+
+	// writeFault, when set, is consulted after each entry BulkWrite stages
+	// (test seam: SetBulkWriteFaultForTest).
+	writeFault func(written int) error
+
 	// dir is the store's REAL directory: the opened path with symlinks
 	// resolved once, at open time, while the volume is known to be healthy.
 	// Both uses need the resolved form. ContainFault matches a faulting
@@ -91,6 +99,30 @@ func (c *CommunityDB) noteMemFault() (first bool) {
 	c.memFaults.Add(1)
 	return c.degraded.CompareAndSwap(false, true)
 }
+
+// syncRecordKey holds the import completion record. The leading NUL makes it
+// unreachable from any hostname: getExact refuses NUL-prefixed keys, so no
+// lookup can read or match it.
+var syncRecordKey = []byte("\x00culvert/ut1-import-complete")
+
+// syncRecordVersion is the completion record's schema.
+const syncRecordVersion = 1
+
+// SyncRecord certifies that one whole feed import is durably in THIS store
+// (PR #1528 §3f F-FEED-1). It lives inside the store it certifies, so a store
+// that is quarantined and re-created carries none, and it names the feed it
+// was imported from, so a changed feed is not mistaken for a synced one.
+type SyncRecord struct {
+	Version     int       `json:"version"`
+	FeedURL     string    `json:"feed_url"`
+	Entries     int64     `json:"entries"`
+	CompletedAt time.Time `json:"completed_at"`
+}
+
+// ErrNoSyncRecord reports a store with no valid completion record: never
+// imported, a legacy store written before records existed, an import that
+// did not finish, or a damaged record.
+var ErrNoSyncRecord = errors.New("catdb: no valid import completion record")
 
 // Open opens (or creates) a BadgerDB at the given directory.
 //
@@ -291,6 +323,9 @@ func (c *CommunityDB) walk(host string) (category string, found bool, err error)
 // different blast radius and is not this fix's to make. What changed is that
 // the degradation is bounded, survivable and visible.
 func (c *CommunityDB) getExact(domain string) (category string, found bool, err error) {
+	if strings.HasPrefix(domain, "\x00") { // reserved metadata, never a domain (F-FEED-1)
+		return "", false, nil
+	}
 	var cat string
 	viewErr := c.db.View(func(txn *badger.Txn) error {
 		item, getErr := txn.Get([]byte(domain))
@@ -312,8 +347,15 @@ func (c *CommunityDB) getExact(domain string) (category string, found bool, err 
 	}
 }
 
-// BulkWrite atomically writes a batch of domain→category pairs into BadgerDB.
+// BulkWrite writes a batch of domain→category pairs into BadgerDB.
 // Existing entries for the same domain are overwritten.
+//
+// It is NOT atomic. badger's WriteBatch commits a large batch as many
+// separate transactions, so a process that dies mid-call leaves SOME of the
+// entries written and the rest missing — and with SyncWrites=false (the
+// default here) even committed transactions are not yet on disk. A partial
+// store is indistinguishable from a complete one by its contents; whether an
+// import finished is recorded only by BeginImport/CompleteImport.
 // Uses WriteBatch for high-throughput ingestion without holding a long-lived
 // transaction — safe to call while the DB serves concurrent reads.
 //
@@ -325,14 +367,158 @@ func (c *CommunityDB) getExact(domain string) (category string, found bool, err 
 func (c *CommunityDB) BulkWrite(entries map[string]string) error {
 	return c.access(func() error {
 		wb := c.db.NewWriteBatch()
+		n := 0
 		for domain, category := range entries {
-			if err := wb.Set([]byte(domain), []byte(category)); err != nil {
+			key := []byte(domain)
+			val := []byte(category)
+			if err := wb.Set(key, val); err != nil {
 				wb.Cancel()
 				return err
+			}
+			n++
+			if c.writeFault != nil {
+				if err := c.writeFault(n); err != nil {
+					// What a process dying mid-import leaves: the staged part
+					// committed, the rest never written.
+					if ferr := wb.Flush(); ferr != nil {
+						return errors.Join(err, ferr)
+					}
+					return err
+				}
 			}
 		}
 		return wb.Flush()
 	})
+}
+
+// SetBulkWriteFaultForTest makes BulkWrite commit what it has staged and fail
+// once fault returns an error (called after each staged entry). Test seam
+// only; nil removes it.
+func (c *CommunityDB) SetBulkWriteFaultForTest(fault func(written int) error) { c.writeFault = fault }
+
+// ForceDegradedForTest latches the store degraded exactly as a contained memory
+// fault would, without needing a real SIGBUS. It lets a test drive the
+// feedsync/F-DISK-RECOVERY-1 watchdog path where BulkWrite blocks while the store
+// latches degraded on a badger-internal goroutine. It touches only the latch
+// atomics (via noteMemFault), never badger.
+func (c *CommunityDB) ForceDegradedForTest() { c.noteMemFault() }
+
+// BeginImport durably withdraws the completion record before an import
+// writes any data, so a record can never describe an import that was
+// interrupted: from here until CompleteImport the store is "not certified".
+//
+// F-DISK-RECOVERY-1: it ALSO lays down a durable import-pending intent marker
+// (a sibling file, via storeguard) BEFORE the completion record is touched. The
+// marker is written while the disk still has space — the risky bulk write that
+// can fill it has not started — so recovery never depends on a write to a full
+// filesystem after the failure. If the intent cannot be made durable the import
+// is REFUSED (fail closed): a mid-write interruption would otherwise leave a
+// torn store with no marker to recover it on the next boot. The marker is a
+// storeguard filesystem call, not badger, so it is outside the access/contain
+// guard (the same shape as recordFault) and the guard-wall is unaffected.
+func (c *CommunityDB) BeginImport() error {
+	if c.dir != "" {
+		if err := storeguard.MarkImportPending(c.dir); err != nil {
+			return fmt.Errorf("catdb: refusing to begin import, the import intent could not be made durable: %w", err)
+		}
+	}
+	return c.access(func() error {
+		if err := c.db.Update(func(txn *badger.Txn) error { return txn.Delete(syncRecordKey) }); err != nil {
+			return err
+		}
+		return c.db.Sync()
+	})
+}
+
+// CompleteImport certifies an import that BulkWrite finished. The order is
+// the guarantee: the imported data is fsynced FIRST, then the record is
+// written and fsynced. A crash before the first sync loses the record with
+// (or before) the data; a crash after it can only lose the record. So a
+// record that survives a crash always certifies data that survived it.
+func (c *CommunityDB) CompleteImport(rec SyncRecord) error {
+	if rec.FeedURL == "" || rec.Entries <= 0 || rec.CompletedAt.IsZero() {
+		return errors.New("catdb: refusing to certify an empty or unnamed import")
+	}
+	rec.Version = syncRecordVersion
+	val, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	if err := c.access(func() error {
+		if err := c.db.Sync(); err != nil { // the data first
+			return err
+		}
+		if err := c.db.Update(func(txn *badger.Txn) error { return txn.Set(syncRecordKey, val) }); err != nil {
+			return err
+		}
+		return c.db.Sync()
+	}); err != nil {
+		return err
+	}
+	// F-DISK-RECOVERY-1: the import is now certified durable, so clear the
+	// import-pending intent — otherwise the next Open would quarantine a
+	// complete, healthy store. Clearing is fsynced; a clear failure is returned
+	// so the caller retries (and re-runs the import), because a stale marker
+	// would cost an unnecessary rebuild on the next boot. The data is safe
+	// either way — this only governs whether the store is kept or rebuilt.
+	if c.dir != "" {
+		if err := storeguard.ClearImportPending(c.dir); err != nil {
+			return fmt.Errorf("catdb: import certified durable but the import-pending marker could not be cleared: %w", err)
+		}
+	}
+	return nil
+}
+
+// ImportRecord returns the completion record when it is present and valid,
+// else ErrNoSyncRecord. It does not check which feed it names; callers
+// compare FeedURL with the feed they serve.
+func (c *CommunityDB) ImportRecord() (SyncRecord, error) {
+	var raw []byte
+	err := c.access(func() error {
+		return c.db.View(func(txn *badger.Txn) error {
+			item, err := txn.Get(syncRecordKey)
+			if err != nil {
+				return err
+			}
+			raw, err = item.ValueCopy(nil)
+			return err
+		})
+	})
+	if err != nil {
+		return SyncRecord{}, ErrNoSyncRecord
+	}
+	var rec SyncRecord
+	if json.Unmarshal(raw, &rec) != nil || rec.Version != syncRecordVersion ||
+		rec.FeedURL == "" || rec.Entries <= 0 || rec.CompletedAt.IsZero() {
+		return SyncRecord{}, ErrNoSyncRecord
+	}
+	return rec, nil
+}
+
+// setRawImportRecordForTest writes arbitrary bytes under the record key.
+func (c *CommunityDB) setRawImportRecordForTest(val []byte) error {
+	return c.access(func() error {
+		return c.db.Update(func(txn *badger.Txn) error { return txn.Set(syncRecordKey, val) })
+	})
+}
+
+// HasEntries reports whether the store holds at least one key. Unlike Stats
+// (an LSM-table estimate that reads 0 until the memtable is flushed) it is
+// exact: one key-only iterator step under a read transaction.
+func (c *CommunityDB) HasEntries() bool {
+	found := false
+	_ = c.access(func() error {
+		return c.db.View(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.PrefetchValues = false
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			it.Rewind()
+			found = it.Valid()
+			return nil
+		})
+	})
+	return found
 }
 
 // Stats returns the estimated number of keys stored in the DB.

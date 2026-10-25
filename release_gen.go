@@ -54,6 +54,12 @@ type releaseCatalogSpec struct {
 	ExpiresAt      string             `json:"expires_at"`   // RFC3339 (P2a: created_at + 90d default)
 	CatalogVersion int                `json:"catalog_version"`
 	Entries        []releaseEntrySpec `json:"entries"`
+	// Carried are predecessor releases taken VERBATIM from verified catalogs
+	// (collectVerifiedPredecessors, release_lineage.go). They are never built
+	// from spec fields, carry no channel, and their exact manifest bytes are
+	// re-bound by sha256 in the new index. Not serialisable on purpose: a JSON
+	// spec file cannot introduce one.
+	Carried []carriedRelease `json:"-"`
 }
 
 // releaseBundle is the generated, byte-stable output: the raw index.json bytes
@@ -118,6 +124,11 @@ func generateReleaseCatalog(spec releaseCatalogSpec) (*releaseBundle, error) {
 		}
 	}
 
+	if err := addCarriedReleases(spec.Carried, seenID, manifests, &idxEntries); err != nil {
+		return nil, err
+	}
+	sort.Slice(idxEntries, func(i, j int) bool { return idxEntries[i].ReleaseID < idxEntries[j].ReleaseID })
+
 	idx := catalogIndexFile{
 		SchemaVersion:  catalogSchemaMajor,
 		GeneratedAt:    spec.GeneratedAt,
@@ -131,6 +142,38 @@ func generateReleaseCatalog(spec releaseCatalogSpec) (*releaseBundle, error) {
 		return nil, fmt.Errorf("release gen: marshal index: %w", err)
 	}
 	return &releaseBundle{Index: idxBytes, Manifests: manifests}, nil
+}
+
+// addCarriedReleases emits verified predecessor manifests byte-for-byte. Each
+// is re-checked here (defense-in-depth): the bytes must parse as a manifest
+// naming the same release and version, and a carried release may not collide
+// with a generated one.
+func addCarriedReleases(carried []carriedRelease, seenID map[string]bool, manifests map[string][]byte, idx *[]catalogIndexEntry) error {
+	for i := range carried {
+		c := carried[i]
+		if err := catalogValidateID("release_id", c.ReleaseID); err != nil {
+			return fmt.Errorf("release gen: carried release: %w", err)
+		}
+		if seenID[c.ReleaseID] {
+			return fmt.Errorf("release gen: carried release %q collides with another entry", c.ReleaseID)
+		}
+		var man catalogManifestFile
+		if err := json.Unmarshal(c.Manifest, &man); err != nil {
+			return fmt.Errorf("release gen: carried release %q: manifest unparsable: %w", c.ReleaseID, err)
+		}
+		if man.ReleaseID != c.ReleaseID || man.VersionID != c.VersionID || man.Image.ListDigest != c.ListDigest || man.Image.Repo != c.Repo {
+			return fmt.Errorf("release gen: carried release %q: manifest does not match its verified identity", c.ReleaseID)
+		}
+		ref := c.ReleaseID + ".json"
+		if err := catalogValidateManifestRef(ref); err != nil {
+			return fmt.Errorf("release gen: carried release %q: %w", c.ReleaseID, err)
+		}
+		seenID[c.ReleaseID] = true
+		manifests[ref] = append([]byte(nil), c.Manifest...)
+		sum := sha256.Sum256(c.Manifest)
+		*idx = append(*idx, catalogIndexEntry{ReleaseID: c.ReleaseID, VersionID: c.VersionID, ManifestRef: ref, ManifestSHA256: hex.EncodeToString(sum[:])})
+	}
+	return nil
 }
 
 // collectChannels records each of a release's channel pointers into the shared

@@ -229,10 +229,17 @@ func d16bTemplates() []Template {
 			// decision, never a wildcard. Carrying the override here — and ONLY
 			// here, the sole proxy-recreate path — is what lets the maintenance
 			// socket survive an agent-driven recreate.
-			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "{compose_override}", "up", "-d"},
+			//
+			// {compose_no_build} expands to `--no-build` on an appliance host
+			// (ComposeNoBuild). The installer keeps ONLY the --no-build lines on
+			// such a host, so the agent there cannot run an `up` that is able to
+			// build; a quick-start host keeps only the plain lines.
+			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "{compose_override}", "up", "-d", "{compose_no_build}"},
 			SudoersLines: []string{
 				"/usr/bin/docker compose -f {compose_path} up -d",
 				"/usr/bin/docker compose -f {compose_path} -f {compose_override_path} up -d",
+				"/usr/bin/docker compose -f {compose_path} up -d --no-build",
+				"/usr/bin/docker compose -f {compose_path} -f {compose_override_path} up -d --no-build",
 			},
 			StateChanging: true,
 		},

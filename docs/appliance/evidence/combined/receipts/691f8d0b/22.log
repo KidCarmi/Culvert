@@ -1,0 +1,618 @@
+=== Symbol Results ===
+
+Vulnerability #1: GO-2026-6809
+    Distrust compromised intermediate certificates in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-6809
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.10
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.Verify
+
+Vulnerability #2: GO-2026-6617
+    HTTP/2 server crash due to HPACK encoder race in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6617
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #2: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #3: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #4: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #5: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #6: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #7: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #8: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #9: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #10: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #11: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #12: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #13: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #14: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #15: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #16: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #17: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #18: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #19: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #20: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #21: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #22: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #23: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #24: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #25: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #26: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #27: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #28: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #29: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #30: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #31: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #32: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #33: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #34: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #35: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #36: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #37: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #38: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #39: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #40: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #41: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #42: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #43: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #44: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #45: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #46: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #47: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #48: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #49: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #50: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #51: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #52: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #53: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #54: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #55: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #56: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #57: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #58: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #59: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #60: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #61: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #62: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #63: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #64: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #65: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #66: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #67: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #68: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #69: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #70: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #71: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #72: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #73: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #74: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #75: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #76: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #77: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #78: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #79: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #80: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #81: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #82: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #83: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #84: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #85: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #86: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #87: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #88: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #89: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #90: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #91: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+      #92: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+
+Vulnerability #3: GO-2026-6613
+    HTTP/1 server connection desynchronization after 2xx CONNECT response in
+    net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6613
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #2: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #3: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #4: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #5: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #6: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #7: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #8: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #9: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #10: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #11: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #12: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #13: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #14: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #15: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #16: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #17: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #18: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #19: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #20: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #21: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #22: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #23: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #24: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #25: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+
+Vulnerability #4: GO-2026-6612
+    Double flow control refund on HTTP/2 server streams in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6612
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #2: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #3: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #4: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #5: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #6: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #7: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #8: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #9: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #10: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #11: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #12: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #13: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #14: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #15: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #16: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #17: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #18: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #19: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #20: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #21: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #22: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #23: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #24: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #25: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #26: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #27: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #28: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #29: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #30: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #31: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #32: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #33: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #34: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #35: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #36: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #37: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #38: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #39: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #40: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #41: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #42: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #43: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #44: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #45: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #46: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #47: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #48: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #49: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #50: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #51: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #52: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #53: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #54: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #55: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #56: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #57: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #58: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #59: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #60: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #61: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #62: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #63: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #64: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #65: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #66: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #67: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #68: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #69: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #70: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #71: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #72: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #73: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #74: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #75: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #76: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #77: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #78: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #79: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #80: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #81: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #82: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #83: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #84: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #85: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #86: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #87: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #88: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #89: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #90: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #91: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+      #92: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+
+Vulnerability #5: GO-2026-6611
+    Excessive CPU consumption from repeated initial window changes in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6611
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #2: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #3: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #4: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #5: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #6: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #7: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #8: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #9: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #10: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #11: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #12: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #13: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #14: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #15: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #16: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #17: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #18: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #19: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #20: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #21: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #22: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #23: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #24: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #25: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #26: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #27: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #28: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #29: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #30: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #31: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #32: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #33: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #34: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #35: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #36: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #37: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #38: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #39: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #40: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #41: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #42: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #43: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #44: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #45: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #46: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #47: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #48: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #49: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #50: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #51: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #52: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #53: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #54: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #55: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #56: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #57: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #58: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #59: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #60: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #61: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #62: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #63: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #64: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #65: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #66: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #67: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #68: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #69: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #70: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #71: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #72: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #73: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #74: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #75: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #76: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #77: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #78: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #79: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #80: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #81: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #82: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #83: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #84: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #85: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #86: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #87: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #88: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #89: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #90: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #91: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+      #92: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+
+Vulnerability #6: GO-2026-6608
+    Memory limit bypass when parsing MIME headers in net/textproto,
+    mime/multipart
+  More info: https://pkg.go.dev/vuln/GO-2026-6608
+  Standard library
+    Found in: net/textproto@go1.26
+    Fixed in: net/textproto@go1.26.9
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls textproto.Reader.ReadMIMEHeader
+
+Vulnerability #7: GO-2026-6607
+    Reject malformed ECH outer extension references in crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-6607
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.9
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Read
+      #2: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Write
+
+Vulnerability #8: GO-2026-6603
+    HTTP/2 server memory exhaustion due to Trailer headers in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6603
+  Standard library
+    Found in: net/http@go1.26
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+      #1: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #2: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.CanonicalHeaderKey
+      #3: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #4: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.HandleFunc
+      #5: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #6: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Header.Add
+      #7: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #8: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Del
+      #9: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #10: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.Header.Get
+      #11: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #12: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.ReadResponse
+      #13: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #14: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Request.Write
+      #15: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #16: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.Response.Write
+      #17: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #18: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Close
+      #19: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #20: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.body.Read
+      #21: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #22: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.bodyEOFSignal.Close
+      #23: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #24: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyEOFSignal.Read
+      #25: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #26: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bodyLocked.Read
+      #27: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #28: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.bufioFlushWriter.Write
+      #29: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #30: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.cancelTimerBody.Close
+      #31: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #32: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.cancelTimerBody.Read
+      #33: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #34: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.gzipReader.Close
+      #35: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #36: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.gzipReader.Read
+      #37: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #38: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ConnectionError.Error
+      #39: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #40: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2ErrCode.String
+      #41: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #42: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameHeader.String
+      #43: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #44: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2FrameType.String
+      #45: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #46: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2GoAwayError.Error
+      #47: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #48: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2Setting.String
+      #49: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #50: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2SettingID.String
+      #51: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #52: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2StreamError.Error
+      #53: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #54: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+      #55: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #56: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2chunkWriter.Write
+      #57: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #58: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2connError.Error
+      #59: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #60: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+      #61: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #62: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2gzipReader.Close
+      #63: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #64: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2gzipReader.Read
+      #65: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #66: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldNameError.Error
+      #67: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #68: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2headerFieldValueError.Error
+      #69: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #70: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2pseudoHeaderError.Error
+      #71: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #72: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2stickyErrWriter.Write
+      #73: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #74: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls http.http2transportResponseBody.Close
+      #75: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #76: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.http2transportResponseBody.Read
+      #77: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #78: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.http2writeData.String
+      #79: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #80: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConn.Read
+      #81: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #82: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.ReadFrom
+      #83: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #84: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.persistConnWriter.Write
+      #85: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #86: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Close
+      #87: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #88: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readTrackingBody.Read
+      #89: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #90: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls http.readWriteCloserBody.Read
+      #91: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+      #92: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls http.transportReadFromServerError.Error
+
+Vulnerability #9: GO-2026-6090
+    Limit handshake messages we are willing to accept post-handshake in
+    crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-6090
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.6
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Read
+      #2: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Write
+
+Vulnerability #10: GO-2026-5972
+    Enforce maximum recursion depth in encoding/asn1
+  More info: https://pkg.go.dev/vuln/GO-2026-5972
+  Standard library
+    Found in: encoding/asn1@go1.26
+    Fixed in: encoding/asn1@go1.26.6
+    Example traces found:
+      #1: proof.go:105:41: releaseproof.NewVerifier calls root.NewTrustedRootFromJSON, which eventually calls asn1.Unmarshal
+      #2: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls asn1.UnmarshalWithParams
+
+Vulnerability #11: GO-2026-5856
+    Invoking Encrypted Client Hello privacy leak in crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-5856
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.5
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Read
+      #2: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Write
+
+Vulnerability #12: GO-2026-5039
+    Arbitrary inputs are included in errors without any escaping in
+    net/textproto
+  More info: https://pkg.go.dev/vuln/GO-2026-5039
+  Standard library
+    Found in: net/textproto@go1.26
+    Fixed in: net/textproto@go1.26.4
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls textproto.Reader.ReadMIMEHeader
+
+Vulnerability #13: GO-2026-5037
+    Inefficient candidate hostname parsing in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-5037
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.4
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.Verify
+      #2: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.VerifyHostname
+      #3: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls x509.HostnameError.Error
+
+Vulnerability #14: GO-2026-4971
+    Panic in Dial and LookupPort when handling NUL byte on Windows in net
+  More info: https://pkg.go.dev/vuln/GO-2026-4971
+  Standard library
+    Found in: net@go1.26
+    Fixed in: net@go1.26.3
+    Example traces found:
+      #1: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls net.Dialer.DialContext
+
+Vulnerability #15: GO-2026-4947
+    Unexpected work during chain building in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4947
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.2
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.Verify
+
+Vulnerability #16: GO-2026-4946
+    Inefficient policy validation in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4946
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.2
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.Verify
+
+Vulnerability #17: GO-2026-4870
+    Unauthenticated TLS 1.3 KeyUpdate record can cause persistent connection
+    retention and DoS in crypto/tls
+  More info: https://pkg.go.dev/vuln/GO-2026-4870
+  Standard library
+    Found in: crypto/tls@go1.26
+    Fixed in: crypto/tls@go1.26.2
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Read
+      #2: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls tls.Conn.Write
+
+Vulnerability #18: GO-2026-4866
+    Case-sensitive excludedSubtrees name constraints cause Auth Bypass in
+    crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4866
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.2
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.Verify
+
+Vulnerability #19: GO-2026-4865
+    JsBraceDepth Context Tracking Bugs (XSS) in html/template
+  More info: https://pkg.go.dev/vuln/GO-2026-4865
+  Standard library
+    Found in: html/template@go1.26
+    Fixed in: html/template@go1.26.2
+    Example traces found:
+      #1: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls template.Error.Error
+      #2: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls template.Template.Funcs
+      #3: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls template.Template.Parse
+      #4: proof.go:107:26: releaseproof.NewVerifier calls fmt.Errorf, which eventually calls template.context.String
+
+Vulnerability #20: GO-2026-4602
+    FileInfo can escape from a Root in os
+  More info: https://pkg.go.dev/vuln/GO-2026-4602
+  Standard library
+    Found in: os@go1.26
+    Fixed in: os@go1.26.1
+    Example traces found:
+      #1: proof.go:24:2: releaseproof.init calls verify.init, which eventually calls os.ReadDir
+
+Vulnerability #21: GO-2026-4601
+    Incorrect parsing of IPv6 host literals in net/url
+  More info: https://pkg.go.dev/vuln/GO-2026-4601
+  Standard library
+    Found in: net/url@go1.26
+    Fixed in: net/url@go1.26.1
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls url.Parse
+
+Vulnerability #22: GO-2026-4600
+    Panic in name constraint checking for malformed certificates in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4600
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.1
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.Verify
+
+Vulnerability #23: GO-2026-4599
+    Incorrect enforcement of email constraints in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-4599
+  Standard library
+    Found in: crypto/x509@go1.26
+    Fixed in: crypto/x509@go1.26.1
+    Example traces found:
+      #1: proof.go:216:29: releaseproof.Verifier.verifyEntity calls verify.Verifier.Verify, which eventually calls x509.Certificate.Verify
+
+Your code is affected by 23 vulnerabilities from the Go standard library.
+This scan also found 23 vulnerabilities in packages you import and 2
+vulnerabilities in modules you require, but your code doesn't appear to call
+these vulnerabilities.
+Use '-show verbose' for more details.

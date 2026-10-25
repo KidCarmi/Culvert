@@ -1,0 +1,6 @@
+ok  	github.com/KidCarmi/Culvert/internal/feedsync	15.145s
+ok  	github.com/KidCarmi/Culvert/internal/catdb	184.701s
+ok  	github.com/KidCarmi/Culvert/internal/storeguard	1.198s
+ok  	github.com/KidCarmi/Culvert/internal/logstore	196.261s
+ok  	github.com/KidCarmi/Culvert/internal/shutdown	3.373s
+ok  	github.com/KidCarmi/Culvert/internal/fileutil	1.140s

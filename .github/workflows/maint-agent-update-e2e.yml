@@ -24,6 +24,7 @@ on:
     paths:
       - "test/e2e/**"
       - "cmd/culvert-maint/**"
+      - "pkg/releaseproof/**"
       - "packaging/**"
       - "docker-compose*.yml"
       - "Dockerfile*"
@@ -173,6 +174,10 @@ jobs:
           STATE_DIR="$RUNNER_TEMP/maint-e2e/state"
           SOCK_PATH="$RUNNER_TEMP/maint-e2e/agent.sock"
           mkdir -p "$PROJECT_DIR" "$STATE_DIR"
+          go run ./test/e2e/release-proof-fixture --output "$RUNNER_TEMP/release-proof" \
+            --ref 'prior=${{ steps.images.outputs.d1_ref }}' --ref 'current=${{ steps.images.outputs.d2_ref }}'
+          sudo install -d -m 0755 /etc/culvert-release-fixture
+          sudo install -m 0644 "$RUNNER_TEMP/release-proof/keyring.json" /etc/culvert-release-fixture/keyring.json
 
           # The agent chdir's into compose_project_dir for every docker call, so
           # the compose file must live there under the configured bare filename.
@@ -268,11 +273,14 @@ jobs:
           SOCK_PATH="${{ steps.cfg.outputs.sock_path }}"
           TARGET_REF="${{ steps.images.outputs.d2_ref }}"
 
+          printf '{"image_ref":"%s"}' "$TARGET_REF" | python3 test/e2e/release-proof-fixture/request.py \
+            --proofs "$RUNNER_TEMP/release-proof/proofs.json" --prior '${{ steps.images.outputs.d1_ref }}' > "$RUNNER_TEMP/release-proof/apply.json"
+
           # POST /v1/upgrades/apply -> 202 Accepted with {"op_id": "...", ...}.
           APPLY_RESP="$(curl -fsS --unix-socket "$SOCK_PATH" \
             -H 'Content-Type: application/json' \
             -X POST \
-            -d "{\"image_ref\":\"$TARGET_REF\"}" \
+            --data-binary @"$RUNNER_TEMP/release-proof/apply.json" \
             http://localhost/v1/upgrades/apply)"
           echo "apply response: $APPLY_RESP"
 

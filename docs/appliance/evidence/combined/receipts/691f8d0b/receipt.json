@@ -1,0 +1,258 @@
+{
+  "commit": "691f8d0b3109f0914fcec0d47ebf0ab79888f60c",
+  "tree": "c7a90de8f2407c026a00c8e11e4e2d96aab48e09",
+  "clean_before": true,
+  "clean_after": true,
+  "status_before": "",
+  "status_after": "",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "go_env": {
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOTOOLCHAIN": "auto"
+  },
+  "host": {
+    "kernel": "6.18.44-fc-v153",
+    "machine": "x86_64",
+    "cpus": 4
+  },
+  "commands": [
+    {
+      "n": 1,
+      "command": "go version && (cd cmd/culvert-maint && go version) && ~/go/bin/golangci-lint version && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck -version | head -3 && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH node --version && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm --version",
+      "exit": 0,
+      "seconds": 0.698,
+      "log": "1.log",
+      "log_sha256": "6479c013b04d558c550952fc0c66f07d95a3fbb1b98292530fb341849585ed8d",
+      "log_bytes": 300
+    },
+    {
+      "n": 2,
+      "command": "git rev-parse df96b738 && git merge-base --is-ancestor df96b738 HEAD && git diff --stat df96b738 HEAD | tail -1 && grep -n '^toolchain' go.mod && grep -n 'golang:1' Dockerfile | head -3",
+      "exit": 0,
+      "seconds": 0.642,
+      "log": "2.log",
+      "log_sha256": "0c7a0096734f9c32536fbf3f621754510d4e74d1a19b76db6764eb3e52f4a5c7",
+      "log_bytes": 405
+    },
+    {
+      "n": 3,
+      "command": "go build ./...",
+      "exit": 0,
+      "seconds": 10.451,
+      "log": "3.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 4,
+      "command": "go vet ./...",
+      "exit": 0,
+      "seconds": 1.644,
+      "log": "4.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 5,
+      "command": "go mod tidy && git diff --exit-code go.mod go.sum",
+      "exit": 0,
+      "seconds": 0.145,
+      "log": "5.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 6,
+      "command": "go test -count=1 -race -shuffle=on -run 'TestFB1_|TestFB2_|TestLoadedRosterRole|TestRosterLoad|SECRBAC|SECUISESS|CategoryFeed|CatFeed|APIURLCatFeedStatus|SECREVOKE1|AccessCIDR|Readiness_Posture' .",
+      "exit": 0,
+      "seconds": 129.487,
+      "log": "6.log",
+      "log_sha256": "d368e2c3d7123301d95773f7c70cb980f582d8973f1625e6dc0cdf558c8549da",
+      "log_bytes": 41
+    },
+    {
+      "n": 7,
+      "command": "go test -race -count=2 -shuffle=on ./internal/feedsync/ ./internal/catdb/ ./internal/storeguard/ ./internal/logstore/ ./internal/shutdown/",
+      "exit": 0,
+      "seconds": 183.804,
+      "log": "7.log",
+      "log_sha256": "7711fa66c354ee59c7727fb7524c70d4d62e6962416964b282a39accc128733a",
+      "log_bytes": 294
+    },
+    {
+      "n": 8,
+      "command": "go test -race -count=2 -shuffle=on -run 'WriteAbandoned|CatFeed|CategoryFeed|Shutdown|SECUISESS|UISess|Cookie|Session|Logout' .",
+      "exit": 0,
+      "seconds": 168.799,
+      "log": "8.log",
+      "log_sha256": "8ab91139fe049d354c26a4e67eb8ee5884ab598f22206d8a35b72061fbeb9a87",
+      "log_bytes": 42
+    },
+    {
+      "n": 9,
+      "command": "go test -race -count=1 -run 'Install|Appliance|ClamAV|OSUpdate|Maint|Deploy|Toolchain' .",
+      "exit": 0,
+      "seconds": 29.199,
+      "log": "9.log",
+      "log_sha256": "5acfb7b66e7767072023f57f7acdf2eb6b7a3aeecb43b1e7a72f8dc029a115eb",
+      "log_bytes": 41
+    },
+    {
+      "n": 10,
+      "command": "go test -count=1 ./...",
+      "exit": 0,
+      "seconds": 409.446,
+      "log": "10.log",
+      "log_sha256": "cdb7b277490f19b565d5b81aba0051c99af36195d11a27f854eaaef03525ceed",
+      "log_bytes": 7377
+    },
+    {
+      "n": 11,
+      "command": "cd cmd/culvert-maint && go vet ./... && go test -count=1 -race ./...",
+      "exit": 0,
+      "seconds": 20.891,
+      "log": "11.log",
+      "log_sha256": "0d2ac9a16c945f80a4a5a795e6e48f9db548aecf8aad3db588c1ef73dd7b25ef",
+      "log_bytes": 449
+    },
+    {
+      "n": 12,
+      "command": "PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH make api-verify",
+      "exit": 0,
+      "seconds": 16.265,
+      "log": "12.log",
+      "log_sha256": "8750e9af50fc7bcca3210bd558582287476f612c7b28f694afcb480fd820fb5a",
+      "log_bytes": 513
+    },
+    {
+      "n": 13,
+      "command": "cd frontend && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm ci --ignore-scripts && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm install --package-lock-only --ignore-scripts && git diff --exit-code package-lock.json package.json && PATH=/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/node24/bin:$PATH npm run verify",
+      "exit": 0,
+      "seconds": 90.001,
+      "log": "13.log",
+      "log_sha256": "d8ccd24e0ac2e1249eb1bdc9d554e1b4edf0c07f506c6e8d516834d71da1b36c",
+      "log_bytes": 3062
+    },
+    {
+      "n": 14,
+      "command": "~/go/bin/golangci-lint run --new-from-rev df96b738 --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 3.776,
+      "log": "14.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 15,
+      "command": "cd cmd/culvert-maint && ~/go/bin/golangci-lint run --new-from-rev df96b738 --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 0.933,
+      "log": "15.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 16,
+      "command": "cd pkg/releaseproof && ~/go/bin/golangci-lint run --new-from-rev df96b738 --max-issues-per-linter=0 --max-same-issues=0 --timeout 20m ./...",
+      "exit": 0,
+      "seconds": 0.825,
+      "log": "16.log",
+      "log_sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47",
+      "log_bytes": 10
+    },
+    {
+      "n": 17,
+      "command": "shellcheck -S warning appliance/provision/culvert-clamav-image appliance/os-maintenance/culvert-os-update packaging/culvert-maint/install.sh",
+      "exit": 0,
+      "seconds": 0.629,
+      "log": "17.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 18,
+      "command": "bash appliance/os-maintenance/power_test.sh",
+      "exit": 0,
+      "seconds": 4.121,
+      "log": "18.log",
+      "log_sha256": "dcd6fe4000db9231109894c894186c6b6bf4b1f3ba8a040f7bce8823ce80debc",
+      "log_bytes": 71
+    },
+    {
+      "n": 19,
+      "command": "bash appliance/build/boot-splash_test.sh",
+      "exit": 0,
+      "seconds": 3.136,
+      "log": "19.log",
+      "log_sha256": "cce4b14b7b083f4c609883c0bc15ce659e2e1a9b7e614d6d36e6071856b89e8c",
+      "log_bytes": 137
+    },
+    {
+      "n": 20,
+      "command": "/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck ./...",
+      "exit": 0,
+      "seconds": 5.463,
+      "log": "20.log",
+      "log_sha256": "b5ae54ddcfa4cb39e85f84ad2d9e43556bd817c480eaab2a71bab63bfc29353b",
+      "log_bytes": 299
+    },
+    {
+      "n": 21,
+      "command": "cd cmd/culvert-maint && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck ./...",
+      "exit": 3,
+      "seconds": 7.097,
+      "log": "21.log",
+      "log_sha256": "bd60a3100ae98ecd6b34fc8393e79f53c89dd57b5e81a03f6e7420167d815ca0",
+      "log_bytes": 86820
+    },
+    {
+      "n": 22,
+      "command": "cd pkg/releaseproof && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/govulncheck ./...",
+      "exit": 3,
+      "seconds": 6.6,
+      "log": "22.log",
+      "log_sha256": "fcd1a8e26ce6fc9eae483fa214152ce5c73dd6ce3b6c141ffa9d3d519c155cee",
+      "log_bytes": 60409
+    },
+    {
+      "n": 23,
+      "command": "/tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/gosec -quiet -exclude=G104,G302,G304,G703,G704 ./...",
+      "exit": 0,
+      "seconds": 25.061,
+      "log": "23.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 24,
+      "command": "cd cmd/culvert-maint && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/gosec -quiet -exclude=G104,G302,G304,G703,G704 ./...",
+      "exit": 0,
+      "seconds": 1.488,
+      "log": "24.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 25,
+      "command": "cd pkg/releaseproof && /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/bin127/gosec -quiet -exclude=G104,G302,G304,G703,G704 ./...",
+      "exit": 0,
+      "seconds": 0.38,
+      "log": "25.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_bytes": 0
+    },
+    {
+      "n": 26,
+      "command": "~/go/bin/gitleaks detect --no-banner --redact --log-opts=df96b738..HEAD",
+      "exit": 0,
+      "seconds": 5.137,
+      "log": "26.log",
+      "log_sha256": "422a052294c18da73995ebab06bbbf5287190b25fe536c94059bd80c946f651a",
+      "log_bytes": 188
+    }
+  ],
+  "all_exit_zero": false
+}

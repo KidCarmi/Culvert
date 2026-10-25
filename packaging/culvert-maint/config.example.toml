@@ -53,6 +53,10 @@ socket_path = "/run/culvert-maint/culvert-maint.sock"
 # State directory root: audit log, per-op logs, optional state.json.
 state_dir = "/var/lib/culvert-maint"
 
+# Docker's data root (images, containerd content, container state). The
+# upgrade preflight refuses a pull that would not fit here.
+docker_root = "/var/lib/docker"
+
 # Privilege mode:
 #   "sudoers"          — production default. Agent prepends `sudo -n` to
 #                        every docker compose invocation; the sudoers
@@ -69,6 +73,10 @@ privilege_mode = "sudoers"
 # proxy port has been remapped or fronted by a TLS terminator.
 health_base_url = "http://127.0.0.1:8080"
 health_path = "/health"
+# A query is honoured (e.g. "/ready?strict=1"), but strict makes every
+# report-only row a rollback trigger, external-dependency rows included.
+# The default gate is /ready 2xx + the rows that were ok before the
+# upgrade (docs/appliance/upgrade-runbook.md).
 ready_path = "/ready"
 
 # Hard ceiling on a single operation. Exceeding triggers cancel +
@@ -107,3 +115,15 @@ image_allowlist = '^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{
 # same repository as image_allowlist (install.sh refuses a mismatch).
 # Default: ghcr.io/kidcarmi/culvert.
 proxy_repo = "ghcr.io/kidcarmi/culvert"
+
+# Classify interrupted operations (crash-recovery journal) against Docker truth
+# at startup and auto-resolve ONLY the non-mutating verdicts: a safe-boundary
+# no-op (the pinned tag never advanced) and the adoption of a target that is
+# already live AND passes the health probe. Everything else — a tag advanced
+# but the container not restarted (TAG HAZARD), an unhealthy target, a data
+# rollback, an unreadable record — is surfaced on GET /v1/status
+# (interrupted_operations, attention_required) for an explicit
+# POST /v1/reconcile/{op_id} {"action":"resolve"|"dismiss"}. false ⇒ mark-only
+# (ops are marked failed(agent_restart_interrupted) and nothing is inspected).
+# Default when absent: true.
+reconcile_on_startup = true

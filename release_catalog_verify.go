@@ -212,10 +212,20 @@ func LoadVerifiedCatalog(src SignedCatalogSource, trust TrustStore) (*Catalog, e
 	if err != nil {
 		return nil, fmt.Errorf("release catalog: read index: %w", err)
 	}
-	if err := verifyIndexSignature(idxBytes, src, trust); err != nil {
+	if len(idxBytes) > catalogMaxReadBytes {
+		return nil, errors.New("release catalog: index exceeds size bound")
+	}
+	idxBytes = append([]byte(nil), idxBytes...)
+	capture := &catalogProofCapture{SignedCatalogSource: src, manifests: make(map[string][]byte)}
+	if err := verifyIndexSignature(idxBytes, capture, trust); err != nil {
 		return nil, err
 	}
-	return loadCatalogFromIndexBytes(idxBytes, src)
+	cat, err := loadCatalogFromIndexBytes(idxBytes, capture)
+	if err != nil {
+		return nil, err
+	}
+	cat.proof = capture.snapshot(idxBytes)
+	return cat, nil
 }
 
 // schemeOutcome is the tri-state result of consulting one configured trust scheme

@@ -1,0 +1,223 @@
+ok  	github.com/KidCarmi/Culvert	414.739s
+?   	github.com/KidCarmi/Culvert/cmd/apibundle	[no test files]
+?   	github.com/KidCarmi/Culvert/cmd/catalogfetch	[no test files]
+ok  	github.com/KidCarmi/Culvert/cmd/cireport	0.301s
+ok  	github.com/KidCarmi/Culvert/cmd/culvert-access	0.350s
+ok  	github.com/KidCarmi/Culvert/cmd/culvert-console	13.560s
+?   	github.com/KidCarmi/Culvert/cmd/mcp-observe-acceptance	[no test files]
+ok  	github.com/KidCarmi/Culvert/cmd/rootshard	36.343s
+?   	github.com/KidCarmi/Culvert/frontend/node_modules/flatted/golang/pkg/flatted	[no test files]
+ok  	github.com/KidCarmi/Culvert/internal/admission	0.364s
+ok  	github.com/KidCarmi/Culvert/internal/alerts	0.293s
+ok  	github.com/KidCarmi/Culvert/internal/apicontract	0.250s
+ok  	github.com/KidCarmi/Culvert/internal/applianceaccess	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/applianceconsole	0.302s
+ok  	github.com/KidCarmi/Culvert/internal/appliancehost	0.029s
+ok  	github.com/KidCarmi/Culvert/internal/audit	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/authcost	0.019s
+ok  	github.com/KidCarmi/Culvert/internal/authstate	0.084s
+ok  	github.com/KidCarmi/Culvert/internal/autoexclude	0.016s
+ok  	github.com/KidCarmi/Culvert/internal/backupcrypt	5.042s
+ok  	github.com/KidCarmi/Culvert/internal/bandwidth	0.022s
+ok  	github.com/KidCarmi/Culvert/internal/blocklist	0.497s
+ok  	github.com/KidCarmi/Culvert/internal/blocklistfeed	0.015s
+ok  	github.com/KidCarmi/Culvert/internal/blockpage	0.006s
+ok  	github.com/KidCarmi/Culvert/internal/bootstrap	7.072s
+ok  	github.com/KidCarmi/Culvert/internal/ca	1.033s
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f92790ea286: runtime error: invalid memory address or nil pointer dereference"
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f92790da286: runtime error: invalid memory address or nil pointer dereference"
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f92790da286: runtime error: invalid memory address or nil pointer dereference"
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f92790da286: runtime error: invalid memory address or nil pointer dereference"
+--- FAIL: TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot (0.05s)
+    resilient_test.go:485: boot 2 did not recover via the poison marker; output:
+        child: returned err=During db.vlog.open err: Error while creating log file in valueLog.open err: while opening file: /tmp/TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot1638009061/001/catfeeddb/000001.vlog err: fallocate /tmp/TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot1638009061/001/catfeeddb/000001.vlog: no space left on device
+        while reserving 268435456 bytes for /tmp/TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot1638009061/001/catfeeddb/000001.vlog quarantined=true trigger=poison_marker
+        PASS
+FAIL
+FAIL	github.com/KidCarmi/Culvert/internal/catdb	9.979s
+ok  	github.com/KidCarmi/Culvert/internal/catgroup	0.165s
+ok  	github.com/KidCarmi/Culvert/internal/catoverride	0.059s
+ok  	github.com/KidCarmi/Culvert/internal/clamav	10.918s
+ok  	github.com/KidCarmi/Culvert/internal/clientclass	0.004s
+ok  	github.com/KidCarmi/Culvert/internal/configver	0.018s
+ok  	github.com/KidCarmi/Culvert/internal/connlimit	0.126s
+ok  	github.com/KidCarmi/Culvert/internal/decryptobs	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/decryptprofile	0.147s
+ok  	github.com/KidCarmi/Culvert/internal/feedsched	0.005s
+FeedSync: starting UT1 sync from http://127.0.0.1:34219
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:34219
+FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)
+CatFeedDB: memory fault reading the community category store — Layer-2 categorisation is now OFF for the life of this process, Layer 1 is unaffected; the data volume is damaged or has gone away: "storeguard: memory fault reading the store's mapped file at 0x7f37337f8286: runtime error: invalid memory address or nil pointer dereference"
+FeedSync: starting UT1 sync from http://127.0.0.1:41773
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:41773
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:41773
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:41773
+FeedSync: community category store is degraded after a memory fault; skipping the sync until this node restarts
+FeedSync: starting UT1 sync from http://127.0.0.1:44573
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:46231
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:46231
+FeedSync: starting UT1 sync from http://127.0.0.1:43847
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): process killed mid-import
+FeedSync: starting UT1 sync from http://127.0.0.1:43847
+FeedSync: parsed 51 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 51 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:40411
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 31 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:44109
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:37269
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:37269
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: bulk write failed (import NOT complete; it is retried, and redone at the next start): write failed
+FeedSync: starting UT1 sync from http://127.0.0.1:46375
+FeedSync: parsed 11 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 11 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:46375
+FeedSync: write REFUSED (disk_space): 1 MiB free, a 11-entry write needs about 512 MiB; the previous category data keeps serving
+FeedSync: starting UT1 sync from http://127.0.0.1:46639
+FeedSync: parsed 6 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 6 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:40679
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:40679
+FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:40361
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:40361
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 31 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:34981
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:34981
+FeedSync: a previous import was abandoned mid-write and may still be in flight; refusing further imports until this node restarts (the store is quarantined+rebuilt on the next start)
+FeedSync: starting UT1 sync from http://127.0.0.1:43015
+FeedSync: parsed 31 domain entries, writing to BadgerDB…
+FeedSync: bulk write stalled past 20ms without returning (import NOT complete; the store is rebuilt on the next start)
+--- FAIL: TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen (0.06s)
+    shutdown_subprocess_test.go:313: reopen after exit: cannot create memtable err: newMemTable err: While opening memtable: /tmp/TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen1006517096/001/catfeeddb/00001.mem err: while opening file: /tmp/TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen1006517096/001/catfeeddb/00001.mem err: fallocate /tmp/TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen1006517096/001/catfeeddb/00001.mem: no space left on device
+        while reserving 134217728 bytes for /tmp/TestShutdown_SIGKILLWithAbandonedWriterRecoversOnReopen1006517096/001/catfeeddb/00001.mem
+FeedSync: starting UT1 sync from http://127.0.0.1:42631
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:42631
+FeedSync: starting UT1 sync from http://127.0.0.1:42631
+FeedSync: download/parse failed: HTTP 503 from http://127.0.0.1:42631
+FeedSync: starting UT1 sync from http://127.0.0.1:46217
+FeedSync: download/parse failed: HTTP 418 from http://127.0.0.1:46217
+FeedSync: starting UT1 sync from http://127.0.0.1:33239
+FeedSync: write REFUSED (disk_space): 64 MiB free, a 2-entry write needs about 512 MiB; no community category data is loaded yet (admin-managed categories only)
+FeedSync: starting UT1 sync from http://127.0.0.1:40335
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:41315
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:33921
+FeedSync: parsed 2 domain entries, writing to BadgerDB…
+FeedSync: sync complete: 2 domains in 0s
+FeedSync: starting UT1 sync from http://127.0.0.1:46739
+FeedSync: write REFUSED (disk_space_unknown): free space on the store's filesystem could not be measured; the store holds an incomplete import, so lookups may return a partial set of categories
+FeedSync: starting UT1 sync from http://127.0.0.1:45385
+FeedSync: write REFUSED (disk_space_unknown): free space on the store's filesystem could not be measured; no community category data is loaded yet (admin-managed categories only)
+FAIL
+FAIL	github.com/KidCarmi/Culvert/internal/feedsync	2.744s
+ok  	github.com/KidCarmi/Culvert/internal/fileblock	0.042s
+ok  	github.com/KidCarmi/Culvert/internal/filemagic	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/fileutil	0.077s
+ok  	github.com/KidCarmi/Culvert/internal/geoip	0.004s
+ok  	github.com/KidCarmi/Culvert/internal/halease	4.083s
+ok  	github.com/KidCarmi/Culvert/internal/hashcache	0.180s
+ok  	github.com/KidCarmi/Culvert/internal/hostutil	1.236s
+ok  	github.com/KidCarmi/Culvert/internal/ipsurrogate	0.010s
+ok  	github.com/KidCarmi/Culvert/internal/lockout	0.032s
+ok  	github.com/KidCarmi/Culvert/internal/logsink	1.689s
+ok  	github.com/KidCarmi/Culvert/internal/logstore	30.713s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/adminapi	0.007s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/approval	0.002s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/authn	0.017s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/canary	0.010s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/canonical	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/catalog	0.012s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/cpdp	0.013s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/cpdp/apply	0.014s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/cpdp/publication	0.008s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/credentials/broker	6.694s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/credentials/profile	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/credentials/provider	0.004s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/events	7.783s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/events/denial	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/events/export	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/events/model	0.004s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/events/spool	5.196s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/events/state	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/execution	49.034s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/hostcheck	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/identity	0.007s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/inspection	0.007s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/inspection/destination	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/inspection/dlp	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/inspection/schema	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/jose	0.006s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/jsonrpc	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/limits	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/management	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/mcperr	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/policy	0.026s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/policy/simulate	0.029s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/protocol	0.004s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/registry	0.011s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/rollout	0.144s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/runtime	7.161s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/senderconstraint	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/session	0.004s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/tooltrust	0.153s
+ok  	github.com/KidCarmi/Culvert/internal/mcp/upstreamclient	0.312s
+ok  	github.com/KidCarmi/Culvert/internal/mcpacceptance	0.089s
+ok  	github.com/KidCarmi/Culvert/internal/nodegroup	0.008s
+ok  	github.com/KidCarmi/Culvert/internal/obs	0.019s
+ok  	github.com/KidCarmi/Culvert/internal/ocsp	5.232s
+ok  	github.com/KidCarmi/Culvert/internal/otlp	0.028s
+ok  	github.com/KidCarmi/Culvert/internal/pac	0.802s
+ok  	github.com/KidCarmi/Culvert/internal/plugin	0.008s
+ok  	github.com/KidCarmi/Culvert/internal/policylearn	13.414s
+ok  	github.com/KidCarmi/Culvert/internal/redaction	0.059s
+ok  	github.com/KidCarmi/Culvert/internal/reqlog	2.878s
+ok  	github.com/KidCarmi/Culvert/internal/rewrite	0.083s
+ok  	github.com/KidCarmi/Culvert/internal/saasfeed	0.008s
+ok  	github.com/KidCarmi/Culvert/internal/scanexcl	0.018s
+ok  	github.com/KidCarmi/Culvert/internal/scanner	6.831s
+ok  	github.com/KidCarmi/Culvert/internal/sealbox	0.021s
+ok  	github.com/KidCarmi/Culvert/internal/secret	3.104s
+ok  	github.com/KidCarmi/Culvert/internal/secscan	15.883s
+ok  	github.com/KidCarmi/Culvert/internal/session	0.240s
+ok  	github.com/KidCarmi/Culvert/internal/shutdown	1.166s
+ok  	github.com/KidCarmi/Culvert/internal/sse	0.002s
+ok  	github.com/KidCarmi/Culvert/internal/sslbypass	0.005s
+ok  	github.com/KidCarmi/Culvert/internal/ssrf	5.674s
+ok  	github.com/KidCarmi/Culvert/internal/storeguard	0.057s
+ok  	github.com/KidCarmi/Culvert/internal/support	0.018s
+ok  	github.com/KidCarmi/Culvert/internal/supportmetrics	0.004s
+ok  	github.com/KidCarmi/Culvert/internal/supportupload	0.008s
+ok  	github.com/KidCarmi/Culvert/internal/syslog	1.199s
+ok  	github.com/KidCarmi/Culvert/internal/threatfeed	1.902s
+ok  	github.com/KidCarmi/Culvert/internal/totp	0.003s
+ok  	github.com/KidCarmi/Culvert/internal/uitls	0.461s
+ok  	github.com/KidCarmi/Culvert/internal/upstream	0.067s
+ok  	github.com/KidCarmi/Culvert/internal/urlcat	1.160s
+ok  	github.com/KidCarmi/Culvert/internal/urlcatfeed	0.072s
+ok  	github.com/KidCarmi/Culvert/internal/yara	6.416s
+ok  	github.com/KidCarmi/Culvert/test/e2e/release-proof-fixture	0.015s
+FAIL

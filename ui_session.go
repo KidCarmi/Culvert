@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"time"
 )
@@ -19,10 +20,18 @@ const uiSessionCookieName = "ps_ui_session"
 // without this check the cookie NAME — which the caller chooses — was the only
 // thing separating a proxy end user's session from an admin operator's.
 //
-// Read by setUISessionCookie and by classifyUISession. Keep it ONE constant: a
+// Read by setUISessionCookie, readUISessionCookie and classifyUISession. Keep
+// it ONE constant: a
 // second spelling at either site is how the issuer and the gate drift into
 // disagreeing, and the direction that drift fails is open.
 const uiSessionProvider = "local"
+
+// uiSessionAudience is the signed purpose every admin-plane session carries.
+// It is the second, independent discriminator beside uiSessionProvider: the
+// proxy end-user cookie carries no audience, and readSessionCookie refuses any
+// session that does. Both are required by classifyUISession, so a token
+// minted for one plane cannot be replayed into the other in either direction.
+const uiSessionAudience = "culvert-admin-ui"
 
 // isSecureRequest returns true when the request was received over TLS, either
 // directly or via a reverse proxy that set X-Forwarded-Proto: https. Used to
@@ -35,6 +44,7 @@ func setUISessionCookie(w http.ResponseWriter, r *http.Request, username string,
 	s := &Session{
 		Sub:      username,
 		Provider: uiSessionProvider,
+		Audience: uiSessionAudience,
 		Role:     string(role),
 		Exp:      time.Now().Add(getSessionTTL()).Unix(),
 		Jti:      newSessionJti(),
@@ -95,7 +105,7 @@ const (
 // Both call sites now read the verdict from here, and sseAuthStillValid's
 // mid-stream re-check reads it from classifyUISession.
 func resolveUISession(r *http.Request) (*Session, UIRole, uiSessionVerdict) {
-	sess, err := readUISessionCookie(r)
+	sess, err := verifyUISessionCookie(r)
 	if err != nil || sess == nil {
 		// No cookie, or one that failed to verify. Indistinguishable to the
 		// caller by design: a forged or stale cookie must not be treated as
@@ -103,6 +113,9 @@ func resolveUISession(r *http.Request) (*Session, UIRole, uiSessionVerdict) {
 		return nil, "", uiSessionAbsent
 	}
 	role, verdict := classifyUISession(sess)
+	if verdict == uiSessionValid {
+		sess.Role = string(role)
+	}
 	return sess, role, verdict
 }
 
@@ -112,21 +125,39 @@ func resolveUISession(r *http.Request) (*Session, UIRole, uiSessionVerdict) {
 // uiSessionAbsent.
 func classifyUISession(sess *Session) (UIRole, uiSessionVerdict) {
 	// The admin plane is the only minter of this cookie and always stamps
-	// uiSessionProvider; anything else is a token issued for the proxy plane,
-	// whose sessions set no Role and would take sessionRoleOrReject's
-	// pre-RBAC compatibility branch to RoleAdmin.
-	if sess.Provider != uiSessionProvider || !cfg.UIUserExists(sess.Sub) {
+	// uiSessionProvider and uiSessionAudience; anything else is a token issued
+	// for the proxy plane, whose sessions set no Role and would take
+	// sessionRoleOrReject's pre-RBAC compatibility branch to RoleAdmin.
+	if sess.Provider != uiSessionProvider || sess.Audience != uiSessionAudience {
 		return "", uiSessionRefused
 	}
-	role, ok := sessionRoleOrReject(sess.Role)
+	signedRole, ok := sessionRoleOrReject(sess.Role)
 	if !ok {
 		// A signed session naming a role this build does not enroll.
 		return "", uiSessionRefused
 	}
-	return role, uiSessionValid
+	// Bound local sessions by BOTH the signed role and the current roster.
+	// Demotion takes effect immediately; promotion needs a fresh login so an
+	// older low-privilege cookie never silently acquires greater authority.
+	currentRole, exists := cfg.UIUserRole(sess.Sub)
+	if !exists {
+		return "", uiSessionRefused
+	}
+	if signedRole.HasRole(currentRole) {
+		return currentRole, uiSessionValid
+	}
+	return signedRole, uiSessionValid
 }
 
-func readUISessionCookie(r *http.Request) (*Session, error) {
+// errUISessionRefused is readUISessionCookie's answer for a cookie that
+// verified but that classifyUISession refuses.
+var errUISessionRefused = errors.New("session is not an authorized admin UI session")
+
+// verifyUISessionCookie checks only the cookie's signature, expiry and
+// revocation. It makes NO admission decision: resolveUISession and
+// readUISessionCookie both pass its result to classifyUISession, so a refused
+// session stays distinguishable from an absent one (SEC-UISESS-1).
+func verifyUISessionCookie(r *http.Request) (*Session, error) {
 	c, err := r.Cookie(uiSessionCookieName)
 	if err == http.ErrNoCookie {
 		return nil, nil
@@ -135,6 +166,22 @@ func readUISessionCookie(r *http.Request) (*Session, error) {
 		return nil, err
 	}
 	return decodeSession(c.Value)
+}
+
+// readUISessionCookie returns the session only when classifyUISession admits
+// it, with Role bound to the roster. A refused cookie is an error, so callers
+// that need to tell refused from absent must use resolveUISession instead.
+func readUISessionCookie(r *http.Request) (*Session, error) {
+	sess, err := verifyUISessionCookie(r)
+	if err != nil || sess == nil {
+		return sess, err
+	}
+	role, verdict := classifyUISession(sess)
+	if verdict != uiSessionValid {
+		return nil, errUISessionRefused
+	}
+	sess.Role = string(role)
+	return sess, nil
 }
 
 func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {
@@ -152,24 +199,10 @@ func clearUISessionCookie(w http.ResponseWriter, r *http.Request) {
 // sessionRoleOrReject resolves the role carried by a verified session cookie
 // into a role this build can evaluate, or refuses the session outright.
 //
-// THE EMPTY VALUE IS THE ONLY COMPATIBILITY CASE. Sessions minted before the
-// role field existed carry "" and must keep resolving to RoleAdmin — those are
-// pre-RBAC single-admin deployments and narrowing that would lock them out
-// mid-session. Every OTHER unenrolled value is refused.
-//
-// The two used to be one branch (`if !role.HasRole(RoleViewer) { role = RoleAdmin }`),
-// and the predicate does not distinguish them: rolePriority is a map, so an
-// unenrolled key reads as 0 and "" and "read-only" and "Admin" were all equally
-// below viewer — so all of them were promoted to ADMIN. The roster loader's
-// missing role validation (see loadedRosterRole) made that reachable from a
-// restored or hand-edited ui_users.json without forging anything: the value
-// rides a legitimately HMAC-signed cookie the appliance minted itself.
-//
-// Splitting the branch is what makes the compat case narrow enough to keep.
+// Empty is also rejected: legacy role-less UI tokens are indistinguishable
+// from valid proxy-portal tokens, which carry no admin role. Their holders must
+// log in again. Never promote missing or unknown authorization to administrator.
 func sessionRoleOrReject(sessionRole string) (UIRole, bool) {
-	if sessionRole == "" {
-		return RoleAdmin, true // pre-RBAC session, minted before the role field
-	}
 	role := UIRole(sessionRole)
 	if !roleEnrolled(role) {
 		return "", false

@@ -2068,18 +2068,55 @@ func matchSourceAddr(rule *PolicyRule, src *clientSource, identity, authSource s
 	return ipOK && idOK && grpOK && srcOK
 }
 
+// ssoIPSourcePrefix marks the IP-bound sign-in (F-SSO-SCOPE-1) surrogate auth
+// source: "sso-ip:" + the provider's OWN direct source (so the wire value is a
+// nested compound, e.g. "sso-ip:oidc:okta"). It is a DISTINCT source class from
+// a direct provider login — an address-inferred identity must never satisfy a
+// rule scoped to the provider, and a real provider login must never satisfy a
+// rule scoped to the surrogate. proxy.go builds the runtime value from this
+// same constant, so there is one spelling of the prefix.
+const ssoIPSourcePrefix = "sso-ip:"
+
+// matchAuthSource reports whether a rule's AuthSource authorizes an actual
+// authenticated source. The contract (F-SSO-SCOPE-1, resolved): IP-bound
+// sign-in ("sso-ip:<provider-source>") is its own source CLASS, strictly
+// separate from a direct provider login. A rule and the actual source must be
+// the SAME class before any provider-name comparison, so no alias can ever
+// cross the surrogate/direct boundary (no weakened authorization, no wildcard).
+// Within a class the inner provider uses the documented bare<->scheme alias.
 func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
-	if strings.EqualFold(ruleAuthSource, actualAuthSource) {
+	// Class gate FIRST: both surrogate, or both direct. A surrogate source and a
+	// direct source never alias each other, whatever their provider names.
+	ruleInner, ruleSurrogate := strings.CutPrefix(ruleAuthSource, ssoIPSourcePrefix)
+	actInner, actSurrogate := strings.CutPrefix(actualAuthSource, ssoIPSourcePrefix)
+	if ruleSurrogate != actSurrogate {
+		return false
+	}
+	// Exact (case-insensitive) match on the inner source — preserves the
+	// mixed-case scheme match (rule "OIDC:okta" vs "oidc:okta"). The non-empty
+	// guard keeps a provider-less "sso-ip:" scope from matching even an
+	// (unreachable) provider-less surrogate source: fail closed.
+	if ruleInner != "" && strings.EqualFold(ruleInner, actInner) {
 		return true
 	}
-	// Legacy/canonical alias: a bare profile ID ("okta") and its prefixed form
-	// ("oidc:okta") refer to the same provider, so they match. BUT two DIFFERENT
-	// explicit schemes MUST NOT alias — a rule scoped to "oidc:okta" must not
-	// authorize a "saml:okta" source (cross-IdP/cross-scheme confusion). Match
-	// iff the bare names are equal AND the schemes are compatible (either side
-	// bare, or the same scheme).
+	return matchDirectAuthSource(ruleInner, actInner)
+}
+
+// matchDirectAuthSource matches a direct (non-surrogate) IdP source with the
+// documented bare<->scheme provider alias: a bare rule name ("okta") matches
+// any scheme of that provider ("oidc:okta"), while two DIFFERENT explicit
+// schemes MUST NOT alias — a rule scoped to "oidc:okta" must not authorize a
+// "saml:okta" source (cross-IdP/cross-scheme confusion). Applied to the inner
+// provider of a surrogate too, so "sso-ip:okta" matches "sso-ip:oidc:okta"
+// (same provider, unspecified inner scheme) while "sso-ip:oidc:okta" still
+// refuses "sso-ip:saml:okta". An empty provider name (e.g. a bare "sso-ip:"
+// scope naming no provider) matches nothing — fail closed.
+func matchDirectAuthSource(ruleAuthSource, actualAuthSource string) bool {
 	ruleScheme, ruleName := splitIdPSource(ruleAuthSource)
 	actScheme, actName := splitIdPSource(actualAuthSource)
+	if ruleName == "" || actName == "" {
+		return false
+	}
 	if !strings.EqualFold(ruleName, actName) {
 		return false
 	}

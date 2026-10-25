@@ -1,0 +1,17 @@
+#!/bin/sh
+# Exit 0 when the machine has a display controller, 1 when it does not: a PCI
+# VGA-compatible (0x0300xx) or other display (0x0380xx) device. A serial-only VM
+# has none; ESXi's SVGA and any emulated VGA are 0x0300. 3D controllers
+# (0x0302, compute GPUs) and XGA (0x0301) drive no console. The kernel's console
+# driver cannot tell the two cases apart: it registers its VGA text console even
+# with no adapter.
+#
+# ExecCondition= of the Plymouth boot and shutdown units: a splash nobody can see
+# would switch kernel console output off for every console, serial included. The
+# same test runs in the initramfs (culvert-splash-message); keep the two
+# identical (boot-splash_test.sh runs both against the same sysfs trees).
+for class in /sys/bus/pci/devices/*/class; do
+    [ -r "$class" ] || continue
+    case "$(cat "$class" 2>/dev/null)" in 0x0300*|0x0380*) exit 0 ;; esac
+done
+exit 1

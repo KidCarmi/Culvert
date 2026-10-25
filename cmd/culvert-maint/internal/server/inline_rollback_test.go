@@ -299,7 +299,7 @@ func TestInlineRollback_StageParity(t *testing.T) {
 	}
 
 	// Standalone: capture_before + core + report.
-	stand := names(srv.buildImageRollbackStages(repo + "@sha256:" + digNew))
+	stand := names(srv.buildImageRollbackStages(repo+"@sha256:"+digNew, &rollbackAccumulator{}))
 	if !containsSubsequence(stand, wantCore) {
 		t.Errorf("standalone stages %v must contain the shared core %v in order", stand, wantCore)
 	}

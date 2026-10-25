@@ -1,0 +1,9 @@
+ok  	github.com/crewjam/saml	5.586s
+?   	github.com/crewjam/saml/example	[no test files]
+?   	github.com/crewjam/saml/example/idp	[no test files]
+?   	github.com/crewjam/saml/example/trivial	[no test files]
+?   	github.com/crewjam/saml/logger	[no test files]
+ok  	github.com/crewjam/saml/samlidp	0.453s
+ok  	github.com/crewjam/saml/samlsp	0.099s
+?   	github.com/crewjam/saml/testsaml	[no test files]
+ok  	github.com/crewjam/saml/xmlenc	0.048s

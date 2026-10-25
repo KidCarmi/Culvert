@@ -1,0 +1,2 @@
+client=29.9.0 server=29.9.0
+github.com/docker/buildx v0.38.0 0dbe87f36ed472fe36b6796c3f70b4210a731fc5

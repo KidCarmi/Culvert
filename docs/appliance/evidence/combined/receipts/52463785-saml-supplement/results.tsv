@@ -1,0 +1,2 @@
+1	0	1792856859.769213470	1792856859.830318091	python3 --version && PYTHONDONTWRITEBYTECODE=1 python3 appliance/artifact-audit/verify_saml_patch.py
+2	0	1792856859.833295250	1792856860.191786627	cd appliance/artifact-audit && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_saml_patch

@@ -41,6 +41,13 @@ image_allowlist = "^127\\.0\\.0\\.1:5000/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-
 # `user: <runner-uid>` and host userns is off in CI, so the peer uid matches).
 allow_peers = ["@@RUNNER_UID@@"]
 
+# Release evidence (TEST-ONLY trust): the agent verifies every apply/rollback
+# against signed catalog evidence for the target AND the running baseline. The
+# catalog repo is the local registry repo, and the keyring holds this run's
+# PUBLIC catalog key (root-controlled path, installed by the workflow).
+release_catalog_repo = "127.0.0.1:5000/culvert"
+release_trust_keys = "/etc/culvert-e2e-catalog/keyring.json"
+
 # Health gate target: the proxy data-plane port published on host loopback.
 health_base_url = "http://127.0.0.1:8080"
 health_path = "/health"

@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/KidCarmi/Culvert/internal/feedsync"
 	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
@@ -58,6 +59,12 @@ type catFeedDBHealth struct {
 	// the open — including any this boot created. Non-zero is the operator's
 	// cue that there is disk to reclaim and an incident to reconcile.
 	ResidualCopies int
+	// InterruptedImportKept is true when this boot found an interrupted import
+	// (the durable import-pending marker of a process that died mid-import)
+	// but could not quarantine the store, so it opened the partial store as
+	// is. The live syncer starts with zero failures, so without this the row
+	// read "loaded" until the first re-sync failed (ASTRA 5978949299, WS-B 3).
+	InterruptedImportKept bool
 
 	// CHAOS-74 runtime overlay. Every field above describes the BOOT, is
 	// written once by loadCommunityFeedDB and never changes again — which left
@@ -175,6 +182,23 @@ func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 			OperatorAction: "Check the data volume holding the community category store for I/O errors and space; see server logs for the reported cause.",
 		}
 	}
+	// A deferred community sync (F-FEED-1): the store is available and intact,
+	// but the feed import did not complete because the data filesystem is below
+	// the free-space floor (or that free space could not be measured). Reported
+	// after the runtime-fault rows above (an active memory/IO fault is the more
+	// urgent root cause) and before the recovery/healthy rows below.
+	// An abandoned import (F-DISK-RECOVERY-1) is a LATCH, not a transient
+	// failure: every later import is refused until restart. It outranks the
+	// deferral row (a deferral retries on its own; this never does).
+	if c, ok := checkCategoryFeedWriteAbandoned(); ok {
+		return c
+	}
+	if c, ok := checkCategoryFeedDeferral(); ok {
+		return c
+	}
+	if c, ok := checkCategoryFeedUncertified(h.InterruptedImportKept); ok {
+		return c
+	}
 	if h.Recovered {
 		return OperatorContractCheck{
 			Code:   "category_feed_db",
@@ -198,4 +222,112 @@ func categoryFeedDBRow(h catFeedDBHealth) OperatorContractCheck {
 		Status:  diagOK,
 		Message: "community category store loaded",
 	}
+}
+
+// checkCategoryFeedWriteAbandoned reports a community import the watchdog
+// abandoned mid-write (internal/feedsync). The abandoned writer may still hold
+// the store, so no further import runs in this process; the durable
+// import-pending marker makes the next start quarantine the half-written store
+// and re-sync. Without this row the only signal was a generic "write" failure
+// that reads as retryable — it is not.
+func checkCategoryFeedWriteAbandoned() (OperatorContractCheck, bool) {
+	sy := globalUT1FeedSyncer
+	if sy == nil {
+		return OperatorContractCheck{}, false
+	}
+	h := sy.Health()
+	if !h.WriteAbandoned {
+		return OperatorContractCheck{}, false
+	}
+	cause := "the write did not complete within its deadline (typically a full or unresponsive data volume)"
+	if h.WriteAbandonedCause == feedsync.AbandonDegraded {
+		cause = "the store hit a contained memory fault while the write was in progress"
+	}
+	// The abandoned write was into the LIVE store and may still land after it
+	// was abandoned, so the store's content is uncertified until the restart
+	// quarantines it — never claim the earlier data is what serves.
+	coverage := "until then community lookups may return a partial, uncertified mix of earlier and newly written entries"
+	if sy.StoreEmpty() {
+		coverage = "no community category data is loaded yet — category matching uses the admin-managed list only"
+	}
+	return OperatorContractCheck{
+		Code:           "category_feed_db",
+		Status:         diagWarn,
+		Message:        "community category import abandoned mid-write: " + cause + "; further imports are refused until this node restarts; " + coverage,
+		OperatorAction: "Check the data volume (free space, I/O errors, mount), then restart this node: the interrupted import is quarantined at the next start and the feed re-syncs automatically.",
+	}, true
+}
+
+// checkCategoryFeedUncertified reports a store holding an INCOMPLETE import:
+// BeginImport withdrew the completion record and BulkWrite then failed partway
+// (an I/O error that returned, rather than the stall the abandoned row covers),
+// or this boot found a previous run's interrupted import and could not move the
+// half-written store aside (interruptedKept). Lookups then answer from a partial,
+// mixed set of categories until an import completes, and the fall-through used
+// to call that "loaded" (OK) — Workstream B F-B2 and ASTRA 5978949299 item 3.
+//
+// It fires only on evidence that something went wrong — a failed import, or the
+// boot's own record of a kept interrupted import. An import still in progress,
+// or a store whose completion record predates this build and is re-synced at
+// start, is uncertified too but has not failed, and warning on those would flap
+// the row on every ordinary sync. The cheap signals are checked first, so the
+// live store reads (ImportComplete, StoreEmpty) only run once one is present.
+func checkCategoryFeedUncertified(interruptedKept bool) (OperatorContractCheck, bool) {
+	sy := globalUT1FeedSyncer
+	if sy == nil {
+		return OperatorContractCheck{}, false
+	}
+	h := sy.Health()
+	if (h.ConsecutiveFailures == 0 && !interruptedKept) || sy.ImportComplete() || sy.StoreEmpty() {
+		return OperatorContractCheck{}, false
+	}
+	why := fmt.Sprintf("the last %d import attempt(s) failed, last cause: %s", h.ConsecutiveFailures, sanitizeLog(h.LastFailure))
+	if h.ConsecutiveFailures == 0 {
+		why = "a previous run's import was interrupted and this start could not move the partial store aside; it is re-synced now"
+	}
+	return OperatorContractCheck{
+		Code:   "category_feed_db",
+		Status: diagWarn,
+		Message: "community category store holds an incomplete import (" + why +
+			") — community lookups may return a partial set of categories until an import completes; it is retried automatically",
+		OperatorAction: "Check the data volume holding the community category store (free space, I/O errors, permissions) and outbound access to the feed; the import is retried automatically, and a restart re-syncs it from scratch.",
+	}, true
+}
+
+// checkCategoryFeedDeferral reports a category sync the free-space guard
+// deferred (internal/feedsync): below the floor, or free space that could not
+// be measured. A bulk badger write onto a full filesystem SIGBUSes the
+// process (readiness report F-DISK-1), so the write is not attempted; the row
+// says which cause, and whether earlier data is serving or there is none yet.
+func checkCategoryFeedDeferral() (OperatorContractCheck, bool) {
+	sy := globalUT1FeedSyncer
+	if sy == nil {
+		return OperatorContractCheck{}, false
+	}
+	var cause string
+	switch sy.Health().LastFailure {
+	case feedsync.FailDiskSpace:
+		cause = "the data filesystem is below the free-space floor for the write"
+	case feedsync.FailDiskSpaceUnknown:
+		cause = "free space on the data filesystem could not be measured"
+	default:
+		return OperatorContractCheck{}, false
+	}
+	// The coverage clause must describe what is actually serving. "Previously
+	// synced categories keep serving" is true only of a CERTIFIED store; after a
+	// partial write failed, the next attempt can be deferred for disk space
+	// while the store holds a partial mix (ASTRA 5978949299, WS-B 2).
+	coverage := "the previously synced community categories keep serving"
+	switch {
+	case sy.StoreEmpty():
+		coverage = "no community category data is loaded yet — category matching uses the admin-managed list only"
+	case !sy.ImportComplete():
+		coverage = "the store holds an incomplete import, so community lookups may return a partial set of categories until an import completes"
+	}
+	return OperatorContractCheck{
+		Code:           "category_feed_db",
+		Status:         diagWarn,
+		Message:        "community category sync deferred: " + cause + "; " + coverage,
+		OperatorAction: "Free space on the filesystem holding the data volume (keep at least 2 GiB free), or fix why it cannot be measured; the sync retries on its own schedule.",
+	}, true
 }

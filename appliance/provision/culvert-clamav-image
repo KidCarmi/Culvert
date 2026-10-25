@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# culvert-clamav-image — keep the appliance's ClamAV sidecar image the exact,
+# scanned bytes the OVA was built with.
+#
+#   sudo culvert-clamav-image ensure   make sure the sidecar tag resolves to the
+#                                      image the build recorded; if it does not,
+#                                      reload it from the baked archive
+#   sudo culvert-clamav-image status   print the last recorded outcome
+#
+# The appliance never BUILDS the sidecar. Its compose file still names a build
+# context (quick-start hosts need it), so a missing tag used to make the next
+# `docker compose up` rebuild it from source — new, unscanned bytes fetched
+# from Docker Hub and the Alpine CDN. Appliance `compose up` now runs with
+# --no-build, and this helper is the only way the tag comes back:
+#
+#   1. the tag already names the recorded image ID          -> present
+#   2. otherwise the baked archive is checked against the SHA-256 the build
+#      recorded, loaded, and the loaded tag must name the
+#      recorded image ID                                     -> reloaded
+#   3. anything else                                         -> refused
+#
+# A refusal exits 2 and is recorded in the state file so the operator sees
+# it. There is no build fallback, no registry pull and no network access on
+# any path. When a refusal finds the tag naming anything other than the
+# recorded image ID — already, or because the archive loaded something else —
+# it removes the tag, so a later `compose up --no-build` cannot start those
+# bytes (a running container keeps running; Docker runs it by image ID, not by
+# tag). Removal is reported from a re-inspect, never assumed: if the tag is
+# still there, or the daemon cannot say, the refusal says so (tag=retained or
+# tag=unconfirmed in the state file) and tells the operator to remove it by
+# hand before starting the stack. The cost is explicit: a stack that was
+# stopped while the image was lost stays down (the proxy depends on a healthy
+# sidecar) until the verified image is back.
+#
+# Exit codes: 0 present or reloaded, 2 refused, 64 usage.
+set -euo pipefail
+
+STATE_DIR="${CULVERT_APPLIANCE_STATE_DIR:-/var/lib/culvert-appliance}"
+MANIFEST="$STATE_DIR/manifest.env"
+BUILD_INFO="$STATE_DIR/build-info.json"
+ARCHIVE="$STATE_DIR/images/clamav.tar.gz"
+STATE_FILE="$STATE_DIR/clamav-image.state"
+LOCK_FILE="$STATE_DIR/clamav-image.lock"
+DOCKER="${CULVERT_DOCKER:-docker}"
+
+log() { printf 'culvert-clamav-image: %s\n' "$*" >&2; }
+
+# record STATUS REASON [TAG] — the last outcome, rewritten atomically. TAG is
+# what a refusal did to the local tag: unchanged, removed, retained, unconfirmed.
+record() {
+  local tmp
+  tmp="$(mktemp "$STATE_DIR/.clamav-image.state.XXXXXX")" || return 0
+  printf 'status=%s\nreason=%s\nref=%s\nexpected_id=%s\ntag=%s\nat=%s\n' \
+    "$1" "$2" "${REF:-}" "${EXPECT_ID:-}" "${3:-unchanged}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$STATE_FILE"
+}
+
+refuse() { # REASON MESSAGE
+  # Only a VALID recorded ID can prove the tag names other bytes; with damaged
+  # metadata the tag is left alone (it may be the genuine sidecar).
+  local cid="" tag=unchanged
+  [[ -n "${REF:-}" && "${EXPECT_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]] && cid="$(current_id)"
+  if [[ -n "$cid" && "$cid" != "$EXPECT_ID" ]]; then
+    tag="$(untag_unverified "$cid")"
+  fi
+  record refused "$1" "$tag"
+  log "REFUSED ($1): $2"
+  log "The sidecar was NOT rebuilt or pulled. A sidecar container that is still running keeps running; a stack that is down stays down (the proxy waits for a healthy sidecar) until the verified image is restored."
+  exit 2
+}
+
+# untag_unverified CID — remove the tag naming unverified image CID and print
+# what is TRUE afterwards, decided by a re-inspect rather than by the rm exit
+# status: removed (the daemon reports no such image), retained (the tag still
+# names an image), unconfirmed (the daemon could not answer).
+untag_unverified() {
+  local rmout rc=0 out
+  rmout="$("$DOCKER" image rm -f "$REF" 2>&1)" || rc=$?
+  if out="$("$DOCKER" image inspect "$REF" --format '{{.Id}}' 2>&1)"; then
+    log "WARNING: $REF still names unverified image ${out:-$1} (image rm exit $rc: ${rmout:-no output}). Do NOT start the stack: remove the tag (sudo docker image rm -f $REF), then run: sudo culvert-clamav-image ensure"
+    echo retained
+  elif grep -qi 'no such image' <<<"$out"; then
+    log "$REF named unverified image $1; the tag was removed, so compose up --no-build cannot start it"
+    echo removed
+  else
+    log "WARNING: could not confirm that $REF no longer names unverified image $1 (image rm exit $rc; inspect: ${out:-no output}). Do NOT start the stack until 'sudo docker image inspect $REF' reports no such image or 'sudo culvert-clamav-image ensure' reports present."
+    echo unconfirmed
+  fi
+}
+
+# manifest_value KEY — read one KEY=value line; the manifest is never sourced.
+manifest_value() {
+  sed -n "s/^$1=//p" "$MANIFEST" | tail -n1
+}
+
+expected_archive_sha() {
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+print(d.get("application",{}).get("clamav_baked_tar_sha256",""))' "$BUILD_INFO" 2>/dev/null || true
+}
+
+current_id() {
+  "$DOCKER" image inspect "$REF" --format '{{.Id}}' 2>/dev/null || true
+}
+
+ensure() {
+  [[ -r "$MANIFEST" ]] || refuse manifest_missing "$MANIFEST is not readable"
+  REF="$(manifest_value CLAMAV_SIDECAR_REF)"
+  EXPECT_ID="$(manifest_value CLAMAV_SIDECAR_ID)"
+  [[ -n "$REF" && "$EXPECT_ID" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || refuse manifest_incomplete "the manifest does not name the sidecar ref and image ID"
+
+  local cid
+  cid="$(current_id)"
+  if [[ "$cid" == "$EXPECT_ID" ]]; then
+    record present ok
+    log "$REF is present ($cid)"
+    return 0
+  fi
+  if [[ -n "$cid" ]]; then
+    log "$REF names $cid, not the recorded $EXPECT_ID; restoring the recorded image"
+  else
+    log "$REF is absent; restoring the recorded image from $ARCHIVE"
+  fi
+
+  [[ -f "$ARCHIVE" ]] || refuse archive_missing "$ARCHIVE does not exist"
+  local want got
+  want="$(expected_archive_sha)"
+  [[ "$want" =~ ^[0-9a-f]{64}$ ]] || refuse archive_hash_unrecorded "$BUILD_INFO does not record the archive SHA-256"
+  got="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+  [[ "$got" == "$want" ]] || refuse archive_hash_mismatch "$ARCHIVE is $got, the build recorded $want"
+
+  "$DOCKER" load -q -i "$ARCHIVE" >/dev/null 2>&1 || refuse load_failed "docker load of $ARCHIVE failed"
+  cid="$(current_id)"
+  [[ "$cid" == "$EXPECT_ID" ]] \
+    || refuse loaded_id_mismatch "after loading, $REF is '${cid:-absent}', the build recorded $EXPECT_ID"
+  record reloaded ok
+  log "$REF restored from the verified archive ($cid)"
+}
+
+status() {
+  if [[ -r "$STATE_FILE" ]]; then cat "$STATE_FILE"; else echo "status=unknown"; fi
+}
+
+case "${1:-}" in
+  ensure)
+    [[ -d "$STATE_DIR" ]] || { log "no appliance state at $STATE_DIR"; exit 2; }
+    exec 9>"$LOCK_FILE"
+    flock 9
+    ensure
+    ;;
+  status) status ;;
+  *) echo "usage: culvert-clamav-image ensure|status" >&2; exit 64 ;;
+esac

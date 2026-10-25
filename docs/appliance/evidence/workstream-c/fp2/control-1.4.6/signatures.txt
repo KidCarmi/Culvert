@@ -1,0 +1,3 @@
+6d4aa01f219e988060fc419f495d07f27e0cdf1a2cccc065971da922c76f7ffb  /var/lib/clamav/bytecode.cvd
+5d98d4bdc9e6c54c93864019d39a3e4b1271ee04cdf803704d0b271e42d30977  /var/lib/clamav/daily.cvd
+0b2182d229f46981ec8f535382222f7c9dfdd656b250ad47988b910a8d302365  /var/lib/clamav/main.cvd

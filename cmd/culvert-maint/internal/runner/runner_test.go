@@ -383,3 +383,46 @@ func TestFormatStringForFlow_StripsControl(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// TestBuildArgv_ComposeNoBuild: `{compose_no_build}` becomes `--no-build` as
+// the LAST token only on a compose_no_build host, and nothing elsewhere — the
+// two shapes the sudoers allowlist carries. It never reaches another template.
+func TestBuildArgv_ComposeNoBuild(t *testing.T) {
+	up := templateByID(TemplateComposeUp)
+	if up == nil {
+		t.Fatal("TemplateComposeUp not registered")
+	}
+	base := Options{ComposeProjectDir: "/srv/culvert", ComposeFile: "docker-compose.yml", StageTimeout: time.Second}
+
+	rOff, err := New(base)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got, want := rOff.buildArgv(up), []string{"docker", "compose", "-f", "/srv/culvert/docker-compose.yml", "up", "-d"}; !equalArgv(got, want) {
+		t.Errorf("default argv:\n got %q\nwant %q", got, want)
+	}
+
+	on := base
+	on.ComposeNoBuild = true
+	on.ComposeOverrideFile = "docker-compose.maint-agent.yml"
+	rOn, err := New(on)
+	if err != nil {
+		t.Fatalf("New (no-build): %v", err)
+	}
+	want := []string{"docker", "compose", "-f", "/srv/culvert/docker-compose.yml", "-f", "/srv/culvert/docker-compose.maint-agent.yml", "up", "-d", "--no-build"}
+	if got := rOn.buildArgv(up); !equalArgv(got, want) {
+		t.Errorf("no-build argv:\n got %q\nwant %q", got, want)
+	}
+
+	for _, tmpl := range []TemplateID{TemplateComposeDown, TemplateComposeImageInspect} {
+		tp := templateByID(tmpl)
+		if tp == nil {
+			t.Fatalf("%s not registered", tmpl)
+		}
+		for _, a := range rOn.buildArgv(tp) {
+			if a == "--no-build" {
+				t.Errorf("--no-build leaked onto %s: %q", tmpl, rOn.buildArgv(tp))
+			}
+		}
+	}
+}
