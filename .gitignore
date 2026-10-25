@@ -75,3 +75,11 @@ frontend/node_modules/
 frontend/tools/openapi-gen/node_modules/
 frontend/test-results/
 frontend/e2e/.state/
+
+# Python bytecode from the repository's own checkers. AGENTS.md makes
+# `python3 docs/agent-context/check.py` mandatory for instruction changes and
+# the Fast PR Gate's docs-guidance job runs the same script, so every
+# contributor who follows the instructions produces one of these next to the
+# script it imported. It is build output of a check, never an artifact.
+__pycache__/
+*.pyc
