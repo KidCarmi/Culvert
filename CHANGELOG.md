@@ -2321,6 +2321,36 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   invariant, a success-resets control, the threshold (asserted on `activeIdx`,
   since a successful failover resets the streak), and the floor; nothing
   previously pinned either the schedule or the threshold.
+- The parent-proxy circuit breaker and six operator signals stopped expiring
+  when the wall clock stepped **backwards** (CHAOS-84). Go's monotonic reading
+  protects an interval only while it stays inside a `time.Time`;
+  `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild one without it, so every
+  interval measured from a stamp held as a bare `int64` is a wall-clock
+  interval. An NTP correction after a wrong RTC, a resumed hypervisor snapshot
+  or an operator fixing the date made those intervals negative, so each
+  `elapsed >= limit` test stayed false until the clock caught up. Nothing
+  errored, nothing was counted, nothing was logged.
+
+  The parent-proxy breaker (`internal/upstream`) is the sharpest: it stayed
+  open, and since the pool falls back to **direct egress** when no parent is
+  eligible, one parent blip plus a clock correction left the appliance
+  egressing around the parent-proxy chain long after the parents recovered. It
+  now re-anchors its trip instant (published on `/api/diagnostics`, so it keeps
+  its wall-clock basis) and serves one fresh window measured from the step,
+  rather than probing at once at parents that may still be down. Five evidence
+  and log gates read a future stamp as "already logged" and suppressed their
+  notice for the whole step: the crash-evidence throttle (a backward step made
+  `recordCrash` return before writing the stack-bearing log and audit entry for
+  every subsequent same-component crash), the scanner and YARA degraded-log
+  gates, the Sluice call-error line, the fail-closed file-profile block warning
+  and the OCSP responder-cap notice. They now decide on the MAGNITUDE of the
+  interval rather than its sign, so a rollback costs at most one suppressed line
+  and a caller that loses a gate's compare-and-swap is not mistaken for a clock
+  step. The tunnel idle reaper, the DP readiness grace and the roster-durability
+  gates have the same defect and are fixed by CHAOS-83 (monotonic stamps); the
+  CDR breaker was already monotonic on main. No configuration, metric, alert or
+  persisted format changes, and behaviour with a sane clock is unchanged. See
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md`.
 - **A shrinking Control Plane address list crashed the Data Plane, and a
   de-listed but still-responsive CP kept serving it (CHAOS-91).** `activeIdx` is
   an index *into* `c.addrs` naming the address the live connection holds, and

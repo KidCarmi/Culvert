@@ -191,7 +191,11 @@ func TestDomainAllowlist_GET_NoAuditEntry(t *testing.T) {
 	baselineTS := time.Now().UnixMilli()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/security-scan/feeds/domain-allowlist", nil)
-	req.RemoteAddr = "198.51.100.62:0"
+	// An actor IP no other test uses: the check below matches by actor and a
+	// millisecond baseline, so a shared IP (policy_refs_test.go audits
+	// x.blocked as 198.51.100.62) lets a neighbour's entry in the same
+	// millisecond read as this GET's under -shuffle.
+	req.RemoteAddr = "198.51.100.162:0"
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
 
 	rec := httptest.NewRecorder()
@@ -201,7 +205,7 @@ func TestDomainAllowlist_GET_NoAuditEntry(t *testing.T) {
 		t.Fatalf("GET: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 	for _, e := range auditGet() {
-		if e.Actor == "198.51.100.62" && e.TS >= baselineTS {
+		if e.Actor == "198.51.100.162" && e.TS >= baselineTS {
 			t.Errorf("audit entry recorded for read-only GET: %+v", e)
 		}
 	}
