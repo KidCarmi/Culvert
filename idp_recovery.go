@@ -292,13 +292,21 @@ func (r *IdPRegistry) publishRevalidated(id string, generation, compiled *IdPPro
 // this used to take and release the lock itself, which made every caller a
 // check-then-act across a lock release (round 17). The answer is true only for
 // as long as the lock is held — that is the whole point.
-func (r *IdPRegistry) stillFetchesSourceLocked(id string, generation *IdPProfile, ref idpDocRef) bool {
+//
+// IT ASKS ABOUT THE DOCUMENT, NOT THE GENERATION. Episodes are keyed by
+// (profile, document ref), so the question is whether the profile now in
+// service still depends on that ref — whichever generation pointer carries it.
+// Requiring the recovery's own generation (the earlier shape) deleted the
+// episode a same-source Upsert had legitimately opened for its newer
+// generation, resetting that provider's degradation clock and alert latch
+// while it served from cache (Codex P2).
+func (r *IdPRegistry) stillFetchesSourceLocked(id string, ref idpDocRef) bool {
 	for _, p := range r.profiles {
 		if p == nil || p.ID != id {
 			continue
 		}
-		if !p.Enabled || p != generation {
-			return false // disabled, or replaced by a newer generation
+		if !p.Enabled {
+			return false // disabled while we were compiling
 		}
 		return effectiveRemoteDocRef(p) == ref
 	}
@@ -444,7 +452,7 @@ func discardSupersededRecoveryEpisode(dc darkCandidate) {
 	if ref.Source == "" {
 		return // fetches nothing; no episode of this kind exists
 	}
-	idpRegistry.forgetEpisodeIfSuperseded(dc.candidate.ID, dc.generation, ref)
+	idpRegistry.forgetEpisodeIfSuperseded(dc.candidate.ID, ref)
 }
 
 // forgetEpisodeIfSuperseded asks whether this generation still fetches source
@@ -465,10 +473,10 @@ func discardSupersededRecoveryEpisode(dc darkCandidate) {
 // the answer, while leaving the proxy request path's own RLock unblocked. The
 // order taken is r.mu -> idpMetadata.mu, the one this package already takes at
 // retireEpisodeAfterCommit and at ReplaceAll's aborts.
-func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, generation *IdPProfile, ref idpDocRef) {
+func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, ref idpDocRef) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.stillFetchesSourceLocked(id, generation, ref) {
+	if r.stillFetchesSourceLocked(id, ref) {
 		return // still in service: the episode is a live outage signal
 	}
 	forgetIdPMetadataEpisodeForSource(id, ref)
@@ -497,7 +505,16 @@ func revalidateCacheServingProviders() int {
 			continue
 		}
 		if !idpRevalidationAdopts(prov, rc.servedAt) {
-			continue // still the same cached document: the IdP has not answered
+			// Still the same cached document: the IdP has not answered. That
+			// stale fallback opened (or extended) an episode, and the profile
+			// may have been disabled, deleted or repointed while the fetch was
+			// in flight — the mutation's own cleanup ran before this episode
+			// existed, so nothing would ever clear it and the watchdog would
+			// page for a provider no longer in service (Codex P2). Same guard
+			// as the failure path: an episode for the source still in service
+			// survives.
+			discardSupersededRecoveryEpisode(rc.darkCandidate)
+			continue
 		}
 		if idpRegistry.publishRevalidated(rc.candidate.ID, rc.generation, rc.candidate, rc.live, prov) {
 			replaced++
@@ -507,6 +524,17 @@ func revalidateCacheServingProviders() int {
 		// Lost the race to an admin write, a snapshot or a retirement; the
 		// fresh document is in the cache, and the next pass (or the dark
 		// recovery path) adopts it for whatever generation is now in service.
+		//
+		// The same ownership question as the branch above, carried here to
+		// close the CLASS rather than the instance. The path is narrower and
+		// was NOT reproduced: adoption normally implies this fetch succeeded,
+		// which clears the episode by evidence. It is reachable only when a
+		// CONCURRENT compile wrote a newer document while THIS fetch failed
+		// and fell back, so this pass adopts a document it did not fetch while
+		// carrying an episode its own 5xx opened. Being a no-op whenever the
+		// source is still authoritative, the guarded call costs nothing to
+		// carry and removes the need to re-derive that argument next round.
+		discardSupersededRecoveryEpisode(rc.darkCandidate)
 		noteIdPRecoverySuperseded(rc.candidate.ID)
 	}
 	return replaced
@@ -621,6 +649,28 @@ func runIdPRecoveryLoop(ctx context.Context) {
 			// refresh into the live registry — register row IDP-4, whose whole
 			// content is that this needs the transactional mutation model rather
 			// than a second publication path bolted onto this loop.
+			//
+			// AND THE EPISODE IS STILL OWNED BY SOMEBODY (Codex round 21).
+			// "The compile SUCCEEDED" does not mean the FETCH did: a dark
+			// profile with a usable cached document compiles from it while the
+			// IdP is down, and the 5xx behind that fallback opens an episode
+			// exactly as a stale acquisition does. So when publication is
+			// refused BECAUSE THE PROFILE WAS DISABLED mid-fetch, the disable's
+			// own cleanup already ran — before this episode existed — and the
+			// episode is left for a configuration no longer in service:
+			// unclearable by evidence, ageing past idpMetadataDegradedAfter
+			// into a page for a provider the operator turned off. Reproduced
+			// end to end.
+			//
+			// FOURTH INSTANCE IN THIS SWEEP of one rule enforced at one layer
+			// and not the next, and the second in this function's own file: the
+			// FAILURE branch above has discarded since round 12 and the
+			// revalidation loop's non-adopting branch since round 20, while
+			// this one only logged. The discard is a no-op whenever the source
+			// is still authoritative — notably the went-live case, where the
+			// episode is the new provider's live outage signal — which is why
+			// it is the guarded call and not a bare forget.
+			discardSupersededRecoveryEpisode(dc)
 			noteIdPRecoverySuperseded(dc.candidate.ID)
 		}
 		if recovered > 0 {

@@ -8,6 +8,13 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**Later rounds:** the 2026-10-13 round is recorded separately in
+[CHAOS-REVIEW-2026-10-13.md](CHAOS-REVIEW-2026-10-13.md) — CHAOS-89 (the DP→CP
+backoff ladder), CHAOS-90 (the unbounded unenrolled-pull map) and CHAOS-91 (the
+DP's stale active-address index), plus a 29-item backlog. Its promotion
+self-deadlock and address-republish findings merged on main as CHAOS-71 riders
+(§44.8). Rows below that it changes are annotated inline.
+
 This document is a standing register. It records where Culvert already survives failure safely
 (and *why*, by code path) and where it does not. The one code change shipped alongside the original
 review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);
@@ -115,6 +122,67 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in silence. The durable fix is still the one recorded above (allocate the id
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
+
+**2026-10-18 — `CHAOS-85` and `CHAOS-86` CLAIMED (placeholder, commit one).**
+Ids allocated in a committed line before any code was written, per the
+convention above. First claimed as `CHAOS-71`/`CHAOS-72` against `dec66e1`,
+where 70 was the highest merged id; **renumbered in merge order** to
+`CHAOS-85`/`CHAOS-86` when main was brought in, because `CHAOS-71` had merged
+as §44 (the CP gRPC listener), `72` is held by an open sweep (#1564), and
+76–84 were claimed by open branches at that time. Findings, risk matrix and verification are written
+up in [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md).
+
+- **`CHAOS-85` — the support domain's durable writes bypassed the
+  `fileutil.AtomicWrite` chokepoint.** Six hand-rolled `os.WriteFile(tmp)` +
+  `os.Rename` pairs: atomic for a reader, but not fsynced and **invisible to the
+  storage-health plane**, so a full or read-only volume failed them silently
+  while `storageDegraded()` and `storage_write_failed` reported healthy. Exactly
+  the **ST-8** shape this register already records for the audit JSONL, in a
+  domain whose own sibling (`support_telemetry_config.go`) already used the
+  chokepoint. The security-relevant instance is `writeBundleState`: the
+  mandatory-preview approval gate's state-first crash ordering had no durability
+  barrier, and an absent state file grandfathers to READY. Fixed, with a
+  table-driven chokepoint test over all six entry points plus a fault-injection
+  test on the gate path.
+- **`CHAOS-86` — the DP→CP retry charged every failure twice.** `backoff()`
+  incremented `failCount` that `pollConfig` had already incremented, so the
+  documented `2s, 4s, 8s … 60s` schedule actually ran `4s, 16s, 60s` and the
+  `failCount < 3` guard let **failover fire on the 2nd** consecutive failure,
+  against its own comment — a ~10s CP blip during a rolling upgrade moved a
+  whole DP fleet off a healthy leader. Neither the schedule nor the threshold
+  had a test; both now do.
+
+This sweep also leaves rows OPEN by attribution rather than fixing them, each
+with file:line evidence in the dated review: the **SOCKS5 pre-posture accept
+window** (`initSOCKS5` at `main.go:254` serves before `LoadAdminSettings`
+restores the GUI-persisted IP filter / rate limit / conn cap at `:255`, an
+asymmetry with the HTTP plane that CHAOS-66 noted only for its bind-fatality
+consequence); the open half of **CHAOS-18**, where the `config_unchanged`
+sentinel means the boot-time clobber of a CP-pushed default action never
+self-heals; zero-delay retry in `applyWithRetry`; dropped scheduler contexts in
+`threatfeed`/`feedsync` rounds; serial uncancellable alert-retry passes; and a
+needs-owner-decision note that two feed clients dial without
+`ssrf.SafeDialContext` — flagged rather than "fixed", because an on-prem feed
+mirror on a private address is a legitimate topology the guard would reject.
+
+**2026-10-16 — `CHAOS-83` CLAIMED (placeholder, commit one). Domain: elapsed-time
+measurement taken on the WALL clock on the data path and the readiness probe —
+the `time.Since(time.Unix(0, stamp))` idiom, where the stamp was written by
+`time.Now().UnixNano()` and the monotonic reading was therefore discarded on
+both sides. `internal/admission` already treats this exact hazard as a
+contract (`FreshCount`, engine.go: "A NEGATIVE age (the clock moved back
+between the stamp and this read) is stale, not fresh", and
+`internal/admission/AGENTS.md` lists "future stamps" as a standing review
+control); the sweep asks where else the idiom appears WITHOUT that reasoning
+applied. Claimed as `CHAOS-71` / §41 after reading merged `main`: 67 and 68
+remain allocated to other open sweeps (§§37–38 reserved), 69 and 70 are
+merged. Renumbered in merge order to `CHAOS-83` / §47 when main was brought
+in again: `CHAOS-71` had merged as §44 (the CP gRPC listener) with §41–§43
+taken by `CHAOS-74`/`CHAOS-75`, 76–82 were claimed by open branches, and §45/§46
+are claimed by open sweeps. Findings and gates are written up in §47 below.** This row is
+committed before any code is written — the remedy the header above reaches
+independently after ten collisions, and which §35, §39 and §40 each applied
+first.
 
 **2026-10-11 — `CHAOS-75` sweep (the release-dispatch plane's detached executor
 goroutines). Id claimed in a committed placeholder row as commit one**, per the
@@ -256,7 +324,7 @@ The third: an `idpMetaInline` early return left an episode nothing could ever
 clear, so a profile switched to inline `metadataXml` warned forever about a
 remote fetch that no longer existed — the observed-evidence rule forbids clearing
 on elapsed TIME, not on evidence the dependency is GONE. See §49, rows
-IDP-1…IDP-13, and `docs/operator/idp-metadata-availability.md`.
+IDP-1…IDP-18, and `docs/operator/idp-metadata-availability.md`.
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -1340,7 +1408,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-12 | Alert **dedup bookkeeping**: unbounded map on an attacker-controlled key space (key embeds the requested host, same input `topHosts` is capped for), rescanned `O(n)` under a process-wide mutex on every dispatch (230,603 ns/op at the flood steady state, growing). Dedup runs *before* the semaphore and the retry queue, so neither bounds it. | GAP → **CLOSED** (CHAOS-27, 4096 cap + amortised prune + eviction counter) | **H** | was: `internal/alerts/store.go` `dedupSuppressed`; see §15 |
 | WK-11 | SSE slow client: non-blocking `select … default → close+evict`, 256-client cap, runs off the request path. | ✓ | — | `internal/sse/sse.go:66-78,46` |
 | WK-12 | YARA compile failure loads remaining rules (never disables engine); regex timeout + saturation cap with admin-selectable fail-closed/open posture + alerts. Residual: abandoned regex goroutines are counted but never cancelled (memory held until they finish). | ✓ (+leak caveat) | L/M | `internal/yara/yara.go:98-130,584-602,540` |
-| WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s |
+| WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP → **PARTIALLY CLOSED**. The two legacy feed tickers closed as WK-13b (CHAOS-59, `internal/feedsched`). The cluster plane closed as **CHAOS-89c** (2026-10-13): per-attempt jitter on the DP→CP backoff ladder and a one-time per-loop phase offset on all five CP-facing tickers. **Still open** for `internal/blocklistfeed` (never migrated to `internal/feedsched`; a failed sync also waits a full interval — row R-3 of the 2026-10-13 round) and `internal/otlp` (row R-5). | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s; `controlplane_client.go` (CHAOS-89c) |
 | WK-15 | **ClamAV's queue wait had its own 5 s deadline, which preempted the orchestrator's 10 s one and INVERTED its posture.** Exceeding the inner limit returned an ordinary error → classified as an engine fault → fail-OPEN, while the outer limit fails CLOSED. Five concurrent scans on a HEALTHY daemon therefore admitted content unscanned, reported as a daemon error. Attacker-inducible, no privilege. | GAP → **CLOSED** (CHAOS-52: `ScanContext` charges the queue wait to the caller's budget; `ErrQueueFull` keeps saturation distinguishable from a fault; `culvert_clam_saturated_total`) | **H** | was: `internal/clamav/clamav.go` `Scan` 5 s `time.After`; now `ScanContext` + `internal/secscan` `recordClamFailure` — see §20 |
 | WK-16 | **`ScanBody` stopped WAITING without stopping the WORK.** The abandoned scan goroutine held a ClamAV slot (1 of 4) and a copy of the body until the client's own 30 s timeout — 3x the budget that had already given up on it — unbounded in count and invisible in every surface. Four abandoned scans occupy every slot, pushing live requests onto WK-15's fail-open path: the failure sustains itself under load. Measured 30.006 s against a 150 ms deadline. | GAP → **CLOSED** (CHAOS-52: the budget is a context; cancellation reaches the dial, the conn deadline and a close-watcher; `culvert_scan_inflight`) | **H** | was: `internal/secscan/secscan.go` `ScanBody` `time.After`; now `context.WithTimeout` + `clamav.effectiveDeadline`/`watchCancel` — see §20 |
 | WK-17 | **The fail-closed scan-timeout refusal was cached with the CONTENT TTL** (1 h default), so seconds of scanner slowness blocked that exact object node-wide, for every user, for an hour after recovery — manual cache flush the only recourse. The ClamAV-error branch two lines above already refuses to cache for exactly this reason. | GAP → **CLOSED** (CHAOS-52: `hashcache.SetTTL` + `scanTimeoutCooldown` 30 s) | M | was: `internal/secscan/secscan.go` `ScanBody` timeout arm; now `SetTTL` — see §20 |
@@ -10897,6 +10965,791 @@ fence again until the listener serves.
 
 ---
 
+## 45. CHAOS-78 — The syslog/SIEM writer handle, published without synchronization
+
+**Id claimed in a committed placeholder row as commit one**, per the convention
+the header above reaches twice independently after ten collisions. `CHAOS-77`
+was the highest id claimed on any open branch (PR #1669), so this sweep took 78
+and will not move.
+
+**Date:** 2026-10-20 · **Domain:** Audit / SIEM forwarding, proxy request path ·
+**Follow-up to:** §42 `OBS-1`, which this file nominated as the *recommended
+first follow-up* and left unfixed because it "touches ~32 sites across a
+different domain".
+
+### 45.1 Executive summary
+
+The syslog/SIEM forwarder's engine is sound. The pointer holding it was not.
+
+`globalSyslog` was a plain `var globalSyslog *syslogWriter`, written at runtime
+from the admin handler goroutine (`InitSyslog` via the `apiSyslogConfig` POST;
+the disable branch stored `nil`) and read unsynchronized on the proxy request
+path at `persistLogEntry` — the single chokepoint every request-log record
+flows through — and on the audit SIEM hook. §42 nominated this as the
+*recommended first follow-up* and left it only for its site count. It is closed
+here, and the sweep found two further defects while reading the write sites.
+
+**Three findings — SIEM-1 and SIEM-3 measured, SIEM-2 confirmed by construction
+and NOT reproduced (see §45.3):**
+
+| | Finding | Impact |
+|---|---|---|
+| **SIEM-1** | The nil check and the dereference were two separate unsynchronized loads, so a request goroutine could pass the check and dereference the `nil` the disable branch had just stored | Aborts an in-flight request or tunnel, over a routine "disable SIEM forwarding" click |
+| **SIEM-2** | A plain pointer write carries no release edge, and the engine treats a zero `queue` as *deliver synchronously* — a path holding the writer mutex across three serialized network ops | A request goroutine pays ~15 s on the data path (the engine's own figure), every other logging caller queued behind it |
+| **SIEM-3** | `InitSyslog` published over the previous writer without closing it, and `drainLoop` exits ONLY via `Close` | One delivery goroutine and one collector socket stranded per runtime SIEM retarget, permanently, with nothing to show it |
+
+SIEM-2 is the load-bearing one, and the reason a nil guard would have been the
+wrong fix: it is not reachable by adding a check, because the pointer is not
+what is unset — the *object behind it* is partially published. The engine sets
+its `queue` in `startAsync`, **after** the struct literal, and
+`internal/syslog`'s `send()` reads `if s.queue == nil { s.writeMsg(...) }`. A
+reader with no acquire edge may observe the non-nil writer and the zero queue,
+fall into `writeMsg` → `deliverLine`, and take `s.mu` across the
+connect/backoff/write state machine on the proxy request goroutine.
+`deliverLine`'s own comment accounts for that cost — "`writeTimeout` + dial
+(5s) + `writeTimeout` — three serialized network ops (~15s worst case) under
+`s.mu`" — which it wrote about the drain goroutine, the only caller it expected
+to be there. That is
+precisely the proxy-wide stall the async design and the engine's own
+`TestAsync_WedgedCollectorNeverBlocksCaller` exist to prevent — reached not
+through the engine but through the pointer holding it. This appliance ships
+`linux/amd64` **and `linux/arm64`** (`.github/workflows/ci.yml`, the release
+images), and arm64 is weakly ordered, so this is a shipped-target property, not
+a thought experiment.
+
+### 45.2 What was NOT wrong, and why that matters
+
+The engine is genuinely well built, and three of the scenarios this sweep set
+out to find were already handled. Recording them is the point of the register.
+
+* **Use-after-`Close` on the request path is safe.** The disable branch closes
+  the writer and a request goroutine may still hold the old handle. `Close`
+  never closes the `queue` channel — it sets `closed atomic.Bool`, closes
+  `stop` under a `closeOnce`, and waits on `done`
+  (`internal/syslog/syslog.go` `Close`). `send` checks `s.closed.Load()` and
+  counts a drop. A send that races `Close` and loses lands on a still-open
+  channel. **No panic, no send-on-closed-channel, and the line is counted.**
+  This is why the fix publishes first and closes second: either order is
+  correct, and that order is merely narrower.
+* **A panic in delivery cannot take the appliance down.** `deliverGuarded`
+  contains per LINE, not per goroutine, counts the line as a drop, and
+  forwards to an optional observer that is itself panic-contained (CHAOS-24).
+  An exited drain goroutine would silently strand every subsequent line, and
+  the code says so.
+* **A wedged collector cannot backpressure the proxy** on the async path:
+  bounded queue at `queueCap`, non-blocking select, counted overflow, and one
+  drain goroutine owning every socket write. `deliverLine`'s own comment is
+  accurate — the mutex "no longer serializes request goroutines". SIEM-2 is the
+  one way back onto that path, and it is a publication bug, not an engine bug.
+* **The nil deref does not kill the process.** The crash-guard framework
+  (`crashguard.go`, M1/CHAOS-24) taps the proxy plane and every detached
+  goroutine birth site, so the panic becomes a crash record and a dead request
+  or tunnel. Stating this plainly matters: §43's own review round had to walk
+  back a 500 that over-claimed, and the honest severity here is
+  "request-fatal, contained", not "appliance-fatal".
+
+### 45.3 Evidence (measured against the real paths, pre-fix)
+
+Reverting the publication to a plain variable behind the same accessor names,
+and splitting the request-path read back into check-then-deref, under `-race`:
+
+```
+WARNING: DATA RACE
+Read at 0x000005cf62a8 by goroutine 15:
+  github.com/KidCarmi/Culvert.persistLogEntry()   store.go:2587
+Previous write at 0x000005cf62a8 by goroutine 23:
+  github.com/KidCarmi/Culvert.setSyslogHandle()   syslog.go:91
+  github.com/KidCarmi/Culvert.InitSyslog()        syslog.go:126
+```
+
+14 reported races in one run — the proxy request path against the admin
+handler, which is the finding verbatim. The leak gate on the same tree:
+
+```
+after 8 retargets: 8 syslog delivery goroutines; want 1 (baseline 0 + the live writer)
+after disable:     7 syslog delivery goroutines; want the 0 baseline
+```
+
+SIEM-3 is therefore exact, not estimated: **one stranded goroutine and socket
+per retarget**, and the disable branch reclaims only the last one.
+
+SIEM-2's reordering was **not** reproduced — no weakly ordered host was
+available in this environment, and a race detector on amd64 reports the race
+but cannot exhibit the reordering. It is reported as a finding confirmed by
+construction (the missing release edge is in the source; the synchronous
+fallback is in the source; the arm64 target is in CI) rather than as a measured
+stall. Stated explicitly, per §42's own standard for mixing measured and
+reasoned items.
+
+### 45.4 The fix
+
+`atomic.Pointer[syslogWriter]`, read once into a local at every site. It supplies
+both missing properties at once — a single load, and the release/acquire edge —
+and it is what this codebase **already** does for every other hot-path-read,
+runtime-reconfigured global: `globalLogStore` (`logstore.go`), `logSink`
+(`logger.go`), `obs.sink` (`internal/obs`), and the syslog engine's own
+`panicObserver`. The pointer holding the engine was the one left plain. The fix
+is not a new pattern; it is the house pattern, applied to the site that missed it.
+
+Access goes through `syslogHandle()` / `setSyslogHandle()` so that a caller
+needing both a nil test and a method call naturally holds ONE value in a local.
+The symbol was renamed `globalSyslog` → `globalSyslogHandle` deliberately: it
+makes the compiler enumerate all ~50 sites instead of trusting a grep over a
+32-reference global.
+
+`setSyslogHandle` returns the writer it displaces, and `InitSyslog` closes it
+(publish first, then release — readers move to the new writer before the old is
+torn down, and post-`Close` sends are already safe per §45.2). The disable
+branch uses the same swap-then-close shape.
+
+**Also fixed, found while reading the write sites:** the enable branch
+dereferenced the global twice more — once for the audit detail, once for the
+JSON reply — with no nil guard at all. A second admin's concurrent disable
+between `InitSyslog` and those reads nil-panicked the admin handler. The format
+now resolves from one load with a fallback to the requested value.
+
+### 45.5 Risk matrix
+
+| Finding | Likelihood | Severity | Customer | Security | Data integrity |
+|---|---|---|---|---|---|
+| SIEM-1 nil deref on the request path | Low (needs a disable concurrent with traffic) | Medium | One request/tunnel aborted; contained to a crash record | None | None — the ring write precedes the forward |
+| SIEM-2 synchronous path on a torn read | Low, arm64 only | **High** | Up to ~15 s stall with all logging queued behind it | None | None |
+| SIEM-3 writer leak per retarget | **High** (every retarget) | Low | Goroutine + fd growth, unbounded in principle | None | None |
+| Enable-branch deref | Low | Low | Admin request 500s, contained | None | None |
+
+### 45.6 Recovery assessment
+
+* **Automatic:** none was needed for SIEM-1/2 — both are per-occurrence and
+  self-clearing (the request dies, or the stall ends). SIEM-3 never recovers: a
+  stranded goroutine and socket persist for the life of the process.
+* **Manual:** a restart reclaimed the leaked writers, which is the only reason
+  SIEM-3 stayed invisible — appliances restart on upgrade often enough to mask
+  a slow fd leak driven by an infrequent admin action.
+* **Monitoring visibility, pre-fix: nil.** This is the register's §1 theme
+  again. Lines lost to a torn or stale handle are not counted by `Drops()`
+  (they never reach `send`), the leaked goroutines are not on any surface, and
+  the crash record names the request, not the cause. §42 `OBS-2` remains open
+  and compounds it: `Drops()` is admin-JSON-only and is never scraped, so even
+  the drops the engine *does* count cannot raise an alert.
+
+### 45.7 Operational and security impact
+
+Operationally the SIEM feed is an audit path: `store.go`'s `audit.SetSIEM` hook
+forwards **audit** entries, which are compliance evidence. A dropped audit line
+leaves no local trace beyond the bounded ring. None of the three findings
+*silently* drops audit records in a way the fix changes — SIEM-1 aborts a
+request loudly (a crash record), SIEM-3 drops nothing — so the security impact
+is honestly **none** for all three. The availability impact of SIEM-2 is the
+real one, and it lands on the data plane.
+
+The sweep found no fail-open: nothing here decides whether traffic is allowed,
+and a syslog forwarder that is nil, closed, wedged or leaked never changes a
+policy outcome. The forwarding path is correctly positioned *after* the ring
+write in `persistLogEntry`, so a fault in it cannot cost the local record.
+
+### 45.8 Gates
+
+* `TestChaos78_ReconfigureRacesTheRequestPath` — 8 readers on the real read
+  paths (`persistLogEntry`, the audit hook) against 60 enable/disable cycles on
+  the real write paths. Bounded by work, not a sleep. Pre-fix: 14 data races.
+* `TestChaos78_RetargetLeaksNoDeliveryGoroutine` — counts delivery goroutines
+  by stack (`syslog.(*Writer).drainLoop`), exact where `runtime.NumGoroutine()`
+  would be suggestive. Pre-fix: 8 leaked of 8 retargets.
+* `TestChaos78_Wall_SyslogHandleIsPublishedAtomically` — AST wall, anchored to
+  the package directory: the handle must be a generic `atomic.Pointer`, no file
+  but `syslog.go` may name it, and nobody may write `syslogHandle().Method()`
+  (two calls in one expression are two loads, reopening the window). Three
+  negative controls prove each rule fires.
+* `TestChaos78_HandleTypeIsAtomicPointer` — fails to BUILD, not to run, if the
+  handle regresses to a plain pointer.
+
+### 45.9 Deliberately left, and recorded
+
+* **§42 `OBS-2` (drop counters are not scrapeable) is NOT fixed here** and is
+  now the sharpest open item in this domain — see §45.6. It needs a metrics
+  surface and its own gates; bundling it would make one unreviewable change out
+  of two reviewable ones, which is §42's own stated reason for splitting.
+* **§42 `OBS-3` (the fully serial alert retry round)** is untouched: a
+  different owner (`internal/alerts`) and a different failure shape.
+* **`syslogConfigured` / `syslogConfiguredAddr` remain plain strings**, written
+  by the same admin handler and read by `buildOperatorContract`. They are
+  racy by the same argument, but they are diagnostic strings, not a pointer
+  that gets dereferenced: the worst outcome is one stale Diagnostics row, and
+  `checkSyslogFeed` already compares them for exactly the mismatch case. Left
+  as a recorded, lower-severity residual rather than widened into this PR.
+* **The engine's `Format()` takes `s.mu`**, which `deliverLine` can hold for
+  ~15 s against a wedged collector — so the admin readback can park for that
+  long. Pre-existing, admin-plane-only, and unchanged by this PR; recorded
+  because the fix moved two `Format()` calls, and it would be wrong to imply
+  they became cheap.
+
+### 45.9b Codex round 1 — the fix traded a leak for silent loss
+
+Closing SIEM-3 opened a narrower hole, and the reviewer was right to call it.
+
+`InitSyslog` now closes the writer it displaces. But `send` reads
+`closed.Load()` and only *then* enqueues, while `Close` stored `closed`, closed
+`stop` and let `drainLoop` exit — so a sender preempted between its check and
+its enqueue could put a line on a queue whose drain goroutine had already
+returned. `Close` deliberately never closes the channel, so the send succeeds:
+the line is **neither delivered nor counted in `Drops`**. Silent loss, invisible
+on every surface, in audit records.
+
+**The shape of the trade is the lesson.** Before SIEM-3's fix the displaced
+writer was leaked, and a leaked `drainLoop` keeps running — so that same
+in-flight line *was* delivered. Fixing the leak is what created the loss. A
+containment fix that moves the failure instead of removing it is the same
+pattern §43 recorded ("containment alone makes it worse"), reached from a
+different direction.
+
+`Close` now stores `closed`, **waits for in-flight senders**, and only then
+closes `stop` (`waitForSenders`, bounded by `senderDrainTimeout`). With that
+ordering a sender either loses the race and is counted as a drop, or wins it and
+has its line on the queue before the flush begins. Every line is accounted for
+**provided the sender clears within `senderDrainTimeout`**; the bound is
+deliberate and the one path that can still lose a line is stated in the
+residual below, rather than being glossed by an unqualified "every".
+The cost is two atomic adds bracketing a buffered channel send that already
+takes the channel's lock and a `formatMsg` that already allocates — noise
+against what the path does anyway, so the engine's "request path never blocks on
+the collector" contract is untouched.
+
+**REPRODUCED AND MEASURED — after a correction this section originally got
+wrong.** Against the pre-fix ordering the conservation test fails **6 runs in
+10**, typically losing exactly one line:
+
+```
+delivered 2091 + dropped 5273 = 7364; want exactly 7365 sent
+```
+
+That one missing line is the finding: enqueued onto a queue whose drain
+goroutine had already returned, so neither delivered nor counted.
+
+**This section first said the opposite, and the reason is the more useful
+lesson.** The original write-up recorded the finding as "confirmed by
+construction, not reproduced", on the strength of ~500 failed attempts across
+two strategies. That conclusion was an artifact of a bug in the test's own fake
+collector: `countingConn` embedded a bare `net.Conn`, so `writeLine`'s
+`SetWriteDeadline` nil-panicked on every line, `deliverGuarded` recovered each
+one and counted it as a drop, and **zero lines were ever delivered**
+(measured: `delivered=0 dropped=50 panics=50`). The conservation law then held
+trivially and the test passed on fixed and broken code alike — a vacuous gate
+that looked like coverage, and a "could not reproduce" that was really "could
+not deliver".
+
+A review comment rated **minor** is what caught it. The generalisable rule: a
+conservation law over two counters is only evidence if BOTH counters can move,
+so assert that they do. The test now requires `delivered > 0` and
+`Panics() == 0` before the law is allowed to mean anything. The same trap
+applies to any differential oracle whose negative case is "a number did not
+change".
+
+Note what this does **not** change: SIEM-2 remains confirmed-by-construction
+and unreproduced, for the unrelated reason that no weakly ordered host was
+available here.
+
+The mechanism is separately measured:
+`TestClose_WaitsForAnInFlightSenderBeforeStoppingTheDrain` parks a registration
+and requires `Close` not to return before it clears — pre-fix `Close` returns in
+**~108 µs** against a required **150 ms**. `TestClose_SenderWaitIsBounded` pins
+the other half: an unreleased registration must never hang shutdown.
+`TestClose_EveryLineIsDeliveredOrDropped` carries the conservation law
+(delivered + dropped == sent) and is the differential above, with the two
+anti-vacuity guards that episode earned.
+
+One assertion was removed rather than kept: an earlier version of this round
+checked `inFlight == 0` once `Close` returned. That is a **false** invariant —
+senders arriving after `waitForSenders` finishes still register briefly before
+taking the closed branch — and the fixed code failed it, which is how the error
+surfaced. The property that matters is the ordering against `close(stop)`, which
+is what the timing assertion measures.
+
+**Residual:** `waitForSenders` is bounded, so a registration that never clears
+within `senderDrainTimeout` lets `Close` proceed and that one line may still go
+unaccounted. Bounding it is deliberate — a wait that cannot finish must not be
+able to hang shutdown — and senders in that window do only CPU work and a
+non-blocking send, never a syscall, so reaching the bound means the goroutine
+was descheduled for a second mid-function.
+
+### 45.10 Residual risk
+
+A caller can still defeat the discipline by loading the handle into a local and
+holding it across a long operation — the value stays valid (the engine tolerates
+post-`Close` use), so this is safe today, but it would stop being safe if
+`Close` ever started releasing state that `send` touches. The AST wall catches
+the two-loads shape, not a long-lived local. Nothing in the tree does this now.
+
+SIEM-2's reordering remains unexhibited rather than disproven (§45.3). The fix
+removes the race that would permit it, so the residual is only that the *cost*
+of the pre-fix bug on arm64 is an upper bound from reading `deliverLine`, not a
+measurement.
+
+---
+
+## 47. CHAOS-83 — Elapsed time measured on the wall clock, and the storage type that caused it
+
+**Date:** 2026-10-16 · **Domain:** Proxy data path / readiness probe /
+durability observability (the clock-skew, clock-rollback and NTP-failure
+domain — the least-covered entry in this register: one prior mention of NTP) ·
+**Code:** `monotime.go` (new), `proxy_tunnel.go` (`newTunnelActivityStamp`,
+`idleCopyCounted`), `readyz_dp_health.go` (`dpCPPollFailingSince`,
+`appendDPHealthChecks`), `roster_persist_durability.go` (both log gates) ·
+**Register rows:** PX-26 (CLOSED), HA-20 (CLOSED), ST-13 (CLOSED), CA-21 (OPEN) ·
+**Gates:** `monotime_chaos_test.go` (10 — the roster gate was added when the overlapping sweep #1650 handed this sweep the roster row)
+
+### Executive summary
+
+Three production decisions measured elapsed time with this idiom:
+
+```go
+stamp := time.Now().UnixNano()   // writes the stamp
+elapsed := time.Since(time.Unix(0, stamp))   // reads it back
+```
+
+`UnixNano()` **discards** the monotonic reading, and `time.Unix(0, n)`
+reconstructs a value that has none, so `Sub` falls back to **wall-clock**
+subtraction — Go subtracts monotonic readings only when *both* operands carry
+one. A backwards clock step (an NTP correction of a long-drifted clock, a VM
+suspend/resume, a container host's clock change, `hwclock` at boot, a manual
+`date`) therefore leaves the stamp in the **future**, and `elapsed` goes
+**negative** — which satisfies neither `elapsed >= deadline` nor
+`elapsed >= grace`. Each decision simply stops firing, for as long as the step
+went:
+
+- **the tunnel idle reaper** (`proxy_tunnel.go`, 1h window) stops reaping. It is
+  the only thing that collects a half-open tunnel — peer still ACKs, never sends,
+  never FINs — and each one it holds costs two sockets, two goroutines and two
+  pooled relay buffers. The tunnels it then holds are *precisely* the idle ones
+  it exists to collect, and the CONNECT-bypass and SOCKS5 paths
+  (`socks5.go:587`) both depend on it. Under the connection pressure this
+  register's brief names — thousands of simultaneous connections, long-lived
+  tunnels, a mass reconnect storm — that is FD and memory exhaustion on the data
+  plane. The forward-step direction is the mirror image: every long-lived tunnel
+  in the fleet is torn down at once on its next deadline pop.
+- **the DP readiness grace window** (`readyz_dp_health.go`, 5min) stops closing.
+  `cp_poll` keeps reporting `ok` while the control plane is genuinely
+  unreachable and the node's policy goes stale — with the probe asserting it is
+  fine. This is the fail-**open** direction of a probe whose whole job is to
+  make a sustained CP outage visible. Be precise about the blast radius: the
+  DEFAULT `/ready` verdict is report-only on this row (200/ready either way —
+  `TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow` pins that, and it
+  is a deliberate contract so a CP outage cannot eject the whole DP fleet from a
+  default-configured LB), so what the suppressed row costs there is the SIGNAL.
+  On a **strict** probe (`/ready?strict=1`), which does gate on the row
+  (`TestHandleReady_StrictGatesFailRows`: 503/not_ready), the suppressed `fail`
+  also keeps the verdict `ready` and so holds the node in the load-balancer
+  rotation.
+- **the roster durability-degraded log gate** (`roster_persist_durability.go`)
+  stops opening. A negative age is always `< interval`, so the gate latches into
+  its suppressed branch and the one operator-visible line saying admin roster
+  writes are **not surviving a restart** — §40's entire subject — goes unsaid,
+  while `rosterPersistSuppress` keeps counting where nobody reads it.
+
+### The finding is the storage type, not the carelessness
+
+This codebase already knows this contract, and states it, in the place where it
+matters most. `ha_lease.go:232` — the HA fencing lease's self-fence deadline,
+where getting it wrong means **split brain** — carries the comment:
+
+> `time.Since` over the monotonic clock keeps this immune to wall-clock jumps
+
+and it is correct, because `h.leaseConfirmedAt` is a **`time.Time` struct
+field**: a `time.Time` retains its monotonic reading, so `time.Since` over it is
+monotonic *for free*, and the author had to do nothing but not convert it.
+`internal/halease` is correct for a second, independent reason — the etcd
+backend, not the caller's wall clock, is the lease-time authority (ADR-0005
+Finding 3). `internal/mcp/rollout/evidence.go`'s `elapsed()` is correct too: an
+injected `now` plus a `d < 0` clamp over a genuinely absolute persisted
+soak-start. And `internal/admission`'s `clusterCountStore.FreshCount` is
+correct, with the hazard spelled out explicitly —
+
+> A NEGATIVE age (the clock moved back between the stamp and this read) is
+> stale, not fresh. `age >= maxAge` alone reads a future stamp as brand new and
+> would honour the broadcast for however far back the clock went
+
+— and `internal/admission/AGENTS.md` lists "future stamps" as a standing review
+control.
+
+So the contract was understood, written down, commented and reviewed. Sort the
+sites by how they **store** the stamp and the pattern is exact:
+
+| stamp storage | sites | monotonic? |
+|---|---|---|
+| `time.Time` struct field | `ha_lease.go` (self-fence) | correct **for free** |
+| injected `now` + absolute instant | `internal/mcp/rollout`, `internal/ocsp` (arg) | correct by clamp (rollout) |
+| `atomic.Int64` | `internal/admission` | correct, by an **explicit** negative-age guard |
+| `atomic.Int64` | `proxy_tunnel.go`, `readyz_dp_health.go`, `roster_persist_durability.go` ×2, `internal/ocsp` | **wrong** |
+
+Every site that got it wrong stores its stamp in an `atomic.Int64`, and every
+`atomic.Int64` site is either wrong or carries a hand-written guard. That is not
+a coincidence and it is not inattention: `atomic.Int64` is the *right* choice at
+all five sites — a lock-free stamp shared between two relay goroutines, or read
+on a probe path, is exactly what it is for, and `conventions.md` explicitly
+forbids replacing a proven lock-free hot path with a generic `RWMutex`. But
+`atomic.Int64` cannot hold a `time.Time`, so it **forces** a conversion through
+`UnixNano()` — and that conversion is the precise point at which the monotonic
+reading is silently dropped. The type system does not notice, the linters do not
+notice, and the resulting code reads exactly like the correct version.
+
+**The defect is therefore a property of the representation, not of the author.**
+That is why this sweep's fix is a shared primitive rather than four local
+patches: `monoNanos()` makes the `atomic.Int64` representation safe by
+construction, so the next lock-free stamp is correct by default instead of
+correct only if its author reasons about NTP.
+
+### Why monotonic, and NOT admission's negative-age guard
+
+Copying `FreshCount`'s `age < 0 ⇒ stale` into these three callers would have been
+the obvious move and it would have been **wrong**. Admission's guard is right for
+admission: a bad stamp there must fail toward the local decision, so reading a
+future stamp as stale is fail-closed.
+
+At these sites "expired" does not mean *fall back* — it means **tear something
+down**, or **flip a readiness row to fail**. `negative ⇒ expired` would reap live tunnels
+and flap `cp_poll` on every node in the fleet on *any* backwards step, including
+the sub-second NTP corrections that are entirely routine. Measuring on the
+monotonic clock removes the choice: the elapsed time is simply correct across a
+step in either direction, and no caller needs a negative branch at all.
+`monotime_chaos_test.go` pins that decision as a **negative control** — a future
+stamp must leave `cp_poll` at `ok`, not flip it to `fail`.
+
+### A sentinel the domain change would have broken
+
+`0` is the "never stamped" sentinel at every one of these call sites
+(`since != 0`, `last != 0`), and the readiness probe has a *tested* contract that
+a bare failing flag with no transition stamp stays `ok`. On the wall clock that
+sentinel was unreachable for free: `0` is 1970. In a process-relative domain `0`
+is the process's own first nanosecond — a legitimate stamp that would read as "no
+stamp" and suppress the transition it had just recorded. `monoNanos` is therefore
+defined to return **strictly positive** stamps (elapsed + 1; `monoSince`
+subtracts two stamps so the offset cancels and no caller sees it), and
+`TestChaos83_MonoNanosIsNeverZero` pins it. This was found by the probe gate
+failing, not by inspection.
+
+### Risk matrix
+
+| Row | Finding | Likelihood | Impact | Status |
+|---|---|---|---|---|
+| **PX-26** | Tunnel idle reaper measured its 1h deadline on the wall clock, so a backwards step suspended reaping of exactly the idle/half-open tunnels it exists to collect — two sockets, two goroutines and two pooled buffers each, on the CONNECT-bypass and SOCKS5 paths | Medium (any NTP step-back, VM suspend/resume, host clock correction; routine in virtualised fleets) | **High** — FD/goroutine/memory exhaustion on the data plane under connection pressure; forward steps tear down every long-lived tunnel at once | **CLOSED** |
+| **HA-20** | DP `cp_poll` readiness grace measured on the wall clock, so a backwards step kept the row at `ok` while the control plane was unreachable | Medium (same producers; needs a step larger than the 5min grace to fully mask) | **High** — fail-**open** readiness: the outage signal is lost on the default (report-only) probe, and on a strict probe (`/ready?strict=1`) the suppressed `fail` also holds the node in the LB rotation serving policy it cannot refresh | **CLOSED** |
+| **ST-13** | Roster durability-degraded log gate measured on the wall clock; a negative age is always `< interval`, latching the gate suppressed | Medium | Medium — the only operator-visible signal that admin roster writes are not surviving a restart (§40's subject) goes unsaid while the suppressed counter climbs unread | **CLOSED** |
+| **CA-21** | `internal/ocsp`'s `allowTruncationLog` has the identical defect over an `atomic.Int64` nanos stamp | Medium | Low — a log gate with no enforcement consequence | **OPEN — deferred, see residual risk**; the overlapping sweep `CHAOS-84` (#1650) closes it with a package-local magnitude gate |
+| — | HA self-fence deadline (`ha_lease.go:232`), `internal/halease` lease authority, `internal/admission` `FreshCount`, `internal/mcp/rollout` `elapsed()` | — | — | **Already correct** — see the storage-type table above for why |
+
+### Verification
+
+`monotime_chaos_test.go` carries 9 gates. Four of them were confirmed to **fail
+against the pre-fix tree** (the production change was reverted and the suite
+re-run), which is the only evidence that a gate is a defect gate rather than a
+tautology:
+
+- `TestChaos83_TunnelActivityStampIsMonotonicDomain` and
+  `..._CPPollFailingSinceIsMonotonicDomain` — the stamp must land in the
+  monotonic domain, not near `time.Now().UnixNano()`.
+- `TestChaos83_CPPollGraceFlipsOnMonotonicElapsedOnly` — the grace window closes
+  on monotonic elapsed, and a future stamp does **not** flip the row (the
+  negative control above).
+- `TestChaos83_NoWallClockElapsedIdiomInPackageMain` — an AST guard over all 385
+  package-main sources banning the `time.Unix(0, stamp)` elapsed idiom. The ban
+  is deliberately narrow: `time.Unix(0, nanos)` is only ever an elapsed stamp,
+  while `time.Unix(seconds, 0)` is a genuine absolute instant (a wire-carried
+  token expiry in `controlplane.go:257` and `session.go:118`, an IdP token expiry
+  in `auth_oidc.go:450`, a timestamp formatted for display) and stays legal. It
+  ships with a verbatim pre-fix/legitimate control source and asserts it flags
+  exactly the two pre-fix shapes — so the guard cannot silently match nothing.
+
+The remaining gates pin the foundations: `monoEpoch` must carry a monotonic
+reading (if it is ever round-tripped through a value that strips it, every
+measurement silently degrades back to the wall clock and every gate above keeps
+passing), `monoSince` is never negative for a prior stamp, `monoNanos` is never
+zero, and the behavioural end — a silent tunnel is reaped once the *monotonic*
+elapsed passes the idle window, driven by a virtual clock running 100× real time.
+
+> **The behavioural test's first draft was wrong in an instructive way.** It
+> advanced a frozen fake clock by one step before the first read-deadline pop.
+> The relay refreshes the activity stamp whenever a copy returns bytes, so the
+> refresh captured the already-advanced value and the tunnel then looked freshly
+> active *forever* — the test timed out against correct code. A one-step clock
+> cannot model this path; the clock has to **run**, which is also the honest
+> model of the thing being tested.
+
+Checks run: `go vet ./...`, `go mod tidy -diff`, `CGO_ENABLED=0` amd64 build and
+`GOOS=linux GOARCH=arm64` cross-build, `go test -race` over the 73 tests in the
+touched areas (tunnel idle/drain, readyz DP, roster durability, SOCKS5), the
+shuffled double determinism run on the root package, and
+`docs/agent-context/check.py`. **`golangci-lint` could not run in this
+environment** and is recorded as blocked, not passed: the available v2.5.0 binary
+is built with go1.24 and `go/types` panics on this tree's go1.26 sources
+(`package requires newer Go version go1.26`), and `go install ...@v2.5.0`
+re-execs the linter module's own pinned toolchain, so a go1.26-built binary could
+not be produced here. CI's `go install` under the pinned compiler is unaffected.
+`gofmt` is clean on every changed file and `go vet` passes.
+
+### Residual risk / deliberately left
+
+- **`internal/ocsp`'s `allowTruncationLog` is the same defect, unfixed**
+  (`internal/ocsp/ocsp.go:101`): `now.Sub(time.Unix(0, last))` over an
+  `atomic.Int64` nanos stamp, so a backwards step latches the responder-cap
+  notice into its suppressed branch. Left open as **CA-21** rather than fixed
+  here: it is a log gate with no enforcement consequence, and the fix belongs to
+  that package — it takes an injected `now time.Time`, so it needs either a
+  package-local monotonic source or admission's negative-age guard, not package
+  main's `monoNanos`. Widening this sweep into an internal package to change a
+  log interval is not proportionate.
+- **The AST guard covers package main only.** Internal packages are not scanned;
+  extending it needs a per-package decision about absolute-vs-elapsed stamps,
+  which is the same judgement CA-21 defers.
+- **Monotonic readings do not advance while the machine is suspended** on some
+  platforms, so `monoNanos` measures elapsed *running* time. For an idle-teardown
+  deadline and a probe grace window — both of which bound how long this process
+  holds something or hides something — running time is the intended quantity, not
+  civil time. A tunnel idle across a host suspend is reaped one window after the
+  host resumes, which is the desired behaviour and a strict improvement on the
+  pre-fix code, where the suspend's clock correction *delayed* the reap.
+- **Nothing here changes an absolute-time decision.** Session and IdP token
+  expiry, certificate validity and the OCSP `nextUpdate` horizon are wire- or
+  disk-carried civil instants and must stay on the wall clock; a token that
+  outlives its `exp` because the local clock rolled back is an inherent property
+  of a signed bearer token, not a defect this sweep could fix. `store_logclock.go`
+  is likewise correct: it memoises the render of an absolute wall-clock second.
+- **`RevokeUser`'s non-persistence was re-derived independently** during this
+  sweep (the `users` map is neither persisted by `SaveRevocations` nor gossiped by
+  `ExportRevocations`, and `ui_middleware.go:271`'s per-request `UIUserExists`
+  check is what currently backstops it). It is already recorded as **AU-19** and
+  is not re-opened here.
+
+---
+
+## 48. CHAOS-84 — The wall clock steps backwards and four recovery bounds stop expiring
+
+**Date:** 2026-10-17 · **Domain:** cross-cutting (data plane / upstream plane /
+readiness / persistence signals) — a property of a REPRESENTATION, not of a
+domain, which is why forty sections of domain sweeps did not surface it ·
+**Code:** `internal/upstream/upstream.go`, `internal/ocsp/ocsp.go`,
+`crashguard.go`, `internal/secscan/secscan.go`, `internal/yara/yara.go`,
+`cdr_proxy.go`, `policy.go` ·
+**Full write-up:** [docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-17.md)
+
+> **Id and scope, reconciled when main was brought in.** Claimed as `CHAOS-71`
+> / §41 on its branch; renumbered in merge order to **`CHAOS-84` / §48**, because
+> `CHAOS-71` merged as §44 (the CP gRPC listener), §41–§43 are `CHAOS-74`/`75`,
+> 76–83 are claimed by open branches and §45–§47 by open sweeps. The scope also
+> narrowed. This sweep and the sibling sweep `CHAOS-83` (§47, #1644) both fixed
+> the tunnel idle reaper (CK-1), the DP readiness grace (CK-4) and the two
+> roster log gates (CK-5) — with contradictory contracts on the readiness row
+> (this sweep failed `cp_poll` on a future stamp; `CHAOS-83` pins that a
+> future stamp leaves it `ok`). Those three sites are owned by `CHAOS-83`, whose
+> monotonic stamps cannot go negative at all, so this sweep's alternative fixes
+> and gates for them were withdrawn rather than merged twice. CK-3 (the CDR
+> breaker) was already closed on main, which moved its reset comparison onto a
+> monotonic stamp (`openedMono`). The rows below keep the original analysis and
+> say which change closes each.
+
+### Executive summary
+
+Go's monotonic clock protects an interval only while it stays inside a
+`time.Time`. `time.Unix(0, n)` and `time.UnixMilli(n)` rebuild a `time.Time`
+with **no** monotonic reading, so every interval measured from a stamp held as a
+bare `int64` is a WALL-CLOCK interval. A backward step — an NTP correction after
+a wrong RTC, a resumed hypervisor snapshot, an operator fixing the date — makes
+that interval negative, so every `elapsed >= limit` test is false and a bound
+whose job is to END a degraded state never fires again until the clock catches
+up. Nothing errors, nothing is counted, nothing is logged.
+
+**Twenty-two** such comparisons exist. **Eight were already guarded**
+(`internal/scanner` `budgetRemaining`, `internal/admission` `engine.go`,
+`internal/mcp/canary` `windowOpenLocked` ×2, `internal/mcp/rollout` `elapsed`,
+`store.go` `advanceLocked`, `proxy_host_bounds.go`, `request_tracing_bounds.go`)
+— the rule was adopted, written into a comment and shipped. **Twelve were not:**
+seven recovery bounds or sole operator signals (CK-1…CK-5) and five evidence/log
+gates (CK-9) that this sweep's first inventory MISSED and a second review round
+surfaced.
+
+### Register rows
+
+- **CK-1 (P1, CLOSED by `CHAOS-83` §47 — both step directions)** — `idleCopyCounted` is the ONLY
+  bound on a half-open CONNECT tunnel, and its staleness verdict was wall-clock. The read deadline is
+  monotonic (netpoll converts against `runtimeNano`), so after a step the loop
+  keeps waking exactly on schedule — it is the *verdict* that is lost, not the
+  wake-up, and every pop re-arms forever. Per dead tunnel: two goroutines, two
+  FDs, a pooled relay buffer and the connlimit slot, held for the whole step. A
+  half-open peer is the normal outcome of a NAT timeout or a packet-loss
+  blackhole, so the leak needs no attacker — only a clock correction while
+  tunnels are open. The FORWARD direction was the other half, and the first
+  write-up wrongly called it immune: a tunnel that is quiet but ALIVE (idle SSH,
+  a long-poll) moves no bytes, so nothing refreshes its stamp, and a forward step
+  — the same dead-RTC appliance boot seen from the other side, where NTP jumps
+  the clock forward, possibly by years — tears it down at the next deadline pop.
+  Closed by moving the stamp to a MONOTONIC basis (`relayEpoch`,
+  `relayMonoNanos`), which is strictly stronger than guarding a wall-clock one:
+  a step cannot be represented in the stamp, so there is no negative case left to
+  decide. Available here, and not for the breakers, because the stamp is
+  process-internal — all five holders pass it straight to `idleCopyCounted` and
+  nothing publishes it. (This sweep's own `relayEpoch` version of that fix was
+  withdrawn on reconciliation; `CHAOS-83`'s `monoNanos` is the same basis.)
+- **CK-2 (P1, CLOSED)** — `internal/upstream` `CircuitBreaker.Allow` held
+  `openedAt` as `UnixMilli`; a step pinned every tripped breaker OPEN. This is
+  the security row, because `Pool.Next` falls back to **direct egress** when
+  nothing is eligible (the deliberate PX-2 / CHAOS-11 posture): one parent blip
+  plus a clock correction leaves the appliance egressing AROUND the enterprise
+  parent-proxy chain for the duration of the step, long after the parents
+  recovered. The fallback alert fires once and then tells the truth forever; what
+  never happened was the recovery it waits for.
+- **CK-3 (P2, CLOSED on main — monotonic `openedMono`)** — the same shape on `cdr_breaker.go`, so content disarm
+  stayed unavailable after the Sluice came back.
+- **CK-4 (P1, CLOSED by `CHAOS-83` §47 — monotonic stamp)** — `readyz_dp_health.go`'s `cp_poll` grace became
+  UNEXPIRABLE: a DP node whose control-plane link is known dead kept answering
+  `ok` on `/ready`, so a load balancer kept routing production traffic to it on
+  indefinitely stale configuration.
+- **CK-5 (P2, CLOSED — roster half by `CHAOS-83` §47, OCSP half here)** — the two roster-durability log gates (CHAOS-70's only
+  notice that a credential/roster mutation did not reach the volume) and the OCSP
+  responder-cap gate read a future stamp as *"already logged"*, converting a
+  visible degradation into a silent one for the duration of the step.
+
+**Posture, and the asymmetry that is the finding's substance.** "An unmeasurable
+interval must never count as INFINITE" fixes all five, but what it counts as
+instead depends on what the bound protects. CK-1 goes further and leaves the wall
+clock altogether (monotonic basis), which it can because its stamp is private;
+CK-2/CK-3 cannot, because `OpenedAt()` publishes their trip instant on
+`/api/diagnostics`. Those two govern a live dependency, so they **re-anchor**
+(CAS, so a concurrent writer's fresher stamp survives) and serve one fresh window
+measured from the step — treating a step as
+"expired" would reap every quiet tunnel on the appliance and fire every breaker's
+probe at parents that may still be down, a mass reset caused by the mitigation.
+CK-4/CK-5 only report, have no live resource to protect and an
+already-established failing state, so they count it **expired** — fail-closed for
+the probe, and audible for the log gates. Recovery is automatic everywhere,
+bounded by one window of the bound in question, never by the step size; no state
+latches and no restart is needed. **No new metric and no new alert** — every one
+of these faults already lands on a series that means it; what was missing was the
+recovery, not the signal.
+
+**Review round (CodeRabbit, PR #1650) — two Minor findings, both real.** (1) The
+forward half of CK-1 was documented as immune and was not, which is what moved
+CK-1 to a monotonic basis; (2) the CK-5 guard mistook its own staleness for a
+rollback — a caller that LOSES the CAS re-reads a stamp the winner stored from a
+later sample, so the negative interval was an ORDERING artifact, and the guard
+emitted a duplicate line and moved the stamp backwards, reintroducing the
+amplification the CAS was added to prevent. The proposed fix (re-sample after the
+Load) was measured INSUFFICIENT — the winner's sample may still be later — so the
+gates now discriminate on MAGNITUDE, not sign: suppress while the stamp is within
+one interval of now in EITHER direction. A rollback therefore costs at most one
+suppressed line instead of silencing the warning for the whole step. The OCSP
+half of (2) was NOT a live defect (no CAS loop; a lost CAS suppresses) and took
+the same rule only for uniformity. **The general lesson: a guard on the SIGN of
+an interval guards the wrong thing — a negative interval means the two readings
+are out of order, which concurrency produces with no clock involved. Compare
+against the quantity's natural scale, or leave the wall clock entirely.**
+
+**Second review round (Codex, P2) — see CK-9 above. Its lesson is about method:
+an inventory is only as exhaustive as the shapes its search can express.** This
+sweep said "seventeen comparisons" as if it had counted a closed set, when it had
+counted the matches of three regexes. The honest claim names the shape searched
+for and admits what it cannot reach. It is also the strongest argument for CK-7:
+a convention applied by hand across twenty-two sites was wrong at five of them,
+and what caught it was a different reader, not a check.
+
+- **CK-9 (P2, CLOSED) — the inventory was not exhaustive, and the SEARCH was
+  why.** Codex rejected §1's exhaustiveness claim and named `crashguard.go:167`,
+  `internal/secscan/secscan.go:828` and `internal/yara/yara.go:643`. Correct on
+  all three, and the cause was the search: the first sweep grepped for the
+  subtraction sitting syntactically beside the time call (`UnixNano() -`,
+  `time.Since(time.Unix(`), which cannot match the far more common two-step form
+  `now := time.Now().UnixNano()` … `now - prev`. Re-sweeping the generalised
+  shape found Codex's three plus **two more it had not named**: `cdr_proxy.go`
+  (Sluice call-error log) and `policy.go` (file-profile unresolved-block
+  warning). `policy.go` compares against a bare literal in Unix SECONDS, so even
+  the generalised `int64(<duration>)` search missed it — it took enumerating
+  every file that seeds an int64 from a time call. **`crashguard.go` is the
+  sharpest member of the whole sweep:** after one crash and a backward step,
+  `recordCrash` returns before updating `lastCrash` and before emitting the
+  stack-bearing log and audit entry, for every subsequent same-component crash —
+  and crash evidence is the one record an operator cannot reconstruct. All five
+  take the symmetric-window rule (absolute interval), four via
+  `time.Duration(d).Abs()` and `policy.go` by explicit negation.
+
+**Gates.** As first shipped, 15 defect + 15 control = 30, all fifteen defect
+gates verified FAILING against the pre-fix tree. After the reconciliation above
+this change carries 8 defect + 9 control = 17: the tunnel, readiness, roster and
+CDR-breaker gates left with their fixes (`CHAOS-83`'s `monotime_chaos_test.go`
+and main's `cdr_breaker_monotonic_test.go` gate those sites). Fault injection is deterministic and needs no host
+clock: a backward step of Δ is observationally identical to a stamp Δ in the
+FUTURE, because the stamp is written before the step and read after it. The
+breaker gates with an injectable clock additionally pin the recovery INTERVAL, so
+the fix cannot degrade into an instant probe flood.
+
+### Deliberately left, and recorded
+
+- **CK-6 — nothing detects or reports the step itself.** Each bound now recovers
+  locally, but no subsystem emits "the wall clock moved backwards by an hour" —
+  the single line that would have made all five diagnosable at once. A
+  process-wide monotonic-vs-wall drift detector is the right home for it and
+  needs its own threshold and alert design; larger than this fault.
+- **CK-7 — nothing structural stops the next bound repeating this.** A lint rule
+  or AST wall over `time.Unix(` / `time.UnixMilli(` inside a comparison would,
+  but the honest version has to tell a recovery bound from a log gate, because
+  the correct guard differs between them. Not built here.
+- **CK-8 — the MCP canary RATE window is the same class, left in place.**
+  `internal/mcp/canary` `budget_enforce.go` rolls its per-minute window on an
+  unguarded `now.UnixNano()-e.rateWindowStart >= budgetRateWindow`, in `Reserve`
+  and in the matching read, while the *activation* window two functions away
+  guards it explicitly. A step pins the window, `rateCount` never resets, and a
+  capped canary denies every reserve for the duration. Left because the direction
+  is **fail-closed** (it stalls rather than over-executes, which is that
+  boundary's posture) and because `Reserve` carries its own reviewed invariants —
+  a monotonic total, and an explicit "do NOT mutate here, this is a read"
+  contract on the twin — so re-anchoring it is a change to a security budget, not
+  a chaos remediation. Fix shape recorded for an owner: re-anchor
+  `rateWindowStart` without resetting `rateCount`, which holds the deny for one
+  more window and then rolls over normally.
+- **Cross-node clock skew is not this sweep.** `internal/halease` delegates lease
+  expiry to etcd, which decides it server-side, so the leader lease is not exposed
+  to a local step; gossiped freshness was closed separately and `internal/admission`
+  `engine.go` already guards `age < 0`. This sweep stayed on single-node steps.
+- **NTP failure as such is not a fault here.** A clock that never corrects is a
+  clock that never steps, which is the benign case for every bound above. The
+  fault is the correction, not its absence.
+
+### The flaky gate this sweep shipped and then fixed
+
+`Race · non-root packages` went red, and the first reading was "red on a
+superseded head". That was wrong. Reproducing the shard locally showed
+`TestChaos84_BreakerRecoveryIsBoundedFromTheStep` failing: `openedAt` is a
+`UnixMilli` stamp, so truncation moves the re-anchor instant down by up to 1ms
+and recovery lands that much before the nominal timeout (measured worst case over
+40 `-race` runs: −791µs). The GATE was stricter than the resolution of the clock
+it read. Fixed by tolerating exactly the stamp resolution — the property under
+test, a full timeout versus an instant half-open, is 0ms versus ~300ms and cannot
+be masked by 1ms. **Two rules out of it: a timing gate must be no stricter than
+the resolution of the clock it reads; and "red on a superseded head" is not a
+diagnosis when the check ran against code still in the PR — reproduce it, because
+the local shard is the authority, not the head SHA.**
+
+### The process lesson
+
+**A rule that lives in a comment is not a rule the tree follows.** The backward-step
+guard had been derived, argued and shipped eight times, once with the reasoning
+written out in full. What never happened was anyone asking where else the same
+subtraction appears — and the answer was the four places where the interval was
+not a log window or a scan budget but the recovery bound for a degraded state.
+
+The second half is about which faults get swept. Forty sections have gone domain
+by domain. A wall-clock step is not a domain; it is a property of a
+REPRESENTATION that cuts across all of them, and it produced one P1 in the data
+plane, one in the upstream plane and one in the readiness plane, in code three
+different sweeps had already visited for other reasons. Sweeping by domain cannot
+find that class. The question that finds it is *"what does this measurement
+depend on, and what happens when that dependency moves?"* — asked of the whole
+tree at once.
+
+> **The rule this sweep produces:** an interval measured from a stamp that has
+> left a `time.Time` is a WALL-CLOCK interval, and a wall-clock interval can go
+> negative. An unmeasurable interval must never count as INFINITE. Where the
+> bound protects a live resource, re-anchor and serve one fresh window; where it
+> only reports, count it as expired.
+
+---
+
 ## 49. CHAOS-87 — The interactive IdP compile path
 
 **Sweep date:** 2026-09-23. **Originally claimed as CHAOS-66 / §36 in a committed
@@ -11433,6 +12286,100 @@ build of it — including with `GOTOOLCHAIN=local`, a cleared `GOCACHE` and
 lint gate is therefore structurally unavailable, and the only signal is a CI
 round trip.
 
+**THAT LAST CLAIM EXPIRED, AND IT IS RECORDED HERE BECAUSE IT COST ROUNDS.** The
+paragraph above says the pinned linter cannot be run locally at all. That was
+true of v2.5.0 — the version installed in the container — and it is NOT true of
+the version the gate actually runs: `pr-fast-gate.yml` installs
+`golangci-lint@v2.15.0`, and `GOTOOLCHAIN=go1.27.3 go install
+github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0` produces a
+binary that type-checks this module and runs the gate's exact command — `run
+--new-from-rev origin/main` — clean. The rounds that accepted a CI round trip as
+the only signal were reading the version on `PATH` instead of the version in the
+workflow. *Take the tool version from the gate that blocks you, the same way the
+toolchain is taken from `go.mod` rather than from whatever `go` resolves to.*
+Two findings came back on the first local run of the right version, and neither
+was reachable from the diff-scoped command alone:
+
+- **`gosec` G703** (taint-analysis path traversal) on three test sites this
+  sweep adds. The gate runs `--new-from-rev`, which is why the many pre-existing
+  G703 sites in `cleanup.go`, `ui_support.go`, `restore.go` and
+  `release_autoseed.go` are grandfathered and these were not — `.golangci.yml`'s
+  `gosec` excludes omit G703 although every standalone `gosec` invocation in
+  `.github/workflows` excludes it *"for parity"*, so the config drifted from the
+  thing it says it mirrors. **Widening the config would weaken a gate outside
+  this sweep's scope**, so the suppressions are at-site and explained; each path
+  is `filepath.Join` of the test's own `t.TempDir()` with a name enumerated from
+  that same directory.
+- **`handleMetrics`' cognitive complexity, 43 on main and 49 with this sweep's
+  metrics block inline.** Both are over the limit, so the violation is
+  pre-existing and `--new-from-rev` cannot see a function GROW: `gocognit` and
+  `cyclop` attribute to the DECLARATION line, which is not new. This is round
+  7's lesson and the `ReplaceAll` 15→16 lesson arriving a third time, now in the
+  one direction that is invisible to BOTH the diff-scoped gate and a full-tree
+  run read without a baseline — *the only honest check is the same measurement
+  on `origin/main` and on the branch.* The block is lifted into
+  `writeIdPMetadataMetrics` verbatim, which returns the function to exactly
+  main's 43.
+
+**A fifth round fixed three P2 defects Codex found, and two of them are the same
+shape as defects this sweep had already fixed one layer away** (register rows
+IDP-14, IDP-15, IDP-16). IDP-14 is the sharpest: round 17 had closed a race
+around the superseded-episode cleanup and written down, in that function's own
+comment, exactly what the harm would be if a republish landed in the window — and
+the predicate *inside* the window still asked whether the compile's GENERATION
+was still current rather than whether anything in service still fetched the
+DOCUMENT, so a republish landing before the lock was even taken produced that
+documented harm with no race at all. **Closing a race around a predicate does
+not make the predicate right**, and the structural wall built to pin the lock
+discipline could not see it; the gate is behavioural where round 17's had to be
+structural, and the wall was extended to reject any re-admission of the
+generation comparison. IDP-15 is the `Delete`/`ReplaceAll` asymmetry again, on
+the CACHE this time: `Delete` has forgotten a removed profile's documents since
+IDP-11 closed, and `ReplaceAll` — the CP→DP snapshot path, i.e. how a cluster
+removes a profile at all — swept the episode and kept the documents, so a
+removal was a no-op for trust material the moment that id and source were
+reintroduced. IDP-16 is the third instance in this sweep of one rule enforced at
+one layer and not the next: the revalidation FAILURE path discarded a superseded
+episode and the SUCCESS-WITHOUT-ADOPTION path did not, although a cache fallback
+succeeds and still opens an episode.
+
+**A sixth round found the same rule missed at a FOURTH layer, and the reason is
+worth more than the fix.** Codex's next review of the round-20 head reported
+that the DARK recovery loop's refused-publication branch still leaked an
+episode (row IDP-17) — and round 20 had *looked at that branch and declined it*,
+reasoning that a compile which succeeded cannot have an open episode. **"The
+compile SUCCEEDED" does not mean the FETCH did**, which is the entire mechanism
+this sweep exists to handle: a dark profile with a usable cached document
+compiles from it while the IdP is down, and the 5xx behind that fallback opens
+an episode. *A rule can be held at three layers and still missed at the fourth,
+and the miss is likeliest when the reasoning that skipped it sounds like the
+rule itself.* So this round added a COUNT WALL over the non-publishing branches
+of both loops rather than one more behavioural gate: four rounds have each
+missed a NEW branch instead of regressing an old one, and a per-branch gate can
+only defend branches that already exist. The wall's first draft asserted the
+wrong count — the author miscounted the branches of the function being fixed —
+and the wall is what said so, which is the clearest case for counting that this
+register has. The round's control was wrong first too, in a way this document
+already records: it drove the competing publication through `Upsert`, which
+holds `r.mu` across its own network compile (row IDP-10), so it parked behind
+the very endpoint the recovery compile was holding and hung until the fetch
+budget expired. *Reading the register's own near-miss would have been faster
+than rediscovering it.*
+
+**The round's own lesson is about the CONTROLS, not the fixes.** Two independent
+sessions fixed these three defects from the same review, and the implementations
+agreed; what differed was what the gates refuse. The cheapest wrong fix for
+IDP-16 — discard UNCONDITIONALLY on that branch — was measured to pass the
+ENTIRE suite with every defect gate in place, and it erases the degradation
+episode on every watchdog tick while an IdP is down, which is a silent failure
+strictly worse than the leaked episode it fixes. **A defect gate proves the
+defect is gone; only a control proves the fix is the right one**, and a fix
+landed without one leaves the next round free to "simplify" it back. The same
+measurement is why IDP-15's disable control is non-negotiable: absence from the
+snapshot, not absence of a remote source, is what makes a profile gone, so a
+DISABLED profile keeps its last-known-good and a re-enable during an outage
+still works (IDP-13).
+
 **The CodeQL stand-down was reversed, correctly, by a later session.** This
 sweep argued at length that no amount of guarding at the SAML metadata call
 site would clear `go/request-forgery`, having tried three reshapings, and
@@ -11505,6 +12452,22 @@ mechanism also makes a docs-only push mid-run costly, since it cancels the run
 it is trying not to disturb; the honest trade is to take the extra CI cycle
 rather than hold a durable commit for it, because the container is ephemeral
 and the run is not.
+
+### Codex review round 21 — a late Put undoes a committed retirement (IDP-18, closed)
+
+Codex's review of the round-20 head found that a recovery or revalidation fetch
+already on the wire when `Delete` (or a removing snapshot) commits finishes
+afterwards and `Put`s its document back, undoing the `Forget` the commit had just
+run; recreating the same id and source while the IdP is down then compiles from
+the deleted generation's signing material. It was recorded open first, with the
+three candidate fixes and the recommendation, and is now closed with that
+recommendation: a per-profile retirement epoch that `Forget` advances and that
+both acquisition sites capture BEFORE dialling and pass in to
+`Store.PutIfCurrent`. *Compiling is not committing* has two orderings — a
+speculative write must not retire what is in service (round 19), and it must not
+resurrect what a commit retired (this round) — and the fence is checked where the
+write happens, under the store's own lock, never by asking the registry. See row
+IDP-18 for the gates and controls.
 
 ### Codex review round 19 — identity is (profile, KIND, source), and a superseded entry is unreachable rather than merely old
 
@@ -12442,6 +13405,11 @@ five were the only ones anybody had ever checked.
 | **IDP-11** | **A DELETED profile's cached documents were never removed.** Round 19 bounded cache occupancy to one entry per live `(profile, kind)` by retiring superseded sources, and the review round after it moved that retirement onto the registry's commit sites. What remained was the DELETE case: the Store had no `Forget`, so a profile removed from the registry left its entries behind — feeding the global, oldest-first, liveness-blind `evictLocked` on behalf of a profile that no longer exists, so with more than `MaxEntries` (64) profiles having ever existed a LIVE profile's only fallback could be evicted for a dead one | **CLOSED.** `Store.Forget(profileID)` removes every entry for the profile whatever its kind or source, called from `Delete` AFTER its persist lands — beside `forgetIdPMetadataEpisode`, on the position that was already the commit site. **CodeRabbit added the reachability this row had missed, and it is the sharper half**: `Get` is keyed by `(profile, kind, source)`, so a profile RECREATED under the same id pointed at the same source was served the PRE-DELETION document during an outage — metadata an operator had deliberately deleted, including whatever signing material it carried, for up to `StaleMaxAge`. **The deferral rationale this row carried had expired and saying so is the point**: it read *"a NEW cross-layer mutation path into the commit code rounds 6, 7, 9, 10 and 16 each got wrong in turn, so it needs its own gates"* — true when written, and no longer true once the round before this one BUILT that path and gated it, which made `Forget` a small sibling rather than a new mechanism. *A recorded deferral is a judgement about the state of the tree at the time, not a standing permission: re-read its reason before relying on it.* The lock order is safe in the one direction that matters — `Delete` holds `r.mu` and `Forget` takes only the store's own mutex, never calling back into the registry, which is the IDP-10 self-deadlock this row warned about and still warns about for any eviction-side alternative. Gates: `TestForget_RemovesEveryDocumentForTheProfile` (both kinds, index AND disk), `TestForget_IsScopedToTheProfile` (another profile survives; an empty id is not a wildcard), `TestChaos87_DeleteRetiresTheProfilesCachedDocuments` (end to end, including that a recreate during an outage cannot compile from the deleted document) and `TestChaos87_RefusedDeleteKeepsTheCachedDocuments` as its CONTROL — a delete whose persist fails leaves the profile stored AND live, so retiring its fallback would take a serving profile dark at the next outage |
 | **IDP-12** | **The cached document's fetch time is RECONSTRUCTED from a delta, not read from the store, and the reconstruction is only correct while a parse and a log write stay under half a second.** `Store.Get` holds the stamp (`time.Unix(e.FetchedAt, 0)`, a whole second written by `s.now().Unix()`) and returns an AGE against its own clock read; `serveCachedIdPDocument` then rebuilds the stamp as `time.Now().Add(-age).Round(time.Second)`. That reproduces the store's second exactly only while the gap between the two clock reads is under 500 ms — and the owner-decision round's own comment states the purpose as making two compiles of ONE document agree. Between those two reads the function runs **two full XML parses of a remote-supplied document up to 1 MiB** (`validateSAMLMetadataDocument` → `samlsp.ParseMetadata`, then `samlValidUntilOf` → a second `xml.Unmarshal`), a mutex-taking `noteIdPMetadataOutcome`, and a `logger.Printf` that `internal/logsink` documents as **BLOCKING the caller on a full queue**. Past 500 ms the rebuilt stamp is `F+1`: one second AHEAD of the store's own. Two consequences, and the first is the one that bites. (1) `idpRevalidationAdopts` adopts on `cachedAt.After(servedAt)`, and BOTH values are independent reconstructions of the same `F` — so a revalidation that fell back to the IDENTICAL cached document reads "a newer document", `publishRevalidated` swaps the live provider and re-stamps `idpServed`, and because the replacement is still cache-serving it stays a revalidation candidate and `runIdPRecoveryLoop` never settles: pointless provider swaps on a live browser-SSO path, each moving the recovery counters, for a document that never changed. (2) `Round` moves the stamp FORWARD, so the stale window's start moves later and the ceiling is extended — by at most a second, immaterial in itself, but it is the UNSAFE direction in a file that adopts CHAOS-61's *a negative age is STALE, not fresh* explicitly | **OPEN, REPORTED NOT FIXED — LOW severity, and the fix is to stop reconstructing rather than to re-tune the rounding.** Reaching it needs a large document or a saturated log sink, and the cost is churn plus a ≤1 s window, never a trust failure — which is why it is reported rather than folded into the round that found it. `Store.Get` already has the stamp in hand at the line that computes the age, so returning it removes the delta, the 500 ms dependency and the two-clock problem together; **truncating instead of rounding is the lesser fix** (it matches the store's own `Unix()` truncation and fails toward the safe side) but still leaves the stamp derived twice. This is this sweep's own standing rule arriving once more: *when one layer decides what a value MEANS, every other layer asks that layer rather than re-deriving it* (SEC-TOTP-1; rounds 6 and 7 of this section, where a value derived in two places drifted and a writer was reconciled against a key that never existed). Closing it changes `internal/idpmeta`'s read signature and every caller of `resolveIdPDocument`, so it needs its own gates — including one that holds the two clock reads apart deliberately, since the defect is invisible at microsecond δ and no existing gate can observe it **The class was enumerated from the PRIMITIVE rather than from the file, and it came back a single instance**: `idpmeta.Store.Get` is the ONLY accessor in the tree that returns an age for a caller to invert into a timestamp, and every other `time.Now().Add(-...)` site is a self-contained constant (certificate `NotBefore` backdating, a pruning cutoff derived from a window). So the blast radius of the proper fix is exactly one signature, and there is no second copy to keep in step |
 | **IDP-13** | **A profile a committed `Upsert` DISABLES, or switches to inline SAML metadata, keeps its cached document indexed** — `retireSupersededDocuments` returns early on an empty source, by design, so the entry occupies a slot and adds pressure to the global, oldest-first `evictLocked`. Raised by CodeRabbit after IDP-11 closed the `Delete` half | **OPEN, REPORTED NOT FIXED — a POSTURE between two failure modes, and the eviction hazard it cites has a DIFFERENT root.** The early return is deliberate and `TestRetireSuperseded_KeepSourceEmptyRetiresNothing` pins it: a DELETE is terminal, which is why `Forget` on delete is unambiguously right, but a DISABLE is REVERSIBLE, so forgetting there means an operator who disables a profile and re-enables it DURING an outage gets a dark profile instead of one that compiles from cache — an immediate, deterministic SSO outage caused by a cleanup, against an accumulation hazard that needs more than `MaxEntries` (64) profiles to have ever existed. **The hazard as stated — "oldest-first eviction can remove a LIVE profile's fallback" — is real but is NOT caused by these entries**: a profile live and serving from cache has an OLD `FetchedAt` PRECISELY BECAUSE IT CANNOT REFRESH, so during a long outage it is often the oldest entry in the store and a prime eviction candidate whether or not any disabled profile's entry is present. Forgetting on disable reduces pressure and closes nothing. **Servability-aware eviction does not close it either** (considered, since round 18 already built `checkServableLocked`): a disabled profile's entry inside the ceiling is still servable by that predicate, so preferring unservable entries would only reclaim ones already past `StaleMaxAge`. **The root is that `evictLocked` is LIVENESS-blind**, and IDP-11 records the constraint on fixing that — liveness must be passed IN, never called OUT, because `Upsert` holds `r.mu.Lock()` across `compileIdPProfile` (row IDP-10) which reaches `store.Put`, so querying the registry from inside eviction takes `r.mu.RLock()` under the write lock and self-deadlocks (the CHAOS-50 cluster-CA defect). *Aim a fix at the liveness-blindness, not at the entry count.* Taking the availability trade the other way is a one-line change plus inverting that gate, and belongs to an owner as an explicit decision rather than arriving as a side effect of a cleanup |
+| **IDP-14** | **The superseded-episode cleanup confused GENERATION ownership with DOCUMENT-SOURCE ownership, so a superseded compile deleted the episode of the provider that is live.** An episode is keyed by `(profileID, kind, source)` and by nothing else, but `stillFetchesSourceLocked` also required `p == generation`. A recovery or revalidation compile runs outside `r.mu` because it reaches the network, so a re-save — or a snapshot reasserting the identical configuration — can commit a NEW generation for the SAME source while that compile is out; the cleanup then saw a different pointer, read "superseded", and deleted the episode that now belongs to the live provider, one that is legitimately degraded on that very document. Its degradation clock restarts and the alert latch is dropped, so the page the operator depends on never fires. **This is verbatim the outcome round 17's own comment describes, and it SURVIVED round 17**: that round closed the window between the check and the act, while the check inside the window still asked the wrong question — a republish landing BEFORE the lock is taken needs no race at all. *Closing a race around a predicate does not make the predicate right*, and the structural wall built to pin the lock discipline could not see it. Found by Codex | **CLOSED.** The predicate now asks only whether the profile currently registered under this id — whatever generation it is — is enabled and still depends on this document ref. Generation identity still decides PUBLICATION, inline in `publishRecompiled` under the write lock, where installing a provider compiled for a retired generation would put superseded operator configuration back into service; that was already its only other home, so the parameter was pure harm where it stood. Gates: `TestChaos87_SameSourceRepublishKeepsTheEpisode` (behavioural, where round 17's had to be structural), the pre-existing `TestChaos87_SupersededRecoveryFailureLeavesNoEpisode` as the opposite-direction control — mutation-proven to fail against the cheapest wrong fix, a cleanup that forgets nothing — and the round-17 wall extended to reject any re-admission of a generation comparison |
+| **IDP-15** | **A snapshot that REMOVES a profile never forgot its cached documents, so a removal was a no-op for the trust material.** IDP-11 closed this for `Delete`; `ReplaceAll` — the CP→DP snapshot-apply path, and therefore how a clustered fleet removes a profile at all — swept the episode and kept the documents indefinitely. `Store.Get` keys on exactly `(kind, profileID, source)`, so an id and source the fleet has used before is served its PRE-REMOVAL document when it is reintroduced, signing material included; during an outage that is the only thing it is served. The same hazard IDP-11 recorded, one writer over, and the writer a cluster actually uses. **The asymmetry hid behind a correct-looking comment**: `retireAfterSnapshotCommit`'s cache sweep is documented as running over the COMMITTED set rather than over `prevSources`, with a sound reason (an id new to this snapshot can carry documents for a source it no longer fetches) — which covers reuse with a DIFFERENT source and silently excludes removal and reuse with the SAME source. Found by Codex, with an end-to-end reproducer | **CLOSED.** `retireAfterSnapshotCommit` forgets the documents of every id in the previous set that is absent from the committed one, through `forgetDeletedProfileDocuments` — the advisory helper `Delete` was already using inline, factored so the two writers cannot drift again. Absence from the snapshot, not absence of a remote source, is the test, which is what keeps IDP-13's posture intact: a DISABLED profile is still configured and keeps its last-known-good. Gates: `TestChaos87_SnapshotRemovalRetiresTheProfilesCachedDocuments` (including end to end, that reintroducing the id+source during an outage cannot compile) with `TestChaos87_SnapshotDisableKeepsTheCachedDocuments` as its CONTROL — the cheapest wrong fix is to sweep every id the snapshot leaves without a remote source, which would trade a bounded accumulation hazard for a deterministic SSO failure on re-enable |
+| **IDP-16** | **A revalidation that SUCCEEDED but adopted nothing left behind an episode nothing would ever clear.** A revalidation compile that falls back to the cache succeeds, and the failed fetch behind that fallback opens an episode exactly as a stale acquisition does. The failure branch of `revalidateCacheServingProviders` has discarded a superseded episode since round 12; the success-without-adoption branch reached `continue` without asking the question. So a profile disabled, deleted or repointed while the fetch was in flight had its episodes swept at the commit, and then this late fallback opened a FRESH one for a configuration no longer in service: nothing fetches that source again, no evidence can ever clear it, the diagnostics stay degraded for a profile the operator has already turned off, and the watchdog pages once it ages past `idpMetadataDegradedAfter`. Found by Codex | **CLOSED.** The branch runs the same guarded discard the failure branch runs, which is a no-op while the profile is still in service on that source — the ordinary case on every watchdog tick during an outage, and the reason the discard must stay conditional. **The guard is only trustworthy because IDP-14 fixed what "still in service" means, and the control is the part worth keeping**: `TestChaos87_StaleRevalidationAfterADisableLeavesNoEpisode` is the defect gate, and `TestChaos87_NonAdoptingRevalidationKeepsALiveEpisode` was added after the cheapest wrong fix — forgetting UNCONDITIONALLY on that branch — was measured to pass the ENTIRE suite. That mutation erases the degradation signal on every tick during an outage: a silent failure, strictly worse than the leaked episode it fixes, and nothing in the tree objected. **Third instance in this sweep of one rule enforced at one layer and not the next** — the shape the narrative already calls this review's most repeated defect |
+| **IDP-17** | **The DARK RECOVERY loop's refused-publication branch left an episode nothing would ever clear — the FOURTH instance of this one rule missed at a NEW layer.** A dark profile holding a usable cached document compiles FROM it while the IdP is down, so the 5xx behind that fallback opens an episode exactly as a stale acquisition does. When the operator disables the profile mid-fetch, `publishRecompiled` correctly refuses, the disable's own cleanup has already run — before this episode existed — and the branch only logged `noteIdPRecoverySuperseded`: the episode is left for a configuration no longer in service, unclearable by evidence, ageing past `idpMetadataDegradedAfter` into a page for a provider the operator turned off. Found by Codex, whose report named the decisive evidence precisely — *"the live-revalidation branch now performs guarded cleanup, while this dark-recovery success branch still does not"* | **CLOSED, and the reason it was missed is the part worth keeping.** The round that fixed IDP-16 looked at this exact branch and declined it, reasoning that a successful compile cannot have an open episode. **"The compile SUCCEEDED" does not mean the FETCH did** — that is the whole mechanism of this sweep, applied everywhere except to the branch that reports a superseded publication. A rule can be held at three layers and still missed at the fourth, and the miss is likelier when the reasoning that skipped it *sounds* like the rule. Both `noteIdPRecoverySuperseded` sites now carry the guarded discard: the dark-recovery one is reproduced end to end, and the revalidation one closes the CLASS on a narrower path that was NOT reproduced (reachable only when a concurrent compile wrote a newer document while this fetch fell back) and is recorded as such rather than claimed. Gates: `TestChaos87_DarkRecoveryLostRaceLeavesNoEpisode` with `TestChaos87_DarkRecoveryLostRaceToALiveProviderKeepsTheEpisode` as its CONTROL — the other way to lose the race is to go LIVE on the same source, where the episode is the new provider's live outage signal, so the cheapest wrong fix (a bare unconditional forget) erases the alert for a provider serving stale metadata right now. **And a COUNT WALL, `TestChaos87_WallEveryUnpublishedCompileBranchDiscardsItsEpisode`**, because four rounds each missed a NEW branch rather than regressing an old one, and a per-branch behavioural gate can only cover branches that exist: the revalidation loop must carry three guarded discards and the dark loop two, so adding a branch fails the wall and forces a decision instead of silence. **The wall's first draft asserted four and was wrong**, and that is the strongest argument for it — the author miscounted the branches of the function being fixed, and the wall is what said so. Its control is the mutation that deletes a discard. **The control's first draft was also wrong, in the way this register already records**: it published the competing generation through `Upsert`, which holds `r.mu` across its own `compileIdPProfile` (row IDP-10) and therefore parked behind the held endpoint the recovery compile was using — hanging 46 s until the fetch budget expired, the identical vacuity round 16 hit (*"it held the very source the intervening Upsert also needed, so both calls parked on one channel"*). The live entry is now installed directly, because what the branch reads is only `publishRecompiled`'s live-guard |
+| **IDP-18** | **A fetch already on the wire when a deletion commits writes the document back AFTERWARDS, undoing the committed retirement — so a profile recreated under the same id and source during an outage compiles from the DELETED generation's signing material.** `store.Put` is called from `resolveIdPDocument`, i.e. during the COMPILE, before any writer has decided to publish; `Forget` is called at the COMMIT. A compile that started before `Delete` (or a removing snapshot) commits therefore finishes after it and recreates exactly the entries the retirement removed. Publication correctly refuses the deleted profile, which is why this is invisible in the registry — the damage is durable and in the cache. **This is the precise MIRROR of the defect round 19 introduced and the round after it fixed**: that round retired superseded documents inside `Put` and was wrong because *compiling is not committing*; here the retirement is correctly at the commit and is undone by a `Put` that is correctly speculative. One rule, both orderings, and fixing one direction left the other open. Found by Codex, which also distinguished it from IDP-15 exactly right — *"Unlike the earlier snapshot-removal finding, `Forget` does run successfully here — the late fetch writes the document back afterward"* | **CLOSED** — option (1), the retirement epoch passed IN. `idpmeta.Store.Forget` advances a per-profile in-memory epoch unconditionally (also with nothing cached, so a brand-new profile deleted during its FIRST fetch is fenced too); both acquisition sites take `Store.Generation(profileID)` BEFORE dialling and hand it through `resolveIdPDocument` to `Store.PutIfCurrent`, which checks the epoch and writes under one hold of the store lock and returns `ErrRetired` otherwise. The registry is never consulted from inside the store, so the IDP-10/IDP-11 constraint holds. Gates: `TestChaos87_LateFetchCannotUndoACommittedDelete` (the recorded end-to-end reproduction; fails with the epoch check disabled), `TestPutIfCurrent_RefusesAWriteThatStraddlesAForget`, `TestPutIfCurrent_FencesTheFirstFetchToo`; controls: `TestChaos87_RecreateAfterDeleteStillCaches` and `TestPutIfCurrent_ARecreateStillCaches` (the fence is not a tombstone), `TestPutIfCurrent_AnUnrelatedDeleteDoesNotFence` (not a store-wide counter), `TestPutIfCurrent_RefusesAForeignGeneration`. A false refusal costs one missed cache refresh, never trust: the fence fails toward no fallback |
 | **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
 | **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so an order that configures a credential first refuses the request and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by the refusal line, so it reports health while testing nothing. 44 root tests mutate the global auth credentials with no restore, so the poisoning order is common, not a rare draw | **CLOSED on main by CHAOS-69 (#1446)**, with the same one-line fix this row proposed — `setupProxyTest(t)`, the repo's own helper for this flake class — reached independently. **It also corrects this row**: CHAOS-69 applied the fix to the SIBLING gate `TestSecReqID1_EndToEndLogAmplificationIsBounded` as well, which this row had assessed as unaffected on the reasoning that it asserts on byte VOLUME rather than on tokens. That reasoning was wrong — leaked credentials change which PATH the request takes, so the byte bound was being measured against a challenge rather than a proxied request. *A gate that drives the real `handleRequest` depends on every global that path reads, not only on the ones its assertion names.* |
 | **SUITE-2** | `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy` is a bare `fast >= legacy` timing ratio with no margin; under `-race` both arms ran ~6-14x slower and INVERTED (5881 vs 5141 ns/op against a documented 376 vs 887), failing with no regression present | **OPEN, REPORTED NOT FIXED** — the package already replaced its other ratio gate with a structural one for this exact reason; widening the bound enough to tolerate a 1.14x inversion would also admit a real 1.4x regression |

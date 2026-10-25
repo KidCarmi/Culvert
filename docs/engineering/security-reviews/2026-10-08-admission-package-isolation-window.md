@@ -411,12 +411,12 @@ complete — not a weakening of the wall.
    | zero-value call | result |
    |---|---|
    | `(&admission.IPFilter{}).Allowed(ip)` | no panic |
-   | `(&admission.IPFilter{}).Add(ip)` | **panic**, `assignment to entry in nil map` |
+   | `(&admission.IPFilter{}).Add(ip)` | no panic since PR #1563 (at review time: panicked, `assignment to entry in nil map`) |
    | `(&admission.RateLimiter{}).Allow(ip)` | no panic |
    | `(&admission.RateLimiter{}).AllowAuto(ip)` | no panic |
    | `(&admission.RateLimiter{}).AllowClusterAware(ip)` | no panic |
    | `(&admission.RateLimiter{}).AddExemption(ip)` | no panic |
-   | `Configure(10, time.Minute)` **then** `Allow(ip)` | **panic**, `assignment to entry in nil map` |
+   | `Configure(10, time.Minute)` **then** `Allow(ip)` | no panic since PR #1563 (at review time: panicked, `assignment to entry in nil map`) |
 
    So the limiter's admission methods short-circuit on `!enabled` *before* they
    reach the uninitialised shard maps, and only a limiter that has been
@@ -440,6 +440,14 @@ complete — not a weakening of the wall.
    Extraction widened *who can write the misuse* (any module-internal package)
    without changing the behaviour. Hardening options, for a separate change:
    make the zero value safe, or make the types unusable without a constructor.
+   **Since closed on main** (PR #1563): the first option was taken. Every map
+   write now lazily initializes in its cold miss branch (`IPFilter.addLocked`,
+   and `rlShard.bucketFor`, the one bucket-creation path `Allow` and
+   `AllowClusterAware` share), so the two write rows above no longer panic,
+   ADR-0039's amendment records the strengthened contract, and
+   `internal/admission/bare_literal_safety_test.go` differentially pins a bare
+   instance equal to a constructed one. The table keeps both rows, re-measured,
+   so `TestZeroValueResidual_DocumentMatchesTheEngine` still drives them.
 2. **`ipf` is swapped unsynchronised.** `controlplane_snapshot.go:873` assigns
    the package-level `ipf` pointer, which request goroutines read at
    `proxy.go:1477` and `socks5.go:430` with no synchronisation. Identical at

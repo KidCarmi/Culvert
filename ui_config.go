@@ -1783,6 +1783,7 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		noteAccessCIDRResult(accessCIDRUIAllow, nil)
 		auditEvent(r, "settings.ui_allow_ips", fmt.Sprintf("%d entries", len(body.IPs)), strings.Join(body.IPs, ", "))
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "ips": ListUIAllowedCIDRs()})
@@ -1799,7 +1800,7 @@ var syslogConfigured string // the addr string, empty = not configured
 // syslogConfiguredAddr records the operator-configured syslog/SIEM target
 // regardless of whether InitSyslog actually connected (mirrors
 // auditLogConfiguredPath). buildOperatorContract's checkSyslogFeed compares
-// it against the live globalSyslog handle so the Diagnostics panel can tell an
+// it against the live globalSyslogHandle handle so the Diagnostics panel can tell an
 // intentional "no SIEM feed" apart from a configured feed that silently failed
 // to connect at startup — the latter previously left only one startup log line
 // as signal while the /api/syslog readback reported the feed as "not
@@ -1831,61 +1832,86 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		format := "rfc3164"
 		var drops, panics uint64
-		if globalSyslog != nil {
-			format = globalSyslog.Format()
+		if sw := syslogHandle(); sw != nil {
+			format = sw.Format()
 			// Read panics before drops: deliverGuarded's recover branch always
 			// increments panics first, then drops (independent atomics, no
 			// combined snapshot). Reading in the same order means a report can
 			// only ever lag panics behind drops, never the reverse — so the
 			// UI's `drops > 0` gate can never hide a real panic behind a
 			// stale-looking drops==0.
-			panics = globalSyslog.Panics()
-			drops = globalSyslog.Drops()
+			panics = sw.Panics()
+			drops = sw.Drops()
 		}
 		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
-		if !requireRole(w, r, RoleAdmin) {
-			return
-		}
-		var body struct {
-			Addr   string `json:"addr"`
-			Format string `json:"format"`
-		}
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		body.Addr = strings.TrimSpace(body.Addr)
-		body.Format = strings.TrimSpace(body.Format)
-		if body.Format != "" && body.Format != "rfc3164" && body.Format != "rfc5424" {
-			http.Error(w, "format must be \"rfc3164\" or \"rfc5424\"", http.StatusBadRequest)
-			return
-		}
-		if body.Addr == "" {
-			// Disable syslog.
-			if globalSyslog != nil {
-				globalSyslog.Close()
-				globalSyslog = nil
-			}
-			syslogConfigured = ""
-			syslogConfiguredAddr = ""
-			auditEvent(r, "settings.syslog", "disabled", "")
-			adminSettingsSave()
-			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
-			return
-		}
-		if err := InitSyslog(body.Addr, body.Format); err != nil {
-			http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		syslogConfigured = body.Addr
-		syslogConfiguredAddr = body.Addr
-		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
-		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
+		handleSyslogConfigPost(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleSyslogConfigPost is the POST half of /api/syslog: validate the body,
+// then either disable forwarding or (re)point it at a new collector. Split out
+// of apiSyslogConfig, behaviour unchanged, to keep that handler inside the
+// repository's configured complexity/length bars (cyclop 15, funlen 80/50)
+// after CHAOS-78 added the one-load format resolution below. Named for the
+// method it serves, not apiXxx, because it is NOT a routed handler — the route
+// table and the mux still name apiSyslogConfig (mirrors
+// handleSupportDebugLevelPost).
+func handleSyslogConfigPost(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var body struct {
+		Addr   string `json:"addr"`
+		Format string `json:"format"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	body.Addr = strings.TrimSpace(body.Addr)
+	body.Format = strings.TrimSpace(body.Format)
+	if body.Format != "" && body.Format != "rfc3164" && body.Format != "rfc5424" {
+		http.Error(w, "format must be \"rfc3164\" or \"rfc5424\"", http.StatusBadRequest)
+		return
+	}
+	if body.Addr == "" {
+		// Disable syslog. Swap to nil FIRST, then close what we displaced: a
+		// request goroutine that already loaded the old handle delivers into a
+		// closed writer, which the engine drops and counts, whereas closing
+		// before the swap widens that window for no gain (CHAOS-78).
+		if displaced := setSyslogHandle(nil); displaced != nil {
+			_ = displaced.Close()
+		}
+		syslogConfigured = ""
+		syslogConfiguredAddr = ""
+		auditEvent(r, "settings.syslog", "disabled", "")
+		adminSettingsSave()
+		jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
+		return
+	}
+	if err := InitSyslog(body.Addr, body.Format); err != nil {
+		http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	syslogConfigured = body.Addr
+	syslogConfiguredAddr = body.Addr
+	// Resolve the format from ONE load, and fall back to the requested value
+	// rather than dereferencing: these two reads were separate unguarded derefs
+	// of the global, so a second admin's concurrent disable between InitSyslog
+	// and here nil-panicked the admin handler (CHAOS-78). The fallback mirrors
+	// the engine's own normalisation.
+	format := body.Format
+	if sw := syslogHandle(); sw != nil {
+		format = sw.Format()
+	} else if format == "" {
+		format = "rfc3164"
+	}
+	auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+format+")")
+	adminSettingsSave()
+	jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": format})
 }
 
 // POST /api/syslog/test — send a test message to the configured syslog target.
@@ -1897,13 +1923,14 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if globalSyslog == nil {
+	sw := syslogHandle()
+	if sw == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
 	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
 	// now via the exported io.Writer surface (writeMsg is package-internal).
-	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
+	_, _ = sw.Write([]byte("Culvert syslog test message — connectivity verified"))
 	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
 }
 
@@ -2122,6 +2149,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid trusted_proxy_cidrs: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		noteAccessCIDRResult(accessCIDRTrustedProxy, nil)
 		SetProxyBaseURL(body.BaseURL)
 		uiExtraSANs = body.UISANs
 		trustForwardedHeaders = body.TrustForwardedHeaders

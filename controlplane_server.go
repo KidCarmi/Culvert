@@ -191,20 +191,23 @@ var unenrolledConfigPull = struct {
 	attempts map[string][]time.Time
 }{attempts: map[string][]time.Time{}}
 
+// unenrolledConfigPullWindow is the sliding window over which unenrolled pull
+// attempts accumulate. Shared by unenrolledConfigPullAllow and the cleanup
+// sweep so the two agree on staleness — the same arrangement
+// enrollRateLimitWindow has.
+const unenrolledConfigPullWindow = time.Minute
+
 // unenrolledConfigPullAllow reports whether ip may pull the full unenrolled
 // config now, sliding-window rate-limited. Generous enough for a bootstrapping
 // node's retries, tight enough to make bulk exfiltration slow.
 func unenrolledConfigPullAllow(ip string) bool {
-	const (
-		maxPulls = 10
-		window   = time.Minute
-	)
+	const maxPulls = 10
 	unenrolledConfigPull.mu.Lock()
 	defer unenrolledConfigPull.mu.Unlock()
 	now := time.Now()
 	recent := unenrolledConfigPull.attempts[ip][:0]
 	for _, t := range unenrolledConfigPull.attempts[ip] {
-		if now.Sub(t) < window {
+		if now.Sub(t) < unenrolledConfigPullWindow {
 			recent = append(recent, t)
 		}
 	}
@@ -214,6 +217,43 @@ func unenrolledConfigPullAllow(ip string) bool {
 	}
 	unenrolledConfigPull.attempts[ip] = append(unenrolledConfigPull.attempts[ip], now)
 	return true
+}
+
+// unenrolledConfigPullCleanup drops per-IP entries whose every timestamp has
+// aged out of the window (CHAOS-90).
+//
+// This is the sweep enrollRateLimitCleanup has had since the growth hazard was
+// first recognised, carried across to its twin. The reasoning transfers
+// verbatim and the comment there already states it: unenrolledConfigPullAllow
+// prunes a slice only on that same IP's NEXT pull, so an address that pulls
+// once and never returns leaves a permanent entry — unbounded growth keyed by
+// a value the peer chooses. One request per address is enough to grow it, and
+// on a control plane the gRPC port is reachable by any peer that can route to
+// it, so an IPv6 source sweep costs the attacker almost nothing.
+//
+// Note the asymmetry with the entry it guards: the empty slice left behind by
+// the prune above still costs a map entry and the IP string, so pruning
+// timestamps is NOT the same as reclaiming the key. Only deleting the key is.
+//
+// Called periodically by the shared security-limiter janitor; a no-op on
+// non-control-plane nodes, where the map is empty.
+func unenrolledConfigPullCleanup() {
+	unenrolledConfigPull.mu.Lock()
+	defer unenrolledConfigPull.mu.Unlock()
+	now := time.Now()
+	for ip, times := range unenrolledConfigPull.attempts {
+		fresh := times[:0]
+		for _, t := range times {
+			if now.Sub(t) < unenrolledConfigPullWindow {
+				fresh = append(fresh, t)
+			}
+		}
+		if len(fresh) == 0 {
+			delete(unenrolledConfigPull.attempts, ip)
+		} else {
+			unenrolledConfigPull.attempts[ip] = fresh
+		}
+	}
 }
 
 // gcMarshalCache caches the marshaled FULL (enrolled) config snapshot keyed on

@@ -70,6 +70,12 @@ sessions.
 different metadata URL or issuer has no cache, so a migration can never be
 answered by the provider you are migrating away from.
 
+**Deleting a profile discards its cached documents**, including the result of a
+fetch that was still in flight when the deletion was saved. A profile later
+recreated under the same id and source therefore never inherits the deleted
+profile's metadata or signing certificates: it has no fallback until it fetches
+its own document.
+
 **Cached bytes are parsed and validated by exactly the same code as network
 bytes.** For OIDC, all three endpoints the appliance uses from the document
 (authorization, token, JWKS) are re-checked STRUCTURALLY — absolute, `http` or
