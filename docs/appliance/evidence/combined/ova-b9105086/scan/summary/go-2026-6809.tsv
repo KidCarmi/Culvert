@@ -1,0 +1,14 @@
+engsrc:usr-bin-containerd	usr-bin-containerd	source	stdlib	v1.27.2	v1.27.3	-	called	GO-2026-6809
+engsrc:usr-bin-containerd-shim-runc-v2	usr-bin-containerd-shim-runc-v2	source	stdlib	v1.27.2	v1.27.3	-	required	GO-2026-6809
+engsrc:usr-bin-ctr	usr-bin-ctr	source	stdlib	v1.27.2	v1.27.3	-	called	GO-2026-6809
+engsrc:usr-bin-docker	usr-bin-docker	source	stdlib	v1.26.9	v1.26.10	-	called	GO-2026-6809
+engsrc:usr-bin-docker-proxy	usr-bin-docker-proxy	source	stdlib	v1.26.9	v1.26.10	-	required	GO-2026-6809
+engsrc:usr-bin-dockerd	usr-bin-dockerd	source	stdlib	v1.26.9	v1.26.10	-	called	GO-2026-6809
+engsrc:usr-bin-runc	usr-bin-runc	source	stdlib	v1.27.2	v1.27.3	-	required	GO-2026-6809
+govulncheck:host-usr-bin-containerd	host-usr-bin-containerd	gobinary	stdlib	v1.27.2	v1.27.3	-	symbol/linked=186	GO-2026-6809
+govulncheck:host-usr-bin-containerd-shim-runc-v2	host-usr-bin-containerd-shim-runc-v2	gobinary	stdlib	v1.27.2	v1.27.3	-	symbol/linked=0	GO-2026-6809
+govulncheck:host-usr-bin-ctr	host-usr-bin-ctr	gobinary	stdlib	v1.27.2	v1.27.3	-	symbol/linked=154	GO-2026-6809
+govulncheck:host-usr-bin-docker	host-usr-bin-docker	gobinary	stdlib	v1.26.9	v1.26.10	-	symbol/linked=152	GO-2026-6809
+govulncheck:host-usr-bin-docker-proxy	host-usr-bin-docker-proxy	gobinary	stdlib	v1.26.9	v1.26.10	-	module/linked=0	GO-2026-6809
+govulncheck:host-usr-bin-dockerd	host-usr-bin-dockerd	gobinary	stdlib	v1.26.9	v1.26.10	-	symbol/linked=200	GO-2026-6809
+govulncheck:host-usr-bin-runc	host-usr-bin-runc	gobinary	stdlib	v1.27.2	v1.27.3	-	symbol/linked=0	GO-2026-6809

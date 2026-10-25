@@ -1,0 +1,3 @@
+kernel 7.0.0-38-generic: CRITICAL denied 6, CRITICAL present 6, HIGH absent 5, HIGH denied 100, HIGH present 179
+userspace-only (not the running kernel): CRITICAL no-kernel-code 3, HIGH no-kernel-code 112
+REVIEW ENTRIES NOT HOLDING ON THIS DISK: bluetooth, rdma_rxe, siw, irdma, ib_srpt, io_ti, kafs, batman-adv, amdgpu, i915, nouveau, vkms, f2fs, ntfs3, hfsplus, hpfs, i2c-stub, idpf, mac802154, vivid, smc, hsr, kcm, rmnet, nvmet-tcp, ocfs2, scsi_debug, r8723bs, thunderbolt, ublk_drv, ath6kl_core, mac80211, mt76, cfg80211, rtw89_core, wcn36xx, wilc1000, zram, snd-usb-audio, l2tp_core, rtrs-server
