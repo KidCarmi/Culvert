@@ -9,6 +9,117 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An inspected tunnel's inner-host pin accepted an authority `net/http` will
+  not send, so the upstream received no authority at all.** A CONNECT tunnel is
+  authorized once, against the CONNECT authority, and `innerHostPinnedToTunnel`
+  (`inspect_host_pin.go`) exists so an inner request cannot name a different
+  destination on that already-authorized tunnel. Its own documentation refuses
+  an EMPTY inner host for a specific reason: `Request.Write` serializes that as
+  a literal `Host: `, and a shared front end answers an authority-less
+  HTTP/1.1 request from its default or fallback vhost — a destination policy
+  never evaluated, with the log row, scan verdicts and CDR decisions all still
+  naming the CONNECT host.
+
+  That refusal was reachable **through** the comparison. `hostutil.StripHostPort`
+  ends in `net.SplitHostPort`, which splits on the last colon and never
+  validates the port, so `Host: allowed.example.com:0/x` reduced to the
+  authorized host and PINNED — while `Request.write` applied
+  `httpguts.ValidHostHeader` to the same value, found the `/`, and (with
+  `usingProxy=false`) zeroed the authority entirely. Measured on go1.27.3:
+  `allowed.example.com:0/x`, `allowed.example.com:443?x` and
+  `allowed.example.com:@blocked.example.com` all pinned and all put `Host: ` on
+  the wire. This is the same defect class #1632's own review fixed for square
+  brackets ("the pin compares a REPAIRED value while the origin receives an
+  UNREPAIRED one"); two further repairs did the same thing and were not covered.
+
+  The second was IDNA case. `NormalizeHostStrict` lowercases before
+  `idna.ToASCII` while `httpguts.PunycodeHostPort` does not, and punycode
+  carries case in its payload — so against tunnel `xn--bcher-kva.example.com`,
+  an inner `BÜCHER.example.com` pinned while the wire carried
+  `xn--BCHER-2pa.example.com`: a different label, not a case variant
+  (`bcher-2pa` != `bcher-kva`), i.e. a name policy never evaluated. The comment
+  asserting a U-label inner host was safe is corrected rather than left to
+  invite a maintainer back toward the hole.
+
+  Both are closed by one rule instead of a list of refused spellings:
+  `innerAuthorityAsSent` canonicalizes through the SAME helpers `net/http` and
+  the HTTP/2 header encoder use and refuses anything they would not forward
+  verbatim, so the pin cannot drift from the wire because it now reads the
+  wire's own definition. Nothing a conforming client sends is newly refused —
+  every pre-existing accepted spelling (trailing root dot, lowercase U-label,
+  `host:443`, bracketed IPv6, IP-literal tunnel) still pins, and the two shapes
+  that look divergent but are the same destination (an ASCII-case A-label
+  variant, an empty port) are now pinned explicitly by the table.
+  `TestInnerHostPin_WireAgreesWithWhatWasPinned` is the differential oracle and
+  the reason this is not a spelling list: for every inner authority the pin
+  accepts, it drives the real `ReadRequest` → `Request.Write` path and asserts
+  the serialized `Host` still canonicalizes to the tunnel host, with a
+  non-vacuity guard. `go.mod` is unchanged (`golang.org/x/net` was already a
+  direct dependency).
+
+- **The new access-list Diagnostics row served the admin-only UI allowlist
+  posture to a viewer.** `checkAccessCIDRLists` joined the operator contract,
+  which `/api/diagnostics` and `/api/health/explain` serve at RoleViewer, but
+  was not classified in `redactContractForRole` — so a viewer or operator read
+  the rejected entry verbatim (the message embeds
+  `fmt.Errorf("invalid IP/CIDR: %s", c)` over the configured value) together
+  with whether the allowlist IN FORCE is empty, spelled out as "the admin UI
+  accepts every client IP", or else its entry count. `GET /api/ui-allow-ips`
+  requires RoleAdmin in both methods and nothing else reads that list, so the
+  row answered "is admin-UI IP restriction in force on this node?" — the
+  question asked before trying a stolen credential from off-network — to the
+  lowest authenticated role.
+
+  `accessCIDRListsRows` now renders the row twice from ONE read of the
+  rejection state (the `rosterViewerRow` discipline, so the two renderings
+  cannot straddle a settings save and disagree), and `redactContractForRole`
+  swaps in the non-admin rendering. The status stays `warn` below admin — a
+  non-admin must still see that a network list is misconfigured and escalate —
+  and an `ok` row is returned identical to both roles. The **trusted-proxy**
+  clause is deliberately carried through unredacted: `GET /api/settings/network`
+  already returns `trusted_proxy_cidrs` at RoleViewer, so withholding it would
+  cost an operator remediation detail without concealing anything. Both
+  directions are pinned, including an over-redaction control and a positive
+  control that the admin keeps the full evidence.
+
+- **`scripts/install.sh` had two disagreeing answers to "is this secret already
+  set?", and the looser one guarded the cluster session key.**
+  `secret_already_set` knows what docker compose resolves — `VAR=`, `VAR=""`,
+  `VAR=''`, `VAR=` with an inline comment and a CRLF-only value are all EMPTY —
+  while `persist_host_env_session_secret` kept its own `^VAR=.+`, which matches
+  every one of those shapes. Measured against both revisions of the real
+  function: for all four empty shapes the installer reported "already
+  configured" and declined to persist the operator's `CULVERT_SESSION_SECRET`,
+  so compose interpolated `""` and every node fell back to its own random
+  per-process signing key instead of the shared cluster key — admin sessions
+  silently stop validating across nodes, which is exactly the failure that
+  function's header comment exists to prevent. (The fallback key is freshly
+  random, so this is a cluster-availability failure, not a weak-key one.)
+
+  Both callers now delegate to one predicate, `env_file_value_set`, reporting
+  0 = set, 1 = absent or empty, 2 = could not read. That third code is
+  load-bearing and preserved: the session-secret path must tell "no entry, safe
+  to add" from "could not look", because confusing them overwrites a signing
+  key it was unable to read. An empty entry is overwritten; a non-empty one is
+  still never touched.
+
+### Fixed
+
+- **`README.md` documented the opposite of CDR's fail-closed guarantee.** The
+  `-cdr-fail-mode` row still said that when no Sluice instance is available at
+  all "CDR is skipped and the file passes through in either mode" — the exact
+  behaviour the CDR unavailable fail-mode fix replaced, and which
+  `docs/OPERATIONS.md` §6 and `config.example.yaml` were updated for while the
+  README was not. An operator reading it concludes `fail_mode: closed` does not
+  cover a Sluice outage, the one case the setting exists for. The row now states
+  that the configured mode applies when no instance can be called, that `open`
+  passes the file through unsanitized and that `closed` refuses it with block
+  reason `cdr_unavailable`, counted in `culvert_cdr_fail_closed_total`.
+  `TestREADMEDocumentsCDRUnavailableFailMode` asserts the row against the code's
+  own `cdrUnavailableBlockReason` constant, with negative controls for the
+  retired claim and a positive control that the fail-open half is still
+  documented.
+
 - **Two merge-gate workflows reached their actions through MUTABLE tags, and a
   repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
   (designed to be a REQUIRED branch-protection check) and
