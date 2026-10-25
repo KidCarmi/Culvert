@@ -149,10 +149,19 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
    > your first GUI enrollment so `loadCDR` re-resolves the full static
    > config with CDR already enabled.
    >
-   > **Booting with `-cdr-enabled`/`cdr.enabled: true` (or with the
-   > `cdr_enabled` sentinel already present) avoids this**, even when no
-   > instance is enrolled yet and no CLI/YAML endpoint/fingerprint is
-   > configured. `loadCDR` calls `initCDRClient(cdrCfg)` at boot with the
+   > **Booting with `-cdr-enabled` or with the `cdr_enabled` sentinel
+   > already present avoids this**, even when no instance is enrolled yet
+   > and no CLI/YAML endpoint/fingerprint is configured — but
+   > **`cdr.enabled: true` in `config.yaml` does NOT**, and crashes the
+   > proxy instead. `FileConfig.validateCDR` rejects an empty `cdr.endpoint`
+   > whenever the YAML `enabled` flag is true, and `loadFileConfigAndFlags`
+   > (`main.go`) treats that validation failure as `log.Fatalf` — the
+   > process never starts. The CLI flag and the sentinel both reach
+   > `loadCDR` with YAML enablement still `false`, so neither is checked by
+   > that validator. If you want this workaround, use `-cdr-enabled` (or
+   > enable once via the GUI/API, which also arms the sentinel for every
+   > later boot), not a bare `cdr.enabled: true` with no endpoint in
+   > `config.yaml`. `loadCDR` calls `initCDRClient(cdrCfg)` at boot with the
    > full resolved config; when the pool build fails completely (empty
    > registry and `bootstrapPoolFromConfig` refuses an empty `Endpoint` or
    > `ServerFingerprint`, or every enrolled instance failed to dial),
@@ -175,8 +184,18 @@ Two ways to turn CDR on, and either one is enough — you do not need both:
 > considers only the remote scan service, text DPI, and ClamAV/YARA body
 > scanning — **not CDR**. On a node where none of those body scanners is
 > enabled, eligible SSL-inspected files are forwarded without ever calling
-> Sluice, with no counter or log line. Enable at least one body-scanning
-> engine (or the remote scan service) alongside CDR.
+> Sluice, with no counter or log line.
+>
+> **Text DPI alone is not enough for the documents CDR exists to sanitize.**
+> `bodyNeedsBuffering`'s DPI branch additionally requires
+> `isTextContentType(contentType)` (`scanner.go`), which covers only
+> `text/*`, JSON, XML, XHTML, JavaScript, and form-urlencoded — it excludes
+> every PDF and Office MIME type. So a node with ONLY `dpi` enabled still
+> never buffers a `.pdf`/`.docx`/`.xlsx` download, and CDR never sees it,
+> even under `fail_mode: closed`. Enable ClamAV/YARA body scanning or the
+> remote scan service (either buffers binary content, not just text)
+> alongside CDR if you need document formats covered — DPI-only
+> satisfies this gate for text bodies only.
 >
 > The same function has a second, unconditional gate ahead of it: a host
 > entered in **Security Scan → Exclusions** (`globalScanExclusions`) skips
