@@ -216,7 +216,7 @@ jobs:
 
       - name: Upload determinism log
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-determinism-log
           path: determinism.log
@@ -263,7 +263,7 @@ jobs:
         # No `run-id`/`github-token`: without them actions/download-artifact
         # reads ONLY the current workflow run, so a floor can never be enforced
         # against some other run's profile. Do not add them.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: qa-coverage
 
@@ -421,15 +421,7 @@ jobs:
         run: go build -ldflags="-s -w" -o culvert .
 
       - name: Verify binary is static
-        run: |
-          file culvert
-          if ldd culvert 2>&1 | grep -q "not a dynamic executable"; then
-            echo "binary is static — good"
-          else
-            echo "::error::binary has dynamic dependencies — broke CGO_ENABLED=0 guarantee"
-            ldd culvert || true
-            exit 1
-          fi
+        run: bash .github/scripts/assert-static-binary.sh culvert
 
       - name: Smoke run — start, hit /health, stop
         run: |
@@ -581,12 +573,12 @@ jobs:
         run: go install -C tools/gosec github.com/securego/gosec/v2/cmd/gosec  # v2.29.0 rules, Go 1.27 loader: see tools/gosec/tools.go
 
       - name: gosec (agent module)
-        # G703 excluded for parity with security-release-gate.yml (taint-mode
-        # variant of the already-excluded G304; see the comment there).
+        # G703/G704 enforced: the sole G703 finding is scoped to the
+        # ULID-validated operation-log read; no G704 findings in this module.
         working-directory: cmd/culvert-maint
         run: |
           $(go env GOPATH)/bin/gosec \
-            -exclude=G104,G302,G304,G703,G704 \
+            -exclude=G104,G302,G304 \
             -fmt=text \
             ./...
 
@@ -697,7 +689,7 @@ jobs:
 
       - name: Upload the unsharded reference
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-audit-reference
           path: qa-audit-reference/
@@ -718,21 +710,21 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       - name: Download the unsharded reference
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: qa-audit-reference
           path: reference
 
       - name: Download the sharded run's inventory
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: qa-race-build
           path: race-build
 
       - name: Download the sharded run's verdict
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: qa-race-verdict
@@ -804,7 +796,7 @@ jobs:
 
       - name: Upload comparison
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: qa-audit-compare
           path: audit-compare/

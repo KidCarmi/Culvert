@@ -94,7 +94,7 @@ deliberate.
 CA Management merged into one "Certificates & CA" view; cluster screen
 restructured (nodes table + health roll-up per `PRODUCT-TERMINOLOGY.md`
 Health scale); diagnostics feeds the dashboard posture strip; Updates/
-Releases visual alignment (M3 backend direction decides an eventual merge).
+Releases visual alignment (M3 backend direction decides an eventual merge). (Correction, post-2026-07-11: the Updates surface and the "updates" posture item above were removed with DEBT-008; only Release management remains — see `PRODUCT-TERMINOLOGY.md`.)
 **Risk**: high pinned-ID density in settings — done view-by-view.
 
 ## M5 — Consistency sweep & hardening
