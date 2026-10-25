@@ -167,49 +167,45 @@ const retainedPathTruncationMarker = "...[truncated; %d bytes total]"
 // request_tracing_bounds.go states and then has to apply to itself.
 var retainedPathTruncated atomic.Int64
 
-// boundRetainedPath returns p unchanged when it fits, or its first
-// maxRetainedRequestPath bytes plus a marker naming the original length.
+// clampRetained is the shared body of the two entry points below: the cut, the
+// UTF-8 back-off, the marker and the counter in one place, so the two bounds
+// cannot drift apart in behavior while differing only in their limit.
 //
 // The cut BACKS OFF TO A UTF-8 BOUNDARY. A path arrives percent-decoded from
 // net/url, so it can carry arbitrary bytes, and a cut through a multi-byte rune
 // would put invalid UTF-8 into a record that is JSON-encoded downstream
 // (logstore.Entry.URI → the persisted JSONL and the SIEM feed), where
 // `encoding/json` would substitute U+FFFD and change the bytes an investigator
-// reads. Backing off drops at most three bytes and never adds an allocation
-// the concatenation did not already need. An invalid sequence that was ALREADY
-// in the path is left alone — this is a cut-site correction, not a sanitizer;
+// reads. Backing off drops at most three bytes and adds no allocation the
+// concatenation did not already need. An invalid sequence that was ALREADY in
+// the value is left alone — this is a cut-site correction, not a sanitizer;
 // sanitizeLog and the JSON encoder own what the bytes may be.
-func boundRetainedPath(p string) string {
-	if len(p) <= maxRetainedRequestPath {
-		return p
+func clampRetained(v string, limit int) string {
+	if len(v) <= limit {
+		return v
 	}
-	cut := maxRetainedRequestPath
+	cut := limit
 	// 0b10xxxxxx is a UTF-8 continuation byte: step back off one. A rune is at
 	// most 4 bytes, so at most 3 steps, and the loop cannot run off the front
-	// because maxRetainedRequestPath is far larger than 3.
-	for cut > 0 && p[cut]&0xC0 == 0x80 {
+	// because both limits are far larger than 3.
+	for cut > 0 && v[cut]&0xC0 == 0x80 {
 		cut--
 	}
 	retainedPathTruncated.Add(1)
-	return p[:cut] + fmt.Sprintf(retainedPathTruncationMarker, len(p))
+	return v[:cut] + fmt.Sprintf(retainedPathTruncationMarker, len(v))
 }
 
-// boundRetainedBlockPageURL is boundRetainedPath for the composed `host + path`
-// string a block page renders. Separate from boundRetainedPath because the
-// bound it enforces is the composed one and because a clamp here must not be
-// mistaken for a clamp on a path: the two run on different values at different
-// call depths, and the block page is the sink with the 5x multiplier.
-func boundRetainedBlockPageURL(u string) string {
-	if len(u) <= maxRetainedBlockPageURL {
-		return u
-	}
-	cut := maxRetainedBlockPageURL
-	for cut > 0 && u[cut]&0xC0 == 0x80 {
-		cut--
-	}
-	retainedPathTruncated.Add(1)
-	return u[:cut] + fmt.Sprintf(retainedPathTruncationMarker, len(u))
-}
+// boundRetainedPath bounds a client-supplied request PATH. Use it at any sink
+// that keeps or reflects a copy — never on the value a matcher decides on, for
+// the fail-open reason in this file's header.
+func boundRetainedPath(p string) string { return clampRetained(p, maxRetainedRequestPath) }
+
+// boundRetainedBlockPageURL bounds the composed `host + path` string a block
+// page renders. It is a separate entry point rather than a second call to
+// boundRetainedPath because the value and the limit are both different: this
+// one is already composed, and it is the sink carrying the 5x escaping
+// multiplier.
+func boundRetainedBlockPageURL(u string) string { return clampRetained(u, maxRetainedBlockPageURL) }
 
 // resetRetainedPathStateForTest clears the process-global counter so tests do
 // not inherit each other's state. Production never calls it.
