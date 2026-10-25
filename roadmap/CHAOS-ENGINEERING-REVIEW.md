@@ -95,17 +95,20 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
-**2026-10-24 — `CHAOS-88` CLAIMED (placeholder, commit one).** Id allocated in
-this committed line before any code was written, per the convention the header
-above reaches twice independently. `CHAOS-86` is the highest id written up in
-this register and `CHAOS-87` is held by an open sweep (PR #1485, the IdP
-availability/existence split), so this one took 88 and did not move. Scope: the
+**2026-10-24 — `CHAOS-101` CLAIMED (placeholder, commit one; renumbered from
+`CHAOS-88`).** Id allocated in this committed line before any code was written,
+per the convention the header above reaches twice independently. It was first
+claimed as `CHAOS-88` (`CHAOS-86` was the highest id written up in this
+register and `CHAOS-87` was held by an open sweep, PR #1485), but `CHAOS-88` was
+also allocated to the open sweep in PR #1564 and `CHAOS-89`–`CHAOS-100` were
+taken or allocated before this merged, so it was renumbered to `CHAOS-101`.
+Only the id moved; the finding, fix and tests are unchanged. Scope: the
 **scan sidecar's own buffer window** (`scan_svc.go` `handleScan`) — the
 process-isolated deployment that the CHAOS-52 runbook recommends as the remedy
 for the in-process scanner's failure modes. Findings, risk matrix and
 verification are written up in [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-24.md).
 
-- **`CHAOS-88` — the scan sidecar answered `clean: true` for a body it had only
+- **`CHAOS-101` — the scan sidecar answered `clean: true` for a body it had only
   partially read.** `handleScan` read `LimitReader(body, maxBytes+1)` — the
   classic overflow probe — and then never looked at the probe byte, so the
   prefix's verdict was reported as the whole object's. The two scan windows are
@@ -134,7 +137,7 @@ verification are written up in [the dated review](../docs/engineering/CHAOS-ENGI
   `remoteScanRefused` reuses the timeout vocabulary: it is the same decision.
   Posture unchanged (fail-open, counted and alerted); refusing the object
   outright is the safer answer but a posture change for large downloads, left to
-  the owner as the **open half of CHAOS-88**.
+  the owner as the **open half of CHAOS-101**.
 
 This sweep also leaves rows OPEN by attribution rather than fixing them, each
 with file:line evidence in the dated review. Three of the four actively report

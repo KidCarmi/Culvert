@@ -1,10 +1,13 @@
 # Chaos engineering review — 2026-10-24
 
 Base: `a27cffb` (merged `main`). Branch: `claude/serene-cerf-r814m7`.
-Id claimed: **CHAOS-88** (the scan sidecar's own buffer window), allocated in a
+Id claimed: **CHAOS-101** (the scan sidecar's own buffer window), allocated in a
 committed placeholder row as commit one per the id-claiming convention in
-[the register](../../roadmap/CHAOS-ENGINEERING-REVIEW.md). 86 is the highest id
-written up there; 87 is held by the open sweep in PR #1485. The id did not move.
+[the register](../../roadmap/CHAOS-ENGINEERING-REVIEW.md). It was first claimed
+as CHAOS-88 (86 was the highest id written up there; 87 was held by the open
+sweep in PR #1485), but 88 was also allocated to the open sweep in PR #1564 and
+89–100 were taken or allocated before this merged, so it was renumbered to 101.
+Only the id moved.
 
 Scope of this sweep: the **content-scanning plane** (the fixed finding), plus a
 breadth pass over the **intelligence/enrichment feeds** and the
@@ -59,7 +62,7 @@ PR; the durable sink it implies is an owner decision.
 
 ## Failure scenarios
 
-### CHAOS-88 — the sidecar reported a truncated read as clean (FIXED)
+### CHAOS-101 — the sidecar reported a truncated read as clean (FIXED)
 
 **Current behavior (before).** `scan_svc.go` `handleScan` read
 `io.ReadAll(io.LimitReader(r.Body, maxBytes+1))` and never compared
@@ -246,7 +249,7 @@ scheduler predates `feedsched` and never received the clamp. Its existing gate
 
 | Id | Finding | Likelihood | Customer | Security | Data integrity | Visibility | Status |
 |---|---|---|---|---|---|---|---|
-| CHAOS-88 | Sidecar reports truncated read as clean | **Medium** (config drift between planes) | Low | **High** (silent scan evasion) | None | **None → full** | **FIXED** |
+| CHAOS-101 | Sidecar reports truncated read as clean | **Medium** (config drift between planes) | Low | **High** (silent scan evasion) | None | **None → full** | **FIXED** |
 | — | Cluster audit trail not durable; ack claims success | **High** (any CP restart) | Low | **High** (audit loss, compliance) | **High** | **None** | Reported |
 | — | logstore flush failure uncounted; gauge claims saving | **High** (any full/RO history volume) | Medium (history gaps) | Medium (lost forensics) | **High** | **None → wrong** | Reported |
 | — | Flush-phase post-mortem written to closed sink | Medium (needs a failing close) | Low | Low | Medium (diagnosis lost) | **None** | Reported |
@@ -257,14 +260,14 @@ scheduler predates `feedsched` and never received the clamp. Its existing gate
 
 ## Recovery assessment
 
-- **CHAOS-88, automatic:** none needed and none attempted — the condition is a
+- **CHAOS-101, automatic:** none needed and none attempted — the condition is a
   standing configuration mismatch, not a transient fault. Recovery is
   **operator-driven and now possible**: `scan_window_bytes` on the sidecar's
   `/health` plus the `scan_skipped` counter and alert on the proxy name both
   halves of the mismatch. Aligning `security.max_scan_mb` resolves it with no
   restart coordination. Before the fix there was nothing to recover *from*,
   because nothing reported a problem.
-- **CHAOS-88, deterministic:** yes. The refusal is a pure function of
+- **CHAOS-101, deterministic:** yes. The refusal is a pure function of
   `len(data) > maxBytes` on bytes already in hand; no timing, no retry.
 - **Cluster audit, manual only:** lost entries are unrecoverable. The local
   per-node JSONL is unaffected, so the magnitude is "centralized trail only" —
@@ -300,7 +303,7 @@ indicator of the durability or enforcement state of these four planes.
 
 ## Security impact
 
-CHAOS-88 was a scan-evasion hole: content past the sidecar's window was admitted
+CHAOS-101 was a scan-evasion hole: content past the sidecar's window was admitted
 with an affirmative clean verdict. It required no attacker capability beyond
 choosing a response size, and no code bug — only two processes configured
 independently, which is what the sidecar's own documentation recommends. The
@@ -366,17 +369,17 @@ Shipped with this PR:
   - `TestScanSvc_OversizeRefusalIsCountedAndOnHealth` — the sidecar-side
     counter and the published window.
 - `internal/secscan/remote_oversize_chaos_test.go`
-  - `TestChaos88_OversizeRefusalIsASizeLimitNotAFault` — 413 charges
+  - `TestChaos101_OversizeRefusalIsASizeLimitNotAFault` — 413 charges
     `ScanSkipped`, and leaves `RemoteScanFail`, `ScanTimeout` and
     `RemoteScanSaturated` alone.
-  - `TestChaos88_OversizeFiresTheScanSkippedAlert` — alert class and
+  - `TestChaos101_OversizeFiresTheScanSkippedAlert` — alert class and
     `Source: "size_limit"`, asserted on content per the package's stragglers
     doctrine.
-  - `TestChaos88_OversizeDoesNotFireTheSidecarDownAlert` — refutes the
+  - `TestChaos101_OversizeDoesNotFireTheSidecarDownAlert` — refutes the
     misclassification that would page on-call for a healthy sidecar.
-  - `TestChaos88_OtherStatusesAreStillFaults` — keeps the new branch narrow
+  - `TestChaos101_OtherStatusesAreStillFaults` — keeps the new branch narrow
     (500/404/400 stay faults).
-  - `TestChaos88_OversizeLogIsRateLimitedWhileTheCounterStaysExact` — the
+  - `TestChaos101_OversizeLogIsRateLimitedWhileTheCounterStaysExact` — the
     throttled-line / exact-counter split.
 
 Owed by the reported findings, none of which has one today: a CP-restart audit
@@ -391,7 +394,7 @@ a `feedsync` zero-entry and unexpected-layout test; and a
 
 ## Residual risk
 
-- **CHAOS-88 does not make the two windows agree.** It makes the disagreement
+- **CHAOS-101 does not make the two windows agree.** It makes the disagreement
   visible and stops it being answered as "clean". A fleet that ignores the new
   alert still forwards large bodies unscanned — by the local path's recorded
   posture, deliberately. Closing that is the posture decision left to the owner.
@@ -477,7 +480,7 @@ the root `go.mod` `toolchain` pin. Run at the branch head.
 | `CGO_ENABLED=0 go build -ldflags="-s -w"` | pass |
 | `go test -race -shuffle=on -count=2 ./internal/secscan` | pass (29.9s) |
 | `go test -run 'TestScanSvc_' -count=1 .` | pass |
-| `go test -run 'TestChaos88_' -count=1 ./internal/secscan` | pass |
+| `go test -run 'TestChaos101_' -count=1 ./internal/secscan` | pass |
 | `TEST_SEED=20260421 go test -race -count=2 -shuffle=on -timeout=40m .` | see PR body |
 
 Defect reproduction, recorded before the fix:

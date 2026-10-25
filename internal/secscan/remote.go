@@ -194,7 +194,7 @@ func remoteScanRefused(hash string) *Result {
 // alerted. Refusing the object instead would be the safer answer and is a real
 // option, but it is a POSTURE change for large downloads that no operator
 // asked for — it belongs to the owner, not to the fix that makes the event
-// visible. Recorded as the open half of CHAOS-88.
+// visible. Recorded as the open half of CHAOS-101.
 func remoteScanOversize() {
 	AddScanSkipped()
 	if degradedLogAllowed(&lastRemoteOversizeLog) {
@@ -299,7 +299,7 @@ const (
 
 	// remoteOutcomeOversize is HTTP 413: the sidecar read the body only as far
 	// as its OWN window and says so rather than answering for a prefix
-	// (CHAOS-88). That is a size limit, not a fault — the same phenomenon the
+	// (CHAOS-101). That is a size limit, not a fault — the same phenomenon the
 	// local path reports via logScanLimitExceeded — so it gets the size-limit
 	// vocabulary in remoteScanOversize instead of being laundered into a
 	// generic sidecar fault. A proxy or load balancer in front of the sidecar
@@ -344,7 +344,7 @@ func (rs *RemoteScanner) scanOnce(ctx context.Context, client *http.Client, base
 			return nil, remoteOutcomeCapacity, "HTTP 429"
 		}
 		if resp.StatusCode == http.StatusRequestEntityTooLarge {
-			// A size limit, not a fault (CHAOS-88; see remoteOutcomeOversize).
+			// A size limit, not a fault (CHAOS-101; see remoteOutcomeOversize).
 			return nil, remoteOutcomeOversize, "HTTP 413"
 		}
 		// The status code IS the class here: it is bounded (a few dozen

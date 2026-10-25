@@ -1,6 +1,6 @@
 package secscan
 
-// CHAOS-88 — the sidecar's OWN scan window, as seen by the client.
+// CHAOS-101 — the sidecar's OWN scan window, as seen by the client.
 //
 // The client already enforces the doctrine that "a verdict must be AFFIRMATIVE"
 // for every other shape of non-answer. The sidecar was the hole in it: it read
@@ -48,10 +48,10 @@ func captureScanSkipped(t *testing.T) *remoteAlertRecorder {
 
 const oversizeDetail = "sidecar scan window exceeded"
 
-// TestChaos88_OversizeRefusalIsASizeLimitNotAFault is the load-bearing gate.
+// TestChaos101_OversizeRefusalIsASizeLimitNotAFault is the load-bearing gate.
 // 413 must land on the local path's scan-skipped vocabulary, because it is the
 // same event the local path reports there.
-func TestChaos88_OversizeRefusalIsASizeLimitNotAFault(t *testing.T) {
+func TestChaos101_OversizeRefusalIsASizeLimitNotAFault(t *testing.T) {
 	resetRemoteLogGates(t)
 	srv := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "scan body exceeds this scanner's window", http.StatusRequestEntityTooLarge)
@@ -79,10 +79,10 @@ func TestChaos88_OversizeRefusalIsASizeLimitNotAFault(t *testing.T) {
 	}
 }
 
-// TestChaos88_OversizeFiresTheScanSkippedAlert pins the alert class, so an
+// TestChaos101_OversizeFiresTheScanSkippedAlert pins the alert class, so an
 // operator already alerting on scan_skipped does not have to learn that the
 // process-isolated deployment reports the same event somewhere else.
-func TestChaos88_OversizeFiresTheScanSkippedAlert(t *testing.T) {
+func TestChaos101_OversizeFiresTheScanSkippedAlert(t *testing.T) {
 	resetRemoteLogGates(t)
 	rec := captureScanSkipped(t)
 	srv := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
@@ -99,10 +99,10 @@ func TestChaos88_OversizeFiresTheScanSkippedAlert(t *testing.T) {
 	}
 }
 
-// TestChaos88_OversizeDoesNotFireTheSidecarDownAlert is the negative control
+// TestChaos101_OversizeDoesNotFireTheSidecarDownAlert is the negative control
 // for the classification: misrouting 413 into the fault class would page the
 // on-call for a sidecar that is healthy and answering correctly.
-func TestChaos88_OversizeDoesNotFireTheSidecarDownAlert(t *testing.T) {
+func TestChaos101_OversizeDoesNotFireTheSidecarDownAlert(t *testing.T) {
 	resetRemoteLogGates(t)
 	rec := captureAlerts(t) // scan_svc_down only
 	srv := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
@@ -116,11 +116,11 @@ func TestChaos88_OversizeDoesNotFireTheSidecarDownAlert(t *testing.T) {
 	rec.noneWith(t, 300*time.Millisecond, statusClass(http.StatusRequestEntityTooLarge))
 }
 
-// TestChaos88_OtherStatusesAreStillFaults is the second negative control: the
+// TestChaos101_OtherStatusesAreStillFaults is the second negative control: the
 // new branch must be narrow. 413 is the only status that means "the body was
 // too large for the scanner"; everything else keeps the fault classification
 // the sweep that added it argued for.
-func TestChaos88_OtherStatusesAreStillFaults(t *testing.T) {
+func TestChaos101_OtherStatusesAreStillFaults(t *testing.T) {
 	for _, code := range []int{http.StatusInternalServerError, http.StatusNotFound, http.StatusBadRequest} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			resetRemoteLogGates(t)
@@ -146,10 +146,10 @@ func TestChaos88_OtherStatusesAreStillFaults(t *testing.T) {
 	}
 }
 
-// TestChaos88_OversizeLogIsRateLimitedWhileTheCounterStaysExact: the producer's
+// TestChaos101_OversizeLogIsRateLimitedWhileTheCounterStaysExact: the producer's
 // rate is set by traffic, so the line is throttled and the counter is not —
 // the same split the fault path uses.
-func TestChaos88_OversizeLogIsRateLimitedWhileTheCounterStaysExact(t *testing.T) {
+func TestChaos101_OversizeLogIsRateLimitedWhileTheCounterStaysExact(t *testing.T) {
 	resetRemoteLogGates(t)
 	srv := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too large", http.StatusRequestEntityTooLarge)

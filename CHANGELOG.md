@@ -10,7 +10,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Security
 
 - **The scan sidecar reported a truncated read as `clean: true`, so content past
-  its own window was admitted with an affirmative clean verdict (CHAOS-88).**
+  its own window was admitted with an affirmative clean verdict (CHAOS-101).**
   `scan_svc.go` `handleScan` read `io.LimitReader(body, maxBytes+1)` — the
   classic overflow probe — and then never compared `len(data)` against
   `maxBytes`, so it paid for the probe byte and discarded what it proved. The
@@ -60,7 +60,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   oversize bodies is the local path's, unchanged: fail-open, counted and
   alerted. Refusing the object outright is the safer answer and a real option,
   but it is a posture change for large downloads that no operator asked for, and
-  is left to the owner as the open half of CHAOS-88.
+  is left to the owner as the open half of CHAOS-101.
 
 - **Two merge-gate workflows reached their actions through MUTABLE tags, and a
   repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`

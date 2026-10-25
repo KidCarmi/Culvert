@@ -1035,7 +1035,7 @@ var cpGRPCStopBudget = cpGRPCGracefulStopBudget
 //     slow-filesystem cases the rest of this review's storage work is built
 //     around — the handler blocks in a write(2) that never completes.
 //
-//     CHAOS-88 CORRECTION: this list previously also named PushAuditEvents,
+//     CHAOS-101 CORRECTION: this list previously also named PushAuditEvents,
 //     "appends to a fileutil.RotatingFile". It does not, and never did:
 //     PushAuditEvents calls globalClusterAudit.Append, which is a mutex and an
 //     in-memory slice trimmed to 5000 entries (controlplane.go:279-299) with no

@@ -175,11 +175,11 @@ for "the scan did not finish in time."
 | Sidecar reports capacity (HTTP 429) | **Fail closed** — refuse | `culvert_remote_scan_saturated_total` + the timeout counter above |
 | Sidecar unreachable / 5xx / unintelligible reply | **Fail open** — forward, counted + alerted | `culvert_remote_scan_fail_total`, `scan_svc_down` alert (register row WK-2b) |
 | Sidecar returns 200 without a verdict | **Fail open**, counted as a fault | `culvert_remote_scan_fail_total`, alert detail `no verdict in response` |
-| Body larger than the **sidecar's own** window (HTTP 413) | **Fail open** — forward, counted + alerted, same posture as the local path's over-limit body | `culvert_scan_skipped_total` (shared with the local path), `scan_skipped` alert, `Source: size_limit` (CHAOS-88) |
+| Body larger than the **sidecar's own** window (HTTP 413) | **Fail open** — forward, counted + alerted, same posture as the local path's over-limit body | `culvert_scan_skipped_total` (shared with the local path), `scan_skipped` alert, `Source: size_limit` (CHAOS-101) |
 | Content matched by the sidecar | Block | — |
 
 **Align the two scan windows.** Each process derives its window from its OWN
-`security.max_scan_mb`, and nothing reconciles them. Until CHAOS-88 a sidecar
+`security.max_scan_mb`, and nothing reconciles them. Until CHAOS-101 a sidecar
 window NARROWER than the caller's was invisible and unsafe: the sidecar scanned
 the prefix it could read and answered `clean: true` for the whole object, so
 scanning was silently off past its window — and the caller's own over-limit

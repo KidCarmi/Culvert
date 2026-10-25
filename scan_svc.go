@@ -180,7 +180,7 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 
 // scanSvcWindow is this process's scan window, with the engine default as the
 // floor. It is deliberately the SAME maxScanBufferBytes() the in-process path
-// uses, computed in THIS process — which is the root of CHAOS-88: each process
+// uses, computed in THIS process — which is the root of CHAOS-101: each process
 // derives it from its own security.max_scan_mb and nothing reconciles the
 // caller's window with the sidecar's.
 func scanSvcWindow() int64 {
@@ -212,7 +212,7 @@ func readScanWindow(body io.Reader, limit int64) (data []byte, truncated bool, e
 // refuseTruncatedScan answers 413 for a body this process could not read to the
 // end, instead of reporting the prefix's verdict as the whole object's.
 //
-// CHAOS-88. Answering `clean: true` for a partial read switched scanning off
+// CHAOS-101. Answering `clean: true` for a partial read switched scanning off
 // for every byte past the window with no counter, no log line and no alert
 // anywhere in the fleet: the caller buffers maxScanBufferBytes() in ITS process
 // from ITS security.max_scan_mb, nothing makes the two windows agree, and a
@@ -268,7 +268,7 @@ func (ss *ScanService) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":            "ok",
 		"requests":          atomic.LoadInt64(&statScanSvcRequests),
 		"oversize_refused":  atomic.LoadInt64(&statScanSvcOversize),
-		"scan_window_bytes": maxScanBufferBytes(),
+		"scan_window_bytes": scanSvcWindow(),
 	})
 }
 

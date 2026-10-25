@@ -1,6 +1,6 @@
 package main
 
-// CHAOS-88 — the scan sidecar's own buffer window.
+// CHAOS-101 — the scan sidecar's own buffer window.
 //
 // The in-process SWG path buffers maxScanBufferBytes() and, when the body runs
 // past that window, fires the operator's only notification that bytes went
@@ -113,10 +113,10 @@ func postScan(t *testing.T, addr, contentType string, body []byte) (status int, 
 // the fleet.
 func TestScanSvc_TruncatedBodyIsNeverReportedClean(t *testing.T) {
 	const window = 4096
-	withScanWindow(t, window, []string{"CULVERT-CHAOS88-MARKER"})
+	withScanWindow(t, window, []string{"CULVERT-CHAOS101-MARKER"})
 	addr := startScanSvc(t)
 
-	body := append(bytes.Repeat([]byte("a"), window+64), []byte("CULVERT-CHAOS88-MARKER")...)
+	body := append(bytes.Repeat([]byte("a"), window+64), []byte("CULVERT-CHAOS101-MARKER")...)
 	status, sr := postScan(t, addr, "text/plain", body)
 
 	if status == http.StatusOK && sr.Clean {
@@ -131,7 +131,7 @@ func TestScanSvc_TruncatedBodyIsNeverReportedClean(t *testing.T) {
 // bytes was fully read, so it gets a real clean verdict.
 func TestScanSvc_BodyExactlyAtWindowStillScansClean(t *testing.T) {
 	const window = 4096
-	withScanWindow(t, window, []string{"CULVERT-CHAOS88-MARKER"})
+	withScanWindow(t, window, []string{"CULVERT-CHAOS101-MARKER"})
 	addr := startScanSvc(t)
 
 	status, sr := postScan(t, addr, "text/plain", bytes.Repeat([]byte("a"), window))
@@ -152,10 +152,10 @@ func TestScanSvc_BodyExactlyAtWindowStillScansClean(t *testing.T) {
 // either (readScanPrefix's doc: block paths never forward the tail).
 func TestScanSvc_MatchInsideWindowStillBlocks(t *testing.T) {
 	const window = 4096
-	withScanWindow(t, window, []string{"CULVERT-CHAOS88-MARKER"})
+	withScanWindow(t, window, []string{"CULVERT-CHAOS101-MARKER"})
 	addr := startScanSvc(t)
 
-	body := append([]byte("CULVERT-CHAOS88-MARKER"), bytes.Repeat([]byte("a"), window*2)...)
+	body := append([]byte("CULVERT-CHAOS101-MARKER"), bytes.Repeat([]byte("a"), window*2)...)
 	status, sr := postScan(t, addr, "text/plain", body)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200 carrying the block verdict", status)
