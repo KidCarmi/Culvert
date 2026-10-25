@@ -12900,6 +12900,20 @@ make the mitigation for a write-amplification defect into one — the rule
   measurement rather than taken here. The clamp does not need it: the
   amplification is gone, leaving one net/http-bounded copy of the path in the
   request object, which is the cost of any header.
+- **TEST-DNS-1 (LOW, CI reliability, found by this sweep's own gate runs; not a
+  product defect).** Nine root tests fail identically on **pristine `main`** in
+  a sandbox whose resolver does not answer for `example.com`:
+  `TestIdPRegistry_UpsertPersistsAtomically`, `…_DeletePersists` and seven
+  `TestAPIIdP*` cases, all with `idp oidc issuer: URL must be https:// and must
+  not point to a private address`. The cause is `validateExternalURL`'s
+  fail-closed DNS check, which is correct — but the fixtures' own comment says
+  `example.com` was chosen *"so it passes validateExternalURL's fail-closed DNS
+  check without depending on a third party's DNS config"*, and that reasoning
+  holds only where the resolver answers **at all**. A restricted or offline
+  resolver makes a correct security control into a test-environment dependency.
+  Recorded, not fixed: the remedy is a seam in the fixtures, which belongs to the
+  authentication domain. It is named here so the baseline is not mistaken for a
+  regression — this sweep's branch reproduces exactly these nine and no others.
 - **The marker is forgeable.** A client can end a short path with the literal
   `...[truncated; N bytes total]`. Nothing is retained that would not have been
   retained anyway and the value is `%q`-quoted at every log site, so the forgery
