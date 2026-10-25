@@ -12865,6 +12865,15 @@ strictly worse than the amplification it was fixing.
 unconditional in every build, so a flat zero means "nothing has done this",
 never "the bound is off"), one series, **no caller-derived label** — an
 unbounded label set keyed on an attacker-chosen value is the WK-12/RS-5 defect.
+
+It is also carried on `/api/stats` as `retainedPathTruncated` and rendered in
+the legacy panel beside the tracing-headers row. That follows **SEC-REQID-1**,
+not CHAOS-69, and the distinction is the reason: an oversize authority is
+**refused with a 400**, so the caller sees it and a Prometheus series is
+enough, whereas a clamped path leaves a request that **succeeded** and a policy
+verdict formed on the whole value — nothing else changes that an operator
+without a metrics scraper or shell access to the log would notice. Both halves
+are gated, so the API field cannot become a number nothing displays.
 There is deliberately **no log line** on truncation: the marker
 (`...[truncated; N bytes total]`, carrying the original length) is already
 inline in the record it happened to, and a second line per truncation would
@@ -12924,7 +12933,7 @@ make the mitigation for a write-amplification defect into one — the rule
 [proxy_path_bounds_test.go](../proxy_path_bounds_test.go))
 
 Seven **defect** gates, verified to FAIL against the pre-fix tree with the
-measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and six
+measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and seven
 **control** gates:
 
 | Gate | Proves |
@@ -12941,7 +12950,8 @@ measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and six
 | `ControlBoundIsInclusiveAndAccounted` | exact boundary, marker content, counter |
 | `ControlCutLandsOnAUTF8Boundary` | 2-, 3- and 4-byte runes straddling the cut at four offsets each |
 | `ControlBlockPageBoundCoversTheComposedValue` | the chokepoint bounds a composition this package does not currently build |
-| `ControlMetricIsExported` | the counter has an operator-facing surface |
+| `ControlMetricIsExported` | the Prometheus series and its TYPE line |
+| `ControlCounterReachesTheAdminSurfacesToo` | `/api/stats` field **and** the legacy panel element that renders it |
 
 ### 53.10 Residual risk
 
