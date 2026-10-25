@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
@@ -638,6 +639,9 @@ func TestChaos79_EachMutatingPathLeavesTheMarkerBalanced(t *testing.T) {
 	// Both paths apply a snapshot, which mutates ipf and rl in place
 	// (RISK-030): bind fresh owners so the next test inherits neither.
 	bindFreshAdmissionOwners(t)
+	// The full path also replaces the shared blocklist's feed entries, resets
+	// the external-auth settings and persists last-good; isolate all three.
+	chaos79IsolateSnapshotApply(t)
 	t.Run("full path", func(t *testing.T) {
 		resetConfigSnapshotApplyHealth(t)
 		restoreEpoch := resetDPLastSeenEpochForTest()
@@ -837,4 +841,23 @@ func TestChaos79_MarkerConsumeIsSerializedAgainstAConcurrentApply(t *testing.T) 
 		t.Error("a pre-mutation panic claimed a content rejection after a concurrent apply — " +
 			"the consume was not serialized with the other applier's bracket")
 	}
+}
+
+// chaos79IsolateSnapshotApply binds the shared state a real snapshot apply
+// writes beyond the admission owners and the policy store: a fresh blocklist
+// (applySnapshotBlocklist replaces its feed entries and saves it), the
+// external-auth settings (applyExternalAuthSnapshotSettings) and the
+// last-good snapshot file and status (persistDPLastGoodConfigSnapshot), each
+// restored on cleanup.
+func chaos79IsolateSnapshotApply(t *testing.T) {
+	t.Helper()
+	origBL := bl
+	bl = blocklist.New()
+	origURL, origTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
+	withDPLastGoodConfigTestGlobals(t)
+	t.Cleanup(func() {
+		bl = origBL
+		SetProxyBaseURL(origURL)
+		trustForwardedHeaders = origTrust
+	})
 }
