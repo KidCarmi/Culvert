@@ -355,16 +355,16 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	// means "nothing has been probed" and never "the feature is off" — the
 	// same rule as culvert_proxy_oversize_host_rejected_total above, and the
 	// inverse of the armed-only gauges elsewhere in this file.
-	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_refused_total Logout requests whose session cookie was refused before anything was retained because this appliance could not verify it (bad signature or malformed). A genuine expired cookie and a replayed logout are excluded, but a cookie signed under a PREVIOUS session secret is not: after a key rotation or a restart with a fresh random key, ordinary browsers produce this until they re-authenticate. Sustained growth with no recent key change means an unauthenticated source is probing /api/auth/logout\n")
-	fmt.Fprintf(w, "# TYPE culvert_session_revoke_refused_total counter\nculvert_session_revoke_refused_total %d\n",
+	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_unverifiable_total Logout requests whose session cookie was refused before anything was retained because this appliance could not verify it (bad signature or malformed). A genuine expired cookie and a replayed logout are excluded, but a cookie signed under a PREVIOUS session secret is not: after a key rotation or a restart with a fresh random key, ordinary browsers produce this until they re-authenticate. Sustained growth with no recent key change means an unauthenticated source is probing /api/auth/logout\n")
+	fmt.Fprintf(w, "# TYPE culvert_session_revoke_unverifiable_total counter\nculvert_session_revoke_unverifiable_total %d\n",
 		sessionRevocationRefusedTotal())
-	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_rejected_total Revocation entries rejected by reason. unsigned/malformed/expired are the public logout endpoint; oversize/capacity/far_future are the UNTRUSTED-origin paths (cluster gossip, the on-disk revocations file); oversize/capacity mean cluster-wide revocation is incomplete on this node, far_future means an entry claimed an expiry no session this appliance issues can have\n")
-	fmt.Fprintf(w, "# TYPE culvert_session_revoke_rejected_total counter\n")
+	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_refused_total Revocation entries refused by reason. unsigned/malformed/expired are the public logout endpoint; oversize/capacity/far_future are the UNTRUSTED-origin paths (cluster gossip, the on-disk revocations file); oversize/capacity mean cluster-wide revocation is incomplete on this node, far_future means an entry claimed an expiry no session this appliance issues can have\n")
+	fmt.Fprintf(w, "# TYPE culvert_session_revoke_refused_total counter\n")
 	for _, reason := range []session.RevokeReason{
 		session.RevokeUnsigned, session.RevokeMalformed, session.RevokeExpired,
 		session.RevokeOversize, session.RevokeCapacity, session.RevokeFarFuture,
 	} {
-		fmt.Fprintf(w, "culvert_session_revoke_rejected_total{reason=%q} %d\n", string(reason), session.Refused(reason))
+		fmt.Fprintf(w, "culvert_session_revoke_refused_total{reason=%q} %d\n", string(reason), session.Refused(reason))
 	}
 	fmt.Fprintf(w, "\n# HELP culvert_session_revocations_tracked Session revocation entries currently held. Bounded by real logins inside one session TTL; a value tracking request rate rather than login rate means something is inserting entries that are not sessions\n")
 	fmt.Fprintf(w, "# TYPE culvert_session_revocations_tracked gauge\nculvert_session_revocations_tracked %d\n", sessionRevoked.Tracked())

@@ -38,8 +38,8 @@ valid.
 
 | Surface | What it tells you |
 |---|---|
-| `culvert_session_revoke_refused_total` | Logout requests carrying a cookie this appliance did not sign. **Ordinary traffic cannot produce one** — a genuine expired cookie and a replayed logout are both excluded — so any non-zero value is somebody sending forged cookies. |
-| `culvert_session_revoke_rejected_total{reason}` | The per-reason breakdown. `unsigned` / `malformed` / `expired` come from the public logout endpoint; `oversize` / `capacity` / `far_future` come from the **untrusted-origin** paths (cluster gossip, the on-disk revocations file). `far_future` is an entry whose expiry lies beyond the maximum session lifetime (7 days plus one hour of clock skew), which no session this appliance issues can have. Revocations this node verified itself are written to the revocations file with a provenance MAC (under the session signing key) and are reloaded past the size bound and the entry cap, so a revoked large cookie stays revoked across a restart with the same key; persisted entries without a valid MAC are treated as untrusted. With a random per-start key the MAC does not verify after restart, which is harmless because the old cookies no longer verify either. |
+| `culvert_session_revoke_unverifiable_total` | Logout requests carrying a cookie this appliance did not sign. **Ordinary traffic cannot produce one** — a genuine expired cookie and a replayed logout are both excluded — so any non-zero value is somebody sending forged cookies. |
+| `culvert_session_revoke_refused_total{reason}` | Every refused revocation entry, by reason. `unsigned` / `malformed` / `expired` come from the public logout endpoint; `oversize` / `capacity` / `far_future` come from the **untrusted-origin** paths (cluster gossip, the on-disk revocations file). `far_future` is an entry whose expiry lies beyond the maximum session lifetime (7 days plus one hour of clock skew), which no session this appliance issues can have. Revocations this node verified itself are written to the revocations file with a provenance MAC (under the session signing key) and are reloaded past the size bound and the entry cap, so a revoked large cookie stays revoked across a restart with the same key; persisted entries without a valid MAC are treated as untrusted. With a random per-start key the MAC does not verify after restart, which is harmless because the old cookies no longer verify either. |
 | `culvert_session_revocations_tracked` | Entries currently held. Bounded by real logins inside one session TTL. A value that tracks *request* rate rather than *login* rate means something is inserting entries that are not sessions. |
 | `culvert_cluster_revocation_drops_total` | Entries the Control Plane refused to retain from a Data Plane node. **Non-zero means a session an operator revoked may still authenticate on other nodes.** |
 | `/api/diagnostics` → `session_revocation` | The operator-contract row. WARN-only; counts only, never a client address or any part of a cookie. |
@@ -47,7 +47,7 @@ valid.
 
 The two counters mean different things and point at different actions:
 
-* **`refused` climbing** is an attacker being correctly turned away. The
+* **`unverifiable` climbing** is an attacker being correctly turned away. The
   control is working; the question is why an untrusted network can reach the
   admin port.
 * **`drops` climbing** is a security decision that did not take effect
@@ -55,7 +55,7 @@ The two counters mean different things and point at different actions:
 
 ## Runbook
 
-### `culvert_session_revoke_refused_total` is climbing
+### `culvert_session_revoke_unverifiable_total` is climbing
 
 Ordinary traffic does not produce this, so treat it as probing of the public
 logout endpoint.
@@ -71,7 +71,7 @@ logout endpoint.
 
 ### A key rotation makes this counter climb, and that is not an attack
 
-`culvert_session_revoke_refused_total` counts logout requests carrying a cookie
+`culvert_session_revoke_unverifiable_total` counts logout requests carrying a cookie
 this appliance **could not verify**. It cannot distinguish a forgery from a
 genuine cookie signed under a **previous** session secret, because neither
 verifies under the current key.

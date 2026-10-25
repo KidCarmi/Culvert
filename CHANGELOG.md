@@ -972,8 +972,8 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
   A refusal stays silent to the caller (same status, body and `Set-Cookie` as a
   genuine logout) so logout cannot become a cookie-validity oracle. New
-  surfaces: `culvert_session_revoke_refused_total`,
-  `culvert_session_revoke_rejected_total{reason}`,
+  surfaces: `culvert_session_revoke_unverifiable_total`,
+  `culvert_session_revoke_refused_total{reason}`,
   `culvert_session_revocations_tracked`,
   `culvert_cluster_revocation_drops_total`, a WARN-only `session_revocation`
   diagnostics row (counts only), and a rate-limited `SESSION_REVOKE_REFUSED`
