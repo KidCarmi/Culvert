@@ -12717,3 +12717,232 @@ Each was confirmed red against `main` before the fix and green after
   committed test suites, and the profiles store was read closely enough to
   establish the C1 contract cited above, but their failure modes under a
   degraded volume were not independently exercised here.
+
+---
+
+## 53. CHAOS-92 — The client-supplied request path, where it is retained
+
+**Date:** 2026-10-25. **Base:** `4c8601d9` (`main`), clean worktree.
+**Status:** Shipped. **Id:** claimed in a committed placeholder row (§0) as
+commit one, before any code was written.
+
+Scope is register row **PX-22**, instantiated as **X-1** by
+[the 2026-10-13 round](CHAOS-REVIEW-2026-10-13.md) and left delegated there.
+This is the last unbounded client-chosen string on the data path. Its two
+siblings are closed and neither reaches it:
+[SEC-REQID-1](../request_tracing_bounds.go) bounds the tracing headers,
+[CHAOS-69](../proxy_host_bounds.go) (§39) bounds the destination authority —
+and CHAOS-69's own "deliberately NOT done" note says so in as many words:
+*"No bound on the inner request path or URI … (register row PX-22) … so it is
+its own finding."*
+
+### 53.1 Executive summary
+
+`r.URL.Path` is copied, unbounded, into three retaining sinks — the process
+log (5 sites), a **buffered HTML response body** (5 sites) and the request-log
+`URI` field (4 sites). On a **stock install**, with no authentication and no
+operator opt-in, one request chooses both how many bytes land in the rotating
+process log and, through `html/template` escaping, a **5x multiplier** on a
+response body buffered in full before it is written back.
+
+The fix is a clamp on **retention**, not on admission, and the separation is
+the finding's whole substance: every matcher still decides on the complete
+path, because truncating the end of a path removes the extension a file-block
+rule matches, so clamping the matcher input would be **fail-open**.
+
+### 53.2 Failure scenario
+
+| | |
+|---|---|
+| **Trigger** | One unauthenticated `GET` through the HTTP proxy port whose path ends in a blocked extension. `.exe` is in the shipped `fileblock.DefaultBlockedExts`, loaded at startup when no config override is provided, so no configuration is required. |
+| **Current behavior (pre-fix), measured** | Through the real `handleRequest`: a 1 048 581-byte path wrote **1 048 631 bytes** to the process log and served a **5 245 706-byte** block page when filled with `'`. See the table in 53.3. |
+| **Expected behavior** | A retained copy of a client-chosen value is bounded, and says so where it was cut. |
+| **Failure mode** | Write amplification into a rotating evidence sink, plus a client-chosen memory and egress amplifier per concurrent request. Not a crash: every write **succeeds**. |
+| **Recovery path** | None needed and none available — there is nothing to recover. The log is simply gone. |
+| **Automatic recovery** | N/A. |
+| **Customer impact** | Degraded, not down. Response-body amplification is bandwidth and heap per concurrent request; the proxy keeps serving. |
+| **Security impact** | **Evidence destruction (CWE-778, OWASP A09:2021).** The process log is a `fileutil.RotatingFile` capped at 50 MB keeping exactly ONE archive, so ~100 MB is the whole retained record. Two minutes of this rotates away every line a responder would need — including the lines describing the flood. Reached before authentication, with all three front-door limiters shipping disabled (§25/CHAOS-57). |
+| **Operational impact** | Self-concealing, which is the recurring theme this register keeps recording. Every write succeeds, so the logsink backpressure counter, `storageDegraded()` and `storage_write_failed` all stay **green** while the evidence is destroyed. |
+| **Data integrity impact** | No corruption. Loss of forensic record, which is the integrity property that actually matters here. |
+| **Monitoring visibility (pre-fix)** | **None.** No counter, no metric, no health row. |
+| **Why it escaped the two sibling sweeps** | Both bounded the value they were about and recorded the path as out of scope. CHAOS-69 named it as a separate finding; the 2026-10-13 round registered it as X-1 and delegated it. Nothing was wrong with either call — the row simply stayed open for twelve days. |
+
+### 53.3 Measurements
+
+Through the real `handleRequest`, stock default extension list:
+
+| path bytes | fill | process log | response body | body ÷ path |
+|-----------:|:----:|------------:|--------------:|------------:|
+| 1 029 | `A` | 1 084 | 3 875 | 3.8x |
+| 65 541 | `A` | 65 596 | 68 387 | 1.0x |
+| 1 048 581 | `A` | 1 048 636 | 1 051 427 | 1.0x |
+| 1 048 581 | `'` | 1 048 636 | **5 245 731** | **5.0x** |
+| 1 048 581 | `<` | 1 048 636 | 4 197 155 | 4.0x |
+
+The multiplier is the attacker's to choose: `html/template` escapes `'` to the
+5-byte `&#39;` and `<` to `&lt;`.
+
+**Deliverability is wire-verified**, which is the check the SEC-REQID-2
+correction exists to require — a bound justified by a length `httptest` can
+construct but the wire cannot deliver proves nothing. Driven through a real
+`net/http` server over a real socket: a 1 048 581-byte request target of raw
+`'` arrives as `r.URL.Path` **byte for byte** (200), and 2 MiB draws a 431
+before the handler runs. `initialReadLimitSize` is `MaxHeaderBytes + 4096` and
+the proxy listener sets no `MaxHeaderBytes`, so net/http's 1 MiB default
+governs the request line too. `'` is an RFC 3986 sub-delim, so it needs no
+percent-encoding: one wire byte buys one retained byte, then five.
+
+### 53.4 What was NOT quadratic, stated so it is not re-reported
+
+CHAOS-69's authority finding was far worse than a write amplifier because the
+authority is **walked** label by label by two quadratic matchers. The path is
+not. It was checked:
+
+- `internal/urlcat` (`lookupIn`, the quadratic suffix walk) is **host-keyed
+  only** — it never sees a path.
+- `internal/catdb` `CommunityDB.Lookup` walks **parent domains**, not path
+  segments.
+- `threatfeed.CheckRequestURL` is `normaliseParsedURL` plus **one map probe**:
+  O(L) with one copy, not a walk.
+- `fileblock.CheckPath` is `path.Ext`, a backwards scan to the last separator.
+
+So this row is an amplification and evidence-destruction finding, not a CPU
+exhaustion one. It is reported at that severity deliberately.
+
+### 53.5 The fix, and why its shape differs from both siblings
+
+The shape is forced by what the value is, and the two precedents point
+opposite ways:
+
+- **CHAOS-69 refuses the request**, because a 1 MiB authority cannot name a
+  destination any resolver would answer for (RFC 1035 §2.3.4 caps a name at 255
+  octets), so the refused set contains nothing legitimate.
+- **SEC-REQID-1 refuses the value and mints its own**, because a truncated
+  correlation id is not a usable id — truncation would silently corrupt trace
+  correlation.
+
+A request path has **neither** property. No RFC caps it, long signed and
+capability-bearing URLs are ordinary traffic, and a forward proxy that answers
+414 to a path a customer's application uses is an egress outage. But a
+truncated path **is** a usable log value — the "structural half available in
+the leaf" that §32/CHAOS-63 had and CHAOS-69 did not. So the bound goes on
+retention:
+
+1. **`serveBlockPage`** ([blockpage_vars.go](../blockpage_vars.go)) clamps its
+   `url` argument. It is the single wrapper every block page passes through, so
+   one edit bounds all five present sinks and every future one — pinned
+   structurally by a gate that fails if anything calls `blockpage.Serve`
+   directly.
+2. **`policyLogURI`** ([proxy.go](../proxy.go)) clamps the path. It is the
+   single derivation of every retained `logstore.Entry.URI`, and so of the
+   in-memory ring, the persisted JSONL, the syslog/SIEM feed and the redaction
+   pipeline.
+3. **The five log sites** clamp **inside** the `sanitizeLog` argument, so the
+   scan and its possible 1 MiB copy are bounded too. Pinned by a source gate
+   that fails on any `sanitizeLog(…URL.Path)` without the clamp.
+
+`maxRetainedRequestPath` is **2048** — above the historical 2083-byte Internet
+Explorer URL limit that web applications were built against for two decades,
+and well above the longest path in ordinary use, because the long part of a
+long URL is almost always the QUERY, which `r.URL.Path` excludes by
+construction. Generous rather than exact, for the reason
+`maxClientTraceparentLen` is: this closes an input-bounds hole, it does not
+decide what a URL may be. The clamp **backs off to a UTF-8 boundary** — a path
+arrives percent-decoded, so a cut through a multi-byte rune would put invalid
+UTF-8 into a record `encoding/json` then rewrites with U+FFFD, changing the
+bytes an investigator reads.
+
+**Enforcement is untouched, and that is the load-bearing property.**
+`fileBlocker.CheckPath`, `globalSecScanner.CheckRequestURL` and every policy
+matcher still receive the complete path. `TestChaos92_ControlEnforcementStillSeesTheWholePath`
+is the gate for it: a 1 MiB path ending `.exe` must still be FILE_BLOCKED with
+`ext=".exe"` recorded. A clamp that reached the matcher would be fail-open —
+strictly worse than the amplification it was fixing.
+
+### 53.6 Monitoring
+
+`culvert_retained_path_truncated_total`, always emitted (the clamp is
+unconditional in every build, so a flat zero means "nothing has done this",
+never "the bound is off"), one series, **no caller-derived label** — an
+unbounded label set keyed on an attacker-chosen value is the WK-12/RS-5 defect.
+There is deliberately **no log line** on truncation: the marker
+(`...[truncated; N bytes total]`, carrying the original length) is already
+inline in the record it happened to, and a second line per truncation would
+make the mitigation for a write-amplification defect into one — the rule
+`request_tracing_bounds.go` states and then has to apply to itself.
+
+### 53.7 Risk matrix
+
+| ID | Finding | Severity | Status | Evidence |
+|----|---------|----------|--------|----------|
+| CHAOS-92a | 1 MiB path → ~1 MiB into a 50 MB/1-archive rotating process log, unauthenticated, stock config; every write succeeds so all storage-health surfaces stay green | **HIGH** | **FIXED** | measured, 53.3 |
+| CHAOS-92b | Same path → a 5 245 706-byte block page buffered in memory and written back; multiplier chosen by the client via `html/template` escaping | **HIGH** | **FIXED** | measured, 53.3 |
+| CHAOS-92c | `policyLogURI` retains the unbounded path into the ring, the JSONL, the SIEM feed and the redaction pipeline (opt-in per rule via `LogFullURI`) | **MEDIUM** | **FIXED** | measured, 53.2 |
+| CHAOS-92d | No counter, metric or health row on any of the above | **MEDIUM** | **FIXED** | source-verified |
+
+### 53.8 Rows left OPEN by attribution rather than fixed
+
+- **CDR-PATH-1 (MEDIUM, needs a CDR-domain decision).** `cdrFilenameFromURL`
+  ([cdr_proxy.go](../cdr_proxy.go)) is `path.Base`, so a 1 MiB path containing
+  no `/` is forwarded **whole to the CDR sidecar** as `SanitizeHeader.Filename`
+  — a fourth retention sink, and an egress one. It is deliberately **not**
+  clamped with this sweep's helper: the sidecar selects a CDR profile **by
+  extension**, so truncating the end there is the same fail-open hazard as
+  clamping a matcher input. The correct remedy keeps the extension and bounds
+  the left side, which is a CDR wire-contract decision, not a log-bounds one.
+  Reachability is lower than 53.2 (an inspected CONNECT plus CDR enabled).
+- **PATH-REFUSAL-1 (owner decision).** Apache's `LimitRequestLine` (8190) and
+  nginx's `large_client_header_buffers` (8k) mean no mainstream origin accepts a
+  URI longer than ~8 KiB, so refusing a path above that would forward nothing an
+  origin would have answered. **Which requests a forward proxy admits is a
+  product decision** — the same one CHAOS-69 and SEC-REQID-1 each declined to
+  make unilaterally for `MaxHeaderBytes` — so it is recorded with its
+  measurement rather than taken here. The clamp does not need it: the
+  amplification is gone, leaving one net/http-bounded copy of the path in the
+  request object, which is the cost of any header.
+- **The marker is forgeable.** A client can end a short path with the literal
+  `...[truncated; N bytes total]`. Nothing is retained that would not have been
+  retained anyway and the value is `%q`-quoted at every log site, so the forgery
+  buys no bytes. Stated rather than defended against: the alternative is an
+  out-of-band marker on every sink, i.e. a request-log wire-contract change.
+
+### 53.9 Required tests (all shipped in
+[proxy_path_bounds_test.go](../proxy_path_bounds_test.go))
+
+Seven **defect** gates, verified to FAIL against the pre-fix tree with the
+measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and six
+**control** gates:
+
+| Gate | Proves |
+|------|--------|
+| `DefectProcessLogStaysBounded` | one request cannot choose the log volume; the line says it was truncated |
+| `DefectBlockPageDoesNotAmplifyTheClientPath` | the 5x `'` body amplifier is gone |
+| `DefectRequestLogURINeverRetainsAnUnboundedPath` | `policyLogURI` and the retained `LogEntry.URI`, end to end |
+| `DefectPolicyProfileFileBlockIsBounded` | the SECOND file-block branch (a matched rule's file profile), not only the global list |
+| `DefectEveryRetainingSinkGoesThroughTheClamp` | **source gate**: no `sanitizeLog(…URL.Path)` without the clamp, and fails vacuously-passing if the pattern drifts |
+| `DefectBlockPageClampIsTheChokepointNotTheCallSites` | **source gate**: `blockpage.Serve` is reachable only through the clamping wrapper |
+| `DefectPathIsDeliverableAtOneMiBOverTheWire` | the measurement's premise, over a real socket |
+| `ControlEnforcementStillSeesTheWholePath` | **the load-bearing control** — a 1 MiB `.exe` path is still FILE_BLOCKED with `ext=".exe"`; the clamp never reaches a matcher |
+| `ControlOrdinaryPathIsRetainedVerbatim` | ordinary traffic is byte-identical in all three sinks, no marker, counter unmoved |
+| `ControlBoundIsInclusiveAndAccounted` | exact boundary, marker content, counter |
+| `ControlCutLandsOnAUTF8Boundary` | 2-, 3- and 4-byte runes straddling the cut at four offsets each |
+| `ControlBlockPageBoundCoversTheComposedValue` | the chokepoint bounds a composition this package does not currently build |
+| `ControlMetricIsExported` | the counter has an operator-facing surface |
+
+### 53.10 Residual risk
+
+- **PATH-REFUSAL-1 and CDR-PATH-1 as recorded above**, both needing an owner
+  decision rather than a mechanical fix.
+- **One net/http-bounded copy of the path remains** in the request object, as it
+  does for any header. Bounding it is `MaxHeaderBytes`, which is the product
+  decision above.
+- **The ring is bounded in ENTRIES, not bytes** (the 2026-10-13 round's X-3).
+  This sweep removes the unbounded per-entry URI that made the entry bound
+  meaningless for the `LogFullURI` case; the byte-budget question for the ring
+  as a whole is X-3's and is not closed here.
+- **The source gates are textual.** They fail on a new unbounded
+  `sanitizeLog(…URL.Path)` site and on a direct `blockpage.Serve` call, which
+  are the two shapes that reintroduce the defect, but a new sink that retains
+  the path by some other route — a new `logstore` field, a new egress header —
+  would not trip them. CDR-PATH-1 is exactly that shape, found by reading
+  rather than by a gate.
