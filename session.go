@@ -9,9 +9,7 @@ package main
 // Identity hub type), and the Session→Identity conversion.
 
 import (
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -100,27 +98,71 @@ func sessionIdentity(s *Session) *Identity {
 	}
 }
 
-// revokeSessionCookie adds the cookie from r to the revocation list.
+// revokeSessionCookie adds the cookie from r to the revocation list, if and
+// only if this appliance signed it.
+//
+// CHAOS-73. The previous body decoded the cookie and inserted its payload
+// WITHOUT verifying the HMAC, on the explicit but mistaken reasoning that the
+// signature had "already [been] verified by decodeSession". It has not been on
+// this path: `/api/auth/logout` is PUBLIC and apiAuthLogout calls this
+// function unconditionally, not only when readUISessionCookie returned a
+// session. An unauthenticated caller therefore chose the retained key, its
+// length and its expiry — see session_revocation_bounds.go for the measured
+// consequences (a 524 KB forged cookie retained with a 100-year expiry, and
+// quadratic disk write amplification), and for why verifying is strictly
+// better here than bounding.
+//
+// Verification loses nothing. A revocation key is the payload half of a cookie
+// we signed, so a cookie we did not sign cannot name a session of ours; and
+// the MAC is checked BEFORE the expiry (as in Decode), so the expired cookie
+// this public route exists to clear still verifies and still logs out.
+//
+// The cookie is cleared by the caller either way. A refusal must not tell an
+// unauthenticated prober whether the cookie it sent was genuine.
 func revokeSessionCookie(cookieName string, r *http.Request) {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
 		return
 	}
-	dot := strings.LastIndex(c.Value, ".")
-	if dot < 0 {
+	changed, reason := sessionRevoked.RevokeVerified(c.Value)
+	if !changed {
+		// Two of the no-change reasons are ORDINARY TRAFFIC and must not be
+		// charged to the probe counter, or the one signal an operator has that
+		// the public endpoint is being attacked is buried in normal use:
+		//
+		//   RevokeAlreadyKnown — a replayed logout of a cookie we already hold
+		//     (a double-submit, or a browser retrying). Also deliberately NOT
+		//     persisted: "a mutation reporting no change issues no write"
+		//     (CHAOS-70), which is most of what made the amplification
+		//     quadratic even for an authenticated caller.
+		//
+		//   RevokeExpired — a genuine cookie whose session already lapsed,
+		//     which is exactly what a user coming back the next day and
+		//     clicking Log out produces. Decode rejects it on expiry alone, so
+		//     there is nothing to record. It is still visible in the
+		//     per-reason series for diagnostics, just not in the aggregate.
+		//
+		// Everything else means the caller sent something this appliance
+		// cannot VERIFY. That is usually a forgery, but it is not only a
+		// forgery: a cookie signed under a PREVIOUS session secret — after a
+		// deliberate rotation, or after a restart that minted a fresh random
+		// key — is a genuine cookie from an ordinary browser and lands here
+		// too. The counter cannot tell them apart, so the surfaces it feeds
+		// must not claim it can (Codex P2, PR #1591).
+		if reason != session.RevokeAlreadyKnown && reason != session.RevokeExpired {
+			noteSessionRevokeRefusal(r, reason, len(c.Value))
+		}
+		// A replayed logout is the one chance to repair a file that is BEHIND
+		// the in-memory list. RevokeAlreadyKnown is reached only after the MAC
+		// verified, so this retry cannot be driven by an unauthenticated
+		// caller; without it, a transient save failure is never retried for
+		// that token and the revocation is lost at the next restart.
+		if reason == session.RevokeAlreadyKnown {
+			persistRevocationsIfDirty()
+		}
 		return
 	}
-	b64part := c.Value[:dot]
-	// Decode just to get the expiry (HMAC already verified by decodeSession).
-	if payload, decErr := base64.RawURLEncoding.DecodeString(b64part); decErr == nil {
-		var s Session
-		if json.Unmarshal(payload, &s) == nil {
-			sessionRevoked.Revoke(b64part, time.Unix(s.Exp, 0))
-			if err := sessionRevoked.SaveRevocations(); err != nil {
-				logger.Printf("Session: failed to persist revocations: %v", err)
-			}
-		}
-	}
+	persistRevocations()
 }
 
 // ---------------------------------------------------------------------------

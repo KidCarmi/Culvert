@@ -903,6 +903,83 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **CHAOS-73 review rounds.** A genuine revocation whose cookie exceeded the
+  untrusted-origin key bound was dropped when the revocations file was
+  reloaded, so the revoked cookie authenticated again after a restart;
+  locally verified entries are now persisted with a provenance MAC
+  (domain-separated, never the cookie's own signature, never on the gossip
+  wire) and restored past both the size bound and the entry cap, while gossip
+  and legacy entries keep the untrusted rules. Untrusted entries may no longer
+  claim an expiry beyond the maximum session lifetime: such entries are never
+  swept, and enough of them permanently fill the list so that legitimate
+  remote revocations are refused at capacity. A revocation whose durable write
+  failed is repaired by the browser's retry instead of being lost at the next
+  restart. The Control Plane bounds the memory it retains per node, not just
+  the entry count, and clears peer-supplied provenance before storing or
+  re-broadcasting an entry. The refusal counter, its metric help, the
+  `session_revocation` contract row and the runbook no longer assert that a
+  refusal is an attack — a cookie signed under a previous session secret is
+  genuine and unverifiable, and a key rotation makes ordinary browsers
+  produce one. Concurrent revocation saves are serialized end to end: the
+  snapshot and the write under the owner's lock, and the save together with
+  the flag that records whether it landed under the coordinator's, so a
+  writer whose save succeeded can no longer clear the retry a writer whose
+  save failed had just recorded and leave the file behind memory with nothing
+  owed. Reconciled with SEC-REVOKE-1 (already on main), which fixed the same
+  unsigned-cookie write by gating `apiAuthLogout`'s revocation on
+  `decodeSession`: the audit entry keeps that gate, but the revocation is
+  routed through `revokeSessionCookie`'s own MAC verification instead, because
+  `Decode` also refuses an already-revoked token and so blocked the replay that
+  repairs a failed save or reconciles a shorter peer-imported expiry.
+
+- `/api/auth/logout` is on the admin-UI auth middleware's **public** allowlist
+  — correctly, since an expired or already-revoked session cannot authenticate
+  a request and must still be able to clear its own cookie. But
+  `revokeSessionCookie` then base64-decoded whatever cookie arrived, read the
+  expiry out of the *decoded* payload, inserted the payload bytes as the
+  session-revocation key, and rewrote the entire revocations file. **The HMAC
+  was never checked** (CHAOS-73), and the call site's comment asserted the
+  opposite — "HMAC already verified by decodeSession" is true of `Decode` and
+  false here, because `apiAuthLogout` calls the function unconditionally; the
+  `sess != nil` guard above it covers only the audit entry.
+
+  So an **unauthenticated** caller chose the retained key, its **length** and
+  its **expiry**. Measured against the real handler behind a real `net/http`
+  server: a **524,389-byte** forged cookie answered `200` and was retained with
+  a 100-year expiry, which the evictor — keyed on that same attacker-chosen
+  value — can never reclaim; 200 requests carrying 16 KiB each (3.2 MB in)
+  wrote **441 MB** to disk, the amplification running 17x → 34x → 68x → 135x as
+  the request count doubled (**quadratic**, because every insert rewrites the
+  whole file); and in a cluster the entry reaches the payload each Data Plane
+  pushes to the Control Plane every 3 s, so one unauthenticated request to one
+  node's admin port becomes durable state on **every** node. `MergeRevocations`
+  separately accepted 50,000 peer-supplied entries with no cap at all.
+
+  The fix **authenticates rather than bounds**: a revocation key is the payload
+  half of a cookie this appliance signed, so a cookie it did not sign cannot
+  name a session of its own and refusing it loses nothing. Verification costs no
+  availability for the case the public route exists to serve — `Decode` checks
+  the MAC before the expiry, so a genuine *expired* cookie still verifies and
+  still logs out, and it is deliberately not counted as a probe. The two writers
+  authentication cannot reach (cluster gossip, the on-disk file) keep a derived
+  key-size bound and an entry cap with counted refusals; the MAC-verified local
+  path is **exempt** from both, so a real session stays revocable however large
+  its cookie grew. The Control Plane's revocation aggregator is bounded in the
+  same change, the persist is gated on an actual change (which removes the rest
+  of the quadratic term even for authenticated callers), and the expired-entry
+  sweep no longer depends on a read of the exact key — previously an
+  un-clustered node had no evictor at all.
+
+  A refusal stays silent to the caller (same status, body and `Set-Cookie` as a
+  genuine logout) so logout cannot become a cookie-validity oracle. New
+  surfaces: `culvert_session_revoke_refused_total`,
+  `culvert_session_revoke_rejected_total{reason}`,
+  `culvert_session_revocations_tracked`,
+  `culvert_cluster_revocation_drops_total`, a WARN-only `session_revocation`
+  diagnostics row (counts only), and a rate-limited `SESSION_REVOKE_REFUSED`
+  log line. No new alert event and no `/readyz` row. Gates: 21 functions in
+  `session_revocation_chaos_test.go`, with ten mutations each verified failing
+  its gate. Runbook: `docs/operator/session-revocation-plane.md`.
 - The IDNA memo's value bound (`len(norm) > maxMemoHostLen`, 253 bytes) had no
   gate on its main-tier axis: an in-limit host that **expands** past the bound
   through punycode encoding. The long tier's oversize cases exercise the same

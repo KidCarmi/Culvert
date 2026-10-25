@@ -882,9 +882,11 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 			}
 			if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
 				logger.Printf("DataPlane: merged %d remote session revocations", added)
-				if err := sessionRevoked.SaveRevocations(); err != nil {
-					logger.Printf("DataPlane: failed to persist revocations: %v", err)
-				}
+				// persistRevocations, not SaveRevocations: a direct save
+				// bypasses the dirty-state tracking, so a failure here would
+				// leave the file behind memory with nothing recording that a
+				// retry is owed (CodeRabbit, PR #1591).
+				persistRevocations()
 			}
 		}
 	}
