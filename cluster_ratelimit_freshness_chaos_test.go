@@ -16,6 +16,9 @@ package main
 // distributed rate limiter.
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 
 	"testing"
@@ -252,5 +255,47 @@ func TestChaos61_NeverAppliedBroadcastAgeMetric(t *testing.T) {
 	st := newRateLimiter().ClusterFreshness()
 	if got := clusterRateLimitBroadcastAgeMetric(st); got != -1 {
 		t.Fatalf("broadcast age metric = %g with no broadcast, want -1 (0 would read as 'just landed')", got)
+	}
+}
+
+// TestAPIStats_SurfacesAuditClusterPushDrops pins the admin-dashboard surface
+// for the same CHAOS-61 counter. /healthz alone is not enough: the admin GUI
+// dashboard polls GET /api/stats, not the bare health-probe endpoint, so
+// without this field a Data Plane node silently dropping audit events on the
+// way to its Control Plane looked identical, on the Dashboard, to one with a
+// complete centralized trail.
+func TestAPIStats_SurfacesAuditClusterPushDrops(t *testing.T) {
+	restore := audit.ResetPendingForTest()
+	defer restore()
+
+	for i := 0; i < audit.MaxPendingForTest()+7; i++ {
+		audit.QueueForClusterForTest(audit.Entry{Action: "policy.add"})
+	}
+
+	w := httptest.NewRecorder()
+	r := adminCtx(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/stats", http.NoBody))
+	r.RemoteAddr = "198.51.100.7:9999"
+	apiStats(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200", w.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /api/stats: %v", err)
+	}
+	raw, ok := body["auditClusterPushDrops"]
+	if !ok {
+		t.Fatal("/api/stats has no auditClusterPushDrops field — a Control-Plane-unreachable audit gap is invisible to the dashboard")
+	}
+	n, ok := raw.(float64)
+	if !ok {
+		t.Fatalf("auditClusterPushDrops = %#v; want a number", raw)
+	}
+	if _, ok := body["auditClusterPushUnreportingNodes"]; !ok {
+		t.Error("/api/stats has no auditClusterPushUnreportingNodes field — a disconnected DP's stale zero would read as a complete trail")
+	}
+	if int64(n) < 7 {
+		t.Errorf("auditClusterPushDrops = %v; want >= 7 (the drops we injected)", n)
 	}
 }
