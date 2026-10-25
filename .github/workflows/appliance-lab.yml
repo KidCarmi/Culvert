@@ -1545,25 +1545,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Candidate 1.5.4 OVA (appliance-lab-ova-candidate-246cb73d, lab run
-      # 39140010708 — the operator-status deadline-fix candidate, #1528
-      # closeout). Archive + index pins are the OVA's own build record
-      # (build-info.json clamav_baked_tar_sha256 78fef25a and
-      # clamav_sidecar_image_id 32c2be57). The amd64 manifest and config are
-      # DERIVED from the re-hashed archive (exported via GITHUB_ENV), so every
-      # link stays hash-bound. This scans the EXACT 1.5.4 sidecar baked into THIS
-      # candidate OVA — an independent rebuild whose bytes differ from 6248daf7's
-      # (image id 32c2be57 vs 8af92aa4, archive 78fef25a vs 7fefc79c), so its
-      # scan is not reusable from the prior candidate's. The 1.4.6 scans are not
-      # reusable either.
-      OVA_ARTIFACT_ID: "12141566476"   # appliance-lab-ova-candidate-246cb73d, run 39140010708 (operator-status deadline-fix candidate)
-      OVA_SHA256: b2af1c9688d3f086ce0cfe55c9ca67f967920da894001a545d9fdbdd3777666a
-      SIDECAR_ARCHIVE_SHA256: 78fef25aaef82784619c4be4820e31231a8ae83730d4c86218c39128096b313c
-      # The sidecar image id (= config digest) from this OVA's own build-info.json
-      # (clamav_sidecar_image_id). bind runs with kind `either`, so this binds to
-      # the config the archive resolves to — the identity ASTRA named for the new
-      # 1.5.4 sidecar. The archive sha above is clamav_baked_tar_sha256.
-      SIDECAR_INDEX: sha256:32c2be57bc73d2aedf3e4178386ff30011290131bf08db225ed97c64522b3f90
+      # The ONE internal OVA built from frozen b9105086 (owner 6398512423). The
+      # archive is read out of the FINISHED VMDK and must equal the F-P2-tested
+      # bytes: archive ce011ffc, image id (config) 4c365e40 — also asserted
+      # against the guest's own manifest.env.
+      OVA_ARTIFACT_ID: "12595618495"   # appliance-lab-ova-candidate-b9105086, run 40185226897
+      OVA_SHA256: 61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a
+      SIDECAR_ARCHIVE_SHA256: ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059
+      SIDECAR_INDEX: sha256:4c365e4047f948e909bfda5a7d5bf06408f2fab68e59fc513c71681ccec65ebc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs (read-only disk access)
@@ -1614,6 +1603,8 @@ jobs:
           sudo env LIBGUESTFS_BACKEND=direct virt-copy-out -a "$disk" /var/lib/culvert-appliance/images/clamav.tar.gz "$W/"
           sudo env LIBGUESTFS_BACKEND=direct virt-cat -a "$disk" /var/lib/culvert-appliance/manifest.env \
             | grep -E '^CLAMAV_' | tee "$E/guest-manifest-clamav.env"
+          grep -qx "CLAMAV_SIDECAR_ID=$SIDECAR_INDEX" "$E/guest-manifest-clamav.env" \
+            || { echo "::error::the guest manifest does not name sidecar $SIDECAR_INDEX"; exit 1; }
           sudo chown "$(id -u):$(id -g)" "$W/clamav.tar.gz"; rm -rf x
           got="$(sha256sum clamav.tar.gz | cut -d' ' -f1)"
           echo "$got  /var/lib/culvert-appliance/images/clamav.tar.gz" | tee "$E/archive.sha256"
@@ -1650,7 +1641,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-6248daf7
+          name: appliance-lab-sidecar-scan-b9105086
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
@@ -2031,17 +2022,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      # Canonical #1528 candidate (appliance-lab-ova-candidate-4524311b, run
-      # 39338618373 — the F-DISK-RECOVERY-1 candidate). Same pins the
-      # agent-identity job and the workflow-level env carry; the app image id is
-      # the OVA's baked app (36af5a8c = the index manifest digest asserted
-      # below), the running .Id the OVA reports.
-      OVA_ARTIFACT_ID: "12228273676"   # appliance-lab-ova-candidate-4524311b, run 39338618373
-      OVA_SHA256: 27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd
-      SOURCE_IMAGE_RUN_ID: "39336581431"
-      SOURCE_IMAGE_TAR_SHA256: eb9e1d40dfe0a0acb027f1ad775fbb8ee58478cc9080bc4c3626e921abf30c81
-      IMAGE_ID: sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a
-      SRC_SHA: 4524311ba9743abcf9df05e9955e2842eb48168c
+      # The ONE internal OVA built from frozen b9105086 (owner 6398512423: exact-
+      # artifact scans, no rebuild). Every identity is read from the FINISHED
+      # OVA's own disk and must equal these pins, or the job stops:
+      #   OVA 61c46d6d (artifact 12595618495, run 40185226897) -> .mf -> VMDK ->
+      #   build-info.json (source b9105086) -> baked app archive a3fabc38
+      #   (application.baked_tar_sha256) -> index manifest ca27cf9a.
+      # The app scanned is the archive BAKED INTO THE OVA, not the CI tar.
+      OVA_ARTIFACT_ID: "12595618495"   # appliance-lab-ova-candidate-b9105086, run 40185226897
+      OVA_SHA256: 61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a
+      APP_ARCHIVE_SHA256: a3fabc3828ad026349bd7b86f2cb094fe15bae5fb28e15b80b8ace431115e486
+      IMAGE_ID: sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c
+      SRC_SHA: b910508629e9d80352067bc8ec608753ddf0924e
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -2084,29 +2076,46 @@ jobs:
           # scanner runs as root (no root-owned scanner cache)
           sudo chmod -R a+rX rootfs
           cp rootfs/var/lib/culvert-appliance/build-info.json "$E/build-info.json"
+          # Fail closed: the finished disk's own build record must name the frozen
+          # source and the pinned app archive + index digest.
+          python3 -I - "$E/build-info.json" <<'PY'
+          import json, os, sys
+          b = json.load(open(sys.argv[1])); a = b["application"]
+          got = {"git_commit": b["source"]["git_commit"], "git_dirty": b["source"]["git_dirty"],
+                 "baked_tar_sha256": a["baked_tar_sha256"], "index_digest": a["index_digest"]}
+          want = {"git_commit": os.environ["SRC_SHA"], "git_dirty": False,
+                  "baked_tar_sha256": os.environ["APP_ARCHIVE_SHA256"], "index_digest": os.environ["IMAGE_ID"]}
+          print(json.dumps({"got": got, "want": want}))
+          sys.exit(0 if got == want else "::error::finished-OVA build record does not match the pins")
+          PY
           # The shipped kernel's own config: configuration-based kernel CVE
           # closures (kernel-cve-prereqs.tsv "config:" tokens) are checked
           # against THIS file by kernel-matrix.py, not against prose.
           cp rootfs/boot/config-* "$E/"
           sudo du -sh rootfs | tee "$E/rootfs-size.txt"
-      - name: The application image (verified sha256) and its Go binaries
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: The application image BAKED INTO THE OVA (hash-checked) and its Go binaries
         run: |
           set -euo pipefail
-          src="$(test/e2e/appliance/lab/obtain-image.sh "$W/img")"
-          echo "image tar $SOURCE_IMAGE_TAR_SHA256 from $src (run $SOURCE_IMAGE_RUN_ID), id $IMAGE_ID" | tee "$W/evidence/image.txt"
+          a="$W/rootfs/var/lib/culvert-appliance/images/culvert.tar.gz"
+          got="$(sha256sum "$a" | cut -d' ' -f1)"
+          [ "$got" = "$APP_ARCHIVE_SHA256" ] || { echo "::error::baked app archive $got != $APP_ARCHIVE_SHA256"; exit 1; }
+          mkdir -p "$W/img"; gunzip -c "$a" > "$W/img/culvert-image.tar"
+          echo "app = archive baked in the OVA: /var/lib/culvert-appliance/images/culvert.tar.gz sha256 $got, id $IMAGE_ID" | tee "$W/evidence/image.txt"
           mkdir -p "$W/appbin"
           python3 -I - "$W/img/culvert-image.tar" "$W/appbin" "$IMAGE_ID" <<'PY'
-          import gzip, io, json, os, sys, tarfile
+          import gzip, hashlib, io, json, os, sys, tarfile
           tar, out, want = sys.argv[1:4]
           t = tarfile.open(tar)
           idx = json.load(t.extractfile("index.json"))
-          assert idx["manifests"][0]["digest"] == want, "image tar does not carry the pinned image id"
-          def blob(d): return t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+          assert len(idx["manifests"]) == 1 and idx["manifests"][0]["digest"] == want, "baked archive does not carry the pinned image id"
+          def blob(d):
+              b = t.extractfile("blobs/sha256/" + d.split(":")[1]).read()
+              assert hashlib.sha256(b).hexdigest() == d.split(":")[1], "blob hash mismatch " + d
+              return b
           top = json.loads(blob(want))
           if "manifests" in top:
               top = json.loads(blob(next(m for m in top["manifests"] if m.get("platform", {}).get("architecture") == "amd64")["digest"]))
+          print("config", top["config"]["digest"])
           wanted = {"app/culvert": "app-culvert", "app/deploy/bin/culvert-maint": "app-deploy-culvert-maint"}
           for l in top["layers"]:
               raw = blob(l["digest"])
@@ -2115,15 +2124,19 @@ jobs:
                   for m in lt.getmembers():
                       if m.isfile() and m.name.lstrip("./") in wanted:
                           open(os.path.join(out, wanted[m.name.lstrip("./")]), "wb").write(lt.extractfile(m).read())
+          assert sorted(os.listdir(out)) == sorted(wanted.values()), os.listdir(out)
           print(sorted(os.listdir(out)))
           PY
+          # the binaries' own version stamp names the frozen source
+          # (no pipe: under pipefail an early-exiting grep would SIGPIPE strings)
+          for b in "$W/appbin/"*; do grep -qaF 'v1.0.327-candidate.gb910508629e9' "$b" || { echo "::error::$b lacks the b9105086 VERSION stamp"; exit 1; }; done
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
         with:
           version: v0.69.3
           cache: true
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.3"   # the toolchain the scanned binaries were built with (go.mod)
           cache: false
       - name: Trivy DB (current) + govulncheck
         run: |
@@ -2190,7 +2203,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-246cb73d
+          name: appliance-lab-exact-scan-b9105086
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
