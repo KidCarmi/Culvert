@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -464,6 +465,45 @@ func TestChaos92_ControlMetricIsExported(t *testing.T) {
 	}
 	if !strings.Contains(body, "# TYPE culvert_retained_path_truncated_total counter") {
 		t.Error("the series has no TYPE line")
+	}
+}
+
+// TestChaos92_ControlCounterReachesTheAdminSurfacesToo extends ControlMetricIsExported
+// to the two surfaces an operator without a metrics scraper actually has. The
+// SEC-REQID-1 precedent is the right one to follow here and the CHAOS-69 one is
+// not: an oversize AUTHORITY is refused with a 400, so the caller sees it, while
+// a clamped path leaves a request that succeeded and a policy verdict formed on
+// the whole value — nothing else changes that an admin would notice.
+func TestChaos92_ControlCounterReachesTheAdminSurfacesToo(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+	boundRetainedPath("/" + strings.Repeat("a", maxRetainedRequestPath+1))
+
+	w := httptest.NewRecorder()
+	r := adminCtx(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/stats", http.NoBody))
+	apiStats(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/api/stats status = %d", w.Code)
+	}
+	var stats map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode /api/stats: %v", err)
+	}
+	if stats["retainedPathTruncated"] != float64(1) {
+		t.Errorf("/api/stats retainedPathTruncated = %v, want 1 — an operator without a metrics scraper cannot see the probing", stats["retainedPathTruncated"])
+	}
+
+	// And the legacy panel that renders it, so the server-side field is not a
+	// number nothing displays. The element id and the JSON key are the contract
+	// between the two halves.
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`id="s-retained-path-truncated"`, "s.retainedPathTruncated"} {
+		if !strings.Contains(string(html), want) {
+			t.Errorf("static/index.html does not carry %s — the counter has an API field with no UI surface", want)
+		}
 	}
 }
 
