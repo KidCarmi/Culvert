@@ -48,7 +48,7 @@ const readCacheTTL = 2 * time.Second
 // The in-memory ring is a fixed-capacity circular buffer. Add overwrites the
 // oldest slot in place, so the steady state allocates nothing: the previous
 // append-then-retrim slice pattern re-allocated a ~2 MB backing array and
-// copied all MaxRing entries (328 B each) under ringMu every ~MaxRing/4 adds
+// copied all MaxRing entries (352 B each) under ringMu every ~MaxRing/4 adds
 // — ~1.5 KB of amortized garbage per logged request plus a periodic 1.6 MB
 // copy while every request goroutine contends on the lock.
 var (
