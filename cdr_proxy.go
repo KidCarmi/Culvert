@@ -579,7 +579,11 @@ func cdrCallErrorClass(err error) string {
 // triggering failure; see that function for why.
 func noteCDRCallError(err error) {
 	now := time.Now().UnixNano()
-	if prev := cdrCallErrorLogAt.Load(); (prev == 0 || now-prev >= int64(cdrCallErrorLogInterval)) &&
+	// CHAOS-84: MAGNITUDE, not sign — a backward clock step would otherwise
+	// silence the Sluice call-error line for the whole step. Comparing the
+	// absolute interval bounds that to one window; a claimant that loses the CAS
+	// below still suppresses, because the CAS is what decides.
+	if prev := cdrCallErrorLogAt.Load(); (prev == 0 || time.Duration(now-prev).Abs() >= cdrCallErrorLogInterval) &&
 		cdrCallErrorLogAt.CompareAndSwap(prev, now) {
 		logger.Print(cdrCallErrorLogLine(err, cdrCallErrorReportedTotal()))
 	}

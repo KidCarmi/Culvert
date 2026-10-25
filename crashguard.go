@@ -164,7 +164,15 @@ func crashThrottleAllow(component string) bool {
 	crashThrottleMu.Lock()
 	defer crashThrottleMu.Unlock()
 	last, ok := crashThrottleLast[component]
-	if ok && now-last < int64(crashThrottleEvery) {
+	// CHAOS-84: MAGNITUDE, not sign. now and last are wall-clock nanos, so a
+	// BACKWARD clock step makes the difference negative and a sign-based test
+	// keeps returning false for the whole step — recordCrash then returns before
+	// updating lastCrash or emitting the stack-bearing log and audit entry, so
+	// every same-component crash after the step is lost. Crash evidence is the
+	// one record an operator cannot reconstruct, which makes this the sharpest
+	// member of the class. Comparing the absolute interval bounds suppression to
+	// one window in either direction.
+	if ok && time.Duration(now-last).Abs() < crashThrottleEvery {
 		return false
 	}
 	if !ok && len(crashThrottleLast) >= maxCrashLabels {
