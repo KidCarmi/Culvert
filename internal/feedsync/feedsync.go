@@ -336,9 +336,12 @@ func (fs *Syncer) syncRound(ctx context.Context) bool {
 	// issue a 50+ MB BulkWrite into a store that is about to close. Cancelled
 	// means do not start the write; it is charged as a failed round, and the
 	// last-good DB stays exactly as it was.
-	if err := ctx.Err(); err != nil {
+	// Charged as failWrite, the existing bounded reason class: the write is what
+	// did not happen. No new reason is introduced, so the health snapshot and
+	// the metrics surface are unchanged.
+	if ctx.Err() != nil {
 		fs.noteFailure(failWrite)
-		obs.Printf("FeedSync: shutting down before the bulk write; the previous category data is unchanged")
+		obs.Printf("FeedSync: cancelled before the bulk write; the previous category data is unchanged")
 		return false
 	}
 
