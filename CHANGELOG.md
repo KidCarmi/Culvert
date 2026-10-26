@@ -17,6 +17,40 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A sixth log sink retained the decrypted inner request path, unbounded, after
+  CHAOS-92 bounded the other five (CHAOS-92e).** The CHAOS-92 sweep enumerated
+  three retaining sink families and clamped each at a chokepoint, with a source
+  gate to keep future sinks bounded. The gate matches call sites carrying both
+  `sanitizeLog(` and `URL.Path` — so it never examined
+  `fileblock.LogBlock`, which sanitizes in the callee (`obs.Sanitize`, the
+  independent internal twin, ADR-0003) and writes the client-chosen path into the
+  50 MB/one-archive rotating process log as `FILE_BLOCKED (tunnel %s)`. Six
+  `emitFileBlock` call sites reach it, four of them passing `req.URL.Path`
+  straight from the decrypted inner request.
+
+  It is worse per request than the five that were fixed: those are fed by a path
+  net/http caps at `MaxHeaderBytes + 4096`, while this one is fed by
+  `http.ReadRequest` on the decrypted stream — `readRequestLimit(b,
+  math.MaxInt64)` over a `textproto.ReadLine()` with no limit — so the inner
+  request line is unbounded on the wire. Measured through the emitter: a 1 MiB
+  path wrote 1 048 646 log bytes, and a 1 MiB path of `0xFF` wrote 4 194 375,
+  because `obs.Sanitize` folds control bytes but `0xFF` is not one and `%q`
+  renders each as the 4-character `\xff`. Every write succeeds, so the logsink
+  backpressure counter and every storage-health surface stay green while the
+  retained record rotates away (CWE-778, OWASP A09:2021). Reachability is the one
+  CHAOS-69 named for the inner path — an allowed destination with SSL inspection
+  enabled — not CHAOS-92's stock-install reachability.
+
+  `emitFileBlock` now clamps with the sweep's own `boundRetainedPath`, inside the
+  `fileblock.LogBlock` argument so the sanitiser's scan and its copy are bounded
+  too. It is package main's only route into `LogBlock`, so one edit bounds all
+  six call sites, and a source gate now fails on a direct
+  `fileblock.LogBlock`/`BlockConn` call from package main. **Enforcement and the
+  client-visible response are untouched**: every matcher ran on the whole value
+  at the call site before the emitter, and the 403 body derives from the
+  extension and source only — pinned by a control that asserts the emitted bytes
+  are identical at 16 B and 1 MiB. Recorded with its measurements in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53.11.
 - **The `file_profile_resolution` diagnostics row went blind to the very rules
   SEC-POLICYACTION-1 taught the request path to honour.** That change made
   `applyPolicyDecision` (`proxy.go`) dispatch on `canonicalPolicyAction`, which
