@@ -508,7 +508,17 @@ confirms), on this working tree.
 | `go test -count=1 -run 'TestChaos73_\|TestCWE117_CPAddress\|TestChaos92_' .` | ok |
 | `python3 docs/agent-context/check.py` | ok |
 | `golangci-lint run --new-from-rev=origin/main` | **BLOCKED — not run.** The installed binary is v2.5.0 built with go1.25.1; CI pins v2.15.0 and this tree compiles with go1.27.3. The old binary panics inside `go/types` loading these sources. Reported rather than worked around; no gate was weakened to obtain a pass. |
-| Full root race suite | see the PR body for the run on the pushed SHA |
+| `go test -race -count=1 -timeout=40m .` (full root package) | 2 305 s; fails only the nine recorded TEST-DNS-1 cases |
+| `TEST_SEED=20260421 go test -count=1 -timeout=30m .` (full root package, enumerating) | **exactly 9 failures**, all `TestIdPRegistry_*`/`TestAPIIdP*`, each `idp oidc issuer: URL must be https:// and must not point to a private address` |
+| The same nine, run on `origin/main` in a clean worktree | **all nine fail identically** — verified pre-existing and environmental, not inherited from prose |
+
+The nine are the register's **TEST-DNS-1** row (§53.8): `validateExternalURL`'s
+fail-closed DNS check is working correctly, and the IdP fixtures chose
+`example.com` on the assumption that a resolver answers for it. `getent hosts
+example.com` returns nothing in this sandbox, so the precondition holds here.
+None of the nine touches any contract these commits change (IdP/OIDC
+persistence and redaction, versus the proxy data path, the revocation
+diagnostics row and the Control Plane address log).
 
 **Negative controls — every fix verified to fail without itself:**
 
