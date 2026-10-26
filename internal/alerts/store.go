@@ -1206,6 +1206,22 @@ func processRetryQueue(ctx context.Context, store *Store) {
 			continue
 		}
 		delivered := retryDeliver(ctx, store, hook, claimed)
+		if !delivered && ctx.Err() != nil {
+			// Interrupted, not failed. A cancelled POST returns the same false
+			// a badly-answering webhook does, and resolveRetry cannot tell them
+			// apart — so charging this one would spend an attempt the webhook
+			// never saw, and for an entry already on its last attempt it would
+			// REMOVE the alert and count it "exhausted after retryMax
+			// attempts". That is the RT-1 loss again, one entry wide: an alert
+			// discarded by an ordinary shutdown. Cancellation can also land
+			// between this loop's ctx check and the request, so the check has
+			// to be here, AFTER the attempt, not only before it.
+			//
+			// An attempt that did not happen is not charged: the claim already
+			// left the entry in the durable queue, so returning now preserves
+			// it at its original attempt count, due again after the lease.
+			return
+		}
 		resolveRetry(claimed, delivered)
 	}
 }

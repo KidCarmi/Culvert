@@ -185,6 +185,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   across its own attempt and leaves only once that attempt has resolved; a crash
   mid-attempt leaves it queued, retried after a 60s lease with its attempt count
   intact, because an attempt that did not complete is not charged.
+  A delivery interrupted by shutdown is not charged as an attempt: a cancelled
+  POST returns the same failure a badly-answering webhook does, so without that
+  distinction a shutdown during an entry's last attempt removed the alert and
+  counted it "exhausted after 3 attempts" though the webhook was never reached.
 - **A retry pass could not be interrupted or bounded (CHAOS-93 RT-2).** The pass
   took no context and each delivery built its own from `context.Background()`, so
   the loop only checked for shutdown *between* passes and a full queue against a

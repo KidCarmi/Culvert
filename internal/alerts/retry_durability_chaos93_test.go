@@ -420,3 +420,62 @@ func TestResolveRetry_FailedAttemptIsRearmedNotLost(t *testing.T) {
 		t.Errorf("delivered entry stayed queued: %d entries", len(got))
 	}
 }
+
+// TestProcessRetryQueue_CancelledDeliveryDoesNotConsumeAnAttempt is the gate for
+// the gap Codex found in the first version of the RT-1 fix (PR #1734 review).
+//
+// The claim/resolve split made a crash mid-attempt safe, but a CLEAN shutdown
+// still charged the interrupted attempt: the cancelled POST returns false, which
+// resolveRetry could not tell apart from a webhook that answered badly, so an
+// entry on its last attempt was removed and counted as "exhausted after 3
+// attempts" — an alert lost to a shutdown, with the third attempt never having
+// reached the webhook at all. Cancellation can also land between the pass's
+// context check and the request, burning the attempt with no contact.
+//
+// An attempt interrupted by lifecycle cancellation did not happen, so it is not
+// charged: the claimed entry stays in the durable queue, at its original attempt
+// count, and is retried after the lease.
+func TestProcessRetryQueue_CancelledDeliveryDoesNotConsumeAnAttempt(t *testing.T) {
+	snapshotRetryQueue(t)
+	snapshotRetryIDs(t)
+	snapshotRetryCounters(t)
+	snapshotRetryDeliver(t)
+	path := retryQueueInTempDir(t)
+
+	// An entry on its FINAL attempt: retryMax-1 attempts already made, so one
+	// more failure exhausts it. This is the only entry for which the difference
+	// between "charged" and "not charged" is the alert's existence.
+	const lastAttempt = retryMax - 1
+	retryMu.Lock()
+	retryNextID++
+	retryQueue = append(retryQueue, retryEntry{
+		ID:        retryNextID,
+		WebhookID: "hook-cancel",
+		Payload:   Payload{Event: "policy_block", Detail: "must survive shutdown"},
+		Attempt:   lastAttempt,
+		NextRetry: time.Now().Add(-time.Minute),
+	})
+	saveRetryQueueLocked()
+	retryMu.Unlock()
+
+	exhaustedBefore := RetryExhaustedTotal()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	retryDeliver = func(_ context.Context, _ *Store, _ Webhook, _ retryEntry) bool {
+		cancel()     // the lifecycle ends while this delivery is in flight
+		return false // ... so the POST aborts, having reached nothing
+	}
+
+	processRetryQueue(ctx, storeWithHook("hook-cancel", "https://example.invalid/hook"))
+
+	persisted := readPersistedQueue(t, path)
+	if len(persisted) != 1 {
+		t.Fatalf("a shutdown consumed the final attempt and discarded the alert: %d entries persisted, want 1", len(persisted))
+	}
+	if persisted[0].Attempt != lastAttempt {
+		t.Errorf("attempt charged to %d for a delivery cancelled by shutdown; want it left at %d", persisted[0].Attempt, lastAttempt)
+	}
+	if got := RetryExhaustedTotal(); got != exhaustedBefore {
+		t.Errorf("RetryExhaustedTotal went %d -> %d: a shutdown was reported as exhausted retries", exhaustedBefore, got)
+	}
+}

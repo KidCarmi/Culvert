@@ -13080,6 +13080,25 @@ with its attempt count intact — an attempt that did not complete is not charge
   and bounded by `retryPassBudget`; the bound caps a pass's LENGTH, not recovery,
   because the next tick resumes from the durable queue.
 
+### 54.2a Review follow-up — the shutdown that still charged an attempt
+
+Codex rejected the first version of the RT-1 fix on PR #1734 and was right. The
+claim/resolve split made a CRASH mid-attempt safe, but a clean CANCELLATION
+still charged the interrupted attempt: once RT-2 gave the delivery the lifecycle
+context, a cancelled POST returned exactly the `false` a badly-answering webhook
+returns, and `resolveRetry` could not tell them apart — so a shutdown during an
+entry's LAST attempt removed it and counted `retryExhaustedTotal`, "exhausted
+after 3 attempts", with the third attempt never having reached the webhook.
+The RT-1 loss shape again, one entry wide, and a contradiction of this sweep's
+own claim that an attempt which did not complete is not charged.
+
+The two fixes interact, which is why neither row found it alone. Fixed by
+distinguishing interrupted from failed, with the check AFTER the attempt (which
+also closes the cancellation landing between the pass's ctx check and the
+request). Gate: `TestProcessRetryQueue_CancelledDeliveryDoesNotConsumeAnAttempt`,
+verified to fail against the first version with `0 entries persisted, want 1`.
+See §9a of [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
+
 ### 54.3 What the sweep did NOT change, and why
 
 **Neither new backoff is jittered.** `feedsched` and `saas_feed_scheduler.go`

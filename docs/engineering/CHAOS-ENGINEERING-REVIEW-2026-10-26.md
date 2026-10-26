@@ -343,8 +343,52 @@ schedule assertion exact and costs no wall-clock time.
 
 ---
 
+## 9a. Review follow-up — the shutdown that still charged an attempt
+
+**Codex rejected the first version of the RT-1 fix on PR #1734, and it was
+right.** The claim/resolve split made a *crash* mid-attempt safe — the entry
+stays queued and is retried after the lease with its attempt count intact — but
+a *clean cancellation* still charged the interrupted attempt.
+
+The mechanism: once the delivery takes the lifecycle context (RT-2), a cancelled
+POST returns exactly the `false` a badly-answering webhook returns, and
+`resolveRetry` could not tell them apart. So a shutdown during an attempt spent
+that attempt, and for an entry already on its **last** attempt
+(`Attempt == retryMax-1`) the resolve removed it and counted it
+`retryExhaustedTotal` — "exhausted after 3 attempts" — when the third attempt
+had never reached the webhook at all. Codex also noted the narrower race:
+cancellation can land between the pass's `ctx.Err()` check and the request,
+burning an attempt with no contact whatsoever.
+
+That is the RT-1 loss shape again, one entry wide instead of a whole batch, and
+it contradicted this document's own claim that "an attempt that did not
+complete is not charged" — which was true of a crash and false of a shutdown.
+The two fixes interact, which is why neither sweep found it alone: RT-2 made
+delivery cancellable, and RT-1's resolve treated cancellation as failure.
+
+Fixed by distinguishing *interrupted* from *failed*: when a delivery returns
+false and `ctx.Err() != nil`, the pass returns without resolving, leaving the
+claimed entry in the durable queue at its original attempt count, due again
+after the lease. The check sits AFTER the attempt, not only before it, which is
+what closes Codex's between-check-and-request race. A delivery that SUCCEEDED
+under a cancelled context still resolves normally — the webhook received it.
+
+Where the two signals are genuinely ambiguous (a real webhook failure that
+coincides with a shutdown), this now errs toward preserving the alert rather
+than charging it. That is the direction this document already argues for under
+at-least-once: a duplicate is visible, a loss is not.
+
+Gate: `TestProcessRetryQueue_CancelledDeliveryDoesNotConsumeAnAttempt`, verified
+to fail against the first version with `0 entries persisted, want 1`.
+
 ## 10. Residual risk
 
+- **A shutdown can delay an interrupted entry by the lease.** An attempt
+  cancelled by shutdown is not charged, so the entry waits out `retryLease`
+  (measured from the claim) before becoming due again. After a restart that
+  takes longer than the remaining lease it is due immediately; after a fast one
+  it waits the remainder, which also keeps a crash-looping process from
+  hammering the webhook from boot.
 - **A claimed entry's lease is 60s.** A crash between claim and resolve delays
   that one entry by up to 60s. Deliberate: it has to exceed `deliveryTimeout` so
   a slow-but-live delivery is never double-sent by the next pass. The
