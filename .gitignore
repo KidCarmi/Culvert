@@ -75,3 +75,10 @@ frontend/node_modules/
 frontend/tools/openapi-gen/node_modules/
 frontend/test-results/
 frontend/e2e/.state/
+
+# Python bytecode. .github/scripts/*.py are imported by sibling scripts (the
+# gosec/CodeQL exception checkers), which leaves a CPython-version-specific
+# __pycache__ behind in a working tree that has run them. Generated, never
+# committed.
+__pycache__/
+*.pyc
