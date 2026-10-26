@@ -17,6 +17,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The `file_profile_resolution` diagnostics row went blind to the very rules
+  SEC-POLICYACTION-1 taught the request path to honour.** That change made
+  `applyPolicyDecision` (`proxy.go`) dispatch on `canonicalPolicyAction`, which
+  folds ASCII case and resolves an EMPTY action to Allow — so a rule persisted as
+  `"allow"`, `"ALLOW"` or with no action at all (the shape an operator-managed
+  `policy_file` or a replayed CP snapshot produces) now reaches the `ActionAllow`
+  branch and really does have `FileProfileBlocked` evaluated against it.
+
+  `fileProfileEnforced` (`file_profile_health.go`) still compared the RAW action,
+  so it answered "not enforced" for exactly those rules. With a dangling
+  `FileProfileID`, every file-bearing transaction such a rule matched was blocked
+  fail-closed — correctly — while the row reported `ok`. That row exists for one
+  purpose: to tell an administrator whose users report "downloads are blocked"
+  why, instead of sending them to SSH and `grep`. Its own stated contract is
+  "ever evaluated by `FileProfileBlocked` on the request path", so it has to read
+  the action the way the request path does, and it now does. Enforcement is
+  untouched — the predicate feeds only the diagnostics row — and the negative
+  control is pinned too: an action this build cannot dispatch at all is blocked
+  outright by the fail-closed branch, so its profile is never evaluated and the
+  predicate still says so.
+
 - **An inspected tunnel's inner-host pin accepted an authority `net/http` will
   not send, so the upstream received no authority at all.** A CONNECT tunnel is
   authorized once, against the CONNECT authority, and `innerHostPinnedToTunnel`
