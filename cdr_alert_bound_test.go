@@ -328,8 +328,16 @@ func TestNoteCDRCallError_SubscribedFiresOneDedupKey(t *testing.T) {
 		t.Fatalf("%d distinct dedup keys for %d failures of one outage, want 1 — a key per request "+
 			"cannot be suppressed and floods the bounded retry queue: %v", len(distinct), fires, distinct)
 	}
-	if tracked := store.DedupTracked(); tracked != 1 {
-		t.Fatalf("the alert store tracked %d dedup keys, want 1", tracked)
+	// The store dedups on exactly "event:detail", so the recorded content above
+	// IS this producer's key set; pin the one key to the bounded status class.
+	// Do NOT count store.DedupTracked() instead: the store is reachable through
+	// globalAlertStore by every `go fireAlert(...)` still in flight from an
+	// EARLIER test, and Dispatch records a key before it matches any hook. Under
+	// -shuffle 1793004681587733862 the two decryption_autoexclude promotions of
+	// TestADR0008_ClientPinnedRequiresAuthenticatedIdentity landed here and
+	// made it 3.
+	if want := codes.Unavailable.String(); !distinct[want] {
+		t.Fatalf("the outage's dedup key is %v, want the status class %q", distinct, want)
 	}
 	// Drain: the delivery goroutine's LAST shared write is the retry enqueue
 	// after its failure, made under the retry mutex that RetryQueueDepth also
