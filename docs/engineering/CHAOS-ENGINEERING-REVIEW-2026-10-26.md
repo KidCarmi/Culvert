@@ -167,7 +167,16 @@ The pass delivered through `Deliver`, which hardcodes `attempt: 1`. The
 `Delivery.Attempt` field exists so the admin delivery-history surface can show
 retry behavior (`ui_security.go:149` — "retries, permanently exhausted/dropped
 deliveries ... without grepping logs"), and it could not distinguish a third
-attempt from a first. Gate: `delivery recorded as attempt 1, want 2`.
+attempt from a first. Gate: `delivery recorded as attempt 1, want 3`.
+
+> The first version of this fix passed `claimed.Attempt` straight through, which
+> is off by one in both directions: `retryEntry.Attempt` counts the attempts
+> ALREADY MADE — 1 after a failed first delivery, and **0** for an entry queued
+> because the delivery semaphore was full and nothing was tried — so a
+> semaphore-queued entry's first delivery would have been recorded as attempt
+> **0**. The record is `Attempt+1`, and both ends of that are now pinned
+> (`…RecordsRealAttemptNumber` and
+> `…SemaphoreQueuedEntryDeliversAsAttemptOne`).
 
 ---
 
@@ -353,6 +362,17 @@ schedule assertion exact and costs no wall-clock time.
 - **`retryQueueMax` still drops the NEWEST entry when full**, and counts it.
   Unchanged — a bounded queue has to refuse something, and the refusal is
   visible.
+- **Write amplification: the queue is now persisted twice per entry** (claim and
+  resolve) rather than once per pass. Accepted deliberately. The claim's persist
+  is what gives a crash-looping process a cooldown instead of hammering the
+  webhook from boot; the resolve's is what keeps a delivered alert from being
+  re-sent. The file is a bounded JSON array of at most 500 entries, the writes
+  are spread across deliveries that each take up to 5s, and entries only exist
+  at all after deliveries have been failing — so the amplified case is one write
+  per several seconds, not a hot path. The pre-existing pattern already fsynced
+  under `retryMu` (`enqueueRetry` did), so the lock discipline is unchanged. If
+  this ever matters, the repo's own answer is `Store.Add`'s
+  `beginSaveLocked`/unlock/`persist()` split.
 - **RT-3 adds up to 6s of latency** to a dispatch against a hard-down agent.
   Judged correct: that is the deployment-visible timing call the 2026-10-18
   sweep deferred, and 6s against a release dispatch is far cheaper than a

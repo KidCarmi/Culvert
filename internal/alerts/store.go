@@ -1218,7 +1218,11 @@ func processRetryQueue(ctx context.Context, store *Store) {
 // ssrf.SafeDialContext correctly refuses the loopback address a test server
 // would be on.
 var retryDeliver = func(ctx context.Context, store *Store, h Webhook, e retryEntry) bool {
-	return store.deliverAttemptContext(ctx, h, e.Payload, e.Attempt)
+	// retryEntry.Attempt counts the attempts ALREADY made — 1 after a failed
+	// first delivery, 0 for an entry queued because the delivery semaphore was
+	// full and nothing was tried — so the delivery about to happen is the next
+	// one after that.
+	return store.deliverAttemptContext(ctx, h, e.Payload, e.Attempt+1)
 }
 
 // claimNextRetry takes the earliest entry due at now, re-arms it to

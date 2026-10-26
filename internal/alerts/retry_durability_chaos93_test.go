@@ -300,8 +300,42 @@ func TestProcessRetryQueue_RecordsRealAttemptNumber(t *testing.T) {
 	if len(hist) == 0 {
 		t.Fatal("no delivery recorded")
 	}
-	if hist[0].Attempt != 2 {
-		t.Errorf("delivery recorded as attempt %d, want the entry's real attempt 2", hist[0].Attempt)
+	// The entry records TWO attempts already made, so this delivery is the third.
+	if hist[0].Attempt != 3 {
+		t.Errorf("delivery recorded as attempt %d, want 3 (the entry's 2 made + this one)", hist[0].Attempt)
+	}
+}
+
+// And the other end of the same contract: an entry queued because the delivery
+// semaphore was full has made NO attempt yet, so its first delivery is attempt
+// 1 — never the attempt 0 a naive read of the field would record.
+func TestProcessRetryQueue_SemaphoreQueuedEntryDeliversAsAttemptOne(t *testing.T) {
+	snapshotRetryQueue(t)
+	snapshotRetryIDs(t)
+	snapshotRetryCounters(t)
+	retryQueueInTempDir(t)
+
+	retryMu.Lock()
+	retryNextID++
+	retryQueue = append(retryQueue, retryEntry{
+		ID:        retryNextID,
+		WebhookID: "hook-sem",
+		Payload:   Payload{Event: "policy_block", Detail: "never tried"},
+		Attempt:   0, // enqueueRetry(..., 0): the semaphore was full
+		NextRetry: time.Now().Add(-time.Minute),
+	})
+	saveRetryQueueLocked()
+	retryMu.Unlock()
+
+	store := storeWithHook("hook-sem", "not-a-url")
+	processRetryQueue(context.Background(), store)
+
+	hist := store.DeliveryHistory()
+	if len(hist) == 0 {
+		t.Fatal("no delivery recorded")
+	}
+	if hist[0].Attempt != 1 {
+		t.Errorf("delivery recorded as attempt %d, want 1", hist[0].Attempt)
 	}
 }
 
