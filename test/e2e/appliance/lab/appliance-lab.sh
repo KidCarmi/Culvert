@@ -531,11 +531,13 @@ engine_overlay() { local disk="$1" fmt="$2" d="${LAB_ENGINE_DEBS:-}" want v
   sudo env LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" virt-customize -q --no-network --format "$fmt" -a "$disk" \
     --run-command 'rm -rf /var/tmp/debs /var/tmp/engine-overlay-*' >> "$EV/01-engine-overlay-virt-customize.log" 2>&1 || true
   local bad="" w
-  for w in $want; do grep -qxF "$w ii " "$EV/01-engine-overlay-versions.txt" || bad+="$w "; done
+  # dpkg Status-Abbrev: desired i (install) or h (hold — re-held above), status
+  # i (installed), no error flag. The hold itself is asserted separately below.
+  for w in $want; do awk -v w="$w" '$1==w && ($2=="ii" || $2=="hi") {f=1} END {exit !f}' "$EV/01-engine-overlay-versions.txt" || bad+="$w "; done
   for w in docker-ce docker-ce-cli containerd.io docker-compose-plugin; do grep -qx "$w" "$EV/01-engine-overlay-holds.txt" || bad+="hold:$w "; done
   if [[ -n "$bad" ]]; then check 1 engine-overlay fail "not installed+held as expected: $bad"; return 1; fi
   save_state ENGINE_EXPECT "$want"
-  check 1 engine-overlay pass "LAB-ONLY: ${want} installed (dpkg ii) + held in the disposable disk BEFORE first boot; DEB sha256s verified; the booted disk is NOT the OVA's disk"
+  check 1 engine-overlay pass "LAB-ONLY: ${want} installed (dpkg ii/hi) + held in the disposable disk BEFORE first boot; DEB sha256s verified; the booted disk is NOT the OVA's disk"
 }
 cmd_up() {
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
