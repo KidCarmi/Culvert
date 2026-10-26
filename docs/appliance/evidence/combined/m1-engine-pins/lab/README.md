@@ -1,0 +1,57 @@
+# M1 step 4 — lab compatibility on Docker 29.9.2 / containerd.io 2.4.2-3
+
+**Result:** run **40338463307**, lab commit `40e28428` on `test/appliance-lab`, job conclusion success. It ran **176 checks: 157 PASS, 18 INFO, 0 FAIL, 1 BLOCKED**. The BLOCKED check is `4b portal-cookie-replay`, which needs an identity provider the lab does not have. It was BLOCKED on the baseline OVA run too and is covered by CI tests.
+
+## What booted (no build)
+
+- **OVA:** the retained internal OVA 61c46d6d (artifact from run 40185226897). Its sha256 and every `.mf` digest are verified before use, and its bytes are never modified.
+- **Before first boot,** the harness installed the three candidate DEBs into the **disposable disk copy**:
+  - `docker-ce` 5:29.9.2-1
+  - `docker-ce-cli` 5:29.9.2-1
+  - `containerd.io` 2.4.2-3
+- **Install method:** `virt-customize` running `dpkg -i`, the same context `prepare-guest.sh` installs the engine in at build time. The sequence is unhold → install → re-hold.
+- **The booted disk is not the OVA's disk.** The check text and `identities.txt` both say so.
+- **One known gap against a rebuilt OVA:** the build-time records inside the disk (`/var/lib/culvert-appliance/{manifest.env,host-components.txt}`) still name 29.9.0. Nothing at runtime reads them.
+
+**Provenance, re-verified on the runner** (`engine-overlay/` inside the evidence archive):
+
+- The key fingerprint equals `DOCKER_APT_KEY_FPR`.
+- InRelease reports `VALIDSIG`.
+- The Packages sha256 appears in the signed InRelease.
+- Each stanza hash equals the pinned hash, and each downloaded DEB equals the pinned hash.
+
+**Read-back from the disk after install:**
+
+- All 3 packages are configured (`hi`: held + installed, no error flag).
+- All 4 engine packages, including compose, are held.
+- The 7 engine binaries are **byte-identical** to the DEB contents that step 2 scanned. GO-2026-6809 is absent from those bytes.
+
+## What ran on the new engine
+
+| Phase | Result | Covers |
+|---|---|---|
+| 1 identity + overlay | PASS | OVA sha256 and `.mf`; `engine-overlay` |
+| 2–3 first boot | PASS | First boot on 29.9.2. Offline load of the baked app archive; `culvert` runs `sha256:ca27cf9a…`. Status `complete` 55 s from power-on. Operator/console/sudo/SSH-refusal posture. |
+| 4–5 setup + enforcement | PASS | Setup token; deny default; real egress allow/deny. The ClamAV sidecar is up from the baked archive (`--no-build`) and `/ready clamav ok`. UT1 category sync and a category rule. |
+| 6 maintenance agent | PASS | Agent reachable over its socket via sudoers. Backup through the agent, listed. Restore dry-run. Live commit refused. down → restore → up. |
+| 6c signed update | PASS | Unsigned apply refused 403. Signed apply → target image. **Agent rollback** → baseline `ca27cf9a`. |
+| 7–8 OS update + reboot | PASS | `culvert-os-update`, then reboot: back in 31 s. **Docker still held, engine 29.9.2.** Stack resumed; policy, CA (PSCA at rest), support bundle and backup all persisted. |
+| E engine surface | PASS | **`engine-version`**: docker-ce 29.9.2, containerd.io 2.4.2-3, running dockerd 29.9.2 (go1.26.10), running containerd v2.4.2. No TCP listener, root-only sockets, **CRI still disabled** (`disabled_plugins=["cri"]`), 67 denied modules, kernel unchanged. |
+| R recovery | PASS | 3 maintenance reboots recovered in 36.9 s / 41.7 s / 36.6 s (budget 60 s). EICAR is blocked by ClamAV after each reboot. |
+| H history | PASS | Encrypted history export. Volume destroyed and restored into a fresh volume with a rotated log key. 12 records re-imported, identical. |
+| P disk pressure | PASS | Full **blocks**, full **inodes**, and package-write ENOSPC. Traffic stays blocked with no EICAR delivered. `/ready` fails truthfully. App update fails with nothing changed; backup is complete or refused cleanly. dpkg recovers once space returns. Proxy is never restarted; Docker stays held. |
+
+## Run 40337235215 (superseded)
+
+This run stopped at `engine-overlay` because of a **harness check bug**, not the engine. The install itself had succeeded, and the binaries matched. The check demanded dpkg status `ii`, but a re-held package correctly reports `hi`. It was fixed in `40e28428` and verified against that run's real read-back file. Its evidence is kept in `evidence-run-40337235215-check-bug.tar.gz`.
+
+## Not claimed
+
+- **This is not a rebuilt OVA.** The replacement OVA build stays conditional on the owner's gates: ASTRA acceptance of the package review and M2, then a frozen SHA/BOM.
+- **No ESXi.**
+- **F-DISK-1 was not re-run.** It is the nested `docker:29-dind` job, which never ran on the appliance engine. ENOSPC on the new engine is covered by the in-guest pressure phase above.
+- **The containerd/runc x/net advisories remain.** containerd.io 2.4.2-3 still vendors x/net < v0.60.0.
+
+## Secret scan
+
+Gitleaks reported 10 hits, all of them the kernel's **public** module-signing key fingerprint printed at boot (`Build time autogenerated kernel key: f250e100…`). This is the same false positive recorded for the OVA evidence earlier.
