@@ -108,15 +108,30 @@ jobs:
           # identity = the linux/amd64 MANIFEST digest (index.json
           # manifests[0].digest), not the config blob 75dd735c…. The ClamAV
           # sidecar must reproduce the F-P2-tested image byte for byte.
-          - variant: candidate-b9105086
+          # M1 compatibility (owner 6400728126, step 4): NO build. The retained
+          # internal OVA 61c46d6d (run 40185226897, sha256 verified) boots with
+          # the candidate engine pins of review/1528-m1-engine-pins 5c4c2be8 —
+          # Docker 29.9.2 / containerd.io 2.4.2-3 from Docker's signed noble
+          # repository, provenance re-verified on this runner — installed into
+          # the DISPOSABLE disk copy before first boot (harness LAB_ENGINE_DEBS).
+          # The OVA's bytes are untouched; the booted disk is not the OVA's disk.
+          # Everything the engine touches then runs on it: first-boot offline
+          # image load, sidecar --no-build, the signed-update apply/rollback
+          # fixture (pressure: 1 extracts this OVA's own archive for it),
+          # engine surface + version, 3 maintenance reboots, history, in-guest
+          # disk pressure.
+          - variant: m1-engine-b9105086
             provisioning: source
             source_sha: "b910508629e9d80352067bc8ec608753ddf0924e"
             image_run: "40133521510"
             image_tar_sha256: "1db620abbf4fe34424749e64a4e8b96861a945a201583ab386d47926cd7ec7fb"
             expect_image_id: "sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c"
-            source_date_epoch: "1792855424"
-            expect_sidecar_id: "sha256:4c365e4047f948e909bfda5a7d5bf06408f2fab68e59fc513c71681ccec65ebc"
-            expect_sidecar_archive_sha256: "ce011ffc6c1a2cfa5496156a44efac27c977e0fcaf38786362be9c02fce4d059"
+            retained_run: "40185226897"
+            retained_name: "appliance-lab-ova-candidate-b9105086"
+            retained_sha256: "61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a"
+            engine_debs: "docker-ce_29.9.2-1~ubuntu.24.04~noble_amd64.deb=95ddf7a2d8b8c0eb82d8597d4d604e294dcf741081f2e228524d5ab9bfd7c8ae docker-ce-cli_29.9.2-1~ubuntu.24.04~noble_amd64.deb=74747b5c99000279b9b2c7eb82543b4121d8436a58aa3be7e78ac6681d74794f containerd.io_2.4.2-3~ubuntu.24.04~noble_amd64.deb=f811ab57d1f4bb0cce19df7d526da8c711d8ebea0447cc83da1999188e664122"
+            pressure: "1"
+            engine_surface: "1"
             disk: dm
             recovery_profiles: "fast:0:0:60"
             recovery_reboots: "3"
@@ -417,11 +432,54 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$LAB_ROOT/ova"
-          gh run download "${{ matrix.retained_run }}" -R "$GITHUB_REPOSITORY" -n "appliance-lab-ova-${{ matrix.variant }}" -D "$LAB_ROOT/ova"
+          gh run download "${{ matrix.retained_run }}" -R "$GITHUB_REPOSITORY" -n "${{ matrix.retained_name || format('appliance-lab-ova-{0}', matrix.variant) }}" -D "$LAB_ROOT/ova"
           got="$(sha256sum "$LAB_ROOT/ova/"*.ova | cut -d' ' -f1)"
           [ "$got" = "${{ matrix.retained_sha256 }}" ] || { echo "::error::retained OVA sha256 $got != ${{ matrix.retained_sha256 }}"; exit 1; }
           grep -q "$got" "$LAB_ROOT/ova/"*.ova.sha256
           echo "retained OVA $got from run ${{ matrix.retained_run }}"
+      - name: "LAB-ONLY engine overlay: candidate Docker DEBs from the signed repository (provenance re-verified here)"
+        # The same chain the build's prepare-guest.sh trusts, re-checked on this
+        # runner: key fingerprint == the manifest's DOCKER_APT_KEY_FPR, InRelease
+        # signature, Packages hash inside the signed InRelease, each DEB's
+        # stanza hash == the pinned hash, downloaded bytes == the pinned hash.
+        if: matrix.engine_debs != ''
+        env:
+          ENGINE_DEBS: ${{ matrix.engine_debs }}
+        run: |
+          set -euo pipefail
+          D="$LAB_ROOT/engine"; rm -rf "$D"; mkdir -p "$D/debs" "$D/gnupg"; chmod 700 "$D/gnupg"; cd "$D"
+          U=https://download.docker.com/linux/ubuntu FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+          export GNUPGHOME="$D/gnupg"
+          curl -fsSL --retry 4 "$U/gpg" -o docker.gpg.asc
+          got="$(gpg --batch --with-colons --show-keys docker.gpg.asc | awk -F: '$1=="fpr"{print $10; exit}')"
+          [ "$got" = "$FPR" ] || { echo "::error::Docker apt key fingerprint $got != $FPR"; exit 1; }
+          gpg --batch -q --import docker.gpg.asc
+          curl -fsSL --retry 4 "$U/dists/noble/InRelease" -o InRelease
+          gpg --batch --status-fd 1 --verify InRelease 2>/dev/null | tee inrelease-verify.txt | grep -qE "^\[GNUPG:\] VALIDSIG .* $FPR\$" || { echo "::error::InRelease signature not valid under $FPR"; exit 1; }
+          curl -fsSL --retry 4 "$U/dists/noble/stable/binary-amd64/Packages" -o Packages
+          ph="$(sha256sum Packages | cut -d' ' -f1)"
+          grep -qE "^ $ph +[0-9]+ stable/binary-amd64/Packages\$" InRelease || { echo "::error::Packages $ph is not the hash in the signed InRelease"; exit 1; }
+          : > SHA256SUMS
+          for e in $ENGINE_DEBS; do
+            f="${e%%=*}" h="${e##*=}"
+            python3 -I - Packages "$f" "$h" <<'PY'
+          import sys
+          pk, fn, h = sys.argv[1:]
+          for s in open(pk).read().split("\n\n"):
+              d = dict(l.split(": ", 1) for l in s.splitlines() if ": " in l and not l.startswith(" "))
+              if d.get("Filename", "").endswith("/" + fn):
+                  assert d["SHA256"] == h, (fn, d["SHA256"], h)
+                  print(f"stanza {fn}: Package={d['Package']} Version={d['Version']} SHA256 ok")
+                  break
+          else:
+              sys.exit(f"{fn}: no stanza in the signed Packages")
+          PY
+            curl -fsSL --retry 4 "$U/dists/noble/pool/stable/amd64/$f" -o "debs/$f"
+            echo "$h  debs/$f" | sha256sum -c --strict --quiet
+            echo "$h  debs/$f" >> SHA256SUMS
+          done | tee provenance.txt
+          cat SHA256SUMS | tee -a provenance.txt
+          echo "LAB_ENGINE_DEBS=$D" >> "$GITHUB_ENV"
       - name: "Retained OVA: its own application archive + manifest for the signed-update fixture (read-only)"
         # The fixture's baseline must be the archive baked into THIS OVA, byte
         # for byte. Build mode reads it from the build overlay; a retained OVA
@@ -654,6 +712,11 @@ jobs:
             "${{ matrix.variant }}" "$GITHUB_SHA" "$APPLIANCE_SOURCE_SHA" "$([ "${{ matrix.provisioning }}" = lab ] && echo "$GITHUB_SHA (lab: $APPLIANCE_SOURCE_SHA + approved provisioning drift, see provisioning-drift.diff)" || echo "$APPLIANCE_SOURCE_SHA")" \
             "$SOURCE_IMAGE_RUN_ID" "$SOURCE_IMAGE_TAR_SHA256" "${{ steps.image.outputs.from }}" \
             "${{ matrix.expect_image_id }}" "$ORIGINAL_OVA_SHA256" > "$LAB_ROOT/lab/evidence/identities.txt"
+          if [ -n "${LAB_ENGINE_DEBS:-}" ]; then
+            mkdir -p "$LAB_ROOT/lab/evidence/engine-overlay"
+            cp "$LAB_ENGINE_DEBS/"{provenance.txt,SHA256SUMS,inrelease-verify.txt,InRelease} "$LAB_ROOT/lab/evidence/engine-overlay/" 2>/dev/null || true
+            printf 'engine_overlay=LAB-ONLY: %s installed into the disposable disk before first boot; the booted disk is NOT the OVA disk (OVA bytes verified, unchanged)\n' "${{ matrix.engine_debs }}" >> "$LAB_ROOT/lab/evidence/identities.txt"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -1307,22 +1370,21 @@ jobs:
           done
           sudo chmod 0644 /boot/vmlinuz-*
           if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
-      - name: "Docker 29.9.0 on the containerd image store (the appliance's engine; the runner's cannot load this OCI archive)"
+      - name: "Docker 29.9.2 / containerd.io 2.4.2-3 on the containerd image store (the appliance's engine pins, M1; the runner's cannot load this OCI archive)"
         run: |
           set -euo pipefail
           sudo install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker-lab.list >/dev/null
           sudo apt-get update -q
-          v="$(apt-cache madison docker-ce | awk '$3 ~ /^5:29\.9\.0-/{print $3; exit}')"
-          [ -n "$v" ] || { echo "::error::docker-ce 29.9.0 not available"; exit 1; }
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
+          v=5:29.9.2-1~ubuntu.24.04~noble c=2.4.2-3~ubuntu.24.04~noble
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" "containerd.io=$c"
           sudo mkdir -p /etc/docker
           [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
           sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d.setdefault("features",{})["containerd-snapshotter"]=True; json.dump(d,open(p,"w"))'
           sudo systemctl restart docker
           for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
-          docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee "$W/evidence/docker-engine.txt" | grep -q 'server=29.9.0 .*io.containerd.snapshotter.v1'
+          docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee "$W/evidence/docker-engine.txt" | grep -q 'server=29.9.2 .*io.containerd.snapshotter.v1'
       - name: "Sidecar under test: build the exact source twice (candidate) or pull by digest (control)"
         run: |
           set -euo pipefail

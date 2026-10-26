@@ -86,6 +86,16 @@ LAB_EXPECT_IMAGE_ID="${LAB_EXPECT_IMAGE_ID:-}"; LAB_UPDATE_DIR="${LAB_UPDATE_DIR
 # read reaches the device and latency can be injected (dm-delay) while the guest
 # runs. `recovery` requires dm.
 LAB_DISK="${LAB_DISK:-overlay}"
+# LAB-ONLY engine overlay (owner 6400728126, M1): a directory holding debs/*.deb
+# and a SHA256SUMS over them. When set, `up` installs those packages into the
+# DISPOSABLE disk copy (offline, `dpkg -i` in the guest's own root via
+# virt-customize — the context prepare-guest.sh installs the engine in at build
+# time) BEFORE the first boot, so first boot, the offline image load and every
+# later phase run on that engine. The OVA's own bytes are verified first and are
+# never modified; the disk the guest boots is then NOT the OVA's disk, and every
+# report says so. libguestfs runs under sudo, as every libguestfs use in the lab
+# workflow does. Unset: byte-identical to the shipped behaviour (no overlay).
+LAB_ENGINE_DEBS="${LAB_ENGINE_DEBS:-}"
 # Maintenance-reboot recovery (cmd_recovery): N reboots per profile; a profile is
 # name:read_ms:write_ms:budget_s (the injected per-I/O latency and the recovery
 # budget each reboot of that profile must meet).
@@ -497,6 +507,36 @@ dm_detach() {
 # time in queue).
 host_disk_stat() { cat "/sys/block/${DM_DEV:?}/stat"; }
 
+engine_overlay() { local disk="$1" fmt="$2" d="${LAB_ENGINE_DEBS:-}" want v
+  [[ -n "$d" ]] || return 0
+  [[ -s "$d/SHA256SUMS" ]] && ls "$d"/debs/*.deb >/dev/null 2>&1 || { check 1 engine-overlay fail "LAB_ENGINE_DEBS=$d has no SHA256SUMS or no debs/*.deb"; return 1; }
+  (cd "$d" && sha256sum -c --strict SHA256SUMS > "$EV/01-engine-overlay-sha256.txt" 2>&1) \
+    && [[ "$(grep -c ': OK$' "$EV/01-engine-overlay-sha256.txt")" == "$(ls "$d"/debs/*.deb | wc -l)" ]] \
+    || { check 1 engine-overlay fail "DEB sha256 mismatch or a DEB not covered by SHA256SUMS (see 01-engine-overlay-sha256.txt)"; return 1; }
+  want=""; for v in "$d"/debs/*.deb; do want+="$(dpkg-deb -f "$v" Package)=$(dpkg-deb -f "$v" Version) "; done
+  want="${want% }"
+  log "engine overlay: installing ${want} into the disposable disk (offline)"
+  # Held in the image (prepare-guest.sh): unhold, install, re-hold — the same
+  # sequence culvert-os-update --docker applies to a running appliance.
+  if ! sudo env LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" virt-customize -q --no-network --format "$fmt" -a "$disk" \
+      --copy-in "$d/debs:/var/tmp" \
+      --run-command 'apt-mark unhold docker-ce docker-ce-cli containerd.io >/dev/null && dpkg -i /var/tmp/debs/*.deb > /var/tmp/engine-overlay-dpkg.log 2>&1 && apt-mark hold docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null' \
+      --run-command 'dpkg-query -W -f="\${Package}=\${Version} \${db:Status-Abbrev}\n" docker-ce docker-ce-cli containerd.io docker-compose-plugin > /var/tmp/engine-overlay-versions.txt; apt-mark showhold > /var/tmp/engine-overlay-holds.txt; sha256sum /usr/bin/dockerd /usr/bin/docker /usr/bin/docker-proxy /usr/bin/containerd /usr/bin/ctr /usr/bin/containerd-shim-runc-v2 /usr/bin/runc > /var/tmp/engine-overlay-binaries.sha256' \
+      > "$EV/01-engine-overlay-virt-customize.log" 2>&1; then
+    check 1 engine-overlay fail "virt-customize/dpkg failed (see 01-engine-overlay-virt-customize.log)"; return 1
+  fi
+  for v in dpkg.log versions.txt holds.txt binaries.sha256; do
+    sudo env LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" virt-cat --format "$fmt" -a "$disk" "/var/tmp/engine-overlay-$v" > "$EV/01-engine-overlay-$v" 2>/dev/null || true
+  done
+  sudo env LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" virt-customize -q --no-network --format "$fmt" -a "$disk" \
+    --run-command 'rm -rf /var/tmp/debs /var/tmp/engine-overlay-*' >> "$EV/01-engine-overlay-virt-customize.log" 2>&1 || true
+  local bad="" w
+  for w in $want; do grep -qxF "$w ii " "$EV/01-engine-overlay-versions.txt" || bad+="$w "; done
+  for w in docker-ce docker-ce-cli containerd.io docker-compose-plugin; do grep -qx "$w" "$EV/01-engine-overlay-holds.txt" || bad+="hold:$w "; done
+  if [[ -n "$bad" ]]; then check 1 engine-overlay fail "not installed+held as expected: $bad"; return 1; fi
+  save_state ENGINE_EXPECT "$want"
+  check 1 engine-overlay pass "LAB-ONLY: ${want} installed (dpkg ii) + held in the disposable disk BEFORE first boot; DEB sha256s verified; the booted disk is NOT the OVA's disk"
+}
 cmd_up() {
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
   local ova="${LAB_OVA:?LAB_OVA=path to the .ova}" want="${LAB_OVA_SHA256:?LAB_OVA_SHA256=expected sha256}"
@@ -509,13 +549,16 @@ cmd_up() {
   if [[ "$LAB_DISK" == dm ]]; then
     log "converting $(basename "$vmdk") → disposable raw disk behind device-mapper"
     qemu-img convert -p -O raw "$vmdk" "$WORK/disk.raw" >/dev/null; rm -f "$vmdk"
+    engine_overlay "$WORK/disk.raw" raw || return 1
     qemu-img info "$WORK/disk.raw" > "$EV/01-base-qcow2-info.txt"
     dm_attach "$WORK/disk.raw" || { check 1 disk-chain blocked "device-mapper disk unavailable (see log)"; return 1; }
     drive="file=/dev/mapper/$DM_NAME,if=none,id=d0,format=raw,cache=none,aio=native"
     check 1 disk-chain pass "disk.raw (disposable copy of the OVA's own VMDK) → direct-I/O loop $DM_LOOP → dm $DM_NAME (linear; latency injectable); QEMU cache=none"
   else
     log "converting $(basename "$vmdk") → immutable qcow2 base"
-    qemu-img convert -p -O qcow2 "$vmdk" "$WORK/base.qcow2" >/dev/null; rm -f "$vmdk"; chmod 0444 "$WORK/base.qcow2"
+    qemu-img convert -p -O qcow2 "$vmdk" "$WORK/base.qcow2" >/dev/null; rm -f "$vmdk"
+    engine_overlay "$WORK/base.qcow2" qcow2 || return 1
+    chmod 0444 "$WORK/base.qcow2"
     qemu-img create -q -f qcow2 -F qcow2 -b "$WORK/base.qcow2" "$WORK/overlay.qcow2"
     qemu-img info "$WORK/base.qcow2" > "$EV/01-base-qcow2-info.txt"
     drive="file=$WORK/overlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback"
@@ -2743,7 +2786,10 @@ cmd_engine_surface() { local f="$EV/E-engine-surface.txt" v
   gpriv --timeout 300 > "$f" 2>&1 <<'EOS' || true
 echo "=== kernel"; echo "running=$(uname -r)"; for k in /boot/vmlinuz-*; do echo "installed=${k#/boot/vmlinuz-}"; done
 echo "=== snapd"; echo "snapd-status=$(dpkg-query -W -f='${db:Status-Status}' snapd 2>/dev/null || echo absent)"; echo "snap-dir=$( [ -e /snap ] || [ -e /var/lib/snapd ] && echo present || echo absent)"
-echo "=== versions"; for p in docker-ce containerd.io docker-compose-plugin; do echo "$p=$(dpkg-query -W -f='${Version}' "$p")"; done
+echo "=== versions"; for p in docker-ce docker-ce-cli containerd.io docker-compose-plugin; do echo "$p=$(dpkg-query -W -f='${Version}' "$p")"; done
+echo "docker-server-running=$(docker version --format '{{.Server.Version}}' 2>/dev/null)"
+echo "containerd-running=$(ctr version 2>/dev/null | awk '/^Server:/{s=1} s && $1=="Version:"{print $2; exit}')"
+echo "dockerd-go=$(docker version --format '{{.Server.GoVersion}}' 2>/dev/null)"
 echo "=== tcp listeners"; ss -Hltnp | sed 's/^/listen /'
 echo "=== published ports"; docker ps --format '{{.Names}} {{.Ports}}' | sed 's/^/published /'
 echo "=== sockets"; for s in /run/containerd/containerd.sock /run/docker.sock; do echo "sock $s $(stat -c '%U:%G %a' "$s" 2>/dev/null || echo missing)"; done
@@ -2834,6 +2880,12 @@ for m in nvmet_tcp ib_srpt; do
   echo "extra-module $m files=$(find /lib/modules/"$(uname -r)" \( -name "$m.ko*" -o -name "${m//_/-}.ko*" \) | wc -l) rc=$rc loaded-after=$(grep -c "^$m " /proc/modules) refused-by=$(sed -n "s/.*install command '\/bin\/false' for module \([a-z0-9_]*\).*/\1/p" <<<"$err" | head -n 1)"; done
 echo "=== containerd tracing"; containerd config dump 2>/dev/null | grep -iE 'otlp|tracing|endpoint' | sed 's/^/tracing /'
 EOS
+  if [[ -n "${ENGINE_EXPECT:-}" ]]; then local w ebad=""
+    for w in $ENGINE_EXPECT; do grep -qxF "$w" "$f" || ebad+="$w "; done
+    [[ "$(sed -n 's/^docker-server-running=//p' "$f")" == "$(sed -n 's/^docker-ce=[0-9]*:\([0-9.]*\)-.*/\1/p' "$f")" ]] || ebad+="running dockerd != installed docker-ce "
+    [[ -z "$ebad" ]] && check E engine-version pass "$(grep -E '^(docker-ce|containerd.io|docker-server-running|containerd-running|dockerd-go)=' "$f" | tr '\n' ' ')" \
+      || check E engine-version fail "expected [$ENGINE_EXPECT]; $ebad; got $(grep -E '^(docker-ce|docker-ce-cli|containerd.io|docker-server-running|containerd-running)=' "$f" | tr '\n' ' ')"
+  fi
   v="$(sed -n 's/^running=//p' "$f")"
   [[ -n "$v" && "$(grep -c '^installed=' "$f")" == 1 && "$(grep '^installed=' "$f")" == "installed=$v" ]] \
     && check E kernel-is-the-only-installed pass "running=$v" || check E kernel-is-the-only-installed fail "$(grep -E '^(running|installed)=' "$f" | tr '\n' ' ')"
