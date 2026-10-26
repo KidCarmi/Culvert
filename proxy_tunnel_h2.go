@@ -427,7 +427,7 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 		filterStr = "on"
 		profileStr = sanitizeLog(string(match.Rule.FileProfile))
 	}
-	logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), profileStr, filterStr)
+	logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(boundRetainedPath(req.URL.Path)), profileStr, filterStr)
 
 	// Reshape the h2 server request for an h2 client RoundTrip: RoundTrip requires
 	// an absolute URL (scheme+host) and an empty RequestURI. The request travels

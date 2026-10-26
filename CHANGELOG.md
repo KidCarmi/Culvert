@@ -37,6 +37,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   control is pinned too: an action this build cannot dispatch at all is blocked
   outright by the fail-closed branch, so its profile is never evaluated and the
   predicate still says so.
+- **An unauthenticated request chose how many bytes Culvert retained, on a stock
+  install (CHAOS-92).** `r.URL.Path` was the last unbounded client-chosen string
+  on the data path. Its two siblings were already closed and neither reaches it:
+  `request_tracing_bounds.go` (SEC-REQID-1) bounds the tracing headers and
+  `proxy_host_bounds.go` (CHAOS-69) bounds the destination authority, whose own
+  "deliberately NOT done" note named the path as its own finding. The path was
+  copied, unbounded, into three retaining sinks — the process log (5 sites), a
+  **buffered HTML response body** (5 sites, through `serveBlockPage`) and the
+  request-log `URI` field (4 sites, through `policyLogURI`). Measured through the
+  real `handleRequest`, with no authentication, no operator opt-in and no
+  configuration (`.exe` is in the shipped `fileblock.DefaultBlockedExts`): a
+  1 048 581-byte path wrote **1 048 636 bytes** to the process log and served a
+  **5 245 731-byte** block page when filled with `'`, because `html/template`
+  escapes it to the 5-byte `&#39;` — so the amplification factor was the
+  client's to choose. Wire-verified rather than only via `httptest`: that target
+  arrives as `r.URL.Path` byte for byte through a real `net/http` server, since
+  the proxy listener sets no `MaxHeaderBytes` and net/http's 1 MiB default
+  governs the request line. The process log is a 50 MB `fileutil.RotatingFile`
+  keeping exactly one archive, and every write **succeeded**, so the logsink
+  backpressure counter, `storageDegraded()` and `storage_write_failed` all
+  reported healthy while the whole retained forensic record rotated away in
+  seconds (CWE-778, OWASP A09:2021). The bound is on **retention, not
+  admission**: a long path can be legitimate, unlike an authority RFC 1035 caps,
+  so refusing the request would be an egress outage — but a truncated path is
+  still a usable log value. Every matcher continues to decide on the **complete**
+  path; clamping what a matcher sees would be fail-open, because truncating the
+  end removes the extension a file-block rule matches. `serveBlockPage` and
+  `policyLogURI` clamp at the chokepoint so one edit bounds every present and
+  future sink, the five log sites clamp inside the `sanitizeLog` argument so the
+  scan and its copy are bounded too, the cut backs off to a UTF-8 boundary, and
+  the retained value carries an explicit marker naming the original length. New
+  counter `culvert_retained_path_truncated_total`. Thirteen gates, seven of them
+  verified to fail against the pre-fix tree with the measured numbers and two of
+  them source gates, so a new sink reintroduces the defect loudly. Full
+  write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53, which also records the
+  CDR-sidecar filename sink and a >8 KiB refusal tier as open owner decisions.
 
 - **An inspected tunnel's inner-host pin accepted an authority `net/http` will
   not send, so the upstream received no authority at all.** A CONNECT tunnel is
