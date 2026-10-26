@@ -1,6 +1,11 @@
 # C1.5 UNKNOWN-Handler Audit Report
 
-Status: complete
+Status: complete — **historical point-in-time record, not a current-state reference.**
+File names cited below (for example `update.go` and `update_cluster.go`) are as of
+this audit and no longer exist at the repository root; the section 3.1/3.2
+findings are enforced by tests (`pac_authz_test.go`, `ui_routes_meta_audit_test.go`).
+For the current admin route, RBAC and audit contract see
+[admin control plane](agent-context/domains/admin-control-plane.md).
 Branch: `claude/refactor-ui-monolith-3toaQ`
 Trigger: post-C1.5 follow-up audit (per maintainer instruction)
 Scope: report-only on the UNKNOWN handlers surfaced by the C1.5 AST scanner
