@@ -102,6 +102,28 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-26 — `CHAOS-93` CLAIMED (placeholder, commit one). Domain: the retry
+plane — every loop in the tree that re-attempts a failed operation, asked three
+questions the SIMULATE list puts next to each other: does it WAIT between
+attempts, can it be INTERRUPTED, and does the work survive the attempt?** Id
+claimed in this committed row before any code was written, per the convention
+above. `CHAOS-92` is the highest id merged on `main`; 68, 72, 76, 79/80, 81, 87
+and 88 are still claimed by sweeps open when this one started (68 = PR #1437,
+72 = #1564, 76 = #1633, 79/80 = #1626, 81 = #1494, 87 = #1485, 88 = #1711) and
+89–91 remain held by [the 2026-10-13 round](CHAOS-REVIEW-2026-10-13.md), so this
+sweep took 93 and will not move.
+
+Scope is the three retry/cancellation rows the
+[2026-10-18 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md)
+verified and deliberately left open as its suggested improvements 4–6 — the
+zero-delay `applyWithRetry`, the feed rounds that discard the scheduler's
+context, and the serial uncancellable alert-retry pass — plus what asking the
+third question (*does the work survive?*) of the alert queue turned up, which
+outranks all three: a pass REMOVES its ready entries from the durable queue
+before delivering any of them, so an ordinary restart discards every
+not-yet-attempted entry in silence. Findings, measurements and gates are
+written up in §54 below.
+
 **2026-10-25 — `CHAOS-92` CLAIMED (placeholder, commit one). Domain: the
 client-supplied request PATH on the unauthenticated data path — the last
 unbounded client-chosen string sitting in front of sinks that retain it.** Id
