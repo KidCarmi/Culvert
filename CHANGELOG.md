@@ -7,6 +7,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Diagnostics now warns when OCSP checking is enabled but does not cover
+  inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
+  on the OCSP panel and in a one-time log line; the one-page diagnostics report
+  read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
+  while OCSP is off) names the unchecked paths. No handshake behavior changes.
+
 ### Security
 
 - **An inspected tunnel's inner-host pin accepted an authority `net/http` will
