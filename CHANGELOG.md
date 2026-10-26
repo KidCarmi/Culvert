@@ -17,6 +17,47 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Diagnostics reported "session revocation healthy … no drops" while a
+  legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
+  CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk
+  revocations file — may insert into the revocation list, and charges a reason
+  for each refusal. `checkSessionRevocation` summed two of the three:
+  `RevokeOversize` and `RevokeCapacity`, but not `RevokeFarFuture`. A node that
+  dropped only far-future entries took the `diagOK` branch and printed "no
+  refusals, no drops" — on the one authenticated surface whose own contract is
+  that a dropped entry "means a session an operator deliberately killed may
+  still authenticate, here or on another node" (CWE-778; the underlying drop is
+  CWE-613).
+
+  `RevokeFarFuture` is the reason with a benign trigger, which is what made the
+  omission matter. `admitUntrustedLocked` refuses a gossiped entry whose expiry
+  exceeds `now + MaxSessionLifetime + revocationExpirySkew`; that is exactly 7
+  days plus 1 hour, and `POST /api/session-timeout` admits `hours` up to 168 —
+  so at the maximum *supported* session TTL the entire inter-node clock-skew
+  budget is one hour. In a cluster at `session_timeout: 168h` with a peer whose
+  clock runs more than an hour ahead, that peer's legitimate revocations are
+  dropped on the receiving node, the revoked cookie keeps authenticating there
+  for the remainder of its life, and Diagnostics affirmatively said revocation
+  was healthy. The count is now summed, the row names the expiry bound among the
+  causes, and the operator action names clock skew as the benign cause to check
+  FIRST — this file's own rule that a refusal surface must not assert an attack.
+  The bound itself is unchanged: widening `revocationExpirySkew` is a security
+  behavior change and is recorded as an owner decision instead.
+- **Peer-supplied Control Plane addresses reached the Data Plane's process log
+  unsanitized (CWE-117).** `applyAddressesLocked` adopts the CP config
+  snapshot's `cp_addresses` verbatim into the client's address list and states
+  that both lists "are peer-supplied … so they are untrusted log values under
+  the CWE-117 rule" — but four older sinks in the same file printed an address
+  from that same list with a bare `%s`: both of `connect`'s lines and both of
+  `failover`'s. `validateConfigSnapshot` count-caps `cp_addresses` at 100 and
+  never validates an entry as `host:port`, so a newline inside one forged
+  records in the DP's process log and in every downstream syslog/OTLP consumer.
+  All four now use `sanitizeLog` with `%q`, and the failover line sanitizes the
+  wrapped error too, since it carries the same address. Pinned by a source gate
+  so a fifth sink cannot reintroduce it. A hostile Control Plane already
+  dictates the Data Plane's policy, so the marginal impact is log integrity —
+  but the convention is the convention, and the inconsistency sat inside one
+  file.
 - **A sixth log sink retained the decrypted inner request path, unbounded, after
   CHAOS-92 bounded the other five (CHAOS-92e).** The CHAOS-92 sweep enumerated
   three retaining sink families and clamped each at a chokepoint, with a source
