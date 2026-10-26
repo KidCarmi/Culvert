@@ -1532,9 +1532,64 @@ func clusterCADir(clusterDBPath string) string {
 	return filepath.Dir(clusterDBPath)
 }
 
+// legacyClusterCADir reproduces the CA directory earlier releases derived
+// from the cluster state path: the text before the last "/", or "." when the
+// path has none. For a root-level state file ("/cluster.json") that is "",
+// which InitOrLoad cleaned to ".", so those releases created the CA in the
+// process working directory (the Docker image's WORKDIR). It is used only to
+// find a CA such a release already created; nothing is generated there.
+func legacyClusterCADir(clusterDBPath string) string {
+	if idx := strings.LastIndex(clusterDBPath, "/"); idx >= 0 {
+		return filepath.Clean(clusterDBPath[:idx])
+	}
+	return "."
+}
+
+// clusterCAFilePresent reports whether dir holds either half of the cluster
+// CA pair. Any error other than not-exist counts as present, so the caller
+// keeps that directory and InitOrLoad surfaces the error (fail closed)
+// instead of looking elsewhere.
+func clusterCAFilePresent(dir string) bool {
+	for _, name := range []string{"cluster-ca.crt", "cluster-ca.key"} {
+		p, err := safeCAPath(dir, name)
+		if err != nil {
+			return true
+		}
+		if _, err := os.Stat(p); err == nil || !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
+// chooseClusterCADir returns dir unless an upgrade must keep a CA at its
+// legacy location: the two directories differ, dir holds no CA file and
+// legacyDir holds one. The legacy CA is then loaded in place (no copy, so
+// the key file and its permissions are untouched) rather than a new CA being
+// generated in dir, which would break mTLS trust for every enrolled node. A
+// partial pair at the legacy location is chosen too, so InitOrLoad fails
+// closed on it instead of bootstrapping a replacement CA.
+func chooseClusterCADir(dir, legacyDir string) (string, bool) {
+	if filepath.Clean(dir) == filepath.Clean(legacyDir) || clusterCAFilePresent(dir) || !clusterCAFilePresent(legacyDir) {
+		return dir, false
+	}
+	return legacyDir, true
+}
+
 // initClusterCA initialises the cluster CA for node enrollment.
 func initClusterCA(clusterDBPath string) {
-	if err := globalClusterCA.InitOrLoad(clusterCADir(clusterDBPath)); err != nil {
+	initClusterCAIn(clusterCADir(clusterDBPath), legacyClusterCADir(clusterDBPath))
+}
+
+// initClusterCAIn loads or creates the cluster CA in dir, falling back to an
+// existing CA in legacyDir per chooseClusterCADir.
+func initClusterCAIn(dir, legacyDir string) {
+	chosen, legacy := chooseClusterCADir(dir, legacyDir)
+	if legacy {
+		logger.Printf("ClusterCA: no CA in %q; loading the existing CA from legacy directory %q (stop the process and move its cluster-ca.* files to %q to adopt the new location)",
+			sanitizeLog(dir), sanitizeLog(chosen), sanitizeLog(dir))
+	}
+	if err := globalClusterCA.InitOrLoad(chosen); err != nil {
 		logger.Printf("ClusterCA: init error: %v — enrollment disabled", err)
 	}
 }
