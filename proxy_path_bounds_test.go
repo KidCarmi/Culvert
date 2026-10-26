@@ -211,7 +211,12 @@ func TestChaos92_DefectPolicyProfileFileBlockIsBounded(t *testing.T) {
 		FileProfile:   FileProfileExecutables,
 	}}
 	policyStore.mu.Unlock()
+	// snapshotPolicyStoreForTest restores the rules only; the default action is
+	// a separate global and must be restored with them, or an empty rule store
+	// is left paired with a permissive fallback for every later test.
+	prevAction := defaultPolicyAction()
 	setDefaultPolicyAction("allow")
+	t.Cleanup(func() { setDefaultPolicyAction(prevAction) })
 
 	w, logBuf := chaos92Request(t, chaos92Path(1024*1024, "'"))
 	if !strings.Contains(logBuf.String(), "FILE_BLOCKED (policy profile)") {
