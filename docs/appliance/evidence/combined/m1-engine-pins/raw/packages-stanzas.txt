@@ -1,0 +1,206 @@
+Package: containerd.io
+Architecture: amd64
+Version: 2.4.1-2~ubuntu.24.04~noble
+Priority: optional
+Section: devel
+Maintainer: Containerd team <help@containerd.io>
+Installed-Size: 86895
+Provides: containerd, runc
+Depends: libc6 (>= 2.38), libseccomp2 (>= 2.5.0)
+Conflicts: containerd, runc
+Replaces: containerd, runc
+Filename: dists/noble/pool/stable/amd64/containerd.io_2.4.1-2~ubuntu.24.04~noble_amd64.deb
+Size: 23258840
+MD5sum: 8beeae5a2b2f80cfd706cb887498aa37
+SHA1: 64563d549223add20f3d57566bcffa4cfdbe0f23
+SHA256: 893c9ddf70deacfb79db14ec3845164f1649807f82634bc453c12a1cc40a88c4
+SHA512: ff712eb0b7c09ede2d4868d715b72c6f75f11add504d87a876424fec5ecdcb533973f043ddfa26a1bd120ad29ac9f592c6be906a1ecacbca4bda2d08a104b2b2
+Homepage: https://containerd.io
+Description: An open and reliable container runtime
+
+Package: containerd.io
+Architecture: amd64
+Version: 2.4.2-1~ubuntu.24.04~noble
+Priority: optional
+Section: devel
+Maintainer: Containerd team <help@containerd.io>
+Installed-Size: 86891
+Provides: containerd, runc
+Depends: libc6 (>= 2.38), libseccomp2 (>= 2.5.0)
+Conflicts: containerd, runc
+Replaces: containerd, runc
+Filename: dists/noble/pool/stable/amd64/containerd.io_2.4.2-1~ubuntu.24.04~noble_amd64.deb
+Size: 23253236
+MD5sum: 6761ed77fb8b435f47c7a6afdd0f1bb0
+SHA1: 208324bfc67918e4d9640597eb08be283d566df3
+SHA256: 2a4a871d36c1380699303adf944bdc72a03371ab39df6a869a9883ed3f50e9d9
+SHA512: 0185a8ed6e215c85722ce01480586555ff04914ce16574a4455b5b99dba70d3433a6220f571ee39613c014993067ba6c7efd6fa6db40b61485b7652a0adf8932
+Homepage: https://containerd.io
+Description: An open and reliable container runtime
+
+Package: containerd.io
+Architecture: amd64
+Version: 2.4.2-2~ubuntu.24.04~noble
+Priority: optional
+Section: devel
+Maintainer: Containerd team <help@containerd.io>
+Installed-Size: 86928
+Provides: containerd, runc
+Depends: libc6 (>= 2.38), libseccomp2 (>= 2.5.0)
+Conflicts: containerd, runc
+Replaces: containerd, runc
+Filename: dists/noble/pool/stable/amd64/containerd.io_2.4.2-2~ubuntu.24.04~noble_amd64.deb
+Size: 23270672
+MD5sum: 5f37684a754e217d6e185315846a359d
+SHA1: 316ea4485e4761a3c55134076198e98cf6f2f1cd
+SHA256: 7327ab23182425e94b46a91567e9ddf0183f9b3a5ed53d5e2489f000dbf9cfe2
+SHA512: af966387a67813e16e3cbe9d5a6d6f40a00780b5342811d0110b3a935618ecf7cdf9d18b4118b492dd34e79553d862355557693615db603d2fe5b36d345288b0
+Homepage: https://containerd.io
+Description: An open and reliable container runtime
+
+Package: containerd.io
+Architecture: amd64
+Version: 2.4.2-3~ubuntu.24.04~noble
+Priority: optional
+Section: devel
+Maintainer: Containerd team <help@containerd.io>
+Installed-Size: 86936
+Provides: containerd, runc
+Depends: libc6 (>= 2.38), libseccomp2 (>= 2.5.0)
+Conflicts: containerd, runc
+Replaces: containerd, runc
+Filename: dists/noble/pool/stable/amd64/containerd.io_2.4.2-3~ubuntu.24.04~noble_amd64.deb
+Size: 23271468
+MD5sum: 3d4f671583598c83788974b4519ec7c1
+SHA1: 451deaa3f6c46d1e132c15902ce0bafcaa9ee05c
+SHA256: f811ab57d1f4bb0cce19df7d526da8c711d8ebea0447cc83da1999188e664122
+SHA512: 5e18855af9a8d82343d1a355964e29c02d456064a3ce0d72493786ca2d7377ca385807122b78a289a384495915cfb58696afd63406b6dea3705e57cb2df0e958
+Homepage: https://containerd.io
+Description: An open and reliable container runtime
+
+Package: docker-ce-cli
+Architecture: amd64
+Version: 5:29.9.0-1~ubuntu.24.04~noble
+Priority: optional
+Section: admin
+Source: docker-ce
+Maintainer: Docker <support@docker.com>
+Installed-Size: 46553
+Depends: libc6 (>= 2.34)
+Recommends: docker-buildx-plugin, docker-compose-plugin
+Suggests: docker-model-plugin
+Conflicts: docker-cli, docker.io
+Breaks: docker-ce (<< 5:0)
+Replaces: docker-ce (<< 5:0)
+Filename: dists/noble/pool/stable/amd64/docker-ce-cli_29.9.0-1~ubuntu.24.04~noble_amd64.deb
+Size: 17594036
+MD5sum: 490ba5f4e8136b379efe65fce568b909
+SHA1: 047bc7159ad069e4b8b60f6847be2468654d9bcf
+SHA256: 2bd67d414c0f555765a91833a505b3c5987cbf744c2836ea1f1563d2ffa4b980
+SHA512: 8793dffec3ad41380a22f701a97f85ced49f2062505726de83f9bee1fb8e8e2b8688c55896dc6839065dedee75f29e9e5f87b484eeb0e34d1d6c0f90f1553288
+Homepage: https://www.docker.com
+Description: Docker CLI: the open-source application container engine
+ Docker is a product for you to build, ship and run any application as a
+ lightweight container
+ .
+ Docker containers are both hardware-agnostic and platform-agnostic. This means
+ they can run anywhere, from your laptop to the largest cloud compute instance
+ and everything in between - and they don't require you to use a particular
+ language, framework or packaging system. That makes them great building blocks
+ for deploying and scaling web apps, databases, and backend services without
+ depending on a particular stack or provider.
+
+Package: docker-ce-cli
+Architecture: amd64
+Version: 5:29.9.2-1~ubuntu.24.04~noble
+Priority: optional
+Section: admin
+Source: docker-ce
+Maintainer: Docker <support@docker.com>
+Installed-Size: 46554
+Depends: libc6 (>= 2.34)
+Recommends: docker-buildx-plugin, docker-compose-plugin
+Suggests: docker-model-plugin
+Conflicts: docker-cli, docker.io
+Breaks: docker-ce (<< 5:0)
+Replaces: docker-ce (<< 5:0)
+Filename: dists/noble/pool/stable/amd64/docker-ce-cli_29.9.2-1~ubuntu.24.04~noble_amd64.deb
+Size: 17595236
+MD5sum: 662a826995403b446ea3731e5d1f60ec
+SHA1: b7ef54af18723772a9483ffea7058e90ecec5397
+SHA256: 74747b5c99000279b9b2c7eb82543b4121d8436a58aa3be7e78ac6681d74794f
+SHA512: dfbf1f5ad902c6e73f2ab38f23bbe9f3fe40188bc679f8651f4b57be437b47dfe8f88dad5686f9ace6466739715fc6d810d199be0628eb49119bf74153bfbee5
+Homepage: https://www.docker.com
+Description: Docker CLI: the open-source application container engine
+ Docker is a product for you to build, ship and run any application as a
+ lightweight container
+ .
+ Docker containers are both hardware-agnostic and platform-agnostic. This means
+ they can run anywhere, from your laptop to the largest cloud compute instance
+ and everything in between - and they don't require you to use a particular
+ language, framework or packaging system. That makes them great building blocks
+ for deploying and scaling web apps, databases, and backend services without
+ depending on a particular stack or provider.
+
+Package: docker-ce
+Architecture: amd64
+Version: 5:29.9.0-1~ubuntu.24.04~noble
+Priority: optional
+Section: admin
+Maintainer: Docker <support@docker.com>
+Installed-Size: 113638
+Pre-Depends: init-system-helpers (>= 1.54~)
+Depends: containerd.io (>= 2.1.5), docker-ce-cli, iptables, nftables, libc6 (>= 2.34), libsystemd0
+Recommends: apparmor, ca-certificates, docker-ce-rootless-extras, git, pigz, procps, xz-utils
+Suggests: cgroupfs-mount | cgroup-lite
+Conflicts: docker.io
+Replaces: docker-ce-cli (<< 5:28.0.0)
+Filename: dists/noble/pool/stable/amd64/docker-ce_29.9.0-1~ubuntu.24.04~noble_amd64.deb
+Size: 24563828
+MD5sum: e4361797a2e1cd653915435653f00800
+SHA1: bbe9323970bef52b5ff4628f2d32caa48420cab6
+SHA256: 118bfd1762738db0f88848035eabfb79f735e7843af47f843e5567cd0cd780e5
+SHA512: 858c8fd64661344329121264e76ee91a054185244771b200809a1929669ceb7ba0de4a051653c354cdb653599def8b08b22427abd4371111f99c4fd3a0f1917b
+Homepage: https://www.docker.com
+Description: Docker: the open-source application container engine
+ Docker is a product for you to build, ship and run any application as a
+ lightweight container
+ .
+ Docker containers are both hardware-agnostic and platform-agnostic. This means
+ they can run anywhere, from your laptop to the largest cloud compute instance
+ and everything in between - and they don't require you to use a particular
+ language, framework or packaging system. That makes them great building blocks
+ for deploying and scaling web apps, databases, and backend services without
+ depending on a particular stack or provider.
+
+Package: docker-ce
+Architecture: amd64
+Version: 5:29.9.2-1~ubuntu.24.04~noble
+Priority: optional
+Section: admin
+Maintainer: Docker <support@docker.com>
+Installed-Size: 113672
+Pre-Depends: init-system-helpers (>= 1.54~)
+Depends: containerd.io (>= 2.1.5), docker-ce-cli, iptables, nftables, libc6 (>= 2.34), libsystemd0
+Recommends: apparmor, ca-certificates, docker-ce-rootless-extras, git, pigz, procps, xz-utils
+Suggests: cgroupfs-mount | cgroup-lite
+Conflicts: docker.io
+Replaces: docker-ce-cli (<< 5:28.0.0)
+Filename: dists/noble/pool/stable/amd64/docker-ce_29.9.2-1~ubuntu.24.04~noble_amd64.deb
+Size: 24558208
+MD5sum: 9def9e687c40be31dae83757fbfdbd0f
+SHA1: ca0b266ad6f21de64759d361b9fa169287894d51
+SHA256: 95ddf7a2d8b8c0eb82d8597d4d604e294dcf741081f2e228524d5ab9bfd7c8ae
+SHA512: c543522a934c2374b2464ac06b974bf08ce2f05327daaeda14c37c9dd41eec76ff48a270e40342ab4b5a3e928d1825fe5e5b56ce5f94984c61d418827cf275a9
+Homepage: https://www.docker.com
+Description: Docker: the open-source application container engine
+ Docker is a product for you to build, ship and run any application as a
+ lightweight container
+ .
+ Docker containers are both hardware-agnostic and platform-agnostic. This means
+ they can run anywhere, from your laptop to the largest cloud compute instance
+ and everything in between - and they don't require you to use a particular
+ language, framework or packaging system. That makes them great building blocks
+ for deploying and scaling web apps, databases, and backend services without
+ depending on a particular stack or provider.
+

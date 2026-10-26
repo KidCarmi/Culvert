@@ -1,0 +1,42 @@
+== containerd
+  GO-2026-5932     old=symbol  new=symbol  golang.org/x/crypto fixed=
+  GO-2026-6238     old=symbol  new=symbol  github.com/cilium/ebpf fixed=v0.22.0
+  GO-2026-6603     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6610     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6611     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6612     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6617     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6809     old=symbol  new=-       stdlib fixed=v1.27.3
+== containerd-shim-runc-v2
+  GO-2026-6238     old=symbol  new=symbol  github.com/cilium/ebpf fixed=v0.22.0
+  GO-2026-6603     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6610     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6611     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6612     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6617     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6809     old=symbol  new=-       stdlib fixed=v1.27.3
+== ctr
+  GO-2026-6238     old=symbol  new=symbol  github.com/cilium/ebpf fixed=v0.22.0
+  GO-2026-6603     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6610     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6611     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6612     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6617     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6809     old=symbol  new=-       stdlib fixed=v1.27.3
+== docker
+  GO-2026-6809     old=symbol  new=-       stdlib fixed=v1.26.10
+== docker-proxy
+  GO-2026-6809     old=module  new=-       stdlib fixed=v1.26.10
+== dockerd
+  GO-2026-5932     old=module  new=module  golang.org/x/crypto fixed=
+  GO-2026-6809     old=symbol  new=-       stdlib fixed=v1.26.10
+== runc
+  GO-2026-5942     old=symbol  new=symbol  golang.org/x/net fixed=v0.56.0
+  GO-2026-6238     old=symbol  new=symbol  github.com/cilium/ebpf fixed=v0.22.0
+  GO-2026-6603     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6610     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6611     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6612     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6617     old=symbol  new=symbol  golang.org/x/net fixed=v0.60.0
+  GO-2026-6686     old=symbol  new=symbol  github.com/moby/sys/user fixed=v0.4.1
+  GO-2026-6809     old=symbol  new=-       stdlib fixed=v1.27.3

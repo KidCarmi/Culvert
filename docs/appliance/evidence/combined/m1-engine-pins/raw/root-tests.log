@@ -1,0 +1,239 @@
+=== RUN   TestArchiveClosure_AcceptsACompleteMultiPlatformArchive
+--- PASS: TestArchiveClosure_AcceptsACompleteMultiPlatformArchive (0.10s)
+=== RUN   TestArchiveClosure_AcceptsASingleManifestArchive
+--- PASS: TestArchiveClosure_AcceptsASingleManifestArchive (0.05s)
+=== RUN   TestArchiveClosure_RefusesTheF_OVA_CLAMAV_1Shape
+--- PASS: TestArchiveClosure_RefusesTheF_OVA_CLAMAV_1Shape (0.05s)
+=== RUN   TestArchiveClosure_RefusesAMissingOrDamagedBlob
+--- PASS: TestArchiveClosure_RefusesAMissingOrDamagedBlob (0.21s)
+=== RUN   TestArchiveClosure_RefusesAnArchiveWithNoAmd64Image
+--- PASS: TestArchiveClosure_RefusesAnArchiveWithNoAmd64Image (0.05s)
+=== RUN   TestBuildOVA_ChecksBothArchivesCarryTheirImageBeforeBaking
+--- PASS: TestBuildOVA_ChecksBothArchivesCarryTheirImageBeforeBaking (0.00s)
+=== RUN   TestArchiveClosure_ACompleteButDifferentImageDoesNotSatisfyThePin
+--- PASS: TestArchiveClosure_ACompleteButDifferentImageDoesNotSatisfyThePin (0.17s)
+=== RUN   TestArchiveClosure_WalksOnlyFromThePin
+--- PASS: TestArchiveClosure_WalksOnlyFromThePin (0.10s)
+=== RUN   TestBuildOVA_ColdLoadsBothArchivesBeforeBaking
+--- PASS: TestBuildOVA_ColdLoadsBothArchivesBeforeBaking (0.00s)
+=== RUN   TestBuildOVA_ClamAVSidecarIsReproducible
+--- PASS: TestBuildOVA_ClamAVSidecarIsReproducible (0.00s)
+=== RUN   TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate
+--- PASS: TestBuildOVA_SavesClamAVBeforeLoadingTheCandidate (0.00s)
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/os-maintenance/culvert-os-update
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/cmd/culvert-maint/internal/runner/runner.go
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/cmd/culvert-console/main_linux.go
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/internal/applianceconsole/view.go
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/provision/culvert-firstboot.sh
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/backup.go
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/packaging/culvert-maint/install.sh
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/.github/scripts/pr-candidate-version.sh
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/build/manifest.env
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/test/e2e/appliance/lifecycle-qualify.sh
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/scripts/install.sh
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/internal/appliancehost/state.go
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/.github/workflows/appliance-console.yml
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/restore_inplace.go
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/build/build-ova.sh
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/docker-compose.yml
+=== RUN   TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/control-unrelated
+--- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges (0.17s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/os-maintenance/culvert-os-update (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/cmd/culvert-maint/internal/runner/runner.go (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/cmd/culvert-console/main_linux.go (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/internal/applianceconsole/view.go (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/provision/culvert-firstboot.sh (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/backup.go (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/packaging/culvert-maint/install.sh (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/.github/scripts/pr-candidate-version.sh (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/build/manifest.env (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/test/e2e/appliance/lifecycle-qualify.sh (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/scripts/install.sh (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/internal/appliancehost/state.go (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/.github/workflows/appliance-console.yml (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/restore_inplace.go (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/appliance/build/build-ova.sh (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/docker-compose.yml (0.01s)
+    --- PASS: TestApplianceLane_ClassifierRunsTheHarnessesForApplianceChanges/control-unrelated (0.01s)
+=== RUN   TestApplianceLane_JobsConsumeTheGateImageAndAreAggregated
+--- PASS: TestApplianceLane_JobsConsumeTheGateImageAndAreAggregated (0.01s)
+=== RUN   TestApplianceLane_ImageConsumersAreCoveredByImageNeeded
+--- PASS: TestApplianceLane_ImageConsumersAreCoveredByImageNeeded (0.01s)
+=== RUN   TestClamAVSidecar_DerivesFromThePinnedOfficialImage
+--- PASS: TestClamAVSidecar_DerivesFromThePinnedOfficialImage (0.00s)
+=== RUN   TestClamAVSidecar_EveryContentChangeGetsANewTag
+--- PASS: TestClamAVSidecar_EveryContentChangeGetsANewTag (0.00s)
+=== RUN   TestClamAVSidecar_EveryShippedFileNamesTheSameLocalTag
+--- PASS: TestClamAVSidecar_EveryShippedFileNamesTheSameLocalTag (0.00s)
+=== RUN   TestClamAVSidecar_CIQualifiesTheShippedImageAndPushesNothing
+--- PASS: TestClamAVSidecar_CIQualifiesTheShippedImageAndPushesNothing (0.01s)
+=== RUN   TestApplianceLane_AgentJobRunsTheBoundedENOSPCHarness
+--- PASS: TestApplianceLane_AgentJobRunsTheBoundedENOSPCHarness (0.01s)
+=== RUN   TestApplianceLane_FullDiskMidwriteIsARequiredGate
+--- PASS: TestApplianceLane_FullDiskMidwriteIsARequiredGate (0.00s)
+=== RUN   TestApplianceLane_ConsoleSuiteIsPartOfTheRequiredDeepGate
+--- PASS: TestApplianceLane_ConsoleSuiteIsPartOfTheRequiredDeepGate (0.01s)
+=== RUN   TestClamAVImageHelper_PresentDoesNothing
+--- PASS: TestClamAVImageHelper_PresentDoesNothing (0.04s)
+=== RUN   TestClamAVImageHelper_AbsentIsReloadedFromVerifiedArchive
+=== RUN   TestClamAVImageHelper_AbsentIsReloadedFromVerifiedArchive/absent
+=== RUN   TestClamAVImageHelper_AbsentIsReloadedFromVerifiedArchive/wrong_image_under_the_tag
+--- PASS: TestClamAVImageHelper_AbsentIsReloadedFromVerifiedArchive (0.19s)
+    --- PASS: TestClamAVImageHelper_AbsentIsReloadedFromVerifiedArchive/absent (0.09s)
+    --- PASS: TestClamAVImageHelper_AbsentIsReloadedFromVerifiedArchive/wrong_image_under_the_tag (0.10s)
+=== RUN   TestClamAVImageHelper_Refusals
+=== RUN   TestClamAVImageHelper_Refusals/archive_missing
+=== RUN   TestClamAVImageHelper_Refusals/archive_tampered
+=== RUN   TestClamAVImageHelper_Refusals/archive_hash_unrecorded
+=== RUN   TestClamAVImageHelper_Refusals/archive_holds_another_image
+=== RUN   TestClamAVImageHelper_Refusals/manifest_incomplete
+=== RUN   TestClamAVImageHelper_Refusals/manifest_missing
+--- PASS: TestClamAVImageHelper_Refusals (0.41s)
+    --- PASS: TestClamAVImageHelper_Refusals/archive_missing (0.04s)
+    --- PASS: TestClamAVImageHelper_Refusals/archive_tampered (0.08s)
+    --- PASS: TestClamAVImageHelper_Refusals/archive_hash_unrecorded (0.09s)
+    --- PASS: TestClamAVImageHelper_Refusals/archive_holds_another_image (0.14s)
+    --- PASS: TestClamAVImageHelper_Refusals/manifest_incomplete (0.04s)
+    --- PASS: TestClamAVImageHelper_Refusals/manifest_missing (0.02s)
+=== RUN   TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes
+=== RUN   TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes/archive_loaded_other_bytes
+=== RUN   TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes/wrong_image_already_under_the_tag,_archive_missing
+--- PASS: TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes (0.21s)
+    --- PASS: TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes/archive_loaded_other_bytes (0.14s)
+    --- PASS: TestClamAVImageHelper_RefusalRemovesATagNamingUnverifiedBytes/wrong_image_already_under_the_tag,_archive_missing (0.07s)
+=== RUN   TestClamAVImageHelper_FailedRemovalIsReportedTruthfully
+=== RUN   TestClamAVImageHelper_FailedRemovalIsReportedTruthfully/rm_fails,_tag_kept
+=== RUN   TestClamAVImageHelper_FailedRemovalIsReportedTruthfully/rm_fails,_daemon_stops_answering
+--- PASS: TestClamAVImageHelper_FailedRemovalIsReportedTruthfully (0.14s)
+    --- PASS: TestClamAVImageHelper_FailedRemovalIsReportedTruthfully/rm_fails,_tag_kept (0.07s)
+    --- PASS: TestClamAVImageHelper_FailedRemovalIsReportedTruthfully/rm_fails,_daemon_stops_answering (0.07s)
+=== RUN   TestClamAVImageHelper_DamagedManifestLeavesTheTagAlone
+--- PASS: TestClamAVImageHelper_DamagedManifestLeavesTheTagAlone (0.04s)
+=== RUN   TestFirstBoot_ConsolePolicyDecision
+--- PASS: TestFirstBoot_ConsolePolicyDecision (0.05s)
+=== RUN   TestFirstBoot_BootstrapHandoffCommitsBeforeDisplay
+--- PASS: TestFirstBoot_BootstrapHandoffCommitsBeforeDisplay (0.09s)
+=== RUN   TestFirstBoot_FailedBootstrapHandoffRetainsRetryAndNeverDisplays
+--- PASS: TestFirstBoot_FailedBootstrapHandoffRetainsRetryAndNeverDisplays (0.13s)
+=== RUN   TestFirstBoot_BootstrapCommitRetryDoesNotRemint
+--- PASS: TestFirstBoot_BootstrapCommitRetryDoesNotRemint (0.09s)
+=== RUN   TestFirstBoot_BootstrapRetryAfterMintingRemovalCommitsExistingPassword
+--- PASS: TestFirstBoot_BootstrapRetryAfterMintingRemovalCommitsExistingPassword (0.04s)
+=== RUN   TestFirstBoot_StepConsole_KeyOnlyMintsLocalPasswordWithoutElevation
+--- PASS: TestFirstBoot_StepConsole_KeyOnlyMintsLocalPasswordWithoutElevation (0.09s)
+=== RUN   TestFirstBoot_AccessImportFailureRetriesWithoutCommitting
+--- PASS: TestFirstBoot_AccessImportFailureRetriesWithoutCommitting (0.03s)
+=== RUN   TestFirstBoot_StepConsole_PasswordSuppliedLeavesSudoPasswordGated
+--- PASS: TestFirstBoot_StepConsole_PasswordSuppliedLeavesSudoPasswordGated (0.04s)
+=== RUN   TestFirstBoot_StepConsole_NeitherSuppliedMintsOneTimePassword
+--- PASS: TestFirstBoot_StepConsole_NeitherSuppliedMintsOneTimePassword (0.10s)
+=== RUN   TestFirstBoot_StepConsole_InterruptedMintIsRedone
+--- PASS: TestFirstBoot_StepConsole_InterruptedMintIsRedone (0.14s)
+=== RUN   TestFirstBoot_StepConsole_ControlSuppliedPasswordIsNeverReplaced
+--- PASS: TestFirstBoot_StepConsole_ControlSuppliedPasswordIsNeverReplaced (0.04s)
+=== RUN   TestFirstBoot_StepInstall_MintsAndPersistsSetupToken
+--- PASS: TestFirstBoot_StepInstall_MintsAndPersistsSetupToken (0.10s)
+=== RUN   TestFirstBoot_StepInstall_RefusesWhenTokenNotPersisted
+--- PASS: TestFirstBoot_StepInstall_RefusesWhenTokenNotPersisted (0.04s)
+=== RUN   TestFirstBoot_StepAgent_RecordsDegradedWhenNotInstalled
+--- PASS: TestFirstBoot_StepAgent_RecordsDegradedWhenNotInstalled (0.02s)
+=== RUN   TestFirstBoot_StepAgent_ReasonsAreSpecific
+--- PASS: TestFirstBoot_StepAgent_ReasonsAreSpecific (0.03s)
+=== RUN   TestFirstBoot_RepairAgent_TransientFailureThenRecovery
+--- PASS: TestFirstBoot_RepairAgent_TransientFailureThenRecovery (0.19s)
+=== RUN   TestFirstBoot_RepairAgent_ReportsAFailedHostRefresh
+--- PASS: TestFirstBoot_RepairAgent_ReportsAFailedHostRefresh (0.23s)
+=== RUN   TestFirstBoot_RepairAgent_RefusesBeforeInstallStep
+--- PASS: TestFirstBoot_RepairAgent_RefusesBeforeInstallStep (0.02s)
+=== RUN   TestSudoPolicy_RequirePasswordRefusesWithoutAPassword
+--- PASS: TestSudoPolicy_RequirePasswordRefusesWithoutAPassword (0.05s)
+=== RUN   TestSudoPolicy_PasswordlessRetiredEvenWithAKey
+--- PASS: TestSudoPolicy_PasswordlessRetiredEvenWithAKey (0.02s)
+=== RUN   TestApplianceStatus_ReportsAgentSudoAndToken
+--- PASS: TestApplianceStatus_ReportsAgentSudoAndToken (0.48s)
+=== RUN   TestApplianceStatus_ReportsDataDiskPressure
+--- PASS: TestApplianceStatus_ReportsDataDiskPressure (1.03s)
+=== RUN   TestSudoPolicy_LiveLastMatchPrecedence
+    appliance_firstboot_test.go:777: set CULVERT_SUDO_POLICY_LIVE=1 (needs root + sudo) to run the live sudoers precedence proof
+--- SKIP: TestSudoPolicy_LiveLastMatchPrecedence (0.00s)
+=== RUN   TestFirstBoot_CandidateBuildExportsScopedAgentTrustOnly
+--- PASS: TestFirstBoot_CandidateBuildExportsScopedAgentTrustOnly (0.04s)
+=== RUN   TestBuildOVA_CandidateModeIsLabelledAndScoped
+--- PASS: TestBuildOVA_CandidateModeIsLabelledAndScoped (0.00s)
+=== RUN   TestFirstBoot_RefusedOVFNetworkKeepsLocalRecoveryUsable
+--- PASS: TestFirstBoot_RefusedOVFNetworkKeepsLocalRecoveryUsable (0.51s)
+=== RUN   TestFirstBoot_ValidOVFNetworkIsApplied
+--- PASS: TestFirstBoot_ValidOVFNetworkIsApplied (0.56s)
+=== RUN   TestFirstBoot_MainEstablishesIdentityBeforeNetwork
+--- PASS: TestFirstBoot_MainEstablishesIdentityBeforeNetwork (0.00s)
+=== RUN   TestResetIdentity_ForgetsPerInstanceOperatorKeys
+--- PASS: TestResetIdentity_ForgetsPerInstanceOperatorKeys (0.00s)
+=== RUN   TestFirstBoot_FinishDisablesCloudInitAfterCompletion
+--- PASS: TestFirstBoot_FinishDisablesCloudInitAfterCompletion (0.04s)
+=== RUN   TestFirstBoot_CloudInitDisableFailureIsNotFatal
+--- PASS: TestFirstBoot_CloudInitDisableFailureIsNotFatal (0.04s)
+=== RUN   TestResetIdentity_ReenablesCloudInit
+--- PASS: TestResetIdentity_ReenablesCloudInit (0.00s)
+=== RUN   TestPrepareGuest_ShipsTheSnapshotsNewestKernelOnly
+--- PASS: TestPrepareGuest_ShipsTheSnapshotsNewestKernelOnly (0.00s)
+=== RUN   TestPrepareGuest_ShipsTheHWEKernel
+--- PASS: TestPrepareGuest_ShipsTheHWEKernel (0.00s)
+=== RUN   TestBuildOVA_NoExt4FilesystemHasEAInode
+--- PASS: TestBuildOVA_NoExt4FilesystemHasEAInode (0.00s)
+=== RUN   TestPrepareGuest_DRMNodesAreRootOnly
+--- PASS: TestPrepareGuest_DRMNodesAreRootOnly (0.00s)
+=== RUN   TestPrepareGuest_PurgesSnapdAndPinsItOut
+--- PASS: TestPrepareGuest_PurgesSnapdAndPinsItOut (0.00s)
+=== RUN   TestAppImage_RuntimeStageIsNeverReplayedFromCache
+--- PASS: TestAppImage_RuntimeStageIsNeverReplayedFromCache (0.00s)
+=== RUN   TestDeepGate_FailsOnAnyFixableOSPackageFinding
+--- PASS: TestDeepGate_FailsOnAnyFixableOSPackageFinding (0.00s)
+=== RUN   TestPrepareGuest_UnusedKernelModulesCannotLoad
+--- PASS: TestPrepareGuest_UnusedKernelModulesCannotLoad (0.00s)
+=== RUN   TestCosignVerifierDefaultsUseSameImmutableDigest
+--- PASS: TestCosignVerifierDefaultsUseSameImmutableDigest (0.01s)
+=== RUN   TestInstallScript_AgentConfig_BindsSidecarToRecordedID
+--- PASS: TestInstallScript_AgentConfig_BindsSidecarToRecordedID (0.04s)
+=== RUN   TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord
+=== RUN   TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord/approved
+=== RUN   TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord/compose_names_another_tag
+=== RUN   TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord/baked_tag_names_other_bytes
+--- PASS: TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord (0.09s)
+    --- PASS: TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord/approved (0.03s)
+    --- PASS: TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord/compose_names_another_tag (0.03s)
+    --- PASS: TestInstallScript_ApplianceStart_BindsComposeSidecarToBakedRecord/baked_tag_names_other_bytes (0.03s)
+=== RUN   TestInstallScript_ApplianceStart_DamagedManifestKeepsNoBuildAndRefuses
+--- PASS: TestInstallScript_ApplianceStart_DamagedManifestKeepsNoBuildAndRefuses (0.03s)
+=== RUN   TestInstallScript_ApplianceStart_QuickStartUnchanged
+--- PASS: TestInstallScript_ApplianceStart_QuickStartUnchanged (0.01s)
+=== RUN   TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar
+=== RUN   TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar/different_tag,_absent
+=== RUN   TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar/different_tag,_present
+=== RUN   TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar/baked_tag,_wrong_image_ID
+--- PASS: TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar (0.19s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar/different_tag,_absent (0.06s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar/different_tag,_present (0.05s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceRefusesAnUnapprovedSidecar/baked_tag,_wrong_image_ID (0.08s)
+=== RUN   TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses
+=== RUN   TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses/no_recorded_ref
+=== RUN   TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses/manifest_missing
+=== RUN   TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses/invalid_recorded_ID
+--- PASS: TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses (0.18s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses/no_recorded_ref (0.06s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses/manifest_missing (0.06s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceWithUnusableManifestRefuses/invalid_recorded_ID (0.06s)
+=== RUN   TestInstallScript_HostRefresh_ApplianceIdentityWithoutStateDir
+=== RUN   TestInstallScript_HostRefresh_ApplianceIdentityWithoutStateDir/appliance-opt
+=== RUN   TestInstallScript_HostRefresh_ApplianceIdentityWithoutStateDir/appliance-etc
+--- PASS: TestInstallScript_HostRefresh_ApplianceIdentityWithoutStateDir (0.12s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceIdentityWithoutStateDir/appliance-opt (0.06s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceIdentityWithoutStateDir/appliance-etc (0.06s)
+=== RUN   TestInstallScript_HostRefresh_ApplianceAdoptsTheApprovedSidecar
+=== RUN   TestInstallScript_HostRefresh_ApplianceAdoptsTheApprovedSidecar/present_with_recorded_ID
+=== RUN   TestInstallScript_HostRefresh_ApplianceAdoptsTheApprovedSidecar/absent_locally
+--- PASS: TestInstallScript_HostRefresh_ApplianceAdoptsTheApprovedSidecar (0.26s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceAdoptsTheApprovedSidecar/present_with_recorded_ID (0.13s)
+    --- PASS: TestInstallScript_HostRefresh_ApplianceAdoptsTheApprovedSidecar/absent_locally (0.13s)
+PASS
+ok  	github.com/KidCarmi/Culvert	7.338s
