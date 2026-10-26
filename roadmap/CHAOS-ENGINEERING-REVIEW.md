@@ -13000,3 +13000,113 @@ measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and seven
   the path by some other route — a new `logstore` field, a new egress header —
   would not trip them. CDR-PATH-1 is exactly that shape, found by reading
   rather than by a gate.
+
+---
+
+## 54. CHAOS-93 — The retry plane: does it wait, can it be interrupted, does the work survive?
+
+**Scope.** Every loop in the tree that re-attempts a failed operation, asked the
+three questions the SIMULATE list puts next to each other — *broken retries*,
+*broken backoff*, *SIGTERM*, *unexpected restart*. The subject is the retry
+*mechanism*, not a subsystem, so the sweep crosses three owners: release
+delivery, the intelligence feeds and observability.
+
+**Origin.** The three retry/cancellation rows the
+[2026-10-18 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md)
+verified and left open as its suggested improvements 4–6, each deferred because
+it needed "its own regression test and a judgment call about deployment-visible
+timing". This sweep is that follow-up. Asking the third question (*does the work
+survive the attempt?*) of the alert queue then turned up a defect that was not
+in the inherited scope and outranks all three.
+
+Findings, measurements, risk matrix and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
+
+### 54.1 The finding the inherited scope did not contain
+
+**`processRetryQueue` took the work out of the durability mechanism in order to
+do the work.** It moved EVERY due entry out of `retryQueue`, persisted the
+truncated queue, and only then delivered them one at a time at up to 5s each.
+For the length of that pass the not-yet-attempted entries existed solely in a
+local slice — absent from memory's queue and absent from the file — so an
+ordinary restart discarded all of them: `SIGTERM` on a config reload, the
+lifecycle ctx cancelled at shutdown order 40 while the pass runs on (nothing
+joins the goroutine, and the late phase has a 30s budget), OOM, a node reboot.
+
+And it discarded them in SILENCE. The plane has two counters built precisely so
+an admin can see alerting degradation on the delivery-history API —
+`retryExhaustedTotal` and `retryDroppedTotal` — and neither covers this path; no
+delivery is recorded and nothing is logged. The queue depth simply drops, which
+reads as *drained* rather than *discarded*. Against a blackholing webhook the
+window is `retryQueueMax` × `deliveryTimeout` = 500 × 5s ≈ **42 minutes** and the
+loss up to **499** alerts. The gate measures it: `persisted 0 of 10 entries`.
+
+This is the **ST-8** shape (§13) relocated into the alert queue, and worse in one
+respect: losing alerts quietly is the worst available failure for the plane whose
+whole job is to report that something *else* broke. The register already applies
+that reasoning to §13 and to the SIEM-feed row CHAOS-81 holds (a feed must report
+whether it is DELIVERING, not whether it once connected).
+
+The fix is the shape the tree already uses one directory over:
+`support_upload_queue.go` holds an `uploading` state IN the durable queue rather
+than lifting the entry out of it. An entry now stays queued across its own
+attempt; a claim re-arms `NextRetry` to `now+retryLease` (60s) and persists that,
+so a crash mid-attempt leaves the entry queued and it is retried after the lease
+with its attempt count intact — an attempt that did not complete is not charged.
+
+### 54.2 The three inherited rows
+
+- **RT-3, `applyWithRetry` retried with zero delay** (`release_dispatch_exec.go`).
+  Three attempts, no sleep, no backoff, no jitter. The budget exists for exactly
+  one fault — a maintenance agent that is briefly unreachable, nearly always
+  because it is restarting — and that fault refuses the connection in
+  microseconds, so the whole budget burned in well under a millisecond and the
+  dispatch landed `TerminalFailedNeedsAttn`, needing a manual re-dispatch, for an
+  agent that was serving again a second later. Now bounded exponential (2s, 4s)
+  through an interruptible wait. `WaitOp`, 170 lines down the same file, already
+  had this shape.
+- **RT-4, both feed rounds discarded the scheduler's context**
+  (`internal/threatfeed`, `internal/feedsync`). `feedsched.Config.Run` is
+  documented "It must respect ctx" and the package promises "prompt
+  cancellation"; both feeds declared `Run: func(context.Context) bool` and
+  dropped the parameter, fetching on `context.Background()`. A stalled origin
+  therefore held the round for up to 60s past `SIGTERM`, and the UT1 round went
+  on to a 50+ MB `BulkWrite` into a BadgerDB that shutdown order 120 is closing.
+  The propagation gate shows the pre-fix round dialling the real third-party
+  origins under an already-cancelled context.
+- **RT-2, the alert retry pass was unbounded and uncancellable.** It took no
+  context and each delivery built its own from `context.Background()`, so the
+  loop's `ctx.Done()` select was only reached BETWEEN passes. Now ctx-threaded
+  and bounded by `retryPassBudget`; the bound caps a pass's LENGTH, not recovery,
+  because the next tick resumes from the durable queue.
+
+### 54.3 What the sweep did NOT change, and why
+
+**Neither new backoff is jittered.** `feedsched` and `saas_feed_scheduler.go`
+jitter because their origins are SHARED — a fleet in lockstep is a thundering
+herd against a third-party provider. Neither new site has a shared origin: a
+`DispatchExecutor` is single-flight against ONE agent, and the alert retry queue
+is per-node and serial. That is the reasoning `uploadRetryBackoff` already
+records for the same decision, and determinism keeps both schedules exactly
+testable. A generic "add jitter to every backoff" review note would be wrong
+here.
+
+**The feed clients still dial without `ssrf.SafeDialContext`.** Left exactly as
+the 2026-10-18 sweep left it and for its reason: an on-prem or air-gapped feed
+mirror on an RFC1918 address is a normal enterprise topology the guard would
+reject, and whether these two feeds are deliberately exempt is recorded at
+neither site. Still an owner decision. This sweep edited the same two functions
+and deliberately did not resolve it — threading a context is not the occasion to
+move a destination-trust boundary.
+
+**Nothing joins the alert retry goroutine at shutdown.** The pass is cancellable
+now, so it stops promptly, but the registry does not WAIT for it. Adding a join
+is a shutdown-ownership decision for that owner, and the durability fix makes it
+unnecessary for correctness: whatever the pass had not finished is in the file.
+
+**Retries here remain unbounded in COUNT where they were** (the feeds) **and
+bounded where they were** (`retryMax = 3`, `applyRetries = 2`). The sweep's
+subject is rate, interruptibility and durability, not the budgets — and
+`feedsched`'s own doc records why its unbounded-but-rate-bounded retry is
+correct: "avoid infinite retries" forbids a silent hot loop, not a rate-bounded
+loop whose state an operator can read.

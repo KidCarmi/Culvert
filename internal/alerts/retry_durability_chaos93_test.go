@@ -55,7 +55,7 @@ func retryQueueInTempDir(t *testing.T) string {
 // fresh process would, with no access to the dying process's memory.
 func readPersistedQueue(t *testing.T, path string) []retryEntry {
 	t.Helper()
-	data, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+	data, err := os.ReadFile(path) // #nosec G304 -- test-controlled temp path
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
