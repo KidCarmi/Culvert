@@ -619,6 +619,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A policy publication now allocates one array per revision instead of one
+  object per rule.** `sortLocked` cloned every definition with its own
+  `new(PolicyRule)` and sorted the clones; it now decides the order first, on a
+  private copy of the live pointers, and clones into ONE contiguous
+  `[]PolicyRule` in publication order. The permutation is identical by
+  construction — the same comparator over the same input sequence, and the clone
+  preserves `Priority` — so this is a layout and allocation change only.
+
+  It is a control-plane cost with a **data-plane consequence**, which is the
+  reason to care: `sortLocked` runs under `ps.mu`, the writer lock, and
+  `evaluationSnapshot` takes the matching RLock before every scan, so a
+  publication stalls ALL policy evaluation for exactly as long as it takes.
+  Every policy edit, config-version restore and cluster config sync pays it.
+
+  Measured with benchstat (n=10, 4-core Xeon @2.10GHz, go1.27.3) on the new
+  `BenchmarkPolicyPublish_SortLocked`: allocations/op **-25% at every rule
+  count**, wall time **1 000 rules 582.4 µs → 483.8 µs (-16.9%, p=0.000)** and
+  **10 000 rules 4.932 ms → 4.034 ms (-18.2%, p=0.002)**, with **no significant
+  change at 100 rules** (54.5 µs → 50.3 µs, p=0.105). `ReplaceAll` inherits it
+  (**100 rules -8.5%**, **10 000 rules -16.1%**); bytes/op is essentially
+  unchanged (-0.4%), because the same definitions are still copied — what goes
+  away is the per-rule allocation, not the data.
+
+  Two negative results are recorded on `sortLocked` itself so they are not
+  re-derived. First, the layout does **not** measurably help the per-request
+  scan: `BenchmarkPolicyEvaluate_NoMatch`/`MatchLast`/`CIDRRules` came out at
+  -3.75% geomean with every size at p > 0.05, because the replaced per-rule
+  `new(PolicyRule)` loop already drew from a single 576-byte size-class span and
+  so was near-contiguous before this change. Second, the engine's superlinear
+  scaling above ~1 000 rules (**7.6 ns/rule at 1 000 → 29.3 ns/rule at
+  10 000**) is the touched working set (~5.7 MB of definitions) leaving L2, not
+  heap scatter; only shrinking what the scan streams per rule can address it,
+  and this change deliberately does not attempt that.
+
+  `TestPolicyPublish_RevisionIsOneContiguousArray` is the regression gate and is
+  **structural, not timed**: the property is worth one allocation out of the ~3
+  a definition clone costs, so a wall-clock or allocation-count bound would have
+  a thin margin and would rot. It asserts the published definitions sit at
+  one-struct stride from a single base, in scan order, and it fails against the
+  pre-change shape (verified). `TestPolicyPublish_OrderingIsUnchangedByTheLayout`
+  is the behavioral control for ordering and for the precompute still landing on
+  the published definitions. `BenchmarkPolicyPublish_EvaluateDuringPublish` is
+  the concurrency arm: evaluation latency with a background publisher holding
+  and releasing the writer lock underneath it.
+
 - A scheduled rule's **timezone is now resolved once per policy evaluation**
   instead of once per rule. Both halves of the per-rule work depend only on
   `(instant, timezone)` and never on the rule, yet `matchScheduleAt` redid both
