@@ -138,7 +138,7 @@ func TestCovIsoPolicy_EvalAccessRulesTracesSourceMismatch(t *testing.T) {
 
 	type step struct{ name, skip string }
 	var got []step
-	matched := evalAccessRules([]*PolicyRule{scoped, open}, &in, time.Now, func(r *PolicyRule, skip string) {
+	matched := evalAccessRules([]*PolicyRule{scoped, open}, nil, &in, time.Now, func(r *PolicyRule, skip string) {
 		got = append(got, step{r.Name, skip})
 	})
 	if matched != open {
