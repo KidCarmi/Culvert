@@ -94,15 +94,121 @@ const normMemoSlots = 1024
 // non-request callers (feed parsing, admin patterns) are not bounded by that
 // 1 KiB gate at all.
 //
-// Refusing to memoize such a host costs nothing: a name longer than this cannot
-// be resolved by any DNS server, and both dispatch gates refuse it immediately
-// after canonicalizing it, so it never reaches the ~10x per-request fan-out the
-// memo exists to collapse. The verdict is unaffected either way — an oversize
-// host is still normalized, just not retained.
+// What it does NOT justify is the claim this comment used to make — that
+// refusing to memoize such a host "costs nothing", because "a name longer than
+// this cannot be resolved by any DNS server, and both dispatch gates refuse it
+// immediately after canonicalizing it". Both halves of that are wrong, because
+// the bound is measured on the key as the CLIENT SPELLED IT, which is not the
+// length DNS ever sees. IDNA SHRINKS a U-label authority: proxy_host_bounds.go
+// records the worst LEGITIMATE case as 883 raw bytes collapsing to a 251-byte
+// A-label, which is why the raw pre-cap is 1 KiB and not 253. So a host whose
+// raw spelling exceeds this bound can canonicalize well inside the DNS limit,
+// with every label inside the 63-byte A-label limit too — a resolvable,
+// ordinary internationalized destination. Both dispatch gates then ACCEPT it.
+// It is not refused; it walks the full ~10x per-request fan-out with nothing
+// memoized, which is the asymmetry this file exists to close.
+//
+// Measured per NORMALIZATION of one such accepted destination — 8 U-labels of
+// 20 CJK code points plus ".example.com", i.e. 499 raw bytes, 227 canonical,
+// longest canonical label 26 (Xeon @2.80GHz, go1.26.9, -count=2):
+//
+//	stage of NormalizeHostStrict                    cost        allocs
+//	strings.ToLower + TrimSuffix                  2 840 ns        0
+//	isCanonicalASCIIHost scan                         1.3 ns      0
+//	idna.ToASCII                                  5 320 ns       18
+//	memo lookup, warm hit (replaces idna)            71 ns        0
+//	whole function, ASCII destination                 50 ns        0
+//
+// So the main tier's key bound left ~5.3 µs and 18 allocations per call on this
+// shape, ~53 µs and 180 allocations per request across the fan-out.
+// TestIDNMemo_LongRawULabelHostIsAcceptedAndRetained pins it: the host is
+// DNS-valid (every canonical label inside the 63-byte limit), both gate
+// predicates admit it, its raw spelling is past this bound, and it must be
+// retained.
+//
+// The verdict is unaffected either way — a host over the bound is still
+// normalized, just not retained — so this was a completeness gap in an
+// optimization, never a wrong answer or a policy decision. Raising THIS bound
+// to cover it would multiply the ceiling above by the raw/canonical ratio, so
+// the shape is retained in a separately bounded tier instead; see
+// maxMemoLongKeyLen.
+//
+// ── The residual, stated plainly ────────────────────────────────────────────
+//
+// The table above also says what the memo does NOT fix. strings.ToLower runs
+// strings.Map(unicode.ToLower, …) for a non-ASCII input — a per-rune table walk
+// over the whole authority — and it sits in NormalizeHostStrict AHEAD of both
+// the fast path and this memo, so no tier can collapse it. At ~2.84 µs per call
+// it is ~28 µs per request across the fan-out, against ~50 ns for an ASCII
+// destination, and it is selected by the client at the cost of ~500 header
+// bytes. That asymmetry is NOT closed here: hoisting or narrowing the lowering
+// pass would change what canonicalization does to non-ASCII input, which is the
+// IDN-homograph contract NormalizeHost exists to enforce (RISK-013), and that
+// is a change for the differential fuzz harness and review, not a perf patch.
 const maxMemoHostLen = 253
 
-// normMemoMask turns a hash into a slot index.
-const normMemoMask = normMemoSlots - 1
+// normMemoMask turns a hash into a main-tier slot index.
+//
+// Typed uint64 so the mask needs no conversion at the call site. An
+// `&uint64(len(table)-1)` computed from the slice instead is a runtime
+// int->uint64 conversion, which gosec reports as G115 (CWE-190) at HIGH — and
+// correctly, as a matter of form: on a zero-length table len-1 is -1, which
+// converts to an all-ones mask and indexes out of range. That cannot happen
+// here (a nil table returns before the lookup and both tiers are non-empty
+// constants), but the fix is to not perform the conversion rather than to
+// suppress the report, so the shape carries no latent out-of-range index for a
+// later reader to re-derive.
+const normMemoMask uint64 = normMemoSlots - 1
+
+// maxMemoLongKeyLen is the longest KEY the long tier retains. The long tier
+// exists for exactly one shape: the U-label authority whose RAW spelling is
+// over maxMemoHostLen but whose CANONICAL form is inside it, which both
+// dispatch gates accept and which the main tier therefore refused to retain
+// while it walked the full per-request fan-out (see maxMemoHostLen).
+//
+// It is set to the request path's RAW pre-cap (maxRawDestAuthorityBytes in
+// proxy_host_bounds.go, 1 KiB), which makes the property this tier exists for
+// hold BY CONSTRUCTION: every authority a dispatch gate can admit is an
+// authority the memo can retain. Sizing it to the empirical maximum IDN
+// expansion instead — 883 raw bytes for a 253-byte canonical authority, pinned
+// by that file's TestChaos69_ControlRawCapExceedsMaximumIDNExpansion — would
+// re-open the same gap in miniature, narrower but resting on a measurement
+// rather than a bound: an authority in the 883..1024 band that canonicalized
+// inside the DNS limit would be accepted and still not retained. The extra
+// 17 KiB of ceiling is a better trade than that doubt, and the root
+// TestHostutilLongRawULabelReachesTheMemo asserts the relation rather than the
+// number, so raising the raw pre-cap fails there instead of silently
+// reintroducing the asymmetry.
+//
+// Callers that are NOT bounded by that gate — threat-feed parsing, admin
+// patterns — can still exceed this, and are normalized without being retained
+// exactly as before.
+const maxMemoLongKeyLen = 1024
+
+// normMemoLongSlots is the long tier's fixed slot count. Power of two, so the
+// slot index is a mask rather than a division, like the main tier's. It is
+// deliberately SMALL. Legitimate traffic barely produces this shape at all — a browser puts
+// the A-label in the Host header and the CONNECT authority, so a long raw
+// U-label reaches the proxy only from a client that sends Unicode verbatim —
+// so the live working set is a handful of destinations, not a tail. 128 slots
+// hold that many times over while bounding this tier at
+// 128 x (entry header + maxMemoLongKeyLen + maxMemoHostLen), i.e. ~165 KB, so
+// the two tiers together stay well inside a megabyte.
+//
+// The sizing is also what keeps this honest about what it does and does not
+// buy. A direct-mapped miss costs exactly what the code cost before the memo,
+// so an adversary ROTATING long U-label hosts gets the pre-memo behaviour
+// either way — the memo never claimed to bound that, and this tier does not
+// either. What it removes is the repeated-destination case: ~53 µs of CPU and
+// 180 allocations per request for one accepted destination requested over and
+// over, whether by an attacker or by a legitimate client of a long
+// internationalized name. The ~28 µs lowering pass documented under
+// maxMemoHostLen remains in both cases.
+const normMemoLongSlots = 128
+
+// normMemoLongMask turns a hash into a long-tier slot index. Typed for the same
+// reason as normMemoMask.
+const normMemoLongMask uint64 = normMemoLongSlots - 1
 
 // normMemoEntry is one memoized answer. Entries are immutable once published:
 // a writer builds a new one and stores the pointer, so a concurrent reader sees
@@ -119,38 +225,96 @@ type normMemoEntry struct {
 var (
 	// normMemoSeed randomizes slot selection per process (see above).
 	normMemoSeed = maphash.MakeSeed()
-	// normMemo is the table. A nil slot has never been filled.
+	// normMemo is the main table, for keys within maxMemoHostLen. A nil slot
+	// has never been filled.
 	normMemo [normMemoSlots]atomic.Pointer[normMemoEntry]
+	// normMemoLong is the long tier, for keys within maxMemoLongKeyLen. Same
+	// entry type, same immutability and same re-verification; only the slot
+	// count and the key bound differ.
+	normMemoLong [normMemoLongSlots]atomic.Pointer[normMemoEntry]
 )
 
-// normMemoSlot returns the slot a key maps to. maphash.String is allocation-free.
-func normMemoSlot(host string) *atomic.Pointer[normMemoEntry] {
-	return &normMemo[maphash.String(normMemoSeed, host)&normMemoMask]
+// normMemoTableFor returns the tier that may retain host and that tier's slot
+// mask, or nil when no tier may. Both tiers are returned as slices so one
+// lookup body serves both; the slice header is stack-allocated and the hit path
+// stays 0-alloc (pinned by TestIDNMemo_AllocRegression and
+// TestIDNMemo_LongTierHitIsAllocationFree).
+//
+// The mask travels WITH the table rather than being derived from len(table) at
+// the call site, so it is a typed constant and never a conversion — see
+// normMemoMask. TestIDNMemo_TierMasksMatchTheirTables pins each pair.
+func normMemoTableFor(host string) (table []atomic.Pointer[normMemoEntry], mask uint64) {
+	switch {
+	case len(host) <= maxMemoHostLen:
+		return normMemo[:], normMemoMask
+	case len(host) <= maxMemoLongKeyLen:
+		return normMemoLong[:], normMemoLongMask
+	default:
+		return nil, 0
+	}
 }
 
 // normalizeHostStrictMemo answers the slow path for host, which the caller has
 // already lowercased, dot-trimmed and established is neither empty nor
 // already-canonical ASCII. On a hit it allocates nothing.
 func normalizeHostStrictMemo(host string) (norm string, ok bool) {
-	// Too long to retain (see maxMemoHostLen): normalize and answer, store
-	// nothing. Checked before the slot lookup because nothing oversize is ever
-	// stored, so the probe could only ever miss.
-	if len(host) > maxMemoHostLen {
+	// Too long for either tier to retain (see maxMemoLongKeyLen): normalize and
+	// answer, store nothing. Decided before the slot lookup because nothing
+	// that long is ever stored, so the probe could only ever miss.
+	table, mask := normMemoTableFor(host)
+	if table == nil {
 		return normalizeHostStrictUncached(host)
 	}
 
-	slot := normMemoSlot(host)
+	slot := &table[maphash.String(normMemoSeed, host)&mask]
 	if e := slot.Load(); e != nil && e.host == host {
 		return e.norm, e.ok
 	}
 
 	norm, ok = normalizeHostStrictUncached(host)
-	// An in-limit input can in principle grow past the limit through punycode
-	// encoding. Punycode shrinks the shapes that matter in practice (a 252-byte
-	// CJK host measures 98 bytes as an A-label), so this branch is not expected
-	// to be reached — it is here so the ceiling holds by construction rather
-	// than by that expectation, and TestIDNMemo_StoredEntriesRespectTheBound
-	// asserts the invariant over every entry rather than over this branch.
+	// A FAILED normalization is retained only in the main tier. In the long
+	// tier it buys nothing and costs the whole key, so it is not stored.
+	//
+	// The asymmetry is in the dispatch gates, not in this table. An
+	// unnormalizable host whose bare form exceeds maxDestHostLen is refused
+	// IMMEDIATELY: on HTTP by rejectOversizeUnnormalizableHost, which runs right
+	// after canonicalDestHost and ahead of the connection limiter, the rate
+	// limiter, Stage-1 auth and every matcher; on SOCKS5 by the RISK-013 gate at
+	// the normalization point itself, ahead of every matcher. One normalization,
+	// no fan-out — so a hit could never pay back the ~1 KiB key clone and the
+	// entry allocation that storing it costs, and a client sending UNIQUE
+	// malformed long authorities would pay that on every request for nothing.
+	//
+	// A SHORT unnormalizable host is different, and that is why the main tier
+	// still memoizes failures: its bare form is inside maxDestHostLen, so the
+	// oversize gate does not fire and it proceeds through the limiters into
+	// Stage-1 authentication — which resolves category fusion through
+	// authRuleMatchesScratch — before the RISK-013 refusal is reached. That path
+	// does normalize repeatedly, and the MalformedACE benchmark row (311 ns ->
+	// 31 ns) is it. Found by Codex review on PR #1624; verified against both
+	// dispatch gates.
+	if !ok && len(host) > maxMemoHostLen {
+		return norm, ok
+	}
+
+	// The VALUE bound, enforced for both tiers. maxMemoHostLen is the DNS name
+	// maximum, so a canonical form longer than it is refused by the dispatch
+	// gates (canonicalHostOversize) and retaining it would buy nothing while
+	// loosening the ceiling. A long-tier input reaches here precisely because
+	// its raw form is longer, and a main-tier input CAN grow past the bound
+	// through punycode encoding — so for both tiers this is a live check, not
+	// a defensive one. Punycode shrinks a dense non-ASCII script (a 252-byte
+	// CJK host is 98 bytes as an A-label), but the ACE overhead is per LABEL,
+	// and the worst case is the opposite shape: one non-ASCII rune in each of
+	// many short labels. "é.é.é…" at 251 bytes normalizes to 671 and
+	// "aé.aé.aé…" at 251 bytes to 629 (measured), up to ~2.7x the bound, and
+	// the HTTP raw pre-cap (1 KiB) admits both with room to spare. Without this
+	// check the main tier alone retains ~969 KB against its ~554 KB ceiling.
+	// TestIDNMemo_PunycodeExpansionIsNotRetained and
+	// TestIDNMemo_ExpansionCannotBreachTheCeiling gate the main-tier expansion
+	// (verified failing with this branch deleted), and
+	// TestIDNMemo_StoredEntriesRespectTheBound asserts the invariant over every
+	// live entry in both tiers rather than over this branch.
 	if len(norm) > maxMemoHostLen {
 		return norm, ok
 	}

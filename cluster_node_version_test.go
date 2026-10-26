@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // TestMetricsReport_VersionFields_WireRoundTrip pins the M5 PR-A additive
@@ -170,5 +172,166 @@ func TestUpdateNodeSeen_EmptyVersionPreservesExisting(t *testing.T) {
 	cs.UpdateNodeSeen("dp-1", "10.0.0.1", "")
 	if n, _ := cs.GetNode("dp-1"); n.Version != "v1.0.0" {
 		t.Fatalf("version = %q, want v1.0.0 preserved on empty report", n.Version)
+	}
+}
+
+// TestBuildMetricsReport_ReportsAuditClusterPushDrops pins the DP side of the
+// CHAOS-61 fleet-visibility fix (Codex review, PR #1414): a DP's heartbeat
+// must carry its own audit push-queue drop count, since that is the only way
+// the CP can ever learn about it — the counter is process-local and never
+// synced any other way.
+func TestBuildMetricsReport_ReportsAuditClusterPushDrops(t *testing.T) {
+	restore := audit.ResetPendingForTest()
+	defer restore()
+
+	for i := 0; i < audit.MaxPendingForTest()+5; i++ {
+		audit.QueueForClusterForTest(audit.Entry{Action: "policy.add"})
+	}
+
+	c := &DataPlaneClient{nodeID: "dp-1"}
+	report := c.buildMetricsReport()
+	if !report.AuditDropsReported {
+		t.Fatal("a current DP heartbeat must set the AuditDropsReported capability bit")
+	}
+	if report.AuditClusterPushDrops < 5 {
+		t.Fatalf("AuditClusterPushDrops = %d, want >= 5 (the drops injected)", report.AuditClusterPushDrops)
+	}
+
+	// omitempty: a healthy DP's heartbeat must not carry the key at all, so a
+	// mixed-version cluster and a quiet steady-state heartbeat both stay small.
+	restore()
+	clean, _ := json.Marshal(c.buildMetricsReport())
+	if strings.Contains(string(clean), "audit_cluster_push_drops") {
+		t.Errorf("healthy heartbeat should omit audit_cluster_push_drops; got %s", clean)
+	}
+}
+
+// TestAuditClusterPushDropsTotal_AggregatesFleetWide pins the CP side: Codex's
+// review of PR #1414 found that /api/stats read the process-local counter
+// directly, which is always zero on a Control Plane (the counter is only ever
+// charged on a Data Plane), so the dashboard a clustered deployment's admin
+// actually looks at reported "0 drops" no matter how many DPs were losing
+// audit events. auditClusterPushDropsTotal must sum every DP's latest
+// reported count instead of reading only this node's own.
+func TestAuditClusterPushDropsTotal_AggregatesFleetWide(t *testing.T) {
+	restore := audit.ResetPendingForTest()
+	defer restore()
+
+	nodeMetricsMu.Lock()
+	origMetrics := nodeMetrics
+	nodeMetrics = map[string]MetricsReport{
+		"dp-1": {NodeID: "dp-1", AuditClusterPushDrops: 3},
+		"dp-2": {NodeID: "dp-2", AuditClusterPushDrops: 4},
+		"dp-3": {NodeID: "dp-3"}, // healthy DP, nothing to add
+	}
+	nodeMetricsMu.Unlock()
+	defer func() {
+		nodeMetricsMu.Lock()
+		nodeMetrics = origMetrics
+		nodeMetricsMu.Unlock()
+	}()
+
+	if got := auditClusterPushDropsTotal(); got != 7 {
+		t.Fatalf("auditClusterPushDropsTotal() = %d, want 7 (this node's own 0 + dp-1's 3 + dp-2's 4)", got)
+	}
+}
+
+// TestAuditClusterPushDropsTotal_SkipsOwnHeartbeat pins the combined CP/DP
+// case: a process running both roles heartbeats to itself, so its own
+// nodeMetrics entry repeats auditPendingDrops(); counting both would inflate
+// the compliance-loss total.
+func TestAuditClusterPushDropsTotal_SkipsOwnHeartbeat(t *testing.T) {
+	restore := audit.ResetPendingForTest()
+	defer restore()
+	for i := 0; i < audit.MaxPendingForTest()+2; i++ {
+		audit.QueueForClusterForTest(audit.Entry{Action: "policy.add"})
+	}
+	local := auditPendingDrops()
+	if local < 2 {
+		t.Fatalf("precondition: local drops = %d, want >= 2", local)
+	}
+
+	origID := clusterRole.nodeID
+	clusterRole.nodeID = "combined-node"
+	t.Cleanup(func() { clusterRole.nodeID = origID })
+
+	nodeMetricsMu.Lock()
+	origMetrics := nodeMetrics
+	nodeMetrics = map[string]MetricsReport{
+		"combined-node": {NodeID: "combined-node", AuditClusterPushDrops: local},
+		"dp-2":          {NodeID: "dp-2", AuditClusterPushDrops: 4},
+	}
+	nodeMetricsMu.Unlock()
+	t.Cleanup(func() {
+		nodeMetricsMu.Lock()
+		nodeMetrics = origMetrics
+		nodeMetricsMu.Unlock()
+	})
+
+	if got, want := auditClusterPushDropsTotal(), local+4; got != want {
+		t.Fatalf("auditClusterPushDropsTotal() = %d, want %d (local %d once + dp-2's 4)", got, want, local)
+	}
+}
+
+// TestAuditClusterPushUnreportingNodes pins that a disconnected Data Plane,
+// and a connected one the Control Plane cannot yet or cannot ever trust for
+// a drop count, are both counted as unreporting — a zero total must not read
+// as a complete centralized trail.
+func TestAuditClusterPushUnreportingNodes(t *testing.T) {
+	origStore := globalClusterStore
+	globalClusterStore = newTestClusterStore(t)
+	t.Cleanup(func() { globalClusterStore = origStore })
+
+	nodeMetricsMu.Lock()
+	origMetrics := nodeMetrics
+	nodeMetrics = map[string]MetricsReport{}
+	nodeMetricsMu.Unlock()
+	t.Cleanup(func() {
+		nodeMetricsMu.Lock()
+		nodeMetrics = origMetrics
+		nodeMetricsMu.Unlock()
+	})
+
+	if got := auditClusterPushUnreportingNodes(); got != 0 {
+		t.Fatalf("empty cluster: unreporting = %d, want 0", got)
+	}
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-up", Status: "connected"})
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-down", Status: "disconnected"})
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-revoked", Status: "revoked"})
+
+	// dp-up is enrolled and connected but has no nodeMetrics entry at all yet
+	// (CP restart, HA promotion, or the ~60s metricsLoop startup window
+	// before its first heartbeat lands). That is indistinguishable from a
+	// node that never reports, so it counts as unreporting alongside the
+	// disconnected node.
+	if got := auditClusterPushUnreportingNodes(); got != 2 {
+		t.Fatalf("unreporting = %d, want 2 (disconnected + connected-but-no-heartbeat-yet)", got)
+	}
+
+	nodeMetricsMu.Lock()
+	nodeMetrics["dp-up"] = MetricsReport{NodeID: "dp-up", AuditDropsReported: true}
+	nodeMetricsMu.Unlock()
+	if got := auditClusterPushUnreportingNodes(); got != 1 {
+		t.Fatalf("unreporting = %d, want 1 (only the disconnected node, once dp-up has reported)", got)
+	}
+
+	// Rolling upgrade: a connected node heartbeating from a build without the
+	// capability bit decodes AuditClusterPushDrops as 0 — that is "unknown",
+	// not "zero drops". A current build reporting zero is trusted.
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-legacy", Status: "connected"})
+	nodeMetricsMu.Lock()
+	nodeMetrics["dp-legacy"] = MetricsReport{NodeID: "dp-legacy"}
+	nodeMetricsMu.Unlock()
+	if got := auditClusterPushUnreportingNodes(); got != 2 {
+		t.Fatalf("unreporting = %d, want 2 (disconnected + legacy connected)", got)
+	}
+
+	// Draining (operator-initiated maintenance): checkNodeLiveness only ever
+	// flips "connected" to "disconnected", so a draining node whose DP
+	// actually goes down for maintenance never becomes "disconnected" either
+	// — it must be counted as unreporting on its own.
+	globalClusterStore.RegisterNode(&EnrolledNode{NodeID: "dp-draining", Status: "draining"})
+	if got := auditClusterPushUnreportingNodes(); got != 3 {
+		t.Fatalf("unreporting = %d, want 3 (disconnected + legacy connected + draining)", got)
 	}
 }

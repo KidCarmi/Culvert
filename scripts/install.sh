@@ -1462,11 +1462,42 @@ is_fresh_deployment() {
   ! sudo docker volume inspect "$resolved_name" >/dev/null 2>&1
 }
 
+# env_file_value_set VAR FILE — the ONE definition of "FILE assigns VAR a value
+# docker compose resolves as NON-EMPTY". Exit 0 = set, 1 = absent or empty,
+# 2 = FILE could not be read (verdict unknown).
+#
+# "Non-empty" means what docker compose resolves: only CR/blanks, an empty
+# quote pair ("" / ''), or a blank followed by an inline # comment is EMPTY
+# there, so none of those may count as configured. A lone opening quote at end
+# of line starts a multiline value (valid compose syntax) and counts as set.
+#
+# It is one function because BOTH callers decide whether to leave an existing
+# secret alone, and they read the same file: secret_already_set() (the at-rest
+# passphrases) and persist_host_env_session_secret() (the cluster session
+# signing key). The latter used its own looser `=.+` test, which counted every
+# shape above as configured and so declined to persist the operator's key —
+# the exact failure its own comment exists to prevent. A second spelling of
+# this predicate is how the two drift; keep it here.
+#
+# Process substitution, not a pipe: grep -q exits at the first match, and under
+# pipefail the producer's SIGPIPE (141) would override that success. The
+# readability probe is separate so a genuine read failure is reported as 2
+# rather than collapsing into grep's "not found" 1 — persist_host_env_session_
+# secret must be able to tell "no entry, safe to add" from "could not look",
+# because confusing them overwrites a signing key it was unable to read.
+env_file_value_set() {
+  local var="$1" file="$2"
+  [[ -r "$file" ]] || return 2
+  grep -Eq "^${var}=([^[:space:]\"']|[[:space:]]+([^[:space:]\"'#]|\"([^\"]|$)|'([^']|$))|\"([^\"]|$)|'([^']|$))" <(tr -d '\r' <"$file" 2>/dev/null)
+}
+
 # secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
+# An unreadable .env answers false (as it always has), so the caller generates
+# a passphrase rather than persisting the CA key unencrypted.
 secret_already_set() {
   local var="$1" envfile="$2"
   [[ -n "${!var:-}" ]] && return 0
-  [[ -f "$envfile" ]] && grep -Eq "^${var}=.+" "$envfile" 2>/dev/null
+  [[ -f "$envfile" ]] && env_file_value_set "$var" "$envfile"
 }
 
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
@@ -1627,12 +1658,25 @@ persist_host_env_session_secret() {
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -f "$envfile" ]]; then
-    grep -Eq '^CULVERT_SESSION_SECRET=.+' "$envfile" 2>/dev/null
-    local rc=$?
+    # env_file_value_set is the SHARED predicate (see its comment): 0 = set,
+    # 1 = absent or empty, 2 = could not read. This used its own `=.+` test,
+    # which matched the shapes docker compose resolves to the EMPTY string —
+    # `VAR=`, `VAR=""`, `VAR=''`, `VAR=` + inline comment, a CRLF-only value —
+    # and so returned "already configured" for an entry that configures
+    # nothing. The operator's shared key was then never persisted and every
+    # node fell back to its own random per-process signing key
+    # (session.InitRandomKey, session.go), which is precisely the cluster-wide
+    # logout this function exists to prevent. An empty entry is NOT a key to
+    # protect, so it is overwritten; a non-empty one is still never touched.
+    #
+    # `|| rc=$?` keeps a non-zero verdict from tripping `set -e`
+    # (this script runs under `set -euo pipefail`) before rc is inspected.
+    local rc=0
+    env_file_value_set CULVERT_SESSION_SECRET "$envfile" || rc=$?
     if [[ $rc -eq 0 ]]; then
       return 0 # already configured — never overwrite
     elif [[ $rc -ne 1 ]]; then
-      warn "Could not verify whether CULVERT_SESSION_SECRET is already set in $envfile (grep exit $rc) —"
+      warn "Could not verify whether CULVERT_SESSION_SECRET is already set in $envfile (read check exit $rc) —"
       warn "leaving it unchanged rather than risk overwriting an existing signing key we can't read. Set"
       warn "$envfile permissions so it is readable, or set CULVERT_SESSION_SECRET there yourself."
       return 0
