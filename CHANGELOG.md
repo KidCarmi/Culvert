@@ -37,6 +37,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   control is pinned too: an action this build cannot dispatch at all is blocked
   outright by the fail-closed branch, so its profile is never evaluated and the
   predicate still says so.
+- **An unauthenticated request chose how many bytes Culvert retained, on a stock
+  install (CHAOS-92).** `r.URL.Path` was the last unbounded client-chosen string
+  on the data path. Its two siblings were already closed and neither reaches it:
+  `request_tracing_bounds.go` (SEC-REQID-1) bounds the tracing headers and
+  `proxy_host_bounds.go` (CHAOS-69) bounds the destination authority, whose own
+  "deliberately NOT done" note named the path as its own finding. The path was
+  copied, unbounded, into three retaining sinks — the process log (5 sites), a
+  **buffered HTML response body** (5 sites, through `serveBlockPage`) and the
+  request-log `URI` field (4 sites, through `policyLogURI`). Measured through the
+  real `handleRequest`, with no authentication, no operator opt-in and no
+  configuration (`.exe` is in the shipped `fileblock.DefaultBlockedExts`): a
+  1 048 581-byte path wrote **1 048 636 bytes** to the process log and served a
+  **5 245 731-byte** block page when filled with `'`, because `html/template`
+  escapes it to the 5-byte `&#39;` — so the amplification factor was the
+  client's to choose. Wire-verified rather than only via `httptest`: that target
+  arrives as `r.URL.Path` byte for byte through a real `net/http` server, since
+  the proxy listener sets no `MaxHeaderBytes` and net/http's 1 MiB default
+  governs the request line. The process log is a 50 MB `fileutil.RotatingFile`
+  keeping exactly one archive, and every write **succeeded**, so the logsink
+  backpressure counter, `storageDegraded()` and `storage_write_failed` all
+  reported healthy while the whole retained forensic record rotated away in
+  seconds (CWE-778, OWASP A09:2021). The bound is on **retention, not
+  admission**: a long path can be legitimate, unlike an authority RFC 1035 caps,
+  so refusing the request would be an egress outage — but a truncated path is
+  still a usable log value. Every matcher continues to decide on the **complete**
+  path; clamping what a matcher sees would be fail-open, because truncating the
+  end removes the extension a file-block rule matches. `serveBlockPage` and
+  `policyLogURI` clamp at the chokepoint so one edit bounds every present and
+  future sink, the five log sites clamp inside the `sanitizeLog` argument so the
+  scan and its copy are bounded too, the cut backs off to a UTF-8 boundary, and
+  the retained value carries an explicit marker naming the original length. New
+  counter `culvert_retained_path_truncated_total`. Thirteen gates, seven of them
+  verified to fail against the pre-fix tree with the measured numbers and two of
+  them source gates, so a new sink reintroduces the defect loudly. Full
+  write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53, which also records the
+  CDR-sidecar filename sink and a >8 KiB refusal tier as open owner decisions.
 
 - **An inspected tunnel's inner-host pin accepted an authority `net/http` will
   not send, so the upstream received no authority at all.** A CONNECT tunnel is
@@ -582,6 +618,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not the class.
 
 ### Performance
+
+- **A policy publication now allocates one array per revision instead of one
+  object per rule.** `sortLocked` cloned every definition with its own
+  `new(PolicyRule)` and sorted the clones; it now decides the order first, on a
+  private copy of the live pointers, and clones into ONE contiguous
+  `[]PolicyRule` in publication order. The permutation is identical by
+  construction — the same comparator over the same input sequence, and the clone
+  preserves `Priority` — so this is a layout and allocation change only.
+
+  It is a control-plane cost with a **data-plane consequence**, which is the
+  reason to care: `sortLocked` runs under `ps.mu`, the writer lock, and
+  `evaluationSnapshot` takes the matching RLock before every scan, so a
+  publication stalls ALL policy evaluation for exactly as long as it takes.
+  Every policy edit, config-version restore and cluster config sync pays it.
+
+  Measured with benchstat (n=10, 4-core Xeon @2.10GHz, go1.27.3) on the new
+  `BenchmarkPolicyPublish_SortLocked`: allocations/op **-25% at every rule
+  count**, wall time **1 000 rules 582.4 µs → 483.8 µs (-16.9%, p=0.000)** and
+  **10 000 rules 4.932 ms → 4.034 ms (-18.2%, p=0.002)**, with **no significant
+  change at 100 rules** (54.5 µs → 50.3 µs, p=0.105). `ReplaceAll` inherits it
+  (**100 rules -8.5%**, **10 000 rules -16.1%**); bytes/op is essentially
+  unchanged (-0.4%), because the same definitions are still copied — what goes
+  away is the per-rule allocation, not the data.
+
+  Two negative results are recorded on `sortLocked` itself so they are not
+  re-derived. First, the layout does **not** measurably help the per-request
+  scan: `BenchmarkPolicyEvaluate_NoMatch`/`MatchLast`/`CIDRRules` came out at
+  -3.75% geomean with every size at p > 0.05, because the replaced per-rule
+  `new(PolicyRule)` loop already drew from a single 576-byte size-class span and
+  so was near-contiguous before this change. Second, the engine's superlinear
+  scaling above ~1 000 rules (**7.6 ns/rule at 1 000 → 29.3 ns/rule at
+  10 000**) is the touched working set (~5.7 MB of definitions) leaving L2, not
+  heap scatter; only shrinking what the scan streams per rule can address it,
+  and this change deliberately does not attempt that.
+
+  `TestPolicyPublish_RevisionIsOneContiguousArray` is the regression gate and is
+  **structural, not timed**: the property is worth one allocation out of the ~3
+  a definition clone costs, so a wall-clock or allocation-count bound would have
+  a thin margin and would rot. It asserts the published definitions sit at
+  one-struct stride from a single base, in scan order, and it fails against the
+  pre-change shape (verified). `TestPolicyPublish_OrderingIsUnchangedByTheLayout`
+  is the behavioral control for ordering and for the precompute still landing on
+  the published definitions. `BenchmarkPolicyPublish_EvaluateDuringPublish` is
+  the concurrency arm: evaluation latency with a background publisher holding
+  and releasing the writer lock underneath it.
 
 - A scheduled rule's **timezone is now resolved once per policy evaluation**
   instead of once per rule. Both halves of the per-rule work depend only on
