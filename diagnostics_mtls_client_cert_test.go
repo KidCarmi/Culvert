@@ -32,16 +32,26 @@ func TestUpstreamMTLSClientCertDiagnostics(t *testing.T) {
 		t.Fatalf("healthy cert must add no row, got %+v", rows)
 	}
 
-	cases := map[string]mtlsClientCertStatus{
-		"failed load": {configured: true, file: "/secret/path/client.pem", lastError: "open /secret/path/client.pem: denied"},
-		"expired":     {configured: true, loaded: true, file: "/secret/path/client.pem", notAfter: time.Now().Add(-48 * time.Hour)},
-		"expiring":    {configured: true, loaded: true, file: "/secret/path/client.pem", notAfter: time.Now().Add(5*24*time.Hour + time.Hour)},
+	type tc struct {
+		st      mtlsClientCertStatus
+		wantMsg string
 	}
-	for name, st := range cases {
-		set(st)
+	cases := map[string]tc{
+		"failed load": {mtlsClientCertStatus{configured: true, file: "/secret/path/client.pem", lastError: "open /secret/path/client.pem: denied"}, "failed to load"},
+		"expired":     {mtlsClientCertStatus{configured: true, loaded: true, file: "/secret/path/client.pem", notAfter: time.Now().Add(-48 * time.Hour)}, "has expired"},
+		// Within the first day after expiry daysUntil truncates to 0; the row
+		// must still say expired, not "expires in 0 days".
+		"expired 1h ago": {mtlsClientCertStatus{configured: true, loaded: true, file: "/secret/path/client.pem", notAfter: time.Now().Add(-time.Hour)}, "has expired"},
+		"expiring":       {mtlsClientCertStatus{configured: true, loaded: true, file: "/secret/path/client.pem", notAfter: time.Now().Add(5*24*time.Hour + time.Hour)}, "expires in 5 days"},
+	}
+	for name, c := range cases {
+		set(c.st)
 		rows := checkUpstreamMTLSClientCert()
 		if len(rows) != 1 || rows[0].Code != "upstream_mtls_client_cert" || rows[0].Status != diagWarn {
 			t.Fatalf("%s: unexpected rows %+v", name, rows)
+		}
+		if !strings.Contains(rows[0].Message, c.wantMsg) {
+			t.Fatalf("%s: message %q does not contain %q", name, rows[0].Message, c.wantMsg)
 		}
 		if rows[0].OperatorAction == "" || strings.Contains(rows[0].Message, "/secret") || strings.Contains(rows[0].OperatorAction, "/secret") {
 			t.Fatalf("%s: action missing or row leaks path: %+v", name, rows[0])

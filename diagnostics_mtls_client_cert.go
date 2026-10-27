@@ -14,7 +14,10 @@ package main
 // configured. The message carries no file path and no load-error text (those
 // can name filesystem layout); the OCSP panel keeps that detail.
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // mtlsClientCertWarnDays is the remaining-validity threshold below which the
 // row turns to WARN, matching the 30-day Root CA rotation overlap.
@@ -40,16 +43,18 @@ func checkUpstreamMTLSClientCert() []OperatorContractCheck {
 	if mc.notAfter.IsZero() {
 		return nil
 	}
-	days := daysUntil(mc.notAfter)
-	switch {
-	case days < 0:
+	// Select the expired branch on the timestamp itself: daysUntil truncates
+	// toward zero, so for the first 24 hours after expiry it returns 0 and the
+	// row would read "expires in 0 days" while upstreams already reject it.
+	if !time.Now().Before(mc.notAfter) {
 		return []OperatorContractCheck{{
 			Code:           "upstream_mtls_client_cert",
 			Status:         diagWarn,
 			Message:        "upstream mTLS client certificate has expired — upstream servers that require mutual TLS will reject this node",
 			OperatorAction: action,
 		}}
-	case days < mtlsClientCertWarnDays:
+	}
+	if days := daysUntil(mc.notAfter); days < mtlsClientCertWarnDays {
 		return []OperatorContractCheck{{
 			Code:           "upstream_mtls_client_cert",
 			Status:         diagWarn,
