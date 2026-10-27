@@ -229,12 +229,22 @@ func isSameOrigin(r *http.Request, origin string) bool {
 // credentials, so this must stay reachable even after cfg.IsConfigured() is
 // true.
 // NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
+//
+// SEC-PUBLICPATH-1 (RISK-033): the list used to carry a `/api/auth/totp`
+// PREFIX that matched no registered route — dead today and a landmine
+// tomorrow. The first `/api/auth/totp/enroll` or `.../disable` handler anyone
+// added would have been born UNAUTHENTICATED, and since SEC-BASIC-1 TOTP
+// enrolment decides whether an account may use HTTP Basic at all
+// (cfg.UserHasTOTP, ui_basic_auth.go), an anonymous caller could have bound
+// their own second factor to an admin account or stripped one. The shipped
+// second factor is verified inside apiAuthLogin's credential-gated exchange,
+// so no pre-session TOTP route is needed. An allowlist entry must name a
+// route that exists; pinned by TestPublicAllowlist_EveryEntryMatchesARegisteredRoute.
 func isPublicUIAuthPath(path string) bool {
 	return strings.HasPrefix(path, "/api/setup") ||
 		path == "/api/auth/login" ||
 		path == "/api/auth/logout" ||
 		path == "/api/auth/status" ||
-		strings.HasPrefix(path, "/api/auth/totp") ||
 		strings.HasPrefix(path, "/auth/") ||
 		path == "/proxy.pac" ||
 		strings.HasPrefix(path, "/pac/") ||

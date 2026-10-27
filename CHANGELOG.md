@@ -78,6 +78,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   alerted. Refusing the object outright is the safer answer and a real option,
   but it is a posture change for large downloads that no operator asked for, and
   is left to the owner as the open half of CHAOS-101.
+- **The Basic-auth SSE re-check no longer counts as a login attempt
+  (SEC-BASICAUTH-5, RISK-032).** A live dashboard stream re-checks its HTTP
+  Basic credential about once a minute, through the same chokepoint as a real
+  submission, so each re-check drew on the per-IP Basic failure budget and was
+  recorded against the two-tier lockout. Streams still carrying a
+  rotated-away password locked their administrator out of the new, correct
+  password, and a legitimate stream on a shared egress reset a co-located
+  attacker's failure count once per interval. `checkUIBasicAuth` is now the
+  single `cfg.VerifyUIUser` call site behind `verifyUIBasicAuth` (submission,
+  unchanged: atomic `Reserve`/`Refund` budget, lockout, per-attempt
+  `auth.basic.fail` audit) and `revalidateUIBasicAuth` (re-check: every refusal
+  still applies, so a rotated, deleted, TOTP-enrolled or locked credential still
+  ends the stream, but nothing is reserved or recorded). Responses are
+  unchanged: refused Basic requests get `401`, `/api/auth/status` answers
+  `200 {"loggedIn":false}`, and only `POST /api/auth/login` returns `429`.
+- **The admin public allowlist no longer pre-authorises `/api/auth/totp*`
+  (SEC-PUBLICPATH-1, RISK-033).** The prefix matched no registered route, so
+  the first TOTP enrol/disable handler would have been served without
+  authentication. Removed (no behaviour change today), and every allowlist
+  entry must now match a registered route
+  (`TestPublicAllowlist_EveryEntryMatchesARegisteredRoute`).
+- **New `culvert_login_limiter_entries` gauge** reports the live size of the
+  admin credential lockout state, whose keys an unauthenticated caller chooses.
+  New runbook `docs/operator/admin-api-credential-lockout.md`: clear a stuck
+  lock with the admin-only `GET`/`POST /api/auth/lockouts` instead of a restart.
 
 - **Diagnostics reported "session revocation healthy … no drops" while a
   legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
