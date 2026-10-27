@@ -4650,3 +4650,71 @@ func TestChaos87_QueuedCandidateStillCachesAfterAnUnrelatedDelete(t *testing.T) 
 		t.Fatal("an unrelated profile's delete fenced the queued candidate: its fresh document was not cached")
 	}
 }
+
+// IDP-20 (Codex review round 23). ReplaceAll is the THIRD serial compile queue
+// outside r.mu. A snapshot [first, gone, invalid]: "first" is held on the
+// wire, "gone" is deleted while it waits, then "gone" compiles and the invalid
+// candidate aborts the snapshot. The abort publishes nothing, so "gone" stays
+// deleted, and with the epoch captured at fetch time its document was back in
+// the cache, where a recreate during an outage compiled from it. Every
+// candidate's epoch is now captured before the queue starts.
+func TestChaos87_QueuedSnapshotCandidateCannotRecacheADeletedProfile(t *testing.T) {
+	store := chaos87Env(t)
+	first := newChaos87IdP(t)
+	gone := newChaos87IdP(t)
+	if err := idpRegistry.Upsert(chaos87Profile("gone", gone.URL())); err != nil {
+		t.Fatalf("healthy upsert: %v", err)
+	}
+	invalid := chaos87Profile("invalid", gone.URL())
+	invalid.Name = "" // fails validateIdPProfile AFTER "gone" has compiled
+
+	release := first.holdRequests()
+	defer release()
+	before := first.hits.Load()
+	done := make(chan error, 1)
+	go func() {
+		done <- idpRegistry.ReplaceAll([]*IdPProfile{
+			chaos87Profile("first", first.URL()), chaos87Profile("gone", gone.URL()), invalid,
+		})
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for first.hits.Load() == before {
+		if time.Now().After(deadline) {
+			release()
+			<-done
+			t.Fatal("the snapshot's first compile never reached its IdP")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// "gone" is queued behind "first" and has not fetched yet.
+	goneHits := gone.hits.Load()
+	if err := idpRegistry.Delete("gone"); err != nil {
+		release()
+		<-done
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := store.Get("gone", idpmeta.KindSAMLMetadata, gone.URL()); !errors.Is(err, idpmeta.ErrNoEntry) {
+		release()
+		<-done
+		t.Fatalf("setup: the committed delete did not retire the document (Get = %v)", err)
+	}
+	release()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("setup: the snapshot with an invalid candidate was accepted")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("ReplaceAll did not finish")
+	}
+	if gone.hits.Load() == goneHits {
+		t.Fatal("setup: the queued candidate never fetched, so the gate exercised nothing")
+	}
+	if _, _, err := store.Get("gone", idpmeta.KindSAMLMetadata, gone.URL()); !errors.Is(err, idpmeta.ErrNoEntry) {
+		t.Fatalf("an aborted snapshot left the deleted profile's document cached (Get = %v)", err)
+	}
+	gone.down.Store(true)
+	if err := idpRegistry.Upsert(chaos87Profile("gone", gone.URL())); err == nil {
+		t.Fatal("a profile recreated during an outage compiled from the DELETED profile's cached metadata")
+	}
+}

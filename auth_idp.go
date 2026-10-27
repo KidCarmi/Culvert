@@ -640,8 +640,11 @@ func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
 // and revalidation loops. gen is the cache retirement epoch captured at that
 // selection, so a deletion committed between selecting the profile and its
 // document fetch still fences the fetch's cache write (IDP-19, Codex round 22).
-// nil captures the epoch immediately before the fetch, which is exact for every
-// caller that compiles under r.mu or for a profile it is about to commit.
+// nil captures the epoch immediately before the fetch, which is exact for a
+// caller that compiles under r.mu (Upsert, boot). Every caller that compiles a
+// QUEUE of candidates outside r.mu — the recovery and revalidation loops, and
+// ReplaceAll (IDP-20) — must capture each candidate's epoch before the queue
+// starts and pass it in.
 func compileIdPProfileAt(p *IdPProfile, gen *idpmeta.Generation) (IdentityProvider, error) {
 	switch p.Type {
 	case IdPTypeOIDC:
@@ -811,6 +814,27 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		discardAllCandidateEpisodesLocked()
 	}
 
+	// The snapshot's candidates compile ONE AFTER ANOTHER outside r.mu, so a
+	// candidate can wait behind another's slow fetch, and an admin Delete can
+	// commit during that wait. Capturing the cache retirement epoch only when
+	// the waiting candidate's own fetch began accepted its write after the
+	// Delete's Forget. An abort later in the loop (a candidate failing
+	// validation or compile, or persistence failing) then left the DELETED
+	// profile's document in the cache, and recreating it during an outage
+	// compiled from that document (IDP-20, Codex round 23: the same rule as
+	// IDP-19, at the third serial compile queue). Every candidate's epoch is
+	// therefore taken here, before the queue starts, under the read lock that
+	// orders it against Delete's Forget, exactly as the recovery loops take
+	// theirs at selection.
+	cacheGens := make(map[string]idpmeta.Generation, len(nextProfiles))
+	r.mu.RLock()
+	for _, p := range nextProfiles {
+		if p != nil {
+			cacheGens[p.ID] = idpMetadataStore().Generation(p.ID)
+		}
+	}
+	r.mu.RUnlock()
+
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
@@ -820,7 +844,8 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		if !p.Enabled {
 			continue
 		}
-		prov, err := compileIdPProfile(p)
+		gen := cacheGens[p.ID]
+		prov, err := compileIdPProfileAt(p, &gen)
 		if err != nil {
 			discardAllCandidateEpisodes()
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
