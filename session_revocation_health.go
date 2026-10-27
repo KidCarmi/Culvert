@@ -769,14 +769,14 @@ func mergeClusterRevocations(entries []RevocationEntry) int {
 // it from its deferred, CP-independent owed-write discharge (CHAOS-79) instead
 // of only after a successful RPC. added is how many entries the caller's merge
 // newly applied; owed is a caller-tracked write that has not landed yet (the
-// DP's per-client flag). It reports whether a save was attempted and whether
-// THAT save landed.
+// DP's per-client flag). It reports whether THIS call attempted a save that
+// landed.
 //
 // A missing backing file with an EMPTY in-memory list is not a doubt: loading a
 // missing file yields exactly that empty list, so a rewrite would repair
 // nothing, and a round that merged nothing must not write (CHAOS-79's clean
 // round control).
-func persistClusterMergedRevocations(added int, owed bool, who string) (attempted, landed bool) {
+func persistClusterMergedRevocations(added int, owed bool, who string) (landed bool) {
 	// "Durability is in doubt" is TWO conditions, not one. The flag covers a
 	// save that was attempted and failed; revocationBackingFileIsGone covers a
 	// file that was never written down again because nobody attempted anything
@@ -805,7 +805,7 @@ func persistClusterMergedRevocations(added int, owed bool, who string) (attempte
 	}
 	shared := sessionRevocationsDirty.Load()
 	if added == 0 && !owed && !failing && !vanished && !shared {
-		return false, false
+		return false
 	}
 	if vanished {
 		logger.Printf("%s: the revocations file is missing — rewriting the %d token and %d account revocation(s) held in memory",
@@ -831,9 +831,9 @@ func persistClusterMergedRevocations(added int, owed bool, who string) (attempte
 		if failing || shared {
 			logger.Printf("%s: merged session revocations are durable again", who)
 		}
-		return true, true
+		return true
 	case persistFailed:
 		// Logged by the coordinator at onset; the counter carries the rest.
 	}
-	return true, false
+	return false
 }

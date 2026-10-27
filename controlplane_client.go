@@ -1141,7 +1141,7 @@ func (c *DataPlaneClient) persistOwedRevocations() {
 	// write-fenced refusal is not a success either: the merge is in force in
 	// memory only, so it stays owed until a write can land (the refusal itself
 	// is cheap and is not logged per attempt).
-	if _, landed := persistClusterMergedRevocations(0, c.revocationsUnsaved.Load(), "DataPlane"); landed {
+	if persistClusterMergedRevocations(0, c.revocationsUnsaved.Load(), "DataPlane") {
 		c.revocationsUnsaved.Store(false)
 	}
 }
