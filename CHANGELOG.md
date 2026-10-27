@@ -9,6 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the upstream mTLS client certificate failed to
+  load, has expired, or expires within 30 days.** That state was visible only in
+  the OCSP panel API; the one-page report read as healthy while upstream servers
+  requiring mutual TLS rejected the node. A new `upstream_mtls_client_cert` WARN
+  row (additive, report-only, no row when unconfigured or healthy) carries no
+  file path or error text. No certificate-loading behavior changes.
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
@@ -16,6 +23,86 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   while OCSP is off) names the unchecked paths. No handshake behavior changes.
 
 ### Security
+
+- **The scan sidecar reported a truncated read as `clean: true`, so content past
+  its own window was admitted with an affirmative clean verdict (CHAOS-101).**
+  `scan_svc.go` `handleScan` read `io.LimitReader(body, maxBytes+1)` — the
+  classic overflow probe — and then never compared `len(data)` against
+  `maxBytes`, so it paid for the probe byte and discarded what it proved. The
+  reply then carried the PREFIX's verdict as the whole object's, and
+  `secscan.ScanResponse` has no truncation field to say otherwise.
+
+  No code bug is needed to reach this, only configuration: each process derives
+  `maxScanBufferBytes()` from its OWN `security.max_scan_mb`, and nothing
+  reconciles the caller's window with the sidecar's — which is precisely the
+  topology the handler's own doc comment recommends ("multiple proxy instances
+  sharing one scanner"). A fleet of 20 MiB proxies in front of a sidecar left at
+  the 5 MiB default had scanning silently off for every byte past 5 MiB, with no
+  counter, no log line and no alert anywhere, and the caller's own overflow
+  signal correctly did not fire because the body fit the CALLER's window. The
+  in-process path has had a signal for this exact event since Finding 4.2
+  (`logScanLimitExceeded`: counter, one log line, `scan_skipped` alert); the
+  process-isolated deployment recommended as the *remedy* for the local path's
+  failure modes was the one without it.
+
+  `handleScan` now uses the probe byte and refuses with 413 rather than
+  answering for a prefix. The probe byte is still scanned, so a signature that
+  ends on it blocks exactly as before the fix rather than drawing a fail-open
+  413. It also publishes `oversize_refused` and
+  `scan_window_bytes` on `/health` — it is the only process that knows its
+  window, and an operator needs it to compare against the caller's.
+
+  **Ordering is the correctness argument.** Refusing on size FIRST — the obvious
+  shape — turns a body whose malware sits inside the window into a 413, which
+  the client classifies as a size limit and therefore forwards fail-open: the
+  one case where the sidecar holds a real block verdict is the case the refusal
+  would throw away, so the "safe" check would have admitted content the unfixed
+  code blocked. The verdict therefore wins and truncation is not reported at all
+  on a block, the same asymmetry `readScanPrefix` documents for the local path.
+  A negative control pins it, and failed against the first draft of this fix.
+
+  Client side, 413 is classified as the size limit it is and charges the LOCAL
+  path's vocabulary — `statScanSkipped`, hence `culvert_scan_skipped_total`, and
+  the `scan_skipped` alert with `Source: "size_limit"` — for the same reason
+  `remoteScanRefused` reuses the timeout vocabulary: it is the same decision, so
+  one phenomenon keeps one counter and one alert class whichever window clipped
+  the object, and an operator already alerting on `scan_skipped` needs no second
+  name. A load balancer in front of the sidecar enforcing its own smaller body
+  limit returns 413 for the same reason, so the classification is right there
+  too; every other status keeps its fault classification.
+
+  Operators running a mismatched fleet will see NEW `scan_skipped` volume on
+  upgrade. That volume is the defect becoming visible, not a regression; the
+  remedy is named in the log line and measurable from `/health`. The posture for
+  oversize bodies is the local path's, unchanged: fail-open, counted and
+  alerted. Refusing the object outright is the safer answer and a real option,
+  but it is a posture change for large downloads that no operator asked for, and
+  is left to the owner as the open half of CHAOS-101.
+- **The Basic-auth SSE re-check no longer counts as a login attempt
+  (SEC-BASICAUTH-5, RISK-032).** A live dashboard stream re-checks its HTTP
+  Basic credential about once a minute, through the same chokepoint as a real
+  submission, so each re-check drew on the per-IP Basic failure budget and was
+  recorded against the two-tier lockout. Streams still carrying a
+  rotated-away password locked their administrator out of the new, correct
+  password, and a legitimate stream on a shared egress reset a co-located
+  attacker's failure count once per interval. `checkUIBasicAuth` is now the
+  single `cfg.VerifyUIUser` call site behind `verifyUIBasicAuth` (submission,
+  unchanged: atomic `Reserve`/`Refund` budget, lockout, per-attempt
+  `auth.basic.fail` audit) and `revalidateUIBasicAuth` (re-check: every refusal
+  still applies, so a rotated, deleted, TOTP-enrolled or locked credential still
+  ends the stream, but nothing is reserved or recorded). Responses are
+  unchanged: refused Basic requests get `401`, `/api/auth/status` answers
+  `200 {"loggedIn":false}`, and only `POST /api/auth/login` returns `429`.
+- **The admin public allowlist no longer pre-authorises `/api/auth/totp*`
+  (SEC-PUBLICPATH-1, RISK-033).** The prefix matched no registered route, so
+  the first TOTP enrol/disable handler would have been served without
+  authentication. Removed (no behaviour change today), and every allowlist
+  entry must now match a registered route
+  (`TestPublicAllowlist_EveryEntryMatchesARegisteredRoute`).
+- **New `culvert_login_limiter_entries` gauge** reports the live size of the
+  admin credential lockout state, whose keys an unauthenticated caller chooses.
+  New runbook `docs/operator/admin-api-credential-lockout.md`: clear a stuck
+  lock with the admin-only `GET`/`POST /api/auth/lockouts` instead of a restart.
 
 - **Diagnostics reported "session revocation healthy … no drops" while a
   legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
@@ -693,6 +780,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not the class.
 
 ### Performance
+
+- **The Stage-2 policy scan no longer streams a 568-byte rule definition to
+  reject a destination.** Every proxied request on every protocol runs
+  `PolicyStore.Evaluate`, a priority-ordered first-match scan over the whole
+  rulebase, and that scan was the largest Culvert-owned CPU cost on the request
+  path (7.4% of an end-to-end HTTP forward at 500 rules, where the rest is
+  kernel and `net/http`). Its cost was the WORKING SET, not the comparisons:
+  `PolicyRule` is 568 bytes spread over nine cache lines, the scan reads fields
+  on five or six of them per rule, and at 10 000 rules the ~5.7 MB of
+  definitions leaves L2 — which is why the engine scaled superlinearly,
+  7.6 ns/rule at 1 000 rising to 29.3 ns/rule at 10 000. `sortLocked`'s own note
+  diagnosed exactly this ("shrinking what the scan streams per rule is the only
+  thing that can address it") and declined to attempt it. This is that change.
+
+  A rule's destination FQDN is the first thing `matchDestNorm` tests and the
+  most common access-rule scope in a gateway rulebase, so it is the
+  discriminator worth packing. Publication now also emits a **16-byte row per
+  rule** in one contiguous array — four rows per cache line, hardware
+  prefetchable — holding the two facts a mismatch is provable from without
+  touching the definition: the shortest host that can match, and the pattern's
+  trailing bytes packed into one word. `hostutil.MatchFQDNNorm` is
+  suffix-anchored in every branch, so a host that is too short, or whose packed
+  trailing bytes differ, cannot match.
+
+  Measured with benchstat over 10 runs per side, back to back on one host
+  (go1.27.3, 4-core Xeon @2.10GHz):
+
+  | benchmark | before | after | delta |
+  | --- | --- | --- | --- |
+  | `PolicyEvaluate_NoMatch/rules=1000` | 10.06 µs | 1.20 µs | **−88.0%** |
+  | `PolicyEvaluate_NoMatch/rules=10000` | 233.9 µs | 12.96 µs | **−94.5%** |
+  | `PolicyEvaluate_MatchLast/rules=10001` | 236.8 µs | 12.76 µs | **−94.6%** |
+  | `PolicyEvaluate_CIDRRules/rules=1000` | 15.51 µs | 1.24 µs | −92.0% |
+  | `PolicyEvaluate_ScheduledRules/rules=1000` | 24.19 µs | 1.23 µs | −94.9% |
+  | `PerfQual_Evaluate/rules=500/nomatch` | 5.08 µs | 638 ns | −87.4% |
+
+  The superlinear knee is gone with it: 29.3 ns/rule at 10 000 rules becomes
+  1.3 ns/rule. Allocations on the scan are unchanged (0 per evaluation on a
+  miss, 1 for the returned `PolicyMatch` on a hit).
+
+  **The index is one-directional and never authoritative.** A row can only make
+  the scan reject a rule the full predicate would also have rejected; nothing is
+  admitted, matched or skipped on a row's word, and every rule that survives the
+  prefilter runs the complete unmodified check sequence. It is paired with its
+  revision by SLICE IDENTITY, so an index published for another revision is
+  discarded rather than applied, and a revision that never reached publication
+  simply gets no prefilter and the pre-change scan. `TestPolicyScanIndex_`
+  `DifferentialOracle` drives the real evaluator twice over randomized
+  rulebases — with the index and without — and requires the selected rule to be
+  identical; `TestPolicyScanIndex_NegativeControl` proves that oracle can fail
+  by feeding it an over-eager row. The Policy Tester's trace path keeps the
+  prefilter off, because it must reach the real predicate behind every reported
+  skip reason.
+
+  **Costs, measured rather than assumed.** Publication grows by one array and
+  one struct — +2 allocations and +2.4% bytes per revision, ~+3–5% of
+  `sortLocked`'s wall time — which matters because publication holds the writer
+  lock that evaluation's RLock waits on. A rulebase no row can prefilter (
+  category-, country- or source-only) publishes **no** index at all and stays on
+  exactly the pre-change path; charging it was measured at +26% on
+  `PolicyEvaluate_CategoryRules/rules=200` and is the reason that case is
+  special-cased rather than tolerated. Two further shapes of the change were
+  measured and backed out for the same reason — a per-width host-tail
+  `[9]uint64` carried in the per-scan struct (+22% on the same benchmark,
+  because the inlined comparison takes its address and the 72 bytes displace the
+  scan's other per-rule state), and folding the scan's two eligibility checks
+  into a helper returning the skip reason (+26%, ~9 ns/rule, because it
+  materializes a string header per rule). Both rejections are recorded beside
+  the code. Rules scoped only by category, category group or country get no
+  prefilter by design; their predicates are not suffix-anchored and are already
+  amortized to O(1) per rule by their own per-scan scratch.
 
 - **A policy publication now allocates one array per revision instead of one
   object per rule.** `sortLocked` cloned every definition with its own
@@ -2746,6 +2904,67 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   round trip. Only deployments using category groups in policy rules are
   affected; no configuration, API or metric surface changes.
 
+- An enabled SAML or OIDC identity provider no longer depends on being able to
+  reach the identity provider in order to EXIST. Compiling a profile performs a
+  synchronous outbound fetch — SAML metadata, OIDC discovery — and it had no
+  cache, no fallback and no retry, on three paths: appliance boot, the admin
+  save, and every Control Plane → Data Plane config sync. Three consequences.
+  An IdP that was briefly unreachable at boot left the profile enabled, stored
+  and listed in the admin UI but with **no live provider**, permanently for the
+  life of the process and with no metric, health row or alert to say so —
+  browser SSO simply stopped, and a scoped `SSORequired` rule returned 403 for
+  every user, against a green dashboard. An ordinary IdP maintenance window
+  **aborted the whole config snapshot**, stopping policy, blocklist and
+  threat-feed distribution to every data plane in the fleet. And because the
+  config version could not advance, every data plane retried the fetch every
+  30 seconds for the duration of the outage, aiming the fleet's full poll rate
+  at the identity provider that was already down.
+
+  The appliance now keeps the last document it successfully fetched and
+  degrades to it, bounded by a 7-day staleness ceiling — withdrawing a key from
+  published metadata is your IdP's revocation lever, so the fallback is a
+  bounded degradation rather than an open-ended one. The network always wins
+  when it answers, so an IdP-side key rotation is still picked up at the next
+  compile; cached bytes are parsed and validated by exactly the same code as
+  network bytes; and a cached document is bound to its source URL, so
+  re-pointing a profile gets no cache. A profile that still cannot be compiled
+  now retries on its own at a bounded, jittered rate and goes live on the first
+  successful fetch — no restart. New: the `idp_metadata` diagnostics row,
+  `culvert_idp_enabled_not_live` (page on `> 0`) and `culvert_idp_metadata_*`,
+  and the existing `identity_backend_unreachable` alert with source
+  `idp_metadata`. Nothing is added to `/readyz`: an IdP outage is fleet-wide,
+  and failing readiness would eject a fleet that is still proxying fine. An
+  unresolvable IdP hostname now falls back to the cached document instead of
+  being reported as a configuration error (an OIDC discovery URL is admitted on
+  structure; the DNS-backed check runs on the fetch, where its failure routes to
+  the cache), the SAML pre-flight host check shares the fetch's deadline instead
+  of resolving unbounded ahead of it, and switching a profile to inline
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. The
+  fallback is **stale-if-error** (RFC 5861): only a transport failure or an
+  HTTP 5xx is answered from the cache. A 4xx, any other non-200, an empty body,
+  or a document the appliance cannot accept (malformed metadata, or a discovery
+  document naming an `authorization_endpoint` that resolves into a private
+  range) fails the compile as before and never replaces the cached copy.
+  Re-pointing a profile from one remote source to another retires the old
+  source's failure episode on commit, so a repoint away from a broken IdP stops
+  alerting instead of paging indefinitely for a URL that is no longer
+  configured. The staleness ceiling is the EARLIER of 7 days and the SAML
+  metadata's own `validUntil`, and it is enforced on a **running** appliance
+  rather than only when a profile is next compiled: a provider whose cached
+  document has expired is retired (logged as `IDP_METADATA_EXPIRED`), so new
+  browser SSO through it fails closed instead of continuing to trust a signing
+  certificate your IdP may have withdrawn, and the retry loop brings it back
+  automatically on the first successful fetch. A provider that is live but
+  serving from cache is also revalidated by the retry loop and replaced the
+  moment the IdP answers again (`IDP_METADATA_REVALIDATED`), so a key rotated
+  during the outage is adopted within minutes of recovery. None of this revokes
+  sessions: the profile stays enabled and stored throughout, and a provider
+  serving a freshly fetched document is never retired however old the cached
+  copy beside it is. Deleting a profile discards its cached documents, and a
+  metadata fetch still in flight when the deletion is saved can no longer write
+  the deleted profile's document back, so a profile recreated under the same id
+  and source during an outage cannot compile from the deleted profile's signing
+  material. See `docs/operator/idp-metadata-availability.md`.
 ### Fixed
 
 - Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the

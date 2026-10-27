@@ -43,6 +43,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`credential-verification-cost.md`](credential-verification-cost.md) — the bounded credential-verification governor and the `auth_verify_saturated` alert.
 - [`admin-login-input-bounds.md`](admin-login-input-bounds.md) — why the admin login endpoint bounds the submitted username, and what it protects.
 - [`admin-basic-auth.md`](admin-basic-auth.md) — HTTP Basic on the admin API: lockout, audit and username bounds now enforced, and why TOTP-enrolled accounts are refused (breaking change).
+- [`admin-api-credential-lockout.md`](admin-api-credential-lockout.md) — what a locked-out admin client sees, finding and clearing locks with `GET`/`POST /api/auth/lockouts` instead of a restart, and the `culvert_login_limiter_entries` gauge.
 - [`admin-roster-durability.md`](admin-roster-durability.md) — with a roster file configured (`-ui-users-file`, set by the shipped `docker-compose.yml`), admin account changes are durable-or-refused: what a failed `ui_users.json` write now returns and the recommended alerts. Without one (the flag's empty default) the roster is in-memory only: changes succeed but revert on restart, with a boot warning.
 
 ## TLS inspection, certificates, and decryption

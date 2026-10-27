@@ -158,7 +158,12 @@ func Counters() CounterSnapshot {
 }
 
 // AddScanSkipped records a response forwarded unscanned because it exceeded
-// the scan buffer limit (incremented by package main's logScanLimitExceeded).
+// the scan buffer limit. Two writers, deliberately sharing one counter: package
+// main's logScanLimitExceeded for the in-process window, and remoteScanOversize
+// for the SIDECAR's own window (CHAOS-101). It is one phenomenon — bytes were
+// forwarded unscanned because the object was larger than the window — so it
+// gets one counter and one alert class regardless of which deployment clipped
+// it.
 func AddScanSkipped() { atomic.AddInt64(&statScanSkipped, 1) }
 
 // AddRemoteScanFail records a remote scan sidecar failure (incremented by the

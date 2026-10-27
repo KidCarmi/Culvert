@@ -15,10 +15,15 @@ import (
 // Categories:
 //   - setup bootstrap (prefix /api/setup)
 //   - login/logout/status auth endpoints
-//   - TOTP enrolment (prefix /api/auth/totp)
 //   - IdP browser callbacks (prefix /auth/)
 //   - PAC file (Windows clients cannot send credentials)
 //   - non-/api/ paths (e.g. /healthz) bypass the API gate entirely
+//
+// SEC-PUBLICPATH-1 (RISK-033) removed a sixth category, "TOTP enrolment
+// (prefix /api/auth/totp)", and the two paths that pinned it. No such route
+// has ever been registered; the prefix only pre-authorised handlers nobody
+// had written yet, so the first enrol/disable endpoint would have been born
+// unauthenticated. The former path now sits in d0NonPublicAPISample.
 var d0PublicPaths = []string{
 	"/api/setup/status",
 	"/api/setup/complete",
@@ -26,8 +31,6 @@ var d0PublicPaths = []string{
 	"/api/auth/login",
 	"/api/auth/logout",
 	"/api/auth/status",
-	"/api/auth/totp/enroll", // prefix allowlist /api/auth/totp
-	"/api/auth/totp/verify", // prefix allowlist /api/auth/totp
 	"/auth/oidc/callback",
 	"/auth/saml/callback",
 	"/auth/select",
@@ -45,6 +48,10 @@ var d0PublicPaths = []string{
 // is NOT on the public allowlist (only /api/auth/login|logout|status are).
 var d0NonPublicAPISample = []string{
 	"/api/auth/users", // intentionally NOT public
+	// SEC-PUBLICPATH-1: the former /api/auth/totp public prefix. No such route
+	// is registered, so this asserts the negative directly: if one is ever
+	// added it must be authenticated (or its author must argue otherwise here).
+	"/api/auth/totp/enroll",
 	"/api/auth/change-password",
 	"/api/policy",
 	"/api/blocklist",
