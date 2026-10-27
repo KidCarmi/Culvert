@@ -134,22 +134,41 @@ its last-known-good cached document if that document is inside the staleness
 ceiling (see §1 and `docs/operator/idp-metadata-availability.md`). No state is
 written by the refusal, so there is no file to repair and no cache to clear.
 
-**Re-enabling a provider under the same id REVIVES the sessions it minted, and
-that matters for incident response.** The check is pure derived state — "is
-this profile stored and enabled *right now*" — with nothing durable recording
-that a cut happened, so a cookie refused during the disabled window
-authenticates again, with the subject and groups the provider asserted before
-the incident, as soon as the profile is back. Only cookies that have expired
-(8 hours by default) or whose holder completed a fresh login in the meantime
-are really gone.
+**Sessions cut in the meantime are not restored.** Re-enabling a disabled
+provider, or re-creating a deleted one under the same id, stamps the profile
+with a session cutoff (`sessionsNotBefore`, shown read-only on
+`GET /api/idp/{id}` and recorded in the `idp.update` / `idp.create` audit
+diff). A `ps_session` cookie naming that provider is honoured only if it was
+minted at or after the cutoff, so every session minted before the cut, an
+attacker's included, stays refused, and users log in again. This is what you
+want after disabling a **compromised** provider: re-enabling it does not hand
+the pre-incident sessions, or the groups they carried, back to anyone.
 
-So if you disabled a provider **because it was compromised**, treat
-re-enabling as restoring those sessions too. To cut them for good, either keep
-the provider disabled past the session TTL, re-create it under a **different
-id** (sessions naming the old id then resolve to nothing), or rotate the
-session signing key, which invalidates every proxy session on the appliance.
-Closing this properly needs a provider generation stamped into the cookie —
-tracked as register row **AU-65** in
+What does **not** move the cutoff, so does not log anyone out:
+
+- an ordinary edit of an enabled provider (rename, domains, priority, groups);
+- disabling a provider (that already refuses every one of its sessions);
+- the IdP becoming unreachable, failing to compile, or being retired at the
+  metadata staleness ceiling — degraded availability, not revocation (§1);
+- a provider nobody has re-enabled or re-created since the upgrade that added
+  the cutoff: it carries none, so its existing sessions keep working.
+
+Two limits worth knowing:
+
+- **Clock.** The cutoff is the Control Plane's wall clock at the moment of the
+  change, compared at one-second granularity with the time the session was
+  minted on whichever node served the login. If that node's clock is behind
+  the Control Plane's, fresh logins through the provider are refused until it
+  catches up. Fix the clock skew; disabling and re-enabling the provider again
+  restamps the cutoff from the current clock.
+- **Mixed versions.** A node running an older release ignores the cutoff and
+  revives the old sessions, as every release before this one did, and an older
+  Control Plane drops the field when it rewrites the profile. Finish a rolling
+  upgrade before relying on it during an incident. A session minted by an older
+  release carries no mint time, so a provider with a cutoff refuses it and the
+  user logs in again.
+
+The engineering record is register row **AU-65** in
 `roadmap/CHAOS-ENGINEERING-REVIEW.md` §50.6f.
 
 If you removed the **only** interactive provider and no local admin account
@@ -189,4 +208,13 @@ provider's profile still stored and enabled?" — for four operational reasons:
 The practical upshot: **restoring a backup that still contains the provider
 restores its ability to authenticate.** If you remove a provider as an incident
 response, make sure the change is captured in your configuration baseline, or a
-later rollback will quietly re-enable it.
+later rollback will quietly re-enable it. A restored `idp_profiles.json` also
+carries the session cutoff it was saved with, so restoring a copy taken before
+the incident brings back the pre-incident cutoff, and with it the sessions
+minted before the cut that have not yet expired; disable and re-enable the
+provider after such a restore to cut them again.
+
+The session cutoff in §4 is the one piece of state the lever keeps, and it
+keeps the properties above: it lives on the profile, so it is already durable
+and already carried to every node by the configuration snapshot, and it is
+compared on every request rather than latched.

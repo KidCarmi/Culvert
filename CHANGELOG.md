@@ -2183,6 +2183,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   prefix-stripped spelling, which let a cookie from a removed `saml:corp`
   profile ride an unrelated enabled `corp` profile (AU-70).
 
+  **Re-enabling or re-creating a provider under the same id no longer revives
+  the sessions it minted** (register row **AU-65**, §50.6f). With the check
+  being pure "is this profile enabled right now", disabling a compromised IdP
+  and re-enabling it within the session TTL brought every pre-incident cookie
+  back, with the groups it carried. A profile now holds a server-owned session
+  cutoff, `sessionsNotBefore`, stamped when the profile is created (including
+  a re-create under a deleted id) and when it goes from disabled to enabled.
+  Session cookies now carry their mint time (`iat`), and a cookie minted
+  before the cutoff is refused. Nothing else moves the cutoff: not an edit,
+  not a disable, and not an unreachable or retired IdP. Existing profiles
+  carry no cutoff, so the upgrade logs nobody out. The cutoff reaches every
+  node through the existing configuration snapshot. It is visible read-only
+  on `GET /api/idp/{id}` and in the `idp.update` / `idp.create` audit diff.
+  An older release ignores it.
+
   **Operator-visible:** `culvert_session_provider_revoked_total` (always
   emitted; counts *requests*, not sessions), `sessionProviderRevoked` on
   `GET /api/stats`, a banner on the Identity Providers panel, and a

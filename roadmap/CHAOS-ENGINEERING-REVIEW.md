@@ -1541,7 +1541,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP → **CLOSED** (CHAOS-49: `introspectCacheGet`/`introspectCacheSet`, 2-min TTL clamped to token expiry, plus `authProbeGate`). **Row was stale until CHAOS-76 §54.8 — it read as a live High gap for two months after the fix and is what drew that sweep into the domain.** Eviction fairness on this cache is a SEPARATE defect, AU-67 | ~~H~~ — | `auth_oidc_flow.go` `resolveByIntrospection`; gates `TestOIDCFlow_IntrospectionResultIsCached`, `..._UnreachableIdPIsGatedAndReported` |
 | AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. **§50 re-measured this and found it lands harder than recorded: the cookie carries the GROUPS the deleted provider asserted, and those go straight into `policyStore.Evaluate`, so group-scoped ALLOW rules kept matching for a removed federation — while arm 2 of the SAME function consults the live provider set on every request.** | GAP → **CLOSED** (CHAOS-88, §50: `sessionProviderLive` probes the live set per request in `resolveRequestAuth` arm 1; a refusal degrades to exactly "no cookie" and re-challenges through the existing no-credential dispatch; `culvert_session_provider_revoked_total`). Fixed as DERIVED STATE, not a `RevokeProvider` event — the admin handler is only one writer of the registry (`ReplaceAll` is also reached from config import, config-version rollback and the CP→DP snapshot), and the absence is already durable and already synced. **The "already synced" half was itself false for the LAST profile removed and is closed by AU-64/§50.6d — the row is CLOSED only with that fix.** | **H** | was: `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245`; now `session_provider_bounds.go` `sessionProviderLive`, gate `proxy.go` arm 1, tests `session_provider_bounds_chaos_test.go` + `session_provider_cluster_test.go` |
 | AU-63 | **There is no "revoke one federated subject" lever at all.** `RevokeUser` has exactly one caller — the LOCAL account-delete handler — so for an SSO subject the only options are cutting the whole federation (now effective, AU-2) or waiting out the session TTL. An operator responding to one compromised SSO account must therefore either terminate the federation for everyone or accept up to 8 h (7 d at a raised TTL) of continued access. | **NEW** (recorded, needs a product surface — a revocation primitive with no admin route is not a control) | M | `internal/session/session.go:155` `RevokeUser` (sole caller `ui_auth.go` user DELETE); no route in `uiRoutes`; see §50.7 |
-| AU-65 | **Re-enabling an IdP under the SAME id revives the sessions it minted.** AU-2's lever is pure derived state with no durable record that a cut happened, and §50.7 deliberately does not clear the cookie on refusal — so a cookie refused throughout the disabled window authenticates again, with the subject and groups asserted BEFORE the incident, as soon as the profile returns. Confirmed against the real resolver (live → disabled → re-enabled restores identity and groups). Reached by the ordinary incident sequence: disable a compromised IdP, investigate, re-enable within the 8 h default TTL. | **NEW** (recorded; runbook §4 corrected and the three workarounds named — keep it disabled past the TTL, re-create under a different id, or rotate the session signing key. The fix is a provider GENERATION stamped into the cookie at mint, which keeps all four §50.4 properties but changes the session AND profile schema with CP→DP and downgrade consequences — its own change. Agreement pinned by `TestChaos88_DocumentedResidual_SameIDRestoration`.) | M | `session_provider_bounds.go` `sessionProviderLive`; §50.6f; raised as P1 by Codex on PR #1564 |
+| AU-65 | **Re-enabling an IdP under the SAME id revived the sessions it minted, and so did re-creating it under that id.** AU-2's lever was pure derived state with no durable record that a cut happened, and §50.7 deliberately does not clear the cookie on refusal, so a cookie refused throughout the disabled window authenticated again, with the subject and groups asserted BEFORE the incident, as soon as the profile returned. Confirmed against the real resolver (live → disabled → re-enabled restored identity and groups). Reached by the ordinary incident sequence: disable a compromised IdP, investigate, re-enable within the 8 h default TTL. | NEW → **CLOSED** (`1a1e752b1`, §50.6f: a server-owned `IdPProfile.SessionsNotBefore` cutoff, stamped by `Upsert` on create and on a disabled→enabled transition, compared per request with the cookie's new `iat` in `ProfileAdmitsSession`. Zero means no cutoff, so no deploy-time logout. Reachability never moves it (§50.6c), and `ReplaceAll` carries it verbatim to every node. Residuals recorded in §50.6f: an older binary ignores the field and the old behaviour returns; second granularity; the cutoff is the CP's wall clock; a pre-incident backup restores the pre-incident cutoff. Gates `TestChaos88_SameIDReEnableRevivesNoSession`, `..._SameIDRecreateRevivesNoSession`, `..._ControlCutoffMovesOnlyOnCreateAndReEnable`, `..._SessionsNotBeforeIsServerOwned`, `..._SessionCutoffReachesTheDataPlaneVerbatim`.) | M | `session_provider_bounds.go` `sessionProviderLive` / `stampSessionsNotBefore`, `auth_idp.go` `ProfileAdmitsSession`, `session.go` `setSessionCookie`; tests `session_provider_cluster_test.go`; §50.6f; raised as P1 by Codex on PR #1564 |
 | AU-64 | **Deleting the LAST IdP profile on the CP reached no Data Plane node.** `idpRegistry.All()` returns a non-nil EMPTY slice for an empty registry; `ConfigSnapshot.IdPProfiles` carried `omitempty`, so the key never reached the wire; the DP decoded nil and `syncSnapshotIdPProfiles` skipped. The removed federation stayed stored, enabled and LIVE on every DP — AU-2's lever answered "enabled", its sessions kept their asserted groups for the full TTL, and NEW logins through it kept working; with `-idp-profiles-file` it survived restarts. All three DP intake paths (full snapshot, delta, last-known-good replay) share the one nil-skip. Removing a non-last profile always propagated, which is why it was invisible. **`TestConfigSurfaces_SnapshotWireWipe` exists for exactly this bug class and never looked: it iterates only `semNilSkipEmptyWipe` bindings, and the row was labelled `semValidatedSkip`.** | GAP → **CLOSED** (§50.6d: drop `omitempty`, relabel the row `semNilSkipEmptyWipe` + `WireWipeCapable`; the apply side was already nil-skip/empty-wipe, so no logic changed. `nil` still means ABSENT — redaction nils the field and a DP polls `GetConfig` before enrollment, so reading `null` as a clear would let an unauthenticated caller wipe every enrolling node's registry; pinned by two controls.) | **H** | `controlplane_snapshot.go` `IdPProfiles`, `config_surfaces.go` row `idp_profiles`, `syncSnapshotIdPProfiles`; tests `session_provider_cluster_test.go` (4) |
 | AU-66 | **A SAML-only deployment stopped reading its session cookies entirely when the provider went dark.** AU-2's fix keys arm 1 on `ProfileEnabled` (§50.6c: an unreachable IdP is degraded availability, not revocation) — but the gate ABOVE arm 1, `authRequired`, keys on `HasEnabledInteractiveProvider`, which is enabled AND **live**. With no local account, no legacy provider and no credential-capable profile, a CHAOS-87 staleness retirement darkens an ENABLED profile, `authRequired` goes false and the whole Stage-1 block is skipped: the session this appliance had decided to KEEP is never read. Measured `proceed=true identity="" groups=[]` — no revocation counter, no log, and identity/group-scoped ALLOW rules silently stop matching. Worse than the revocation §50.6c forbids, because a revocation is decided and counted and this is skipped. Every §50 gate missed it: `c72Setup` installs a local admin, which holds `credCapable` true. | GAP → **CLOSED** (§50.6g: a SECOND predicate, `HasEnabledInteractiveProfile` — enabled, not live — opens arm 1 only, via `sessionCapable`; arms 2 and 3 stay on `authRequired`, so the live-gated `ssoCapable` and the no-backend inert guard are untouched and no unfulfillable challenge or hot-path log becomes reachable. Both wrong fixes measured failing.) | **H** | `proxy.go` `sessionCapable`, `auth_idp.go` `HasEnabledInteractiveProfile`; tests `session_provider_availability_test.go` (4); raised as P2 by Codex on PR #1564 |
 | AU-70 | **A session from a DELETED or DISABLED profile survived through an unrelated profile whose id was its prefix-stripped spelling.** `sessionProviderLive` fell back to `ProfileEnabled(stripIdPPrefix(pvd))`, and profile ids are free-form, so a cookie from `saml:corp` resolved through `corp` after `saml:corp` was removed: its identity and groups outlived the revocation. Found by Codex (§50.6h) | H | `session_provider_bounds.go` `sessionProviderLive` | **CLOSED.** Exact `ProfileEnabled(pvd)` only. The minter wall pins that legitimate cookies carry the bare id or `"local"`, so this costs no availability. Gates `TestChaos88_APrefixedProfileIDCannotRideAnotherProfile` and `TestChaos88_OnlyTheExactProfileIDResolves` fail with the fallback restored |
@@ -14427,7 +14427,7 @@ code, and to nothing else. *A guard that is correct and a guard that is
 VERIFIABLE are different properties, and on this path the repo's convention
 requires both.*
 
-### 50.6f RESIDUAL (AU-65) — re-enabling a provider under the SAME id revives the sessions it minted
+### 50.6f Re-enabling a provider under the SAME id revived the sessions it minted (AU-65, CLOSED)
 
 Raised as a **P1** by the Codex reviewer on this PR and **confirmed against the
 real resolver** before being acted on:
@@ -14454,28 +14454,104 @@ compromised provider, including an attacker's, becomes valid again.
 
 **The runbook asserted the opposite** ("Sessions cut in the meantime are **not**
 restored"), which is the CHAOS-70 round-2 class: a recovery step that misleads
-mid-incident. That sentence is corrected, with the three workarounds available
-today — keep it disabled past the TTL, re-create under a *different* id, or
-rotate the session signing key.
+mid-incident. The sentence was first corrected to describe the residual and
+name three workarounds. With the fix below it is TRUE again, and §4 of
+`docs/operator/identity-provider-revocation.md` says so and no longer needs
+the workarounds.
 
-**Not fixed here, and the reason is scope, not disagreement.** The fix is a
-provider GENERATION stamped into the cookie at mint and compared per request,
-bumped by delete/re-create and by a disable→enable transition. That shape is
-attractive precisely because it keeps all four of §50.4's properties —
-`IdPProfile` is already durable and already carried fleet-wide by
-`ConfigSnapshot.IdPProfiles`, so it needs no new persistence and no new gossip,
-and the comparison stays evaluated rather than latched. But it changes the
-session cookie schema AND the profile schema, with CP→DP and downgrade
-consequences (a cookie minted before the field exists must be admitted, or the
-deploy logs everyone out), and it reopens a predicate the owner deliberately
-narrowed on 2026-10-13 (§50.6c). That is its own change with its own review,
-not a rider on this one.
+**Fixed in `1a1e752b1`: a session cutoff on the profile, a mint second on the cookie.**
 
-**Pinned, not left to prose.** `TestChaos88_DocumentedResidual_SameIDRestoration`
-asserts the behaviour the runbook now describes, in the CHAOS-65 `ocspCoverage`
-shape: it pins the AGREEMENT between the claim and the code, not the gap. When
-generations land, that test fails, and whoever implements them updates the
-runbook in the same change instead of leaving a stale promise behind.
+- `IdPProfile.SessionsNotBefore` (Unix seconds, `omitempty`) is **server-owned**.
+  `Upsert` derives it from the STORED profile under the registry lock
+  (`stampSessionsNotBefore`). It is set to now on a create (which includes a
+  re-create under a deleted id through `PUT /api/idp/{id}`) and on a
+  disabled→enabled transition. Every other write keeps the stored value. A
+  request body cannot set it, because "send 0" would otherwise be a
+  one-request undo of a revocation, and the GET projection echoes it back on
+  every edit.
+- `Session.Iat` (Unix seconds, `omitempty`) is stamped by `setSessionCookie`.
+- `sessionProviderLive(pvd, iat)` asks `IdPRegistry.ProfileAdmitsSession`:
+  is the profile stored, enabled, AND was the cookie minted at or after the
+  cutoff? That is one allocation-free pass under the read lock, per request.
+
+**It keeps §50.4's four properties.** It needs no new persistence, because the
+registry file already holds the profile. It needs no new gossip, because
+`ConfigSnapshot.IdPProfiles` already carries the profile and `ReplaceAll`
+stores it verbatim, so a Data Plane never restamps its own clock (and a fresh
+node's first sync cannot log everyone out). It cannot be evicted. And it is
+evaluated rather than latched, since both halves are read from the stored
+profile on every request.
+
+**It keeps §50.6c.** Reachability never runs `Upsert`. A compile failure or a
+CHAOS-87 staleness retirement darkens a provider without moving its cutoff,
+and `TestChaos88_ControlCutoffMovesOnlyOnCreateAndReEnable` asserts that the
+pre-upgrade cookie survives a retirement with the counter at zero.
+
+**No deploy-time logout and no breaking schema change.** Zero means no cutoff,
+and every profile stored before this change carries zero. Both new keys are
+`omitempty` and additive. Old cookies decode with `Iat == 0`, and the MAC
+covers the encoded payload, not the struct. A cookie with no `iat` is admitted
+only by a zero-cutoff profile. Under a non-zero cutoff it is refused, because
+a cookie that cannot say when it was minted cannot prove it postdates the cut.
+That costs one re-login, and only for a provider an operator has re-enabled or
+re-created since the upgrade.
+
+**Why not the provider GENERATION this section first proposed.** A counter
+stamped into the cookie would also close the hole. But it needs a monotonic
+per-id counter that survives delete and re-create, which means durable state
+outside the profile, because the profile itself is what gets deleted. A
+timestamp gets the same ordering from the clock the cookie already uses for
+`exp`, and needs nothing that outlives the profile.
+
+**Residuals, recorded rather than closed:**
+
+- **Downgrade / mixed versions.** An older binary ignores both keys, so on
+  that node the old residual returns: a re-enabled profile revives
+  pre-incident sessions. An older Control Plane rewriting the registry drops
+  the cutoff entirely (it persists only the fields it knows). A cookie minted
+  by an older node carries no `iat`, so after a cut it is refused by an
+  upgraded node until its holder logs in again. Finish the rolling upgrade
+  before relying on the lever.
+- **One-second granularity**, the cookie's own (`exp` is seconds too). A
+  cookie minted in the same second as the cutoff is admitted. While disabled
+  a profile has no live provider and mints nothing, so the only pre-cut
+  cookie that can share the cutoff's second is one minted in the same second
+  as a disable→re-enable (or delete→re-create) cycle completed inside that
+  second.
+- **Wall clock across nodes.** The cutoff is the Control Plane's wall clock.
+  The `iat` is the wall clock of whichever node served the login. A node
+  running behind the CP refuses fresh logins through that provider until its
+  clock passes the cutoff (fail-closed, an availability cost). Disabling and
+  re-enabling restamps the cutoff from the current clock.
+- **Restoring a pre-incident registry file** (backup restore) restores the
+  pre-incident cutoff. This is the same class as the runbook's existing §5
+  note that a restore restores a deleted provider, and it is now stated
+  there.
+- **Repointing an enabled profile at a different IdP** (an issuer or metadata
+  edit) keeps its cutoff and therefore its sessions. That is unchanged
+  behaviour, outside this finding.
+
+**Gates** (`session_provider_cluster_test.go`). They drive the operator's real
+lever, `apiIdPItem` PUT/DELETE, because the stamp lives on that write path and
+assigning registry fields would skip it. The replaced residual pin,
+`TestChaos88_DocumentedResidual_SameIDRestoration`, promised to fail "when a
+provider generation is stamped". It assigned `idpRegistry.profiles` directly,
+and when measured it STAYED GREEN with this fix in place. It could never have
+caught the change it existed to catch.
+
+| Gate | Pins |
+|---|---|
+| `TestChaos88_SameIDReEnableRevivesNoSession` | disable → re-enable through the handler: the pre-incident cookie stays refused, groups included, and is counted. A legacy no-`iat` cookie is refused. A body that tries to lower the cutoff is ignored. A login minted by the real `setSessionCookie` after the re-enable authenticates with its groups |
+| `TestChaos88_SameIDRecreateRevivesNoSession` | delete → PUT re-create under the same id refuses the old incarnation's cookie. A fresh login works |
+| `TestChaos88_ControlCutoffMovesOnlyOnCreateAndReEnable` | the negative control: an untouched zero-cutoff profile keeps admitting old and no-`iat` cookies while another profile is cycled. An edit does not move the cutoff. A staleness retirement does not move it and revokes nothing |
+| `TestChaos88_SessionsNotBeforeIsServerOwned` | the stamp table: create (enabled or not) and re-enable stamp, while edit, disable and disabled-edit keep the stored value whatever the body carried |
+| `TestChaos88_SessionCutoffReachesTheDataPlaneVerbatim` | the CP's stamp survives the real snapshot encode/decode and is stored verbatim by the DP, which refuses an older cookie and admits a newer one |
+
+**Mutations verified**, each caught by at least one gate: no stamp at all
+(re-enable, re-create, table); cutoff ignored at admission (re-enable,
+re-create, DP wire); body value honoured on a non-transition write (control,
+table); minter stamps no `iat` (re-enable); no stamp on create (re-create,
+table).
 
 ### 50.6g The SAML-only deployment never read the cookie at all — the fix's own predicate disagreed with the gate above it (AU-66)
 
