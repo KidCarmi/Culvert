@@ -275,19 +275,19 @@ func TestChaos88_ControlAbsentCookieChargesNothing(t *testing.T) {
 
 // ── REPRESENTATION ──────────────────────────────────────────────────────────
 
-// This codebase carries TWO representations of one provider identity on
-// purpose: the interactive providers stamp the BARE profile id into
-// `Identity.Provider` (`ExchangeCode`, `extractSAMLIdentity`) while `Name()`
-// returns `oidc:<id>` / `saml:<id>` — which is why `stripIdPPrefix` exists at
-// all. A fail-closed bound applied to the wrong representation is a
-// customer-visible outage rather than a tightening (CHAOS-69's round-1 IDN
-// regression), so both forms must resolve while a removed provider is refused
-// in EITHER spelling.
-func TestChaos88_BothProviderRepresentationsResolve(t *testing.T) {
+// A `pvd` is a LITERAL profile id: every minter stamps the bare id (the wall
+// below), so the predicate matches it exactly and never through
+// stripIdPPrefix. A prefixed spelling of a live id is refused because no
+// legitimate cookie carries one, and a removed provider is refused in every
+// spelling.
+func TestChaos88_OnlyTheExactProfileIDResolves(t *testing.T) {
 	c72Setup(t, "live")
-	for _, spelling := range []string{"corp", "saml:corp", "oidc:corp", "ldap:corp"} {
-		if !sessionProviderLive(spelling) {
-			t.Errorf("live provider spelled %q was refused", spelling)
+	if !sessionProviderLive("corp") {
+		t.Error("the live provider's own id was refused")
+	}
+	for _, spelling := range []string{"saml:corp", "oidc:corp", "ldap:corp"} {
+		if sessionProviderLive(spelling) {
+			t.Errorf("%q was admitted through the unrelated profile \"corp\"", spelling)
 		}
 	}
 	c72Setup(t, "deleted")
@@ -298,7 +298,32 @@ func TestChaos88_BothProviderRepresentationsResolve(t *testing.T) {
 	}
 }
 
-// Probing both spellings must never WIDEN: a bare id that names nothing live
+// AU-69 (Codex). Profile ids are free-form, so `corp` and `saml:corp` can both
+// be configured. A cookie minted by `saml:corp` carries exactly that id. Once
+// `saml:corp` is deleted or disabled, that cookie must be refused even while the
+// unrelated `corp` stays enabled. Stripping the prefix found `corp` and kept
+// the revoked session's identity and groups.
+func TestChaos88_APrefixedProfileIDCannotRideAnotherProfile(t *testing.T) {
+	c72Setup(t, "live") // "corp", enabled
+	prefixed := &IdPProfile{ID: "saml:corp", Type: IdPTypeSAML, Enabled: true, Name: "Corp SAML"}
+	idpRegistry.profiles = append(idpRegistry.profiles, prefixed)
+	if !sessionProviderLive("saml:corp") {
+		t.Fatal("setup: the enabled profile \"saml:corp\" does not own its own cookies")
+	}
+	prefixed.Enabled = false // disabled: still stored, authenticates nobody
+	if sessionProviderLive("saml:corp") {
+		t.Fatal("a cookie from the DISABLED profile \"saml:corp\" was admitted through the unrelated profile \"corp\"")
+	}
+	idpRegistry.profiles = idpRegistry.profiles[:1] // deleted
+	if sessionProviderLive("saml:corp") {
+		t.Fatal("a cookie from the DELETED profile \"saml:corp\" was admitted through the unrelated profile \"corp\"")
+	}
+	if !sessionProviderLive("corp") {
+		t.Fatal("control: the unrelated enabled profile lost its own sessions")
+	}
+}
+
+// The predicate must never WIDEN: a bare id that names nothing live
 // stays refused however it is prefixed, and a prefix alone is not a provider.
 func TestChaos88_ControlPrefixAloneIsNotAProvider(t *testing.T) {
 	c72Setup(t, "live")
