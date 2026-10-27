@@ -10,6 +10,7 @@ package threatfeed
 // must survive local syncs too (Codex review on PR #587).
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -170,7 +171,7 @@ func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
 	tf := New()
 	tf.SetEnabledForTest(true) // publishes the read view; a bare field poke would leave it stale
 	urls, domains := map[string]entry{}, map[string]entry{}
-	replaced, failure := tf.fetchFeedInto(empty.URL, sourceURLhaus, "URLhaus", urls, domains)
+	replaced, failure := tf.fetchFeedInto(context.Background(), empty.URL, sourceURLhaus, "URLhaus", urls, domains)
 	if replaced {
 		t.Fatal("zero-entry fetch reported replaced=true; previous entries would be wiped")
 	}
@@ -182,7 +183,7 @@ func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
 		fmt.Fprintln(w, "http://evil.example/mal.exe")
 	}))
 	defer full.Close()
-	replaced, failure = tf.fetchFeedInto(full.URL, sourceURLhaus, "URLhaus", urls, domains)
+	replaced, failure = tf.fetchFeedInto(context.Background(), full.URL, sourceURLhaus, "URLhaus", urls, domains)
 	if !replaced || failure != "" {
 		t.Fatalf("non-empty fetch = (replaced=%v, failure=%q), want (true, \"\")", replaced, failure)
 	}
@@ -281,7 +282,7 @@ func TestFetchFeedInto_TruncatedNonZeroBodyReplaces_DocumentedResidual(t *testin
 	tf := seedFeed() // 1 urlhaus URL + 2 openphish URLs seeded
 
 	newURLs, newDomains := map[string]entry{}, map[string]entry{}
-	replaced, failure := tf.fetchFeedInto(tiny.URL, sourceURLhaus, "URLhaus", newURLs, newDomains)
+	replaced, failure := tf.fetchFeedInto(context.Background(), tiny.URL, sourceURLhaus, "URLhaus", newURLs, newDomains)
 	if !replaced || failure != "" {
 		t.Fatalf("truncated-but-nonzero fetch = (replaced=%v, failure=%q); the documented residual expects (true, \"\") — a magnitude floor was added, update this pin", replaced, failure)
 	}

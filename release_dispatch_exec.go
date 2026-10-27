@@ -168,7 +168,12 @@ type DispatchExecutor struct {
 	audit        func(DispatchAuditEvent)
 	newOpID      func() string
 	applyRetries int           // extra Apply attempts on TRANSIENT error (same key reused)
+	applyBackoff time.Duration // first delay between Apply attempts; doubles per attempt
 	maxWatch     time.Duration // WaitOp ceiling when ctx has no deadline (§7)
+
+	// applyWait is the interruptible delay between Apply attempts (a seam, so
+	// the backoff gate asserts the schedule without spending it).
+	applyWait func(ctx context.Context, d time.Duration) error
 
 	mu       sync.Mutex
 	inflight bool
@@ -182,7 +187,35 @@ func NewDispatchExecutor(client AgentClient, cfg DispatchConfig, audit func(Disp
 		audit:        audit,
 		newOpID:      newDispatchOpID,
 		applyRetries: 2,
+		applyBackoff: dispatchApplyBackoffBase,
 		maxWatch:     dispatchDefaultMaxWatch,
+		applyWait:    waitInterruptible,
+	}
+}
+
+// dispatchApplyBackoffBase is the delay before the SECOND Apply attempt,
+// doubling for each further one — so the default applyRetries of 2 waits 2s
+// then 4s, bounded at 6s of added latency against a hard-down agent.
+//
+// Deterministic, with no jitter, for the reason uploadRetryBackoff records:
+// an executor is single-flight against ONE agent, so there is no shared origin
+// for a fleet to stampede, and determinism keeps the schedule exactly testable.
+const dispatchApplyBackoffBase = 2 * time.Second
+
+// waitInterruptible sleeps for d unless ctx is cancelled first, in which case it
+// returns ctx's error. A bare time.Sleep here would make a shutdown wait out the
+// backoff of a dispatch that is already doomed.
+func waitInterruptible(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }
 
@@ -421,11 +454,31 @@ func (e *DispatchExecutor) classifyTerminal(ctx context.Context, plan *DispatchP
 // across attempts and the agent's idempotency contract dedupes a repeated key to
 // the same op — so a retry after a request that actually reached the agent
 // returns that op rather than starting a second upgrade.
+//
+// CHAOS-93 RT-3: the attempts are spaced. They used to run back to back with no
+// sleep, no backoff and no jitter, which made the retry budget worthless against
+// the fault it exists for. A restarting maintenance agent refuses the connection
+// in microseconds, so all three attempts burned in well under a millisecond and
+// the dispatch landed TerminalFailedNeedsAttn — an operator-visible, manually
+// re-dispatched failure — for an agent that was serving again a second later.
+// "Three attempts" has to mean three attempts spread across the outage, not
+// three syscalls. WaitOp in this file already got this right with a
+// consecutive-error budget on a ticker; this is the same idea on the Apply.
 func (e *DispatchExecutor) applyWithRetry(ctx context.Context, req UpgradeApplyRequest) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= e.applyRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
+		}
+		if attempt > 0 {
+			// Bounded exponential: base, base*2, … Interruptible, so a
+			// shutdown does not wait out the backoff of a doomed dispatch.
+			// A cancellation during the backoff surfaces as the context error,
+			// exactly as the loop-top check already does — a shutdown must not
+			// be reported to the operator as an agent fault.
+			if err := e.waitBeforeAttempt(ctx, attempt); err != nil {
+				return "", err
+			}
 		}
 		opID, err := e.client.Apply(ctx, req) // req.IdempotencyKey constant across attempts
 		if err == nil {
@@ -437,6 +490,25 @@ func (e *DispatchExecutor) applyWithRetry(ctx context.Context, req UpgradeApplyR
 		}
 	}
 	return "", lastErr
+}
+
+// waitBeforeAttempt delays before retry number `attempt` (1-based among the
+// retries): applyBackoff doubled per attempt, capped by the exponent so a
+// misconfigured base cannot overflow.
+func (e *DispatchExecutor) waitBeforeAttempt(ctx context.Context, attempt int) error {
+	base := e.applyBackoff
+	if base <= 0 {
+		return nil // explicitly disabled (tests that assert attempt counts only)
+	}
+	shift := attempt - 1
+	if shift > 10 {
+		shift = 10
+	}
+	wait := e.applyWait
+	if wait == nil {
+		wait = waitInterruptible
+	}
+	return wait(ctx, base<<shift)
 }
 
 // verifyRunning reports whether any running digest (reverse-rewritten to the

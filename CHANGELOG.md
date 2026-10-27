@@ -361,6 +361,55 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The alert webhook retry queue lost its unattempted entries on an ordinary
+  restart, and lost them silently (CHAOS-93 RT-1).** A retry pass moved every due
+  entry out of the queue, persisted the truncated queue, and only then delivered
+  them one at a time at up to 5s each — so for the length of that pass the
+  not-yet-attempted alerts existed only in memory, absent from both the queue and
+  the file. A `SIGTERM` on a config reload, the lifecycle context cancelled at
+  shutdown while the pass ran on, an OOM or a node reboot therefore discarded all
+  of them, and neither `retryExhaustedTotal` nor `retryDroppedTotal` nor the
+  delivery history nor the log recorded it: the queue depth simply dropped, which
+  reads as *drained* rather than *discarded*. Against a blackholing webhook the
+  window was the whole pass — up to 500 × 5s ≈ 42 minutes — and the loss up to
+  499 alerts, security events among them. An entry now stays in the durable queue
+  across its own attempt and leaves only once that attempt has resolved; a crash
+  mid-attempt leaves it queued, retried after a 60s lease with its attempt count
+  intact, because an attempt that did not complete is not charged.
+  A delivery interrupted by shutdown is not charged as an attempt: a cancelled
+  POST returns the same failure a badly-answering webhook does, so without that
+  distinction a shutdown during an entry's last attempt removed the alert and
+  counted it "exhausted after 3 attempts" though the webhook was never reached.
+- **A retry pass could not be interrupted or bounded (CHAOS-93 RT-2).** The pass
+  took no context and each delivery built its own from `context.Background()`, so
+  the loop only checked for shutdown *between* passes and a full queue against a
+  blackholing webhook occupied it for ~42 minutes. The pass is now cancellable
+  and bounded; the bound caps a pass's length, not recovery, since the next tick
+  resumes from the durable queue. Delivery throughput is unchanged.
+- **Every webhook re-delivery was recorded as attempt 1 (CHAOS-93 RT-5).** The
+  retry pass delivered through the first-attempt entry point, so the delivery
+  history the admin surface renders could not distinguish a third attempt from a
+  first. It now records the entry's real attempt number.
+- **A release dispatch's Apply retries ran back to back with no delay
+  (CHAOS-93 RT-3).** The three attempts existed for one fault — a maintenance
+  agent that is briefly unreachable, nearly always because it is restarting — and
+  that fault refuses the connection in microseconds, so the whole retry budget
+  burned in well under a millisecond and the dispatch terminated
+  `FAILED_NEEDS_ATTN`, needing a manual re-dispatch, for an agent that was
+  serving again a second later. The attempts are now spaced by bounded
+  exponential backoff (2s then 4s), interruptible so a shutdown does not sit out
+  the backoff of a doomed dispatch, and a cancellation is reported as such rather
+  than as an agent fault.
+- **The threat-feed and category-feed rounds ignored the scheduler's shutdown
+  context (CHAOS-93 RT-4).** Both declared a context-taking round function and
+  dropped the parameter, fetching on `context.Background()` instead, so a stalled
+  feed origin could not be interrupted by `SIGTERM` and the round ran on for up
+  to its 60s HTTP timeout past the point where the process was told to stop. The
+  UT1 category round then went on to issue a 50+ MB bulk write into a store that
+  shutdown was closing; it now checks for cancellation immediately before that
+  write, is charged as a failed round so the health plane sees it, and leaves the
+  last-good category data untouched. The admin "sync now" action deliberately
+  still runs to completion rather than being bound to the request.
 - **`README.md` documented the opposite of CDR's fail-closed guarantee.** The
   `-cdr-fail-mode` row still said that when no Sluice instance is available at
   all "CDR is skipped and the file passes through in either mode" — the exact
