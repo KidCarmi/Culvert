@@ -383,22 +383,34 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 // window: the pre-change handler emitted `"logs": null` for an out-of-range
 // offset and for an empty ring, and that wire shape is preserved.
 func filterLogPage(all []LogEntry, fromMs, toMs int64, offset, limit int, pred func(*LogEntry) bool) (page []LogEntry, total int) {
-	// CWE-770. `limit` originates in a client query parameter, and it now sizes
-	// an allocation, so the bound is applied HERE, at the allocation, and not
-	// left to the caller: the same reason the SSRF guards sit inline at their
-	// dial sites rather than behind a wrapper (conventions.md, "Security-
-	// sensitive I/O"). It also makes the helper self-bounding — the fill
-	// condition below is `len(page) < limit`, so an unclamped limit would grow
-	// the slice past the reservation. parseLogQueryWindow already clamps to the
-	// same constant, so this is a no-op for every current caller. A zero or
-	// negative limit reserves nothing and pages nothing, while `total` is still
+	// CWE-770, and the shape of this guard is deliberate (CodeQL "Slice memory
+	// allocation with excessive size value", alert 425). `limit` arrives from
+	// the client's `limit` query parameter and sizes the reservation below, so
+	// the bound is checked HERE rather than trusted from the caller — the same
+	// reason the SSRF guards sit inline at their dial sites instead of behind a
+	// wrapper (conventions.md, "Security-sensitive I/O and logging").
+	//
+	// The value is READ ONLY INSIDE the check, so the allocation is reached
+	// only on a path where the bound is known to hold. Clamping instead
+	// (`if limit > max { limit = max }`) leaves the allocation after the
+	// control-flow merge, where the bound no longer dominates it — that was the
+	// first attempt at this fix and CodeQL rejected it, correctly: on the merged
+	// path nothing proves which branch supplied the value.
+	//
+	// parseLogQueryWindow already clamps to this same constant, so every
+	// current caller takes the checked branch with its value unchanged. A zero
+	// or negative limit reserves nothing and pages nothing; `total` is still
 	// counted in full.
-	if limit > apiLogsMaxLimit {
-		limit = apiLogsMaxLimit
+	pageLimit := apiLogsMaxLimit
+	if limit <= apiLogsMaxLimit {
+		pageLimit = limit
 	}
 
-	// At most `limit` entries can be paged out, and at most len(all)-offset can
-	// remain after the offset, so one allocation of that size is always enough.
+	// Reserve once, for the whole page. The cap is bounded by the page limit
+	// and by the snapshot's own length; `offset` is deliberately NOT in this
+	// expression, even though it would shave the reservation when paging past
+	// the end of the data, because it is the other client-controlled value and
+	// keeping it out of the allocation keeps the bound to one guarded input.
 	//
 	// Trade-off, stated rather than engineered around: this sizes the page by
 	// the REQUESTED limit, where the pre-change shape grew with the number of
@@ -409,7 +421,7 @@ func filterLogPage(all []LogEntry, fromMs, toMs int64, offset, limit int, pred f
 	// 7.5 MB of doubling-growth garbage on the poll every open dashboard tab
 	// issues every 3 s. Sizing by matches would mean growing the slice again,
 	// which is the cost being removed; it is not worth the complexity.
-	if pageCap := min(limit, len(all)-offset); pageCap > 0 {
+	if pageCap := min(pageLimit, len(all)); pageCap > 0 {
 		page = make([]LogEntry, 0, pageCap)
 	}
 	for i := range all {
@@ -423,7 +435,7 @@ func filterLogPage(all []LogEntry, fromMs, toMs int64, offset, limit int, pred f
 		if !pred(e) {
 			continue
 		}
-		if total >= offset && len(page) < limit {
+		if total >= offset && len(page) < pageLimit {
 			page = append(page, *e)
 		}
 		total++
