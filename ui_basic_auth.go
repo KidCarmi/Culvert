@@ -31,10 +31,13 @@ package main
 //     compliance record.
 //
 // THE RULE. Every Basic credential on the admin plane goes through
-// verifyUIBasicAuth, which applies the SAME controls as the login handler and
-// in the same order. Do not call cfg.VerifyUIUser from a request path again —
-// verifyUIBasicAuth is the only admin-plane caller, and
-// TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller walls that.
+// checkUIBasicAuth, which applies the SAME controls as the login handler and
+// in the same order. A credential SUBMISSION enters through verifyUIBasicAuth;
+// the SSE stream's liveness RE-CHECK enters through revalidateUIBasicAuth,
+// which refuses identically but records nothing (SEC-BASICAUTH-5). Do not call
+// cfg.VerifyUIUser from a request path again — checkUIBasicAuth is the only
+// admin-plane caller, and TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller
+// walls that.
 //
 // TOTP IS A REFUSAL, NOT A PROMPT. The Basic scheme carries exactly one
 // credential, so an enrolled second factor cannot be satisfied over it. The
@@ -64,16 +67,81 @@ package main
 import (
 	"fmt"
 	"net/http"
+
+	"github.com/KidCarmi/Culvert/internal/lockout"
 )
 
-// verifyUIBasicAuth verifies HTTP Basic credentials for the admin plane under
-// the full login-path control set. It returns the caller's role and true only
-// when the credential is valid AND the account may use this scheme.
+// basicAuthIntent distinguishes a credential SUBMISSION from a liveness
+// RE-CHECK of a credential this process has already admitted (SEC-BASICAUTH-5,
+// RISK-032).
 //
-// It never writes to the ResponseWriter: the three call sites answer
-// differently (401, a loggedIn:false document, a dropped SSE connection), so
-// the response stays theirs. Callers MUST treat false as unauthenticated.
+// It decides what the check WRITES, never what it REFUSES. Both intents apply
+// every refusal — the oversize bound, the lockout Check before any bcrypt, the
+// password verification and the TOTP posture. Only a submission reserves the
+// per-IP failure budget and records against the two-tier lockout.
+type basicAuthIntent int
+
+const (
+	// basicAuthSubmission is a caller presenting credentials to be admitted:
+	// the middleware fallback and the public status endpoint. This is the
+	// guessing surface, so it reserves the per-IP budget atomically up front
+	// and records every success and failure.
+	basicAuthSubmission basicAuthIntent = iota
+	// basicAuthLiveness is a re-check of credentials captured when a
+	// long-lived connection was ESTABLISHED. It reserves nothing and records
+	// nothing against the lockout. See revalidateUIBasicAuth.
+	basicAuthLiveness
+)
+
+// verifyUIBasicAuth verifies an admin-plane HTTP Basic credential SUBMISSION
+// under the full login-path control set. It returns the caller's role and true
+// only when the credential is valid AND the account may use this scheme.
+//
+// It never writes to the ResponseWriter: the call sites answer differently
+// (401, a loggedIn:false document), so the response stays theirs. Callers MUST
+// treat false as unauthenticated.
 func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
+	return checkUIBasicAuth(r, user, pass, basicAuthSubmission)
+}
+
+// revalidateUIBasicAuth re-checks credentials that were already verified when a
+// long-lived connection (the SSE stream) was established. It is NOT an attempt
+// (SEC-BASICAUTH-5, RISK-032): it draws nothing from the per-IP failure budget
+// and records neither a failure nor a success against the two-tier lockout.
+//
+// It is not a relaxation. Every refusal still applies: the lockout Check still
+// runs first, so a locked pair costs no bcrypt and its live streams are cut;
+// the credential is still verified, so a rotated password or a deleted user
+// still ends the stream; and a TOTP-enrolled account is still refused.
+//
+// Recording a re-check was wrong in both directions. The headers are captured
+// when the stream opens and cannot change, so after a password rotation every
+// open stream replays the OLD password once per interval: recording those as
+// failures locks the administrator out of the pair at the moment they rotated
+// the credential. Recording a SUCCESS is the more serious half: RecordSuccess
+// deletes the tier-1 pair entry and refreshes the tier-2 trusted-IP grant, so
+// one legitimate stream held open from a shared egress (a NAT, a CGNAT range,
+// an L7 proxy with no trusted_proxy_cidrs) cleared a co-located attacker's
+// failure count once per interval — a weakening of RISK-012 itself. Drawing on
+// the per-IP budget was the same mistake against the budget: open streams
+// spent the allowance that bounds real guesses.
+//
+// Neither loss costs a bound, because this path cannot be a guessing oracle:
+// reaching it requires an established stream, establishing one requires
+// passing requireRole through the SUBMISSION path, and the credential is then
+// fixed for the life of the connection.
+func revalidateUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
+	return checkUIBasicAuth(r, user, pass, basicAuthLiveness)
+}
+
+// checkUIBasicAuth is THE ONE PLACE an admin-plane Basic credential is
+// verified — the single cfg.VerifyUIUser call site behind both wrappers. Call
+// it only through verifyUIBasicAuth or revalidateUIBasicAuth, so the argument
+// that decides whether a security counter is written is a name at the call
+// site, never a positional value.
+func checkUIBasicAuth(r *http.Request, user, pass string, intent basicAuthIntent) (UIRole, bool) {
+	submission := intent == basicAuthSubmission
+
 	// CHAOS-63: bound the name before it can reach the lockout maps or the
 	// audit ring. Basic is reachable unauthenticated on the public
 	// /api/auth/status, so an unbounded name here is the same unauthenticated
@@ -90,10 +158,10 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 	// every admin.
 	clientIP := realClientIP(r)
 
-	// Per-IP FAILURE budget, RESERVED before anything retains state or costs
-	// a bcrypt. The two-tier lockout below is keyed by (IP, username), so a
-	// caller rotating a fresh username per request never trips it, and
-	// apiLimiter gates only mutating methods — without this, GET
+	// Per-IP FAILURE budget (SUBMISSION ONLY), RESERVED before anything
+	// retains state or costs a bcrypt. The two-tier lockout below is keyed by
+	// (IP, username), so a caller rotating a fresh username per request never
+	// trips it, and apiLimiter gates only mutating methods — without this, GET
 	// /api/auth/status would let one unauthenticated client mint unbounded
 	// lockout-map entries and durable auth.basic.fail audit lines. The unit
 	// is claimed atomically up front (a probe-then-charge pair lets a
@@ -101,24 +169,41 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 	// REFUNDED on success and on a lockout refusal, so only outcomes that cost
 	// a bcrypt without granting access are charged — a correctly-configured
 	// script is never throttled. The refusal itself is silent (auditing it
-	// would rebuild the write amplifier this bounds).
-	resv, reserved := basicAuthFailLimiter.Reserve(clientIP)
-	if !reserved {
-		return "", false
+	// would rebuild the write amplifier this bounds). A liveness re-check is
+	// not a guess and must not spend the allowance real guesses are bounded
+	// by (SEC-BASICAUTH-5).
+	var resv lockout.Reservation
+	if submission {
+		var reserved bool
+		if resv, reserved = basicAuthFailLimiter.Reserve(clientIP); !reserved {
+			return "", false
+		}
 	}
 
 	// Two-tier lockout BEFORE any credential verification — same order as
 	// apiAuthLogin, and the reason the ~80 ms bcrypt is no longer reachable at
 	// an unbounded rate. A locked refusal costs no bcrypt and retains
-	// nothing, so it does not consume the failure budget.
+	// nothing, so it does not consume the failure budget. Applies on BOTH
+	// intents: a liveness re-check is exempt from recording, never from being
+	// refused, so a locked pair has its live streams cut.
 	if locked, _ := loginLimiter.Check(clientIP, user); locked {
-		basicAuthFailLimiter.Refund(resv)
+		if submission {
+			basicAuthFailLimiter.Refund(resv)
+		}
 		return "", false
 	}
 
 	role, ok := cfg.VerifyUIUser(user, pass)
 	if !ok {
-		// The reserved unit stays charged.
+		// SUBMISSION ONLY (SEC-BASICAUTH-5): a re-check replays a credential
+		// that was valid when the stream opened, so it is not a guess, and
+		// charging one failure per open stream turns a password rotation into
+		// an administrator lockout. The stream is still cut.
+		if !submission {
+			return "", false
+		}
+		// The reserved unit stays charged. Every failed submission is
+		// audited.
 		loginLimiter.RecordFailure(clientIP, user)
 		auditEvent(r, "auth.basic.fail", truncateForAudit(user),
 			fmt.Sprintf("invalid credentials over HTTP Basic, attempts_left=%d",
@@ -128,17 +213,24 @@ func verifyUIBasicAuth(r *http.Request, user, pass string) (UIRole, bool) {
 
 	// Correct password, but the account carries a second factor the Basic
 	// scheme cannot carry. Refuse rather than silently downgrade. Deliberately
-	// NOT charged to the per-ACCOUNT lockout — see the header — but the
-	// reserved per-IP unit stays charged: the refusal still cost a bcrypt and
-	// a durable audit line, and the compromised-first-factor case is exactly
-	// the one 2FA must keep bounded.
+	// NOT charged to the per-ACCOUNT lockout — see the header — but on a
+	// submission the reserved per-IP unit stays charged: the refusal still
+	// cost a bcrypt and a durable audit line, and the compromised-first-factor
+	// case is exactly the one 2FA must keep bounded. Audited on both intents:
+	// a stream whose account was enrolled after it opened is cut here, and
+	// that is bounded by the open-stream cap, not by anything a caller sends.
 	if cfg.UserHasTOTP(user) {
 		auditEvent(r, "auth.basic.refused", truncateForAudit(user),
 			"HTTP Basic refused: account has TOTP enrolled — use the session login flow")
 		return "", false
 	}
 
-	basicAuthFailLimiter.Refund(resv)
-	loginLimiter.RecordSuccess(clientIP, user)
+	// SUBMISSION ONLY (SEC-BASICAUTH-5): a liveness re-check must not clear a
+	// counter it did not earn — on a shared egress that hands a co-located
+	// attacker an unlock once per interval and re-arms the tier-2 bypass.
+	if submission {
+		basicAuthFailLimiter.Refund(resv)
+		loginLimiter.RecordSuccess(clientIP, user)
+	}
 	return role, true
 }

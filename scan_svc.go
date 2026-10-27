@@ -43,6 +43,22 @@ type ScanRequest struct {
 
 var statScanSvcRequests int64
 
+// statScanSvcOversize counts /scan requests refused because the body ran past
+// this process's own scan window. It is surfaced on /health because the sidecar
+// is the only process that knows its window: the caller buffered within ITS
+// limit and has no way to discover that this one is narrower.
+var statScanSvcOversize int64
+
+// lastScanSvcOversizeLog throttles the refusal log line. The producer's rate is
+// set by TRAFFIC — an origin chooses its own response size, so a client can put
+// every request on this path — and the same doctrine the engine uses for its
+// degraded lines applies: the counter carries the magnitude, the line carries
+// the news.
+var lastScanSvcOversizeLog atomic.Int64
+
+// scanSvcOversizeLogInterval matches internal/secscan's degradedLogInterval.
+const scanSvcOversizeLogInterval = time.Minute
+
 // NewScanService creates a scan sidecar server bound to addr.
 func NewScanService(addr string) *ScanService {
 	return &ScanService{addr: addr}
@@ -115,12 +131,8 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(&statScanSvcRequests, 1)
 	start := time.Now()
 
-	// Read body up to the configured max.
-	maxBytes := maxScanBufferBytes()
-	if maxBytes <= 0 {
-		maxBytes = 5 << 20
-	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	maxBytes := scanSvcWindow()
+	data, truncated, err := readScanWindow(r.Body, maxBytes)
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
@@ -152,10 +164,98 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A truncated read is refused LAST, and only when the prefix came back
+	// clean — see refuseTruncatedScan for why that ordering is the whole
+	// correctness argument.
+	if truncated && resp.Clean {
+		refuseTruncatedScan(w, r, maxBytes)
+		return
+	}
+
 	resp.ElapsedMS = time.Since(start).Milliseconds()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck // headers are already sent; an encode failure here is a client-side write the caller cannot be told about
+}
+
+// scanSvcWindow is this process's scan window, with the engine default as the
+// floor. It is deliberately the SAME maxScanBufferBytes() the in-process path
+// uses, computed in THIS process — which is the root of CHAOS-101: each process
+// derives it from its own security.max_scan_mb and nothing reconciles the
+// caller's window with the sidecar's.
+func scanSvcWindow() int64 {
+	if window := maxScanBufferBytes(); window > 0 {
+		return window
+	}
+	return 5 << 20
+}
+
+// readScanWindow buffers at most limit+1 bytes and reports whether the body
+// continued past limit.
+//
+// limit+1 is the overflow PROBE: one byte past the window is all it takes to
+// learn that there is more. The probe byte is RETURNED, not sliced off, so the
+// engines scan exactly the bytes the handler scanned before CHAOS-101 —
+// LimitReader(body, limit+1). Dropping it would make a signature that ENDS on
+// that byte unmatchable: the handler would then answer 413, which the client
+// classifies as a size limit and forwards fail-open, admitting content the
+// pre-fix handler blocked (Codex P2, PR #1711; gated by
+// TestScanSvc_SignatureEndingOnTheProbeByteStillBlocks). A read error is
+// propagated, never laundered into a truncation.
+func readScanWindow(body io.Reader, limit int64) (data []byte, truncated bool, err error) {
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	return raw, int64(len(raw)) > limit, nil
+}
+
+// refuseTruncatedScan answers 413 for a body this process could not read to the
+// end, instead of reporting the prefix's verdict as the whole object's.
+//
+// CHAOS-101. Answering `clean: true` for a partial read switched scanning off
+// for every byte past the window with no counter, no log line and no alert
+// anywhere in the fleet: the caller buffers maxScanBufferBytes() in ITS process
+// from ITS security.max_scan_mb, nothing makes the two windows agree, and a
+// fleet of 20 MiB proxies in front of a sidecar left at the 5 MiB default hands
+// this handler bodies it cannot finish. The caller's own overflow signal
+// correctly does not fire, because the body fit the CALLER's window.
+//
+// ORDERING IS THE WHOLE CORRECTNESS ARGUMENT, and the caller must keep it.
+// Refusing on size BEFORE scanning — the obvious shape — turns a body whose
+// malware sits INSIDE the window into a 413, which the client classifies as a
+// size limit and therefore forwards fail-open: the one case where this handler
+// holds a real block verdict is the case the refusal would throw away, so the
+// "safe" check would admit known-malicious content that the unfixed code
+// blocked. A caught verdict is strictly better news than "I could not read it
+// all", so the verdict wins and truncation is not reported at all on a block —
+// the same asymmetry the local path documents (readScanPrefix: block paths
+// never forward the tail, so they never signal).
+//
+// 413 is the honest status for what remains: the entity genuinely is too large
+// for this scanner. The client classifies it as the size-limit outcome it is
+// and charges the LOCAL path's scan-skipped vocabulary, rather than laundering
+// it into a generic sidecar fault (internal/secscan remote.go
+// remoteScanOversize). A body of exactly limit bytes was read whole and still
+// gets its real clean verdict.
+func refuseTruncatedScan(w http.ResponseWriter, r *http.Request, maxBytes int64) {
+	atomic.AddInt64(&statScanSvcOversize, 1)
+	if scanSvcOversizeLogAllowed() {
+		logger.Printf("ScanSvc: refused /scan from %q — body exceeds this scanner's %d-byte window (declared content-length %d); total %d",
+			sanitizeLog(r.RemoteAddr), maxBytes, r.ContentLength, atomic.LoadInt64(&statScanSvcOversize))
+	}
+	http.Error(w, "scan body exceeds this scanner's window", http.StatusRequestEntityTooLarge)
+}
+
+// scanSvcOversizeLogAllowed reports whether enough time has passed to log
+// another refusal. Same CAS shape as internal/secscan's degradedLogAllowed.
+func scanSvcOversizeLogAllowed() bool {
+	now := time.Now().UnixNano()
+	prev := lastScanSvcOversizeLog.Load()
+	if prev != 0 && now-prev < int64(scanSvcOversizeLogInterval) {
+		return false
+	}
+	return lastScanSvcOversizeLog.CompareAndSwap(prev, now)
 }
 
 // handleHealth returns 200 OK for liveness probes.
@@ -165,9 +265,11 @@ func (ss *ScanService) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"status":   "ok",
-		"requests": atomic.LoadInt64(&statScanSvcRequests),
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // headers are already sent; an encode failure here is a client-side write the caller cannot be told about
+		"status":            "ok",
+		"requests":          atomic.LoadInt64(&statScanSvcRequests),
+		"oversize_refused":  atomic.LoadInt64(&statScanSvcOversize),
+		"scan_window_bytes": scanSvcWindow(),
 	})
 }
 

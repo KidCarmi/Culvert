@@ -35,8 +35,12 @@ import (
 // gets through (and still answers to their own tier-1 pair lock).
 //
 // A successful login resets the pair counter and marks the IP trusted for
-// that user. State is not persisted across restarts (intentional — an
-// operator restart is the documented break-glass for a stuck lock).
+// that user. State is not persisted across restarts, which is intentional but
+// is NOT the routine remedy for a stuck lock: ResetUser clears every lock for
+// a username, and package main exposes it as the admin-only
+// POST /api/auth/lockouts (with GET to list what is locked). A restart clears
+// the same state and remains the break-glass for when nobody can authenticate
+// to reach that endpoint; it also interrupts proxy traffic.
 // ---------------------------------------------------------------------------
 
 const (
@@ -441,6 +445,22 @@ type LockedEntry struct {
 	Username         string `json:"username"`
 	IP               string `json:"ip,omitempty"`
 	SecondsRemaining int    `json:"seconds_remaining"`
+}
+
+// EntryCount returns the number of tier-1 pair and tier-2 account entries the
+// limiter is holding (the trusted-IP grants are not counted: only a SUCCESSFUL
+// authentication creates one).
+//
+// Both counted maps are keyed by data an UNAUTHENTICATED caller chooses, so
+// their size is a security observable, not a curiosity: MaxUsernameKeyLen
+// bounds each key's bytes (CHAOS-63) and Cleanup bounds how long an entry
+// survives, but nothing here bounds how many a caller may create — that is
+// the callers' job. package main exports it as the
+// culvert_login_limiter_entries gauge.
+func (l *LoginLimiter) EntryCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pairs) + len(l.accounts)
 }
 
 // Snapshot returns every currently-active lockout across both tiers, sorted
