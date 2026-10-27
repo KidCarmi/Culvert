@@ -293,6 +293,14 @@ type PolicyStore struct {
 	// can tell a policy file that filtered down to nothing from a genuinely
 	// empty one; see ConfiguredRuleCount and SEC-POLICYDROP-1.
 	droppedOnLoad atomic.Int64
+	// scanIndex is the packed Stage-2 destination prefilter for the revision
+	// it names (see policy_scanindex.go). Published lock-free under mu by
+	// publishScanIndexLocked, alongside every assignment to `verified`, and
+	// read without a lock by the enforcement path. It is never a second source
+	// of truth: a reader pairs it with `rules` by slice identity and discards
+	// an index that names any other revision, and the prefilter it drives can
+	// only reject rules the full per-rule predicate also rejects.
+	scanIndex atomic.Pointer[policyScanIndex]
 }
 
 // policyLoadDropped records the rules a Load rejected without retaining the
@@ -1371,7 +1379,10 @@ func (ps *PolicyStore) sortLocked() {
 	// 10 000, BenchmarkPolicyEvaluate_NoMatch) is the touched working set
 	// (~5.7 MB of definitions) leaving L2, NOT heap scatter — shrinking what the
 	// scan streams per rule is the only thing that can address it, and this
-	// change deliberately does not attempt that.
+	// change deliberately did not attempt that. The packed destination
+	// prefilter published below does (policy_scanindex.go): the scan now streams
+	// 16 bytes per rule it can reject and leaves the definition untouched, which
+	// took that benchmark to 1.3 ns/rule at 10 000 rules.
 	//
 	// Retention is unchanged in practice: a reader holds the whole published
 	// slice, so every definition in the revision was already reachable from it.
@@ -1420,6 +1431,10 @@ func (ps *PolicyStore) sortLocked() {
 	// other assignment to ps.rules leaves the memo naming a different slice,
 	// which is the fail-safe direction (one scan, never a stale verdict).
 	ps.verified = next
+	// The packed scan prefilter is derived from the per-rule state precomputed
+	// just above (normFQDN), in the same critical section and from the same
+	// values, so the two cannot describe different revisions.
+	ps.publishScanIndexLocked()
 }
 
 // copyPolicyRuleForPublication detaches every mutable nested value that the
@@ -1590,6 +1605,11 @@ func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 	// The slice in hand has now passed exactly the check the pre-change fast
 	// path ran per request, so record it and let later evaluations skip it.
 	ps.verified = ps.rules
+	// A revision installed WITHOUT passing through sortLocked (the in-place
+	// delete paths, and tests that assign ps.rules directly) reaches publication
+	// here and nowhere else, so index it here too — otherwise the prefilter
+	// would stay off for the rest of that revision's life.
+	ps.publishScanIndexLocked()
 	rules = ps.rules
 	ps.mu.Unlock()
 	return rules
@@ -1647,7 +1667,7 @@ const (
 // reason ("" = this rule matched, scan stops). trace MUST be nil on the
 // enforcement hot path: the nil branch allocates nothing (the skip strings are
 // static literals), preserving the zero-per-rule-allocation contract.
-func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.Time, trace func(rule *PolicyRule, skip string)) *PolicyRule { //nolint:gocognit // one explicit skip-reason branch per rule condition; the zero-alloc contract forbids extraction on this hot path
+func evalAccessRules(rules []*PolicyRule, rows []policyScanRow, in *accessEvalInput, now func() time.Time, trace func(rule *PolicyRule, skip string)) *PolicyRule { //nolint:gocognit // one explicit skip-reason branch per rule condition; the zero-alloc contract forbids extraction on this hot path
 	// The client address is parsed at most ONCE for the whole scan, lazily on
 	// the first rule that actually carries a SourceIP, and reused across every
 	// rule's precomputed srcPrefix/srcIPNet. A scan with no source-scoped rule
@@ -1663,19 +1683,25 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 	// contract, set that way at every construction site), so re-deriving it
 	// here would normalize the destination twice per scan.
 	catScratch := newHostCatScratchNorm(in.host, in.normHost)
-	// The control flow is deliberately the parent enforcement loop's exact
-	// continue-based structure: on the nil-trace path (enforcement) it is
-	// branch-for-branch identical to the pre-extraction scan, and the skip-reason
-	// string literals are referenced only inside the `if trace != nil` guards, so
-	// they are never materialized on the hot path (no per-rule string work). The
-	// guards themselves are predicted-not-taken when trace is nil.
+	// The skip-reason string literals are referenced only inside the
+	// `if trace != nil` guards, so they are never materialized on the hot path
+	// (no per-rule string work), and the guards are predicted-not-taken when
+	// trace is nil. Folding the two eligibility checks into one helper that
+	// RETURNS the reason costs ~9 ns/rule (policy_scanindex.go).
+
 	// Schedule state for the whole scan: the instant is read once on the first
 	// scheduled rule reached (a rulebase with none never reads the clock), and
 	// the timezone resolution plus the derived clock fields are memoised across
 	// the remaining rules. See scheduleClock.
 	var schedClock scheduleClock
-	var schedNowSet bool
+	// The prefilter skips rules whose 16-byte packed row already PROVES a
+	// destination mismatch, so their definitions are never streamed; it can
+	// prove nothing else. See policy_scanindex.go.
+	pre := newDestPrefilter(rows, len(rules), in.normHost, trace != nil)
 	for i := range rules {
+		if pre.rejectsAt(i) {
+			continue
+		}
 		rule := rules[i]
 		if !ruleIsEnabled(rule) {
 			if trace != nil {
@@ -1699,10 +1725,7 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 			continue
 		}
 		if rule.Schedule != nil {
-			if !schedNowSet {
-				schedClock.now = now()
-				schedNowSet = true
-			}
+			schedClock.armNow(now)
 			if !matchScheduleMemo(rule.Schedule, &schedClock) {
 				if trace != nil {
 					trace(rule, accessSkipSchedule)
@@ -1753,7 +1776,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		normHost:   normalizeHost(host),
 		groups:     groups,
 	}
-	rule := evalAccessRules(rules, &in, time.Now, nil)
+	rule := evalAccessRules(rules, scanIndexFor(&ps.scanIndex, rules), &in, time.Now, nil)
 	if rule == nil {
 		return nil
 	}
@@ -1921,12 +1944,27 @@ type scheduleClock struct {
 	// zero value means "not read yet"; the Stage-2 scan fills it lazily so a
 	// rulebase with no scheduled rule never reads the clock at all.
 	now time.Time
+	// nowSet records that armNow has captured `now`. It is separate from
+	// now.IsZero() because an injected test clock may legitimately return the
+	// zero instant. Callers that set `now` directly never consult it.
+	nowSet bool
 
 	set     bool         // true once tz/local/weekday/minutes below are valid
 	tz      string       // timezone string the memo was derived for
 	local   time.Time    // now.In(loc), kept for the legacy string comparison
 	weekday time.Weekday // local.Weekday()
 	minutes int          // local minutes since midnight
+}
+
+// armNow captures the scan's instant on the FIRST scheduled rule reached, and
+// only then: a rulebase with no scheduled rule never reads the clock at all.
+// Later calls within one scan are no-ops, so every scheduled rule in an
+// evaluation decides against the same instant.
+func (c *scheduleClock) armNow(now func() time.Time) {
+	if !c.nowSet {
+		c.now = now()
+		c.nowSet = true
+	}
 }
 
 // at returns the derived clock fields for tz, resolving and memoising on a

@@ -156,8 +156,13 @@ func sseAuthStillValid(r *http.Request) bool {
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
 	if user, pass, ok := r.BasicAuth(); ok {
-		// SEC-BASIC-1: same controls as every other admin-plane Basic site.
-		_, valid := verifyUIBasicAuth(r, user, pass)
+		// SEC-BASIC-1: same refusals as every other admin-plane Basic site.
+		// SEC-BASICAUTH-5 (RISK-032): through the LIVENESS wrapper, which
+		// refuses exactly as the submission path does but reserves no per-IP
+		// budget and records nothing against the lockout. These headers were
+		// captured when the stream was established and cannot change, so a
+		// re-check is never a new guess. See revalidateUIBasicAuth.
+		_, valid := revalidateUIBasicAuth(r, user, pass)
 		return valid
 	}
 	return false
@@ -383,6 +388,16 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_retained_path_truncated_total Client-supplied request paths clamped before being retained in a log line, a block page or the request-log URI. Sustained growth means a source is attempting write amplification through the proxy data plane\n")
 	fmt.Fprintf(w, "# TYPE culvert_retained_path_truncated_total counter\nculvert_retained_path_truncated_total %d\n",
 		retainedPathTruncated.Load())
+
+	// AU-17b: the live size of the admin credential lockout state. Its keys
+	// are usernames an UNAUTHENTICATED caller chooses (the public GET on
+	// /api/auth/status accepts Basic), so the entry count is a security
+	// observable: the per-IP Basic failure budget bounds how fast one source
+	// can grow it, and this gauge is how an operator sees a source cycling
+	// usernames rather than guessing passwords.
+	fmt.Fprintf(w, "\n# HELP culvert_login_limiter_entries Live tier-1 (IP, username) pair plus tier-2 account entries held by the admin credential lockout\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_limiter_entries gauge\nculvert_login_limiter_entries %d\n",
+		loginLimiter.EntryCount())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.
