@@ -1251,9 +1251,29 @@ func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Respons
 // protocol-neutral responder (the same bytes fileblock.BlockConn wrote, minus the
 // H1 force-close — the H1 loop owns teardown, and an H2 per-stream block must not
 // close the shared conn). This is the single file-block choke point for both
-// protocols (invariant C5).
+// protocols (invariant C5), and therefore also package main's only route into
+// fileblock.LogBlock — which is why the CHAOS-92 clamp below belongs here and
+// not at the six call sites.
+//
+// CHAOS-92e: urlPath is the decrypted inner request path (four call sites) or an
+// origin-supplied Content-Disposition filename (one), and LogBlock retains it in
+// the 50 MB/one-archive rotating process log with `%q`. It is the SIXTH retaining
+// log sink and the one §53.2's enumeration missed, because it sanitizes in the
+// callee (obs.Sanitize) and so carries no sanitizeLog( token for that source gate
+// to match. It is also the worst of the six by volume: the plain-HTTP sinks are
+// fed by a path net/http caps at MaxHeaderBytes+4096, while this one is fed by
+// http.ReadRequest — readRequestLimit(b, math.MaxInt64) over a textproto.ReadLine
+// with no limit — so the inner request line is unbounded on the wire. Measured
+// through this emitter: a 1 MiB path wrote 1 048 646 log bytes, and a 1 MiB path
+// of 0xFF wrote 4 194 375, because %q renders each non-UTF-8 byte as `\xff`.
+//
+// The clamp sits INSIDE the argument, before the sanitiser's scan and its copy,
+// which is the rule the other five sites follow. Enforcement is untouched:
+// fileBlocker.CheckPath, FileProfileBlocked and every matcher ran on the whole
+// value at the call site before reaching here, and BlockMessage derives the 403
+// body from ext and source only — so no client-visible byte depends on urlPath.
 func emitFileBlock(br blockResponder, hostOnly, urlPath, ext, source string) {
-	fileblock.LogBlock(hostOnly, urlPath, ext, source)
+	fileblock.LogBlock(hostOnly, boundRetainedPath(urlPath), ext, source)
 	br.blockBeforeResponse("text/plain; charset=utf-8", fileblock.BlockMessage(ext, source))
 }
 

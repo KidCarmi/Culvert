@@ -328,8 +328,18 @@ func resetSessionRevokeCountersForTest() {
 // surface, and the bytes in question are attacker-chosen.
 func revocationAdmissionRow() (OperatorContractCheck, bool) {
 	refused := sessionRevocationRefusedTotal()
+	// Every untrusted-origin refusal admitUntrustedLocked counts, plus the
+	// Control Plane's per-node drop. SEC-REVDIAG-1: RevokeFarFuture was missing
+	// from this sum, so a node that dropped ONLY far-future entries reported
+	// "no drops" while a revocation an operator believed had taken effect had
+	// not. It is the one reason here with a benign, non-adversarial trigger —
+	// see the operator action below — which is exactly why it must be counted
+	// rather than assumed hostile and ignored. Any new RevokeReason charged in
+	// admitUntrustedLocked belongs here too; TestChaos73_DefectEveryUntrusted
+	// DropReachesTheContractRow fails if one is added and not added here.
 	dropped := session.Refused(session.RevokeOversize) +
 		session.Refused(session.RevokeCapacity) +
+		session.Refused(session.RevokeFarFuture) +
 		clusterRevocationDropTotal()
 	tracked := sessionRevoked.Tracked()
 
@@ -341,11 +351,15 @@ func revocationAdmissionRow() (OperatorContractCheck, bool) {
 			Code:   "session_revocation",
 			Status: diagWarn,
 			Message: fmt.Sprintf("%d session-revocation entries were dropped on an untrusted-origin path "+
-				"(over-long key, or past the entry cap); %d entries currently tracked", dropped, tracked),
+				"(over-long key, past the entry cap, or an expiry beyond the maximum session lifetime); "+
+				"%d entries currently tracked", dropped, tracked),
 			OperatorAction: "A dropped entry means a revoked admin session may still authenticate on this " +
-				"or another node. Force a re-login for the affected administrators (change the session " +
-				"secret to invalidate every session at once), and check whether a cluster peer is pushing " +
-				"malformed revocation state.",
+				"or another node. Check the benign cause FIRST: the expiry bound is the maximum session " +
+				"lifetime plus one hour of clock skew, so with session_timeout at or near its 168-hour " +
+				"maximum, a peer whose clock runs more than an hour ahead has its legitimate revocations " +
+				"dropped here — verify time sync across the cluster before suspecting a peer. Then force " +
+				"a re-login for the affected administrators (change the session secret to invalidate every " +
+				"session at once), and check whether a cluster peer is pushing malformed revocation state.",
 		}, true
 	}
 	if refused > 0 {

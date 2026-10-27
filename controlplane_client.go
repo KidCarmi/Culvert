@@ -246,7 +246,14 @@ func (c *DataPlaneClient) connect(addr string) error {
 		dialOpt = grpc.WithTransportCredentials(creds)
 	} else {
 		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
-		logger.Printf("DataPlane: connecting to %s (insecure — dev only!)", addr)
+		// CWE-117: addr can be peer-supplied. applyAddressesLocked below adopts
+		// the CP snapshot's cp_addresses verbatim into c.addrs, and connect is
+		// reached from failover/reconnectActive with an entry from that list, so
+		// every sink in this file treats it as untrusted — the same rule the
+		// address-list line states in as many words. Entries are count-capped at
+		// 100 but never validated as host:port, so a newline in one would forge
+		// log records on the DP (and in syslog/OTLP downstream).
+		logger.Printf("DataPlane: connecting to %q (insecure — dev only!)", sanitizeLog(addr))
 	}
 
 	// clusterClientCallOptions carries the mandatory raw codec (the default
@@ -267,7 +274,7 @@ func (c *DataPlaneClient) connect(addr string) error {
 	// support. Safe under the callers' locking: connect runs pre-goroutine in
 	// NewDataPlaneClient and under c.mu in reconnectActive/failover.
 	c.deltaUnsupported = false
-	logger.Printf("DataPlane: connected to ControlPlane at %s", addr)
+	logger.Printf("DataPlane: connected to ControlPlane at %q", sanitizeLog(addr))
 	return nil
 }
 
@@ -312,9 +319,13 @@ func (c *DataPlaneClient) failover() bool {
 	for i := 1; i < len(c.addrs); i++ {
 		nextIdx := (c.activeIdx + i) % len(c.addrs)
 		nextAddr := c.addrs[nextIdx]
-		logger.Printf("DataPlane: failing over to CP at %s", nextAddr)
+		// nextAddr comes from c.addrs, which applyAddressesLocked fills from the
+		// CP snapshot. Untrusted, like every other sink for this value.
+		logger.Printf("DataPlane: failing over to CP at %q", sanitizeLog(nextAddr))
 		if err := c.connect(nextAddr); err != nil {
-			logger.Printf("DataPlane: failover to %s failed: %v", nextAddr, err)
+			// The error wraps the same untrusted address (connect's "gRPC dial %s"),
+			// so it is sanitized too — the pattern applyAddressesLocked uses.
+			logger.Printf("DataPlane: failover to %q failed: %q", sanitizeLog(nextAddr), sanitizeLog(err.Error()))
 			continue
 		}
 		c.activeIdx = nextIdx
